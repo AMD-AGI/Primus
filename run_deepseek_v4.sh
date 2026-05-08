@@ -77,6 +77,14 @@ export PRECISION_TYPE=${PRECISION_TYPE:-BF16}
 export FP8=null
 export FP8_RECIPE=null
 
+# Plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
+# Precedence in DeepseekV4Attention.forward:
+#   use_turbo_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
+#   use_v4_triton_csa_attention > eager                     (cr == 4)
+# These are V4-only; they have no effect on other model types.
+export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-False}
+export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-False}
+
 if [ "$PRECISION_TYPE" = "FP8" ]; then
   export FP8=${FP8:-hybrid}
   export FP8_RECIPE=${FP8_RECIPE:-delayed}
@@ -122,6 +130,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --mock_data True \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
+  --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
+  --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \

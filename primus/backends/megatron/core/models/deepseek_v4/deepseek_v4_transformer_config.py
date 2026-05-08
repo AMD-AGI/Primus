@@ -87,6 +87,19 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     index_head_dim: int = 128
     index_n_heads: int = 64
 
+    # ---- DeepSeek-V4 plan-4 in-tree Triton attention kernels ----
+    # Plan-4 P25: when ``use_v4_triton_attention=True`` the dense
+    # (``compress_ratio == 0``) and HCA (``compress_ratio == 128``)
+    # paths route through the Primus-owned Triton FlashAttention kernel
+    # in ``v4_attention_kernels/v4_attention.py`` instead of the
+    # eager-Python softmax. Precedence is
+    # ``use_turbo_attention > use_v4_triton_attention > eager``.
+    # Plan-4 P26: ``use_v4_triton_csa_attention=True`` enables the CSA
+    # (``compress_ratio == 4``) Triton kernel; precedence is
+    # ``use_v4_triton_csa_attention > eager``.
+    use_v4_triton_attention: bool = False
+    use_v4_triton_csa_attention: bool = False
+
     # ---- DeepSeek-V4 grouped low-rank output projection ----
     # Mirrors the released checkpoint's `wo_a` / `wo_b` layout.
     # When ``o_lora_rank == 0`` the attention falls back to a flat O proj

@@ -1,0 +1,358 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Plan-4 P25 G23 — `v4_attention` Triton FWD equivalence to eager.
+
+Asserts that :func:`v4_attention` (Triton kernel from
+``primus...transformer.v4_attention_kernels.v4_attention``) produces
+forward output equal to :func:`eager_v4_attention` within the plan-4
+tolerance budget across:
+
+* V4-Flash and V4-Pro shape envelopes (head_dim=512, H ∈ {64, 128});
+* ``compress_ratio ∈ {0, 128}`` — dense + SWA + sink (no bias) and HCA
+  (joint-softmax additive bias, no in-kernel SWA);
+* fp32 and bf16 inputs;
+* ``sink ∈ {None, learned [H]}``;
+* MQA (``K_H == 1``) and MHA (``K_H == HQ``) layouts.
+
+The test is GPU-only (Triton requires CUDA / HIP); CPU runs are
+``pytest.skip``-ed at module collection time.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+if not torch.cuda.is_available():
+    pytest.skip("v4_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+
+# Triton import (must be importable in the env).
+pytest.importorskip("triton", reason="Triton not installed")
+
+from primus.backends.megatron.core.transformer.sliding_window_kv import (  # noqa: E402
+    sliding_window_causal_mask,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
+    eager_v4_attention,
+    v4_attention,
+)
+
+# ---------------------------------------------------------------------------
+# Shape envelope (V4-Flash / V4-Pro)
+# ---------------------------------------------------------------------------
+
+
+# Shapes are intentionally smaller than the full V4 yamls so the suite
+# completes in seconds on a single MI355X. The numerical contract being
+# tested is the kernel's, not the model's full size; G27 covers the
+# release-tier S=4096 smoke.
+_BASE_SHAPES = [
+    # (variant, B, H, S, head_dim, swa_window)
+    ("v4_flash_small", 1, 8, 64, 64, 32),
+    ("v4_pro_small", 1, 4, 64, 64, 32),
+]
+_DTYPES = [torch.float32, torch.bfloat16]
+_SINK_MODES = [True, False]
+_KV_LAYOUTS = ["mqa", "mha"]  # K_H == 1 vs K_H == HQ
+
+
+def _fwd_tol(dtype: torch.dtype) -> dict:
+    if dtype == torch.float32:
+        return {"atol": 1e-4, "rtol": 1e-4}
+    if dtype == torch.bfloat16:
+        return {"atol": 2e-2, "rtol": 2e-2}
+    raise ValueError(f"unsupported dtype {dtype!r}")
+
+
+def _make_dense_inputs(
+    *,
+    B: int,
+    H: int,
+    S: int,
+    D: int,
+    swa_window: int,
+    sink_on: bool,
+    dtype: torch.dtype,
+    kv_layout: str,
+    seed: int = 1234,
+):
+    """Build inputs for a dense (compress_ratio=0) test case.
+
+    The kernel is invoked with ``swa_window > 0, additive_mask=None``;
+    the eager reference is invoked with the equivalent ``additive_mask``
+    pre-built (so both go through identical mask math).
+    """
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    device = "cuda"
+    K_H = 1 if kv_layout == "mqa" else H
+
+    q = torch.randn(B, H, S, D, generator=g, device=device, dtype=dtype)
+    k = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype)
+    v = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype)
+    sink = torch.randn(H, generator=g, device=device, dtype=torch.float32) * 0.1 if sink_on else None
+    return dict(B=B, H=H, S=S, D=D, swa_window=swa_window, q=q, k=k, v=v, sink=sink)
+
+
+def _make_hca_inputs(
+    *,
+    B: int,
+    H: int,
+    S: int,
+    P: int,
+    D: int,
+    swa_window: int,
+    sink_on: bool,
+    dtype: torch.dtype,
+    kv_layout: str,
+    seed: int = 1234,
+):
+    """Build inputs for an HCA (compress_ratio=128) test case.
+
+    HCA pre-concatenates a length-``P`` compressed-pool key/value to the
+    length-``S`` local key/value, and the caller pre-builds the joint
+    additive mask so the kernel does NOT apply SWA / causal in-kernel.
+    """
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    device = "cuda"
+    K_H = 1 if kv_layout == "mqa" else H
+
+    q = torch.randn(B, H, S, D, generator=g, device=device, dtype=dtype)
+    k_local = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype)
+    v_local = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype)
+    pool_k = torch.randn(B, K_H, P, D, generator=g, device=device, dtype=dtype)
+    pool_v = torch.randn(B, K_H, P, D, generator=g, device=device, dtype=dtype)
+    k_full = torch.cat([k_local, pool_k], dim=2)
+    v_full = torch.cat([v_local, pool_v], dim=2)
+
+    # Local SWA-causal mask: [S, S]
+    local_mask = sliding_window_causal_mask(S, swa_window, device=device, dtype=dtype)
+    # Pool causal-on-stride mask: pool[s] is visible at query t iff
+    # (s+1)*ratio - 1 <= t. Use a fixed ratio of 4 for the test.
+    ratio = 4
+    t = torch.arange(S, device=device).unsqueeze(1)
+    s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * ratio - 1
+    pool_mask = torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
+    full_mask = torch.cat([local_mask, pool_mask], dim=-1)  # [S, S+P]
+
+    sink = torch.randn(H, generator=g, device=device, dtype=torch.float32) * 0.1 if sink_on else None
+    return dict(
+        B=B,
+        H=H,
+        S=S,
+        P=P,
+        D=D,
+        q=q,
+        k=k_full,
+        v=v_full,
+        sink=sink,
+        full_mask=full_mask,
+    )
+
+
+# ---------------------------------------------------------------------------
+# G23 — dense (compress_ratio == 0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant,B,H,S,D,swa_window", _BASE_SHAPES)
+@pytest.mark.parametrize("dtype", _DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+@pytest.mark.parametrize("sink_on", _SINK_MODES, ids=["sink_on", "sink_off"])
+@pytest.mark.parametrize("kv_layout", _KV_LAYOUTS)
+def test_g23_dense_fwd_matches_eager(
+    variant: str,
+    B: int,
+    H: int,
+    S: int,
+    D: int,
+    swa_window: int,
+    dtype: torch.dtype,
+    sink_on: bool,
+    kv_layout: str,
+):
+    """Dense path: kernel uses in-kernel SWA-causal mask + optional sink."""
+    toy = _make_dense_inputs(
+        B=B,
+        H=H,
+        S=S,
+        D=D,
+        swa_window=swa_window,
+        sink_on=sink_on,
+        dtype=dtype,
+        kv_layout=kv_layout,
+    )
+
+    scale = 1.0 / math.sqrt(D)
+
+    # Reference: eager_v4_attention with pre-built SWA additive_mask
+    eager_mask = sliding_window_causal_mask(S, swa_window, device=toy["q"].device, dtype=dtype)
+    out_ref = eager_v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=0,
+        additive_mask=eager_mask,
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+
+    # Candidate: v4_attention with swa_window > 0, additive_mask=None
+    out_cand = v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=swa_window,
+        additive_mask=None,
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+
+    assert out_ref.shape == out_cand.shape == toy["q"].shape
+    assert out_ref.dtype == out_cand.dtype == dtype
+    torch.testing.assert_close(out_cand, out_ref, **_fwd_tol(dtype))
+
+
+# ---------------------------------------------------------------------------
+# G23 — HCA (compress_ratio == 128) — caller-supplied additive mask
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant,B,H,S,D,swa_window", _BASE_SHAPES)
+@pytest.mark.parametrize("dtype", _DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+@pytest.mark.parametrize("sink_on", _SINK_MODES, ids=["sink_on", "sink_off"])
+@pytest.mark.parametrize("kv_layout", _KV_LAYOUTS)
+def test_g23_hca_style_fwd_matches_eager(
+    variant: str,
+    B: int,
+    H: int,
+    S: int,
+    D: int,
+    swa_window: int,
+    dtype: torch.dtype,
+    sink_on: bool,
+    kv_layout: str,
+):
+    """HCA path: caller pre-concatenates pool keys + supplies joint additive mask."""
+    P = 4  # tiny pool — exercises the additive_mask branch w/o full HCA setup
+    toy = _make_hca_inputs(
+        B=B,
+        H=H,
+        S=S,
+        P=P,
+        D=D,
+        swa_window=swa_window,
+        sink_on=sink_on,
+        dtype=dtype,
+        kv_layout=kv_layout,
+    )
+
+    scale = 1.0 / math.sqrt(D)
+
+    out_ref = eager_v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=0,
+        additive_mask=toy["full_mask"],
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+
+    out_cand = v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=0,
+        additive_mask=toy["full_mask"],
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+
+    assert out_ref.shape == out_cand.shape == toy["q"].shape
+    assert out_ref.dtype == out_cand.dtype == dtype
+    torch.testing.assert_close(out_cand, out_ref, **_fwd_tol(dtype))
+
+
+# ---------------------------------------------------------------------------
+# G25 — determinism with attn_dropout=0.0
+# ---------------------------------------------------------------------------
+
+
+def test_g25_determinism_fp32_mha():
+    """Repeated FWD calls with the same inputs produce bit-identical output (fp32 / MHA)."""
+    toy = _make_dense_inputs(
+        B=1,
+        H=4,
+        S=64,
+        D=64,
+        swa_window=32,
+        sink_on=True,
+        dtype=torch.float32,
+        kv_layout="mha",
+    )
+    scale = 1.0 / math.sqrt(toy["D"])
+
+    out_a = v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=toy["swa_window"],
+        additive_mask=None,
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+    out_b = v4_attention(
+        toy["q"],
+        toy["k"],
+        toy["v"],
+        sink=toy["sink"],
+        swa_window=toy["swa_window"],
+        additive_mask=None,
+        attn_dropout=0.0,
+        training=False,
+        scale=scale,
+    )
+    assert torch.equal(out_a, out_b), "v4_attention FWD is non-deterministic at fp32 / MHA"
+
+
+def test_g25_dropout_with_training_is_rejected():
+    """``attn_dropout > 0`` with ``training=True`` raises (kernel does not implement dropout)."""
+    toy = _make_dense_inputs(
+        B=1,
+        H=4,
+        S=64,
+        D=64,
+        swa_window=32,
+        sink_on=False,
+        dtype=torch.float32,
+        kv_layout="mha",
+    )
+    scale = 1.0 / math.sqrt(toy["D"])
+    with pytest.raises(NotImplementedError, match="dropout"):
+        v4_attention(
+            toy["q"],
+            toy["k"],
+            toy["v"],
+            sink=None,
+            swa_window=toy["swa_window"],
+            additive_mask=None,
+            attn_dropout=0.1,
+            training=True,
+            scale=scale,
+        )

@@ -106,6 +106,13 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
+      # plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
+      # Precedence in DeepseekV4Attention.forward:
+      #   use_turbo_attention > use_v4_triton_attention > eager        (cr ∈ {0, 128})
+      #   use_v4_triton_csa_attention > eager                          (cr == 4)
+      use_v4_triton_attention: ${PRIMUS_USE_V4_TRITON_ATTENTION:false}
+      use_v4_triton_csa_attention: ${PRIMUS_USE_V4_TRITON_CSA_ATTENTION:false}
+
       moe_use_fused_router_with_aux_score: false
       moe_permute_fusion: true
 

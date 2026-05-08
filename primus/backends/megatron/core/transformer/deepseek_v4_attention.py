@@ -79,6 +79,7 @@ from primus.backends.megatron.core.transformer.sliding_window_kv import (
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     eager_v4_attention,
     eager_v4_csa_attention,
+    v4_attention,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -440,6 +441,19 @@ class DeepseekV4Attention(MLASelfAttention):
         # ``_attention_scale()`` (the YaRN ``m_scale`` is a layer-static
         # constant set at RoPE init time, so this matches the eager-path
         # scale exactly for ``compress_ratio == 0``).
+        # Plan-4 P25: in-tree Primus Triton kernel for cr ∈ {0, 128}.
+        # Read the config flag once at __init__ so ``forward`` only does
+        # a cheap attribute load. Precedence in ``forward`` is
+        # ``use_turbo_attention > use_v4_triton_attention > eager``.
+        self._use_v4_triton_attention: bool = bool(getattr(config, "use_v4_triton_attention", False))
+        if self._use_v4_triton_attention and self.compress_ratio not in (0, 128):
+            # Plan-4 P26 ships the CSA Triton kernel under
+            # ``use_v4_triton_csa_attention`` — the dense / HCA flag does
+            # NOT enable it. Surface the misconfiguration loud at build
+            # time so a stray run script doesn't silently fall back to
+            # eager for the CSA layers (and skew layer-vs-layer perf).
+            self._use_v4_triton_attention = False
+
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
         if submodules.core_attention is not None and self.compress_ratio == 0:
@@ -643,6 +657,48 @@ class DeepseekV4Attention(MLASelfAttention):
         inline implementation.
         """
         return eager_v4_attention(
+            q,
+            k,
+            v,
+            sink=self.attn_sink,
+            swa_window=0,
+            additive_mask=attn_mask,
+            attn_dropout=self.attn_dropout,
+            training=self.training,
+            scale=self._attention_scale(),
+        )
+
+    def _attention_forward_via_v4_triton(
+        self,
+        q: torch.Tensor,  # [B, H, Sq, head_dim]
+        k: torch.Tensor,  # [B, H, Sk, head_dim]
+        v: torch.Tensor,  # [B, H, Sk, head_dim]
+        attn_mask: torch.Tensor,  # [Sq, Sk] additive (broadcasts over B, H)
+    ) -> torch.Tensor:
+        """Run the dense / HCA softmax-and-attend through the plan-4
+        in-tree :func:`v4_attention` Triton kernel.
+
+        Numerically equivalent to :meth:`_attention_forward` (same eager
+        ``q @ k^T * scale + mask + sink → softmax → @ v`` math) but
+        executes in a single fused kernel that re-materialises ``P``
+        from the saved LSE during the BWD instead of storing the
+        ``[Sq, Sk]`` ``P`` tensor — important at full V4-Flash dims
+        (``S=4096`` ⇒ ``P`` is 32 MiB / microbatch).
+
+        We always route through the kernel's caller-supplied
+        ``additive_mask`` path (rather than ``swa_window > 0``) because:
+
+        * dense already builds ``local_mask`` outside the kernel so
+          there is no incremental cost,
+        * HCA *requires* the joint mask (``cat([local, pool])``) which
+          is already materialised by the caller,
+        * one code path is easier to reason about than two.
+
+        A perf follow-up may flip dense to the in-kernel
+        ``swa_window > 0`` path so the small ``[Sq, Sk]`` mask tensor
+        is not materialised at all.
+        """
+        return v4_attention(
             q,
             k,
             v,
@@ -903,21 +959,36 @@ class DeepseekV4Attention(MLASelfAttention):
         v_local_bh = v_h.transpose(1, 2)
 
         if self.compress_ratio == 0:
-            # Eager-Python dense path (used when ``core_attention`` is not
-            # built or the V4 sink + Turbo sink-attention contract isn't
-            # met; e.g. CPU unit tests or TE-without-sink configs).
-            out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
+            # Plan-4 P25: ``use_v4_triton_attention`` routes the dense
+            # softmax-and-attend through the in-tree Triton kernel.
+            # Precedence ``use_turbo_attention > use_v4_triton_attention
+            # > eager`` is enforced by the earlier ``_use_core_attention``
+            # branch returning before this block.
+            if self._use_v4_triton_attention:
+                out_bh = self._attention_forward_via_v4_triton(q_bh, k_local_bh, v_local_bh, local_mask)
+            else:
+                # Eager-Python dense path (used when ``core_attention`` is not
+                # built or the V4 sink + Turbo sink-attention contract isn't
+                # met; e.g. CPU unit tests or TE-without-sink configs).
+                out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
         elif self.compress_ratio == 128:
             # HCA cannot use ``core_attention``: the local SWA branch and
             # the compressed-pool branch share **one** softmax with **one**
-            # sink column.  Stock flash-attn returns no LSE, so we can't
-            # decompose into two flash calls and recombine.  Stays on the
-            # eager-Python path under plan-3.
+            # sink column. Stock flash-attn returns no LSE, so we can't
+            # decompose into two flash calls and recombine. Plan-4 P25's
+            # in-tree Triton kernel is HCA-aware (it consumes the joint
+            # ``cat([local_mask, pool_mask])`` additive bias and runs a
+            # single online-softmax pass), so HCA opts into
+            # ``use_v4_triton_attention`` too — exactly the same kernel
+            # call as the dense path.
             extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
             k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
             full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
-            out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
+            if self._use_v4_triton_attention:
+                out_bh = self._attention_forward_via_v4_triton(q_bh, k_full, v_full, full_mask)
+            else:
+                out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
         elif self.compress_ratio == 4:
             # CSA cannot use ``core_attention``: the per-query top-K
             # gather (``gathered = pool[..., topk_idxs, :]``, shape

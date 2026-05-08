@@ -31,8 +31,14 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels.reference im
     eager_v4_attention,
     eager_v4_csa_attention,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_attention import (
+    V4AttentionFn,
+    v4_attention,
+)
 
 __all__ = [
     "eager_v4_attention",
     "eager_v4_csa_attention",
+    "v4_attention",
+    "V4AttentionFn",
 ]
