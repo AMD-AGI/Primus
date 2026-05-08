@@ -143,27 +143,44 @@ def _probe_rocm_smi() -> Optional[Dict[str, Any]]:
     return {"rc": rc, "out": out, "err": err}
 
 
+_PROBE_CACHE: Optional[ProbeResult] = None
+
+
 def probe_gpus() -> ProbeResult:
     """
     Best-effort GPU probe for identity + memory + occupancy.
 
     Returns a normalized structure; individual fields may be missing depending
     on the environment/tooling availability.
+
+    Results are cached since the probe is called multiple times per rank
+    (from gpu_basic, gpu_topology, and gpu_perf) and the output is static
+    during a single preflight run.
+
+    amd-smi and rocm-smi are only invoked on LOCAL_RANK == 0 to avoid
+    /dev/shm mutex contention (rocm_smi_lib#88) and shared-FS subprocess
+    overhead at scale. Their output is node-level (identical across ranks).
     """
+    global _PROBE_CACHE
+    if _PROBE_CACHE is not None:
+        return _PROBE_CACHE
+
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
     torch_info = _probe_with_torch()
     tooling: Dict[str, Any] = {"torch": torch_info}
 
-    amd = _probe_amd_smi()
-    if amd is not None:
-        tooling["amd-smi"] = amd
-    rocmsmi = _probe_rocm_smi()
-    if rocmsmi is not None:
-        tooling["rocm-smi"] = rocmsmi
+    if LOCAL_RANK == 0:
+        amd = _probe_amd_smi()
+        if amd is not None:
+            tooling["amd-smi"] = amd
+        rocmsmi = _probe_rocm_smi()
+        if rocmsmi is not None:
+            tooling["rocm-smi"] = rocmsmi
 
     backend = torch_info.get("backend") if torch_info.get("ok") else "unknown"
     devices = torch_info.get("devices", []) if torch_info.get("ok") else []
 
-    # Version metadata (best-effort)
     tooling["amdgpu_version"] = _probe_amdgpu_version()
     tooling["rocm_version"] = _probe_rocm_version()
 
@@ -172,4 +189,5 @@ def probe_gpus() -> ProbeResult:
         and bool(torch_info.get("cuda_is_available"))
         and int(torch_info.get("device_count", 0)) > 0
     )
-    return ProbeResult(ok=ok, backend=str(backend), devices=list(devices), tooling=tooling)
+    _PROBE_CACHE = ProbeResult(ok=ok, backend=str(backend), devices=list(devices), tooling=tooling)
+    return _PROBE_CACHE

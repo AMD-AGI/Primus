@@ -31,7 +31,15 @@ def _numa_mapping_best_effort() -> Optional[Dict[str, Any]]:
     """
     Best-effort GPU<->NUMA mapping.
     On many systems this requires PCI bus IDs; we attempt to use amd-smi if present.
+
+    Only runs on LOCAL_RANK == 0 to avoid /dev/shm mutex contention and
+    shared-FS subprocess overhead at scale (output is node-level).
     """
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
+    if LOCAL_RANK != 0:
+        return None
+
     if which("amd-smi") is None:
         return None
 
@@ -64,6 +72,12 @@ def _numa_mapping_best_effort() -> Optional[Dict[str, Any]]:
 
 def _xgmi_presence_best_effort() -> Optional[Dict[str, Any]]:
     # Best-effort: use amd-smi topology if available; otherwise skip.
+    # Only runs on LOCAL_RANK == 0 (node-level output, avoids mutex contention).
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
+    if LOCAL_RANK != 0:
+        return None
+
     if which("amd-smi") is None:
         return None
     rc, out, err = run_cmd(["amd-smi", "topo"], timeout_s=10)
@@ -105,8 +119,14 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
     findings.extend(_device_consistency(probe.devices))
 
     # NUMA mapping / imbalance detection (best-effort).
+    # _numa_mapping_best_effort() returns None on non-zero LOCAL_RANK
+    # (amd-smi is only invoked on LOCAL_RANK 0).
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
     numa = _numa_mapping_best_effort()
-    if numa is None:
+    if numa is None and LOCAL_RANK != 0:
+        findings.append(Finding("info", "NUMA mapping skipped (non-zero LOCAL_RANK)", {}))
+    elif numa is None:
         findings.append(Finding("warn", "NUMA mapping unavailable (amd-smi not found); skipped", {}))
     else:
         nodes = [x.get("numa_node") for x in numa.get("gpus", []) if x.get("numa_node") is not None]
@@ -123,7 +143,9 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
     # Topology (XGMI vs PCIe) best-effort.
     if force_topology or probe.backend == "rocm":
         topo = _xgmi_presence_best_effort()
-        if topo is None:
+        if topo is None and LOCAL_RANK != 0:
+            findings.append(Finding("info", "Topology check skipped (non-zero LOCAL_RANK)", {}))
+        elif topo is None:
             findings.append(Finding("warn", "Topology check skipped (amd-smi not found)", {}))
         else:
             findings.append(Finding("info", "GPU topology (amd-smi topo)", topo))
