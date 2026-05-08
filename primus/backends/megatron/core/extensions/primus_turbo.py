@@ -9,17 +9,17 @@ from typing import Callable, List, Optional, Tuple
 import primus_turbo.pytorch as primus_turbo_torch
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import transformer_engine as te
-from megatron.core import tensor_parallel
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
+    TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
     TEQuantizationParams,
     TEQuantizationRecipe,
     TERowParallelLinear,
+    condition_init_method,
 )
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -31,10 +31,10 @@ from megatron.core.parallel_state import (
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
+from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
 from primus_turbo.pytorch.core import QuantizedTensor as PrimusTurboQuantizedTensor
 from primus_turbo.pytorch.core.low_precision import (
@@ -206,7 +206,6 @@ def _use_split_wgrad_op():
         "v-min",
     ]:
         enable_split_wgrad_op = True
-        return True
 
     elif args.patch_zero_bubble and args.enable_zero_bubble:
         enable_split_wgrad_op = True
@@ -789,6 +788,10 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        args = get_args()
+        self.offload = args.offload and "parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -803,6 +806,9 @@ class PrimusTurboLinear(TELinear):
             symmetric_ar_type=symmetric_ar_type,
             tp_group=tp_group,
         )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboLinear only supports tensor parallel size = 1"
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
 
@@ -918,12 +924,8 @@ class PrimusTurboLinear(TELinear):
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
-        self.is_first_microbatch = False
-
-        if self.te_return_bias:
-            return out, bias_tensor
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
 
         return out, None
 
@@ -967,6 +969,9 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
         )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboRowParallelLinear only supports tensor parallel size = 1"
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
 
@@ -1087,12 +1092,8 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
-        self.is_first_microbatch = False
-
-        if self.te_return_bias:
-            return out, bias_tensor
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
 
         return out, None
 
@@ -1133,6 +1134,9 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
             tp_group=tp_group,
             stride=stride,
         )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboColumnParallelLinear only supports tensor parallel size = 1"
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
 
@@ -1251,12 +1255,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
 
-        self.is_first_microbatch = False
-
-        if self.te_return_bias:
-            return out, bias_tensor
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
 
         return out, None
 
@@ -1309,6 +1309,10 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             disable_grad_reduce=disable_grad_reduce,
             tp_group=tp_group,
         )
+
+        tp_size = get_pg_size(tp_group)
+        assert tp_size == 1, "PrimusTurboColumnParallelLinearTorch only supports tensor parallel size = 1"
+
         self.is_first_microbatch = True
         self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
@@ -1423,10 +1427,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             else:
                 out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
-        out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         return out, bias_tensor
 
@@ -1454,7 +1455,6 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         stride: int = 1,
     ):
         args = get_args()
-        self.config = config
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
@@ -1472,6 +1472,9 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
             tp_group=tp_group,
             stride=stride,
         )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboLayerNormColumnParallelLinear only supports tensor parallel size = 1"
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
 
@@ -1595,50 +1598,81 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
-        self.is_first_microbatch = False
-
-        if self.te_return_bias:
-            return out, bias_tensor
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
 
         return out, None
 
 
-class PrimusTurboGroupedMLP(TEGroupedMLP):
-    """
-    Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
+def fused_bias_act_with_probs(
+    intermediate_parallel: torch.Tensor,
+    bias_parallel: torch.Tensor,
+    permuted_probs: torch.Tensor,
+    tokens_per_experts: torch.Tensor,
+    activation_func: str,
+):
+    assert intermediate_parallel.ndim == 2
+    assert permuted_probs.ndim == 1
+    assert tokens_per_experts.device == intermediate_parallel.device
 
-    Megatron removed the old ``GroupedMLP`` implementation, but DeepEP sync-free
-    stage 2/3 still relies on the turbo grouped-gemm token-count contract. Keep
-    TEGroupedMLP-style parameter initialization/checkpoint layout while executing
-    the expert MLP with PrimusTurbo grouped-gemm kernels.
+    # TODO(ruibin): fuse bias addition with activation function
+    if bias_parallel is not None:
+        intermediate_parallel = intermediate_parallel + bias_parallel
+
+    num_tokens = intermediate_parallel.shape[0]
+    row_mask = primus_turbo_torch.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+
+    # TODO(ruibin): support more activation functions
+    if activation_func == "silu":
+        fused_act_with_probs = primus_turbo_torch.ops.swiglu_with_probs
+    elif activation_func == "gelu":
+        fused_act_with_probs = primus_turbo_torch.ops.geglu_with_probs
+    else:
+        raise ValueError(f"Activation function {activation_func} is not supported.")
+
+    return fused_act_with_probs(intermediate_parallel, permuted_probs, row_mask)
+
+
+class PrimusTurboGroupedLinear(TEGroupedLinear):
+    """
+    Wrapper for the PrimusTurbo `grouped_gemm` ops.
     """
 
     def __init__(
         self,
-        num_local_experts: int,
-        config: TransformerConfig,
-        submodules,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         args = get_args()
-        self.offload = args.offload and "grouped_linear" in args.offload_ops
-        assert not self.offload, "grouped_linear offload is not supported in PrimusTurboGroupedMLP"
+        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         super().__init__(
-            num_local_experts=num_local_experts,
+            num_gemms,
+            input_size,
+            output_size,
+            parallel_mode=parallel_mode,
             config=config,
-            submodules=submodules,
+            init_method=init_method,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
         )
-        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
-        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
-        self.patch_zero_bubble = args.patch_zero_bubble
-        self.patch_primus_pipeline = args.patch_primus_pipeline
 
-        if self.config.add_bias_linear:
-            raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboGroupedLinear only supports tensor parallel size = 1"
 
         if self.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
@@ -1665,12 +1699,22 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
         return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
 
-    def forward(
+    def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, m_splits, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
-        permuted_local_hidden_states: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        permuted_probs: torch.Tensor,
-        routing_map: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
+        m_splits: torch.Tensor,
+        is_first_microbatch: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
         _is_first_microbatch = self.is_first_microbatch
@@ -1774,33 +1818,85 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
                     intermediate_parallel, w2, tokens_per_expert, trans_b=False
                 )
         else:
-            # Keep a gradient path for expert weights even when no local token is routed here.
-            assert (
-                not self.patch_zero_bubble and not self.patch_primus_pipeline
-            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
-            w1_flat = w1.view(self.config.hidden_size, -1)
-            w2_flat = w2.view(-1, self.config.hidden_size)
-            hidden = torch.matmul(permuted_local_hidden_states, w1_flat)
-            if self.activation_recompute:
-                if self.use_turbo_fused_act_with_probs:
-                    hidden = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, hidden, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    hidden = self.activation_checkpoint.checkpoint(
-                        self.bias_act_func, hidden, None, probs_for_activation
-                    )
-            else:
-                if self.use_turbo_fused_act_with_probs:
-                    hidden = self.activation_func_with_probs(hidden, permuted_probs, tokens_per_expert)
-                else:
-                    hidden = self.bias_act_func(hidden, None, probs_for_activation)
-            output = torch.matmul(hidden, w2_flat)
+            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=False)
 
-        if self.activation_recompute:
-            self.activation_checkpoint.discard_output_and_register_recompute(output)
+        return out, None
 
-        return output, None
+
+class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
+    """
+    Wrapper for the PrimusTurboGroupedLinear layer but specialized
+    to column-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="column",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports tensor parallel size = 1"
+
+
+class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
+    """
+    Wrapper for the PrimusTurboGroupedLinear layer but specialized
+    to row-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="row",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports tensor parallel size = 1"
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
@@ -1849,6 +1945,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
+        use_turbo_grouped_gemm = args.use_turbo_grouped_gemm or args.use_turbo_grouped_mlp
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
@@ -1861,9 +1958,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=(
-                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
-            ),
+            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )

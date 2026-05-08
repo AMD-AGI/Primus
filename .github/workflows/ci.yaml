@@ -18,6 +18,7 @@ env:
   PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986 # PR: feat: _flash_attn_forward add out args (#2648)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
+  TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
   BASE_IMAGE: docker.io/rocm/primus:v26.2
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
@@ -93,6 +94,7 @@ jobs:
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -153,7 +155,8 @@ jobs:
                --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
-               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
@@ -194,6 +197,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
+      PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
@@ -332,9 +336,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      - name: Init Primus-Turbo submodules (full clone)
+        working-directory: Primus-Turbo
+        run: |
+          rm -rf 3rdparty/composable_kernel .git/modules/3rdparty/composable_kernel
+          git submodule sync --recursive
+          git submodule update --init --recursive
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
