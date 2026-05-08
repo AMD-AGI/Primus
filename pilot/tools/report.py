@@ -272,6 +272,47 @@ def _summarize_smoke(handle: dict[str, Any], snapshot: dict[str, Any] | None) ->
     }
 
 
+def _score_measurement(measurement: dict[str, Any] | None) -> float | None:
+    if not measurement:
+        return None
+    if measurement.get("median_iter_time_ms"):
+        return 1000.0 / float(measurement["median_iter_time_ms"])
+    if measurement.get("throughput_steps_per_s"):
+        return float(measurement["throughput_steps_per_s"])
+    return None
+
+
+def _summarize_tuning_state(tuning_state: dict[str, Any], ref: str | None = None) -> dict[str, Any]:
+    history = tuning_state.get("run_history") or tuning_state.get("history") or []
+    champion = tuning_state.get("champion")
+    champion_id = tuning_state.get("champion_id")
+    if champion is None and champion_id:
+        champion = next((r for r in history if r.get("id") == champion_id), None)
+    baseline = next((r for r in history if r.get("stage") == "BASELINE"), None)
+    champion_score = _score_measurement((champion or {}).get("measurement"))
+    baseline_score = _score_measurement((baseline or {}).get("measurement"))
+    improvement_pct = None
+    if champion_score is not None and baseline_score:
+        improvement_pct = round((champion_score / baseline_score - 1.0) * 100.0, 2)
+    failed_runs = 0
+    for item in history:
+        measurement = item.get("measurement") or {}
+        status = measurement.get("status") or item.get("status")
+        if status not in ("completed", "success", "pass"):
+            failed_runs += 1
+    return {
+        "session_id": tuning_state.get("session_id"),
+        "rounds": (tuning_state.get("budget_used") or {}).get("rounds") or tuning_state.get("round_id"),
+        "champion_id": champion_id,
+        "champion": champion,
+        "baseline": baseline,
+        "improvement_pct": improvement_pct,
+        "run_count": len(history),
+        "failed_runs": failed_runs,
+        "history_ref": ref,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Verdict rules
 # ---------------------------------------------------------------------------
@@ -351,6 +392,7 @@ def build(
     cluster_profile: str | Path | None = None,
     smoke_run_dir: str | Path | None = None,
     smoke_snapshot: str | Path | None = None,
+    tuning_state: str | Path | None = None,
     report_id: str | None = None,
     out_dir: str | Path = "state/reports",
     render_markdown: bool = True,
@@ -418,6 +460,22 @@ def build(
     stages["baseline"] = None
 
     verdict = _decide_verdict(stages)
+    tuning_summary = None
+    if tuning_state:
+        ts_path = Path(tuning_state).resolve()
+        ts = _load_yaml(ts_path)
+        tuning_summary = _summarize_tuning_state(ts, ref=str(ts_path))
+        artifacts.append({"kind": "TuningState", "ref": str(ts_path)})
+        if tuning_summary.get("champion_id"):
+            verdict = {
+                "overall": "pass" if (tuning_summary.get("failed_runs") or 0) == 0 else "warn",
+                "headline": (
+                    f"single-node tuning complete; champion={tuning_summary['champion_id']} "
+                    f"improvement={tuning_summary.get('improvement_pct')}%"
+                ),
+                "next_action": "promote",
+                "blockers": [],
+            }
 
     report: dict[str, Any] = {
         "schema_version": "1.0",
@@ -434,6 +492,7 @@ def build(
         "stages": stages,
         "verdict": verdict,
         "artifacts": artifacts,
+        "tuning": tuning_summary,
         "meta": {
             "pilot_version": None,
             "host": socket.gethostname(),
@@ -485,6 +544,30 @@ def render_markdown_text(report: dict[str, Any]) -> str:
     p(f"- **Operator**: `{s.get('operator') or '?'}`")
     p(f"- **Primus rev**: `{s.get('primus_git_rev') or '?'}`")
     p(f"- **Generated**: `{report.get('generated_at')}`")
+
+    tuning = report.get("tuning")
+    if tuning:
+        p("")
+        p("## Tuning")
+        p("")
+        p(f"- **Session**: `{tuning.get('session_id')}`")
+        p(f"- **Rounds**: `{tuning.get('rounds')}`")
+        p(f"- **Runs**: `{tuning.get('run_count')}`  "
+          f"(failed=`{tuning.get('failed_runs')}`)")
+        p(f"- **Champion**: `{tuning.get('champion_id')}`")
+        p(f"- **Improvement vs baseline**: `{tuning.get('improvement_pct')}%`")
+        champion = tuning.get("champion") or {}
+        meas = champion.get("measurement") or {}
+        if meas:
+            p(f"- **Champion median iter time**: `{meas.get('median_iter_time_ms')} ms`")
+            p(f"- **Champion median TFLOPS/GPU**: `{meas.get('median_tflops')}`")
+        overrides = champion.get("overrides") or {}
+        if overrides:
+            p("- **Champion overrides**:")
+            for k in sorted(overrides):
+                p(f"  - `{k}`: `{overrides[k]}`")
+        if tuning.get("history_ref"):
+            p(f"- tuning_state: `{tuning.get('history_ref')}`")
 
     blockers = verdict.get("blockers") or []
     if blockers:
@@ -668,6 +751,8 @@ def _cli() -> int:
                      help="Convenience: shorthand that resolves to state/runs/<id>/.")
     p_b.add_argument("--smoke-snapshot", default=None,
                      help="Optional: pin a specific snapshot YAML. Default: latest in <run_dir>/snapshots/.")
+    p_b.add_argument("--tuning-state", default=None,
+                     help="Optional: tuning_state.yaml from `pilot.tools.tune_single run`.")
     p_b.add_argument("--report-id", default=None)
     p_b.add_argument("--out-dir", default="state/reports")
     p_b.add_argument("--no-markdown", action="store_true", help="Skip markdown rendering.")
@@ -689,6 +774,7 @@ def _cli() -> int:
                 cluster_profile=args.cluster_profile,
                 smoke_run_dir=smoke_run_dir,
                 smoke_snapshot=args.smoke_snapshot,
+                tuning_state=args.tuning_state,
                 report_id=args.report_id,
                 out_dir=args.out_dir,
                 render_markdown=not args.no_markdown,

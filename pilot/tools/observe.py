@@ -596,17 +596,99 @@ def _print_one_line(snap: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# compare_loss — kept as stub
+# compare_loss — lightweight correctness gate
 # ---------------------------------------------------------------------------
 
 
-def compare_loss(run_id: str, reference_curve: str) -> dict[str, Any]:
-    """CORRECTNESS gate: tokens-aligned comparison vs T0/T1 reference (§S2).
+def _latest_snapshot_path(run_id: str, log_dir: str | Path = "state/runs") -> Path | None:
+    snap_dir = _resolve_pilot_path(log_dir) / run_id / "snapshots"
+    if not snap_dir.exists():
+        return None
+    snaps = sorted(snap_dir.glob("*.yaml"))
+    return snaps[-1] if snaps else None
 
-    Stub — requires a reference loss curve produced by an earlier T0 baseline,
-    which is out of scope for the SMOKE slice.
+
+def _load_yaml_mapping(path: str | Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise _ObserveError("DEP_MISSING", f"PyYAML required: {exc}")
+    p = Path(path)
+    if not p.is_absolute():
+        p = _resolve_pilot_path(p)
+    if not p.exists():
+        raise _ObserveError("USAGE", f"file not found: {p}")
+    data = yaml.safe_load(p.read_text())
+    if not isinstance(data, dict):
+        raise _ObserveError("USAGE", f"{p} is not a YAML mapping")
+    return data
+
+
+def _latest_loss_from_snapshot(snap: dict[str, Any]) -> float | None:
+    latest = ((snap.get("metrics") or {}).get("latest") or {}).get("loss")
+    if isinstance(latest, (int, float)) and math.isfinite(float(latest)):
+        return float(latest)
+    hist = ((snap.get("metrics") or {}).get("history") or {}).get("loss") or []
+    vals = [float(v) for v in hist if isinstance(v, (int, float)) and math.isfinite(float(v))]
+    return vals[-1] if vals else None
+
+
+def _reference_loss(reference: dict[str, Any]) -> float | None:
+    for key in ("loss", "final_loss", "reference_loss"):
+        value = reference.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            return float(value)
+    if "snapshot" in reference and isinstance(reference["snapshot"], dict):
+        return _latest_loss_from_snapshot(reference["snapshot"])
+    if "metrics" in reference:
+        return _latest_loss_from_snapshot(reference)
+    return None
+
+
+def compare_loss(
+    run_id: str,
+    reference_curve: str,
+    *,
+    log_dir: str | Path = "state/runs",
+    max_delta_pct: float = 25.0,
+) -> dict[str, Any]:
+    """CORRECTNESS gate: short-window numeric health vs a reference loss.
+
+    This first implementation is intentionally lightweight: it compares latest
+    finite loss against a reference scalar or snapshot-derived latest loss.
     """
-    raise NotImplementedError("pilot.tools.observe.compare_loss")
+    snap_path = _latest_snapshot_path(run_id, log_dir)
+    snap = _load_yaml_mapping(snap_path) if snap_path else snapshot(run_id, log_dir=log_dir, save=True)
+    ref = _load_yaml_mapping(reference_curve)
+    loss = _latest_loss_from_snapshot(snap)
+    ref_loss = _reference_loss(ref)
+    loss_finite = bool((snap.get("metrics") or {}).get("loss_finite", True))
+    symptoms = snap.get("symptoms") or {}
+    hard_symptom = any(bool(symptoms.get(k)) for k in (
+        "oom_detected", "nccl_error", "cuda_error", "python_error", "loss_nan_or_inf",
+    ))
+    delta_pct = None
+    if loss is not None and ref_loss not in (None, 0):
+        delta_pct = (loss - float(ref_loss)) / abs(float(ref_loss)) * 100.0
+    passed = (
+        loss_finite
+        and not hard_symptom
+        and loss is not None
+        and (delta_pct is None or delta_pct <= max_delta_pct)
+    )
+    return {
+        "stage": "CORRECTNESS_LITE",
+        "status": "pass" if passed else "fail",
+        "run_id": run_id,
+        "snapshot_ref": str(snap_path) if snap_path else None,
+        "reference_ref": str(reference_curve),
+        "loss": loss,
+        "reference_loss": ref_loss,
+        "loss_delta_pct": round(delta_pct, 4) if delta_pct is not None else None,
+        "max_delta_pct": max_delta_pct,
+        "loss_finite": loss_finite,
+        "hard_symptom": hard_symptom,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +745,8 @@ def _cli() -> int:
     p_cmp = sub.add_parser("compare_loss", help="(stub) CORRECTNESS gate.")
     p_cmp.add_argument("--run-id", required=True)
     p_cmp.add_argument("--reference", required=True)
+    p_cmp.add_argument("--log-dir", default="state/runs")
+    p_cmp.add_argument("--max-delta-pct", type=float, default=25.0)
 
     args = p.parse_args()
     try:
@@ -694,8 +778,13 @@ def _cli() -> int:
             return _EXIT_OK
 
         if args.cmd == "compare_loss":
-            _emit(_failure("TOOL_ERROR", "compare_loss not implemented"))
-            return _EXIT_USAGE
+            _emit(compare_loss(
+                args.run_id,
+                args.reference,
+                log_dir=args.log_dir,
+                max_delta_pct=args.max_delta_pct,
+            ))
+            return _EXIT_OK
 
     except _ObserveError as exc:
         _emit(_failure(exc.kind, str(exc)))

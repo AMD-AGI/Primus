@@ -97,18 +97,78 @@ When a downstream stage emits `failure.kind = HANG | CLUSTER | STRUCTURAL_INVALI
 
 ## PROJECTION
 
-**Status**: TODO. Anchor: README §3.1 step 2 (lines 257-271). Authority pending in `skills/workflow/projection.md`.
+**Status**: single-node v1 implemented via `pilot.tools.profiler.run`.
 
-Inputs: ClusterProfile + Model Spec.
-Produces: Single-node profiling, Execution Model, Initial PlanGraph.
+Inputs: ClusterProfile + Model Spec + base Primus exp YAML.
+Produces: GPU inventory and per-config estimates used to seed the first candidate pool.
+
+Valid next states:
+
+| Result | Next state | Conditions |
+|--------|------------|------------|
+| `success` | `SMOKE` | At least one config estimate produced. |
+| `failed(CLUSTER)` | `ABORT` | No GPU visible or torch unavailable on the training node. |
+| `failed(TOOL_ERROR)` | `ABORT` | Profiler implementation/runtime error. |
 
 ---
 
-## SMOKE / BASELINE / CORRECTNESS / OPTIMIZE_LOOP / REPORT / LEARN
+## SMOKE
 
-**Status**: TODO. Each will get a row mirroring the PREFLIGHT layout when promoted.
+**Status**: single-node v1 implemented by `pilot.tools.tune_single run`.
 
-Cross-reference: README §7 contains the loop body, §12.2 the failure transitions. Until each row is filled here, the Orchestrator **must** consult those README sections directly.
+SMOKE submits the base Primus exp with a short `train_iters` override, observes the terminal `RunSnapshot`, and fails fast on OOM, hang, NCCL/RCCL, CUDA/HIP, Python exception, or NaN/Inf loss.
+
+Valid next states:
+
+| Result | Next state |
+|--------|------------|
+| `success` | `BASELINE` |
+| hard runtime symptom | `ABORT` or `OPTIMIZE_LOOP.DIAGNOSE` |
+
+---
+
+## BASELINE
+
+**Status**: single-node v1 implemented by `pilot.tools.tune_single run`.
+
+Runs the base plan for the configured short tuning window, writes the first `run_history` entry, and sets it as `champion`.
+
+Valid next state: `CORRECTNESS` for explicit reference checks, or directly `OPTIMIZE_LOOP.DIAGNOSE` in the single-node runner.
+
+---
+
+## CORRECTNESS / CORRECTNESS_LITE
+
+**Status**: single-node v1 implemented by `pilot.tools.observe.compare_loss`.
+
+The first implementation is a short-window numeric health gate: finite loss, no hard symptoms, and latest loss delta within a configured percent of the reference snapshot/scalar. It is not yet a full token-aligned T0/T1/T2 curve comparison.
+
+---
+
+## OPTIMIZE_LOOP
+
+**Status**: single-node v1 implemented by `pilot.tools.tune_single.{diagnose,replan,settle,run}`.
+
+Loop order:
+
+```
+OBSERVE -> DIAGNOSE -> REPLAN -> EXECUTE -> CORRECTNESS_LITE -> SETTLE
+```
+
+Single-node v1 rules:
+
+- `DIAGNOSE` uses `RunSnapshot` metrics and symptoms only.
+- `REPLAN` emits a small priority pool over `micro_batch_size`, `tensor_model_parallel_size`, and recompute settings.
+- `EXECUTE` runs candidates through `submit.run` in foreground mode.
+- `SETTLE` promotes only if score improves by `epsilon_promote`; repeated gains below `epsilon_stop` stop the loop.
+
+---
+
+## REPORT / LEARN
+
+**Status**: single-node v1.
+
+`pilot.tools.report build --tuning-state <path>` summarizes champion overrides, baseline/champion improvement, run count, and referenced artifacts. `pilot.tools.knowledge.write` writes review-only drafts under `pilot/state/knowledge_drafts/`; it never writes directly to `skills/knowledge/`.
 
 ---
 

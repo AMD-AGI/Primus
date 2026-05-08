@@ -4,12 +4,14 @@ Per §S4 governance, this tool writes ONLY to `state/knowledge_drafts/`.
 It cannot write to `skills/knowledge/` — that path is reserved for
 curator-merged git PRs.
 
-Status: skeleton.
 """
 
 from __future__ import annotations
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 
@@ -35,7 +37,63 @@ def write(report: dict, kind: DraftKind, *,
     Returns:
         {written_path: str, draft_id: str, accepted: bool, reasons: list[str]}
     """
-    raise NotImplementedError("pilot.tools.knowledge.write")
+    reasons: list[str] = []
+    verdict = report.get("verdict") or {}
+    session = report.get("session") or {}
+    tuning = report.get("tuning") or {}
+    champion = tuning.get("champion") or {}
+    headline = verdict.get("headline") or f"{kind} draft for {session.get('plan_name', 'unknown plan')}"
+    if len(headline) > 200:
+        reasons.append("headline exceeds 200 chars")
+        headline = headline[:197] + "..."
+    evidence = []
+    for artifact in report.get("artifacts") or []:
+        if artifact.get("ref"):
+            evidence.append({"kind": artifact.get("kind", "artifact"), "ref": artifact["ref"]})
+    if not evidence:
+        reasons.append("no artifact evidence attached")
+    if not session.get("plan_ref"):
+        reasons.append("missing plan binding")
+
+    draft_id = f"{kind}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+    draft = {
+        "schema_version": "1.0",
+        "draft_id": draft_id,
+        "kind": kind,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "accepted": not reasons,
+        "reasons": reasons,
+        "headline": headline,
+        "binding": {
+            "plan_ref": session.get("plan_ref"),
+            "cluster_id": session.get("cluster_id"),
+            "model": session.get("plan_name"),
+        },
+        "evidence": evidence,
+        "content": {
+            "overall": verdict.get("overall"),
+            "next_action": verdict.get("next_action"),
+            "champion_id": champion.get("id"),
+            "champion_overrides": champion.get("overrides"),
+            "improvement_pct": tuning.get("improvement_pct"),
+        },
+    }
+    root = Path(drafts_root)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parent.parent / root
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{draft_id}.yaml"
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:  # pragma: no cover
+        return {"written_path": "", "draft_id": draft_id, "accepted": False,
+                "reasons": [f"PyYAML required: {exc}"]}
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        yaml.safe_dump(draft, f, sort_keys=False, default_flow_style=False)
+    tmp.replace(path)
+    return {"written_path": str(path), "draft_id": draft_id,
+            "accepted": not reasons, "reasons": reasons}
 
 
 def _cli() -> int:
@@ -45,8 +103,27 @@ def _cli() -> int:
     w.add_argument("--kind", required=True, choices=[
         "final_best_case", "failure_pattern", "env_recipe", "model_calibration_drift"])
     w.add_argument("--report", required=True)
+    w.add_argument("--drafts-root", default="state/knowledge_drafts")
     args = p.parse_args()
-    raise NotImplementedError(f"CLI dispatch for {args.cmd!r} not implemented")
+    try:
+        if args.cmd == "write":
+            import yaml  # type: ignore
+            with open(args.report) as f:
+                report = yaml.safe_load(f)
+            if not isinstance(report, dict):
+                raise ValueError("report must be a mapping")
+            print(json.dumps(write(report, args.kind, drafts_root=args.drafts_root),
+                             indent=2, default=str))
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({
+            "stage": "LEARN",
+            "status": "failed",
+            "failure": {"kind": "TOOL_ERROR", "message": str(exc),
+                        "escalate_to_orchestrator": True},
+        }, indent=2))
+        return 2
+    return 2
 
 
 if __name__ == "__main__":

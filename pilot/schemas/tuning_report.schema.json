@@ -181,6 +181,23 @@
       }
     },
 
+    "tuning": {
+      "type": ["object", "null"],
+      "description": "Single-node tuning loop summary derived from tuning_state.yaml.",
+      "additionalProperties": true,
+      "properties": {
+        "session_id": {"type": ["string", "null"]},
+        "rounds": {"type": ["integer", "null"]},
+        "champion_id": {"type": ["string", "null"]},
+        "champion": {"type": ["object", "null"], "additionalProperties": true},
+        "baseline": {"type": ["object", "null"], "additionalProperties": true},
+        "improvement_pct": {"type": ["number", "null"]},
+        "run_count": {"type": "integer"},
+        "failed_runs": {"type": "integer"},
+        "history_ref": {"type": ["string", "null"]}
+      }
+    },
+
     "meta": {
       "type": "object",
       "description": "Bookkeeping. Not load-bearing for downstream tools.",
