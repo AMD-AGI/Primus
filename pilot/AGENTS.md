@@ -26,7 +26,7 @@ This file is the canonical entry for any AI agent (Cursor / Claude Code / Codex 
 ## 3. Non-negotiables
 
 1. **Pilot core (`skills/` + `prompts/` + `tools/` + `schemas/` + `state/`) does NOT import any agent SDK.** SDK deps (`anthropic`, `cursor-client`, `openai`, ...) live only under `integrations/<framework>/` (and optionally under `agent/`).
-2. **Tools expose process / MCP boundaries**, not Python function boundaries. Every tool module must support `python -m pilot.tools.<module> <subcommand>`.
+2. **Tools expose process / MCP boundaries**, not Python function boundaries. Every tool module must support `python -m pilot.tools.<module> <subcommand>`. A unified shorthand `python -m pilot <module> <subcommand>` (see `pilot/cli/main.py`) is provided for discoverability and dispatches to the same `_cli()` — both forms are equivalent.
 3. **State is the file system.** No in-memory shared state across stages. Cross-stage memory goes through `state/`.
 4. **Subagent isolation is the framework's job, not Pilot's.** Pilot only specifies the boundary table (§13.2 of `README.md`) — `subagent.spawn` is a protocol abstraction, concrete impl injected by `integrations/<framework>/`.
 5. **`SubagentResult.summary < 200 tokens`** — enforced by schema validation. Workers exceeding it are rejected.

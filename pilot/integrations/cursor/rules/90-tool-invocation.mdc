@@ -12,7 +12,7 @@ Cursor has two ways to invoke them.
 ## Universal environmental input: `cluster.yaml`
 
 **Every** Pilot tool that touches the cluster (preflight / env_probe / submit /
-observe / constraint) reads a single environmental file describing the runtime
+tune_single / profiler) reads a single environmental file describing the runtime
 mode (`single` container or existing `slurm` allocation). Pass it via
 `--cluster-config <path>`; if omitted, tools look in `$PRIMUS_PILOT_CLUSTER_CONFIG`,
 then `./cluster.yaml`.
@@ -26,7 +26,16 @@ do not consume `cluster.yaml`.
 
 ## Mode A: Shell (default)
 
-Every Tool corresponds to a `python -m pilot.tools.<name>` subcommand:
+Every Tool corresponds to a `python -m pilot.tools.<name>` subcommand. A
+unified front door is also available — `python -m pilot <name> ...` is
+strictly equivalent (it just re-emits `sys.argv` to the same `_cli()`):
+
+```bash
+python -m pilot          state checkpoint --input -      # unified entry
+python -m pilot.tools.state    checkpoint --input -      # legacy entry (identical)
+```
+
+Use whichever reads better in your script; both paths are first-class.
 
 | Tool | Example command |
 |------|-----------------|
@@ -34,16 +43,21 @@ Every Tool corresponds to a `python -m pilot.tools.<name>` subcommand:
 | `preflight.env_probe` | `python -m pilot.tools.preflight env_probe --cluster-config cluster.yaml` |
 | `preflight.env_sweep` | `python -m pilot.tools.preflight env_sweep --cluster-config cluster.yaml --base-plan <ref> --candidates <json>` |
 | `submit.run` | `python -m pilot.tools.submit run --cluster-config cluster.yaml --plan <ref>` |
-| `submit.cancel` | `python -m pilot.tools.submit cancel --run_id <id>` |
-| `observe.snapshot` | `python -m pilot.tools.observe snapshot --cluster-config cluster.yaml --run_id <id>` |
-| `observe.compare_loss` | `python -m pilot.tools.observe compare_loss --run_id <id> --reference <ref>` |
-| `constraint.check` | `python -m pilot.tools.constraint check --plan <ref>` |
-| `constraint.check_env` | `python -m pilot.tools.constraint check_env --env_diff <json>` |
+| `submit.cancel` | `python -m pilot.tools.submit cancel --run-id <id>` |
+| `observe.snapshot` | `python -m pilot.tools.observe snapshot --run-id <id>` |
+| `observe.compare_loss` | `python -m pilot.tools.observe compare_loss --run-id <id> --reference <ref>` |
+| `constraint.check` | `python -m pilot.tools.constraint check --plan <ref> --cluster <cluster-yaml>` |
+| `constraint.check_env` | `python -m pilot.tools.constraint check_env --env <env-yaml>` |
 | `constraint.estimate_mem` | `python -m pilot.tools.constraint estimate_mem --plan <ref>` |
-| `state.checkpoint` | `python -m pilot.tools.state checkpoint --session <id> --stage <s>` |
-| `state.resume` | `python -m pilot.tools.state resume --session <id>` |
-| `state.trim` | `python -m pilot.tools.state trim --keep <fields>` |
-| `state.handoff` | `python -m pilot.tools.state handoff --session <id> --reason <r>` |
+| `state.checkpoint` | `python -m pilot.tools.state checkpoint --input <state-yaml>` |
+| `state.resume` | `python -m pilot.tools.state resume <path>` |
+| `state.trim` | `python -m pilot.tools.state trim --input <state-yaml> --keep session_id,current_stage,champion_id` |
+| `state.handoff` | `python -m pilot.tools.state handoff --session-id <id> --reason <r> --next-action-hint <hint>` |
+| `tune_single.run` | `python -m pilot.tools.tune_single run --cluster-config cluster.yaml --plan <exp-yaml> --rounds 2` |
+| `tune_single.diagnose` | `python -m pilot.tools.tune_single diagnose --snapshot <snapshot-yaml>` |
+| `tune_single.replan` | `python -m pilot.tools.tune_single replan --cluster-config cluster.yaml --plan <exp-yaml> --snapshot <snapshot-yaml>` |
+| `tune_single.settle` | `python -m pilot.tools.tune_single settle --history <tuning-state-yaml>` |
+| `report.build` | `python -m pilot.tools.report build --plan <exp-yaml> --tuning-state pilot/state/tuning_state.yaml` |
 | `knowledge.write` | `python -m pilot.tools.knowledge write --report <ref> --kind <k>` |
 
 Each command emits JSON on stdout and logs on stderr; parse stdout.
