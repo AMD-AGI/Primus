@@ -118,42 +118,6 @@ def _bridge_weight_grad(x: torch.Tensor, weight: torch.nn.Parameter, weight_buff
     return _WeightGradBridge.apply(x, weight, weight)
 
 
-def _bridge_weight_grad(
-    x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: torch.Tensor
-) -> torch.Tensor:
-    """Route quantized weight gradient to original weight and keep weight in autograd graph."""
-
-    class _IdentityFunc(torch.autograd.Function):
-        """Identity on ``output`` that keeps ``weight`` in the autograd graph.
-
-        Forward returns ``output`` unchanged.  Backward passes ``grad_output``
-        through and returns a zero gradient for ``weight`` so that its gradient
-        accumulator fires (triggering DDP's ``register_grad_ready`` hook).
-        """
-
-        @staticmethod
-        def forward(ctx, output, weight):
-            ctx.save_for_backward(weight)
-            return output
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            (weight,) = ctx.saved_tensors
-            return grad_output, torch.zeros_like(weight)
-
-    if weight_buffer is not None and weight_buffer.requires_grad:
-
-        def _copy_grad(grad, w=weight):
-            if w.grad is not None:
-                w.grad.copy_(grad)
-            else:
-                w.grad = grad.clone()
-
-        weight_buffer.register_hook(_copy_grad)
-
-    return _IdentityFunc.apply(x, weight)
-
-
 def _call_fp8_autocast_enter(
     *,
     enabled: bool,
