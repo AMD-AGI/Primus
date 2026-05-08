@@ -7,6 +7,7 @@
 """Extra Megatron tokenizers."""
 
 import math
+from collections import OrderedDict
 
 from megatron.training.arguments import (
     _add_tokenizer_args as megatron_add_tokenizer_args,
@@ -25,7 +26,7 @@ except ImportError:
         HuggingFaceTokenizer as _HuggingFaceTokenizer,
     )
 
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 CUSTOM_TOKENIZER_TYPES = {
     "DeepSeekV2Tokenizer",
@@ -38,6 +39,62 @@ CUSTOM_TOKENIZER_TYPES = {
     "KimiK2Tokenizer",
     "HuggingFaceTokenizer",
 }
+
+
+def _ensure_unique_identifiers(tokenizer, args):
+    """Attach unique_identifiers for MCore dataset cache hashing compatibility."""
+    if hasattr(tokenizer, "unique_identifiers"):
+        return tokenizer
+
+    unique_identifiers = OrderedDict()
+    unique_identifiers["class"] = f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}"
+    unique_identifiers["tokenizer_path"] = getattr(args, "tokenizer_model", None)
+    unique_identifiers["tokenizer_type"] = getattr(args, "tokenizer_type", None)
+
+    for arg_name in (
+        "vocab_file",
+        "merge_file",
+        "tokenizer_hf_no_use_fast",
+        "tokenizer_hf_no_include_special_tokens",
+        "trust_remote_code",
+    ):
+        if hasattr(args, arg_name):
+            unique_identifiers[arg_name] = str(getattr(args, arg_name))
+
+    tokenizer.unique_identifiers = unique_identifiers
+    return tokenizer
+
+
+def _build_custom_hf_tokenizer(args, **kwargs):
+    """Build custom tokenizer aliases through HF-compatible Megatron path."""
+    tokenizer = None
+    original_tokenizer_type = args.tokenizer_type
+    fallback_reason = None
+
+    # Prefer the upstream builder for MCore compatibility (e.g. unique_identifiers).
+    builder = None if megatron_build_tokenizer is build_tokenizer else megatron_build_tokenizer
+    if builder is not None:
+        args.tokenizer_type = "HuggingFaceTokenizer"
+        try:
+            tokenizer = builder(args, **kwargs)
+        except Exception as e:
+            tokenizer = None
+            fallback_reason = "upstream build_tokenizer failed with " f"{type(e).__name__}: {e}"
+        finally:
+            args.tokenizer_type = original_tokenizer_type
+
+    # Fallback to direct HF tokenizer construction for legacy/custom flows.
+    if tokenizer is None:
+        if fallback_reason is None:
+            fallback_reason = "upstream build_tokenizer unavailable (recursive patch path)"
+        warning_rank_0(
+            "[TokenizerCompat] Falling back to direct HuggingFace tokenizer construction "
+            f"for tokenizer_type={original_tokenizer_type}, tokenizer_model={args.tokenizer_model}. "
+            f"Reason: {fallback_reason}"
+        )
+        tokenizer = _HuggingFaceTokenizer(args.tokenizer_model, trust_remote_code=True)
+
+    return _ensure_unique_identifiers(tokenizer, args)
 
 
 def _add_tokenizer_args(parser):
@@ -55,7 +112,7 @@ def build_tokenizer(args, **kwargs):
 
     # Select and instantiate the tokenizer.
     if args.tokenizer_type in CUSTOM_TOKENIZER_TYPES:
-        tokenizer = _HuggingFaceTokenizer(args.tokenizer_model, trust_remote_code=True)
+        tokenizer = _build_custom_hf_tokenizer(args, **kwargs)
     else:
         return megatron_build_tokenizer(args, **kwargs)
 
