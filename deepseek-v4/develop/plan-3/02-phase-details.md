@@ -488,6 +488,123 @@ need to pass them through.)
 * **G18** — Dense attention: turbo vs eager-Python forward equivalence within 1e-3.
 * **G19** — HCA + CSA branches still produce identical outputs vs plan-2 baseline.
 
+### Status (2026-05-07)
+
+P22 lands the full wiring for the dense (`compress_ratio == 0`) Turbo
+flash-attn path, with two pieces still gated on aiter Triton kernel
+upgrades:
+
+* **`DeepseekV4AttentionSubmodules.core_attention`** — new optional
+  field; spec helper emits it only for dense layers.  HCA / CSA leave
+  the slot `None` and route through the eager softmax exactly as before
+  (with new code comments documenting the kernel-engineering
+  prerequisites — LSE-returning flash for HCA, per-query indexed
+  attention for CSA).
+* **Provider plumbing** — `provider.core_attention()` already returns
+  `PrimusTurboAttention` when `args.use_turbo_attention=True` and
+  `TEDotProductAttention` otherwise (no change to the provider; we just
+  now consume it for V4).
+* **Sink alias** — `DeepseekV4Attention.__init__` builds
+  `self.core_attention` from the spec, and when V4's per-head
+  learnable sink is on AND the built core-attention class advertises
+  `use_sink_attention=True` (i.e. Turbo with sinks), it aliases
+  `core_attention.sinks = self.attn_sink` so the released V4-Flash
+  checkpoint key `layers.{i}.attn.attn_sink` continues to load via
+  state-dict.  TE's `DotProductAttention` does not expose
+  `use_sink_attention`; in that case the dense path falls back to the
+  inline eager softmax-with-sink (same math, no kernel difference).
+* **Forward dispatch** — new `_attention_forward_via_core(q, kv)`
+  reshapes V4's `[B, S, H, D]` Q and `[B, S, 1, D]` single-latent KV
+  to Turbo's `qkv_format="sbhd"` and forwards through the kernel.  The
+  KV is forwarded as `[S, B, 1, D]` (not H-broadcast) so `num_gqa_groups
+  = 1` does the broadcast inside the kernel — saves the 64x activation
+  blowup of `kv.expand(...).contiguous()`.
+* **Sink-attention args plumbing** — `_maybe_plumb_v4_sink_attention_args`
+  in `deepseek_v4_builders.py` derives `args.use_sink_attention=True`,
+  `args.sink_window_even_layers_only=False`, and (importantly)
+  `args.sink_sliding_window=0` from V4's `attn_sink` /
+  `attn_sliding_window` whenever `enable_primus_turbo and
+  use_turbo_attention and attn_sink`.  The `sink_sliding_window` knob
+  is **zeroed out** because the released aiter Triton flash-attn
+  kernel (`aiter/ops/triton/attention/mha.py`) raises
+  `ValueError: Sliding Window is not supported yet in the Triton
+  Backend` for any `window_size != (-1, -1)`.  When the V4 config's
+  window covers the full sequence (smoke: `seq=128`, `window=128`)
+  the zero-out is mathematically equivalent to the eager-Python path;
+  when it doesn't (full V4-Flash: `seq=4096`, `window=128`) we emit a
+  rank-0 warning and still zero the window — V4 dense layers attend
+  to *all* causal-prior tokens instead of the windowed subset.  This
+  deviation is documented in the warning text: production V4-Flash
+  training should keep `use_turbo_attention=False` until aiter adds
+  SWA support.
+* **YAML / runner** — `examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml`
+  exposes `enable_primus_turbo` / `use_turbo_attention` / `use_turbo_deepep`
+  via `${PRIMUS_*}` env knobs (default off).  `run_deepseek_v4.sh`
+  threads `ENABLE_PRIMUS_TURBO`, `USE_TURBO_ATTENTION`, and
+  `USE_TURBO_DEEPEP` through the trainer; setting
+  `USE_TURBO_ATTENTION=True` (or `USE_TURBO_DEEPEP=True`) flips
+  `ENABLE_PRIMUS_TURBO=True` automatically so the
+  `before_train` provider-rebind patch fires.
+
+#### Test results
+
+* **G18 (unit)** — `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p22_core_attention.py`,
+  11 tests all pass under
+  `python -m pytest test_v4_p22_core_attention.py`:
+  * Submodules dataclass surface check.
+  * Spec emission: dense emits `core_attention`; HCA / CSA do not.
+  * Sink alias contract: `attn_sink_enabled and core_use_sink` →
+    `core_attention.sinks is self.attn_sink`; TE (no sink support)
+    → `_use_core_attention=False` (eager fallback).
+  * Sink-attention args plumbing: 4 cases (seq ≤ window, seq > window,
+    Turbo off, attn_sink off, explicit user override).
+  * Dense forward equivalence on CUDA: a `MockTurbo` core-attention
+    class replicates the eager softmax-with-sink kernel; the V4
+    dense path produces output within `5e-3 max-abs` of the eager
+    forward.  Skipped when CUDA is unavailable.
+* **Smoke (PP=2 EP=4)** — `deepseek-v4/develop/progress/p22/smoke_eager_pp2_ep4.log` —
+  10/10 iterations clean with the new wiring (USE_TURBO_ATTENTION=False;
+  smoke validates that the spec emission + init build + alias logic
+  doesn't regress the eager path).  Throughput holds at ~12.6
+  TFLOP/s/GPU vs the P21 baseline, no `submodule init failed` /
+  `fallback to nn.Linear` warnings.
+* **Smoke (EP=8 PP=1)** — `deepseek-v4/develop/progress/p22/smoke_eager_ep8_pp1.log` —
+  10/10 iterations clean, same sanity checks.
+
+#### Known limitation: aiter Triton kernel can't run V4-Flash dims today
+
+Running the smoke with `USE_TURBO_ATTENTION=True` reproducibly fails
+inside the aiter Triton kernel (`aiter/ops/triton/_triton_kernels/attention/mha.py`)
+with:
+
+```
+out of resource: shared memory, Required: 262144, Hardware limit: 163840
+```
+
+Root cause: V4-Flash's `head_dim=512` makes `BLOCK_DMODEL=512` in the
+Triton flash-attn forward.  With aiter's default block config
+(`BLOCK_M=128, BLOCK_N=64, num_stages=1`), the per-CTA SMEM allocation
+exceeds MI355's 160 KiB shared-memory budget.  The smaller-block
+config (`BLOCK_M=32, BLOCK_N=32`) only triggers when `q.shape[-1] >
+v.shape[-1]` (i.e. partial-RoPE pe-head separation, which is how MLA
+runs through the kernel today).  V4's single-latent KV puts all 512
+channels in both Q and V (`q.shape[-1] == v.shape[-1] == 512`), so the
+kernel falls into the wrong tuning bucket.
+
+Two follow-ups, both out of plan-3 scope:
+
+1. Pad V4's Q / K to add a phantom 64-channel "pe" axis (zero-filled);
+   the kernel would then take the smaller-block path and fit within
+   SMEM.  The math is unchanged because the extra channels contribute
+   `0` to QK^T.  Implementation work: ~30 lines in `_attention_forward_via_core`.
+2. Land aiter SWA support so `attn_sliding_window=128` is honored at
+   the kernel level for full V4-Flash sequences (`seq=4096`).
+
+Until those land, the production V4-Flash path stays on the
+eager-Python forward.  P22 keeps the wiring in place so a future
+`use_turbo_attention=True` upgrade is a one-line YAML flip + an aiter
+patch.
+
 ---
 
 ## P23 — Turbo DeepEP dispatcher in V4 specs

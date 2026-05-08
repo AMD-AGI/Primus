@@ -91,12 +91,18 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo / deepep — keep off until V4 path is verified
-      enable_primus_turbo: false
-      use_turbo_attention: false
+      # turbo / deepep — keep off by default; enable via env vars when
+      # benchmarking the Turbo path (see run_deepseek_v4.sh).  Plan-3 P22
+      # routes the dense (compress_ratio == 0) attention layers through
+      # PrimusTurboAttention when ``use_turbo_attention=true``; the V4
+      # builder auto-derives ``use_sink_attention`` /
+      # ``sink_sliding_window`` from ``attn_sink`` / ``attn_sliding_window``
+      # so the YAML stays free of Turbo-internal knobs.
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:false}
       use_turbo_grouped_mlp: false
       use_turbo_rms_norm: false
-      use_turbo_deepep: false
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 

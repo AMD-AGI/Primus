@@ -291,6 +291,13 @@ def _build_v4_attention_submodules(
         submods.compressor = ModuleSpec(module=Compressor)
         if compress_ratio == 4:
             submods.indexer = ModuleSpec(module=Indexer)
+    else:
+        # Plan-3 P22: dense layers route their softmax-and-attend through
+        # provider.core_attention() (PrimusTurboAttention when
+        # ``use_turbo_attention=True``, TEDotProductAttention otherwise).
+        # HCA + CSA layers do not get this slot — see
+        # ``DeepseekV4AttentionSubmodules`` docstring for why.
+        submods.core_attention = ModuleSpec(module=provider.core_attention())
 
     return submods
 

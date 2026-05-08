@@ -59,6 +59,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
@@ -117,6 +118,20 @@ class DeepseekV4AttentionSubmodules:
     on the attention module itself (key ``layers.{i}.attn.attn_sink``
     in the released checkpoint), and the softmax-with-sink combine is
     inlined in :meth:`DeepseekV4Attention._attention_forward`.
+
+    Plan-3 P22: ``core_attention`` is the Turbo / TE flash-attention
+    kernel.  Only the dense layer kind (``compress_ratio == 0``) emits
+    a spec for this slot — HCA / CSA cannot use a stock flash-attn
+    kernel (HCA needs a joint sink across two key streams which would
+    require an LSE-returning flash kernel; CSA needs per-query top-K
+    indexed keys which is not a flash pattern).  When the dense path
+    receives a ``core_attention`` it bypasses the eager-Python softmax
+    and runs through ``provider.core_attention()`` instead.  When
+    ``provider.core_attention()`` returns
+    :class:`PrimusTurboAttention` (i.e. ``use_turbo_attention=True``)
+    and V4's ``attn_sink`` is on, the attention module aliases
+    ``core_attention.sinks`` to ``self.attn_sink`` so the released
+    checkpoint key path is preserved.
     """
 
     linear_q_down_proj: Optional[Union[ModuleSpec, type]] = None
@@ -129,6 +144,8 @@ class DeepseekV4AttentionSubmodules:
     kv_layernorm: Optional[Union[ModuleSpec, type]] = None
     compressor: Optional[Union[ModuleSpec, type]] = None
     indexer: Optional[Union[ModuleSpec, type]] = None
+    # Plan-3 P22: dense (compress_ratio == 0) layers only.
+    core_attention: Optional[Union[ModuleSpec, type]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +424,75 @@ class DeepseekV4Attention(MLASelfAttention):
             if self.compress_ratio == 4:
                 self.indexer = self._build_indexer(submodules.indexer)
 
+        # ---- core attention (Turbo / TE flash) — dense layers only ----
+        # Plan-3 P22: when the spec emits a ``core_attention`` submodule
+        # (only on dense ``compress_ratio == 0`` layers), build it now and
+        # use it as the softmax-and-attend kernel instead of the
+        # eager-Python ``_attention_forward``.  HCA + CSA always run
+        # eager-Python because their joint softmax / per-query top-K
+        # gather can't be expressed as a stock flash-attn call (see
+        # comments in ``forward`` / ``_csa_forward``).
+        #
+        # The constant ``softmax_scale`` is precomputed via
+        # ``_attention_scale()`` (the YaRN ``m_scale`` is a layer-static
+        # constant set at RoPE init time, so this matches the eager-path
+        # scale exactly for ``compress_ratio == 0``).
+        self.core_attention: Optional[nn.Module] = None
+        self._use_core_attention: bool = False
+        if submodules.core_attention is not None and self.compress_ratio == 0:
+            softmax_scale = self._attention_scale()
+            try:
+                self.core_attention = build_module(
+                    submodules.core_attention,
+                    config=config,
+                    layer_number=self.layer_number,
+                    attn_mask_type=AttnMaskType.causal,
+                    attention_type="self",
+                    softmax_scale=softmax_scale,
+                    k_channels=head_dim,
+                    v_channels=head_dim,
+                    cp_comm_type="p2p",
+                    pg_collection=self.pg_collection,
+                )
+            except TypeError:
+                # Some core-attention classes (e.g. local CPU stubs in
+                # unit tests) don't accept the full TE / Turbo kwarg set.
+                # Retry with the minimal kwargs Megatron ships everywhere.
+                self.core_attention = build_module(
+                    submodules.core_attention,
+                    config=config,
+                    layer_number=self.layer_number,
+                    attn_mask_type=AttnMaskType.causal,
+                    attention_type="self",
+                    softmax_scale=softmax_scale,
+                )
+
+            # Sink alias: when V4's per-head learnable sink is on AND the
+            # core-attention class supports learned sinks (Turbo only —
+            # the TE class does not), tie ``core_attention.sinks`` to
+            # ``self.attn_sink`` so the released-checkpoint key
+            # ``layers.{i}.attn.attn_sink`` keeps loading.  TE classes
+            # that don't expose ``use_sink_attention`` get ``False`` here
+            # and we fall back to eager-Python so the inline
+            # softmax-with-sink path still produces the right math.
+            core_use_sink = bool(getattr(self.core_attention, "use_sink_attention", False))
+            if attn_sink_enabled and core_use_sink:
+                # Cast V4's sink parameter to match the dtype Turbo allocated
+                # so the alias doesn't break dtype contracts.  The eager
+                # path always promotes to float32 inside the softmax, so
+                # casting the parameter dtype is safe.
+                turbo_sinks = getattr(self.core_attention, "sinks", None)
+                if turbo_sinks is not None and turbo_sinks.dtype != self.attn_sink.dtype:
+                    self.attn_sink.data = self.attn_sink.data.to(turbo_sinks.dtype)
+                self.core_attention.sinks = self.attn_sink
+                self._use_core_attention = True
+            elif not attn_sink_enabled and self.core_attention is not None:
+                # No-sink V4 still uses core_attention (e.g. unit tests,
+                # ablations).  SWA is honored by Turbo only when sinks are
+                # on, so we accept this only when SWA is off too.
+                if self.attn_sliding_window <= 0:
+                    self._use_core_attention = True
+
     # ------------------------------------------------------------------
     # construction helpers (compressed branches)
     # ------------------------------------------------------------------
@@ -549,6 +635,49 @@ class DeepseekV4Attention(MLASelfAttention):
         if self.attn_dropout > 0.0 and self.training:
             probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
         return torch.matmul(probs.to(v.dtype), v)
+
+    def _attention_forward_via_core(
+        self,
+        q: torch.Tensor,  # [B, S, H, head_dim] (post-RoPE)
+        kv: torch.Tensor,  # [B, S, 1, head_dim] (post-RoPE, single-latent)
+    ) -> torch.Tensor:
+        """Run the dense (compress_ratio == 0) softmax-and-attend through
+        ``self.core_attention`` (Turbo flash-attn / TE flash-attn).
+
+        Plan-3 P22.  Avoids materialising the eager
+        ``[B, H, S, S] fp32`` logits tensor — at full V4-Flash dims
+        (``H=64, S=4096, hc_mult=4``) that's 16 GiB / microbatch, and
+        the dominant activation cost.
+
+        Inputs use V4's local-frame layout (Q has all H heads, KV is
+        single-latent with 1 head).  We forward as Turbo's required
+        ``qkv_format="sbhd"`` and let the underlying flash kernel
+        broadcast the 1-head KV across H query heads (MQA).  Causal
+        masking + (optional) sliding window are honored by the kernel
+        directly — the eager ``local_mask`` is not used here.
+
+        Returns ``[B, H, S, head_dim]`` to match the contract of
+        :meth:`_attention_forward`.
+        """
+        B, S, H, Dh = q.shape
+        # [B, S, H, D] -> [S, B, H, D] (qkv_format="sbhd").
+        q_sbhd = q.transpose(0, 1).contiguous()
+        kv_sbhd = kv.transpose(0, 1).contiguous()  # [S, B, 1, D]
+
+        # Turbo / TE flash-attn forward.  ``attention_mask=None`` is
+        # legal for causal+SWA (the kernel builds the mask internally
+        # from ``attn_mask_type`` + the layer's ``window_size``).
+        out = self.core_attention(
+            q_sbhd,
+            kv_sbhd,
+            kv_sbhd,
+            None,
+            attn_mask_type=AttnMaskType.causal,
+        )  # -> [S, B, H * head_dim]
+
+        # [S, B, H*D] -> [B, S, H, D] -> [B, H, S, D].
+        out = out.view(S, B, H, Dh).permute(1, 2, 0, 3).contiguous()
+        return out
 
     def _grouped_o_projection(self, attn: torch.Tensor) -> torch.Tensor:
         """Apply the V4 grouped low-rank O projection.
@@ -738,6 +867,19 @@ class DeepseekV4Attention(MLASelfAttention):
         # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
         # (V4's single-latent design: K and V share the rope-applied kv).
         q, kv = self._apply_rope_q_k(q, kv, position_ids)
+
+        if self.compress_ratio == 0 and self._use_core_attention:
+            # Plan-3 P22: dense layer, Turbo / TE flash path.  Causal + SWA
+            # are handled inside the kernel; the eager ``local_mask`` is
+            # not consulted here.  KV is forwarded as ``[S, B, 1, D]``
+            # and broadcast across H query heads via MQA.
+            out_bh = self._attention_forward_via_core(q, kv)
+            out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
+            out = out.to(dtype=dtype)
+            if self.linear_o_a is not None:
+                return self._grouped_o_projection(out)
+            return self._flat_o_projection(out)
+
         # Broadcast K / V across the H query-head axis.
         k_h = kv.expand(B, S, self.num_heads, self.head_dim)
         v_h = kv.expand(B, S, self.num_heads, self.head_dim)
@@ -750,14 +892,28 @@ class DeepseekV4Attention(MLASelfAttention):
         v_local_bh = v_h.transpose(1, 2)
 
         if self.compress_ratio == 0:
+            # Eager-Python dense path (used when ``core_attention`` is not
+            # built or the V4 sink + Turbo sink-attention contract isn't
+            # met; e.g. CPU unit tests or TE-without-sink configs).
             out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
         elif self.compress_ratio == 128:
+            # HCA cannot use ``core_attention``: the local SWA branch and
+            # the compressed-pool branch share **one** softmax with **one**
+            # sink column.  Stock flash-attn returns no LSE, so we can't
+            # decompose into two flash calls and recombine.  Stays on the
+            # eager-Python path under plan-3.
             extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
             k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
             full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
             out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
         elif self.compress_ratio == 4:
+            # CSA cannot use ``core_attention``: the per-query top-K
+            # gather (``gathered = pool[..., topk_idxs, :]``, shape
+            # ``[B, H, S, K, head_dim]``) is sparse-per-row indexed
+            # attention — there is no flash-attn kernel that reads a
+            # different per-query subset of keys from a pool.  Stays on
+            # eager-Python under plan-3 (a custom kernel is required).
             out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask)
         else:
             # Guarded by __init__; included for static-analysis completeness.

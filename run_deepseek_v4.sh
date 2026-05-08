@@ -35,6 +35,14 @@ export PROFILE=${PROFILE:-False}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
 export LEGACY_GG=${LEGACY_GG:-False}
+# Plan-3 P22 / P23: PrimusTurbo gate (must be on for turbo attention /
+# turbo deepep to take effect; enable_primus_turbo gates the
+# `before_train` patches that re-bind the spec provider).
+export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-False}
+if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True" ]; then
+  ENABLE_PRIMUS_TURBO=True
+fi
+export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 
 export PRECISION_TYPE=${PRECISION_TYPE:-BF16}
 export FP8=null
@@ -83,7 +91,9 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --compress_ratios "$PRIMUS_COMPRESS_RATIOS" \
   --mtp_num_layers 0 \
   --mock_data True \
+  --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
+  --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --fp8 "$FP8" \
