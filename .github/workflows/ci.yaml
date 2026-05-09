@@ -203,6 +203,8 @@ jobs:
     runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Clean stale Primus-Turbo checkout
+        run: rm -rf "${GITHUB_WORKSPACE}/Primus-Turbo"
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
@@ -330,6 +332,8 @@ jobs:
     runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Clean stale Primus-Turbo checkout
+        run: rm -rf "${GITHUB_WORKSPACE}/Primus-Turbo"
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
