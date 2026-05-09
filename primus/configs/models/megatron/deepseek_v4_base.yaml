@@ -56,6 +56,15 @@ attn_sink: true
 use_v4_triton_attention: false
 use_v4_triton_csa_attention: false
 
+# Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
+# projection inside HyperMixer.compute_weights) with a cached
+# ``torch.compile(fullgraph=True, dynamic=False)`` build. Collapses the
+# 39 fp32 ``aten::sum`` reductions per call into a single Inductor-fused
+# Triton kernel; AOT autograd handles BWD. Default ``false`` until G32
+# (FWD + BWD parity) and G33b (post-P29 trace) flip it on. Driven by
+# the ``PRIMUS_USE_V4_COMPILED_SINKHORN`` env var via run_deepseek_v4.sh.
+use_v4_compiled_sinkhorn: false
+
 # ---------- Output projection (grouped low-rank) ----------
 o_groups: 8
 o_lora_rank: 1024

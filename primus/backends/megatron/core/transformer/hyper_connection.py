@@ -32,16 +32,104 @@ Phase 4 contract:
   The block is responsible for passing in/out tensors in whatever activation
   dtype it uses; the module up-casts internally to fp32 around the Sinkhorn
   region and casts back at the end.
+
+Plan-5 P29 (RESCOPED — see ``deepseek-v4/develop/plan-5/02-phase-details.md``)
+adds a ``torch.compile`` fast path for :func:`sinkhorn_normalize`. The eager
+loop issues 1 + 2*(n_iters - 1) separate fp32 ``aten::sum`` reductions per
+call; at V4-Flash production widths each reduction runs at ~250x over the
+memory-bound floor because HIP's default ``reduce_kernel<512, 1, ...>`` is
+sized for huge reductions and our ``[1, 4096, 4, 4] -> [1, 4096, 4, 1]``
+shape has only 4 elements per output. The compiled path collapses every
+sum / divide / broadcast into one Inductor-fused Triton kernel
+(``fullgraph=True, dynamic=False``). The compiled callable is cached
+module-globally on ``(n_iters, eps, dtype)`` so each combination compiles
+exactly once per process.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Tuple
+from typing import Callable, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# ---------------------------------------------------------------------------
+# Plan-5 P29 fast path: torch.compile-fused Sinkhorn-Knopp.
+#
+# Cache keyed on ``(n_iters, eps, dtype)``.  Each freshly-decorated callable
+# uses ``@torch.compile(fullgraph=True, dynamic=True)`` so a SINGLE compiled
+# artefact handles every input shape variation Inductor generates code that
+# accepts shape as a runtime argument.  The dynamic path is the right
+# trade-off for V4 because:
+#
+# * In production each rank sees exactly one Sinkhorn input shape
+#   (``[B, S, K, K] = [1, 4096, 4, 4]`` at V4-Flash) so ``dynamic=True``
+#   pays no specialization cost vs ``dynamic=False``.
+# * Multi-shape harnesses (unit tests, MTP heads with different leading
+#   dims) all hit the same compiled artefact, so we never thrash Dynamo's
+#   recompile_limit.  ``dynamic=False`` would force one Dynamo
+#   specialization per shape AND ALL CLOSURES SHARE THE SAME CODE OBJECT
+#   (closures from the same factory function inherit the factory's code
+#   object), which means Dynamo's cache_size_limit (default 8) is shared
+#   across every cached callable.  After ~8 distinct ``(shape, stride,
+#   requires_grad)`` combinations the limit is hit and ``fullgraph=True``
+#   raises ``FailOnRecompileLimitHit`` even though our cache is fine —
+#   the cache key just is not what Dynamo's internal cache is keyed on.
+#
+# ``in_dtype`` still participates in the cache key because the trailing
+# cast back to the input activation dtype changes the Inductor IR; running
+# bf16 and fp32 callers through the same compiled artefact would force a
+# miscompile or a redundant recompile.
+# ---------------------------------------------------------------------------
+
+_SinkhornCacheKey = tuple[int, float, torch.dtype]
+_compiled_sinkhorn_cache: dict[_SinkhornCacheKey, Callable[[torch.Tensor], torch.Tensor]] = {}
+
+
+def _build_compiled_sinkhorn(
+    n_iters: int,
+    eps: float,
+    in_dtype: torch.dtype,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Build (and torch.compile) one Sinkhorn-Knopp implementation specialised
+    on ``(n_iters, eps, in_dtype)`` but generic over input shape.
+
+    The body is the same algorithm as the eager :func:`sinkhorn_normalize`
+    path but written so Inductor sees one straight-line graph of fp32
+    sums / divides / broadcasts (Python ``for`` is unrolled at compile time
+    because ``n_iters`` is a closure-captured Python int).
+    """
+
+    @torch.compile(fullgraph=True, dynamic=True)
+    def _impl(logits: torch.Tensor) -> torch.Tensor:
+        m = logits.float()
+        m = m / (m.sum(dim=-2, keepdim=True) + eps)
+        for _ in range(max(n_iters - 1, 0)):
+            m = m / (m.sum(dim=-1, keepdim=True) + eps)
+            m = m / (m.sum(dim=-2, keepdim=True) + eps)
+        return m.to(in_dtype)
+
+    return _impl
+
+
+def _get_compiled_sinkhorn(
+    n_iters: int,
+    eps: float,
+    in_dtype: torch.dtype,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Cache-or-build accessor; returns the compiled callable for the given
+    Sinkhorn signature.  Shape is NOT part of the key — see module-level
+    cache notes (we use ``dynamic=True`` so one artefact handles every
+    shape).
+    """
+    key: _SinkhornCacheKey = (int(n_iters), float(eps), in_dtype)
+    fn = _compiled_sinkhorn_cache.get(key)
+    if fn is None:
+        fn = _build_compiled_sinkhorn(n_iters, eps, in_dtype)
+        _compiled_sinkhorn_cache[key] = fn
+    return fn
 
 
 def sinkhorn_normalize(
@@ -49,6 +137,7 @@ def sinkhorn_normalize(
     *,
     n_iters: int = 20,
     eps: float = 1e-6,
+    use_compiled: bool = False,
 ) -> torch.Tensor:
     """Project a non-negative ``[..., K, K]`` matrix onto the doubly-stochastic
     manifold via the Sinkhorn-Knopp algorithm.
@@ -77,10 +166,21 @@ def sinkhorn_normalize(
         n_iters: total Sinkhorn iterations (= 1 priming column step
             + ``n_iters - 1`` row/col cycles).
         eps: numerical floor to prevent divide-by-zero.
+        use_compiled: when ``True``, dispatch to the cached
+            ``torch.compile(fullgraph=True, dynamic=False)`` build of the
+            same loop (plan-5 P29 RESCOPED).  The compiled callable
+            collapses the 1 + 2*(n_iters - 1) fp32 ``aten::sum`` launches
+            (and their divides / broadcasts) into one Inductor-fused Triton
+            kernel; AOT autograd handles the BWD.  Numerical contract is
+            unchanged (algorithm is identical; only the kernel boundary
+            moves).  Default ``False`` until the V4 config flag
+            ``use_v4_compiled_sinkhorn`` is flipped on.
 
     Returns:
         Approximately doubly-stochastic ``[..., K, K]`` (same dtype as input).
     """
+    if use_compiled:
+        return _get_compiled_sinkhorn(n_iters, eps, logits.dtype)(logits)
     in_dtype = logits.dtype
     m = logits.float()
     m = m / (m.sum(dim=-2, keepdim=True) + eps)
@@ -109,6 +209,14 @@ class HyperMixer(nn.Module):
         hc_mult: number of parallel streams ``K``.
         eps: floor for ``sigmoid(...) + eps`` and for Sinkhorn.
         sinkhorn_iters: Sinkhorn iteration count (``20`` matches V4 release).
+        use_compiled_sinkhorn: plan-5 P29 (RESCOPED) fast path.  When
+            ``True`` the call to :func:`sinkhorn_normalize` inside
+            :meth:`compute_weights` dispatches to the
+            ``torch.compile(fullgraph=True, dynamic=False)`` build of the
+            same algorithm, kept in :data:`_compiled_sinkhorn_cache`.
+            Defaults to ``False`` so existing callers (and existing
+            checkpoints) are bit-equivalent.  The V4 block reads
+            ``config.use_v4_compiled_sinkhorn`` and forwards it here.
     """
 
     def __init__(
@@ -118,6 +226,7 @@ class HyperMixer(nn.Module):
         hc_mult: int,
         eps: float = 1e-6,
         sinkhorn_iters: int = 20,
+        use_compiled_sinkhorn: bool = False,
     ) -> None:
         super().__init__()
         if hc_mult < 1:
@@ -127,6 +236,7 @@ class HyperMixer(nn.Module):
         self.hc_mult = hc_mult
         self.eps = eps
         self.sinkhorn_iters = sinkhorn_iters
+        self.use_compiled_sinkhorn = bool(use_compiled_sinkhorn)
 
         out_dim = (2 + hc_mult) * hc_mult
         # All HC params kept in fp32; see techblog §2.2 pitfall #3.
@@ -177,7 +287,12 @@ class HyperMixer(nn.Module):
         pre = torch.sigmoid(pre_logit) + self.eps  # (eps, 1+eps]
         post = 2.0 * torch.sigmoid(post_logit)  # (0, 2)  no eps
         comb = torch.softmax(comb_logit, dim=-1) + self.eps
-        comb = sinkhorn_normalize(comb, n_iters=self.sinkhorn_iters, eps=self.eps)
+        comb = sinkhorn_normalize(
+            comb,
+            n_iters=self.sinkhorn_iters,
+            eps=self.eps,
+            use_compiled=self.use_compiled_sinkhorn,
+        )
 
         # Cast back to the activation dtype to match downstream block compute.
         out_dtype = x.dtype

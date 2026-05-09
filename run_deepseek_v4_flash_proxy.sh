@@ -31,6 +31,13 @@
 #   - USE_TURBO_DEEPEP              (PrimusTurboDeepEPTokenDispatcher)
 #   - TURBO_USE_GROUPED_MLP         (Turbo grouped-GEMM MoE expert path)
 #
+# Plan-5 P29 (RESCOPED) adds a fifth perf knob, also ON by default in
+# the proxy after G32 + G33b green:
+#   - USE_V4_COMPILED_SINKHORN      (torch.compile-fused HyperMixer
+#                                    Sinkhorn-Knopp projection — kills
+#                                    the 7.6 s aten::sum fp32 reduce
+#                                    that dominated the P28 baseline).
+#
 # USE_TURBO_ATTENTION stays OFF — Turbo would take precedence over the V4
 # Triton dense path in `DeepseekV4Attention.forward` (plan-4 P27 dispatch
 # precedence: turbo > v4_triton > eager for cr ∈ {0, 128}).
@@ -92,11 +99,15 @@ export GBS=${GBS:-8}
 export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 
-# ---------- Plan-5 perf knobs (all four ON) ---------------------------------
+# ---------- Plan-5 perf knobs (all five ON) ---------------------------------
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
+# Plan-5 P29 (RESCOPED): torch.compile-fused HyperMixer Sinkhorn.  Kills
+# the 7.6 s aten::sum fp32 reduce (87.3 % of step time in the P28
+# baseline trace).  Default ON in the proxy after G32 + G33b are green.
+export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-True}
 
 # Turbo attention OFF — would take precedence over V4 Triton dense path
 # in DeepseekV4Attention.forward (plan-4 P27 dispatch precedence:

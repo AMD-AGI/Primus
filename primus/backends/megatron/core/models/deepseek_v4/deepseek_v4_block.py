@@ -513,6 +513,12 @@ class DeepseekV4HybridLayer(TransformerLayer):
         norm_eps = float(config.norm_epsilon)
         hc_eps = float(config.hc_eps)
         hc_sinkhorn_iters = int(config.hc_sinkhorn_iters)
+        # Plan-5 P29 (RESCOPED): forward the V4 config flag to HyperMixer
+        # so its sinkhorn_normalize dispatches to the torch.compile fast
+        # path when the run script flips USE_V4_COMPILED_SINKHORN=True.
+        # Default is False — see deepseek_v4_transformer_config.py for
+        # the dispatch contract.
+        use_v4_compiled_sinkhorn = bool(getattr(config, "use_v4_compiled_sinkhorn", False))
 
         use_spec_submodules = submodules is not None
         submodules = submodules or DeepseekV4HybridLayerSubmodules()
@@ -614,6 +620,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                     hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
+                    use_compiled_sinkhorn=use_v4_compiled_sinkhorn,
                 )
             else:
                 self.attn_hc = HyperMixer(
@@ -621,6 +628,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                     hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
+                    use_compiled_sinkhorn=use_v4_compiled_sinkhorn,
                 )
             if use_spec_submodules and submodules.ffn_hc is not None:
                 self.ffn_hc = build_module(
@@ -629,6 +637,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                     hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
+                    use_compiled_sinkhorn=use_v4_compiled_sinkhorn,
                 )
             else:
                 self.ffn_hc = HyperMixer(
@@ -636,6 +645,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                     hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
+                    use_compiled_sinkhorn=use_v4_compiled_sinkhorn,
                 )
         else:
             self.attn_hc = None

@@ -85,6 +85,12 @@ export FP8_RECIPE=null
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 
+# Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
+# cached torch.compile build. Default OFF here; the proxy script
+# (run_deepseek_v4_flash_proxy.sh) flips it ON. After G32 + G33b are
+# green, the default flips to True for the V4-Flash configs.
+export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
+
 # Plan-4 P27: TP-side guard for the V4 Triton kernels.
 # The dense / HCA / CSA kernels operate on the local head slice (each
 # rank only sees H/TP query heads) so TP-sharded execution is correct
@@ -144,6 +150,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \

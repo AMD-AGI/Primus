@@ -113,6 +113,11 @@ modules:
       use_v4_triton_attention: ${PRIMUS_USE_V4_TRITON_ATTENTION:false}
       use_v4_triton_csa_attention: ${PRIMUS_USE_V4_TRITON_CSA_ATTENTION:false}
 
+      # plan-5 P29 (RESCOPED): wrap sinkhorn_normalize with a cached
+      # torch.compile(fullgraph=True, dynamic=False) build. Default
+      # false until G32 (parity) + G33b (trace) flip it on.
+      use_v4_compiled_sinkhorn: ${PRIMUS_USE_V4_COMPILED_SINKHORN:false}
+
       moe_use_fused_router_with_aux_score: false
       moe_permute_fusion: true
 

@@ -180,128 +180,175 @@ against.
 
 ---
 
-## Phase 29 — Small-op fusion targets picked from the P28 trace
+## Phase 29 — Sinkhorn fp32 reduce: kill the dominant 7.6 s kernel (RESCOPED)
 
-> "我之前看到trace里面，有很多小kernel, kernel launch开销很大，cpu
-> idle占比很高。因此，这个是一个优化重点，可以查看是哪些模块的小算子，
-> 是否可以通过torch.compile或者triton来开发fused版本。" — user, plan-5
-> kick-off (optimisation hint #1).
+> P28 (commit `afd7ea59`) report at
+> `develop/profile/profile-baseline-ep8-20260508.md` named the dominant
+> `aten::sum` fp32 reduce as the #1 bottleneck and KEEP-RESCOPED P29:
+> "P29 KEEP — RESCOPE. CPU-bound floor is 0.3 % (≪ 10 % rule), so the
+> original P29 mandate (small-op kernel-launch fusion via torch.compile
+> or Triton-fused Compressor / Indexer / MoE-router chains) is
+> de-scoped. P29 is redirected to root-cause + eliminate the dominant
+> aten::sum fp32 reduce (87.5 % of step, 87 % of Σ kernel dur)."
+>
+> The original "small-op fusion" kick-off framing
+> ("我之前看到trace里面，有很多小kernel, kernel launch开销很大") does NOT
+> hold at V4-Flash production widths — the P28 trace shows the GPU is
+> 99.7 % active and the CPU-bound floor is 0.3 %. Kernel-launch tail is
+> not the bottleneck.
 
-P29 attacks the kernel-launch / CPU-idle tail named in the P28 report.
-The seeded targets below match the V4 attention small-op chain that
-runs eager Python today; they get **picked or dropped** in the P29
-"task list refinement" pass against the actual P28 trace. A target
-that the trace shows is < 1 % of step time is dropped before
-implementation.
+### What was de-scoped (and why it stays in tree as a follow-up note)
+
+The seeded plan-5 P29 candidates (a) `v4_fused_q_proj`,
+(b) `v4_fused_kv_proj`, (c) `v4_fused_o_proj`, (d) `v4_fused_compressor`
++ `v4_fused_indexer`, (e) `v4_fused_moe_router` are all targeted at the
+small-op kernel-launch tail. The P28 bottleneck table shows that tail
+is rank #4 at 0.7 % of step (`small-op kernel-launch tail`), well below
+the 10 % keep-rule. They become **plan-5 follow-ups** for revisit only
+if a future trace shows the small-op tail re-emerging at a different
+configuration (e.g. multi-node EP with cross-node activation
+reshuffling, or a much smaller per-rank batch).
+
+### Forensic root cause (P29 task 1 deliverable)
+
+`progress/p29/refinement.md` (the task-list refinement document for
+this rescope) walks every dominant
+`reduce_kernel<512, 1, ReduceOp<float, sum_functor<float, float, float>>>`
+launch back to `primus/backends/megatron/core/transformer/
+hyper_connection.py:47 sinkhorn_normalize`. **624 of 717 launches**
+(96 % by count, 99.95 % by time) are `aten::sum` calls on shape
+`(1, 4096, 4, 4) → (1, 4096, 4, 1)` with `dim=[-1] keepdim=True` —
+the 64-K-element fp32 reduce that the Sinkhorn-Knopp doubly-stochastic
+projection issues 39 times per call (1 priming column-norm + 19
+alternating row/col cycles × 2 sums). Eight V4-Flash hybrid layers per
+iter × 39 sums per call × 2 (FWD + BWD chain) ≈ 624 launches.
+
+The kernel runs at **~250× over memory-bound floor** (12.19 ms observed
+vs. 51 µs floor) because the HIP / ROCm dispatcher chose a 512-thread-
+block reduce kernel with one thread per output for an inner dim of
+size 4 → effective occupancy ≈ 12.5 %, plus 624 × 5 µs launch overhead.
+We can't fix the dispatcher; we **must avoid issuing 624 of these
+calls per iter in the first place**.
 
 ### Tasks
 
-0. **Task list refinement** — read the P28 report's bottleneck list,
-   pick the top-K small-op chains by total CPU time (typical: K = 3),
-   add or drop targets in the seeded list below. The chosen list is
-   recorded as a `### P29 task list refinement` block at the top of
-   the corresponding `progress/p29/` notes.
-1. **Q-projection chain (candidate a)** — fuse
-   `linear_q_down → q_layernorm → linear_q_up → _per_head_rms_norm
-   → apply_interleaved_partial_rope` into a single callable
-   `v4_fused_q_proj(hidden, q_down_w, q_up_w, q_norm_w, q_pe_freqs,
-   eps) -> (q_nope, q_pe)`. Two implementation options; pick at
-   refinement time:
-   - **torch.compile** — wrap the pure function with `torch.compile`
-     and rely on the Inductor backend to fuse pointwise ops + emit
-     fused matmul + RoPE kernels.
-   - **In-tree Triton** — write a single-program-per-row kernel that
-     does the matmul / RMSNorm / partial-RoPE in registers (analogous
-     to the per-row design in plan-4 P26).
-2. **KV-projection chain (candidate b)** — fuse
-   `linear_kv → kv_layernorm → split_qk_pe` (single-latent KV projection
-   plus the position-embedding axis split). Same two implementation
-   options as candidate (a).
-3. **O-projection group (candidate c)** — fuse
-   `attn_out → reshape → linear_o_a → linear_o_b` (grouped low-rank
-   output projection — currently two separate matmuls + an explicit
-   reshape). Lower priority because matmuls are big; but if the
-   reshape contributes a hot pointwise kernel in the P28 trace, the
-   fusion picks up the reshape + linear_o_a chain.
-4. **Compressor + Indexer pre-attention chain (candidate d)** —
-   for cr=4 / cr=128 layers, the Compressor (small linear + softmax
-   + scatter) and Indexer (small linear + topk + gather) launch
-   ~6–10 small kernels per layer per step. Fuse the compressor's
-   linear + softmax into a single Triton kernel; fuse the indexer's
-   linear + topk into a single Triton kernel.
-5. **MoE router (candidate e)** — fuse the gate-softmax + topk +
-   permute-mask chain inside the MoE router (NOT touching the
-   DeepEP dispatch boundary). Asserts `moe_router_dtype=fp32` is
-   preserved (DeepEP contract from plan-3 P23).
-6. **Per-target switches** — every fusion lands behind its own
-   boolean (`use_v4_fused_q_proj`, `use_v4_fused_kv_proj`,
-   `use_v4_fused_o_proj`, `use_v4_fused_compressor`,
-   `use_v4_fused_indexer`, `use_v4_fused_moe_router`) defaulting
-   to `False`. The proxy script (P28) flips them to `True` after
-   the corresponding G32.{a..e} gate is green.
-7. **Per-target equivalence test (G32.{a..e})** — for each chosen
-   fusion, add a `tests/unit_tests/megatron/transformer/deepseek_v4/
-   test_v4_p29_<target>.py` with forward + backward equivalence
-   (eager small-op vs fused) at V4-Flash + V4-Pro shapes, fast tier
-   + release tier (release marked `pytest.mark.slow`). Reuses the
-   plan-4 `compare_fwd_bwd` harness.
-8. **End-to-end smoke (G33)** — re-run the proxy with all fusions
-   on; assert ≥ +X % TFLOP/s/GPU vs P28 baseline. X comes from the
-   P28 report.
+1. **Task-list refinement (P29 task 1)** — `progress/p29/refinement.md`
+   pins the forensic call-site attribution + the chosen fix
+   (`torch.compile(fullgraph=True, dynamic=False)` wrapping
+   `sinkhorn_normalize`) + the fall-back (hand-Triton fused-Sinkhorn
+   kernel) + the X1 perf budget (≥ 50 % drop in `aten::sum` kernel
+   time, ≥ 35 % drop in steady iter wall time, ≥ 60 % gain in
+   TFLOP/s/GPU).
+2. **Config flag** — add `use_v4_compiled_sinkhorn: bool` (default
+   `False`) on `DeepSeekV4TransformerConfig`; plumb through
+   `examples/megatron/configs/MI355X/deepseek_v4_*-BF16-pretrain.yaml`,
+   `run_deepseek_v4.sh`, and the proxy script
+   `run_deepseek_v4_flash_proxy.sh`.
+3. **Fix implementation** — in `hyper_connection.py`:
+   - module-level cached compile (`_compiled_sinkhorn_cache: dict[(int,
+     float), Callable]`) so each `(n_iters, eps)` combination compiles
+     exactly once per process;
+   - `sinkhorn_normalize` accepts a new `use_compiled: bool = False`
+     keyword that switches between the eager loop (today's path) and
+     the cached compiled path;
+   - `HyperMixer.__init__` accepts `use_compiled_sinkhorn: bool = False`
+     and forwards it at every `compute_weights` call;
+   - `DeepseekV4HybridLayer` reads `config.use_v4_compiled_sinkhorn`
+     and passes it through.
+4. **G32 — equivalence test** —
+   `tests/unit_tests/megatron/transformer/deepseek_v4/
+   test_v4_p29_compiled_sinkhorn.py`:
+   - fast tier: `B=2 S=64 K=4` random fp32 inputs, FWD + BWD parity
+     vs eager within `atol=1e-5, rtol=1e-5` (Sinkhorn is bit-stable in
+     fp32 for K=4);
+   - release tier (`pytest.mark.slow`): `B=1 S=4096 K=4` (V4-Flash
+     production input shape), same parity budget;
+   - cold-compile time recorded in the test as a `print()` line.
+5. **G33a — proxy smoke** —
+   `progress/p29/run_smoke_compiled_sinkhorn_ep8.sh`: 10-iter EP=8 run
+   under the proxy with the flag on; assert plan-4 ratchet
+   (G23..G30) stays green, no banned warnings (plan-3 / plan-4 grep
+   set), `lm_loss` after 10 iters within 5e-2 of the P28 baseline at
+   the same fixed seed.
+6. **G33b — proxy trace + post-P29 report** —
+   `progress/p29/run_baseline_trace_ep8_p29.sh` (mirrors
+   `progress/p28/run_baseline_trace_ep8.sh`) captures iter 6 → 7 with
+   the flag on; render
+   `develop/profile/profile-after-p29-ep8-<YYYYMMDD>.{md,html}` reusing
+   `develop/profile/_tools/render_baseline_report.py`. Assert
+   `aten::sum` fp32 reduce kernel time drops by ≥ 50 % vs P28 baseline
+   (budget X1).
+7. **Conditional escalation** — if the post-P29 trace shows a
+   `< 50 %` drop, ship the fall-back hand-Triton fused-Sinkhorn kernel
+   (`primus/backends/megatron/core/transformer/v4_attention_kernels/
+   _triton/v4_sinkhorn.py`) under the same `use_v4_compiled_sinkhorn`
+   flag; document in `progress/p29/post_compile_results.md`.
+8. **Default flip** — once G32 + G33a + G33b are green, flip
+   `use_v4_compiled_sinkhorn` default to `True` in YAML +
+   `run_deepseek_v4.sh` + the proxy. The plan-5 baseline TFLOP/s/GPU
+   pinned in P28 is rolled to the post-P29 value for P30 / P31 to
+   measure against.
 
 ### Design notes
 
-- **Functional fusion, not module fusion.** Fuse pure functions, not
-  `nn.Module.forward`. `torch.compile`-wrapping `DeepseekV4Attention.forward`
-  closes over `self._submodules`, `self._rope`, `pg_collection`,
-  `self.layer_number`, etc., which Megatron's spec walker rebinds
-  at construction time → recompile-on-every-rebuild or silent miscompile.
-  Functional sub-chains (e.g. `q_proj_chain(hidden, q_down_w,
-  q_up_w, q_norm_w, q_pe_freqs)`) close over only the leaf tensors,
-  so they compile once and stay valid for the whole run.
-- **torch.compile vs hand-written Triton.** The decision is per-target,
-  picked at refinement time:
-  - `torch.compile`: lower author cost, no autotune, but Inductor
-    sometimes emits suboptimal kernels at `head_dim=512` (long
-    register pressure, large SMEM); the cost is the perf delta
-    vs hand-tuning. Fast to land, easy to revert.
-  - Hand-written Triton: higher author cost, autotune-able, but a
-    ground-truth kernel that the team owns end-to-end (no Inductor
-    version drift). Slow to land, hard to revert.
-  Defaults: torch.compile for candidates (b), (c), (d), (e); hand
-  Triton for (a) — Q-projection has both the partial-RoPE and the
-  per-head RMSNorm, which Inductor historically struggles to fuse
-  cleanly at `head_dim=512`.
-- **Cold-compile cost** — `torch.compile` first-iter compile time
-  can run minutes per fused chain; the proxy's iter 0 cost will
-  jump materially. The report uses steady-iter throughput, but
-  total wall-time-to-first-iter matters for short jobs. Document
-  the cold-compile cost in the per-target G32 status row.
-- **Backward path** — every fusion MUST also fuse the BACKWARD,
-  not just the forward. `torch.compile` handles this via Inductor's
-  AOT autograd; hand-Triton fusions ship a matching `_bwd` kernel
-  alongside.
-- **No shared-state mutation.** A fused chain that writes into
-  `self.<some buffer>` (e.g. an `attn_dropout_mask`) breaks the
-  pure-function contract. The plan-5 fusions all run on stateless
-  pure-tensor inputs/outputs; if the trace surfaces a fusion
-  candidate that mutates module state, it gets refactored to a pure
-  function first.
+- **Why `torch.compile(fullgraph=True, dynamic=False)` is the right
+  tool.** The 39 sums + 39 divides + 39 broadcasts in
+  `sinkhorn_normalize` are pure-function shape-stable
+  (`(1, 4096, 4, 4)` fp32 in, same fp32 out) — exactly the case
+  Inductor handles best. Inductor unrolls the Python `for` loop at
+  compile time (since `n_iters` is captured in the closure), produces
+  one big graph, and fuses the whole thing into one (or maybe two:
+  FWD + BWD) Triton kernel(s). No algorithmic change → bit-equivalent
+  math (modulo non-deterministic reduction order which the test
+  tolerance accommodates). AOT-autograd compiles BWD too.
+- **Why we did NOT pick "reduce `n_iters` from 20 to 5".** That is a
+  model-quality decision that affects pretraining convergence
+  (Sinkhorn-Knopp converges quadratically; 5 iters is usually enough
+  for `K=4`, but the V4 release pinned `hc_sinkhorn_iters=20`). Out
+  of plan-5 scope.
+- **Why we did NOT pick "cast `sinkhorn_normalize` to bf16".** The
+  function explicitly casts up to fp32 (techblog §2.2 pitfall #3 —
+  the doubly-stochastic projection is sensitive to dtype underflow on
+  the iterative `m / m.sum()` chain); a cast-to-bf16 hedge is its own
+  experiment, not a perf optimisation, and would need its own
+  numerical-stability gate.
+- **Cold-compile cost.** First-iter compile time for
+  `torch.compile(fullgraph=True, dynamic=False)` on a 39-op pure
+  function is typically 5 – 20 s; subsequent calls are ~0 latency.
+  The proxy's iter 0 will reflect this. The post-P29 report uses
+  steady-iter throughput; total wall-time-to-first-iter is
+  documented but does not gate.
+- **Why `dynamic=False`.** The Sinkhorn input shape is statically
+  `[B, S, K, K]` per V4 layer with `K = hc_mult = 4`. Locking shapes
+  via `dynamic=False` avoids guard-failure recompiles.
+- **Why module-level cache (`_compiled_sinkhorn_cache`).** Without
+  the cache, each `HyperMixer` instance compiles its own copy → 8
+  copies per V4-Flash trunk + N more per MTP head. With the cache
+  keyed on `(n_iters, eps)`, exactly one compilation happens per
+  process for all layers.
 
 ### Edge cases
 
-- **Per-layer compress_ratio dispatch** — candidates (d) and (e) only
-  apply to a subset of layers (cr=4 / cr=128 for compressor+indexer;
-  every MoE layer for router). The fusion switch is checked per layer
-  in `DeepseekV4Attention.__init__` and auto-disabled for the wrong
-  layer kind (mirrors the plan-4 `_use_v4_triton_attention` /
-  `_use_v4_triton_csa_attention` auto-disable pattern).
-- **State-dict compatibility** — fused weights MUST keep the same
-  state-dict keys as the unfused chain (`linear_q_down_proj.weight`
-  + `linear_q_up_proj.weight` + `q_layernorm.weight` etc.) so plan-2
-  P17's checkpoint-load path stays unbroken. The fused functions
-  read the unfused weights at call time; they do NOT introduce a
-  fused weight tensor.
+- **`torch.compile` ROCm pin.** Inductor's HIP backend has had
+  occasional miscompiles on minor torch versions. The `use_v4_
+  compiled_sinkhorn` switch defaults to `False` for the P29-shipping
+  commit; the default flip happens only after G33b's perf delta is
+  pinned and the equivalence test is green at release tier.
+- **Recompilation guard.** If a future config change varies
+  `hc_sinkhorn_iters` per layer (currently uniform), the cache key
+  picks that up. If shape varies (e.g. when the K-stream
+  representation changes between PP stages), the proxy script must
+  pin one `seq_length` per run.
+- **Numerical determinism.** `torch.compile` may reorder the inner
+  reductions into a different order than eager (e.g. tree-reduction
+  vs sequential reduction); the FWD output is bit-identical for
+  `K = 4` (only 6 reduction orderings exist on 4 floats and pairwise
+  tree reduction is the canonical choice for Inductor) but the BWD
+  may differ at the ULP level. The G32 tolerance (`atol=1e-5,
+  rtol=1e-5`) accommodates this.
+- **Plan-2 P17 state-dict compatibility.** The fix touches no weight
+  tensors (Sinkhorn is parameter-free); state-dict keys are
+  unchanged.
 
 ---
 

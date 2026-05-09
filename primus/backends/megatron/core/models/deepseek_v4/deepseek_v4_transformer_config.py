@@ -100,6 +100,22 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     use_v4_triton_attention: bool = False
     use_v4_triton_csa_attention: bool = False
 
+    # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
+    # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-
+    # details.md). The Sinkhorn-Knopp doubly-stochastic projection inside
+    # ``HyperMixer.compute_weights`` (see ``hyper_connection.py``) issues
+    # 1 + 2 * (n_iters - 1) separate fp32 ``aten::sum`` reductions per
+    # call. At V4-Flash production widths the per-call shape is
+    # ``[B, S, K, K] = [1, 4096, 4, 4]`` and HIP's default
+    # ``reduce_kernel<512, 1, ...>`` runs the kernel ~250x over the
+    # memory-bound floor. The P28 baseline trace pinned this kernel as
+    # 87.3 % of step time. Setting this flag to ``True`` collapses every
+    # such call into a single ``torch.compile(fullgraph=True,
+    # dynamic=False)`` Inductor-fused Triton kernel; AOT autograd handles
+    # the BWD. Default ``False`` until G32 (FWD + BWD parity) and G33b
+    # (post-P29 trace) flip it on.
+    use_v4_compiled_sinkhorn: bool = False
+
     # ---- DeepSeek-V4 grouped low-rank output projection ----
     # Mirrors the released checkpoint's `wo_a` / `wo_b` layout.
     # When ``o_lora_rank == 0`` the attention falls back to a flat O proj

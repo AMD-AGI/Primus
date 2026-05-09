@@ -9,31 +9,42 @@ and per-phase records live here.
 ```
 deepseek-v4/develop/
 ├── README.md                     ← this file (quick index)
+├── rules/                        ← project-wide working rules + habits
+│   └── rule.md                   ← review-before-commit, status-pin pattern, etc.
 ├── techblog/                     ← Step 1 deliverable: deep-dive write-up + PNG diagrams
 │   ├── README.md
 │   ├── 01-deepseek-v4-architecture-deep-dive.md
 │   ├── render_diagrams.py
 │   └── diagrams/{architecture,csa,hca,mhc}.png
 │
-├── plan/                         ← Step 2 deliverable: development plan (this step)
-│   ├── README.md                 ← navigation / overview of the plan documents
-│   ├── 00-roadmap.md             ← overall roadmap: phase breakdown, milestones, dependencies
-│   ├── 01-code-layout.md         ← full file landing list (where every new module goes in primus)
-│   ├── 02-phase-details.md       ← per-phase task list, deliverables, exit criteria, risks
-│   └── 03-testing-strategy.md    ← test strategy: numerical alignment, convergence, parallelism, perf
+├── plan-<n>/                     ← per-plan documents (plan-0..plan-5 today)
+│   ├── README.md                 (optional)
+│   ├── 01-roadmap.md             phase overview, dependencies, milestones
+│   ├── 02-phase-details.md       per-phase task lists, design notes
+│   └── 03-test-strategy.md       gate matrix, ratchet, perf-budget contract
 │
 ├── notes/                        ← ad-hoc notes / investigations during development
 │   └── README.md
 │
+├── profile/                      ← perf-trace analysis reports
+│   ├── _tools/                   ← report renderers
+│   └── profile-{baseline,after-p<id>}-ep<N>-<YYYYMMDD>.{md,html}
+│
 └── progress/                     ← per-phase progress tracker
-    └── status.md                 ← real-time per-task status (manually or scripted)
+    ├── status.md                 ← real-time per-task status
+    └── p<id>/                    ← per-phase scratch + summary
+        ├── p<id>-summary.md      ← one-page phase close (R2.1)
+        ├── run_smoke_*.sh
+        ├── run_*_trace_*.sh
+        └── ...
 ```
 
 ## Current Status
 
 - [x] **Step 1**: architecture investigation + tech blog (see `techblog/`)
-- [x] **Step 2**: development plan (see `plan/`)
-- [ ] **Step 3**: actual code development
+- [x] **Step 2**: development plan (see `plan-<n>/`)
+- [-] **Step 3**: actual code development (in progress — currently
+      plan-5 P29 closed, P30 next)
 
 For the task-level breakdown see [`progress/status.md`](progress/status.md).
 
@@ -41,11 +52,12 @@ For the task-level breakdown see [`progress/status.md`](progress/status.md).
 
 | Audience | Path |
 |---|---|
-| **Reviewer / want a 1-min overview** | `plan/README.md` → `plan/00-roadmap.md` |
-| **Reviewer / want to know where each module lives** | `plan/01-code-layout.md` |
-| **Developer / about to pick up a phase** | `plan/02-phase-details.md`, jump to that phase |
+| **First-time reader / want the working rules first** | [`rules/rule.md`](rules/rule.md) |
+| **Reviewer / want a 1-min overview** | `plan-<n>/README.md` → `plan-<n>/01-roadmap.md` (latest plan) |
+| **Reviewer / want to know where each module lives** | `plan-1/01-code-layout.md` |
+| **Developer / about to pick up a phase** | `plan-<n>/02-phase-details.md`, jump to that phase |
 | **Want to understand the architecture itself** | `techblog/01-deepseek-v4-architecture-deep-dive.md` |
-| **Want to track progress** | `progress/status.md` |
+| **Want to track progress** | `progress/status.md` and the latest `progress/p<id>/p<id>-summary.md` |
 
 ## Naming Conventions
 
