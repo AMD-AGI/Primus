@@ -85,6 +85,18 @@ export FP8_RECIPE=null
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-False}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-False}
 
+# Plan-4 P27: TP-side guard for the V4 Triton kernels.
+# The dense / HCA / CSA kernels operate on the local head slice (each
+# rank only sees H/TP query heads) so TP-sharded execution is correct
+# by construction (no in-kernel collective comm needed).  Plan-4 unit
+# tests / smoke gates exercise TP=1 only; emit a soft warning when a
+# user enables the kernels at TP>1 so any TP-related regression is
+# easy to attribute.  TP=1 is the V4-Flash / V4-Pro release default
+# (release configs use PP+EP for parallelism, never TP).
+if { [ "$USE_V4_TRITON_ATTENTION" = "True" ] || [ "$USE_V4_TRITON_CSA_ATTENTION" = "True" ]; } && [ "${PRIMUS_TP:-1}" -gt 1 ]; then
+  echo "[WARN] Plan-4 V4 Triton kernels enabled at PRIMUS_TP=${PRIMUS_TP}>1; this combination is not covered by Plan-4 unit tests / smoke gates (G28..G30 ran TP=1 only). Functionally the kernels operate per-rank on the local H/TP head slice, so this should work, but treat any TP>1 regression as a Plan-4 follow-up."
+fi
+
 if [ "$PRECISION_TYPE" = "FP8" ]; then
   export FP8=${FP8:-hybrid}
   export FP8_RECIPE=${FP8_RECIPE:-delayed}

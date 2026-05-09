@@ -53,6 +53,7 @@ Forward signature:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -84,6 +85,8 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,53 @@ class DeepseekV4Attention(MLASelfAttention):
     Because the parent's ``__init__`` builds modules we don't want, we
     skip the MLA / Attention init chain and call ``nn.Module.__init__``
     directly. V4-shape modules are built from the spec submodules.
+
+    **Plan-4 P27 — kernel dispatch precedence.**
+
+    The softmax-and-attend kernel each layer fires through is selected
+    in :meth:`forward` / :meth:`_csa_forward` based on three independent
+    config flags (``use_turbo_attention``, ``use_v4_triton_attention``,
+    ``use_v4_triton_csa_attention``).  The layer-kind-specific
+    precedence is:
+
+    .. code-block:: text
+
+        compress_ratio == 0  (dense / SWA, single key axis):
+            use_turbo_attention      > use_v4_triton_attention > eager
+            (-> self.core_attention)   (-> v4_attention)         (-> _attention_forward)
+
+        compress_ratio == 128  (HCA: local SWA + full compressed pool):
+            use_v4_triton_attention  > eager
+            (-> v4_attention,          (-> _attention_forward
+             HCA path with joint        with cat([local, pool])
+             [local | pool] mask)       additive mask)
+
+            ``use_turbo_attention`` does NOT route HCA — Turbo's
+            flash-attn returns no LSE so the joint local+pool softmax
+            cannot be decomposed into two flash calls.
+
+        compress_ratio == 4  (CSA: local SWA + per-query top-K gather):
+            use_v4_triton_csa_attention  > eager
+            (-> v4_csa_attention)          (-> _csa_forward eager)
+
+            Neither ``use_turbo_attention`` nor
+            ``use_v4_triton_attention`` applies to CSA — the per-query
+            top-K gather (``gathered = pool[..., topk_idxs, :]``) is
+            sparse-per-row indexed attention with no flash-attn
+            equivalent.
+
+    Auto-disable rules (init-side, fail-loud):
+
+    * ``use_v4_triton_attention=True`` + ``compress_ratio == 4`` →
+      auto-disabled (CSA layers must opt in via the separate flag).
+    * ``use_v4_triton_csa_attention=True`` + ``compress_ratio != 4`` →
+      auto-disabled (the dense / HCA flag is ``use_v4_triton_attention``).
+
+    On rank 0 each ``__init__`` emits one ``INFO`` log line through
+    :meth:`_log_kernel_choice` summarising the dispatch outcome for
+    the layer (e.g. ``[V4-attn] Layer 17: cr=128, kernel = v4_attention
+    (Triton, HCA path)``) so smoke / training logs unambiguously show
+    which kernel each layer is firing through.
     """
 
     def __init__(
@@ -522,9 +572,66 @@ class DeepseekV4Attention(MLASelfAttention):
                 if self.attn_sliding_window <= 0:
                     self._use_core_attention = True
 
+        # Plan-4 P27: surface the dispatch outcome in the training log
+        # so smoke / debug logs unambiguously show which kernel each
+        # layer is firing through (precedence is documented in the
+        # class docstring).  Rank-0 only — every rank's own
+        # per-rank-file already captures the right entries.
+        self._log_kernel_choice()
+
     # ------------------------------------------------------------------
     # construction helpers (compressed branches)
     # ------------------------------------------------------------------
+
+    def _log_kernel_choice(self) -> None:
+        """Emit one ``INFO`` log line summarising this layer's kernel choice.
+
+        Plan-4 P27.  Resolves the precedence outcome captured by
+        :meth:`forward` / :meth:`_csa_forward` (see class docstring) and
+        logs it once at ``__init__`` time so smoke / training logs
+        unambiguously show which kernel is firing for each layer.
+
+        Rank-0 only when distributed; in single-process unit tests the
+        log fires unconditionally so ``caplog.at_level(logging.INFO)``
+        captures it.  We cannot use Megatron's ``print_rank_0`` here
+        because this module is also imported in CPU-only unit tests
+        where Megatron's parallel-state isn't initialised.
+        """
+        try:
+            dist_initialized = torch.distributed.is_available() and torch.distributed.is_initialized()
+        except Exception:
+            dist_initialized = False
+        if dist_initialized and torch.distributed.get_rank() != 0:
+            return
+
+        if self.compress_ratio == 0:
+            if self._use_core_attention:
+                kernel = "core_attention (Turbo / TE flash)"
+            elif self._use_v4_triton_attention:
+                kernel = "v4_attention (Triton, dense path)"
+            else:
+                kernel = "v4_attention (eager Python, dense path)"
+        elif self.compress_ratio == 128:
+            if self._use_v4_triton_attention:
+                kernel = "v4_attention (Triton, HCA path)"
+            else:
+                kernel = "v4_attention (eager Python, HCA path)"
+        elif self.compress_ratio == 4:
+            if self._use_v4_triton_csa_attention:
+                kernel = "v4_csa_attention (Triton)"
+            else:
+                kernel = "v4_csa_attention (eager Python)"
+        else:
+            # Defensive: __init__ already raises ValueError for unsupported
+            # compress_ratio, so this branch should be unreachable.
+            kernel = f"<unknown compress_ratio={self.compress_ratio}>"
+
+        logger.info(
+            "[V4-attn] Layer %s: cr=%s, kernel = %s",
+            self.layer_number,
+            self.compress_ratio,
+            kernel,
+        )
 
     def _build_compressor(self, spec: Optional[Union[ModuleSpec, type]]) -> nn.Module:
         """Build the V4 :class:`Compressor` for compressed branches.

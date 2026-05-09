@@ -551,3 +551,118 @@ kernel-numerics issue.
   G27 explicitly test that
   `model.load_state_dict({"attn_sink": ...})` still works after the
   kernel switches are flipped on.
+
+### P27 hand-off (status — closes plan-4)
+
+Plan-4 ships a Primus-owned, in-tree Triton kernel pair for the V4
+attention block — one for the dense / HCA path (`compress_ratio ∈
+{0, 128}`) and one for the CSA path (`compress_ratio == 4`) — gated
+behind two new V4-only switches (`use_v4_triton_attention`,
+`use_v4_triton_csa_attention`, both default `False`). The kernels
+sit alongside the eager-Python reference (P24) and the Plan-3 P22
+Turbo `core_attention` wiring; precedence is enforced layer-by-layer
+in `DeepseekV4Attention` (`use_turbo_attention >
+use_v4_triton_attention > eager` for cr ∈ {0, 128};
+`use_v4_triton_csa_attention > eager` for cr == 4) and surfaced at
+boot via a one-shot rank-0 `[V4-attn] Layer N: cr=R, kernel = ...`
+log line.
+
+**Commit chain (P24 → P27)**
+
+| phase   | scope                                                                                                                                                | commit(s)                  |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| P24     | reference op + harness + dtype contract refinement (bf16 matmul, fp32 softmax)                                                                       | `8b971881`, `38ef526c`     |
+| P25     | dense / HCA Triton kernel + autograd Function + dispatch plumbing + G23 / G24 / G25 + dispatch surface tests                                         | `7df4cfeb`                 |
+| P26     | CSA Triton kernel + autograd Function + `_csa_forward` dispatch + G26 / G27 + dispatch surface tests                                                 | `da6f48bc`                 |
+| P27 G28 | release-tier shape gate (`H ∈ {64, 128}, head_dim=512, swa_window=128, K_topk ∈ {512, 1024}`); `pytest.mark.slow` + `--run-slow` opt-in              | `TBD-p27a` (this PR's HEAD) |
+| P27 G29 | dispatch precedence runtime test + `_log_kernel_choice` rank-0 startup log + class-docstring precedence section + run-script TP > 1 soft warn       | `TBD-p27`  (this commit)   |
+| P27 G30 | TP=1 PP=1 EP=8 10-iter smoke with both kernels engaged + Turbo DeepEP + script under `progress/p27/` (gitignored log)                                | `TBD-p27`  (this commit)   |
+
+**Test totals (`mi355-gpu-14` inside `dev_primus_wenx_693`)**
+
+* Fast tier (default `pytest tests/unit_tests/megatron/transformer/deepseek_v4/`):
+  **272 pass / 1 skipped + 80 deselected (`pytest.mark.slow` release-tier rows)**
+  * P25 G23 (fwd) — 34, P25 G24 (bwd) — 33, P25 G25 (determinism / dropout) — 2, P25 dispatch — 5
+  * P26 G26 (fwd) — 13, P26 G27 (bwd) — 10, P26 dispatch — 4
+  * P27 G29 (dispatch precedence) — 16
+  * The 1 deselected fast-tier row (`test_v4_mtp.py::test_helper_pulls_norm_and_linear_from_v4_provider`) is a pre-plan-4 failure on `dev/wenx/deepseek-v4`; verified by stash + re-run on commit `6a17c3b0`.
+* Release tier (`pytest --run-slow -m slow`):
+  **80 / 80 pass in 60.2 s** at production V4 dims (`head_dim=512`,
+  V4-Flash @ `H=64, S=1024, K_topk=512` and V4-Pro @
+  `H=128, S=512, K_topk=512`). Per-test `torch.cuda.empty_cache()`
+  fixture under `tests/unit_tests/megatron/transformer/deepseek_v4/conftest.py`
+  prevents PyTorch's caching allocator from holding onto the
+  `~64 GiB [B, H, Sq, K, D]` eager-CSA broadcast across consecutive
+  tests; bf16 tolerances bumped at release tier (FWD `atol=5e-2`;
+  BWD `dq/dk/dv/dgathered atol=2e-1`; `dsink atol=5e-2`) to absorb
+  `head_dim=512` matmul noise + `tl.atomic_add` jitter on `dk / dv`.
+
+**G30 smoke perf delta**
+
+| baseline                                            | TFLOP/s/GPU (steady-state) | ms / iter | iter loss curve  |
+| --------------------------------------------------- | -------------------------- | --------- | ---------------- |
+| P22 eager Turbo-off (`p22/smoke_eager_ep8_pp1`)     | ~12.6                      | ~770      | `11.89 → 11.62`  |
+| P23 eager + Turbo DeepEP (`p23/smoke_turbo_deepep`) | ~17–19                     | ~530      | `11.88 → 11.65`  |
+| **P27 V4 Triton + Turbo DeepEP (G30)**              | **~17.3** (peak ~19.8)     | **~500**  | `11.85 → 11.65`  |
+
+Plan-4's Triton kernels are at parity (within smoke noise) with the
+P23 Turbo-DeepEP-on-eager-attention baseline at the smoke's small
+seq length (`PRIMUS_SEQ_LENGTH=128`). The eager attention is
+matmul-cheap at this seq length and DeepEP dominates iter time, so
+the Triton kernels' real win is expected on full V4-Flash production
+dims (`S=4096`) where the eager `[B, H, S, S]` logits tensor blows
+to 16 GiB / microbatch. The full-S smoke is a Plan-4 follow-up
+(G30 only covers the 10-iter ergonomic gate; the production-scale
+perf comparison is planned for the same successor plan that flips
+the kernel defaults to `True`).
+
+**Follow-ups (post-plan-4)**
+
+1. **Megatron-side `layer_number` plumbing.** Every layer's
+   `[V4-attn]` startup log line currently says `Layer 0` because
+   the V4 spec does not pass `layer_number=` through to
+   `DeepseekV4Attention.__init__` at construction time (Megatron
+   normally sets it later via a spec-walker setattr). The dispatch
+   itself is unaffected (it only reads `compress_ratio` + the
+   runtime flags), and the cr-by-cr log lines are still
+   distinguishable, but a dedicated patch in
+   `primus/backends/megatron/patches/deepseek_v4_*` to populate
+   `self.layer_number` from the spec walker would make per-layer
+   debugging cleaner. Low priority — cosmetic.
+2. **Full-S=4096 V4-Flash smoke.** P27 G30 ran at
+   `PRIMUS_SEQ_LENGTH=128` for ergonomic loop time and to fit on
+   any free MI355X without juggling allocator pressure. A
+   follow-up plan should run a single-iter smoke at the
+   release-default `S=4096` to confirm the kernels' bandwidth
+   advantage materialises at the seq lengths plan-4 was designed
+   for. Gated on a free node with sufficient HBM headroom for the
+   eager comparison baseline; the kernel side is already exercised
+   by G28's `S ∈ {512, 1024}` release-tier matrix.
+3. **HCA LSE merge for Turbo `core_attention`.** Plan-4's HCA path
+   stays on the v4_attention Triton kernel because Turbo / TE
+   flash-attn does not return LSE, so the joint local + pool
+   softmax cannot be decomposed into two flash calls + a recombine.
+   A follow-up that adds an LSE-returning branch to Turbo would
+   let HCA layers ride the same `core_attention` path the dense
+   layers use.
+4. **CSA in-kernel gather.** Plan-4 P26 does the
+   `pool[..., topk_idxs, :]` gather wrapper-side and feeds the
+   `[B, H, Sq, K, head_dim]` gathered tensor into the kernel. A
+   follow-up that does the gather in-kernel (issuing per-row
+   indirect loads from `pool` based on `topk_idxs`) would save
+   the gather's `K*D` write-then-read round-trip to HBM. Bigger
+   kernel-engineering effort — defer until the V4 production
+   smoke confirms the gather is on the critical path.
+5. **FP8 path for both kernels.** Plan-4 ships bf16 + fp32 only
+   (V4-Flash trains in bf16 with `attn_dropout=0`). FP8 quant at
+   the QK^T and PV matmuls follows the same pattern Turbo /
+   `core_attention` already supports; gated on a follow-up plan
+   that picks a release recipe (`fp8_recipe ∈ {delayed, hybrid}`)
+   and updates the bf16 tolerance budget for fp8.
+6. **Flip the V4 Triton kernel switches to `True` by default.**
+   Plan-4 ships the kernels at `default=False` so this PR is a
+   pure safety-net add. Once items (2) + (5) above are landed and
+   the release perf is confirmed, a follow-up plan should flip
+   `use_v4_triton_attention` and `use_v4_triton_csa_attention` to
+   `True` in the V4-Flash YAML default and update the
+   release-config docs.

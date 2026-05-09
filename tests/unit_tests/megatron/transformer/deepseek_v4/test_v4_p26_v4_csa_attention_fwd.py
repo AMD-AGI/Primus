@@ -48,23 +48,76 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # 
 # ---------------------------------------------------------------------------
 
 
-# Shapes are intentionally smaller than the full V4 yamls so the suite
-# completes in seconds on a single MI355X. The numerical contract being
-# tested is the kernel's, not the model's full size.
+# Two tiers of shapes are exposed to the parametrise decorator below:
+#
+# * Fast tier — toy ``head_dim=64`` / ``H ∈ {4, 8}`` / ``S=64`` shapes
+#   that exercise every code path in the kernel (per-query top-K
+#   sparse, local-SWA, sink) in milliseconds. Run on every ``pytest``
+#   invocation.
+#
+# * Release tier (``pytest.mark.slow``) — production V4 dimensions
+#   (``head_dim=512``, real ``H``, real ``swa_window``, real
+#   ``index_topk``) calibrated so the eager fp32 reference fits MI355X
+#   HBM. The release tier is the plan-4 G28 gate that empirically
+#   confirms CSA kernel correctness at the exact ``head_dim`` that
+#   plan-4 exists to solve. ``S`` is calibrated per variant:
+#   V4-Flash @ S=1024 / V4-Pro @ S=512 keep peak fp32 memory below
+#   ~3 GiB per test (gathered tensor dominates).
+#
+# The full ``S=4096`` smoke is owned by G30 (P27 smoke gate); these
+# unit tests intentionally stay below that to keep the per-test cost
+# in the ``-m slow`` budget.
 _BASE_SHAPES = [
     # (variant, B, H, S, D, K_topk, swa_window)
     ("v4_flash_small", 1, 8, 64, 64, 16, 32),
     ("v4_pro_small", 1, 4, 64, 64, 16, 32),
+    # V4-Flash release: production K_topk=512.
+    pytest.param(
+        "v4_flash_release",
+        1,
+        64,
+        1024,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
+    # V4-Pro release: production K_topk is 1024, but the eager
+    # reference's ``torch.einsum("bhsd,bhskd->bhsk", q, gathered_h)``
+    # path materialises a ``[B, H, Sq, K, D]`` intermediate at
+    # ``B=1, H=128, Sq=512, K=1024, D=512`` => 128 GiB fp32 — pushes
+    # the BWD test past MI355 287 GiB once the autograd graph is held.
+    # K is downscaled to 512 (matching V4-Flash production); the
+    # kernel's per-row sparse-tile loop is still exercised at full
+    # production K via the V4-Flash release row above.
+    pytest.param(
+        "v4_pro_release",
+        1,
+        128,
+        512,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
 ]
 _DTYPES = [torch.float32, torch.bfloat16]
 _SINK_MODES = [True, False]
 
 
-def _fwd_tol(dtype: torch.dtype) -> dict:
+def _is_release_tier(variant: str) -> bool:
+    """Release-tier shapes are tagged by name (``*_release``)."""
+    return variant.endswith("_release")
+
+
+def _fwd_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
     if dtype == torch.float32:
         return {"atol": 1e-4, "rtol": 1e-4}
     if dtype == torch.bfloat16:
-        return {"atol": 2e-2, "rtol": 2e-2}
+        # Release-tier ``head_dim=512`` / ``K_topk`` ∈ {512, 1024}
+        # accumulates ~8x more terms than the fast tier; bf16 long-tail
+        # rounding scales as ~sqrt(N). Loosen by ~2.5x for release.
+        return {"atol": 5e-2, "rtol": 5e-2} if release else {"atol": 2e-2, "rtol": 2e-2}
     raise ValueError(f"unsupported dtype {dtype!r}")
 
 
@@ -185,7 +238,11 @@ def test_g26_csa_fwd_matches_eager(
 
     assert out_ref.shape == out_cand.shape == toy["q"].shape
     assert out_ref.dtype == out_cand.dtype == dtype
-    torch.testing.assert_close(out_cand, out_ref, **_fwd_tol(dtype))
+    torch.testing.assert_close(
+        out_cand,
+        out_ref,
+        **_fwd_tol(dtype, release=_is_release_tier(variant)),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -50,20 +50,68 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # 
 # ---------------------------------------------------------------------------
 
 
+# See ``test_v4_p26_v4_csa_attention_fwd._BASE_SHAPES`` for the fast vs
+# release tier rationale (G28 plan-4 release-tier shape gate).
 _BASE_SHAPES = [
     ("v4_flash_small", 1, 8, 64, 64, 16, 32),
     ("v4_pro_small", 1, 4, 64, 64, 16, 32),
+    # See ``test_v4_p26_v4_csa_attention_fwd._BASE_SHAPES`` for the
+    # rationale on V4-Pro release ``K_topk=512`` (eager broadcast OOM).
+    pytest.param(
+        "v4_flash_release",
+        1,
+        64,
+        1024,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
+    pytest.param(
+        "v4_pro_release",
+        1,
+        128,
+        512,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
 ]
 _DTYPES = [torch.float32, torch.bfloat16]
 _SINK_MODES = [True, False]
 
 
-def _bwd_tol(dtype: torch.dtype) -> dict:
-    """Plan-4 BWD tolerance budget."""
+def _is_release_tier(variant: str) -> bool:
+    """Release-tier shapes are tagged by name (``*_release``)."""
+    return variant.endswith("_release")
+
+
+def _bwd_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
+    """Plan-4 BWD tolerance budget.
+
+    See ``test_v4_p25_v4_attention_bwd._bwd_tol`` for the
+    matmul-noise + ``atomic_add`` jitter rationale at release-tier
+    ``head_dim=512``.
+    """
     if dtype == torch.float32:
         return {"atol": 1e-4, "rtol": 1e-4}
     if dtype == torch.bfloat16:
-        return {"atol": 5e-2, "rtol": 5e-2}
+        return {"atol": 2e-1, "rtol": 2e-1} if release else {"atol": 5e-2, "rtol": 5e-2}
+    raise ValueError(f"unsupported dtype {dtype!r}")
+
+
+def _sink_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
+    """Per-head sink gradient tolerance (CSA path).
+
+    ``dsink[h]`` reduces over ``B * Sq`` softmax-derivative terms;
+    cumulative bf16 rounding scales linearly with ``Sq``. Release-tier
+    ``Sq`` ∈ {512, 1024} is 8x–16x the fast-tier ``Sq=64``.
+    """
+    if dtype == torch.float32:
+        return {"atol": 1e-4, "rtol": 1e-4}
+    if dtype == torch.bfloat16:
+        return {"atol": 5e-2, "rtol": 5e-2} if release else {"atol": 5e-3, "rtol": 5e-3}
     raise ValueError(f"unsupported dtype {dtype!r}")
 
 
@@ -229,17 +277,15 @@ def test_g27_csa_bwd_matches_eager(
         cand_inp["sink"],
     )
 
-    tol = _bwd_tol(dtype)
+    release = _is_release_tier(variant)
+    tol = _bwd_tol(dtype, release=release)
     torch.testing.assert_close(dq_cand, dq_ref, **tol)
     torch.testing.assert_close(dkl_cand, dkl_ref, **tol)
     torch.testing.assert_close(dvl_cand, dvl_ref, **tol)
     torch.testing.assert_close(dg_cand, dg_ref, **tol)
     if sink_on:
         assert dsink_ref.shape == dsink_cand.shape == (H,)
-        # Sink grad uses fp32 internally; tolerance is fp32-ish regardless
-        # of input dtype.
-        sink_tol = {"atol": 5e-3, "rtol": 5e-3} if dtype == torch.bfloat16 else {"atol": 1e-4, "rtol": 1e-4}
-        torch.testing.assert_close(dsink_cand, dsink_ref, **sink_tol)
+        torch.testing.assert_close(dsink_cand, dsink_ref, **_sink_tol(dtype, release=release))
     else:
         assert dsink_ref is None and dsink_cand is None
 

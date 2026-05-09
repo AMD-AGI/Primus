@@ -10,6 +10,20 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help=(
+            "run tests marked with @pytest.mark.slow (e.g. plan-4 release-tier "
+            "shape gates at head_dim=512). Default: skip slow tests."
+        ),
+    )
+
 
 def pytest_configure(config):
     # Add project root first to ensure main primus package takes precedence
@@ -23,3 +37,26 @@ def pytest_configure(config):
         megatron_path = project_root / "third_party" / "Megatron-LM"
     if str(megatron_path) not in sys.path:
         sys.path.append(str(megatron_path))
+
+    # Register custom markers used by the primus test suite.
+    config.addinivalue_line(
+        "markers",
+        (
+            "slow: marks tests as slow (release-tier shape gates that exercise "
+            "production V4 dims at head_dim=512). Skipped by default; opt in "
+            "with --run-slow or '-m slow'."
+        ),
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    # If the user explicitly opts in via --run-slow or '-m slow', run slow tests.
+    if config.getoption("--run-slow", default=False):
+        return
+    marker_expr = config.getoption("-m") or ""
+    if "slow" in marker_expr:
+        return
+    skip_slow = pytest.mark.skip(reason="slow test (use --run-slow or '-m slow' to enable)")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)

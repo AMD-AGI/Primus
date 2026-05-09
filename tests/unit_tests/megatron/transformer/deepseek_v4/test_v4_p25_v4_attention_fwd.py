@@ -49,25 +49,66 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # 
 # ---------------------------------------------------------------------------
 
 
-# Shapes are intentionally smaller than the full V4 yamls so the suite
-# completes in seconds on a single MI355X. The numerical contract being
-# tested is the kernel's, not the model's full size; G27 covers the
-# release-tier S=4096 smoke.
+# Two tiers of shapes are exposed to the parametrise decorator below:
+#
+# * Fast tier — toy ``head_dim=64`` / ``H ∈ {4, 8}`` / ``S=64`` shapes
+#   that exercise every code path in the kernel (in-kernel SWA mask,
+#   caller-supplied additive_mask, MQA/MHA, sink) in milliseconds. Run
+#   on every ``pytest`` invocation.
+#
+# * Release tier (``pytest.mark.slow``) — production V4 dimensions
+#   (``head_dim=512``, real ``H``, real ``swa_window``) calibrated so
+#   the eager fp32 reference fits MI355X HBM. The release tier is the
+#   plan-4 G28 gate that empirically confirms kernel correctness at the
+#   exact ``head_dim`` that plan-4 exists to solve. ``S`` is calibrated
+#   per variant: V4-Flash @ S=1024 / V4-Pro @ S=512 keep peak fp32
+#   memory below ~1 GiB per test even for the MHA layout.
+#
+# The full ``S=4096`` smoke is owned by G30 (P27 smoke gate); these
+# unit tests intentionally stay below that to keep the per-test cost
+# in the ``-m slow`` budget.
 _BASE_SHAPES = [
     # (variant, B, H, S, head_dim, swa_window)
     ("v4_flash_small", 1, 8, 64, 64, 32),
     ("v4_pro_small", 1, 4, 64, 64, 32),
+    pytest.param(
+        "v4_flash_release",
+        1,
+        64,
+        1024,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
+    pytest.param(
+        "v4_pro_release",
+        1,
+        128,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
 ]
 _DTYPES = [torch.float32, torch.bfloat16]
 _SINK_MODES = [True, False]
 _KV_LAYOUTS = ["mqa", "mha"]  # K_H == 1 vs K_H == HQ
 
 
-def _fwd_tol(dtype: torch.dtype) -> dict:
+def _is_release_tier(variant: str) -> bool:
+    """Release-tier shapes are tagged by name (``*_release``)."""
+    return variant.endswith("_release")
+
+
+def _fwd_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
     if dtype == torch.float32:
         return {"atol": 1e-4, "rtol": 1e-4}
     if dtype == torch.bfloat16:
-        return {"atol": 2e-2, "rtol": 2e-2}
+        # Release-tier ``head_dim=512`` accumulates ~8x more terms than
+        # the ``head_dim=64`` fast tier; bf16 long-tail rounding scales
+        # as ~sqrt(N). Empirically the worst-case outlier sits between
+        # 2.0e-2 and 5.0e-2 at release-tier dims; we loosen by ~2.5x.
+        return {"atol": 5e-2, "rtol": 5e-2} if release else {"atol": 2e-2, "rtol": 2e-2}
     raise ValueError(f"unsupported dtype {dtype!r}")
 
 
@@ -219,7 +260,11 @@ def test_g23_dense_fwd_matches_eager(
 
     assert out_ref.shape == out_cand.shape == toy["q"].shape
     assert out_ref.dtype == out_cand.dtype == dtype
-    torch.testing.assert_close(out_cand, out_ref, **_fwd_tol(dtype))
+    torch.testing.assert_close(
+        out_cand,
+        out_ref,
+        **_fwd_tol(dtype, release=_is_release_tier(variant)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +329,11 @@ def test_g23_hca_style_fwd_matches_eager(
 
     assert out_ref.shape == out_cand.shape == toy["q"].shape
     assert out_ref.dtype == out_cand.dtype == dtype
-    torch.testing.assert_close(out_cand, out_ref, **_fwd_tol(dtype))
+    torch.testing.assert_close(
+        out_cand,
+        out_ref,
+        **_fwd_tol(dtype, release=_is_release_tier(variant)),
+    )
 
 
 # ---------------------------------------------------------------------------

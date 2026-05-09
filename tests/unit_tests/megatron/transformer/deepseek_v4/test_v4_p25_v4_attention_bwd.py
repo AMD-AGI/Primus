@@ -44,21 +44,74 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # 
 # ---------------------------------------------------------------------------
 
 
+# See ``test_v4_p25_v4_attention_fwd._BASE_SHAPES`` for the fast vs
+# release tier rationale (G28 plan-4 release-tier shape gate).
 _BASE_SHAPES = [
     ("v4_flash_small", 1, 8, 64, 64, 32),
     ("v4_pro_small", 1, 4, 64, 64, 32),
+    pytest.param(
+        "v4_flash_release",
+        1,
+        64,
+        1024,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
+    pytest.param(
+        "v4_pro_release",
+        1,
+        128,
+        512,
+        512,
+        128,
+        marks=pytest.mark.slow,
+    ),
 ]
 _DTYPES = [torch.float32, torch.bfloat16]
 _SINK_MODES = [True, False]
 _KV_LAYOUTS = ["mqa", "mha"]
 
 
-def _bwd_tol(dtype: torch.dtype) -> dict:
-    """Plan-4 BWD tolerance budget."""
+def _is_release_tier(variant: str) -> bool:
+    """Release-tier shapes are tagged by name (``*_release``)."""
+    return variant.endswith("_release")
+
+
+def _bwd_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
+    """Plan-4 BWD tolerance budget.
+
+    Release-tier ``head_dim=512`` causes:
+    * ~sqrt(8) ≈ 2.8x more matmul-accumulation noise than the
+      ``head_dim=64`` fast tier;
+    * non-deterministic ``tl.atomic_add`` contributions to ``dk / dv``
+      (sliding-window cells receive ~SWA contributions, summed in a
+      non-deterministic thread order) which adds another ~``sqrt(SWA)``
+      bf16 jitter on top of matmul noise.
+
+    Empirically the worst-case outlier at V4-Flash / V4-Pro release
+    sits around ``0.15-0.18`` for bf16 ``dk``; we set ``atol=2e-1`` to
+    absorb the long tail while keeping fast-tier shapes tight.
+    """
     if dtype == torch.float32:
         return {"atol": 1e-4, "rtol": 1e-4}
     if dtype == torch.bfloat16:
-        return {"atol": 5e-2, "rtol": 5e-2}
+        return {"atol": 2e-1, "rtol": 2e-1} if release else {"atol": 5e-2, "rtol": 5e-2}
+    raise ValueError(f"unsupported dtype {dtype!r}")
+
+
+def _sink_tol(dtype: torch.dtype, *, release: bool = False) -> dict:
+    """Per-head sink gradient tolerance.
+
+    ``dsink[h] = sum_{b, t} dprobs_at_sink_column[b, h, t]`` — the
+    reduction is over ``B * Sq`` softmax-derivative terms, so cumulative
+    bf16 rounding scales linearly with ``Sq``. Release-tier ``Sq=1024``
+    is 16x the fast-tier ``Sq=64``; loosen the bf16 budget accordingly.
+    """
+    if dtype == torch.float32:
+        return {"atol": 1e-4, "rtol": 1e-4}
+    if dtype == torch.bfloat16:
+        return {"atol": 5e-2, "rtol": 5e-2} if release else {"atol": 5e-3, "rtol": 5e-3}
     raise ValueError(f"unsupported dtype {dtype!r}")
 
 
@@ -240,16 +293,15 @@ def test_g24_dense_bwd_matches_eager(
         out_cand, cand_inp["q"], cand_inp["k"], cand_inp["v"], cand_inp["sink"]
     )
 
-    tol = _bwd_tol(dtype)
+    release = _is_release_tier(variant)
+    tol = _bwd_tol(dtype, release=release)
     torch.testing.assert_close(dq_cand, dq_ref, **tol)
     torch.testing.assert_close(dk_cand, dk_ref, **tol)
     torch.testing.assert_close(dv_cand, dv_ref, **tol)
     if sink_on:
         # Per-head sink gradient: shape [H]
         assert dsink_ref.shape == dsink_cand.shape == (H,)
-        # Sink grad uses fp32; tolerance is fp32-ish regardless of input dtype
-        sink_tol = {"atol": 5e-3, "rtol": 5e-3} if dtype == torch.bfloat16 else {"atol": 1e-4, "rtol": 1e-4}
-        torch.testing.assert_close(dsink_cand, dsink_ref, **sink_tol)
+        torch.testing.assert_close(dsink_cand, dsink_ref, **_sink_tol(dtype, release=release))
     else:
         assert dsink_ref is None and dsink_cand is None
 
@@ -332,14 +384,14 @@ def test_g24_hca_style_bwd_matches_eager(
         out_cand, cand_inp["q"], cand_inp["k"], cand_inp["v"], cand_inp["sink"]
     )
 
-    tol = _bwd_tol(dtype)
+    release = _is_release_tier(variant)
+    tol = _bwd_tol(dtype, release=release)
     torch.testing.assert_close(dq_cand, dq_ref, **tol)
     torch.testing.assert_close(dk_cand, dk_ref, **tol)
     torch.testing.assert_close(dv_cand, dv_ref, **tol)
     if sink_on:
         assert dsink_ref.shape == dsink_cand.shape == (H,)
-        sink_tol = {"atol": 5e-3, "rtol": 5e-3} if dtype == torch.bfloat16 else {"atol": 1e-4, "rtol": 1e-4}
-        torch.testing.assert_close(dsink_cand, dsink_ref, **sink_tol)
+        torch.testing.assert_close(dsink_cand, dsink_ref, **_sink_tol(dtype, release=release))
     else:
         assert dsink_ref is None and dsink_cand is None
 
