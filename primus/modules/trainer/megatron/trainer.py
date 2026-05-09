@@ -120,6 +120,7 @@ from megatron.training.training import (
     dummy_train_step,
     enable_forward_pre_hook,
     evaluate_and_print_results,
+    get_megatron_optimizer_config,
     get_model,
     get_megatron_optimizer_config,
     get_optimizer_param_scheduler,
