@@ -623,9 +623,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hbm-busy-threshold-gib",
         type=float,
         default=2.0,
-        help="FAIL the node if any GPU has more than this much "
+        help="FAIL the node if any GPU has at least this much "
         "HBM in use BEFORE we touch the device (i.e. someone "
-        "else is holding it). Default: 2.0 GiB.",
+        "else is holding it). Boundary is inclusive. Default: 2.0 GiB.",
     )
     pr.add_argument(
         "--allow-foreign-procs",

@@ -474,12 +474,12 @@ def _write_pretouch_hbm(
         pt_rows = _pretouch_hbm_rows(nodes, threshold_gib=threshold)
         if not pt_rows:
             f.write(
-                f"*No GPU exceeded the pre-touch HBM threshold "
-                f"({threshold} GiB) -- every GPU started clean.*\n"
+                f"*No GPU reached the pre-touch HBM threshold "
+                f"({threshold} GiB or more) -- every GPU started clean.*\n"
             )
         else:
             f.write(
-                f"GPUs with more than **{threshold} GiB** of HBM already "
+                f"GPUs with **at least {threshold} GiB** of HBM already "
                 f"in use BEFORE smoke touched the device. This number is "
                 "not polluted by our own caching allocator (it's measured "
                 "before any allocation), so it directly reflects foreign "

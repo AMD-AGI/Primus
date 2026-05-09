@@ -28,9 +28,13 @@ from primus.tools.preflight.node_smoke.aggregator.report import write_smoke_repo
 from primus.tools.preflight.node_smoke.aggregator.summarizers import (
     _busy_gpu_rows,
     _clock_summary,
+    _pretouch_hbm_rows,
     _stack_drift_rows,
 )
-from primus.tools.preflight.node_smoke.collectors.gpu_processes import _parse_lsof_pcn
+from primus.tools.preflight.node_smoke.collectors.gpu_processes import (
+    _flatten_amd_smi_process_json,
+    _parse_lsof_pcn,
+)
 from primus.tools.preflight.node_smoke.collectors.rocm_smi import (
     _parse_rocm_smi_ras_info_text,
 )
@@ -346,3 +350,104 @@ def test_module_help_exits_zero():
     )
     assert cp.returncode == 0, cp.stderr
     assert "node-local preflight smoke test" in cp.stdout.lower()
+
+
+# ---------------------------------------------------------------------------
+# E. amd-smi schema-drift detection + HBM threshold boundary guards
+# ---------------------------------------------------------------------------
+#
+# These tests lock in two operator-facing contracts:
+#
+#   1. _flatten_amd_smi_process_json must return (parsed, drift) where
+#      `drift` is True only when at least one record looked like a process
+#      dict structurally but had no usable pid/process_id. This lets the
+#      caller fall through to text/rocm-smi/lsof on a future amd-smi
+#      schema rename instead of silently reporting the node clean.
+#
+#   2. The aggregator's pre-touch HBM threshold uses `>=` (inclusive
+#      boundary). A GPU sitting at exactly the threshold MUST appear in
+#      the rendered `smoke_report.md` outliers section; the operator-
+#      facing help / docs / report wording is aligned to "at least".
+#      (We test the aggregator side because that's the artifact
+#      operators read; the runner-side `>=` in per_gpu.py is the
+#      one-line counterpart, kept honest by argparse help + code review.)
+
+
+def _annotate_passthrough(pid, name, hbm):
+    """Minimal annotate() shim for the schema-drift tests."""
+    return {"pid": pid, "name": name, "hbm_bytes": hbm}
+
+
+def test_flatten_amd_smi_top_level_unknown_returns_empty_no_drift():
+    """E.1 -- a doc that is neither Shape A/A'/B (no `process_list`, no
+    pid-bearing items) returns ([], False). False on `drift` is what
+    distinguishes "schema we do not speak yet at the top level" from
+    "schema we do speak but per-process fields drifted"; the caller
+    falls through in either case but the message differs."""
+    parsed, drift = _flatten_amd_smi_process_json({"unexpected_key": 1}, _annotate_passthrough)
+    assert parsed == []
+    assert drift is False
+    parsed, drift = _flatten_amd_smi_process_json([{"some_other_field": 42}], _annotate_passthrough)
+    assert parsed == []
+    assert drift is False
+
+
+def test_flatten_amd_smi_shape_a_empty_process_list_no_drift():
+    """E.2 -- Shape A with empty process_list is the clean-node case.
+    Buckets are pre-registered (so the caller can tell schema-matched
+    from schema-not-matched), processes lists are empty, drift is False
+    -- the caller trusts the result and skips the fallback chain."""
+    doc = [
+        {"gpu": 0, "process_list": []},
+        {"gpu": 1, "process_list": []},
+    ]
+    parsed, drift = _flatten_amd_smi_process_json(doc, _annotate_passthrough)
+    assert parsed == [
+        {"gpu": 0, "processes": []},
+        {"gpu": 1, "processes": []},
+    ]
+    assert drift is False
+
+
+def test_flatten_amd_smi_shape_a_renamed_pid_field_raises_drift():
+    """E.3 -- the future-schema-drift smoking gun: a Shape A entry whose
+    process_list items are dicts (so the structural shape matches) but
+    use a renamed key (`proc_pid`) instead of `pid` / `process_id`.
+    The bucket is registered, processes is empty, but drift=True so the
+    caller falls through to amd-smi text / rocm-smi / lsof rather than
+    silently reporting the GPU clean."""
+    doc = [
+        {
+            "gpu": 0,
+            "process_list": [
+                {"proc_pid": 1234, "name": "python"},
+            ],
+        }
+    ]
+    parsed, drift = _flatten_amd_smi_process_json(doc, _annotate_passthrough)
+    assert parsed == [{"gpu": 0, "processes": []}]
+    assert drift is True
+
+
+def test_pretouch_hbm_rows_includes_gpu_at_exact_threshold():
+    """E.4 -- the aggregator's `_pretouch_hbm_rows` uses `>= threshold`,
+    which is what populates the `GPU pre-touch HBM usage outliers`
+    section in `smoke_report.md`. Lock in the inclusive boundary at the
+    exact value so the wording fix in `aggregator/report.py` and the
+    runtime stay aligned: a GPU sitting at threshold MUST be listed,
+    a GPU below MUST NOT, a GPU above MUST."""
+    nodes = [
+        {
+            "host": "host-a",
+            "node_rank": 0,
+            "tier1": {
+                "per_gpu": [
+                    {"gpu": 0, "details": {"hbm_pre_touch_used_gib": 2.0}},  # ==
+                    {"gpu": 1, "details": {"hbm_pre_touch_used_gib": 1.99}},  # <
+                    {"gpu": 2, "details": {"hbm_pre_touch_used_gib": 2.01}},  # >
+                ],
+            },
+        },
+    ]
+    rows = _pretouch_hbm_rows(nodes, threshold_gib=2.0)
+    assert sorted(r["gpu"] for r in rows) == [0, 2]
