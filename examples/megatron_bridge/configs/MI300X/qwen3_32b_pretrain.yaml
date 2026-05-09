@@ -1,0 +1,55 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_32b_pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron_bridge
+    config: pretrain_trainer.yaml
+
+    # Model to run
+    model: qwen3_32b.yaml
+
+    overrides:
+      stderr_sink_level: DEBUG
+
+      # Recipe override: use pretrain config instead of finetune
+      flavor: qwen3_32b_pretrain_config
+      dataset: null
+
+      # --- Parameters accepted by _qwen3_common() ---
+
+      # Training configuration
+      train_iters: 50
+      global_batch_size: 128
+      micro_batch_size: 16
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+
+      # Nested overrides (applied by _apply_nested_overrides)
+      log_interval: 1
+      eval_interval: 500
+      eval_iters: 0
+      skip_save: true
+
+      # Optimizer
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+      enable_primus_turbo: false
+
+      # Data
+      mock: true
+      # Real data path should point to a Megatron indexed dataset prefix:
+      #   <prefix>.bin + <prefix>.idx
+      data_paths: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null

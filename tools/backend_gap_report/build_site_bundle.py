@@ -11,11 +11,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_GAP_DOCS_ROOT = REPO_ROOT / "docs" / "backend-gap"
+WEEKLY_REPORTS_DOCS_ROOT = REPO_ROOT / "docs" / "weekly_reports"
 SITE_SOURCE_ROOT = REPO_ROOT / "tools" / "backend_gap_report" / "site"
 SOURCE_DASHBOARD_DATA_DIR = BACKEND_GAP_DOCS_ROOT / "dashboard-data"
+WEEKLY_REPORTS_DASHBOARD_DATA_DIR = WEEKLY_REPORTS_DOCS_ROOT / "dashboard-data"
 METADATA_REPORTS_DIR = SOURCE_DASHBOARD_DATA_DIR / "reports"
 PDF_TEMPLATE = REPO_ROOT / "tools" / "backend_gap_report" / "templates" / "pdf-report.css"
 BUILD_INDEX_SCRIPT = Path(__file__).resolve().with_name("build_dashboard_index.py")
+BUILD_WEEKLY_INDEX_SCRIPT = Path(__file__).resolve().with_name("build_weekly_reports_index.py")
 REQUIRED_REPORT_FIELDS = (
     "id",
     "title",
@@ -76,6 +79,16 @@ def run_build_index() -> None:
         subprocess.run(["python3", str(BUILD_INDEX_SCRIPT)], check=True)
     except subprocess.CalledProcessError as exc:
         fail(f"failed to rebuild dashboard index (exit={exc.returncode})")
+
+
+def run_build_weekly_index() -> None:
+    if not WEEKLY_REPORTS_DASHBOARD_DATA_DIR.exists():
+        return
+    print("[weekly-report] Rebuild weekly-report dashboard index", flush=True)
+    try:
+        subprocess.run(["python3", str(BUILD_WEEKLY_INDEX_SCRIPT)], check=True)
+    except subprocess.CalledProcessError as exc:
+        fail(f"failed to rebuild weekly-report dashboard index (exit={exc.returncode})")
 
 
 def load_report_metadata() -> list[dict]:
@@ -222,6 +235,7 @@ def validate_bundle(bundle_dir: Path) -> None:
 
 def build_site(output_dir: Path) -> None:
     run_build_index()
+    run_build_weekly_index()
     if not PDF_TEMPLATE.exists():
         fail(f"missing PDF template: {PDF_TEMPLATE}")
     if not SOURCE_DASHBOARD_DATA_DIR.exists():
@@ -234,6 +248,12 @@ def build_site(output_dir: Path) -> None:
     print("[backend-gap] Build standalone dashboard bundle", flush=True)
     copy_tree(SITE_SOURCE_ROOT, output_dir)
     copy_tree(SOURCE_DASHBOARD_DATA_DIR, output_dir / "dashboard-data")
+    if WEEKLY_REPORTS_DASHBOARD_DATA_DIR.exists():
+        print("[weekly-report] Copy weekly-report dashboard data", flush=True)
+        copy_tree(
+            WEEKLY_REPORTS_DASHBOARD_DATA_DIR,
+            output_dir / "weekly-reports-data",
+        )
     build_pdf_artifacts(output_dir)
     print("[backend-gap] Validate standalone dashboard bundle", flush=True)
     validate_bundle(output_dir)

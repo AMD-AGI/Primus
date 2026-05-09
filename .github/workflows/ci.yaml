@@ -14,10 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: 333b68d7c81b722b21b4aad10cd250c45f15027c # fix sm_scale none bug (#263)
-  PRIMUS_TURBO_AITER_COMMIT: e83f9903c07001a0ec29e85d223f6e6cdbe00859
+  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
+  PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
+  TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
   BASE_IMAGE: docker.io/rocm/primus:v26.2
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
@@ -78,8 +79,8 @@ jobs:
           fi
       - name: Build and Push Docker Image
         run: |
-          echo "> Login to ROCm Docker Hub"
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # echo "> Login to ROCm Docker Hub"
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           echo "> Build dependencies"
@@ -93,6 +94,7 @@ jobs:
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -101,7 +103,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # # Primus v26.2 already includes AINIC under /workspace. Re-enable this
           # # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
@@ -141,7 +143,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
@@ -153,7 +155,8 @@ jobs:
                --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
-               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
@@ -162,7 +165,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
           start_time=$(date +%s)
@@ -181,7 +184,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
@@ -194,11 +197,14 @@ jobs:
     env:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
+      PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Clean stale Primus-Turbo checkout
+        run: rm -rf "${GITHUB_WORKSPACE}/Primus-Turbo"
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
@@ -326,15 +332,22 @@ jobs:
     runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Clean stale Primus-Turbo checkout
+        run: rm -rf "${GITHUB_WORKSPACE}/Primus-Turbo"
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      - name: Init Primus-Turbo submodules (full clone)
+        working-directory: Primus-Turbo
+        run: |
+          rm -rf 3rdparty/composable_kernel .git/modules/3rdparty/composable_kernel
+          git submodule sync --recursive
+          git submodule update --init --recursive
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |

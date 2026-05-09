@@ -1,11 +1,11 @@
 ---
 name: backend-gap-report
-description: Compare a Primus backend against an upstream repository or reference, verify git state, dependencies, directory changes, and integration coupling, then generate comparison reports, dashboard metadata, and a deployable dashboard index. Use when comparing TorchTitan, Megatron, or other Primus backends with upstream branches, tags, or releases.
+description: Compare a Primus backend against an upstream repository or reference, verify git state, dependencies, directory changes, and integration coupling, then generate comparison reports, dashboard metadata, and a deployable dashboard index. Also owns the shared Primus engineering dashboard under `tools/backend_gap_report/`, which surfaces both backend-gap reports and weekly engineering reports as first-class sections. Use when comparing TorchTitan, Megatron, or other Primus backends with upstream branches, tags, or releases, or when integrating weekly engineering reports into the shared dashboard.
 ---
 
-# Backend Gap Report
+# Backend Gap Report & Shared Dashboard
 
-Use this skill when the user asks to compare a Primus backend with upstream code and wants stable deliverables instead of ad hoc notes.
+Use this skill when the user asks to compare a Primus backend with upstream code and wants stable deliverables instead of ad hoc notes, **or** when integrating a different content type (e.g. weekly engineering reports) into the shared Primus engineering dashboard that lives under `tools/backend_gap_report/`.
 
 ## Default Outputs
 
@@ -123,6 +123,7 @@ The metadata must:
 - reference publish artifact paths that can be generated
 - map to markdown source files that exist in the repo
 - include backend identity, refs, stats, highlights, and artifact links
+- include `dashboard_summary` with concise homepage-ready facts when the report has enough evidence
 
 Use the schema and examples in [reference.md](reference.md) and [examples.md](examples.md).
 
@@ -191,6 +192,92 @@ Before finishing:
 - Dashboard source data lives under `docs/backend-gap/dashboard-data/reports/`.
 - `docs/backend-gap/dashboard-data/index.json` is generated, not hand-maintained.
 - Artifact paths in metadata are relative to the standalone published site root.
+- Backend deep-dive cards should render structured `dashboard_summary` fields when present. Do not make the frontend infer important conclusions from Markdown prose.
+
+### Backend Dashboard Summary
+
+When generating backend metadata, add a `dashboard_summary` object whenever the comparison has confirmed facts worth surfacing on the homepage:
+
+- `headline`: one sentence explaining why this backend comparison matters
+- `recommendation`: concise action label such as `monitor`, `plan sync`, or `urgent sync`
+- `why_it_matters`: 3-5 concise facts or risks
+- `feature_deltas`: notable upstream capabilities added since the Primus pin
+- `dependency_deltas`: dependency, runtime, CUDA, ROCm, or package-channel differences
+- `integration_risks`: Primus-specific coupling points or upgrade risks
+
+All `dashboard_summary` content must be derived from the same evidence used in the detailed report. Do not invent features, versions, or risks to make the dashboard look richer.
+
+## Weekly Engineering Report Integration
+
+The shared dashboard under `tools/backend_gap_report/` surfaces two content
+types from a single static site:
+
+1. **Backend gap reports** — owned by this skill, stored under `docs/backend-gap/`.
+2. **Weekly engineering reports** — the automated weekly Primus reports under
+   `docs/weekly_reports/`.
+
+Weekly reports share the same site shell and the same build/publish pipeline.
+Routine weekly runs should update weekly data only and should not redesign
+the dashboard.
+
+### Weekly-report data plane
+
+- Per-report metadata: `docs/weekly_reports/dashboard-data/reports/{report_id}.json`
+- Aggregated index: `docs/weekly_reports/dashboard-data/index.json` (generated)
+- The Markdown report itself lives at `docs/weekly_reports/{report_id}-primus-weekly.md`
+  and is not bundled into the published site — the dashboard links to the
+  GitHub-rendered Markdown via `report_github_url` in each metadata file.
+- `report_id` uses ISO week format `YYYY-Www` (e.g. `2026-W17`).
+
+Required fields in each weekly metadata JSON:
+
+- `report_id`, `content_type` (`weekly-report`), `title`
+- `report_path`, `report_github_url`
+- `time_window` (`timezone`, `start`, `end`)
+- `generated_at`, `merged_pr_count`, `category_breakdown`
+- `megatron_status`, `torchtitan_status`, `primus_turbo_status`
+- `recommendations` (keys: `megatron`, `torchtitan`, `primus_turbo`)
+- `key_findings` (non-empty list of short, factual strings)
+
+### Weekly index builder
+
+Run directly to refresh just the weekly index:
+
+```bash
+python3 tools/backend_gap_report/build_weekly_reports_index.py
+```
+
+Run the full site bundle (which also invokes this script) to validate the
+combined bundle:
+
+```bash
+python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-dashboard-site
+```
+
+### Presentation rules for the shared dashboard
+
+- The homepage should lead with the latest weekly engineering snapshot because
+  the weekly report is the broad Primus status view.
+- Backend gap reports should appear as backend deep-dive cards, not as a
+  separate top-level dashboard module or tab.
+- Backend deep-dive cards should be generated from backend metadata records and
+  should automatically expand when new backend reports are added.
+- The backend card should prioritize `dashboard_summary` content: why it
+  matters, new upstream capabilities, dependency shifts, integration risks, and
+  PDF links.
+- Weekly archive/list sections should stay simple. Avoid unnecessary filters or
+  history affordances when there is only one report.
+- Visual style must remain calm, editorial, presentation-ready. No emoji,
+  no animations, no decorative gradients beyond the existing header treatment.
+
+### When to update weekly-report dashboard shell
+
+- Data-only runs (standard case): update only weekly metadata under
+  `docs/weekly_reports/dashboard-data/` and the refreshed Markdown report.
+  Do not modify shared tooling, site, or this skill.
+- Shell updates are allowed only when there is a concrete structural gap
+  (missing weekly-report support, a rendering bug, a schema evolution) or
+  when the user explicitly requests a shell change.
 
 ## Additional Resources
 
