@@ -39,7 +39,13 @@ old unpruned masked-tile work:
 | P29 | Compiled Sinkhorn | 0.54 | 0.27 | 6.61 | 0.64 | 0.58 | 0.29 | `profile-after-p29-ep8-20260509.md` |
 | P30a | Dense SWA K-loop pruning (cr=0 only) | 11.77 | 5.44 | 6.71 | 0.64 | 0.58 | 0.30 | trace `1778313739342936814` |
 | P30b | Dense + HCA SWA K-loop pruning (cr=0 + cr=128) | 12.12 | 5.50 | 6.71 | 0.64 | 11.35 | 5.60 | `profile-after-p30-ep8-20260509.md` |
+| P31 | CSA in-kernel top-K gather/scatter (cr=4) | 12.12 | 5.50 | 8.32 | 0.73 | 11.35 | 5.60 | `profile-after-p31-ep8-20260509.md` |
+| P31b | CSA dense-local + sparse head-block BWD split | 12.12 | 5.50 | 8.32 | 24.17 | 11.35 | 5.60 | `progress/p31/bench_csa_attention_ep8.py` |
 
 All values are effective TFLOP/s for the corresponding kernel family.
-For P30b, all five `_v4_attention_bwd_kernel` launches are in the
-30-34 ms range, including the two cr=128 HCA launches.
+For P30b and P31, all five `_v4_attention_bwd_kernel` launches are in
+the 30-34 ms range, including the two cr=128 HCA launches. P31's cr=4
+values use `_v4_csa_attention_pool_{fwd,bwd}_kernel`; P31b's cr=4 BWD
+uses the standalone EP8-shape benchmark after the BWD timer was fixed to
+exclude forward execution. The old `gathered` CSA API remains covered by
+P26 tests as a fallback/reference.

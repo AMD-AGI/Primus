@@ -275,6 +275,164 @@ def _v4_csa_attention_fwd_kernel(
     tl.store(lse_ptr, lse, mask=q_active)
 
 
+@triton.jit
+def _v4_csa_attention_pool_fwd_kernel(
+    Q,
+    K_LOCAL,
+    V_LOCAL,
+    POOL,
+    TOPK_IDXS,
+    SINK,
+    OUT,
+    LSE,
+    # Q strides: [B, H, Sq, D]
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    # K_local strides: [B, H, Sq, D]
+    stride_klb,
+    stride_klh,
+    stride_kln,
+    stride_kld,
+    # V_local strides: [B, H, Sq, D]
+    stride_vlb,
+    stride_vlh,
+    stride_vln,
+    stride_vld,
+    # Pool strides: [B, P, D] (shared across heads)
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    # topk_idxs strides: [B, Sq, K_topk]
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    # OUT strides: [B, H, Sq, D]
+    stride_ob,
+    stride_oh,
+    stride_om,
+    stride_od,
+    # LSE strides: [B, H, Sq]
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    SWA_WINDOW: tl.constexpr,
+    HAS_SINK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """CSA FWD with in-kernel topk gather from the compressed pool."""
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    bid = pid_bh // HEAD_Q
+    qhid = pid_bh % HEAD_Q
+
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    q_active = pid_m < seqlen_q
+    NEG_INF: tl.constexpr = -1.0e30
+
+    q_row_offset = bid * stride_qb + qhid * stride_qh + pid_m * stride_qm
+    q = tl.load(Q + q_row_offset + offs_d * stride_qd, mask=q_active, other=0.0)
+
+    acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
+    m_i = tl.full((), value=NEG_INF, dtype=tl.float32)
+    l_i = tl.zeros((), dtype=tl.float32)
+
+    n_loop_end = pid_m + 1
+    if n_loop_end > seqlen_q:
+        n_loop_end = seqlen_q
+    if SWA_WINDOW > 0:
+        n_lo_raw = pid_m - SWA_WINDOW + 1
+        if n_lo_raw < 0:
+            n_lo_raw = 0
+        n_loop_start = (n_lo_raw // BLOCK_N) * BLOCK_N
+    else:
+        n_loop_start = 0
+
+    for n_start in range(n_loop_start, n_loop_end, BLOCK_N):
+        offs_n = n_start + tl.arange(0, BLOCK_N)
+        kl_ptrs = (
+            K_LOCAL
+            + bid * stride_klb
+            + qhid * stride_klh
+            + offs_n[:, None] * stride_kln
+            + offs_d[None, :] * stride_kld
+        )
+        kl_load_mask = offs_n[:, None] < seqlen_q
+        kl = tl.load(kl_ptrs, mask=kl_load_mask, other=0.0)
+        qk = tl.sum(kl.to(tl.float32) * q[None, :].to(tl.float32), axis=1) * sm_scale
+
+        if SWA_WINDOW > 0:
+            in_window = (offs_n >= pid_m - SWA_WINDOW + 1) & (offs_n <= pid_m)
+        else:
+            in_window = offs_n <= pid_m
+        qk = tl.where(in_window & (offs_n < seqlen_q), qk, NEG_INF)
+
+        m_tile = tl.max(qk, axis=0)
+        m_new = tl.maximum(m_i, m_tile)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(qk - m_new)
+        l_i = l_i * alpha + tl.sum(p, axis=0)
+
+        vl_ptrs = (
+            V_LOCAL
+            + bid * stride_vlb
+            + qhid * stride_vlh
+            + offs_n[:, None] * stride_vln
+            + offs_d[None, :] * stride_vld
+        )
+        vl = tl.load(vl_ptrs, mask=kl_load_mask, other=0.0)
+        acc = acc * alpha + tl.sum(p[:, None] * vl.to(tl.float32), axis=0)
+        m_i = m_new
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        offs_k = k_start + tl.arange(0, BLOCK_K)
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + offs_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=offs_k < K_topk, other=-1)
+        valid = (offs_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid[:, None], other=0.0)
+
+        qk_sparse = tl.sum(pool.to(tl.float32) * q[None, :].to(tl.float32), axis=1) * sm_scale
+        qk_sparse = tl.where(valid, qk_sparse, NEG_INF)
+
+        m_tile = tl.max(qk_sparse, axis=0)
+        m_new = tl.maximum(m_i, m_tile)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(qk_sparse - m_new)
+        l_i = l_i * alpha + tl.sum(p, axis=0)
+
+        acc = acc * alpha + tl.sum(p[:, None] * pool.to(tl.float32), axis=0)
+        m_i = m_new
+
+    if HAS_SINK:
+        sink_h = tl.load(SINK + qhid).to(tl.float32)
+        m_new = tl.maximum(m_i, sink_h)
+        alpha = tl.exp(m_i - m_new)
+        beta = tl.exp(sink_h - m_new)
+        l_i = l_i * alpha + beta
+        acc = acc * alpha
+        m_i = m_new
+
+    out = acc / l_i
+    lse = m_i + tl.log(l_i)
+
+    out_offset = bid * stride_ob + qhid * stride_oh + pid_m * stride_om
+    tl.store(OUT + out_offset + offs_d * stride_od, out.to(OUT.dtype.element_ty), mask=q_active)
+
+    lse_ptr = LSE + bid * stride_lb + qhid * stride_lh + pid_m * stride_lm
+    tl.store(lse_ptr, lse, mask=q_active)
+
+
 # ---------------------------------------------------------------------------
 # Python launcher
 # ---------------------------------------------------------------------------
@@ -412,7 +570,127 @@ def _launch_v4_csa_attention_fwd(
     return out, lse
 
 
+def _launch_v4_csa_attention_pool_fwd(
+    q: torch.Tensor,  # [B, H, Sq, D]
+    k_local: torch.Tensor,  # [B, H, Sq, D]
+    v_local: torch.Tensor,  # [B, H, Sq, D]
+    pool: torch.Tensor,  # [B, P, D]
+    topk_idxs: torch.Tensor,  # [B, Sq, K_topk], -1 means masked
+    *,
+    sink: Optional[torch.Tensor],
+    swa_window: int,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Launch CSA forward with in-kernel topk gather from ``pool``."""
+    if q.dim() != 4 or k_local.dim() != 4 or v_local.dim() != 4:
+        raise ValueError(
+            "v4_csa_attention pool forward expects q / k_local / v_local of rank 4 "
+            f"(got {q.dim()} / {k_local.dim()} / {v_local.dim()})"
+        )
+    if pool.dim() != 3:
+        raise ValueError(
+            f"v4_csa_attention pool forward expects pool of rank 3 [B, P, D]; "
+            f"got rank {pool.dim()}, shape {tuple(pool.shape)}"
+        )
+    if topk_idxs.dim() != 3:
+        raise ValueError(
+            f"v4_csa_attention pool forward expects topk_idxs of rank 3 [B, Sq, K]; "
+            f"got rank {topk_idxs.dim()}, shape {tuple(topk_idxs.shape)}"
+        )
+
+    B, HQ, Sq, D = q.shape
+    if k_local.shape != q.shape or v_local.shape != q.shape:
+        raise ValueError(
+            "v4_csa_attention pool path requires k_local.shape == v_local.shape == q.shape "
+            f"(got q={tuple(q.shape)}, k_local={tuple(k_local.shape)}, "
+            f"v_local={tuple(v_local.shape)})."
+        )
+    Bp, P, Dp = pool.shape
+    if Bp != B or Dp != D:
+        raise ValueError(
+            "v4_csa_attention pool shape mismatch: expected "
+            f"[B, P, D] = [{B}, *, {D}]; got {tuple(pool.shape)}."
+        )
+    Bt, Sqt, K_topk = topk_idxs.shape
+    if Bt != B or Sqt != Sq:
+        raise ValueError(
+            "v4_csa_attention topk_idxs shape mismatch: expected "
+            f"[B, Sq, K] = [{B}, {Sq}, *]; got {tuple(topk_idxs.shape)}."
+        )
+    if topk_idxs.dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"v4_csa_attention topk_idxs must be int32/int64, got {topk_idxs.dtype}.")
+    if not q.is_cuda:
+        raise ValueError("v4_csa_attention requires CUDA / HIP tensors.")
+    if q.dtype != k_local.dtype or q.dtype != v_local.dtype or q.dtype != pool.dtype:
+        raise ValueError(
+            "v4_csa_attention pool path requires q.dtype == k_local.dtype == "
+            f"v_local.dtype == pool.dtype (got {q.dtype} / {k_local.dtype} / "
+            f"{v_local.dtype} / {pool.dtype})."
+        )
+
+    has_sink = sink is not None
+    out = torch.empty_like(q)
+    lse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
+
+    BLOCK_N = 32
+    BLOCK_K = 32
+    BLOCK_DMODEL = D
+    grid = (Sq, B * HQ)
+    sink_ptr = sink if has_sink else q
+
+    _v4_csa_attention_pool_fwd_kernel[grid](
+        q,
+        k_local,
+        v_local,
+        pool,
+        topk_idxs,
+        sink_ptr,
+        out,
+        lse,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k_local.stride(0),
+        k_local.stride(1),
+        k_local.stride(2),
+        k_local.stride(3),
+        v_local.stride(0),
+        v_local.stride(1),
+        v_local.stride(2),
+        v_local.stride(3),
+        pool.stride(0),
+        pool.stride(1),
+        pool.stride(2),
+        topk_idxs.stride(0),
+        topk_idxs.stride(1),
+        topk_idxs.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out.stride(3),
+        lse.stride(0),
+        lse.stride(1),
+        lse.stride(2),
+        Sq,
+        P,
+        K_topk,
+        float(scale),
+        HEAD_Q=HQ,
+        SWA_WINDOW=int(swa_window) if swa_window > 0 else 0,
+        HAS_SINK=has_sink,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        num_warps=4,
+        num_stages=1,
+    )
+    return out, lse
+
+
 __all__ = [
     "_v4_csa_attention_fwd_kernel",
+    "_v4_csa_attention_pool_fwd_kernel",
     "_launch_v4_csa_attention_fwd",
+    "_launch_v4_csa_attention_pool_fwd",
 ]

@@ -64,6 +64,7 @@ Edge cases:
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -71,6 +72,7 @@ import triton
 import triton.language as tl
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_bwd import (
+    _v4_attention_bwd_kernel,
     _v4_attention_bwd_preprocess_kernel,
 )
 
@@ -168,6 +170,8 @@ def _v4_csa_attention_bwd_kernel(
 
     do_row_offset = bid * stride_dob + qhid * stride_doh + pid_m * stride_dom
     dout = tl.load(DOUT + do_row_offset + offs_d * stride_dod, mask=q_active, other=0.0)
+    q_f = q.to(tl.float32)
+    dout.to(tl.float32)
 
     lse = tl.load(
         LSE + bid * stride_lb + qhid * stride_lh + pid_m * stride_lm,
@@ -228,7 +232,8 @@ def _v4_csa_attention_bwd_kernel(
         vl = tl.load(vl_ptrs, mask=kl_load_mask, other=0.0)
 
         # Re-materialise qk in fp32 (matches FWD).
-        qk = tl.sum(kl.to(tl.float32) * q[None, :].to(tl.float32), axis=1) * sm_scale
+        kl_f = kl.to(tl.float32)
+        qk = tl.sum(kl_f * q_f[None, :], axis=1) * sm_scale
 
         if SWA_WINDOW > 0:
             in_window = (offs_n >= pid_m - SWA_WINDOW + 1) & (offs_n <= pid_m)
@@ -325,6 +330,334 @@ def _v4_csa_attention_bwd_kernel(
     # ---- Store dq (direct — no collisions across programs) ----------------
     dq_offset = bid * stride_dqb + qhid * stride_dqh + pid_m * stride_dqm
     tl.store(DQ + dq_offset + offs_d * stride_dqd, dq, mask=q_active)
+
+
+@triton.jit
+def _v4_csa_attention_pool_bwd_kernel(
+    Q,
+    K_LOCAL,
+    V_LOCAL,
+    POOL,
+    TOPK_IDXS,
+    DOUT,
+    LSE,
+    D,
+    DQ,
+    DK_LOCAL,
+    DV_LOCAL,
+    DPOOL,
+    DSINK,
+    SINK,
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_klb,
+    stride_klh,
+    stride_kln,
+    stride_kld,
+    stride_vlb,
+    stride_vlh,
+    stride_vln,
+    stride_vld,
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dqb,
+    stride_dqh,
+    stride_dqm,
+    stride_dqd,
+    stride_dklb,
+    stride_dklh,
+    stride_dkln,
+    stride_dkld,
+    stride_dvlb,
+    stride_dvlh,
+    stride_dvln,
+    stride_dvld,
+    stride_dpb,
+    stride_dpp,
+    stride_dpd,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    SWA_WINDOW: tl.constexpr,
+    HAS_SINK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    STORE_DPOOL: tl.constexpr,
+    LOCAL_ONLY: tl.constexpr,
+):
+    """CSA BWD with in-kernel scatter-add into the compressed-pool gradient."""
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    bid = pid_bh // HEAD_Q
+    qhid = pid_bh % HEAD_Q
+
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    NEG_INF: tl.constexpr = -1.0e30
+    q_active = pid_m < seqlen_q
+
+    q_row_offset = bid * stride_qb + qhid * stride_qh + pid_m * stride_qm
+    q = tl.load(Q + q_row_offset + offs_d * stride_qd, mask=q_active, other=0.0)
+
+    do_row_offset = bid * stride_dob + qhid * stride_doh + pid_m * stride_dom
+    dout = tl.load(DOUT + do_row_offset + offs_d * stride_dod, mask=q_active, other=0.0)
+    q_f = q.to(tl.float32)
+    dout_f = dout.to(tl.float32)
+
+    lse = tl.load(
+        LSE + bid * stride_lb + qhid * stride_lh + pid_m * stride_lm,
+        mask=q_active,
+        other=0.0,
+    )
+    dvec = tl.load(
+        D + bid * stride_db + qhid * stride_dh + pid_m * stride_dm,
+        mask=q_active,
+        other=0.0,
+    )
+
+    if HAS_SINK:
+        sink_h = tl.load(SINK + qhid).to(tl.float32)
+        p_sink = tl.exp(sink_h - lse)
+        tl.atomic_add(DSINK + qhid, tl.where(q_active, -p_sink * dvec, 0.0))
+
+    dq = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
+
+    n_loop_end = pid_m + 1
+    if n_loop_end > seqlen_q:
+        n_loop_end = seqlen_q
+    if SWA_WINDOW > 0:
+        n_lo_raw = pid_m - SWA_WINDOW + 1
+        if n_lo_raw < 0:
+            n_lo_raw = 0
+        n_loop_start = (n_lo_raw // BLOCK_N) * BLOCK_N
+    else:
+        n_loop_start = 0
+
+    for n_start in range(n_loop_start, n_loop_end, BLOCK_N):
+        offs_n = n_start + tl.arange(0, BLOCK_N)
+
+        kl_ptrs = (
+            K_LOCAL
+            + bid * stride_klb
+            + qhid * stride_klh
+            + offs_n[:, None] * stride_kln
+            + offs_d[None, :] * stride_kld
+        )
+        kl_load_mask = offs_n[:, None] < seqlen_q
+        kl = tl.load(kl_ptrs, mask=kl_load_mask, other=0.0)
+
+        vl_ptrs = (
+            V_LOCAL
+            + bid * stride_vlb
+            + qhid * stride_vlh
+            + offs_n[:, None] * stride_vln
+            + offs_d[None, :] * stride_vld
+        )
+        vl = tl.load(vl_ptrs, mask=kl_load_mask, other=0.0)
+
+        kl_f = kl.to(tl.float32)
+        qk = tl.sum(kl_f * q_f[None, :], axis=1) * sm_scale
+        if SWA_WINDOW > 0:
+            in_window = (offs_n >= pid_m - SWA_WINDOW + 1) & (offs_n <= pid_m)
+        else:
+            in_window = offs_n <= pid_m
+        qk = tl.where(in_window & (offs_n < seqlen_q) & q_active, qk, NEG_INF)
+
+        p = tl.exp(qk - lse)
+        vl_f = vl.to(tl.float32)
+        dp = tl.sum(dout_f[None, :] * vl_f, axis=1)
+        ds = p * (dp - dvec)
+
+        dq += tl.sum(ds[:, None] * kl_f, axis=0) * sm_scale
+
+        dk_contrib = ds[:, None] * sm_scale * q_f[None, :]
+        dk_ptrs = (
+            DK_LOCAL
+            + bid * stride_dklb
+            + qhid * stride_dklh
+            + offs_n[:, None] * stride_dkln
+            + offs_d[None, :] * stride_dkld
+        )
+        tl.atomic_add(dk_ptrs, dk_contrib, mask=kl_load_mask, sem="relaxed")
+
+        dv_contrib = p[:, None] * dout_f[None, :]
+        dv_ptrs = (
+            DV_LOCAL
+            + bid * stride_dvlb
+            + qhid * stride_dvlh
+            + offs_n[:, None] * stride_dvln
+            + offs_d[None, :] * stride_dvld
+        )
+        tl.atomic_add(dv_ptrs, dv_contrib, mask=kl_load_mask, sem="relaxed")
+
+    if not LOCAL_ONLY:
+        for k_start in range(0, K_topk, BLOCK_K):
+            offs_k = k_start + tl.arange(0, BLOCK_K)
+            topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + offs_k * stride_tik
+            topk = tl.load(topk_ptrs, mask=offs_k < K_topk, other=-1)
+            valid = (offs_k < K_topk) & (topk >= 0) & (topk < pool_size)
+            safe_topk = tl.where(valid, topk, 0)
+
+            pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+            pool = tl.load(pool_ptrs, mask=valid[:, None], other=0.0)
+            pool_f = pool.to(tl.float32)
+
+            qk_sparse = tl.sum(pool_f * q_f[None, :], axis=1) * sm_scale
+            qk_sparse = tl.where(valid & q_active, qk_sparse, NEG_INF)
+
+            p = tl.exp(qk_sparse - lse)
+            dp = tl.sum(dout_f[None, :] * pool_f, axis=1)
+            ds = p * (dp - dvec)
+
+            dq += tl.sum(ds[:, None] * pool_f, axis=0) * sm_scale
+
+            if STORE_DPOOL:
+                dpool_contrib = ds[:, None] * sm_scale * q_f[None, :] + p[:, None] * dout_f[None, :]
+                dpool_ptrs = (
+                    DPOOL + bid * stride_dpb + safe_topk[:, None] * stride_dpp + offs_d[None, :] * stride_dpd
+                )
+                tl.atomic_add(dpool_ptrs, dpool_contrib, mask=valid[:, None], sem="relaxed")
+
+    dq_offset = bid * stride_dqb + qhid * stride_dqh + pid_m * stride_dqm
+    tl.store(DQ + dq_offset + offs_d * stride_dqd, dq, mask=q_active)
+
+
+@triton.jit
+def _v4_csa_attention_pool_sparse_bwd_kernel(
+    Q,
+    POOL,
+    TOPK_IDXS,
+    DOUT,
+    LSE,
+    D,
+    DQ,
+    DPOOL,
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dqb,
+    stride_dqh,
+    stride_dqm,
+    stride_dqd,
+    stride_dpb,
+    stride_dpp,
+    stride_dpd,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """Sparse CSA BWD using a head block so pool work maps to tl.dot."""
+    pid_m = tl.program_id(0)
+    pid_h_block = tl.program_id(1)
+    bid = tl.program_id(2)
+
+    offs_h = pid_h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    h_mask = offs_h < HEAD_Q
+    q_active = pid_m < seqlen_q
+
+    q_ptrs = (
+        Q + bid * stride_qb + offs_h[:, None] * stride_qh + pid_m * stride_qm + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(q_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    dout_ptrs = (
+        DOUT
+        + bid * stride_dob
+        + offs_h[:, None] * stride_doh
+        + pid_m * stride_dom
+        + offs_d[None, :] * stride_dod
+    )
+    dout = tl.load(dout_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    lse = tl.load(
+        LSE + bid * stride_lb + offs_h * stride_lh + pid_m * stride_lm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+    dvec = tl.load(
+        D + bid * stride_db + offs_h * stride_dh + pid_m * stride_dm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+
+    dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        sparse_k = k_start + offs_k
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=sparse_k < K_topk, other=-1)
+        valid_k = (sparse_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid_k, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
+
+        q_bf16 = q.to(pool.dtype)
+        dout_bf16 = dout.to(pool.dtype)
+        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout_bf16, tl.trans(pool))
+        ds = p * (dp - dvec[:, None])
+
+        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+
+        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
+        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        dpool_ptrs = DPOOL + bid * stride_dpb + safe_topk[:, None] * stride_dpp + offs_d[None, :] * stride_dpd
+        tl.atomic_add(dpool_ptrs, dpool_contrib, mask=valid_k[:, None], sem="relaxed")
+
+    dq_ptrs = (
+        DQ
+        + bid * stride_dqb
+        + offs_h[:, None] * stride_dqh
+        + pid_m * stride_dqm
+        + offs_d[None, :] * stride_dqd
+    )
+    tl.atomic_add(dq_ptrs, dq, mask=h_mask[:, None] & q_active, sem="relaxed")
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +823,296 @@ def _launch_v4_csa_attention_bwd(
     return dq_out, dk_local_out, dv_local_out, dgathered_out, dsink_out
 
 
+def _launch_v4_csa_attention_pool_bwd(
+    q: torch.Tensor,  # [B, H, Sq, D]
+    k_local: torch.Tensor,  # [B, H, Sq, D]
+    v_local: torch.Tensor,  # [B, H, Sq, D]
+    pool: torch.Tensor,  # [B, P, D]
+    topk_idxs: torch.Tensor,  # [B, Sq, K_topk]
+    out: torch.Tensor,  # [B, H, Sq, D]
+    dout: torch.Tensor,  # [B, H, Sq, D]
+    lse: torch.Tensor,  # [B, H, Sq]
+    *,
+    sink: Optional[torch.Tensor],
+    swa_window: int,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Launch CSA backward with in-kernel scatter-add into ``pool.grad``."""
+    if not q.is_cuda:
+        raise ValueError("v4_csa_attention pool BWD requires CUDA / HIP tensors.")
+    if dout.shape != out.shape or out.shape != q.shape:
+        raise ValueError(
+            "v4_csa_attention pool BWD shape mismatch: "
+            f"out={tuple(out.shape)}, dout={tuple(dout.shape)}, q={tuple(q.shape)}"
+        )
+    if pool.dim() != 3:
+        raise ValueError(f"v4_csa_attention pool BWD expects pool rank 3 [B, P, D], got {tuple(pool.shape)}.")
+    if topk_idxs.dim() != 3:
+        raise ValueError(
+            f"v4_csa_attention pool BWD expects topk_idxs rank 3 [B, Sq, K], got {tuple(topk_idxs.shape)}."
+        )
+
+    B, HQ, Sq, D = q.shape
+    Bp, P, Dp = pool.shape
+    Bt, Sqt, K_topk = topk_idxs.shape
+    if Bp != B or Dp != D or Bt != B or Sqt != Sq:
+        raise ValueError(
+            "v4_csa_attention pool BWD shape mismatch: "
+            f"q={tuple(q.shape)}, pool={tuple(pool.shape)}, topk_idxs={tuple(topk_idxs.shape)}"
+        )
+    if topk_idxs.dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"v4_csa_attention topk_idxs must be int32/int64, got {topk_idxs.dtype}.")
+
+    has_sink = sink is not None
+
+    BLOCK_N = 32
+    BLOCK_K = 64
+    BLOCK_DMODEL = D
+    use_split_sparse = os.getenv("PRIMUS_V4_CSA_BWD_SPLIT_SPARSE", "1") != "0"
+
+    dq_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+    dk_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+    dv_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+    dpool_fp32 = torch.zeros((B, P, D), device=q.device, dtype=torch.float32)
+    if has_sink:
+        dsink_fp32 = torch.zeros((HQ,), device=q.device, dtype=torch.float32)
+        sink_arg = sink.to(torch.float32) if sink.dtype != torch.float32 else sink
+    else:
+        dsink_fp32 = q
+        sink_arg = q
+
+    d_buf = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
+    pre_grid = (triton.cdiv(Sq, BLOCK_N), B * HQ)
+    _v4_attention_bwd_preprocess_kernel[pre_grid](
+        out,
+        dout,
+        d_buf,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out.stride(3),
+        dout.stride(0),
+        dout.stride(1),
+        dout.stride(2),
+        dout.stride(3),
+        d_buf.stride(0),
+        d_buf.stride(1),
+        d_buf.stride(2),
+        Sq,
+        HEAD=HQ,
+        BLOCK_M=BLOCK_N,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        num_warps=4,
+        num_stages=1,
+    )
+
+    if use_split_sparse:
+        local_block_m = 32
+        local_grid = (triton.cdiv(Sq, local_block_m), B * HQ)
+        _v4_attention_bwd_kernel[local_grid](
+            q,
+            k_local,
+            v_local,
+            dout,
+            lse,
+            d_buf,
+            dq_fp32,
+            dk_local_fp32,
+            dv_local_fp32,
+            dsink_fp32,
+            sink_arg,
+            q,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k_local.stride(0),
+            k_local.stride(1),
+            k_local.stride(2),
+            k_local.stride(3),
+            v_local.stride(0),
+            v_local.stride(1),
+            v_local.stride(2),
+            v_local.stride(3),
+            dout.stride(0),
+            dout.stride(1),
+            dout.stride(2),
+            dout.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            d_buf.stride(0),
+            d_buf.stride(1),
+            d_buf.stride(2),
+            dq_fp32.stride(0),
+            dq_fp32.stride(1),
+            dq_fp32.stride(2),
+            dq_fp32.stride(3),
+            dk_local_fp32.stride(0),
+            dk_local_fp32.stride(1),
+            dk_local_fp32.stride(2),
+            dk_local_fp32.stride(3),
+            dv_local_fp32.stride(0),
+            dv_local_fp32.stride(1),
+            dv_local_fp32.stride(2),
+            dv_local_fp32.stride(3),
+            0,
+            0,
+            Sq,
+            Sq,
+            float(scale),
+            HEAD_Q=HQ,
+            HEAD_K=HQ,
+            SWA_WINDOW=int(swa_window) if swa_window > 0 else 0,
+            HAS_SINK=has_sink,
+            HAS_ADD_MASK=False,
+            HCA_LOCAL_SEQLEN=0,
+            USE_CAUSAL=True,
+            BLOCK_M=local_block_m,
+            BLOCK_N=BLOCK_N,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            num_warps=8,
+            num_stages=1,
+        )
+    else:
+        grid = (Sq, B * HQ)
+        _v4_csa_attention_pool_bwd_kernel[grid](
+            q,
+            k_local,
+            v_local,
+            pool,
+            topk_idxs,
+            dout,
+            lse,
+            d_buf,
+            dq_fp32,
+            dk_local_fp32,
+            dv_local_fp32,
+            dpool_fp32,
+            dsink_fp32,
+            sink_arg,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k_local.stride(0),
+            k_local.stride(1),
+            k_local.stride(2),
+            k_local.stride(3),
+            v_local.stride(0),
+            v_local.stride(1),
+            v_local.stride(2),
+            v_local.stride(3),
+            pool.stride(0),
+            pool.stride(1),
+            pool.stride(2),
+            topk_idxs.stride(0),
+            topk_idxs.stride(1),
+            topk_idxs.stride(2),
+            dout.stride(0),
+            dout.stride(1),
+            dout.stride(2),
+            dout.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            d_buf.stride(0),
+            d_buf.stride(1),
+            d_buf.stride(2),
+            dq_fp32.stride(0),
+            dq_fp32.stride(1),
+            dq_fp32.stride(2),
+            dq_fp32.stride(3),
+            dk_local_fp32.stride(0),
+            dk_local_fp32.stride(1),
+            dk_local_fp32.stride(2),
+            dk_local_fp32.stride(3),
+            dv_local_fp32.stride(0),
+            dv_local_fp32.stride(1),
+            dv_local_fp32.stride(2),
+            dv_local_fp32.stride(3),
+            dpool_fp32.stride(0),
+            dpool_fp32.stride(1),
+            dpool_fp32.stride(2),
+            Sq,
+            P,
+            K_topk,
+            float(scale),
+            HEAD_Q=HQ,
+            SWA_WINDOW=int(swa_window) if swa_window > 0 else 0,
+            HAS_SINK=has_sink,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            STORE_DPOOL=(os.getenv("PRIMUS_V4_CSA_BWD_SKIP_DPOOL", "0") != "1"),
+            LOCAL_ONLY=False,
+            num_warps=4,
+            num_stages=1,
+        )
+
+    if use_split_sparse:
+        BLOCK_H = 64
+        sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
+        _v4_csa_attention_pool_sparse_bwd_kernel[sparse_grid](
+            q,
+            pool,
+            topk_idxs,
+            dout,
+            lse,
+            d_buf,
+            dq_fp32,
+            dpool_fp32,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            pool.stride(0),
+            pool.stride(1),
+            pool.stride(2),
+            topk_idxs.stride(0),
+            topk_idxs.stride(1),
+            topk_idxs.stride(2),
+            dout.stride(0),
+            dout.stride(1),
+            dout.stride(2),
+            dout.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            d_buf.stride(0),
+            d_buf.stride(1),
+            d_buf.stride(2),
+            dq_fp32.stride(0),
+            dq_fp32.stride(1),
+            dq_fp32.stride(2),
+            dq_fp32.stride(3),
+            dpool_fp32.stride(0),
+            dpool_fp32.stride(1),
+            dpool_fp32.stride(2),
+            Sq,
+            P,
+            K_topk,
+            float(scale),
+            HEAD_Q=HQ,
+            BLOCK_H=BLOCK_H,
+            BLOCK_K=BLOCK_K,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            num_warps=8,
+            num_stages=1,
+        )
+
+    dq_out = dq_fp32.to(q.dtype)
+    dk_local_out = dk_local_fp32.to(k_local.dtype)
+    dv_local_out = dv_local_fp32.to(v_local.dtype)
+    dpool_out = dpool_fp32.to(pool.dtype)
+    dsink_out = dsink_fp32.to(sink.dtype) if has_sink else None
+    return dq_out, dk_local_out, dv_local_out, dpool_out, dsink_out
+
+
 __all__ = [
     "_v4_csa_attention_bwd_kernel",
+    "_v4_csa_attention_pool_bwd_kernel",
+    "_v4_csa_attention_pool_sparse_bwd_kernel",
     "_launch_v4_csa_attention_bwd",
+    "_launch_v4_csa_attention_pool_bwd",
 ]

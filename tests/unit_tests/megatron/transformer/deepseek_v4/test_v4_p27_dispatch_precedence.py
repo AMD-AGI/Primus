@@ -28,7 +28,7 @@ mock all four candidate kernels and assert exactly one fires:
         use_v4_triton_attention=F → eager_v4_attention          (P24)
 
     cr == 4:
-        use_v4_triton_csa_attention=T → v4_csa_attention        (P26)
+        use_v4_triton_csa_attention=T → v4_csa_attention_from_pool (P31)
         use_v4_triton_csa_attention=F → eager_v4_csa_attention  (P24)
 
 We bypass ``__init__`` (which requires distributed + GPU + Megatron
@@ -125,7 +125,7 @@ def _make_bare_attn(
         pytest.param(128, False, True, False, "Triton, HCA path", id="cr128_triton"),
         pytest.param(128, False, False, False, "eager Python, HCA path", id="cr128_eager"),
         # cr == 4: 2 valid kernel choices (no turbo / dense-triton path for CSA)
-        pytest.param(4, False, False, True, "v4_csa_attention (Triton)", id="cr4_triton"),
+        pytest.param(4, False, False, True, "v4_csa_attention_from_pool (Triton)", id="cr4_triton"),
         pytest.param(4, False, False, False, "v4_csa_attention (eager Python)", id="cr4_eager"),
     ],
 )
@@ -248,14 +248,14 @@ def _stub_csa_inputs():
     [
         pytest.param(
             True,
-            "v4_csa_attention",
+            "v4_csa_attention_from_pool",
             "eager_v4_csa_attention",
             id="csa_triton_wins",
         ),
         pytest.param(
             False,
             "eager_v4_csa_attention",
-            "v4_csa_attention",
+            "v4_csa_attention_from_pool",
             id="csa_eager_when_off",
         ),
     ],
@@ -265,7 +265,7 @@ def test_p27_csa_forward_dispatch_precedence(
     fired_attr: str,
     suppressed_attr: str,
 ) -> None:
-    """``_csa_forward`` picks v4_csa_attention vs eager_v4_csa_attention by flag.
+    """``_csa_forward`` picks v4_csa_attention_from_pool vs eager_v4_csa_attention by flag.
 
     Precedence (P26): ``use_v4_triton_csa_attention > eager``.
     """
@@ -328,15 +328,14 @@ def test_p27_csa_forward_passes_kernel_args_through() -> None:
     ``eager_v4_csa_attention``, otherwise a kernel swap would silently
     re-route through a different code path.
     """
-    expected_keys = {
+    common_expected_keys = {
         "sink",
         "swa_window",
-        "sparse_mask",
         "attn_dropout",
         "training",
         "scale",
     }
-    for use_csa, target in [(True, "v4_csa_attention"), (False, "eager_v4_csa_attention")]:
+    for use_csa, target in [(True, "v4_csa_attention_from_pool"), (False, "eager_v4_csa_attention")]:
         attn = _make_bare_attn(compress_ratio=4, use_v4_triton_csa_attention=use_csa)
         attn.attn_sink = MagicMock()
         attn.attn_sliding_window = 128
@@ -365,6 +364,8 @@ def test_p27_csa_forward_passes_kernel_args_through() -> None:
                 local_mask=local_mask,
             )
         kwargs = mock_kernel.call_args.kwargs
+        expected_keys = set(common_expected_keys)
+        expected_keys.add("topk_idxs" if use_csa else "sparse_mask")
         missing = expected_keys - set(kwargs.keys())
         assert not missing, (
             f"_csa_forward did not pass {sorted(missing)} to {target} when "

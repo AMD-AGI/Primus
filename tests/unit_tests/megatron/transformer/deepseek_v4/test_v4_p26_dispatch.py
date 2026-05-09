@@ -113,9 +113,10 @@ def test_p26_csa_forward_consults_use_v4_triton_csa_attention_flag():
         "use_v4_triton_csa_attention > eager)."
     )
 
-    # The Triton kernel function must be referenced (string ref in code).
-    refs_csa_kernel = "v4_csa_attention" in names or "v4_csa_attention" in consts_str
+    # The Triton kernel function must be referenced (P31 routes through
+    # the pool/topk variant to avoid materialising gathered tensors).
+    refs_csa_kernel = "v4_csa_attention_from_pool" in names or "v4_csa_attention_from_pool" in consts_str
     assert refs_csa_kernel, (
-        "DeepseekV4Attention._csa_forward must call v4_csa_attention "
-        "when the CSA Triton flag is on (plan-4 P26)."
+        "DeepseekV4Attention._csa_forward must call v4_csa_attention_from_pool "
+        "when the CSA Triton flag is on (plan-5 P31)."
     )

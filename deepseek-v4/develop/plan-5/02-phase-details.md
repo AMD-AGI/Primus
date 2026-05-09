@@ -530,6 +530,71 @@ proxy eventually go to `Sq=4096` without downscaling.
   sequences with `-1`; the kernel checks `topk_idxs >= 0` before
   every `tl.load` (plan-4 P26 already takes this contract).
 
+### P31 close-out note
+
+P31 shipped the in-kernel gather/scatter path as a new
+`v4_csa_attention_from_pool` API. `DeepseekV4Attention._csa_forward`
+now passes the compressed `pool` and `topk_idxs` directly when
+`use_v4_triton_csa_attention=True`; the old `gathered` API remains in
+tree for eager fallback and P26 ratchet tests.
+
+Correctness:
+
+- P31 fast pool/topk tests: `8 passed`.
+- P31 release pool/topk tests: `8 passed`.
+- P26 CSA release ratchet: `16 passed`.
+- P26/P27 fast CSA + dispatch ratchet: `43 passed`.
+
+Performance on the V4-Flash EP8 proxy:
+
+- 10-iter smoke: `lm_loss[10] = 9.259875E+00`, no NaN / Inf, steady
+  iter 10 `4312.3/4331.7 ms`, `158.7/158.0 TFLOP/s/GPU`.
+- Trace: steady window `4317.0 ms`, `158.5 TFLOP/s/GPU`, vs P30b
+  `4943.4 ms`, `138.4 TFLOP/s/GPU` (`-12.7 %` step time, `+14.5 %`
+  throughput).
+- CSA BWD drops from P30b `4.04 s` to P31 `3.50 s` (`-13.5 %`);
+  CSA FWD drops from ~`153 ms` to `123.5 ms`.
+
+The original `BLOCK_K=64` tuning experiment compiled and passed the
+P31 fast/release tests, but smoke throughput regressed to ~`155`
+TFLOP/s/GPU, so the shipped pool kernels keep `BLOCK_K=32`. K-tile
+prefetch remains deferred; the remaining P31 bottleneck is the per-row
+CSA BWD design itself, especially sparse-branch bandwidth and atomic
+pressure into `dpool`.
+
+### P31 follow-up — CSA BWD deep optimization
+
+After the first close-out, CSA BWD was still too slow. P31 was reopened
+with a stricter target: drive the CSA backward kernel toward **< 50 ms**
+at the proxy EP8 shape.
+
+New tasks:
+
+1. **Standalone EP8-shape CSA benchmark** — add
+   `progress/p31/bench_csa_attention_ep8.py` so candidate kernel changes
+   can be measured on one GPU without launching full EP8 training. The
+   default shape is `B=1, H=64, S=4096, D=512, P=1024, K_topk=512,
+   swa_window=128, bf16, sink=on`.
+2. **Optimization log** — record reference scans, failed tuning
+   experiments, benchmark numbers, and conclusions in
+   `progress/p31/csa_bwd_optimization_log.md`.
+3. **Quick contention experiments** — test per-head `dpool` staging and
+   launch-parameter tuning (`num_warps`, `BLOCK_K`) under the existing
+   correctness tests before using the benchmark.
+4. **Sparse BWD redesign plan** — if the benchmark shows the current
+   per-row sparse branch cannot approach target, pivot to a split sparse
+   BWD design: separate `dQ` from `dpool`, and investigate pool-owned
+   reduction / inverted-index accumulation to remove random `dpool`
+   atomics.
+
+Current benchmark outcome: the first corrected BWD-only baseline was
+~`1433 ms`. A split redesign now runs the local branch through the dense
+`_v4_attention_bwd_kernel` with CSA's joint `lse/D`, then runs a new
+head-block sparse kernel for `dq + dpool`. The standalone EP8-shape
+benchmark reports **35.43 ms** BWD-only, meeting the <50 ms kernel target.
+The same pass also fixed the benchmark so the BWD number excludes forward
+execution.
+
 ---
 
 ## Phase 32 — Pipeline / comm / optimizer overlap + recompute knobs

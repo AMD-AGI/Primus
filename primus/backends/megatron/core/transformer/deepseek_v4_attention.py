@@ -81,7 +81,7 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     eager_v4_attention,
     eager_v4_csa_attention,
     v4_attention,
-    v4_csa_attention,
+    v4_csa_attention_from_pool,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -618,7 +618,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 kernel = "v4_attention (eager Python, HCA path)"
         elif self.compress_ratio == 4:
             if self._use_v4_triton_csa_attention:
-                kernel = "v4_csa_attention (Triton)"
+                kernel = "v4_csa_attention_from_pool (Triton)"
             else:
                 kernel = "v4_csa_attention (eager Python)"
         else:
@@ -991,15 +991,10 @@ class DeepseekV4Attention(MLASelfAttention):
         :func:`sliding_window_causal_mask` as :meth:`_local_mask` makes,
         so the result is bit-identical).
 
-        Plan-4 P26: when ``use_v4_triton_csa_attention=True`` the
-        joint-softmax math is dispatched through the in-tree Triton
-        kernel :func:`v4_csa_attention` instead of the eager reference;
-        both have identical signatures and dtype contracts so this is a
-        1:1 swap. The autograd of ``torch.gather`` (and the
-        ``pool.unsqueeze(1).expand(...)`` broadcast) automatically
-        scatter-adds the kernel's ``dgathered`` output back into the
-        compressed-pool gradient — the kernel does NOT see ``topk_idxs``
-        so the scatter-add lives outside the autograd Function.
+        Plan-5 P31: when ``use_v4_triton_csa_attention=True`` the sparse
+        top-K pool gather moves into the Triton kernel. The eager fallback
+        still materialises ``gathered`` here so it remains the reference
+        implementation and keeps the old P26 API covered by unit tests.
         """
         del local_mask  # see docstring
         B, H, S, Dh = q_bh.shape
@@ -1011,36 +1006,35 @@ class DeepseekV4Attention(MLASelfAttention):
 
         # 2) Indexer top-K per query.
         topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
+
+        # Plan-5 P31 dispatch: Triton path consumes pool + topk directly
+        # and avoids materialising [B, S, K, Dh] gathered tensors.
+        if self._use_v4_triton_csa_attention:
+            return v4_csa_attention_from_pool(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
+
+        # 3) Eager fallback gathers per-query pool slices: [B, S, K, Dh].
+        # ``gathered`` is broadcast across heads in the reference op (no
+        # H dim), matching V4's single-latent pool shared by all heads.
         K = topk_idxs.shape[-1]
         valid = topk_idxs >= 0  # [B, S, K]
         safe_idx = topk_idxs.clamp(min=0)
-
-        # 3) Gather per-query pool slices: [B, S, K, head_dim].
-        # ``gathered`` is broadcast across heads in the kernel / eager
-        # reference (no H dim) — matches the V4 design where the
-        # compressor produces a single-latent pool shared by all heads.
         idx_expand = safe_idx.unsqueeze(-1).expand(B, S, K, Dh)
         pool_expand = pool.unsqueeze(1).expand(B, S, P, Dh)
         gathered = torch.gather(pool_expand, dim=2, index=idx_expand)
         gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
         sparse_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)  # [B, S, K]
 
-        # Plan-4 P26 dispatch: precedence ``use_v4_triton_csa_attention >
-        # eager``. The candidate functions share a signature, so this is
-        # a 1:1 swap.
-        if self._use_v4_triton_csa_attention:
-            return v4_csa_attention(
-                q_bh,
-                k_local_bh,
-                v_local_bh,
-                gathered,
-                sink=self.attn_sink,
-                swa_window=int(self.attn_sliding_window),
-                sparse_mask=sparse_mask,
-                attn_dropout=self.attn_dropout,
-                training=self.training,
-                scale=self._attention_scale(),
-            )
         return eager_v4_csa_attention(
             q_bh,
             k_local_bh,
