@@ -195,8 +195,8 @@ External artefacts (kept, not in `progress/p29/`):
 
 | commit | scope |
 |---|---|
-| **TBD-p29** | Plan-5 P29 (RESCOPED) — `torch.compile`-fused Sinkhorn behind `use_v4_compiled_sinkhorn` flag; G32 + G33a + G33b green; post-P29 baseline pinned for P30 / P31 |
+| **1ea7e7a8** | Plan-5 P29 (RESCOPED) — `torch.compile`-fused Sinkhorn behind `use_v4_compiled_sinkhorn` flag; G32 + G33a + G33b green; post-P29 baseline pinned for P30 / P31 |
 
 Status row pinning will land in a follow-up `docs(deepseek-v4)[P29]:
-pin status.md P29 cells to the P29 SHA (TBD-p29)` once the feature
+pin status.md P29 cells to the P29 SHA (1ea7e7a8)` once the feature
 commit is on origin.

@@ -60,7 +60,7 @@
 
 | key | value |
 |---|---|
-| commit | `TBD-p29` |
+| commit | `1ea7e7a8` |
 | host | `mi355-gpu-14` |
 | container | `dev_primus_wenx_693` |
 | seq_length | 4096 |
