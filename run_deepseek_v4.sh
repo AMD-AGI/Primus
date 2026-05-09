@@ -17,8 +17,8 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 export MBS=${MBS:-1}
 export GBS=${GBS:-16}
 export PRIMUS_TP=${PRIMUS_TP:-1}
-export PRIMUS_PP=${PRIMUS_PP:-2}
-export PRIMUS_EP=${PRIMUS_EP:-4}
+export PRIMUS_PP=${PRIMUS_PP:-1}
+export PRIMUS_EP=${PRIMUS_EP:-8}
 
 # Keep this smoke config lightweight for quick bring-up.
 export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-8}
@@ -82,8 +82,8 @@ export FP8_RECIPE=null
 #   use_turbo_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
 #   use_v4_triton_csa_attention > eager                     (cr == 4)
 # These are V4-only; they have no effect on other model types.
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-False}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-False}
+export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
+export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 
 # Plan-4 P27: TP-side guard for the V4 Triton kernels.
 # The dense / HCA / CSA kernels operate on the local head slice (each
