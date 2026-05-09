@@ -17,10 +17,10 @@ shape envelope:
   key column with notional value zero at the end of the K-loop;
 * optional sliding-window-causal mask (``swa_window > 0``) applied
   in-kernel;
-* optional caller-supplied ``[Sq, Sk]`` additive bias (used by the HCA
-  ``compress_ratio == 128`` path which pre-concatenates pool keys to
-  local keys and supplies the joint-softmax mask) — when given, the
-  kernel ignores ``swa_window`` and applies the additive bias instead.
+* optional caller-supplied additive bias. The generic path accepts
+  ``[Sq, Sk]`` and ignores ``swa_window``. The HCA split-mask path
+  accepts pool-only ``[Sq, P]`` with ``HCA_LOCAL_SEQLEN=Sq`` and keeps
+  the local branch on kernel-native SWA.
 
 dtype contract (matches :func:`eager_v4_attention`):
 
@@ -90,6 +90,7 @@ def _v4_attention_fwd_kernel(
     SWA_WINDOW: tl.constexpr,  # 0 = off, > 0 = SWA window
     HAS_SINK: tl.constexpr,
     HAS_ADD_MASK: tl.constexpr,
+    HCA_LOCAL_SEQLEN: tl.constexpr,  # 0 = generic mask; >0 = [local SWA keys | pool keys]
     USE_CAUSAL: tl.constexpr,  # only meaningful when HAS_ADD_MASK = False
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -146,14 +147,35 @@ def _v4_attention_fwd_kernel(
     m_i = tl.full([BLOCK_M], value=NEG_INF, dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    # Determine k-loop upper bound: causal / SWA cuts the loop short,
-    # otherwise we walk the whole key axis.
-    if HAS_ADD_MASK:
+    # Determine k-loop bounds.
+    #
+    # Plan-5 P30: for SWA, skip K tiles that are guaranteed outside the
+    # sliding window for *every* row in this M block.  The old P25 loop
+    # started at zero and relied on the mask below, which means late
+    # rows at S=4096 spent most of their time multiplying all-masked
+    # tiles.  Rounding down to the BLOCK_N boundary preserves exact
+    # masking semantics while cutting the steady-state SWA tile count
+    # from O(S / BLOCK_N) to O(window / BLOCK_N).
+    n_loop_start = 0
+    if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
         # Caller's additive_mask handles all masking; iterate the full
         # key axis. (We still apply boundary mask for keys past seqlen_k.)
         n_loop_end = seqlen_k
-    elif SWA_WINDOW > 0 or USE_CAUSAL:
-        # Causal / SWA: keys with n > max(offs_m) are -inf, so the loop
+    elif SWA_WINDOW > 0:
+        # This block's earliest row is pid_m * BLOCK_M.  Any key before
+        # earliest_row - SWA_WINDOW + 1 is invisible for every row in the
+        # block, so skip those tiles entirely.
+        n_loop_start = pid_m * BLOCK_M - SWA_WINDOW + 1
+        if n_loop_start < 0:
+            n_loop_start = 0
+        n_loop_start = (n_loop_start // BLOCK_N) * BLOCK_N
+        # Keys with n > max(offs_m) are causal-masked for every row.
+        n_loop_end = (pid_m + 1) * BLOCK_M
+        local_end = HCA_LOCAL_SEQLEN if HCA_LOCAL_SEQLEN > 0 else seqlen_k
+        if n_loop_end > local_end:
+            n_loop_end = local_end
+    elif USE_CAUSAL:
+        # Full causal: keys with n > max(offs_m) are -inf, so the loop
         # only needs to cover keys up to (pid_m + 1) * BLOCK_M.
         n_loop_end = (pid_m + 1) * BLOCK_M
         if n_loop_end > seqlen_k:
@@ -161,8 +183,10 @@ def _v4_attention_fwd_kernel(
     else:
         n_loop_end = seqlen_k
 
-    # K-loop: iterate one BLOCK_N tile at a time
-    for n_start in range(0, n_loop_end, BLOCK_N):
+    # K-loop: local branch. For HCA split-mask this covers only the
+    # pruned local SWA prefix; the pool suffix is handled by the second
+    # loop below.
+    for n_start in range(n_loop_start, n_loop_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         # K tile: [BLOCK_N, BLOCK_DMODEL] in k.dtype
@@ -177,7 +201,7 @@ def _v4_attention_fwd_kernel(
 
         # Mask: additive_mask OR SWA / causal (mutually exclusive — see
         # the docstring's precedence rule).
-        if HAS_ADD_MASK:
+        if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
             mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + offs_n[None, :] * stride_mn
             mask_load_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
             add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
@@ -215,6 +239,51 @@ def _v4_attention_fwd_kernel(
         # acc <- acc * alpha + p @ v (fp32 accumulator inside tl.dot)
         acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
         m_i = m_new
+
+    # HCA split-mask pool branch. The local branch above prunes the SWA
+    # prefix; the pool suffix is short (P = S / 128 for V4-Flash) and
+    # uses the caller-provided pool-only visibility mask [Sq, P].
+    if HAS_ADD_MASK and HCA_LOCAL_SEQLEN > 0:
+        for n_start in range(HCA_LOCAL_SEQLEN, seqlen_k, BLOCK_N):
+            offs_n = n_start + tl.arange(0, BLOCK_N)
+            pool_n = offs_n - HCA_LOCAL_SEQLEN
+
+            k_ptrs = (
+                K
+                + bid * stride_kb
+                + khid * stride_kh
+                + offs_n[:, None] * stride_kn
+                + offs_d[None, :] * stride_kd
+            )
+            k_load_mask = offs_n[:, None] < seqlen_k
+            k = tl.load(k_ptrs, mask=k_load_mask, other=0.0)
+
+            qk = tl.dot(q, tl.trans(k)) * sm_scale
+
+            mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + pool_n[None, :] * stride_mn
+            mask_load_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
+            add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
+            qk = qk + add_bias
+            qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+
+            m_ij = tl.max(qk, 1)
+            m_new = tl.maximum(m_i, m_ij)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(qk - m_new[:, None])
+            l_i = l_i * alpha + tl.sum(p, 1)
+
+            v_ptrs = (
+                V
+                + bid * stride_vb
+                + khid * stride_vh
+                + offs_n[:, None] * stride_vn
+                + offs_d[None, :] * stride_vd
+            )
+            v_load_mask = offs_n[:, None] < seqlen_k
+            v = tl.load(v_ptrs, mask=v_load_mask, other=0.0)
+
+            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            m_i = m_new
 
     # Sink: virtual key column with value 0. The max-subtract trick
     # uses sink as a candidate row maximum; sink contributes to
@@ -255,6 +324,7 @@ def _launch_v4_attention_fwd(
     swa_window: int,
     additive_mask: Optional[torch.Tensor],  # [Sq, Sk] or None
     scale: float,
+    hca_local_seqlen: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch the V4 attention forward kernel.
 
@@ -290,11 +360,30 @@ def _launch_v4_attention_fwd(
 
     has_sink = sink is not None
     has_add_mask = additive_mask is not None
+    hca_local_seqlen = int(hca_local_seqlen)
+    if hca_local_seqlen:
+        if not has_add_mask:
+            raise ValueError("hca_local_seqlen requires a pool additive_mask.")
+        if hca_local_seqlen <= 0 or hca_local_seqlen >= Sk:
+            raise ValueError(
+                "hca_local_seqlen must split local and pool keys "
+                f"(got hca_local_seqlen={hca_local_seqlen}, Sk={Sk})."
+            )
+        expected_mask_shape = (Sq, Sk - hca_local_seqlen)
+        if tuple(additive_mask.shape) != expected_mask_shape:
+            raise ValueError(
+                "HCA split-mask mode expects additive_mask shape "
+                f"{expected_mask_shape}, got {tuple(additive_mask.shape)}."
+            )
+        if swa_window <= 0:
+            raise ValueError("HCA split-mask mode requires swa_window > 0.")
 
     # Mask precedence: additive_mask wins over swa_window. When neither
     # is set, USE_CAUSAL = True (eager / V4 default).
     use_causal = (not has_add_mask) and (swa_window <= 0)
-    swa_window_constexpr = int(swa_window) if (not has_add_mask and swa_window > 0) else 0
+    swa_window_constexpr = (
+        int(swa_window) if ((not has_add_mask or hca_local_seqlen) and swa_window > 0) else 0
+    )
 
     out = torch.empty_like(q)
     lse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
@@ -356,6 +445,7 @@ def _launch_v4_attention_fwd(
         SWA_WINDOW=swa_window_constexpr,
         HAS_SINK=has_sink,
         HAS_ADD_MASK=has_add_mask,
+        HCA_LOCAL_SEQLEN=hca_local_seqlen,
         USE_CAUSAL=use_causal,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,

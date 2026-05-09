@@ -154,10 +154,11 @@ def _build_inputs(
         s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * ratio - 1
         pool_mask = torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
         full_mask = torch.cat([local_mask, pool_mask], dim=-1)
-        kernel_swa_window = 0
+        kernel_swa_window = swa_window
         eager_swa_window = 0
         eager_mask: Optional[torch.Tensor] = full_mask
-        kernel_mask: Optional[torch.Tensor] = full_mask
+        kernel_mask: Optional[torch.Tensor] = pool_mask
+        hca_local_seqlen = S
     else:
         k = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype, requires_grad=True)
         v = torch.randn(B, K_H, S, D, generator=g, device=device, dtype=dtype, requires_grad=True)
@@ -167,6 +168,7 @@ def _build_inputs(
         kernel_mask = None
         eager_swa_window = 0
         kernel_swa_window = swa_window
+        hca_local_seqlen = 0
 
     sink = (
         torch.randn(H, generator=g, device=device, dtype=torch.float32, requires_grad=True) * 0.1
@@ -182,6 +184,7 @@ def _build_inputs(
         eager_swa_window=eager_swa_window,
         kernel_mask=kernel_mask,
         kernel_swa_window=kernel_swa_window,
+        hca_local_seqlen=hca_local_seqlen,
     )
 
 
@@ -288,6 +291,7 @@ def test_g24_dense_bwd_matches_eager(
         attn_dropout=0.0,
         training=False,
         scale=scale,
+        hca_local_seqlen=cand_inp["hca_local_seqlen"],
     )
     dq_cand, dk_cand, dv_cand, dsink_cand = _grads_from(
         out_cand, cand_inp["q"], cand_inp["k"], cand_inp["v"], cand_inp["sink"]
@@ -374,11 +378,12 @@ def test_g24_hca_style_bwd_matches_eager(
         cand_inp["k"],
         cand_inp["v"],
         sink=cand_inp["sink"],
-        swa_window=0,
+        swa_window=cand_inp["kernel_swa_window"],
         additive_mask=cand_inp["kernel_mask"],
         attn_dropout=0.0,
         training=False,
         scale=scale,
+        hca_local_seqlen=cand_inp["hca_local_seqlen"],
     )
     dq_cand, dk_cand, dv_cand, dsink_cand = _grads_from(
         out_cand, cand_inp["q"], cand_inp["k"], cand_inp["v"], cand_inp["sink"]
@@ -425,6 +430,7 @@ def test_g24_no_nan_in_grads_dense_fp32():
         attn_dropout=0.0,
         training=False,
         scale=1.0 / math.sqrt(64),
+        hca_local_seqlen=inp["hca_local_seqlen"],
     )
     grads = _grads_from(out_cand, inp["q"], inp["k"], inp["v"], inp["sink"])
     for name, g in zip(("q", "k", "v", "sink"), grads):

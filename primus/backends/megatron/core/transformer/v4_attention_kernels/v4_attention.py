@@ -21,9 +21,10 @@ Dispatch contract (consumed by ``DeepseekV4Attention.forward``):
   ``additive_mask=None`` so the kernel applies the SWA-causal mask
   in-place.
 * ``compress_ratio == 128`` (HCA): caller pre-concatenates pool keys
-  to local keys and passes the full ``[Sq, Sk]`` joint additive mask
-  with ``swa_window=0``; the kernel applies the bias and skips the
-  in-kernel SWA / causal masks.
+  to local keys, passes the pool-only ``[Sq, P]`` additive mask, sets
+  ``hca_local_seqlen=Sq``, and keeps ``swa_window > 0``. The kernel
+  splits the loop into a pruned local SWA branch plus the compressed-pool
+  suffix.
 
 dtype contract (must match :func:`eager_v4_attention`):
 
@@ -68,6 +69,7 @@ class V4AttentionFn(torch.autograd.Function):
         attn_dropout: float,
         training: bool,
         scale: float,
+        hca_local_seqlen: int,
     ) -> torch.Tensor:
         if attn_dropout > 0.0 and training:
             # Plan-4 P25 does not implement dropout in the kernel — V4
@@ -89,6 +91,7 @@ class V4AttentionFn(torch.autograd.Function):
             swa_window=swa_window,
             additive_mask=additive_mask,
             scale=scale,
+            hca_local_seqlen=hca_local_seqlen,
         )
         # Save tensors the BWD kernel needs. None-typed args
         # (``sink`` / ``additive_mask``) are stashed on ``ctx`` because
@@ -98,6 +101,7 @@ class V4AttentionFn(torch.autograd.Function):
         ctx.attn_dropout = float(attn_dropout)
         ctx.training_mode = bool(training)
         ctx.scale = float(scale)
+        ctx.hca_local_seqlen = int(hca_local_seqlen)
         ctx.sink_was_none = sink is None
         ctx.mask_was_none = additive_mask is None
         return out
@@ -144,6 +148,7 @@ class V4AttentionFn(torch.autograd.Function):
             swa_window=ctx.swa_window,
             additive_mask=mask_arg,
             scale=ctx.scale,
+            hca_local_seqlen=ctx.hca_local_seqlen,
         )
 
         # Honor needs_input_grad: zero-cost ``None`` for inputs that
@@ -160,8 +165,8 @@ class V4AttentionFn(torch.autograd.Function):
             dsink = None
 
         # Forward signature: (q, k, v, sink, additive_mask, swa_window,
-        # attn_dropout, training, scale)
-        return dq, dk, dv, dsink, None, None, None, None, None
+        # attn_dropout, training, scale, hca_local_seqlen)
+        return dq, dk, dv, dsink, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +185,7 @@ def v4_attention(
     attn_dropout: float,
     training: bool,
     scale: float,
+    hca_local_seqlen: int = 0,
 ) -> torch.Tensor:
     """Triton-backed V4 dense / HCA attention.
 
@@ -203,6 +209,7 @@ def v4_attention(
         attn_dropout,
         training,
         scale,
+        hca_local_seqlen,
     )
 
 

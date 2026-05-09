@@ -170,6 +170,7 @@ def _v4_attention_bwd_kernel(
     SWA_WINDOW: tl.constexpr,
     HAS_SINK: tl.constexpr,
     HAS_ADD_MASK: tl.constexpr,
+    HCA_LOCAL_SEQLEN: tl.constexpr,
     USE_CAUSAL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -225,17 +226,27 @@ def _v4_attention_bwd_kernel(
         dsink_contrib = tl.sum(-p_sink_masked * dvec_masked)
         tl.atomic_add(DSINK + qhid, dsink_contrib)
 
-    # Determine n-loop range (matches FWD's logic).
-    if HAS_ADD_MASK:
+    # Determine n-loop bounds (matches FWD's P30 SWA tile pruning).
+    n_loop_start = 0
+    if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
         n_loop_end = seqlen_k
-    elif SWA_WINDOW > 0 or USE_CAUSAL:
+    elif SWA_WINDOW > 0:
+        n_loop_start = pid_m * BLOCK_M - SWA_WINDOW + 1
+        if n_loop_start < 0:
+            n_loop_start = 0
+        n_loop_start = (n_loop_start // BLOCK_N) * BLOCK_N
+        n_loop_end = (pid_m + 1) * BLOCK_M
+        local_end = HCA_LOCAL_SEQLEN if HCA_LOCAL_SEQLEN > 0 else seqlen_k
+        if n_loop_end > local_end:
+            n_loop_end = local_end
+    elif USE_CAUSAL:
         n_loop_end = (pid_m + 1) * BLOCK_M
         if n_loop_end > seqlen_k:
             n_loop_end = seqlen_k
     else:
         n_loop_end = seqlen_k
 
-    for n_start in range(0, n_loop_end, BLOCK_N):
+    for n_start in range(n_loop_start, n_loop_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         k_ptrs = (
@@ -250,7 +261,7 @@ def _v4_attention_bwd_kernel(
 
         # qk = Q @ K.T * scale + mask (re-materialise in fp32)
         qk = tl.dot(q, tl.trans(k)) * sm_scale
-        if HAS_ADD_MASK:
+        if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
             mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + offs_n[None, :] * stride_mn
             mask_load_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
             add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
@@ -304,6 +315,65 @@ def _v4_attention_bwd_kernel(
         dv_mask = offs_n[:, None] < seqlen_k
         tl.atomic_add(dv_ptrs, dv_contrib, mask=dv_mask, sem="relaxed")
 
+    if HAS_ADD_MASK and HCA_LOCAL_SEQLEN > 0:
+        for n_start in range(HCA_LOCAL_SEQLEN, seqlen_k, BLOCK_N):
+            offs_n = n_start + tl.arange(0, BLOCK_N)
+            pool_n = offs_n - HCA_LOCAL_SEQLEN
+
+            k_ptrs = (
+                K
+                + bid * stride_kb
+                + khid * stride_kh
+                + offs_n[:, None] * stride_kn
+                + offs_d[None, :] * stride_kd
+            )
+            v_ptrs = (
+                V
+                + bid * stride_vb
+                + khid * stride_vh
+                + offs_n[:, None] * stride_vn
+                + offs_d[None, :] * stride_vd
+            )
+            kv_load_mask = offs_n[:, None] < seqlen_k
+            k = tl.load(k_ptrs, mask=kv_load_mask, other=0.0)
+            v = tl.load(v_ptrs, mask=kv_load_mask, other=0.0)
+
+            qk = tl.dot(q, tl.trans(k)) * sm_scale
+            mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + pool_n[None, :] * stride_mn
+            mask_load_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
+            add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
+            qk = qk + add_bias
+            qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+            qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+
+            p = tl.exp(qk - lse[:, None])
+            dp = tl.dot(dout, tl.trans(v))
+            ds = p * (dp - dvec[:, None])
+
+            dq += tl.dot(ds.to(k.dtype), k) * sm_scale
+
+            dk_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+            dk_ptrs = (
+                DK
+                + bid * stride_dkb
+                + khid * stride_dkh
+                + offs_n[:, None] * stride_dkn
+                + offs_d[None, :] * stride_dkd
+            )
+            dk_mask = offs_n[:, None] < seqlen_k
+            tl.atomic_add(dk_ptrs, dk_contrib, mask=dk_mask, sem="relaxed")
+
+            dv_contrib = tl.dot(tl.trans(p.to(dout.dtype)), dout)
+            dv_ptrs = (
+                DV
+                + bid * stride_dvb
+                + khid * stride_dvh
+                + offs_n[:, None] * stride_dvn
+                + offs_d[None, :] * stride_dvd
+            )
+            dv_mask = offs_n[:, None] < seqlen_k
+            tl.atomic_add(dv_ptrs, dv_contrib, mask=dv_mask, sem="relaxed")
+
     # Store dQ (fp32 buffer; launcher casts back to input dtype on return).
     dq_ptrs = (
         DQ
@@ -332,6 +402,7 @@ def _launch_v4_attention_bwd(
     swa_window: int,
     additive_mask: Optional[torch.Tensor],  # [Sq, Sk] or None
     scale: float,
+    hca_local_seqlen: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Launch the V4 attention backward kernel.
 
@@ -352,8 +423,27 @@ def _launch_v4_attention_bwd(
 
     has_sink = sink is not None
     has_add_mask = additive_mask is not None
+    hca_local_seqlen = int(hca_local_seqlen)
+    if hca_local_seqlen:
+        if not has_add_mask:
+            raise ValueError("hca_local_seqlen requires a pool additive_mask.")
+        if hca_local_seqlen <= 0 or hca_local_seqlen >= Sk:
+            raise ValueError(
+                "hca_local_seqlen must split local and pool keys "
+                f"(got hca_local_seqlen={hca_local_seqlen}, Sk={Sk})."
+            )
+        expected_mask_shape = (Sq, Sk - hca_local_seqlen)
+        if tuple(additive_mask.shape) != expected_mask_shape:
+            raise ValueError(
+                "HCA split-mask mode expects additive_mask shape "
+                f"{expected_mask_shape}, got {tuple(additive_mask.shape)}."
+            )
+        if swa_window <= 0:
+            raise ValueError("HCA split-mask mode requires swa_window > 0.")
     use_causal = (not has_add_mask) and (swa_window <= 0)
-    swa_window_constexpr = int(swa_window) if (not has_add_mask and swa_window > 0) else 0
+    swa_window_constexpr = (
+        int(swa_window) if ((not has_add_mask or hca_local_seqlen) and swa_window > 0) else 0
+    )
 
     BLOCK_M = 32
     BLOCK_N = 32
@@ -464,6 +554,7 @@ def _launch_v4_attention_bwd(
         SWA_WINDOW=swa_window_constexpr,
         HAS_SINK=has_sink,
         HAS_ADD_MASK=has_add_mask,
+        HCA_LOCAL_SEQLEN=hca_local_seqlen,
         USE_CAUSAL=use_causal,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,

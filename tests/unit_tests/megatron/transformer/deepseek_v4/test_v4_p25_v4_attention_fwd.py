@@ -194,6 +194,7 @@ def _make_hca_inputs(
         v=v_full,
         sink=sink,
         full_mask=full_mask,
+        pool_mask=pool_mask,
     )
 
 
@@ -320,11 +321,12 @@ def test_g23_hca_style_fwd_matches_eager(
         toy["k"],
         toy["v"],
         sink=toy["sink"],
-        swa_window=0,
-        additive_mask=toy["full_mask"],
+        swa_window=swa_window,
+        additive_mask=toy["pool_mask"],
         attn_dropout=0.0,
         training=False,
         scale=scale,
+        hca_local_seqlen=S,
     )
 
     assert out_ref.shape == out_cand.shape == toy["q"].shape

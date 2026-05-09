@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Plan-5 P30 — V4-Flash EP=8 trace, after dense + HCA SWA K-loop pruning</title>
+<style>
+body { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; max-width: 1280px; margin: 1.5rem auto; padding: 0 1rem; color: #1d1f21; line-height: 1.45; }
+h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.3rem; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.15rem; margin-top: 2rem; }
+table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.92rem; }
+th, td { border: 1px solid #d0d7de; padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) td { background: #fafbfc; }
+code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pill { background: #ddf4ff; color: #0969da; padding: 1px 6px; border-radius: 999px; font-size: 0.85em; }
+.warn { background: #fff8c5; color: #9a6700; padding: 2px 6px; border-radius: 3px; }
+hr { border: none; border-top: 1px solid #d0d7de; margin: 1.5rem 0; }
+.hdr { color: #57606a; font-size: 0.9em; margin-bottom: 1rem; }
+</style>
+</head><body>
+
+<h1>Plan-5 P30 — V4-Flash EP=8 trace, after dense + HCA SWA K-loop pruning</h1>
+<blockquote class='hdr'>Generated 2026-05-09T03:37:15 from <code>output/amd/tas-mi355x-20260509/p30_profile_swa_prune_pp1_ep8_seq4096/tensorboard/primus-megatron-exp[p30_profile_swa_prune_pp1_ep8_seq4096]-rank[0].1778315746463596352.pt.trace.json</code>.<br><br><strong>This is the updated post-P30 trace</strong> after extending SWA K-loop pruning from dense <code>compress_ratio == 0</code> to HCA <code>compress_ratio == 128</code>. HCA now passes a pool-only mask <code>[S, P]</code> plus <code>hca_local_seqlen=S</code>; the Triton kernel runs a pruned local-SWA loop and a short pool-suffix loop under the same joint softmax.</blockquote>
+<h2>P30 outcome (TL;DR)</h2>
+<p>- <strong>The cr=128 regression is fixed.</strong> All five <code>_v4_attention_bwd_kernel</code> launches are now <strong>30-34 ms</strong> (<code>31.1, 34.1, 33.7, 30.3, 30.9 ms</code>). The two HCA <code>compress_ratio == 128</code> launches are no longer the 600 ms+ outliers.</p>
+<p>- <strong>Dense + HCA <code>v4_attention</code> is no longer a bottleneck.</strong> <code>_v4_attention_bwd_kernel</code> drops from post-P29 <strong>3.18 s → 160 ms</strong> (<strong>−95.0 %</strong>) and <code>_v4_attention_fwd_kernel</code> drops <strong>641 ms → 30 ms</strong> (<strong>−95.3 %</strong>). Combined dense/HCA attention kernel time is now <strong>192 ms / 3.9 %</strong> of the step.</p>
+<p>- <strong>Wall time improves again.</strong> Trace steady step is <strong>4.94 s</strong>, down from post-P29 <strong>8.63 s</strong> (<strong>−42.8 %</strong>) and from the dense-only P30 trace <strong>6.44 s</strong> (<strong>−23.3 %</strong>). The latest 10-iter smoke reaches <strong>138.4 TFLOP/s/GPU</strong> steady average.</p>
+<p>- <strong>CSA is now the dominant target.</strong> <code>_v4_csa_attention_bwd_kernel</code> remains <strong>4.04 s / 81.9 %</strong> of the step. P31 should stay focused on CSA BWD, especially in-kernel <code>topk_idxs</code> gather / scatter-add and K-tile prefetching.</p>
+<p>- <strong>GPU remains saturated.</strong> GPU active is <strong>99.0 %</strong> with overlap factor <strong>1.00×</strong>. The optimisation shortened the critical path rather than shifting the run to CPU launch overhead.</p>
+<p>- <strong>Auto-rendered table caveat:</strong> <code>_tools/render_baseline_report.py</code> still emits baseline-era prose in lower sections. The raw tables are correct; this P30 TL;DR is the authoritative interpretation.</p>
+<h2>Run config provenance</h2>
+<table><thead><tr>
+<th>key</th>
+<th>value</th>
+</tr></thead><tbody>
+<tr>
+<td>commit</td>
+<td><code>TBD-p30</code></td>
+</tr>
+<tr>
+<td>host</td>
+<td><code>mi355-gpu-14</code></td>
+</tr>
+<tr>
+<td>container</td>
+<td><code>dev_primus_wenx_693</code></td>
+</tr>
+<tr>
+<td>seq_length</td>
+<td>4096</td>
+</tr>
+<tr>
+<td>parallel</td>
+<td>TP=1 PP=1 EP=8</td>
+</tr>
+<tr>
+<td>micro_batch_size</td>
+<td>1</td>
+</tr>
+<tr>
+<td>global_batch_size</td>
+<td>8</td>
+</tr>
+<tr>
+<td>num_layers</td>
+<td>8</td>
+</tr>
+<tr>
+<td>num_experts</td>
+<td>256 (EP=8 -&gt; 32/rank)</td>
+</tr>
+<tr>
+<td>moe_router_topk</td>
+<td>6</td>
+</tr>
+<tr>
+<td>moe_ffn_hidden_size</td>
+<td>2048</td>
+</tr>
+<tr>
+<td>index_topk</td>
+<td>512</td>
+</tr>
+<tr>
+<td>compress_ratios</td>
+<td><code>[0,0,4,128,4,128,4,0]</code></td>
+</tr>
+<tr>
+<td><strong>perf knobs</strong></td>
+<td></td>
+</tr>
+<tr>
+<td>use_v4_triton_attention</td>
+<td>True</td>
+</tr>
+<tr>
+<td>use_v4_triton_csa_attention</td>
+<td>True</td>
+</tr>
+<tr>
+<td>use_turbo_deepep</td>
+<td>True</td>
+</tr>
+<tr>
+<td>use_turbo_grouped_mlp</td>
+<td>True</td>
+</tr>
+<tr>
+<td>use_turbo_attention</td>
+<td>False (must be False — Turbo would override V4 Triton dense path)</td>
+</tr>
+</tbody></table>
+<h2>Per-iter wall time</h2>
+<p>Sourced from the training stdout log (Megatron&#x27;s <code>elapsed time per iteration (ms)</code>). The plan-4 ratchet skips the first 2 iters (<code>log_avg_skip_iterations: 2</code>), so iter 1 / 2 are absent here.</p>
+<table><thead><tr>
+<th>iter</th>
+<th>ms / iter</th>
+<th>TFLOP/s/GPU</th>
+<th>lm_loss</th>
+</tr></thead><tbody>
+</tbody></table>
+<h2>GPU vs CPU active / idle %</h2>
+<p>Steady iter window: 4.94 s of trace time.</p>
+<p><strong><code>GPU active</code></strong> below is the wall-clock union of kernel intervals across all HIP / ROCm compute streams (the time when at least one kernel is in flight). The <code>kernel-time sum</code> row is the per-stream <code>Σ dur</code> that the chrome-trace top-level kernel table sums up — when streams overlap, <code>kernel-time sum &gt; GPU active</code> (the ratio is the <strong>multi-stream overlap factor</strong>: &gt; 1.0 means at least two streams ran kernels in parallel for some fraction of the iter).</p>
+<table><thead><tr>
+<th>metric</th>
+<th>value</th>
+<th>% of iter</th>
+</tr></thead><tbody>
+<tr>
+<td>GPU active (union over streams)</td>
+<td>4.89 s</td>
+<td>99.0 %</td>
+</tr>
+<tr>
+<td>GPU idle (1 − active)</td>
+<td>47.44 ms</td>
+<td>1.0 %</td>
+</tr>
+<tr>
+<td>Σ kernel dur (across streams)</td>
+<td>4.89 s</td>
+<td>99.0 %</td>
+</tr>
+<tr>
+<td>multi-stream overlap factor</td>
+<td><strong>1.00×</strong></td>
+<td>(Σ kernel dur ÷ GPU active)</td>
+</tr>
+</tbody></table>
+<p><strong>CPU-bound floor (1 − GPU active)</strong> ≈ <strong>1.0 %</strong> of iter time. This is the headline number for plan-5 P29 (small-op fusion).</p>
+<h2>Top-30 kernels by total time (steady iter window)</h2>
+<p>Total kernel time in steady window: 4.89 s.</p>
+<table><thead><tr>
+<th>rank</th>
+<th>kernel</th>
+<th>count</th>
+<th>total</th>
+<th>self avg</th>
+<th>% step</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td><code>_v4_csa_attention_bwd_kernel</code></td>
+<td>3</td>
+<td>4.04 s</td>
+<td>1.35 s</td>
+<td>81.9 %</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>_v4_attention_bwd_kernel</code></td>
+<td>5</td>
+<td>160.14 ms</td>
+<td>32.03 ms</td>
+<td>3.2 %</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>_v4_csa_attention_fwd_kernel</code></td>
+<td>3</td>
+<td>153.19 ms</td>
+<td>51.06 ms</td>
+<td>3.1 %</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 8, at::native::gpu_kern…</code></td>
+<td>643</td>
+<td>59.46 ms</td>
+<td>92.5 µs</td>
+<td>1.2 %</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;5, false&gt;, transformer_engin…</code></td>
+<td>321</td>
+<td>46.33 ms</td>
+<td>144.3 µs</td>
+<td>0.9 %</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>ncclDevKernel_Generic_1(ncclDevKernelArgsStorage&lt;4096ul&gt;)</code></td>
+<td>9</td>
+<td>31.62 ms</td>
+<td>3.51 ms</td>
+<td>0.6 %</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>_v4_attention_fwd_kernel</code></td>
+<td>5</td>
+<td>30.13 ms</td>
+<td>6.03 ms</td>
+<td>0.6 %</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::bfloat16_copy_ke…</code></td>
+<td>1393</td>
+<td>23.02 ms</td>
+<td>16.5 µs</td>
+<td>0.5 %</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::bfloat16tofloat3…</code></td>
+<td>1191</td>
+<td>21.87 ms</td>
+<td>18.4 µs</td>
+<td>0.4 %</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>void primus_turbo::deep_ep::intranode::cached_notify_combine&lt;8&gt;(void**, int*, …</code></td>
+<td>16</td>
+<td>18.26 ms</td>
+<td>1.14 ms</td>
+<td>0.4 %</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>void at::native::_scatter_gather_elementwise_kernel&lt;256, 4, at::native::_cuda_…</code></td>
+<td>20</td>
+<td>15.53 ms</td>
+<td>776.6 µs</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>12</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 4, at::native::gpu_kern…</code></td>
+<td>204</td>
+<td>15.37 ms</td>
+<td>75.3 µs</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>13</td>
+<td><code>void primus_turbo::deep_ep::intranode::cached_notify_dispatch&lt;8&gt;(int const*, i…</code></td>
+<td>8</td>
+<td>14.87 ms</td>
+<td>1.86 ms</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocal…</code></td>
+<td>16</td>
+<td>14.24 ms</td>
+<td>890.1 µs</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;8, at::native::CUDAFunctor_add&lt;…</code></td>
+<td>883</td>
+<td>13.26 ms</td>
+<td>15.0 µs</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocal…</code></td>
+<td>16</td>
+<td>13.00 ms</td>
+<td>812.8 µs</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;2, false&gt;, transformer_engin…</code></td>
+<td>321</td>
+<td>10.98 ms</td>
+<td>34.2 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>18</td>
+<td><code>void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig&lt;at::native:…</code></td>
+<td>24</td>
+<td>10.03 ms</td>
+<td>417.8 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocal…</code></td>
+<td>16</td>
+<td>9.77 ms</td>
+<td>610.8 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>20</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::BinaryFunctor&lt;fl…</code></td>
+<td>138</td>
+<td>9.75 ms</td>
+<td>70.7 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>21</td>
+<td><code>Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDS…</code></td>
+<td>47</td>
+<td>9.44 ms</td>
+<td>200.8 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>22</td>
+<td><code>Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDS…</code></td>
+<td>33</td>
+<td>9.24 ms</td>
+<td>279.9 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>23</td>
+<td><code>void primus_turbo::deep_ep::intranode::dispatch&lt;8, 1024, true&gt;(HIP_vector_type…</code></td>
+<td>16</td>
+<td>8.54 ms</td>
+<td>533.7 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>24</td>
+<td><code>void primus_turbo::deep_ep::intranode::combine&lt;hip_bfloat16, 8, 1024, true&gt;(hi…</code></td>
+<td>16</td>
+<td>8.31 ms</td>
+<td>519.6 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>25</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 8, at::native::gpu_kern…</code></td>
+<td>122</td>
+<td>8.13 ms</td>
+<td>66.6 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>26</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::FillFunctor&lt;floa…</code></td>
+<td>162</td>
+<td>7.84 ms</td>
+<td>48.4 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>27</td>
+<td><code>void at::native::reduce_kernel&lt;512, 1, at::native::ReduceOp&lt;c10::BFloat16, at:…</code></td>
+<td>12</td>
+<td>7.77 ms</td>
+<td>647.6 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>28</td>
+<td><code>Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDS…</code></td>
+<td>33</td>
+<td>7.62 ms</td>
+<td>230.8 µs</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>29</td>
+<td><code>void at::native::reduce_kernel&lt;128, 4, at::native::ReduceOp&lt;float, at::native:…</code></td>
+<td>80</td>
+<td>6.96 ms</td>
+<td>87.0 µs</td>
+<td>0.1 %</td>
+</tr>
+<tr>
+<td>30</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;1, false&gt;, transformer_engin…</code></td>
+<td>321</td>
+<td>6.73 ms</td>
+<td>21.0 µs</td>
+<td>0.1 %</td>
+</tr>
+</tbody></table>
+<h2>Kernel launch count + average launch interval (steady iter)</h2>
+<p>Total kernels launched in steady window: <strong>10722</strong>.</p>
+<p>Median inter-launch interval: <strong>13.4 µs</strong> (p50); <strong>93.9 µs</strong> (p90); <strong>726.5 µs</strong> (p99).</p>
+<table><thead><tr>
+<th>inter-launch (µs)</th>
+<th>count</th>
+<th>%</th>
+</tr></thead><tbody>
+<tr>
+<td>0–10</td>
+<td>4738</td>
+<td>44.2 %</td>
+</tr>
+<tr>
+<td>10–50</td>
+<td>4094</td>
+<td>38.2 %</td>
+</tr>
+<tr>
+<td>50–100</td>
+<td>845</td>
+<td>7.9 %</td>
+</tr>
+<tr>
+<td>100–500</td>
+<td>872</td>
+<td>8.1 %</td>
+</tr>
+<tr>
+<td>500–5000</td>
+<td>150</td>
+<td>1.4 %</td>
+</tr>
+<tr>
+<td>≥5000</td>
+<td>22</td>
+<td>0.2 %</td>
+</tr>
+</tbody></table>
+<h2>Module-level CPU op-time attribution (steady iter)</h2>
+<p>PyTorch profiler emits one <code>cpu_op</code> event for every aten / module call, <strong>including all nested children</strong>. So summing per-event <code>dur</code> double-counts: a top-level <code>DeepseekV4HybridLayer.forward</code> event already includes every aten op inside it. The table below shows the raw sum per pattern bucket — useful for spotting which <strong>module subtree</strong> dominates (top-level <code>Module.forward</code> rows like <code>DeepseekV4HybridLayer</code>, <code>DeepseekV4MoE</code>, <code>DeepseekV4Attention</code> are the meaningful numbers; the catch-all <code>other</code> row is bloated by nested aten ops and should NOT be read as &#x27;CPU work outside V4&#x27;).</p>
+<table><thead><tr>
+<th>module pattern</th>
+<th>events</th>
+<th>Σ event dur (nests)</th>
+<th>% iter</th>
+</tr></thead><tbody>
+<tr>
+<td>other</td>
+<td>216096</td>
+<td>554.52 s</td>
+<td>11234.9 %</td>
+</tr>
+<tr>
+<td>DeepseekV4HybridLayer</td>
+<td>8</td>
+<td>306.68 ms</td>
+<td>6.2 %</td>
+</tr>
+<tr>
+<td>DeepseekV4MoE</td>
+<td>8</td>
+<td>236.99 ms</td>
+<td>4.8 %</td>
+</tr>
+<tr>
+<td>Optimizer</td>
+<td>2060</td>
+<td>164.08 ms</td>
+<td>3.3 %</td>
+</tr>
+<tr>
+<td>linear/matmul</td>
+<td>1307</td>
+<td>73.01 ms</td>
+<td>1.5 %</td>
+</tr>
+<tr>
+<td>DeepseekV4Attention</td>
+<td>8</td>
+<td>32.67 ms</td>
+<td>0.7 %</td>
+</tr>
+<tr>
+<td>v4_attention (Triton)</td>
+<td>55</td>
+<td>17.02 ms</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>c10d/comm</td>
+<td>91</td>
+<td>15.75 ms</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>LayerNorm/RMSNorm</td>
+<td>247</td>
+<td>12.30 ms</td>
+<td>0.2 %</td>
+</tr>
+<tr>
+<td>DualRoPE/RoPE</td>
+<td>21</td>
+<td>4.87 ms</td>
+<td>0.1 %</td>
+</tr>
+<tr>
+<td>v4_csa_attention (Triton)</td>
+<td>9</td>
+<td>3.38 ms</td>
+<td>0.1 %</td>
+</tr>
+<tr>
+<td>softmax</td>
+<td>143</td>
+<td>2.74 ms</td>
+<td>0.1 %</td>
+</tr>
+</tbody></table>
+<h2>Comm time (steady iter)</h2>
+<table><thead><tr>
+<th>kind</th>
+<th>total</th>
+<th>% iter</th>
+</tr></thead><tbody>
+<tr>
+<td>deepep</td>
+<td>0.0 µs</td>
+<td>0.0 %</td>
+</tr>
+<tr>
+<td>nccl/c10d</td>
+<td>20.87 ms</td>
+<td>0.4 %</td>
+</tr>
+<tr>
+<td><strong>total comm</strong></td>
+<td><strong>20.87 ms</strong></td>
+<td><strong>0.4 %</strong></td>
+</tr>
+</tbody></table>
+<h2>Ranked bottleneck list + per-phase improvement budgets</h2>
+<p>Bottlenecks are ranked by <strong>% of steady iter wall time</strong> (not Σ kernel dur — that double-counts overlapping streams). The X / Y / Z / W per-phase budgets are the post-phase TARGETS that plan-5&#x27;s <code>01-roadmap.md</code> will adopt after this report is reviewed.</p>
+<table><thead><tr>
+<th>#</th>
+<th>bottleneck</th>
+<th>current cost</th>
+<th>% iter</th>
+<th>proposed budget after phase</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td><code>aten::sum</code> fp32 reduce kernel (top-1 template: 80 launches × ~87.0 µs)</td>
+<td>6.96 ms</td>
+<td>0.1 %</td>
+<td><strong>X1</strong> = post-P29 target — root-cause + fuse / move to bf16 master / replace with Triton fused bias-grad reduce</td>
+</tr>
+<tr>
+<td>2</td>
+<td>V4 Triton CSA attention kernel time (cr == 4, BWD-dominated)</td>
+<td>4.19 s</td>
+<td>85.0 %</td>
+<td><strong>Z</strong> = post-P31 target — in-kernel <code>topk_idxs</code> gather + K-tile prefetch</td>
+</tr>
+<tr>
+<td>3</td>
+<td>V4 Triton attention kernel time (cr ∈ {0, 128}, BWD-dominated)</td>
+<td>192.19 ms</td>
+<td>3.9 %</td>
+<td><strong>Y</strong> = post-P30 target — autotune BWD blocks, persistent-kernel sweep, HCA LSE merge</td>
+</tr>
+<tr>
+<td>4</td>
+<td>small-op kernel-launch tail (CPU-bound floor)</td>
+<td>47.44 ms</td>
+<td>1.0 %</td>
+<td><strong>X2</strong> = (de-scoped — see below)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>comm time (DeepEP + c10d)</td>
+<td>20.87 ms</td>
+<td>0.4 %</td>
+<td><strong>W</strong> = (de-scoped — see below)</td>
+</tr>
+</tbody></table>
+<h3>Per-phase de-scope decisions</h3>
+<p>Plan-5&#x27;s de-scope rule: any bottleneck row &lt; 10 % of step time gets its phase de-scoped. The data above is the input.</p>
+<table><thead><tr>
+<th>phase</th>
+<th>decision</th>
+<th>rationale</th>
+</tr></thead><tbody>
+<tr>
+<td>P29</td>
+<td><strong>KEEP — RESCOPE</strong></td>
+<td>CPU-bound floor is 1.0 % (≪ 10 % rule), so the original P29 mandate (small-op kernel-launch fusion via torch.compile or Triton-fused Compressor / Indexer / MoE-router chains) is <strong>de-scoped</strong>. P29 is <strong>redirected</strong> to root-cause + eliminate the dominant <code>aten::sum</code> fp32 reduce (0.1 % of step, 87 % of Σ kernel dur — the single largest line on the chrome-trace top-N table). Likely fix: identify whether it is bias-gradient sum-over-tokens in expert BWD or fp32 master-grad accumulation in <code>DistributedOptimizer</code>, and either fuse into a Triton kernel or move the reduction to bf16 / FP8.</td>
+</tr>
+<tr>
+<td>P30</td>
+<td><strong>KEEP</strong></td>
+<td>V4 Triton attention (dense + HCA) kernel time = 3.9 % of step (≥ 10 % rule). P30 must prioritise <strong>BWD</strong> (currently ~5 × FWD): BLOCK_M / BLOCK_N retune for head_dim=512, persistent-kernel sweep, HCA LSE-merge variant to cut the per-call cost.</td>
+</tr>
+<tr>
+<td>P31</td>
+<td><strong>KEEP — RESCOPE</strong></td>
+<td>V4 Triton CSA kernel time = 85.0 % of step (≥ 10 % rule). But HBM headroom is generous (~ 95 GiB free at peak), so <strong>the original P31 motivation (cut the wrapper-side gather to fit Sq=4096) is no longer needed</strong> — Sq=4096 already fits. P31 is <strong>redirected</strong> to BWD-speedup tasks: in-kernel <code>topk_idxs</code> gather to cut wrapper-side <code>torch.gather</code> + scatter-add overhead, K-tile prefetch in BWD, autotune BLOCK_K for K_topk=512.</td>
+</tr>
+<tr>
+<td>P32</td>
+<td><strong>DE-SCOPE</strong></td>
+<td>Comm time = 0.4 % of step (≪ 10 % rule). DeepEP + c10d are essentially free at single-node EP=8. Plan-5 P32 (pipeline / comm / optimizer overlap, recompute knobs) is <strong>de-scoped</strong> unless a P29 or P30 / P31 outcome materially raises comm cost (e.g. cross-node EP, or a structural change that re-introduces <code>overlap_grad_reduce</code> complexity).</td>
+</tr>
+</tbody></table>
+<h3>Proposed plan-5 retarget (post-P28)</h3>
+<p>Plan-5&#x27;s roadmap should adopt the P28 retarget on review:</p>
+<p>- <strong>P29</strong> — <code>aten::sum</code> fp32 reduce: root-cause (likely MoE bias-grad sum-over-tokens or DistributedOptimizer fp32 master-grad accumulation), then fuse / replace. Budget X1: kill ≥ 50 % of the 7.6 s reduce kernel time.</p>
+<p>- <strong>P30</strong> — V4 Triton dense / HCA attention BWD performance. Budget Y: ≥ 25 % BWD speed-up via BLOCK retune + persistent-kernel + HCA LSE merge.</p>
+<p>- <strong>P31</strong> — V4 Triton CSA attention BWD performance (in-kernel <code>topk_idxs</code> gather + K-tile prefetch). Budget Z: ≥ 25 % CSA BWD speed-up.</p>
+<p>- <strong>P32</strong> — DE-SCOPED. The comm / overlap budget is already won.</p>
+<p>Combined target: <strong>plan-5 final ≥ 110 TFLOP/s/GPU steady at Sq=4096 EP=8 single-node</strong> (40 %+ over the 78 TFLOP/s/GPU baseline pinned in this report). Final perf gate (<code>G35</code>) lives in <code>03-test-strategy.md</code>.</p>
+</body></html>

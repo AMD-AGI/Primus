@@ -359,66 +359,86 @@ calls per iter in the first place**.
 > plan-5 kick-off (optimisation hint #2).
 
 P30 tunes the in-tree dense / HCA `v4_attention` Triton kernel. The
-plan-4 kernel landed at conservative `BLOCK_M=BLOCK_N=32, num_warps=8,
-num_stages=1` to fit MI355's 160 KiB SMEM budget at `head_dim=512`;
-P30 explores per-shape autotune for the configurations that fit, plus
-the structural HCA LSE-merge variant that plan-4 deferred.
+post-P29 trace shows the wall-time critical path moved to V4 Triton
+attention BWD, with `_v4_attention_bwd_kernel` at **3.18 s / 36.8 %**
+of the steady step and `_v4_attention_fwd_kernel` at **641 ms / 7.4 %**.
+
+The first P30 optimisation is deliberately narrower than the seeded
+autotune / LSE-merge plan: **SWA K-loop range pruning** for dense
+`compress_ratio == 0` and HCA `compress_ratio == 128` layers. The
+plan-4 dense wrapper was still passing a materialised local additive mask
+into the kernel, and the first P30 cut only moved dense onto the
+kernel-native `swa_window` path. Trace review then showed the two
+remaining 600 ms+ `_v4_attention_bwd_kernel` launches were exactly the
+HCA layers, where the joint full additive mask still forced a full
+local-key scan. P30 therefore adds an HCA split-mask mode: local keys use
+the same pruned SWA loop, while the compressed-pool suffix uses the
+pool-only additive mask.
 
 ### Tasks
 
-0. **Task list refinement** — read the P28 report's attention-kernel
-   row; if attention time is < 10 % of step time at the post-P29
-   measurement, P30 gets de-scoped to "autotune table only" (no
-   structural redesign).
-1. **Per-shape autotune table (FWD)** — extend
-   `_triton/v4_attention_fwd.py` with a `triton.autotune` decorator
-   keyed on `(H, head_dim, swa_window, has_add_mask, has_sink)` over
-   a config grid: `BLOCK_M ∈ {32, 64, 128}, BLOCK_N ∈ {32, 64,
-   128}, num_warps ∈ {4, 8}, num_stages ∈ {1, 2}`. SMEM budget
-   constraint encoded: configs whose runtime SMEM exceeds 160 KiB
-   are pruned at compile time via `@triton.heuristics`.
-2. **Per-shape autotune table (BWD)** — extend
-   `_triton/v4_attention_bwd.py` analogously; tighter SMEM budget
-   because BWD also holds `dout`.
-3. **Persistent FWD kernel** — drop the per-`m`-tile launch by
-   running one program per `(B, HQ)` and looping over `m`-tiles
-   in-kernel. Pays off at long sequence lengths where launch
-   overhead is a non-trivial fraction of kernel time.
-4. **HCA LSE-merge variant** — implement a second forward path
-   (`v4_attention_lse_merge`) that runs SWA over `[Sq, Sq]` and the
-   compressed-pool branch over `[Sq, P]` as two flash kernels and
-   merges via online softmax. Avoids materialising the
-   `[Sq, Sk] = [Sq, Sq + P]` additive bias tensor (plan-4 P25
-   takes this materialised path because it is simpler). The LSE-merge
-   variant is the structural HCA optimisation.
-5. **`use_v4_attention_lse_merge` switch** (default `False`) +
-   gate G34 (FWD + BWD equivalence between the two variants
-   within the bf16 tolerance budget).
-6. **In-kernel SWA mask path** stays where it is (plan-4 P25 already
-   took it). P30 only revisits if the P28 trace shows SWA-mask CPU
-   cost as a hot spot.
+0. **Task list refinement** — read the post-P29 report's attention
+   rows. Because dense / HCA attention totals **3.82 s / 44.2 %** of
+   the step, P30 stays in scope. Choose SWA K-loop pruning as the
+   first cut because it removes mathematically dead tiles with no new
+   user-facing flag, no autotune warmup, and no dtype-contract change.
+1. **FWD SWA K-loop pruning** — in
+   `_triton/v4_attention_fwd.py`, compute `n_loop_start` from the
+   earliest query row in the program:
+   `max(0, pid_m * BLOCK_M - SWA_WINDOW + 1)`, rounded down to
+   `BLOCK_N`. Iterate `range(n_loop_start, n_loop_end, BLOCK_N)`.
+   `HAS_ADD_MASK` still forces the full key axis because caller-provided
+   additive masks can express arbitrary visibility.
+2. **BWD SWA K-loop pruning** — apply the same loop-start logic in
+   `_triton/v4_attention_bwd.py`. The recompute path must visit exactly
+   the same visible K tiles as FWD so FWD/BWD parity remains inside the
+   existing bf16 tolerance budget.
+3. **Dense wrapper dispatch** — in `deepseek_v4_attention.py`, route
+   `compress_ratio == 0` + V4 Triton attention through
+   `v4_attention(..., additive_mask=None, swa_window=attn_sliding_window)`.
+   Eager dense layers continue building `_local_mask`; HCA
+   (`compress_ratio == 128`) passes `extra_mask` (`[S, P]`) plus
+   `hca_local_seqlen=S` so the kernel can split local SWA and pool
+   visibility under one joint softmax. Eager HCA still builds the full
+   concatenated mask.
+4. **HCA split-mask kernel mode** — extend `v4_attention` with optional
+   `hca_local_seqlen` (default `0`). When set, the FWD/BWD kernels run
+   two K loops: a pruned local-SWA loop over `[0, S)` and a short
+   pool-suffix loop over `[S, S+P)` using the pool-only additive mask.
+5. **G34 — SWA-prune equivalence + release-shape gate** — re-run
+   `test_v4_p25_v4_attention_{fwd,bwd}.py` at fast and slow tiers.
+   This covers dense SWA and HCA additive-mask shapes, including
+   `head_dim=512`, sink, and bf16 BWD tolerances.
+6. **G34a — EP8 smoke + trace delta** — run a 10-iter EP=8 proxy with
+   P29 compiled Sinkhorn and P30 SWA pruning on, then capture a
+   torch.profiler trace and render
+   `profile-after-p30-ep8-<YYYYMMDD>.{md,html}`. The P30 success metric
+   is measured against post-P29: lower `_v4_attention_bwd_kernel` time,
+   stable loss, no banned warnings, and positive steady TFLOP/s/GPU.
+7. **Deferred structural work** — per-shape autotune, persistent FWD,
+   and the HCA LSE-merge variant stay as follow-ups. They require a
+   larger correctness surface and are better justified after the P30
+   trace shows the residual dense/HCA cost.
 
 ### Design notes
 
-- **Autotune cache pinning** — the autotune cache lives in-process
-  per `(shape, dtype)` key and gets re-evaluated on every fresh
-  process. For long training jobs the cost amortises; for short
-  jobs it compounds. Plan-5 documents the autotune warmup cost in
-  the G34 / G33 status rows.
-- **HCA LSE-merge correctness gate** — the LSE-merge variant has
-  to **exactly** match the single-kernel-with-additive-bias
-  variant (within bf16 tol) on the bf16 path. The merge step uses
-  `m_merged = max(m_swa, m_pool); l_merged = l_swa * exp(m_swa -
-  m_merged) + l_pool * exp(m_pool - m_merged); o_merged =
-  (o_swa * exp(m_swa - m_merged) * l_swa + o_pool * exp(m_pool -
-  m_merged) * l_pool) / l_merged`. Sink contributes only to
-  `l_merged` (virtual key with zero V) — the BWD propagates `dsink`
-  per the plan-4 P25 contract.
-- **Persistent kernel + autotune interaction** — persistent kernels
-  benefit less from per-shape `BLOCK_N` autotune (the m-loop is
-  inside the kernel, so `BLOCK_N` mostly controls tile time, not
-  launch count). Autotune the persistent kernel separately;
-  document the chosen tile in the G34 status row.
+- **No new user knob.** SWA K-loop pruning is a strict implementation
+  improvement under the existing `use_v4_triton_attention` path. If
+  `additive_mask` is present, pruning is disabled because arbitrary
+  additive masks are not guaranteed to be sliding windows.
+- **Exact-mask equivalence.** For dense layers the additive local mask
+  and the kernel-native `swa_window` mask describe the same set of
+  visible keys. The only intended numerical difference is the absence
+  of work on fully masked tiles; output and gradients stay within the
+  existing plan-4 tolerances.
+- **HCA split-mask is still one joint softmax.** The implementation does
+  not approximate HCA as two independent attentions. It keeps the same
+  online softmax state across the pruned local loop, pool loop, and sink
+  update, matching the original full-mask math.
+- **HCA LSE-merge remains deferred.** Split-mask removes the dead local
+  tiles while preserving the single-kernel structure. The LSE-merge
+  variant is still the future route if we want to run local and pool
+  branches as independent flash kernels and merge their LSEs.
 
 ### Edge cases
 

@@ -9,7 +9,7 @@
 > findability. Rules are atomic and self-contained — pick the section
 > first, then read the rule.
 >
-> Last updated: 2026-05-09 (P29 close).
+> Last updated: 2026-05-09 (P30 perf-table rule).
 
 ---
 
@@ -98,6 +98,18 @@ under `progress/p<id>/` with a leading underscore to mark them as
 non-shipping helpers. Their generated text outputs (`forensics*_output.txt`)
 are gitignored; **only the helper script and the curated
 attribution table inside `refinement.md` get committed**.
+
+### R2.5 — Performance table upkeep
+When a task optimises V4 attention kernels, update
+`develop/perf/attention_perf.md` after the attention operator unit tests
+pass. The table entry must record the new FWD / BWD TFLOP/s for every
+affected attention family (`compress_ratio == 0`, `4`, and / or `128`)
+using the table's documented shape and FLOP-counting convention.
+
+When a task runs the EP8 proxy and end-to-end performance improves,
+update `develop/perf/proxy_ep8.md` with the new steady iter time and
+TFLOP/s/GPU. Keep intermediate rows when they explain an optimisation
+step or regression (for example, dense-only P30 before HCA split-mask).
 
 ---
 

@@ -792,7 +792,10 @@ class DeepseekV4Attention(MLASelfAttention):
         q: torch.Tensor,  # [B, H, Sq, head_dim]
         k: torch.Tensor,  # [B, H, Sk, head_dim]
         v: torch.Tensor,  # [B, H, Sk, head_dim]
-        attn_mask: torch.Tensor,  # [Sq, Sk] additive (broadcasts over B, H)
+        attn_mask: Optional[torch.Tensor],  # [Sq, Sk] additive (broadcasts over B, H)
+        *,
+        swa_window: int = 0,
+        hca_local_seqlen: int = 0,
     ) -> torch.Tensor:
         """Run the dense / HCA softmax-and-attend through the plan-4
         in-tree :func:`v4_attention` Triton kernel.
@@ -804,29 +807,24 @@ class DeepseekV4Attention(MLASelfAttention):
         ``[Sq, Sk]`` ``P`` tensor — important at full V4-Flash dims
         (``S=4096`` ⇒ ``P`` is 32 MiB / microbatch).
 
-        We always route through the kernel's caller-supplied
-        ``additive_mask`` path (rather than ``swa_window > 0``) because:
-
-        * dense already builds ``local_mask`` outside the kernel so
-          there is no incremental cost,
-        * HCA *requires* the joint mask (``cat([local, pool])``) which
-          is already materialised by the caller,
-        * one code path is easier to reason about than two.
-
-        A perf follow-up may flip dense to the in-kernel
-        ``swa_window > 0`` path so the small ``[Sq, Sk]`` mask tensor
-        is not materialised at all.
+        Plan-5 P30 flips the dense path to ``attn_mask=None`` +
+        ``swa_window > 0`` so the kernel can skip K tiles that are
+        guaranteed outside the sliding window. HCA uses the same pruning
+        for its local prefix by passing a pool-only mask plus
+        ``hca_local_seqlen``; the kernel then runs local SWA and pool
+        visibility as two loops under one joint softmax.
         """
         return v4_attention(
             q,
             k,
             v,
             sink=self.attn_sink,
-            swa_window=0,
+            swa_window=int(swa_window) if (attn_mask is None or hca_local_seqlen > 0) else 0,
             additive_mask=attn_mask,
             attn_dropout=self.attn_dropout,
             training=self.training,
             scale=self._attention_scale(),
+            hca_local_seqlen=int(hca_local_seqlen),
         )
 
     def _attention_forward_via_core(
@@ -1099,8 +1097,6 @@ class DeepseekV4Attention(MLASelfAttention):
         k_h = kv.expand(B, S, self.num_heads, self.head_dim)
         v_h = kv.expand(B, S, self.num_heads, self.head_dim)
 
-        local_mask = self._local_mask(S, device=device, dtype=dtype)
-
         # Move heads dim before sequence: [B, S, H, head_dim] -> [B, H, S, head_dim]
         q_bh = q.transpose(1, 2)
         k_local_bh = k_h.transpose(1, 2)
@@ -1113,11 +1109,18 @@ class DeepseekV4Attention(MLASelfAttention):
             # > eager`` is enforced by the earlier ``_use_core_attention``
             # branch returning before this block.
             if self._use_v4_triton_attention:
-                out_bh = self._attention_forward_via_v4_triton(q_bh, k_local_bh, v_local_bh, local_mask)
+                out_bh = self._attention_forward_via_v4_triton(
+                    q_bh,
+                    k_local_bh,
+                    v_local_bh,
+                    None,
+                    swa_window=int(self.attn_sliding_window),
+                )
             else:
                 # Eager-Python dense path (used when ``core_attention`` is not
                 # built or the V4 sink + Turbo sink-attention contract isn't
                 # met; e.g. CPU unit tests or TE-without-sink configs).
+                local_mask = self._local_mask(S, device=device, dtype=dtype)
                 out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
         elif self.compress_ratio == 128:
             # HCA cannot use ``core_attention``: the local SWA branch and
@@ -1132,10 +1135,18 @@ class DeepseekV4Attention(MLASelfAttention):
             extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
             k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
-            full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
             if self._use_v4_triton_attention:
-                out_bh = self._attention_forward_via_v4_triton(q_bh, k_full, v_full, full_mask)
+                out_bh = self._attention_forward_via_v4_triton(
+                    q_bh,
+                    k_full,
+                    v_full,
+                    extra_mask,
+                    swa_window=int(self.attn_sliding_window),
+                    hca_local_seqlen=S,
+                )
             else:
+                local_mask = self._local_mask(S, device=device, dtype=dtype)
+                full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
                 out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
         elif self.compress_ratio == 4:
             # CSA cannot use ``core_attention``: the per-query top-K
@@ -1144,6 +1155,7 @@ class DeepseekV4Attention(MLASelfAttention):
             # attention — there is no flash-attn kernel that reads a
             # different per-query subset of keys from a pool.  Stays on
             # eager-Python under plan-3 (a custom kernel is required).
+            local_mask = self._local_mask(S, device=device, dtype=dtype)
             out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask)
         else:
             # Guarded by __init__; included for static-analysis completeness.
