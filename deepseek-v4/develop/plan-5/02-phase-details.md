@@ -3,7 +3,7 @@
 > Each phase below lists (a) the user request that motivates it, (b)
 > the concrete tasks, (c) the design notes that the implementer must
 > keep in mind, and (d) the edge cases / risks. Test gates live in
-> `03-test-strategy.md`. P29 / P30 / P31 / P32 task lists are
+> `03-test-strategy.md`. P29 / P30 / P31 task lists are
 > **seeded**; each phase opens with a "task list refinement" pass
 > that revises the breakdown against the P28 trace.
 
@@ -21,7 +21,7 @@
 P28 is the foundation for every other plan-5 phase: it defines the
 proxy that lets us measure V4-Flash perf on a single MI355X node, the
 baseline trace that names the bottlenecks, and the report that picks
-which optimisations are in scope for P29 / P30 / P31 / P32. Without
+which optimisations are in scope for P29 / P30 / P31. Without
 P28, every perf phase would pick fusion / autotune targets blind, and
 the "did this phase actually help" check would have nothing to compare
 against.
@@ -113,7 +113,7 @@ against.
      improvement budget (e.g. "current: 18.5 ms / iter (= 32 % of
      step), target: 10 ms / iter (= 18 % of step)") that becomes
      the perf-budget contract for the corresponding plan-5 phase;
-   - **Per-phase improvement budgets** — set the X / Y / Z / W
+   - **Per-phase improvement budgets** — set the X / Y / Z
      numbers from `01-roadmap.md` against the actual baseline.
      If the trace shows the small-op tail is < 10 % of step time,
      P29 gets de-scoped; if attention kernels are < 10 %, P30 / P31
@@ -124,8 +124,7 @@ against.
    It parses `traceEvents`, builds the kernel / module / comm
    tables, renders the markdown report, then renders an HTML
    dashboard (Plotly tables + bar charts; no chrome-trace embed).
-   The tool is committed; it is reused for P32's
-   `profile-final-ep8-<YYYYMMDD>.{md,html}`.
+   The tool is committed and reused by post-phase profile reports.
 
 ### Design notes
 
@@ -152,7 +151,7 @@ against.
   An offline chrome-trace viewer is a nice-to-have but a separate
   asset.
 - **Bottleneck-list de-scope rule** is in writing in the report so
-  that P29 / P30 / P31 / P32 cannot accidentally take work that the
+  that P29 / P30 / P31 cannot accidentally take work that the
   trace says is < 10 % of the step. Plan-5 is **measurement-driven**;
   every optimisation phase has a baseline cost it is buying down.
 - **Banned-warning ratchet** — the proxy MUST run with zero
@@ -594,87 +593,3 @@ head-block sparse kernel for `dq + dpool`. The standalone EP8-shape
 benchmark reports **35.43 ms** BWD-only, meeting the <50 ms kernel target.
 The same pass also fixed the benchmark so the BWD number excludes forward
 execution.
-
----
-
-## Phase 32 — Pipeline / comm / optimizer overlap + recompute knobs
-
-> "也可以发挥你的分析能力，看看还有没有其他的优化可以做。" — user,
-> plan-5 kick-off (optimisation hint #3).
-> Plus plan-1 P6 follow-up: `--overlap_grad_reduce False
-> --overlap_param_gather False` in `run_deepseek_v4.sh` was a
-> plan-2 stability hedge that plan-4 G30 obsoleted.
-
-P32 closes plan-5 with the comm / overlap re-enables surfaced by the
-P28 trace, plus recompute granularity tuning if HBM headroom permits.
-Lands last because comm overlap multiplies the gain from kernel-side
-improvements; running it before the kernel phases would conflate
-kernel-time wins with overlap wins on the per-phase delta.
-
-### Tasks
-
-0. **Task list refinement** — read the P28 report's comm row + HBM
-   row; pick the overlap targets visible in the trace.
-1. **Re-enable `--overlap_grad_reduce True --overlap_param_gather
-   True`** in `run_deepseek_v4.sh` and the proxy. Plan-4 G30
-   obsoletes the plan-2 stability hedge; G31 + G33 (post-P29 / P30 /
-   P31) re-verify the overlap is correct.
-2. **MoE shared-expert overlap** — currently `moe_shared_expert_overlap=
-   False` (DeepEP contract from plan-3 P23). Investigate whether a
-   stream-side overlap is feasible without violating the DeepEP
-   contract; if not, leave as-is and document.
-3. **Recompute granularity tuning** — current `recompute_num_layers=0,
-   recompute_granularity=full, recompute_method=block`. If P31's
-   in-kernel gather frees enough HBM headroom, drop recompute
-   (`recompute_granularity=null`); the trace + the new memory
-   floor in the P32 report show the trade-off.
-4. **Final EP=8 trace** — at all P29 / P30 / P31 / P32 optimisations
-   on; report at `develop/profile/profile-final-ep8-<YYYYMMDD>.{md,html}`
-   reusing the P28 report tooling.
-5. **Plan-5 hand-off note** — appended to `plan-5/02-phase-details.md`
-   summarising commit chain P28..P32, gate totals, baseline → final
-   TFLOP/s/GPU delta, follow-ups (FP8, multi-node EP, long-context,
-   convergence).
-
-### Design notes
-
-- **Overlap re-enable is a smoke gate, not a kernel gate.** G31
-  (smoke) catches overlap regressions; the existing plan-4 unit
-  tests (G23 / G24 / G26 / G27 / G29) are TP=1 PP=1 EP=1 mock-tests
-  and do not exercise the overlap.
-- **Recompute trade-off** — dropping recompute frees HBM but doubles
-  the activation memory inside the layer. P32's report owns the
-  per-iter memory floor table so the trade-off is visible.
-
-### Edge cases
-
-- **DeepEP comm-stream interaction** — DeepEP runs its own comm
-  stream when `turbo_deepep_use_comm_stream=True`; default is
-  `False` (plan-3 P23). If P32 re-enables `moe_shared_expert_overlap`,
-  the DeepEP comm-stream contract has to be re-verified; G31 + G33
-  catch contract violations end-to-end.
-- **Overlap + V4 hash-router PP broadcast** — plan-2 P19 added
-  `pp_token_pre_broadcast` to push `input_ids` to PP rank > 0 ahead
-  of the schedule. With `--overlap_grad_reduce True`, the broadcast
-  has to land before the first `recv_forward.wait()` on PP rank > 0;
-  the plan-2 P19 patch already enforces this (broadcast in the
-  schedule wrapper, before any send/recv). G31 confirms.
-
----
-
-## Plan-5 hand-off note (status — closes plan-5)
-
-> _(Filled in at P32 commit time, mirrors the plan-4 P27 hand-off
-> block.)_
-
-- Commit chain P28 → P32: `TBD-p28` → `TBD-p29` → `TBD-p30` →
-  `TBD-p31` → `TBD-p32`.
-- Gate totals: G31 / G32.{a..e} / G33 / G34 / G35 + plan-4 ratchet
-  (G23 / G24 / G25 / G26 / G27 / G28 / G29 / G30) all green at the
-  final commit.
-- Baseline (P28) → final (P32) steady-iter TFLOP/s/GPU delta:
-  `TBD-baseline` → `TBD-final` (= `+TBD %`); per-phase share of the
-  delta tabulated in the P32 report.
-- Follow-ups (out of scope, owned by future plans): FP8 / FP4 /
-  mxfp4 quantised forward; multi-node EP scaling; long-context
-  (1M-token) bring-up; convergence run; HF state-dict adapter.

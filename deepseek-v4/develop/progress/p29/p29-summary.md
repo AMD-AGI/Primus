@@ -31,7 +31,7 @@ Three iterative passes (`_forensics{,2,3}.py`) over the P28 chrome-
 trace JSON produced the attribution table below:
 
 | metric | value |
-|---|---|
+| --- | --- |
 | matching `reduce_kernel<512, 1, ...>` launches in steady iter | **624 / 717 = 87 % by count** |
 | Σ kernel duration | **7607.9 ms / 99.95 %** of all matching reduce-kernel time |
 | direct launcher cpu_op | `aten::sum` (100 %) |
@@ -55,7 +55,7 @@ must avoid issuing the 624 launches.
 ## 3. The fix — `torch.compile`-fused Sinkhorn behind a flag
 
 | component | path | what it does |
-|---|---|---|
+| --- | --- | --- |
 | config flag | `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_transformer_config.py:117` | `use_v4_compiled_sinkhorn: bool = False` |
 | compiled path | `primus/backends/megatron/core/transformer/hyper_connection.py:60-115` | `_compiled_sinkhorn_cache` keyed on `(n_iters, eps, in_dtype)` (shape NOT in key); `_build_compiled_sinkhorn` wraps the algorithm in `@torch.compile(fullgraph=True, dynamic=True)` |
 | dispatch | `primus/backends/megatron/core/transformer/hyper_connection.py:136..191` | `sinkhorn_normalize(..., use_compiled: bool = False)` selects compiled vs eager |
@@ -79,7 +79,7 @@ cost. This came up live during G32 release-tier and is documented at
 ## 4. Gates
 
 | gate | status | numbers |
-|---|---|---|
+| --- | --- | --- |
 | **G32** — FWD + BWD parity (compiled vs eager) | **GREEN** | 10 / 10 tests pass; fast tier `(B=2, S=64, K=4)` atol=1e-5; release tier `(B=1, S=4096, K=4)` atol=1e-5, marked `pytest.mark.slow`; cache hit on second call asserted; `HyperMixer` flag-propagation test included. Test file: `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p29_compiled_sinkhorn.py`. |
 | **G33a** — 10-iter EP=8 smoke (compiled flag on) | **GREEN** | `progress/p29/run_smoke_compiled_sinkhorn_ep8.sh`; no NaN / Inf / banned warnings; `lm_loss[10] = 9.258` vs P28 `9.258` (bit-for-bit at fixed seed); steady throughput **79.1 vs 77.5 TFLOP/s/GPU = +2.0 %**. |
 | **G33b** — post-P29 trace + report (budget X1) | **GREEN, X1 met by ~1000×** | `progress/p29/run_baseline_trace_ep8_p29.sh`; report at `develop/profile/profile-after-p29-ep8-20260509.{md,html}`; on the critical `(1,4096,4,4)` shape: **624 → 16 launches** and **7607.9 ms → 0.2 ms** (−97.4 % launches, **−99.997 % kernel time**); across all variants of the slow reduce template: 7607.9 ms → 6.91 ms. |
@@ -89,7 +89,7 @@ cost. This came up live during G32 release-tier and is documented at
 ## 5. Numerics — what hit and what did not
 
 | metric | P28 baseline | post-P29 | delta vs baseline | budget | status |
-|---|---:|---:|---:|---|---|
+|---|---:|---:|---:| --- | --- |
 | `aten::sum` fp32 reduce — Σ kernel time (critical shape) | 7607.9 ms | 0.2 ms | **−99.997 %** | ≥ 50 % drop (**X1**) | **CLEAR** |
 | `aten::sum` fp32 reduce — launches (critical shape) | 624 | 16 | −97.4 % | — | — |
 | Steady iter wall time | 8.83 s | 8.63 s | −2.3 % | ≥ 35 % drop | **MISSED** |
@@ -125,9 +125,9 @@ P30 / P31 mandate, unchanged.
 ## 6. De-scope decisions recorded at P29 close
 
 | task | decision | rationale |
-|---|---|---|
+| --- | --- | --- |
 | Hand-Triton fall-back kernel (`v4_sinkhorn.py`) | **NOT NEEDED — out of tree** | `torch.compile` path over-shoots X1 by ~1000×. Hand-Triton stays as a plan-5 follow-up if a future change pulls Sinkhorn out of the small-input regime where Inductor + `triton.autotune` already win. |
-| Global default flip of `use_v4_compiled_sinkhorn` | **DEFERRED to plan-5 P32 hand-off** | Wall-time delta is +2 % only; cold-compile cost is paid once per `(n_iters, eps, dtype)` per process — a footgun for short-iter unit-test harnesses. Proxy default flipped to `True` so P30 / P31 measure against the post-P29 plan-5 baseline; baseline `run_deepseek_v4.sh` stays `False` so future plan-5 phases can A/B against the knob without env plumbing. Final flip lands at G35. |
+| Global default flip of `use_v4_compiled_sinkhorn` | **DEFERRED outside current Plan-5 scope** | Wall-time delta is +2 % only; cold-compile cost is paid once per `(n_iters, eps, dtype)` per process — a footgun for short-iter unit-test harnesses. Proxy default flipped to `True` so P30 / P31 measure against the post-P29 plan-5 baseline; baseline `run_deepseek_v4.sh` stays `False` so future work can A/B against this knob without env plumbing. |
 | Original seeded P29 candidates (a..e fused projections) | **DE-SCOPED at plan-5 P28** (re-confirmed here) | CPU-bound floor 0.3 % at production widths; small-op-launch tail < 10 % rule. Stays as plan-5 follow-ups. |
 
 ---
@@ -150,9 +150,6 @@ mandate:
   retargeted** at the BWD: ≥ 25 % drop on
   `_v4_csa_attention_bwd_kernel` via in-kernel `topk_idxs` gather +
   K-tile prefetch + autotune `BLOCK_K` for `K_topk=512`.
-* **P32** — comm / overlap re-enables remain de-scoped (comm = 0.2 %
-  step, unchanged). Final flip of `use_v4_compiled_sinkhorn`
-  default + plan-5 close.
 
 Combined plan-5 final target (unchanged from P28): **≥ 110
 TFLOP/s/GPU steady at Sq=4096 EP=8 single-node**; **≥ 39 % over the
@@ -163,7 +160,7 @@ post-P29 79.1 TFLOP/s/GPU baseline**.
 ## 8. Artefacts shipped under `progress/p29/`
 
 | file | purpose |
-|---|---|
+| --- | --- |
 | `refinement.md` | full forensic write-up + chosen-fix design + perf-budget contract |
 | `_forensics.py` / `_forensics2.py` / `_forensics3.py` | trace-dive helpers (gitignored output: `forensics_output.txt`, `forensics2_output.txt`, `forensics3_output.txt`) |
 | `forensics3_after_p29.txt` | shape-attribution snapshot of the post-P29 trace (kept for the report) |
@@ -175,7 +172,7 @@ post-P29 79.1 TFLOP/s/GPU baseline**.
 External artefacts (kept, not in `progress/p29/`):
 
 | file | purpose |
-|---|---|
+| --- | --- |
 | `develop/profile/profile-after-p29-ep8-20260509.md` + `.html` | post-P29 baseline report (rendered via `develop/profile/_tools/render_baseline_report.py`) |
 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p29_compiled_sinkhorn.py` | G32 numerical equivalence test |
 
@@ -184,9 +181,9 @@ External artefacts (kept, not in `progress/p29/`):
 ## 9. Known follow-ups carried forward
 
 | item | reason | revisit at |
-|---|---|---|
+| --- | --- | --- |
 | Hand-Triton fused-Sinkhorn kernel `v4_sinkhorn.py` | Out-of-tree; not needed at current shape | Only if Sinkhorn input shape changes (e.g. multi-node EP, different `hc_mult`) and the compiled path stops winning |
-| Global default flip of `use_v4_compiled_sinkhorn` | +2 % wall-time delta at single-node EP=8 + cold-compile footgun for unit tests | P32 hand-off, alongside the W-cumulative-budget gate (G35) |
+| Global default flip of `use_v4_compiled_sinkhorn` | +2 % wall-time delta at single-node EP=8 + cold-compile footgun for unit tests | Future follow-up outside current Plan-5 scope |
 | Pre-existing failure in `test_v4_mtp.py::test_helper_pulls_norm_and_linear_from_v4_provider` | Confirmed unrelated to P29 (stash + re-run reproduces with NO P29 changes); known bad MagicMock chain in MTP fixture | Plan-5 follow-up (or sooner if MTP work re-opens) |
 
 ---
@@ -194,7 +191,7 @@ External artefacts (kept, not in `progress/p29/`):
 ## 10. Commit chain
 
 | commit | scope |
-|---|---|
+| --- | --- |
 | **1ea7e7a8** | Plan-5 P29 (RESCOPED) — `torch.compile`-fused Sinkhorn behind `use_v4_compiled_sinkhorn` flag; G32 + G33a + G33b green; post-P29 baseline pinned for P30 / P31 |
 
 Status row pinning will land in a follow-up `docs(deepseek-v4)[P29]:

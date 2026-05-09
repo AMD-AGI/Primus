@@ -26,7 +26,7 @@ The report covers:
   - **Comm time**: DeepEP dispatch / combine + ``c10d::*`` ops
     separated.
   - **Ranked bottleneck list** with per-phase improvement budgets
-    (X / Y / Z / W) for plan-5 P29 / P30 / P31 / P32.
+    (X / Y / Z) for plan-5 P29 / P30 / P31.
 
 Usage::
 
@@ -439,9 +439,7 @@ def render_markdown(
     lines.append(
         f"- **V4 Triton attention kernels (BWD heavy).** dense / HCA: {_fmt_us(attn_us)} ({_fmt_pct(attn_us, sw_dur)}) — BWD ≫ FWD (~5×). CSA: {_fmt_us(csa_us)} ({_fmt_pct(csa_us, sw_dur)}) — BWD ≫ FWD (~26×). Plan-5 P30 / P31 should focus on **BWD performance** (atomic-add density, recompute-free LSE merge for HCA, in-kernel `topk_idxs` gather for CSA) rather than FWD autotune."
     )
-    lines.append(
-        "- **Comm time is negligible** (DeepEP + c10d ≪ 1 % of iter). Plan-5 P32 (overlap / comm-stream tuning) should be **de-scoped** unless a structural change materially raises comm cost."
-    )
+    lines.append("- **Comm time is negligible** (DeepEP + c10d ≪ 1 % of iter).")
     lines.append(
         "- **HBM headroom is generous.** Steady peak ≈ 195 GiB / 287 GiB ≈ 68 % at Sq=4096, MBS=1, GBS=8 (recompute off). Plan-5 P31's HBM-saving in-kernel `topk_idxs` gather is no longer headroom-driven; its motivation reduces to the BWD speed-up that comes from cutting the wrapper-side gather + scatter-add."
     )
@@ -631,7 +629,7 @@ def render_markdown(
     lines.append("## Ranked bottleneck list + per-phase improvement budgets")
     lines.append("")
     lines.append(
-        "Bottlenecks are ranked by **% of steady iter wall time** (not Σ kernel dur — that double-counts overlapping streams). The X / Y / Z / W per-phase budgets are the post-phase TARGETS that plan-5's `01-roadmap.md` will adopt after this report is reviewed."
+        "Bottlenecks are ranked by **% of steady iter wall time** (not Σ kernel dur — that double-counts overlapping streams). The X / Y / Z per-phase budgets are the post-phase TARGETS that plan-5's `01-roadmap.md` will adopt after this report is reviewed."
     )
     lines.append("")
     if steady_window is not None:
@@ -651,7 +649,7 @@ def render_markdown(
             f"| 4 | small-op kernel-launch tail (CPU-bound floor) | {_fmt_us(max(0.0, sw_dur - gpu_us))} | {100.0 * cpu_idle_pct:.1f} % | **X2** = (de-scoped — see below) |"
         )
         lines.append(
-            f"| 5 | comm time (DeepEP + c10d) | {_fmt_us(comm_us)} | {_fmt_pct(comm_us, sw_dur)} | **W** = (de-scoped — see below) |"
+            f"| 5 | comm time (DeepEP + c10d) | {_fmt_us(comm_us)} | {_fmt_pct(comm_us, sw_dur)} | Out of current Plan-5 scope |"
         )
     lines.append("")
     lines.append("### Per-phase de-scope decisions")
@@ -690,19 +688,9 @@ def render_markdown(
         "scatter-add overhead, K-tile prefetch in BWD, autotune BLOCK_K for "
         "K_topk=512."
     )
-    p32_decision = "**DE-SCOPE**"
-    p32_rationale = (
-        f"Comm time = {_fmt_pct(comm_us, sw_dur)} of step (≪ 10 % rule). DeepEP + "
-        "c10d are essentially free at single-node EP=8. Plan-5 P32 (pipeline / "
-        "comm / optimizer overlap, recompute knobs) is **de-scoped** unless a P29 "
-        "or P30 / P31 outcome materially raises comm cost (e.g. cross-node EP, "
-        "or a structural change that re-introduces `overlap_grad_reduce` "
-        "complexity)."
-    )
     lines.append(f"| P29 | {p29_decision} | {p29_rationale} |")
     lines.append(f"| P30 | {p30_decision} | {p30_rationale} |")
     lines.append(f"| P31 | {p31_decision} | {p31_rationale} |")
-    lines.append(f"| P32 | {p32_decision} | {p32_rationale} |")
     lines.append("")
     lines.append("### Proposed plan-5 retarget (post-P28)")
     lines.append("")
@@ -717,10 +705,8 @@ def render_markdown(
     lines.append(
         "- **P31** — V4 Triton CSA attention BWD performance (in-kernel `topk_idxs` gather + K-tile prefetch). Budget Z: ≥ 25 % CSA BWD speed-up."
     )
-    lines.append("- **P32** — DE-SCOPED. The comm / overlap budget is already won.")
-    lines.append("")
     lines.append(
-        "Combined target: **plan-5 final ≥ 110 TFLOP/s/GPU steady at Sq=4096 EP=8 single-node** (40 %+ over the 78 TFLOP/s/GPU baseline pinned in this report). Final perf gate (`G35`) lives in `03-test-strategy.md`."
+        "Combined target: **plan-5 final ≥ 110 TFLOP/s/GPU steady at Sq=4096 EP=8 single-node** (40 %+ over the 78 TFLOP/s/GPU baseline pinned in this report)."
     )
 
     # Trim trailing empty lines so the file ends with exactly one newline
