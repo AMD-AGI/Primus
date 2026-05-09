@@ -574,9 +574,9 @@ log line.
 | P24     | reference op + harness + dtype contract refinement (bf16 matmul, fp32 softmax)                                                                       | `8b971881`, `38ef526c`     |
 | P25     | dense / HCA Triton kernel + autograd Function + dispatch plumbing + G23 / G24 / G25 + dispatch surface tests                                         | `7df4cfeb`                 |
 | P26     | CSA Triton kernel + autograd Function + `_csa_forward` dispatch + G26 / G27 + dispatch surface tests                                                 | `da6f48bc`                 |
-| P27 G28 | release-tier shape gate (`H ∈ {64, 128}, head_dim=512, swa_window=128, K_topk ∈ {512, 1024}`); `pytest.mark.slow` + `--run-slow` opt-in              | `TBD-p27a` (this PR's HEAD) |
-| P27 G29 | dispatch precedence runtime test + `_log_kernel_choice` rank-0 startup log + class-docstring precedence section + run-script TP > 1 soft warn       | `TBD-p27`  (this commit)   |
-| P27 G30 | TP=1 PP=1 EP=8 10-iter smoke with both kernels engaged + Turbo DeepEP + script under `progress/p27/` (gitignored log)                                | `TBD-p27`  (this commit)   |
+| P27 G28 | release-tier shape gate (`H ∈ {64, 128}, head_dim=512, swa_window=128, K_topk ∈ {512, 1024}`); `pytest.mark.slow` + `--run-slow` opt-in              | `e19663f7`                  |
+| P27 G29 | dispatch precedence runtime test + `_log_kernel_choice` rank-0 startup log + class-docstring precedence section + run-script TP > 1 soft warn       | `e19663f7`                  |
+| P27 G30 | TP=1 PP=1 EP=8 10-iter smoke with both kernels engaged + Turbo DeepEP + script under `progress/p27/` (gitignored log)                                | `e19663f7`                  |
 
 **Test totals (`mi355-gpu-14` inside `dev_primus_wenx_693`)**
 
