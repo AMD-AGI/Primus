@@ -4,70 +4,50 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Integration tests for tools/preflight_bisect/bisect.py that require a live
-# Slurm cluster. These tests are opt-in: they are skipped automatically unless
-# the required environment variables are set.
+# Integration tests for tools/preflight_bisect/bisect.py. These require a live
+# Slurm allocation and skip automatically when the required environment is
+# missing.
 #
 # Required env vars
 # -----------------
 # Both tests require a Slurm nodelist. If BISECT_NODELIST is unset, the tests
 # use SLURM_NODELIST from the current allocation.
 #
-# Test 1 (test_bisect_all_nodes_pass) additionally requires:
-#   VENV_ACTIVATE     Path to the venv activate script used by run_preflight_direct.sh
-#
-# Optional tuning vars
-# --------------------
-#   BISECT_PARTITION       Slurm partition. If unset, SLURM_JOB_PARTITION is used
-#                          when available; otherwise --partition is omitted.
-#   BISECT_BAD_NODE        Hostname of the node that should appear faulty for
-#                          test_bisect_identifies_bad_node. If unset, the last
-#                          hostname from the resolved nodelist is used.
-#   BISECT_TRIAL_TIMEOUT   Timeout per trial in seconds
-#                          (default: 600 for test 1, 30 for test 2)
-#   BISECT_SLURM_TIME      srun -t limit per trial
-#                          (default: 00:15:00 for test 1, 00:02:00 for test 2)
-#   BISECT_PREFLIGHT_ENV   Space-separated KEY=VALUE pairs forwarded to bisect.py
-#                          as repeated --preflight-env args, e.g.
-#                          "NCCL_DEBUG=INFO NCCL_IB_GID_INDEX=3"
-#
 # Running from inside a Slurm allocation
-# --------------------------------------
-# Slurm provides SLURM_NODELIST, and nested srun can inherit the current
-# allocation context, so the common case only needs VENV_ACTIVATE:
-#
+# --------------------------
 #   cd ~/Primus
 #   export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
 #   python3 -m pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
-#
-# BISECT_NODELIST, BISECT_PARTITION, and BISECT_BAD_NODE are optional overrides.
-# If BISECT_NODELIST is unset, the tests use SLURM_NODELIST. If no partition is
-# provided through BISECT_PARTITION or SLURM_JOB_PARTITION, --partition is
-# omitted. If BISECT_BAD_NODE is unset, test_bisect_identifies_bad_node picks
-# the last hostname from the resolved nodelist and marks only that host as bad.
-#
-# Cluster-specific networking settings are still environment-specific. Export
-# them before running pytest, or pass simple comma-free values through
-# BISECT_PREFLIGHT_ENV:
-#
+
+
+
+# More complex example
+# --------------------------
 #   export NCCL_SOCKET_IFNAME=tw-eth0
 #   export GLOO_SOCKET_IFNAME=tw-eth0
 #   export NCCL_IB_HCA="rdma0:1,rdma1:1,rdma2:1,rdma3:1,rdma4:1,rdma5:1,rdma6:1,rdma7:1"
 #   export BISECT_PREFLIGHT_ENV="USING_AINIC=1 NCCL_IB_GID_INDEX=3 NCCL_CROSS_NIC=0 NCCL_PXN_DISABLE=0"
 #
-# Keep values containing commas, such as NCCL_IB_HCA, as normal exported
-# environment variables. BISECT_PREFLIGHT_ENV is translated into
-# srun --export=ALL,..., where commas split entries.
+#   python3 -m pytest \
+#       tests/unit_tests/tools/test_preflight_bisect_slurm.py \
+#       -v \
+#       --basetemp=/tmp/preflight-bisect-pytest
 #
-# Running from outside an allocation
-# ----------------------------------
-# Provide explicit overrides:
+# Inspect pytest artifacts:
+#   ls -R /tmp/preflight-bisect-pytest
+#   cat /tmp/preflight-bisect-pytest/test_bisect_all_nodes_pass*/trial-*.log
+#   cat /tmp/preflight-bisect-pytest/test_bisect_all_nodes_pass*/summary.txt
 #
-#   BISECT_NODELIST="chi2867,chi2879" \
-#   BISECT_PARTITION="mi355x" \
-#   BISECT_BAD_NODE="chi2879" \
-#   VENV_ACTIVATE="/path/to/venv/bin/activate" \
-#   pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
+# Defaults
+# --------
+# - BISECT_NODELIST defaults to SLURM_NODELIST.
+# - BISECT_PARTITION defaults to SLURM_JOB_PARTITION; otherwise --partition is omitted.
+# - BISECT_BAD_NODE defaults to the last host in the resolved nodelist.
+#
+# Optional tuning:
+#   BISECT_TRIAL_TIMEOUT, BISECT_SLURM_TIME, BISECT_PREFLIGHT_ENV
+# Keep comma-containing values such as NCCL_IB_HCA as normal exported env vars;
+# BISECT_PREFLIGHT_ENV is passed through srun --export=ALL,...
 #
 ###############################################################################
 

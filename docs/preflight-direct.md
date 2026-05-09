@@ -355,17 +355,10 @@ srun ... runner/run_preflight_direct.sh --perf-test \
 
 ## 9. Automated node bisection (finding the bad node in an NCCL hang)
 
-When a cluster-wide preflight run hangs or fails, you can automatically bisect
-the nodelist to isolate the node(s) responsible instead of manually halving
-the nodelist and re-running preflight.
-
-Each trial runs `preflight --perf-test` on a subset of nodes via
-[`runner/run_preflight_direct.sh`](../runner/run_preflight_direct.sh). Per-trial
-environment overrides are propagated to the subset's `srun` task via
-`--export=ALL,KEY=VALUE,...`. Subsets that pass are pruned immediately. Subsets
-that fail or time out are split in half, and the two sibling subsets are
-launched in parallel by default (up to 2 concurrent trials) until a singleton
-suspect is isolated.
+When a cluster-wide preflight run hangs or fails, use
+[`tools/preflight_bisect/bisect.py`](../tools/preflight_bisect/bisect.py) to
+run `preflight --perf-test` on smaller Slurm node subsets until suspect nodes
+are isolated.
 
 ### Prerequisites
 
@@ -373,47 +366,33 @@ suspect is isolated.
    `VENV_ACTIVATE` exported from a shared filesystem path.
 2. Run from the SLURM login/head node, where both `scontrol` and `srun` are
    available.
-3. `scontrol show hostnames "<nodelist>"` must resolve the node expression you
-   plan to bisect.
+3. Run from inside a Slurm allocation, or provide a Slurm nodelist explicitly.
 
-### Example template
+### Example from inside an allocation
 
 ```bash
 export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
-
-PARTITION="<your-partition>"
-OUTPUT_DIR="<your-output-dir>"
-LOG_FILE="<your-log-file>"
-NODELIST="${SLURM_NODELIST:-<your-nodelist>}"
+mkdir -p output
 
 python tools/preflight_bisect/bisect.py \
-    --nodelist "$NODELIST" \
-    --partition "$PARTITION" \
-    --output-dir "$OUTPUT_DIR/bisect-$(date +%Y%m%d-%H%M%S)" \
+    --nodelist "$SLURM_NODELIST" \
+    --output-dir "output/bisect-$(date +%Y%m%d-%H%M%S)" \
     --trial-timeout-sec 600 \
     --slurm-time 00:15:00 \
     --preflight-env USING_AINIC=1 \
     --preflight-env NCCL_IB_GID_INDEX=1 \
     --preflight-env NCCL_CROSS_NIC=1 \
     --preflight-env NCCL_PXN_DISABLE=0 \
-    2>&1 | tee "$LOG_FILE"
+    2>&1 | tee output/bisect-latest.log
 ```
 
-Set `PARTITION`, `OUTPUT_DIR`, and `LOG_FILE` for your environment. If you are
-already inside a SLURM allocation, `SLURM_NODELIST` is used automatically;
-otherwise set `NODELIST` explicitly. Adjust the `--preflight-env` lines to
-match your cluster.
+Adjust the `--preflight-env` lines to match your cluster. Per-trial logs and a
+final `summary.txt` are written under `--output-dir`.
 
 > Note: `--preflight-env KEY=VALUE` values are concatenated into a single
 > `srun --export=ALL,...` argument, so values must not contain commas or
-> whitespace. NCCL flags never do, so this is rarely a concern in practice.
-
-The script runs `preflight --perf-test` on shrinking subsets via `srun`. By
-default, when a subset fails or hangs, its two sibling halves are launched in
-parallel (up to 2 concurrent trials total), while passing subsets are pruned
-immediately and are not split further. Any non-zero exit or trial timeout is
-treated as a failure. Per-trial logs and a final `summary.txt` (including
-`SUSPECT_NODES: ...`) are written under `--output-dir`.
+> whitespace. Keep comma-containing values as normal exported environment
+> variables.
 
 ---
 
