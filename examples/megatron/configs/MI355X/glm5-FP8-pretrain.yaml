@@ -59,8 +59,6 @@ modules:
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
-
-      moe_use_legacy_grouped_gemm: true
       moe_layer_freq: 1
 
       # MLA
