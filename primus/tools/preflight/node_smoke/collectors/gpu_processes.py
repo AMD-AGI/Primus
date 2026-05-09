@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..shell_utils import _parse_size_with_unit, _which
 from .rocm_smi import _rocm_smi_processes
@@ -261,13 +261,25 @@ def _collect_gpu_processes(
             if cp.returncode == 0 and cp.stdout.strip():
                 try:
                     doc = json.loads(cp.stdout)
-                    parsed = _flatten_amd_smi_process_json(doc, _annotate)
-                    if parsed:
-                        # Schema recognized (Shape A/A'/B): trust the result
-                        # even when each per-GPU bucket is empty.
+                    parsed, schema_drift = _flatten_amd_smi_process_json(doc, _annotate)
+                    if parsed and not schema_drift:
+                        # Schema fully recognized (Shape A/A'/B): trust the
+                        # result even when each per-GPU bucket is empty.
                         out["per_gpu"] = parsed
                         out["tool"] = "amd-smi process --json"
                         out["ok"] = True
+                    elif schema_drift:
+                        # Top-level shape matched (Shape A bucket layout or
+                        # Shape B per-process dicts) but at least one record
+                        # had no usable pid / process_id -- the smoking gun
+                        # for a future amd-smi rename. Fall through to the
+                        # text / rocm-smi / lsof chain rather than silently
+                        # reporting the node clean.
+                        out["json_parse_error"] = (
+                            "amd-smi process --json: per-process schema not "
+                            "recognized (pid / process_id missing on at least "
+                            "one record); falling back to text / rocm-smi / lsof"
+                        )
                     else:
                         # Valid JSON but no recognizable per-GPU entries -- a
                         # future amd-smi schema we don't speak yet. Fall
@@ -368,7 +380,7 @@ def _collect_gpu_processes(
 def _flatten_amd_smi_process_json(
     doc: Any,
     annotate: Any,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], bool]:
     """Coerce the amd-smi process JSON into a stable per-GPU shape.
 
     The schema varies across releases; we tolerate missing fields silently.
@@ -399,11 +411,23 @@ def _flatten_amd_smi_process_json(
          ``gpu`` / ``gpus`` (uncommon, but seen on a couple of branches)::
 
            [{"pid": ..., "name": ..., "gpu": 0, "memory_usage": {...}}]
+
+    Returns ``(per_gpu, schema_drift_suspected)``. The drift flag is raised
+    when at least one record looked like a process dict at the structural
+    level (i.e. we entered ``_push``) but the per-process pid/process_id
+    field was missing or had a non-numeric value -- the smoking gun for a
+    future amd-smi schema rename. The caller uses this to fall through to
+    the text/rocm-smi/lsof fallbacks instead of trusting an empty result.
+    A genuinely clean node (empty ``process_list``) never enters ``_push``
+    so the flag stays False and the fast path is preserved.
     """
     out_by_gpu: Dict[int, List[Dict[str, Any]]] = {}
+    schema_drift_suspected = False
 
     def _push(gpu: int, pid: Any, name: Any, hbm: Any) -> None:
+        nonlocal schema_drift_suspected
         if not isinstance(pid, (int, float)):
+            schema_drift_suspected = True
             return
         ann = annotate(int(pid), str(name or ""), hbm)
         out_by_gpu.setdefault(int(gpu), []).append(ann)
@@ -470,8 +494,14 @@ def _flatten_amd_smi_process_json(
     for item in items:
         if not isinstance(item, dict):
             continue
-        # Shape A / A': per-GPU dict with process_list
-        plist = item.get("process_list") or item.get("processes")
+        # Shape A / A': per-GPU dict with process_list. Use explicit
+        # presence checks rather than `... or ...` -- an empty list is
+        # the *clean GPU* signal we want to honor, and `[] or x` would
+        # short-circuit past it to ``processes``, then to None, and miss
+        # the Shape A bucket pre-registration entirely.
+        plist = item.get("process_list")
+        if not isinstance(plist, list):
+            plist = item.get("processes")
         if isinstance(plist, list):
             gpu_idx = item.get("gpu")
             if not isinstance(gpu_idx, int):
@@ -513,7 +543,10 @@ def _flatten_amd_smi_process_json(
                     _hbm_of(proc),
                 )
 
-    return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]
+    return (
+        [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())],
+        schema_drift_suspected,
+    )
 
 
 def _parse_amd_smi_process_text(text: str, annotate: Any) -> List[Dict[str, Any]]:

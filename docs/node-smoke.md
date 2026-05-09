@@ -214,7 +214,7 @@ The authoritative source of flags + defaults is `python -m primus.tools.prefligh
 | `--ulimit-l-min-gb GB` | 32 | RLIMIT_MEMLOCK threshold (0 disables). |
 | `--shm-min-gb GB` | 8 | `/dev/shm` size threshold (0 disables). |
 | `--rocm-smi-timeout-sec SEC` | 5.0 | Hard timeout for the `rocm-smi --version` self-latency canary; hitting it is a node FAIL (driver likely wedging). |
-| `--hbm-busy-threshold-gib GiB` | 2.0 | FAIL the node if any GPU has more than this many GiB of HBM in use BEFORE smoke touches the device (i.e. someone else is holding it). |
+| `--hbm-busy-threshold-gib GiB` | 2.0 | FAIL the node if any GPU has at least this many GiB of HBM in use BEFORE smoke touches the device (i.e. someone else is holding it). Boundary is inclusive. |
 | `--allow-foreign-procs` | off | Do NOT FAIL the node when foreign processes are found holding a GPU. They will still be reported. |
 | `--allowed-procs LIST` | `gpuagent,rocm-smi-daemon,amd-smi,dcgm-exporter` | Comma-separated process names that are OK to find holding the GPU. Set to `""` to disable the whitelist. |
 | `--gpu-activity-warn-pct PCT` | 20.0 | Warn (does NOT fail) if amd-smi reports any GPU's `gfx_activity_pct` above this when smoke starts. |
