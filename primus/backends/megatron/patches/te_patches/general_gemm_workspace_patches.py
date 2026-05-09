@@ -92,6 +92,7 @@ def patch_te_general_gemm_workspace_helper(ctx: PatchContext):
         from primus.backends.transformer_engine.pytorch.module.base import (
             get_workspace as workspace_helper,
         )
+
         helper_source = "Primus"
     except (ImportError, ModuleNotFoundError) as exc:
         # The TE-native helper is the upstream fallback Megatron itself uses
@@ -103,6 +104,7 @@ def patch_te_general_gemm_workspace_helper(ctx: PatchContext):
             from transformer_engine.pytorch.module.base import (
                 get_workspace as workspace_helper,
             )
+
             helper_source = f"TE (Primus helper unavailable: {exc})"
         except (ImportError, ModuleNotFoundError) as te_exc:
             te_ext._get_workspace = None

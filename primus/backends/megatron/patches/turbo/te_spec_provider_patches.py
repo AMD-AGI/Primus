@@ -41,6 +41,17 @@ def _primus_turbo_deep_importable() -> bool:
         return False
 
 
+def _uses_legacy_grouped_gemm(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    return bool(
+        getattr(args, "moe_grouped_gemm", False)
+        and getattr(args, "moe_use_legacy_grouped_gemm", False)
+        and not (
+            getattr(args, "use_turbo_grouped_gemm", False) or getattr(args, "use_turbo_grouped_mlp", False)
+        )
+    )
+
+
 def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     """
     Check if PrimusTurbo is enabled and can be used.
@@ -79,12 +90,22 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     return True
 
 
+def _needs_primus_spec_provider(ctx: PatchContext) -> bool:
+    if _uses_legacy_grouped_gemm(ctx):
+        log_rank_0(
+            "[Patch:megatron.turbo.te_spec_provider] "
+            "legacy grouped GEMM enabled; using Primus spec provider..."
+        )
+        return True
+    return _is_primus_turbo_enabled(ctx)
+
+
 @register_patch(
     "megatron.turbo.te_spec_provider",
     backend="megatron",
     phase="before_train",
-    description="Replace TESpecProvider with PrimusTurboSpecProvider when PrimusTurbo is enabled",
-    condition=_is_primus_turbo_enabled,
+    description="Replace TESpecProvider with Primus provider for PrimusTurbo or legacy grouped GEMM",
+    condition=_needs_primus_spec_provider,
     backend_versions=["<0.17"],
     priority=41,
 )
@@ -92,8 +113,8 @@ def patch_te_spec_provider(ctx: PatchContext):
     """
     Patch Transformer Engine integration to use PrimusTurboSpecProvider.
 
-    This replaces TESpecProvider in all relevant Megatron modules with
-    PrimusTurboSpecProvider to enable PrimusTurbo backend.
+    This replaces TESpecProvider in all relevant Megatron modules. It is used
+    for PrimusTurbo features and for legacy grouped-GEMM expert selection.
     """
     import megatron.core.extensions as meg_ext
     from megatron.core.extensions import transformer_engine_spec_provider
@@ -104,9 +125,17 @@ def patch_te_spec_provider(ctx: PatchContext):
         PrimusTurboSpecProvider,
     )
 
+    args = get_args(ctx)
+    if _uses_legacy_grouped_gemm(ctx):
+        reason = "legacy grouped GEMM enabled"
+    elif bool(getattr(args, "enable_primus_turbo", False)):
+        reason = "PrimusTurbo backend enabled"
+    else:
+        reason = "Primus spec provider requested"
+
     log_rank_0(
         "[Patch:megatron.turbo.te_spec_provider] "
-        "Patch TESpecProvider to PrimusTurboSpecProvider; PrimusTurbo backend enabled"
+        f"Patch TESpecProvider to PrimusTurboSpecProvider; {reason}"
     )
 
     assert (
@@ -138,4 +167,4 @@ def patch_te_spec_provider(ctx: PatchContext):
         f"megatron.core.transformer.multi_token_prediction.TESpecProvider -> {PrimusTurboSpecProvider.__name__}"
     )
 
-    log_rank_0("[Patch:megatron.turbo.te_spec_provider] Using PrimusTurbo backend (PT)")
+    log_rank_0(f"[Patch:megatron.turbo.te_spec_provider] Using Primus spec provider ({reason})")

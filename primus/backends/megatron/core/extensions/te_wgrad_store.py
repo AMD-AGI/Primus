@@ -26,6 +26,7 @@ import queue
 import torch
 from megatron.training import get_args
 from transformer_engine.pytorch.module._common import WeightGradStore
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
 _original_init = WeightGradStore.__init__
 _original_put = WeightGradStore.put
@@ -53,6 +54,13 @@ def _snapshot_for_wgrad(item):
     """
     if item is None:
         return None
+    if isinstance(item, Float8Tensor):
+        cloned = item.detach()
+        cloned._data = item._data.detach().clone() if item._data is not None else None
+        cloned._transpose = item._transpose.detach().clone() if item._transpose is not None else None
+        cloned._scale_inv = item._scale_inv.detach().clone() if item._scale_inv is not None else None
+        cloned._transpose_invalid = item._transpose_invalid
+        return cloned
     if isinstance(item, torch.Tensor):
         return item.detach().clone()
     if isinstance(item, (list, tuple)):

@@ -165,9 +165,7 @@ def _make_patched_forward():
                 self.config.moe_router_topk == 1
             ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
             original_dtype = permuted_local_hidden_states.dtype
-            permuted_local_hidden_states = (
-                permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
-            )
+            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
             permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
             # Probs already applied; reset post-activation factor to ones to
             # keep the autograd graph connected without double-applying.
@@ -184,9 +182,7 @@ def _make_patched_forward():
                 num_local_experts,
                 hidden_size,
             )
-            intermediate_parallel = _activation_with_probs(
-                self, fc1_output, permuted_probs.unsqueeze(-1)
-            )
+            intermediate_parallel = _activation_with_probs(self, fc1_output, permuted_probs.unsqueeze(-1))
             fc2_output = _grouped_fc2(
                 self.weight2,
                 intermediate_parallel,

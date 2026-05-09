@@ -122,7 +122,6 @@ from megatron.training.training import (
     evaluate_and_print_results,
     get_megatron_optimizer_config,
     get_model,
-    get_megatron_optimizer_config,
     get_optimizer_param_scheduler,
     num_floating_point_operations,
     post_training_step_callbacks,

@@ -65,7 +65,7 @@ modules:
       # model features
       multi_latent_attention: false
       moe_permute_fusion: false
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: ${PRIMUS_USE_LEGACY_GG:false}
 
       # ckpt
       finetune: false
