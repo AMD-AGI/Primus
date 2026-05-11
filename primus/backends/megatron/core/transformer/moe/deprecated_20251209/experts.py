@@ -161,6 +161,14 @@ class DeprecatedGroupedMLP(MegatronModule):
         else:
             self.activation_func = self.config.activation_func
 
+        @jit_fuser
+        def activation_func_with_probs(x, probs):
+            dtype = x.dtype
+            res = self.activation_func(x) * probs
+            return res.to(dtype)
+
+        self.activation_func_with_probs = activation_func_with_probs
+
         # How many feature each rank holds for fc1 and fc2, respectively.
         tp_size = parallel_state.get_expert_tensor_parallel_world_size()
         tp_rank = parallel_state.get_expert_tensor_parallel_rank()
@@ -253,8 +261,32 @@ class DeprecatedGroupedMLP(MegatronModule):
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
-    def forward(self, permuted_local_hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
+    def forward(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: Optional[torch.Tensor] = None,
+        routing_map: Optional[torch.Tensor] = None,
+    ):
         """Forward step of the GroupedMLP."""
+        del routing_map
+        if permuted_probs is None:
+            permuted_probs = torch.ones(
+                permuted_local_hidden_states.shape[0],
+                dtype=permuted_local_hidden_states.dtype,
+                device=permuted_local_hidden_states.device,
+            )
+
+        if self.config.moe_apply_probs_on_input:
+            assert (
+                self.config.moe_router_topk == 1
+            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
+            original_dtype = permuted_local_hidden_states.dtype
+            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
+            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
+            # Probabilities already scaled the input; keep the activation path connected.
+            permuted_probs = torch.ones_like(permuted_probs)
+
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
             w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
@@ -262,7 +294,7 @@ class DeprecatedGroupedMLP(MegatronModule):
 
             fc1_output = gg.ops.gmm(permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False)
 
-            intermediate_parallel = self.activation_func(fc1_output)
+            intermediate_parallel = self.activation_func_with_probs(fc1_output, permuted_probs.unsqueeze(-1))
 
             fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
         else:
@@ -273,7 +305,7 @@ class DeprecatedGroupedMLP(MegatronModule):
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
-            h = self.activation_func(h)
+            h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
             h = torch.matmul(h, w2)
 
             fc2_output = h
