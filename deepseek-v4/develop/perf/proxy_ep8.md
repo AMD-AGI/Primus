@@ -28,6 +28,7 @@ V4-Flash EP8 proxy.
 | P30b           | Dense + HCA SWA K-loop pruning (cr=0 + cr=128) | 4943.4         | 138.4       | 1.79x       | `profile-after-p30-ep8-20260509.md`, P30 smoke |
 | P31            | CSA in-kernel top-K gather/scatter (cr=4)      | 4317.0         | 158.5       | 2.04x       | `profile-after-p31-ep8-20260509.md`, P31 smoke |
 | P31b           | CSA dense-local + sparse head-block BWD split  | 964.8          | 709.3       | 9.15x       | trace `1778324637328675032`, P31b smoke        |
+| P32            | CSA FWD split (local + sparse + LSE merge)     | 890.5          | 768.4       | 9.92x       | trace `1778476971738245137`, `profile-after-p32-ep8-20260511.md` |
 
 
 Notes:
@@ -46,3 +47,17 @@ kernels as 600 ms+ outliers.
   post-profiler instantaneous value. Trace kernels show
   `_v4_csa_attention_pool_sparse_bwd_kernel` at **80.8 ms / 3 launches**
   and `_v4_csa_attention_pool_fwd_kernel` at **123.1 ms / 3 launches**.
+- P32 ships the CSA FWD split (local SWA + sparse pool + LSE merge) as
+  the new default; V4 attention BWD stays monolithic and CSA BWD stays
+  on the gather + atomic dpool path. The bench-only split BWD and
+  segmented-reduction CSA BWD paths remain available via
+  `PRIMUS_V4_ATTN_BWD_USE_SPLIT=1` / `PRIMUS_V4_CSA_BWD_SEGREDUCE=1`
+  (they win the standalone microbench but lose ~190 ms and ~40 ms /
+  iter respectively in EP8 because of doubled HBM traffic competing
+  with MoE work). P32 iter 10 is the post-profiler steady value:
+  `890.5/1037.1 ms` and `768.4/703.8 TFLOP/s/GPU`. Trace kernels show
+  `_v4_csa_attention_pool_sparse_fwd_kernel` at **33.6 ms / 3
+  launches** (plus ~17 ms of `_v4_attention_fwd_kernel` for the new
+  CSA local FWD; previously `_v4_csa_attention_pool_fwd_kernel` was
+  **123.1 ms / 3 launches**) and `_v4_csa_attention_pool_sparse_bwd_kernel`
+  at **72.5 ms / 3 launches** (vs P31b 80.8 ms).

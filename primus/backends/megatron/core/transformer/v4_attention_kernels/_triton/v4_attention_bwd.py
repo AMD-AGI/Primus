@@ -1021,10 +1021,16 @@ def _launch_v4_attention_bwd(
         stride_ms = 0
         stride_mn = 0
 
-    # Plan-5 P32: default to the split BWD (dQ kernel + dK/dV kernel,
-    # no atomics for dQ / dK / dV). ``PRIMUS_V4_ATTN_BWD_FORCE_MONOLITHIC=1``
-    # falls back to the legacy single-kernel design for A/B.
-    if os.getenv("PRIMUS_V4_ATTN_BWD_FORCE_MONOLITHIC", "0") != "1":
+    # Plan-5 P32: the split BWD (dQ kernel + dK/dV kernel, no atomics for
+    # dQ / dK / dV) wins the operator microbench but regresses end-to-end
+    # EP8 proxy throughput by ~190 ms / iter because the split design reads
+    # Q / K / V twice (once per kernel) — 2x HBM traffic vs the monolithic
+    # kernel that produces all three gradients in a single visit. On the
+    # standalone microbench (no concurrent MoE traffic) the split is faster;
+    # in the EP8 proxy MoE work saturates HBM and the monolithic design
+    # wins. ``PRIMUS_V4_ATTN_BWD_USE_SPLIT=1`` opts into the split design
+    # for kernel-level perf experiments.
+    if os.getenv("PRIMUS_V4_ATTN_BWD_USE_SPLIT", "0") == "1":
         dq_grid = (triton.cdiv(Sq, BLOCK_M), B * HQ)
         _v4_attention_bwd_dq_kernel[dq_grid](
             q,
