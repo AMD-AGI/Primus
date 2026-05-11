@@ -20,7 +20,6 @@ from primus.tools.preflight.global_vars import (
     get_warmup,
 )
 from primus.tools.preflight.utility import (
-    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -30,6 +29,23 @@ from primus.tools.preflight.utility import (
 
 
 def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
+    """Inter-node point-to-point benchmark.
+
+    Approach A: ranks send/recv directly on ``dist.group.WORLD`` using
+    explicit peer ranks. The pre-refactor code built one 2-rank
+    ``dist.new_group`` per (src, peer) pair (LOCAL_WORLD_SIZE * num_nodes/2
+    groups), which on 128N is 512 brand-new ncclCommSplit operations and
+    matching destroys -- a primary contributor to the IB OOB
+    ephemeral-port TIME_WAIT exhaustion that drives the EADDRINUSE crash.
+    The functional behavior is unchanged: each src rank sends a tensor to
+    a peer on the neighboring node, and we measure per-pair latency and
+    bandwidth identically to before.
+
+    Non-participating ranks (those with no valid peer when num_nodes is
+    odd) still participate in the WORLD-scope barriers / gather_object so
+    that all WORLD collectives stay rank-uniform. They simply skip the
+    actual send/recv.
+    """
     device = torch.device(f"cuda:{LOCAL_RANK}")
     if sizes_mb is None or len(sizes_mb) == 0:
         sizes_mb = [2**i for i in range(1, 11)]
@@ -55,48 +71,39 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
 
     num_adjacent_groups = num_nodes // adjacent_nodes
     num_paired_ranks = num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE
-    p2p_group = None
     is_src_rank = ((RANK // LOCAL_WORLD_SIZE) % 2) == 0
     if RANK < num_paired_ranks:
         peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
         assert peer_rank >= 0 and peer_rank < WORLD_SIZE
     else:
         peer_rank = -1
-    for i_group in range(num_adjacent_groups):
-        for i_r in range(LOCAL_WORLD_SIZE):
-            group_ranks = [
-                i_group * adjacent_nodes * LOCAL_WORLD_SIZE + i_r,
-                i_group * adjacent_nodes * LOCAL_WORLD_SIZE + i_r + LOCAL_WORLD_SIZE,
-            ]
-            tmp_group = dist.new_group(ranks=group_ranks)
-            if RANK in group_ranks:
-                assert p2p_group is None
-                p2p_group = tmp_group
-    if RANK < num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE:
-        assert p2p_group is not None
 
     if RANK == 0:
         with open(args.markdown_file, "a", encoding="utf-8") as f:
-            f.write(f"## InterNode - P2P\n")
+            f.write("## InterNode - P2P\n")
 
+    # Pre-allocate the send/recv tensor only on participating ranks.
+    # Non-participants enter the size loop solely to keep WORLD barriers
+    # rank-aligned and never touch a tensor.
     for size in sizes:
-        if p2p_group is None:
-            break
-
+        # WORLD barrier so every pair starts its warmup at roughly the
+        # same time; non-participating ranks must call this too.
+        dist.barrier(device_ids=[torch.cuda.current_device()])
+        if peer_rank == -1:
+            continue
         tensor = torch.rand(size // 2, dtype=torch.bfloat16, device=device)
-        dist.barrier(group=p2p_group, device_ids=[torch.cuda.current_device()])
         for _ in range(warmup):
             if is_src_rank:
-                dist.send(tensor, dst=peer_rank, group=p2p_group)
+                dist.send(tensor, dst=peer_rank)
             else:
-                dist.recv(tensor, src=peer_rank, group=p2p_group)
+                dist.recv(tensor, src=peer_rank)
         torch.cuda.synchronize()
         start = time.time()
         for _ in range(iteration):
             if is_src_rank:
-                dist.send(tensor, dst=peer_rank, group=p2p_group)
+                dist.send(tensor, dst=peer_rank)
             else:
-                dist.recv(tensor, src=peer_rank, group=p2p_group)
+                dist.recv(tensor, src=peer_rank)
         torch.cuda.synchronize()
         elapsed = (time.time() - start) / iteration
         comm_size = size
@@ -104,10 +111,10 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
         latency_results[f"{size//1024//1024}MB"] = elapsed * 1e6
         bandwidth_results[f"{size//1024//1024}MB"] = gb_per_sec
 
+    # Single WORLD barrier between the timed section and the rank-0
+    # reporting collectives. No process group destroy is needed because
+    # nothing was created.
     dist.barrier(device_ids=[torch.cuda.current_device()])
-    if p2p_group is not None:
-        dist.destroy_process_group(p2p_group)
-    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     all_latency_results = [None for _ in range(WORLD_SIZE)]
     all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
@@ -167,7 +174,7 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
                     f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
                 )
                 f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
-            f.write(f"\n")
+            f.write("\n")
 
             f.write(f"=======InterNodeComm - {case_name} (GB/s)=======\n")
             log(f"=======InterNodeComm - {case_name} (GB/s)=======")
@@ -184,7 +191,7 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
                     f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
                 )
                 f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
-            f.write(f"\n")
+            f.write("\n")
 
         if not args.plot:
             return
@@ -268,5 +275,5 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
         plt.close()
         with open(args.markdown_file, "a", encoding="utf-8") as f:
             f.write(f"![{plot_case}](./{plot_case}/{png_file})\n")
-            f.write(f"\n")
-        log(f"")
+            f.write("\n")
+        log("")

@@ -11,29 +11,37 @@ from primus.tools.preflight.global_vars import (
     get_iteration,
     get_warmup,
 )
-from primus.tools.preflight.utility import barrier_after_comm_destroy, log
+from primus.tools.preflight.utility import log
 
 # profile parameters
 _ENABLE_PROFILE = False
 
 _NODE_RANK = RANK // LOCAL_WORLD_SIZE
+# Sentinel: when None, ``send_recv_once`` and the underlying ``dist.P2POp``
+# / ``dist.isend`` / ``dist.irecv`` calls fall back to the default WORLD
+# process group. The shape of the ring (same local_rank across nodes) is
+# expressed entirely by the peer math in ``send_recv_once``; the ring
+# subgroups themselves are no longer materialized, which removes
+# ``LOCAL_WORLD_SIZE`` (= 8) NCCL communicators per preflight run and the
+# matching IB OOB ephemeral-port churn at destroy time.
 _GLOBAL_PIPELINE_GROUP = None
 
 
 def init_pipeline_group():
+    """Validate that ring-p2p is applicable; no subgroups are created.
+
+    Signature is preserved so existing callers (and any external probes)
+    can still inspect a boolean status. Internally we leave
+    ``_GLOBAL_PIPELINE_GROUP`` as ``None`` -- the "use WORLD" sentinel --
+    instead of building one NCCL subgroup per local rank.
+    """
     global _GLOBAL_PIPELINE_GROUP
     assert WORLD_SIZE % LOCAL_WORLD_SIZE == 0
     num_nodes = WORLD_SIZE // LOCAL_WORLD_SIZE
     if num_nodes <= 1:
         return False
 
-    pipeline_ranks = [[(i + LOCAL_WORLD_SIZE * j) for j in range(num_nodes)] for i in range(LOCAL_WORLD_SIZE)]
-
-    for ranks in pipeline_ranks:
-        pp_group = torch.distributed.new_group(ranks, backend="NCCL")
-        if RANK in ranks:
-            assert _GLOBAL_PIPELINE_GROUP is None
-            _GLOBAL_PIPELINE_GROUP = pp_group
+    _GLOBAL_PIPELINE_GROUP = None
     return True
 
 
@@ -208,9 +216,9 @@ def run_inter_node_ring_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
 
     write_markdown(args, sizes_in_mb_to_bench, time_statistics)
 
-    if _GLOBAL_PIPELINE_GROUP is not None:
-        dist.destroy_process_group(_GLOBAL_PIPELINE_GROUP)
-    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
+    # No process group was created; nothing to destroy. The per-iteration
+    # ``dist.gather_object`` inside the size loop already provides a WORLD
+    # synchronization point, so no extra barrier is needed here.
 
     # TODO (limou)
     # support plot
