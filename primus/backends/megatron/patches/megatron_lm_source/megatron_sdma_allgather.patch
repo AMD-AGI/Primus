@@ -1,0 +1,500 @@
+diff --git a/megatron/core/distributed/distributed_data_parallel.py b/megatron/core/distributed/distributed_data_parallel.py
+index ca77f98cc..bd54bd234 100644
+--- a/megatron/core/distributed/distributed_data_parallel.py
++++ b/megatron/core/distributed/distributed_data_parallel.py
+@@ -259,6 +259,8 @@ class DistributedDataParallel(_BaseDataParallel):
+             # buckets in reverse order (since all-gathers happen in reverse order of buckets).
+             if self.ddp_config.use_distributed_optimizer and self.ddp_config.overlap_param_gather:
+                 num_bucket_groups = len(bucket_groups)
++                for order, bucket_group in enumerate(reversed(bucket_groups)):
++                    bucket_group.param_gather_order = order
+                 for i in range(1, num_bucket_groups):
+                     bucket_groups[num_bucket_groups - i].next_param_gather_bucket_group = (
+                         bucket_groups[num_bucket_groups - i - 1]
+diff --git a/megatron/core/distributed/param_and_grad_buffer.py b/megatron/core/distributed/param_and_grad_buffer.py
+index d49d77f63..758991612 100644
+--- a/megatron/core/distributed/param_and_grad_buffer.py
++++ b/megatron/core/distributed/param_and_grad_buffer.py
+@@ -1,13 +1,15 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ 
+ import functools
++import importlib
+ import logging
+ import math
++import os
+ import warnings
+ from contextlib import nullcontext
+ from enum import Enum
+ from functools import partial
+-from typing import Dict, List, Optional
++from typing import Callable, Dict, List, Optional, Tuple
+ 
+ import torch
+ from torch.distributed import _coalescing_manager
+@@ -37,6 +39,350 @@ except:
+ import megatron.core.nccl_allocator as nccl_allocator
+ 
+ 
++class _WaitableHandle:
++    """Lightweight waitable handle that mimics torch.distributed.Work."""
++
++    def __init__(self, wait_fn: Optional[Callable[[], None]] = None, work=None):
++        self._wait_fn = wait_fn
++        self._work = work
++        self._done = False
++
++    def wait(self):
++        if self._done:
++            return True
++        if self._work is not None:
++            self._work.wait()
++        if self._wait_fn is not None:
++            self._wait_fn()
++        self._done = True
++        return True
++
++
++def _all_gather_into_tensor_waitable_fallback(
++    output_tensor: torch.Tensor,
++    input_tensor: torch.Tensor,
++    group: Optional[torch.distributed.ProcessGroup] = None,
++    async_op: bool = False,
++):
++    """Fallback to torch.distributed all_gather_into_tensor with waitable handle."""
++    # assert False, "Fallback to torch.distributed all_gather_into_tensor with waitable handle"
++    work = torch.distributed.all_gather_into_tensor(
++        output_tensor, input_tensor, group=group, async_op=async_op
++    )
++    if async_op and work is not None:
++        return _WaitableHandle(work=work)
++    return _WaitableHandle()
++
++
++def _get_sdma_peer_copy_stream_count(world_size: int) -> int:
++    """Get peer-copy stream count for SDMA param all-gather."""
++
++    max_streams = max(world_size - 1, 1)
++    default_streams = min(max_streams, 8)
++    env_value = os.getenv("MEGATRON_SDMA_PEER_COPY_STREAMS")
++    if env_value is None:
++        return default_streams
++
++    try:
++        configured_streams = int(env_value)
++    except ValueError:
++        warnings.warn(
++            f"Invalid MEGATRON_SDMA_PEER_COPY_STREAMS={env_value!r}; using default "
++            f"{default_streams}."
++        )
++        return default_streams
++
++    if configured_streams < 1:
++        warnings.warn(
++            f"MEGATRON_SDMA_PEER_COPY_STREAMS must be >= 1, got {configured_streams}; "
++            f"using default {default_streams}."
++        )
++        return default_streams
++
++    return min(configured_streams, max_streams)
++
++
++class _SDMAGroupRuntime:
++    """Shared SDMA runtime for a process group (streams + single in-flight state)."""
++
++    def __init__(self, world_size: int):
++        # self.comm_stream = torch.cuda.Stream(priority=0)
++        self.comm_stream = torch.cuda.Stream()
++        # Keep barrier/publish/local-copy on one shared communication stream.
++        # self.peer_copy_streams = [torch.cuda.Stream() for _ in range(max(world_size - 1, 1))]
++        # Limit fan-out by default to reduce SDMA/memory-system pressure and
++        # improve overlap with forward compute. Override via env var for A/B.
++        peer_copy_stream_count = _get_sdma_peer_copy_stream_count(world_size)
++        self.peer_copy_streams = [torch.cuda.Stream() for _ in range(peer_copy_stream_count)]
++
++
++_sdma_group_runtime_cache: Dict[Tuple[str, int], _SDMAGroupRuntime] = {}
++
++
++def _get_sdma_group_runtime(group_name: str, world_size: int) -> _SDMAGroupRuntime:
++    cache_key = (group_name, world_size)
++    runtime = _sdma_group_runtime_cache.get(cache_key)
++    if runtime is None:
++        runtime = _SDMAGroupRuntime(world_size=world_size)
++        _sdma_group_runtime_cache[cache_key] = runtime
++    return runtime
++
++
++def all_gather_into_tensor_sdma(
++    output_tensor: torch.Tensor,
++    input_tensor: torch.Tensor,
++    group: Optional[torch.distributed.ProcessGroup] = None,
++    async_op: bool = False,
++):
++    """SDMA all-gather with torch.distributed.all_gather_into_tensor-compatible signature.
++
++    This implementation follows Primus-Turbo async-tp style logic (symmetric
++    memory + DMA copies) and always returns a handle that supports `.wait()`.
++    When SDMA primitives are unavailable, it falls back to
++    `torch.distributed.all_gather_into_tensor`.
++    """
++    # debug
++    # return _all_gather_into_tensor_waitable_fallback(
++    #     output_tensor, input_tensor, group=group, async_op=async_op
++    # )
++
++    if not torch.distributed.is_initialized():
++        raise RuntimeError("torch.distributed must be initialized before all_gather_into_tensor_sdma")
++
++    # Resolve default group in the same way as torch.distributed collectives.
++    if group is None:
++        group = torch.distributed.distributed_c10d._get_default_group()
++
++    world_size = torch.distributed.get_world_size(group=group)
++    rank = torch.distributed.get_rank(group=group)
++
++    if output_tensor.numel() != input_tensor.numel() * world_size:
++        raise ValueError(
++            "output_tensor.numel() must equal input_tensor.numel() * world_size for all_gather_into_tensor"
++        )
++    if output_tensor.dtype != input_tensor.dtype:
++        raise ValueError(
++            "output_tensor.dtype must match input_tensor.dtype for SDMA all_gather_into_tensor"
++        )
++
++    # SDMA path is CUDA-only and expects contiguous flattened layout.
++    if (
++        not output_tensor.is_cuda
++        or not input_tensor.is_cuda
++        or output_tensor.device != input_tensor.device
++        or output_tensor.device.index != torch.cuda.current_device()
++        or not output_tensor.is_contiguous()
++    ):
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++    assert input_tensor.is_contiguous(), "SDMA all_gather_into_tensor requires contiguous input_tensor"
++
++    try:
++        hip = importlib.import_module("hip").hip
++        get_amd_symm_mem_workspace = importlib.import_module(
++            "primus_turbo.pytorch.kernels.async_tp.amd_symmetric_memory"
++        ).get_amd_symm_mem_workspace
++        hip_check = importlib.import_module(
++            "primus_turbo.pytorch.kernels.async_tp.common_ops"
++        ).hip_check
++    except Exception:
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++
++    group_name = getattr(group, "group_name", None)
++    if group_name is None:
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++
++    input_nbytes = input_tensor.nbytes
++    output_flat = output_tensor.view(-1)
++
++    memcpy_comm_kind = getattr(
++        hip.hipMemcpyKind, "hipMemcpyDeviceToDeviceNoCU", hip.hipMemcpyKind.hipMemcpyDeviceToDevice
++    )
++
++    # Allocate/reuse symmetric workspace and expose each rank's local shard buffer.
++    symm_mem = get_amd_symm_mem_workspace(group_name, min_size=max(input_nbytes,749887296))
++    gather_buffers = [
++        symm_mem.get_buffer(r, input_tensor.shape, input_tensor.dtype) for r in range(world_size)
++    ]
++    runtime = _get_sdma_group_runtime(group_name=group_name, world_size=world_size)
++
++    current_stream = torch.cuda.current_stream()
++    # barrier_event = runtime.barrier_event
++    # Keep per-call events to avoid cross-call dependency aliasing.
++    barrier_event = torch.cuda.Event()
++    # Keep a per-call completion event so each returned handle tracks its own
++    # all-gather completion point.
++    
++    # TODO(wenx): event record will block the overlap, so use wait stream instead of event record
++    # copies_done_event = torch.cuda.Event()
++    # peer_copies_done_event = []
++    # for _ in range(len(runtime.peer_copy_streams)):
++    #     peer_copies_done_event.append(torch.cuda.Event())
++
++    # Ensure input is ready on the communication stream.
++    runtime.comm_stream.wait_stream(current_stream)
++    
++    with torch.cuda.stream(runtime.comm_stream):
++        # Reuse barrier (workspace safety), publish local shard, and post-publish
++        # barrier all on the same communication stream.
++        symm_mem.barrier()
++        
++        gather_buffers[rank].copy_(input_tensor, True)
++        # hip_check(
++        #     hip.hipMemcpyAsync(
++        #         gather_buffers[rank].data_ptr(),
++        #         input_tensor.data_ptr(),
++        #         input_nbytes,
++        #         memcpy_comm_kind,
++        #         runtime.comm_stream.cuda_stream,
++        #     )
++        # )
++        symm_mem.barrier()
++        # Mark point where peer copies can start. This only needs publish
++        # barrier completion, and can be recorded before local-rank copy.
++        # TODO(wenx): this event record will block the first copy from being overlapped, why?
++        barrier_event.record(runtime.comm_stream)
++        # TODO(wenx)
++        # output_flat[rank * input_tensor.numel() : (rank + 1) * input_tensor.numel()].copy_(input_tensor, True)
++        hip_check(
++            hip.hipMemcpyAsync(
++                output_flat.data_ptr() + rank * input_nbytes,
++                input_tensor.data_ptr(),
++                input_nbytes,
++                memcpy_comm_kind,
++                runtime.comm_stream.cuda_stream,
++            )
++        )
++
++    for peer_idx, src_rank in enumerate(r for r in range(world_size) if r != rank):
++        src_buf = gather_buffers[src_rank]
++        copy_stream = runtime.peer_copy_streams[peer_idx % len(runtime.peer_copy_streams)]
++        with torch.cuda.stream(copy_stream):
++            copy_stream.wait_event(barrier_event)
++            hip_check(
++                hip.hipMemcpyAsync(
++                    output_flat.data_ptr() + src_rank * input_nbytes,
++                    src_buf.data_ptr(),
++                    input_nbytes,
++                    memcpy_comm_kind,
++                    copy_stream.cuda_stream,
++                )
++            )
++
++    # Final completion is tracked on comm_stream after all peer copy streams.
++    # TODO(wenx): event record will block the overlap, so use wait stream instead of event record
++    # with torch.cuda.stream(runtime.comm_stream):
++    #     copies_done_event.record(runtime.comm_stream)
++    # for idx in range(len(runtime.peer_copy_streams)):
++    #     peer_copies_done_event[idx].record(runtime.peer_copy_streams[idx])
++
++    def _wait_impl():
++        wait_stream = torch.cuda.current_stream()
++        wait_stream.wait_stream(runtime.comm_stream)
++        
++        for copy_stream in runtime.peer_copy_streams:
++            wait_stream.wait_stream(copy_stream)
++        
++        # wait_stream.wait_event(copies_done_event)
++        # for idx in range(len(runtime.peer_copy_streams)):
++        #     wait_stream.wait_event(peer_copies_done_event[idx])
++
++    handle = _WaitableHandle(wait_fn=_wait_impl)
++    if not async_op:
++        handle.wait()
++    return handle
++
++
++def all_gather_into_tensor_sdma_debug(
++    output_tensor: torch.Tensor,
++    input_tensor: torch.Tensor,
++    group: Optional[torch.distributed.ProcessGroup] = None,
++    async_op: bool = False,
++):
++    """Debug helper that only copies local input shard to output shard."""
++
++    if not torch.distributed.is_initialized():
++        raise RuntimeError(
++            "torch.distributed must be initialized before all_gather_into_tensor_sdma_debug"
++        )
++
++    if group is None:
++        group = torch.distributed.distributed_c10d._get_default_group()
++
++    world_size = torch.distributed.get_world_size(group=group)
++    rank = torch.distributed.get_rank(group=group)
++
++    if output_tensor.numel() != input_tensor.numel() * world_size:
++        raise ValueError(
++            "output_tensor.numel() must equal input_tensor.numel() * world_size for all_gather_into_tensor"
++        )
++
++    if (
++        not output_tensor.is_cuda
++        or not input_tensor.is_cuda
++        or output_tensor.device != input_tensor.device
++        or output_tensor.device.index != torch.cuda.current_device()
++        or not output_tensor.is_contiguous()
++        or not input_tensor.is_contiguous()
++    ):
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++
++    try:
++        hip = importlib.import_module("hip").hip
++        hip_check = importlib.import_module(
++            "primus_turbo.pytorch.kernels.async_tp.common_ops"
++        ).hip_check
++    except Exception:
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++
++    group_name = getattr(group, "group_name", None)
++    if group_name is None:
++        return _all_gather_into_tensor_waitable_fallback(
++            output_tensor, input_tensor, group=group, async_op=async_op
++        )
++
++    runtime = _get_sdma_group_runtime(group_name=group_name, world_size=world_size)
++    current_stream = torch.cuda.current_stream()
++    copy_done_event = torch.cuda.Event()
++
++    memcpy_comm_kind = getattr(
++        hip.hipMemcpyKind, "hipMemcpyDeviceToDeviceNoCU", hip.hipMemcpyKind.hipMemcpyDeviceToDevice
++    )
++    input_nbytes = input_tensor.nbytes
++    output_flat = output_tensor.view(-1)
++
++    runtime.comm_stream.wait_stream(current_stream)
++    with torch.cuda.stream(runtime.comm_stream):
++        hip_check(
++            hip.hipMemcpyAsync(
++                output_flat.data_ptr() + rank * input_nbytes,
++                input_tensor.data_ptr(),
++                input_nbytes,
++                memcpy_comm_kind,
++                runtime.comm_stream.cuda_stream,
++            )
++        )
++        copy_done_event.record(runtime.comm_stream)
++
++    def _wait_impl():
++        wait_stream = torch.cuda.current_stream()
++        wait_stream.wait_event(copy_done_event)
++
++    handle = _WaitableHandle(wait_fn=_wait_impl)
++    if not async_op:
++        handle.wait()
++    return handle
++
++
+ class BufferType(Enum):
+     """
+     Enumeration for buffer type.
+@@ -147,6 +493,7 @@ class _ParamAndGradBucketGroup:
+                 self.params.add(param)
+ 
+         self.next_param_gather_bucket_group = None
++        self.param_gather_order = None
+ 
+         if self.ddp_config.num_distributed_optimizer_instances > 1:
+             self.inter_distributed_optimizer_instance_group = None
+@@ -164,6 +511,15 @@ class _ParamAndGradBucketGroup:
+         # or bucket.grad_data.
+         self.cached_param_buffer_shard_list = [None] * len(self.buckets)
+         self.cached_grad_buffer_shard_list = [None] * len(self.buckets)
++        
++        # TODO(wenx)
++        # Setting the all-gather/reduce-scatter streams to be higher priority
++        # can help avoid some issues where their copies in/out are delayed and
++        # block computation (this is different from high-pri NCCL streams)
++        high_priority = -1
++        # All-gather stream allows overlapping next all-gather with current
++        # forward compute
++        self.all_gather_stream = torch.cuda.Stream(priority=high_priority)
+ 
+     def reset(self):
+         """
+@@ -233,32 +589,47 @@ class _ParamAndGradBucketGroup:
+             assert self.param_gather_handle is None
+ 
+         async_op = self.ddp_config.overlap_param_gather and not force_sync
+-        # Coalesce communication kernels across buckets in the bucket group.
+-        with _coalescing_manager(
+-            self.intra_distributed_optimizer_instance_group, async_ops=async_op
+-        ) as cm:
+-            for idx, bucket in enumerate(self.buckets):
+-                if self.cached_param_buffer_shard_list[idx] is None:
+-                    self.cached_param_buffer_shard_list[idx] = shard_buffer(
+-                        bucket.param_data, self.intra_distributed_optimizer_instance_size
+-                    )
+-                local_data_view = self.cached_param_buffer_shard_list[idx][
+-                    self.intra_distributed_optimizer_instance_rank
+-                ]
+-                dist_all_gather_func(
+-                    bucket.param_data,
+-                    local_data_view,
+-                    group=self.intra_distributed_optimizer_instance_group,
+-                    async_op=async_op,
++        # TODO(wenx)
++        param_gather_handles = []
++        all_gather_event = None
++        enable_sdma_allgather = os.getenv("ENABLE_SDMA_ALLGATHER") == "1"
++        all_gather_func = (
++            _all_gather_into_tensor_waitable_fallback
++            if (self.param_gather_order is not None and self.param_gather_order < 2)
++            or not enable_sdma_allgather
++            else all_gather_into_tensor_sdma
++        )
++        for idx, bucket in enumerate(self.buckets):
++            if self.cached_param_buffer_shard_list[idx] is None:
++                self.cached_param_buffer_shard_list[idx] = shard_buffer(
++                    bucket.param_data, self.intra_distributed_optimizer_instance_size
+                 )
++            local_data_view = self.cached_param_buffer_shard_list[idx][
++                self.intra_distributed_optimizer_instance_rank
++            ]
++            # if self.param_gather_order is not None and self.param_gather_order < 2
++            # else:
++                # with torch.cuda.stream(self.all_gather_stream):
++            handle = all_gather_func(
++                bucket.param_data,
++                local_data_view,
++                group=self.intra_distributed_optimizer_instance_group,
++                async_op=async_op,
++            )
++            if async_op:
++                param_gather_handles.append(handle)
++                # if idx == len(self.buckets) - 1:
++                #     all_gather_event = self.all_gather_stream.record_event()
++
+         if async_op:
+-            self.param_gather_handle = cm
++            def _wait_all_param_gathers():
++                # if all_gather_event is not None:
++                #     torch.cuda.current_stream().wait_event(all_gather_event)
++                for handle in param_gather_handles:
++                    handle.wait()
++
++            self.param_gather_handle = _WaitableHandle(wait_fn=_wait_all_param_gathers)
+         else:
+-            # When using `_coalescing_manager`, even if a synchronous op (async_op=False) is used,
+-            # `cm` is not None, which is different from when `_coalescing_manager` is not used in
+-            # which case the torch.distributed._all_gather_base() will return None. In order to
+-            # maintain consistency with prior code, we need to manually set communication handle to
+-            # None.
+             self.param_gather_handle = None
+         self.param_gather_dispatched = True
+ 
+@@ -982,4 +1353,4 @@ def partition_buckets(
+                     buffer.data_parallel_world_size,
+                 )
+             )
+-        return bucket_groups
++        return bucket_groups
+\ No newline at end of file
+diff --git a/megatron/core/transformer/moe/moe_layer.py b/megatron/core/transformer/moe/moe_layer.py
+index bbb5fce4e..a73911648 100644
+--- a/megatron/core/transformer/moe/moe_layer.py
++++ b/megatron/core/transformer/moe/moe_layer.py
+@@ -221,6 +221,8 @@ class MoELayer(BaseMoELayer):
+         dispatched_input, tokens_per_expert, permuted_probs = (
+             self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
+         )
++        # TODO(wenx)
++        tokens_per_expert = tokens_per_expert.to(dispatched_input.device)
+         expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert, permuted_probs)
+         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+         output = self.token_dispatcher.combine_preprocess(expert_output)

@@ -64,6 +64,11 @@ _PATCH_FILES: Tuple[str, ...] = (
     "megatron_te_general_gemm_workspace_compat.patch",
     "megatron_te_bshd_layout.patch",
     "megatron_moe_skip_identity_sort.patch",
+    # SDMA-driven param all-gather (runtime-gated by ENABLE_SDMA_ALLGATHER=1).
+    # Patch unconditionally adds new helpers and a small MoE-layer fixup; the
+    # SDMA dispatch path is only used when the env var is set, so applying
+    # the patch is a no-op for callers that leave the flag unset.
+    "megatron_sdma_allgather.patch",
 )
 
 _PATCH_DIR = Path(__file__).parent / "megatron_lm_source"
