@@ -44,10 +44,10 @@ This post focuses on the design ideas behind Primus CLI and how they translate i
 
 In many training setups, the workflow evolves organically:
 
-- one script for local debugging  
-- another wrapper for container execution  
-- a separate Slurm launcher for multi-node runs  
-- additional scripts for benchmarks and environment checks  
+- one script for local debugging
+- another wrapper for container execution
+- a separate Slurm launcher for multi-node runs
+- additional scripts for benchmarks and environment checks
 
 Over time, these scripts diverge. Flags drift, environment variables differ, and assumptions become implicit.
 The result is a workflow that works, but is difficult to reason about, reproduce, or extend.
@@ -120,9 +120,9 @@ Training workflows rarely stay static. New benchmarks are added, diagnostics evo
 
 Primus CLI is designed to accommodate this evolution:
 
-- new tasks can be added as subcommands  
-- benchmarks can grow independently  
-- workflow-specific logic can be composed without rewriting launchers  
+- new tasks can be added as subcommands
+- benchmarks can grow independently
+- workflow-specific logic can be composed without rewriting launchers
 
 This modular approach allows the CLI surface to expand while keeping the core execution model stable.
 
@@ -149,10 +149,10 @@ The result is a workflow that feels natural in Python environments, yet remains 
 
 In day-to-day usage, a unified entry point translates into tangible benefits:
 
-- reproducibility across local, container, and cluster runs  
-- simpler debugging due to consistent logs and execution paths  
-- lower onboarding cost for new users and contributors  
-- less glue code maintained outside the core workflow  
+- reproducibility across local, container, and cluster runs
+- simpler debugging due to consistent logs and execution paths
+- lower onboarding cost for new users and contributors
+- less glue code maintained outside the core workflow
 
 Teams can focus more on training behavior and performance, and less on maintaining launch scripts.
 
@@ -162,9 +162,9 @@ Teams can focus more on training behavior and performance, and less on maintaini
 
 Primus CLI is designed for teams who:
 
-- run training workflows across multiple environments  
-- care about reproducibility and debuggability at scale  
-- want to evolve training pipelines without rewriting launch logic  
+- run training workflows across multiple environments
+- care about reproducibility and debuggability at scale
+- want to evolve training pipelines without rewriting launch logic
 
 ---
 
