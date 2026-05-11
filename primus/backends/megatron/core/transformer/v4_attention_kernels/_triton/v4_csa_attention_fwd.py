@@ -53,11 +53,16 @@ Edge cases handled:
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
+
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_fwd import (
+    _launch_v4_attention_fwd,
+)
 
 # ---------------------------------------------------------------------------
 # Triton kernel
@@ -629,6 +634,24 @@ def _launch_v4_csa_attention_pool_fwd(
         )
 
     has_sink = sink is not None
+
+    # Plan-5 P32: default to the split FWD (local SWA dense kernel +
+    # head-block sparse kernel + LSE merge). The monolithic per-row
+    # ``_v4_csa_attention_pool_fwd_kernel`` stays in tree as the
+    # ``PRIMUS_V4_CSA_FWD_FORCE_MONOLITHIC=1`` fallback so we can A/B
+    # the two designs from the proxy without rebuilding.
+    if os.getenv("PRIMUS_V4_CSA_FWD_FORCE_MONOLITHIC", "0") != "1":
+        return _launch_v4_csa_attention_pool_fwd_split(
+            q,
+            k_local,
+            v_local,
+            pool,
+            topk_idxs,
+            sink=sink,
+            swa_window=int(swa_window),
+            scale=float(scale),
+        )
+
     out = torch.empty_like(q)
     lse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
 
@@ -688,9 +711,390 @@ def _launch_v4_csa_attention_pool_fwd(
     return out, lse
 
 
+# ---------------------------------------------------------------------------
+# Plan-5 P32 split CSA FWD — sparse head-block tile + LSE merge
+#
+# The per-row design in ``_v4_csa_attention_pool_fwd_kernel`` cannot reach
+# tensor-core throughput because ``tl.sum(k * q, axis=1)`` is a per-row
+# reduction (one program per ``(b, qhid, m)``). FlashAttention-style
+# multi-row ``tl.dot`` tiles need ``BLOCK_M >= 16`` queries per program;
+# the sparse branch's per-query ``topk_idxs`` gather blocks that — adjacent
+# query rows have different sparse keys.
+#
+# P32 splits the FWD into three launches that ARE multi-row friendly:
+#
+#  1. ``_launch_v4_attention_fwd`` (already shipped) handles the local
+#     SWA branch with ``BLOCK_M=BLOCK_N=32`` ``tl.dot`` tiles. We call it
+#     with ``sink=None`` so the returned ``(out_local, lse_local)`` does
+#     NOT include the per-head sink.
+#  2. ``_v4_csa_attention_pool_sparse_fwd_kernel`` (new) handles the
+#     sparse pool branch with a **head-block** tile. The per-query
+#     ``topk_idxs`` gather is shared across all ``H`` query heads — the
+#     pool tensor itself has no head dimension. One program owns one
+#     ``(b, m, h_block)`` and runs ``tl.dot(Q[BLOCK_H, D],
+#     tl.trans(pool[BLOCK_K, D]))`` per top-K tile, online-softmax-
+#     updating per-head ``m_i / l_i / acc`` along the way. Output
+#     ``(out_sparse, lse_sparse)`` does NOT include the sink.
+#  3. ``_v4_csa_attention_lse_merge_kernel`` (new) combines the two
+#     ``(out, lse)`` pairs with the per-head sink under one final online
+#     softmax. Result: a joint ``out`` and joint ``lse`` mathematically
+#     identical to the monolithic kernel (modulo fp32 reduction order),
+#     plus the per-iteration BWD contract is unchanged because the joint
+#     ``lse`` is what the BWD already re-materialises ``P`` from.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _v4_csa_attention_pool_sparse_fwd_kernel(
+    Q,
+    POOL,
+    TOPK_IDXS,
+    OUT,
+    LSE,
+    # Q strides: [B, H, Sq, D]
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    # Pool strides: [B, P, D]
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    # topk_idxs strides: [B, Sq, K_topk]
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    # OUT strides: [B, H, Sq, D]
+    stride_ob,
+    stride_oh,
+    stride_om,
+    stride_od,
+    # LSE strides: [B, H, Sq]
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """Sparse-branch CSA FWD with head-block tile + ``tl.dot``.
+
+    Grid: ``(seqlen_q, cdiv(HEAD_Q, BLOCK_H), B)``. Each program owns
+    one ``(b, h_block, m)`` and computes the sparse branch's normalized
+    output + LSE for ``BLOCK_H`` heads. The pool gather is shared
+    across heads because ``pool`` and ``topk_idxs`` have no H axis.
+    """
+    pid_m = tl.program_id(0)
+    pid_h_block = tl.program_id(1)
+    bid = tl.program_id(2)
+
+    offs_h = pid_h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    h_mask = offs_h < HEAD_Q
+    q_active = pid_m < seqlen_q
+
+    NEG_INF: tl.constexpr = -1.0e30
+
+    # Q tile: [BLOCK_H, BLOCK_DMODEL]
+    q_ptrs = (
+        Q + bid * stride_qb + offs_h[:, None] * stride_qh + pid_m * stride_qm + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(q_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    # Online-softmax state per head.
+    acc = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
+    m_i = tl.full([BLOCK_H], value=NEG_INF, dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_H], dtype=tl.float32)
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        sparse_k = k_start + offs_k
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=sparse_k < K_topk, other=-1)
+        valid_k = (sparse_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid_k, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
+
+        # qk = Q @ pool.T : [BLOCK_H, BLOCK_K] in fp32 accumulator
+        qk = tl.dot(q.to(pool.dtype), tl.trans(pool)) * sm_scale
+        qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, NEG_INF)
+
+        # Online softmax update per head row.
+        m_tile = tl.max(qk, axis=1)
+        m_new = tl.maximum(m_i, m_tile)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(qk - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        acc = acc * alpha[:, None] + tl.dot(p.to(pool.dtype), pool)
+        m_i = m_new
+
+    # Detect "all invalid" rows (K_topk == 0 or every topk_idx == -1):
+    # l_i stays zero; we leave acc as zero and write a NEG_INF lse so the
+    # merge kernel treats the sparse branch as carrying zero softmax mass
+    # for that (b, h, m).
+    empty = l_i == 0.0
+    safe_l = tl.where(empty, 1.0, l_i)
+    out = acc / safe_l[:, None]
+    lse = tl.where(empty, NEG_INF, m_i + tl.log(safe_l))
+
+    out_ptrs = (
+        OUT + bid * stride_ob + offs_h[:, None] * stride_oh + pid_m * stride_om + offs_d[None, :] * stride_od
+    )
+    tl.store(out_ptrs, out.to(OUT.dtype.element_ty), mask=h_mask[:, None] & q_active)
+
+    lse_ptrs = LSE + bid * stride_lb + offs_h * stride_lh + pid_m * stride_lm
+    tl.store(lse_ptrs, lse, mask=h_mask & q_active)
+
+
+@triton.jit
+def _v4_csa_attention_lse_merge_kernel(
+    OUT_LOCAL,
+    LSE_LOCAL,
+    OUT_SPARSE,
+    LSE_SPARSE,
+    SINK,
+    OUT,
+    LSE,
+    stride_olb,
+    stride_olh,
+    stride_olm,
+    stride_old,
+    stride_llb,
+    stride_llh,
+    stride_llm,
+    stride_osb,
+    stride_osh,
+    stride_osm,
+    stride_osd,
+    stride_lsb,
+    stride_lsh,
+    stride_lsm,
+    stride_ob,
+    stride_oh,
+    stride_om,
+    stride_od,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    seqlen_q,
+    HEAD_Q: tl.constexpr,
+    HAS_SINK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """Merge ``(out_local, lse_local)`` and ``(out_sparse, lse_sparse)``
+    with the per-head sink under one final online softmax.
+
+    Grid: ``(cdiv(seqlen_q, BLOCK_M), B * HEAD_Q)``. Each program owns
+    one ``[BLOCK_M, BLOCK_DMODEL]`` slice of the joint output.
+    """
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    bid = pid_bh // HEAD_Q
+    qhid = pid_bh % HEAD_Q
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    m_mask = offs_m < seqlen_q
+
+    NEG_INF: tl.constexpr = -1.0e30
+
+    lse_local = tl.load(
+        LSE_LOCAL + bid * stride_llb + qhid * stride_llh + offs_m * stride_llm,
+        mask=m_mask,
+        other=NEG_INF,
+    )
+    lse_sparse = tl.load(
+        LSE_SPARSE + bid * stride_lsb + qhid * stride_lsh + offs_m * stride_lsm,
+        mask=m_mask,
+        other=NEG_INF,
+    )
+
+    out_local = tl.load(
+        OUT_LOCAL
+        + bid * stride_olb
+        + qhid * stride_olh
+        + offs_m[:, None] * stride_olm
+        + offs_d[None, :] * stride_old,
+        mask=m_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    out_sparse = tl.load(
+        OUT_SPARSE
+        + bid * stride_osb
+        + qhid * stride_osh
+        + offs_m[:, None] * stride_osm
+        + offs_d[None, :] * stride_osd,
+        mask=m_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
+
+    if HAS_SINK:
+        sink_h = tl.load(SINK + qhid).to(tl.float32)
+    else:
+        sink_h = NEG_INF
+
+    m_max = tl.maximum(lse_local, lse_sparse)
+    if HAS_SINK:
+        m_max = tl.maximum(m_max, sink_h)
+
+    alpha_local = tl.exp(lse_local - m_max)
+    alpha_sparse = tl.exp(lse_sparse - m_max)
+    if HAS_SINK:
+        alpha_sink = tl.exp(sink_h - m_max)
+    else:
+        alpha_sink = tl.zeros_like(alpha_local)
+
+    denom = alpha_local + alpha_sparse + alpha_sink
+    # Empty-row safety: if every branch is NEG_INF, denom == 0. Use a
+    # safe denom and rely on the alpha_* being zero so the numerator is
+    # zero too — output stays at 0 / 1 = 0, lse remains NEG_INF.
+    safe_denom = tl.where(denom == 0.0, 1.0, denom)
+
+    out = (out_local * alpha_local[:, None] + out_sparse * alpha_sparse[:, None]) / safe_denom[:, None]
+    lse = tl.where(denom == 0.0, NEG_INF, m_max + tl.log(safe_denom))
+
+    out_ptrs = (
+        OUT + bid * stride_ob + qhid * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
+    )
+    tl.store(out_ptrs, out.to(OUT.dtype.element_ty), mask=m_mask[:, None])
+
+    lse_ptrs = LSE + bid * stride_lb + qhid * stride_lh + offs_m * stride_lm
+    tl.store(lse_ptrs, lse, mask=m_mask)
+
+
+def _launch_v4_csa_attention_pool_fwd_split(
+    q: torch.Tensor,
+    k_local: torch.Tensor,
+    v_local: torch.Tensor,
+    pool: torch.Tensor,
+    topk_idxs: torch.Tensor,
+    *,
+    sink: Optional[torch.Tensor],
+    swa_window: int,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """P32 split CSA FWD: local SWA via dense kernel + sparse head-block + LSE merge."""
+    B, HQ, Sq, D = q.shape
+    P = pool.shape[1]
+    K_topk = topk_idxs.shape[2]
+    has_sink = sink is not None
+
+    # Step 1: local SWA branch (no sink — applied in the merge).
+    out_local, lse_local = _launch_v4_attention_fwd(
+        q,
+        k_local,
+        v_local,
+        sink=None,
+        swa_window=int(swa_window) if swa_window > 0 else 0,
+        additive_mask=None,
+        scale=float(scale),
+        hca_local_seqlen=0,
+    )
+
+    # Step 2: sparse pool branch (head-block tile).
+    out_sparse = torch.empty_like(q)
+    lse_sparse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
+    BLOCK_H = 64 if HQ >= 64 else triton.next_power_of_2(HQ)
+    if BLOCK_H > HQ:
+        BLOCK_H = max(triton.next_power_of_2(HQ), 16)
+    BLOCK_K = 32
+    BLOCK_DMODEL = D
+    sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
+    _v4_csa_attention_pool_sparse_fwd_kernel[sparse_grid](
+        q,
+        pool,
+        topk_idxs,
+        out_sparse,
+        lse_sparse,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        pool.stride(0),
+        pool.stride(1),
+        pool.stride(2),
+        topk_idxs.stride(0),
+        topk_idxs.stride(1),
+        topk_idxs.stride(2),
+        out_sparse.stride(0),
+        out_sparse.stride(1),
+        out_sparse.stride(2),
+        out_sparse.stride(3),
+        lse_sparse.stride(0),
+        lse_sparse.stride(1),
+        lse_sparse.stride(2),
+        Sq,
+        P,
+        K_topk,
+        float(scale),
+        HEAD_Q=HQ,
+        BLOCK_H=BLOCK_H,
+        BLOCK_K=BLOCK_K,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        num_warps=8,
+        num_stages=1,
+    )
+
+    # Step 3: merge with sink.
+    out = torch.empty_like(q)
+    lse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
+    MERGE_BLOCK_M = 32
+    merge_grid = (triton.cdiv(Sq, MERGE_BLOCK_M), B * HQ)
+    sink_arg = sink if has_sink else q
+    _v4_csa_attention_lse_merge_kernel[merge_grid](
+        out_local,
+        lse_local,
+        out_sparse,
+        lse_sparse,
+        sink_arg,
+        out,
+        lse,
+        out_local.stride(0),
+        out_local.stride(1),
+        out_local.stride(2),
+        out_local.stride(3),
+        lse_local.stride(0),
+        lse_local.stride(1),
+        lse_local.stride(2),
+        out_sparse.stride(0),
+        out_sparse.stride(1),
+        out_sparse.stride(2),
+        out_sparse.stride(3),
+        lse_sparse.stride(0),
+        lse_sparse.stride(1),
+        lse_sparse.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out.stride(3),
+        lse.stride(0),
+        lse.stride(1),
+        lse.stride(2),
+        Sq,
+        HEAD_Q=HQ,
+        HAS_SINK=has_sink,
+        BLOCK_M=MERGE_BLOCK_M,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        num_warps=4,
+        num_stages=1,
+    )
+    return out, lse
+
+
 __all__ = [
     "_v4_csa_attention_fwd_kernel",
     "_v4_csa_attention_pool_fwd_kernel",
+    "_v4_csa_attention_pool_sparse_fwd_kernel",
+    "_v4_csa_attention_lse_merge_kernel",
     "_launch_v4_csa_attention_fwd",
     "_launch_v4_csa_attention_pool_fwd",
+    "_launch_v4_csa_attention_pool_fwd_split",
 ]

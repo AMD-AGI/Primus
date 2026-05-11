@@ -41,11 +41,20 @@ old unpruned masked-tile work:
 | P30b | Dense + HCA SWA K-loop pruning (cr=0 + cr=128) | 12.12 | 5.50 | 6.71 | 0.64 | 11.35 | 5.60 | `profile-after-p30-ep8-20260509.md` |
 | P31 | CSA in-kernel top-K gather/scatter (cr=4) | 12.12 | 5.50 | 8.32 | 0.73 | 11.35 | 5.60 | `profile-after-p31-ep8-20260509.md` |
 | P31b | CSA dense-local + sparse head-block BWD split | 12.12 | 5.50 | 8.32 | 24.17 | 11.35 | 5.60 | `progress/p31/bench_csa_attention_ep8.py` |
+| P32 | Split CSA FWD + atomic-free V4/CSA BWD + segreduce dpool | 92.68 | 22.11 | 108.40 | 52.50 | 83.49 | 15.95 | `progress/p32/{bench_v4_attention_ep8,bench_csa_attention_ep8}.py` |
 
 All values are effective TFLOP/s for the corresponding kernel family.
 For P30b and P31, all five `_v4_attention_bwd_kernel` launches are in
 the 30-34 ms range, including the two cr=128 HCA launches. P31's cr=4
 values use `_v4_csa_attention_pool_{fwd,bwd}_kernel`; P31b's cr=4 BWD
 uses the standalone EP8-shape benchmark after the BWD timer was fixed to
-exclude forward execution. The old `gathered` CSA API remains covered by
-P26 tests as a fallback/reference.
+exclude forward execution. P32 measures per-kernel wall time on the EP8
+microbench: cr=0 FWD 0.73 ms / BWD 7.65 ms (split dq + dkv kernels), cr=4
+FWD 3.16 ms (split local-SWA + sparse + LSE merge) / BWD 16.31 ms (split
+local + segreduce dpool), cr=128 FWD 0.91 ms / BWD 11.91 ms. CSA FWD,
+V4 attention BWD (dense + HCA) and CSA BWD all clear their P32 targets
+except CSA BWD which misses by ~1.3 ms. The old `gathered` CSA API
+remains covered by P26 tests as a fallback/reference; the monolithic
+CSA FWD and monolithic V4 attention BWD remain as opt-in fallbacks
+via `PRIMUS_V4_CSA_FWD_FORCE_MONOLITHIC` /
+`PRIMUS_V4_ATTN_BWD_FORCE_MONOLITHIC`.

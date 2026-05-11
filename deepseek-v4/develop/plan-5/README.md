@@ -34,7 +34,8 @@
 | EP=8 baseline torch.profiler trace at the proxy config + a baseline analysis report (Markdown + HTML) under `deepseek-v4/develop/profile/profile-baseline-*` | Convergence run + long-context (1M-token) bring-up + multi-node EP scaling smokes (separate plan) |
 | Small-op fusion (P29) — torch.compile and / or hand-written Triton fusions for the attention pre / post-projection chain, Compressor / Indexer, partial-RoPE, MoE router gather / scatter — concrete fusion targets get picked from the P28 trace | HF state-dict adapter, V4-Pro release-tier perf, V3 / V2 backports of the Triton fusions |
 | V4 Triton attention kernel perf tuning (P30) — autotune `BLOCK_M / BLOCK_N / num_warps / num_stages` per-shape, persistent kernel for FWD, in-kernel SWA, HCA LSE-merge variant (was a plan-4 follow-up) | Re-implementing V4 attention as TE / aiter callouts (plan-4 owns that fallback path; plan-5 only optimises the in-tree Triton kernels) |
-| V4 Triton CSA kernel perf tuning (P31) — in-kernel `topk_idxs` gather to drop the wrapper-side `[B, H, Sq, K, D]` materialisation, better K-tile prefetching | A new CSA kernel design (radically different math); plan-5 stays in the per-row design that plan-4 P26 shipped |
+| V4 Triton CSA kernel perf tuning (P31) — in-kernel `topk_idxs` gather to drop the wrapper-side `[B, H, Sq, K, D]` materialisation, better K-tile prefetching, dense local + sparse head-block BWD split | A new CSA kernel design (radically different math); plan-5 stays in the per-row design that plan-4 P26 shipped |
+| Operator-microbenchmark-driven attention kernel speed-ups (P32) — `bench_v4_attention_ep8.py` + targeted kernel rewrites to hit CSA FWD ≤ 6 ms, V4 attention BWD ≤ 15 ms, CSA BWD ≤ 15 ms on the proxy EP8 shape | Algorithmic changes to attention (e.g. different softmax / sparsity), FP8 / FP4 numerics work, autograd-graph rewriting outside the V4 attention modules |
 
 ## Why each phase is in plan-5 and not plan-4
 
@@ -54,14 +55,19 @@ plan-5's first deliverable.
 | **P28** | V4-Flash proxy script + EP=8 baseline trace + bottleneck analysis report (md + html in `develop/profile/profile-baseline-*`) | (none — kick-off phase)    |
 | **P29** | Small-op fusion targets picked from the P28 trace (torch.compile and / or in-tree Triton); attention pre / post-projection chain + Compressor / Indexer + MoE router as the prime candidates | P22 follow-up: "the Compressor / Indexer / partial-RoPE small-op chain runs as eager Python on every layer" |
 | **P30** | V4 Triton attention kernel perf tuning — per-shape autotune, persistent kernel, in-kernel SWA, HCA LSE-merge variant | Plan-4 P25 follow-up: "HCA single-kernel-with-additive-bias is simpler and good enough for plan-4; LSE-merge is a future perf optimisation" |
-| **P31** | V4 Triton CSA kernel perf tuning — in-kernel `topk_idxs` gather + tile / prefetch tuning | Plan-4 P26 follow-up: "wrapper-side gather materialises 2–4 GiB / microbatch; in-kernel `topk_idxs`-driven `tl.load` is left for a future perf plan" |
+| **P31** | V4 Triton CSA kernel perf tuning — in-kernel `topk_idxs` gather + tile / prefetch tuning + split CSA BWD | Plan-4 P26 follow-up: "wrapper-side gather materialises 2–4 GiB / microbatch; in-kernel `topk_idxs`-driven `tl.load` is left for a future perf plan" |
+| **P32** | Operator-microbench-driven attention kernel speed-ups — `bench_v4_attention_ep8.py` lands; CSA FWD multi-row tile + LSE merge, V4 attention BWD split into dQ + dK/dV kernels, CSA BWD sparse tuning. Single-kernel targets: CSA FWD ≤ 6 ms, V4 attention BWD ≤ 15 ms, CSA BWD ≤ 15 ms | P31b follow-up: "the remaining V4 attention BWD / CSA FWD / CSA BWD slice is the residual proxy-trace bottleneck; tightening it via the standalone operator microbenchmark avoids the proxy-train round-trip" |
 
-> **Caveat — P29..P31 are trace-driven.** The exact fusion / autotune
-> targets get **picked** in P28's analysis report. Plan-5 commits to
-> delivering P28; the P29..P31 task lists below are seeded from the
-> user's optimisation hints and from known plan-4 attention follow-ups,
-> but each phase opens with a "task list refinement" pass that revises
-> the breakdown against the P28 trace before kernel work starts.
+> **Caveat — P29..P31 are trace-driven; P32 is microbench-driven.**
+> The exact fusion / autotune targets for P29..P31 get **picked** in
+> P28's analysis report. P32 takes the post-P31b shape baseline forward
+> with the CSA microbench plus a new V4 attention microbench so kernel
+> iteration is not gated on a full EP8 training round-trip. Plan-5
+> commits to delivering P28; the P29..P32 task lists below are seeded
+> from the user's optimisation hints and from known plan-4 / P31b
+> follow-ups, but each phase opens with a "task list refinement" pass
+> that revises the breakdown against the latest trace / bench data
+> before kernel work starts.
 
 ## References
 
@@ -93,11 +99,13 @@ plan-5's first deliverable.
 
 ## Reporting hand-off
 
-Plan-5 closes after P31 when every remaining phase row in
+Plan-5 closes after P32 when every remaining phase row in
 `../progress/status.md` is checked, the latest EP=8 proxy trace/report
-shows the steady-state TFLOP/s/GPU target met, and every plan-4
-unit-test gate (G23 / G24 / G25 / G26 / G27 / G28 / G29) plus the
-plan-5 smoke/perf gates through G34b are green at the final commit.
+plus the operator microbenchmarks (`progress/p31/bench_csa_attention_ep8.py`
+and `progress/p32/bench_v4_attention_ep8.py`) show the per-kernel
+targets met, and every plan-4 unit-test gate
+(G23 / G24 / G25 / G26 / G27 / G28 / G29) plus the plan-5 smoke /
+perf gates through G35 are green at the final commit.
 
 ## Out of scope (plan-5)
 

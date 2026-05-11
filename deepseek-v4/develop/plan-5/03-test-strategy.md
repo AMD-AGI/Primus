@@ -2,10 +2,11 @@
 
 > Plan-5 reuses the test conventions from `../plan-4/03-test-strategy.md`.
 > Plan-5 is **measurement-driven**: every optimisation phase has a
-> baseline cost it is buying down (set in P28's report), and every
-> phase ships its own perf-budget gate. Correctness gates (G23 /
-> G24 / G25 / G26 / G27 / G28 / G29 / G30) ratchet — every plan-5
-> phase MUST keep them green. Plan-5 adds gates G31..G34b.
+> baseline cost it is buying down (set in P28's report or the
+> microbenchmark trail), and every phase ships its own perf-budget
+> gate. Correctness gates (G23 / G24 / G25 / G26 / G27 / G28 / G29 /
+> G30) ratchet — every plan-5 phase MUST keep them green. Plan-5 adds
+> gates G31..G35.
 
 ## Gate matrix
 
@@ -19,6 +20,7 @@
 | **G34** | P30 | runtime (GPU) | SWA K-loop pruning equivalence: dense `v4_attention` with kernel-native `swa_window` matches the existing additive-mask semantics, and HCA split-mask mode (`pool_mask + hca_local_seqlen`) matches the original full `cat([local_mask, pool_mask])` additive-mask semantics. Fast tier and release tier cover FWD + BWD, sink, bf16 tolerances, and `head_dim=512` V4-Flash / V4-Pro shapes. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p25_v4_attention_fwd.py` + `test_v4_p25_v4_attention_bwd.py` (`-m "not slow"` and `-m slow`) |
 | **G34a** | P30 | smoke + perf | TP=1 PP=1 EP=8 10-iter proxy smoke with `USE_V4_COMPILED_SINKHORN=True` and V4 Triton dense/CSA attention on. No NaN / Inf / banned warnings; fixed-seed `lm_loss` remains aligned with post-P29; capture a chrome trace and render `profile-after-p30-ep8-<YYYYMMDD>.{md,html}`. Perf gate is measured against post-P29: all five `_v4_attention_bwd_kernel` launches, including the two cr=128 HCA launches, drop materially and steady TFLOP/s/GPU improves. | `deepseek-v4/develop/progress/p30/run_smoke_v4_attention_swa_prune_ep8.sh` + `run_baseline_trace_ep8_p30.sh` + `deepseek-v4/develop/profile/profile-after-p30-ep8-<YYYYMMDD>.{md,html}` |
 | **G34b** | P31 | runtime + smoke + perf | CSA in-kernel top-K gather/scatter equivalence: `v4_csa_attention_from_pool(q, k_local, v_local, pool, topk_idxs, ...)` matches eager CSA with wrapper-side `torch.gather(pool, topk_idxs)` and autograd scatter to `dpool`. Fast and release tiers cover FWD + BWD, invalid `topk_idxs == -1`, duplicate top-K slots, sink on/off, fp32/bf16, and `head_dim=512`. Then rerun the EP8 proxy smoke/trace and render `profile-after-p31-ep8-<YYYYMMDD>.{md,html}`; perf gate is improvement vs P30b with no NaN / Inf / banned warnings. Follow-up CSA BWD tuning uses the standalone EP8-shape microbenchmark before any full-training trace. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p31_v4_csa_in_kernel_gather.py` + `deepseek-v4/develop/progress/p31/bench_csa_attention_ep8.py` + `deepseek-v4/develop/progress/p31/run_smoke_csa_in_kernel_gather_ep8.sh` + `run_baseline_trace_ep8_p31.sh` |
+| **G35** | P32 | runtime + perf (microbench) | Operator-microbenchmark-driven attention kernel speed-ups equivalence + perf: (1) plan-4 G23..G28 + P31 G34b fast/release ratchets stay green after each CSA FWD / V4 attention BWD / CSA BWD kernel change. (2) `progress/p31/bench_csa_attention_ep8.py` reports steady CSA FWD ≤ 6 ms and CSA BWD ≤ 15 ms at the proxy EP8 shape (`B=1, H=64, S=4096, D=512, P=1024, K_topk=512, swa=128, bf16, sink=on`). (3) `progress/p32/bench_v4_attention_ep8.py` (new) reports steady V4 attention BWD ≤ 15 ms for both cr=0 (dense SWA) and cr=128 (HCA split-mask) shapes at the same EP8 dims. (4) Post-P32 EP8 proxy trace renders `profile-after-p32-ep8-<YYYYMMDD>.{md,html}` and shows positive headline TFLOP/s/GPU vs P31b with no NaN / Inf / banned warnings. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p31_v4_csa_in_kernel_gather.py` + `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p25_v4_attention_{fwd,bwd}.py` + `deepseek-v4/develop/progress/p31/bench_csa_attention_ep8.py` + `deepseek-v4/develop/progress/p32/bench_v4_attention_ep8.py` + `deepseek-v4/develop/progress/p32/run_baseline_trace_ep8_p32.sh` + `develop/profile/profile-after-p32-ep8-<YYYYMMDD>.{md,html}` |
 
 ## Plan-4 ratchet (every plan-5 commit MUST keep these green)
 
@@ -101,13 +103,15 @@ G32 + G34 require GPU. The harness:
 
 ## Reporting hand-off
 
-Plan-5 closes after P31 with the latest EP8 proxy trace/report and
-the P31 entry in `../progress/status.md`. The plan-5 close-out note
-records:
+Plan-5 closes after P32 with the latest EP8 proxy trace/report, the
+P32 microbenchmark numbers, and the P32 entry in
+`../progress/status.md`. The plan-5 close-out note records:
 
-- Commit SHAs for P28 / P29 / P30 / P31.
+- Commit SHAs for P28 / P29 / P30 / P31 / P32.
 - The baseline → final TFLOP/s/GPU delta + per-phase share.
-- Per-phase gate totals (G31 / G32 / G33a / G33b / G34 / G34a / G34b) +
-  plan-4 ratchet totals.
+- Per-kernel microbenchmark deltas (CSA FWD, V4 attention BWD,
+  CSA BWD).
+- Per-phase gate totals (G31 / G32 / G33a / G33b / G34 / G34a /
+  G34b / G35) + plan-4 ratchet totals.
 - Follow-ups surfaced (FP8 / FP4 / mxfp4, multi-node EP, long-
   context, convergence, HF state-dict adapter).

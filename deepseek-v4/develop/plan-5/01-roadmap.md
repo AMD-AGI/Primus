@@ -1,6 +1,6 @@
 # 01 — Plan-5 Roadmap
 
-> Plan-5 is **strictly bounded** to four phases that take the V4-Flash
+> Plan-5 is **strictly bounded** to five phases that take the V4-Flash
 > single-node EP=8 training step from its current 17 TFLOP/s/GPU
 > steady-state (plan-4 P27 G30 smoke at `seq_length=128`) to a
 > measurable improvement at production-shape sequence length, by
@@ -23,7 +23,8 @@ canonical example.
 | **P28** | **V4-Flash proxy + EP=8 baseline trace + bottleneck report** | enablement | (1) `run_deepseek_v4_flash_proxy.sh` — wraps `run_deepseek_v4.sh` with a V4-Flash-shape proxy (8 layers, full V4-Flash widths: `hidden_size=4096, H=64, head_dim=512, num_experts=256, moe_router_topk=6, moe_ffn_hidden_size=2048, index_topk=512`, all four perf knobs on: `USE_V4_TRITON_ATTENTION=True`, `USE_V4_TRITON_CSA_ATTENTION=True`, `USE_TURBO_DEEPEP=True`, `TURBO_USE_GROUPED_MLP=True`); `seq_length` calibrated so MI355X HBM survives EP=8 (target `4096`; downscale if OOM with the chosen value documented in the report). (2) Chrome-trace capture for one active iteration (`PROFILE=True --profile_step_start 6 --profile_step_end 7`) under the proxy config. Raw trace JSON gitignored under `progress/p28/`; the proxy script + the report are committed. (3) Bottleneck analysis report at `develop/profile/profile-baseline-ep8-<date>.md` + `.html` covering: cold-iter vs steady-iter ms-per-iter, GPU vs CPU active / idle %, top-N kernels by total time, kernel launch count + average launch interval, attention-kernel time vs MoE time vs comm time, the small-op chain breakdown (which Python-side modules account for the kernel-launch tail), and a ranked bottleneck list. | Proxy script runs 10 iters EP=8 single-node with no NaN / Inf and no banned warnings (G31 smoke); trace JSON captured for iter 6→7; report committed; the report's bottleneck list is **the** input to P29 / P30 / P31 task-list refinement | not started |
 | **P29** | **Sinkhorn fp32 reduce — kill the dominant 7.6 s kernel (RESCOPED from "small-op fusion")** | core | RESCOPED at P28 close (commit `afd7ea59`): the seeded small-op fusion candidates (a..e) were de-scoped (CPU-bound floor 0.3 % at V4-Flash production widths, ≪ 10 % rule). Forensic trace dive (`progress/p29/refinement.md`) attributes 624 / 717 of the dominant `aten::sum` fp32 reduce launches (96 % by count, 99.95 % by time) to `primus/backends/megatron/core/transformer/hyper_connection.py:47 sinkhorn_normalize` — 39 reductions per call × 8 layers × 2 (FWD + BWD chain). Each reduce kernel runs at ~250 × over the memory-bound floor because HIP's default `reduce_kernel<512, 1, …>` is sized for huge reductions, and our `(1, 4096, 4, 4) → (1, 4096, 4, 1)` reduction has 4 elements / output. Fix: `torch.compile(fullgraph=True, dynamic=False)` wrapping `sinkhorn_normalize` (collapses 39 sums + 39 divides into one Inductor-generated Triton kernel; AOT-autograd handles BWD); fall back to a hand-Triton fused-Sinkhorn kernel if the post-P29 trace shows < 50 % drop in `aten::sum` kernel time. New gate G32 = numerical equivalence (FWD + BWD parity vs eager); G33a = proxy smoke; G33b = post-P29 trace + report. | (1) Each chosen fusion target passes its forward + backward equivalence gate at fast tier + release tier (`--run-slow` opt-in, mirrors plan-4 P27 G28). (2) End-to-end EP=8 smoke (G33) shows ≥ +X % TFLOP/s/GPU vs P28 baseline — target X is set in P28's report from the trace (typical floor: +10 % for fusion phases). (3) No regression on plan-4 G23 / G24 / G26 / G27 / G29. | not started |
 | **P30** | **V4 Triton attention kernel perf tuning** | core | (a) Per-shape autotune table for `BLOCK_M / BLOCK_N / num_warps / num_stages` keyed on `(H, head_dim, swa_window)`; (b) persistent kernel for FWD (one program per `(B*HQ)`, loop over m-tiles in-kernel — drops the per-tile launch overhead at long sequence lengths); (c) **HCA LSE-merge variant** of `v4_attention` that runs the SWA branch and the compressed-pool branch as two flash kernels and merges via online softmax (was a plan-4 follow-up, was deferred because the single-kernel-with-additive-bias was simpler; LSE-merge avoids materialising the `[Sq, Sk]` mask tensor at all). (d) In-kernel SWA mask path stays where it is — already lands in plan-4 P25; tuning only revisits if P28 surfaces SWA-mask CPU cost as a hot spot. | (1) FWD + BWD equivalence (plan-4 G23 / G24) still green at fast + release tier with the new tuning. (2) Attention-kernel time on the EP=8 trace drops by ≥ Y % — Y is set in P28's report. (3) HCA LSE-merge variant lands behind a `use_v4_attention_lse_merge` switch defaulting to `False`; new gate G34 asserts FWD + BWD equivalence to the single-kernel-with-additive-bias variant within the bf16 tolerance budget. | not started |
-| **P31** | **V4 Triton CSA kernel perf tuning** | core | (a) **In-kernel `topk_idxs` gather** for `v4_csa_attention` — replace the wrapper-side `pool[..., topk_idxs, :]` materialisation (which costs `B * S * K_topk * head_dim * 2` bytes per microbatch — 2 GiB at V4-Flash, 4 GiB at V4-Pro) with `tl.load` on `pool` driven by `topk_idxs` inside the K-tile loop. Wrapper-side gather stays in tree as the eager fallback. (b) Better K-tile prefetching / unrolling for the per-row design that plan-4 P26 shipped. | (1) FWD + BWD equivalence (plan-4 G26 / G27) still green at fast + release tier with the in-kernel gather. (2) CSA-kernel time on the EP=8 trace drops by ≥ Z % — Z is set in P28's report. (3) Wrapper-side gather peak HBM usage drops to ≈ 0 (the `[B, H, Sq, K, D]` tensor stops being materialised). | not started |
+| **P31** | **V4 Triton CSA kernel perf tuning** | core | (a) **In-kernel `topk_idxs` gather** for `v4_csa_attention` — replace the wrapper-side `pool[..., topk_idxs, :]` materialisation (which costs `B * S * K_topk * head_dim * 2` bytes per microbatch — 2 GiB at V4-Flash, 4 GiB at V4-Pro) with `tl.load` on `pool` driven by `topk_idxs` inside the K-tile loop. Wrapper-side gather stays in tree as the eager fallback. (b) Better K-tile prefetching / unrolling for the per-row design that plan-4 P26 shipped. (c) **CSA BWD redesign** — split into dense local + sparse head-block kernels (closes at < 50 ms BWD on the EP8-shape microbenchmark). | (1) FWD + BWD equivalence (plan-4 G26 / G27) still green at fast + release tier with the in-kernel gather. (2) CSA-kernel time on the EP=8 trace drops by ≥ Z % — Z is set in P28's report. (3) Wrapper-side gather peak HBM usage drops to ≈ 0 (the `[B, H, Sq, K, D]` tensor stops being materialised). | done |
+| **P32** | **Operator-microbenchmark-driven attention kernel speed-ups** | core | (a) **CSA FWD rewrite to multi-row / tensor-core tile** — replace the per-row `tl.sum` design (one program per `(b, qhid, m)`) with FlashAttention-style multi-row `tl.dot` for the local branch, plus a head-block tile sparse branch that shares the per-query top-K pool gather across all `H` heads. Merge the two branches via online softmax (LSE merge or single-kernel join). Target: drive CSA FWD on `progress/p32/bench_v4_attention_ep8.py` (per CSA layer at proxy shape, sink on, swa=128, K_topk=512) from **~41 ms → < 6 ms**. (b) **V4 attention BWD split-kernel design** — drop atomic-add contention by splitting the monolithic BWD into a parallel-over-`m` dQ kernel and a parallel-over-`n` dK/dV kernel (matches FlashAttention-2 BWD), keep the existing SWA / HCA split-mask K-loop pruning. Target: drive the V4 attention BWD on the new benchmark (cr=0 and cr=128 shapes) from **~31 ms → < 15 ms**. (c) **CSA BWD reuses (b)** for its local branch, plus pool-sparse kernel `BLOCK_K` / `BLOCK_H` tuning for the sparse branch. Target: drive CSA BWD from **~26 ms → < 15 ms**. (d) **Microbenchmarks** — add `progress/p32/bench_v4_attention_ep8.py` (mirrors `progress/p31/bench_csa_attention_ep8.py`); both benchmarks exercise the production EP8 shape per kernel without launching full training. | (1) Plan-4 G23..G28 ratchet + P31 pool/topk fast and release gates stay green at each kernel change. (2) `progress/p32/bench_v4_attention_ep8.py` (cr=0, cr=128) reports BWD < 15 ms; `progress/p31/bench_csa_attention_ep8.py` reports FWD < 6 ms and BWD < 15 ms. (3) EP8 proxy trace after P32 shows positive headline throughput vs the P31b baseline and no banned warnings. | not started |
 
 ## Dependency Graph
 
@@ -33,26 +34,33 @@ P28[P28 Proxy + EP=8 baseline trace + bottleneck report]
 P29[P29 Sinkhorn reduce kill]
 P30[P30 V4 Triton attention perf]
 P31[P31 V4 Triton CSA perf]
+P32[P32 Operator-microbench-driven attention speed-ups]
 
 P28 --> P29
 P28 --> P30
 P28 --> P31
+P30 --> P32
+P31 --> P32
 ```
 
-P28 is the input to every other phase — its bottleneck list picks
-which fusion / autotune targets are in scope. P29, P30, and P31 are
-independent and can land in any order; the ranking comes from the P28
-report.
+P28 is the input to P29 / P30 / P31 — its bottleneck list picks which
+fusion / autotune targets are in scope. P29, P30, and P31 are
+independent and can land in any order. P32 takes the post-P31b
+baseline and the CSA microbenchmark forward to a tighter set of
+single-kernel targets (CSA FWD, V4 attention BWD, CSA BWD); it is
+trace-informed but **microbenchmark-driven** so kernel iteration does
+not require launching full training each time.
 
 ## Milestones
 
 | Milestone | Scope | Phases | Status |
 | --- | --- | --- | --- |
-| **M0: Plan-5 locked** | Plan docs + status.md tracking opened (Phase 28–31) | (kick-off, no commit) | in progress |
-| **M1: Baseline trace + report** | `run_deepseek_v4_flash_proxy.sh` lands; EP=8 trace captured at production V4-Flash widths; bottleneck report (md + html) under `develop/profile/profile-baseline-*` committed | P28 | not started |
-| **M2: Sinkhorn reduce killed** | RESCOPED from "Small-op tail closed". `sinkhorn_normalize` torch.compile path lands behind `use_v4_compiled_sinkhorn` switch; G32 (FWD + BWD parity) green; G33a (smoke) green; G33b (proxy trace) shows ≥ 50 % drop in `aten::sum` fp32 reduce kernel time (budget X1 from P28). | P29 | not started |
-| **M3: Attention kernels tuned** | Per-shape autotune lands; HCA LSE-merge variant green behind switch; attention-kernel time on the trace drops by ≥ Y % | P30 | not started |
-| **M4: CSA kernel tuned** | In-kernel `topk_idxs` gather lands behind switch; CSA-kernel time on the trace drops by ≥ Z %; wrapper gather peak HBM ≈ 0 | P31 | not started |
+| **M0: Plan-5 locked** | Plan docs + status.md tracking opened (Phase 28–32) | (kick-off, no commit) | in progress |
+| **M1: Baseline trace + report** | `run_deepseek_v4_flash_proxy.sh` lands; EP=8 trace captured at production V4-Flash widths; bottleneck report (md + html) under `develop/profile/profile-baseline-*` committed | P28 | done |
+| **M2: Sinkhorn reduce killed** | RESCOPED from "Small-op tail closed". `sinkhorn_normalize` torch.compile path lands behind `use_v4_compiled_sinkhorn` switch; G32 (FWD + BWD parity) green; G33a (smoke) green; G33b (proxy trace) shows ≥ 50 % drop in `aten::sum` fp32 reduce kernel time (budget X1 from P28). | P29 | done |
+| **M3: Attention kernels tuned** | Per-shape autotune lands; HCA LSE-merge variant green behind switch; attention-kernel time on the trace drops by ≥ Y % | P30 | done |
+| **M4: CSA kernel tuned** | In-kernel `topk_idxs` gather lands behind switch; CSA-kernel time on the trace drops by ≥ Z %; wrapper gather peak HBM ≈ 0 | P31 | done |
+| **M5: Operator-bench targets met** | `bench_v4_attention_ep8.py` lands; CSA FWD ≤ 6 ms, V4 attention BWD ≤ 15 ms, CSA BWD ≤ 15 ms at EP=8 production shape; plan-4 + P31 ratchet still green | P32 | not started |
 
 ## Top Risks
 

@@ -3,9 +3,9 @@
 > Each phase below lists (a) the user request that motivates it, (b)
 > the concrete tasks, (c) the design notes that the implementer must
 > keep in mind, and (d) the edge cases / risks. Test gates live in
-> `03-test-strategy.md`. P29 / P30 / P31 task lists are
+> `03-test-strategy.md`. P29 / P30 / P31 / P32 task lists are
 > **seeded**; each phase opens with a "task list refinement" pass
-> that revises the breakdown against the P28 trace.
+> that revises the breakdown against the latest trace / bench data.
 
 ## Phase 28 — V4-Flash proxy + EP=8 baseline trace + bottleneck report
 
@@ -593,3 +593,181 @@ head-block sparse kernel for `dq + dpool`. The standalone EP8-shape
 benchmark reports **35.43 ms** BWD-only, meeting the <50 ms kernel target.
 The same pass also fixed the benchmark so the BWD number excludes forward
 execution.
+
+---
+
+## Phase 32 — Operator-microbenchmark-driven attention kernel speed-ups
+
+> "添加phase32，继续优化v4 triton attention和v4 triton csa attention的
+> 性能。优化目标：v4 csa attention forward，当前在41ms左右，需要优化到
+> 6ms以内。v4 attention backward，当前在31ms左右，需要优化到15ms以内。
+> v4 csa attention backward，当前在26ms左右，需要优化到15ms以内。优化
+> 可以使用类似 `progress/p31/bench_csa_attention_ep8.py` 单独的算子
+> benchmark来进行测试，可以再添加一个attention的版本，不用每次都跑proxy
+> model train来测试算子性能，这样比较快。" — user, plan-5 P32 kick-off.
+
+P32 closes the remaining V4 Triton attention slice of the EP8 proxy
+trace. Post-P31b, three kernel families still dominate the attention
+budget at the production V4-Flash EP8 shape (`B=1, H=64, S=4096,
+D=512, swa=128, sink=on, bf16`):
+
+- **CSA FWD (`_v4_csa_attention_pool_fwd_kernel`)** — the per-row
+  design (one program per `(b, qhid, m)`, `tl.sum(k * q, axis=1)`)
+  cannot reach tensor-core utilisation because there is only one
+  query row per program. Benchmark on
+  `progress/p31/bench_csa_attention_ep8.py`: **~41 ms** per CSA layer.
+  Target: **< 6 ms**.
+- **V4 attention BWD (`_v4_attention_bwd_kernel`)** — monolithic
+  single-kernel design parallelises over m-blocks and atomic-adds
+  `dK` / `dV` across `H` heads × multiple m-blocks. EP8 trace shows
+  each of the five launches at **~31 ms**. Target: **< 15 ms**.
+- **CSA BWD (`_v4_csa_attention_pool_sparse_bwd_kernel` +
+  `_v4_attention_bwd_kernel` local split)** — already split after
+  P31b; remaining cost is sparse-branch arithmetic intensity + local
+  branch atomic contention. Benchmark (EP8 shape): **~26 ms**.
+  Target: **< 15 ms**.
+
+The cure for all three is the same FlashAttention-2 lesson:
+multi-row tiles + `tl.dot` + remove cross-program atomics. P32 lands
+the kernel rewrites that put those wins in tree, plus a new V4
+attention microbenchmark so kernel iteration does not require a full
+EP8 training round-trip.
+
+### Tasks
+
+0. **Task list refinement** — read the post-P31b CSA / V4 attention
+   shape data from `progress/p31/bench_csa_attention_ep8.py` and the
+   latest EP8 trace; pin the three single-kernel targets (CSA FWD
+   < 6 ms, V4 attention BWD < 15 ms, CSA BWD < 15 ms) and the per-
+   target hypothesis (multi-row tile / split BWD / sparse tuning).
+   Refinement note lands at `progress/p32/refinement.md`.
+1. **`progress/p32/bench_v4_attention_ep8.py`** — mirror
+   `progress/p31/bench_csa_attention_ep8.py` for the dense / HCA
+   `v4_attention` Triton path. Covers FWD + BWD-only timing for both
+   `compress_ratio=0` (dense SWA) and `compress_ratio=128` (HCA
+   split-mask) at the proxy EP8 shape. Argparse interface mirrors the
+   CSA bench (`--batch`, `--heads`, `--seq-len`, `--head-dim`,
+   `--swa-window`, `--dtype`, `--iters`, `--warmup`, `--profile`,
+   `--trace-dir`, `--json-out`, `--no-sink`, `--mode {dense, hca}`).
+2. **CSA FWD multi-row / tensor-core tile rewrite** — replace
+   `_v4_csa_attention_pool_fwd_kernel`'s per-row design with a
+   FlashAttention-2 style multi-row tile for the local SWA branch
+   (`BLOCK_M=32`, `tl.dot(Q, K.T)`), plus either:
+
+   - **(2a) single-kernel join** — keep the existing program grid
+     `(cdiv(Sq, BLOCK_M), B * HQ)`, run the local SWA tile loop
+     first, then walk the per-row `topk_idxs` for the sparse branch
+     under the same online softmax. Per-row sparse load stays as the
+     `tl.load(POOL, topk_idx)` scatter; only the local tile gets
+     multi-row treatment. Maintenance cost: low (one kernel).
+   - **(2b) LSE-merge split** — run a dense Triton attention for the
+     local branch and a separate head-block sparse kernel for the
+     pool branch (head-block sharing the per-query top-K gather
+     across all `H` heads), then merge their `(out, lse)` via a
+     small online-softmax merge kernel. Sink applied to the merged
+     result. Maintenance cost: higher (three kernels) but unlocks
+     head-block tile shared-pool reads.
+
+   P32 ships (2a) first; if benchmark falls short of the < 6 ms
+   target, escalate to (2b). Both keep the existing
+   `v4_csa_attention_from_pool` Python API; the kernel rewrites stay
+   behind that boundary.
+3. **V4 attention BWD split-kernel rewrite** — split
+   `_v4_attention_bwd_kernel` into two parallelisation modes:
+
+   - **dQ kernel** — parallelise over m-blocks (same as today),
+     re-materialise `P = exp(qk - lse)` per-tile, accumulate `dQ`
+     in registers, write at end. Computes `dsink` here (it reuses
+     the same `P_sink = exp(sink_h - lse)`). No atomics for `dQ`.
+   - **dK/dV kernel** — parallelise over n-blocks (one program per
+     `n_block × batch × head_k`), iterate m-blocks per program,
+     re-materialise `P` and `dS`, accumulate `dK` / `dV` in
+     registers, write at end. No atomics for `dK` / `dV`.
+
+   Total compute doubles (`P` re-materialised twice per `(m, n)`
+   tile) but atomic contention disappears. On MI355 atomic adds are
+   slow relative to register accumulation, so the split design is a
+   net win for `H=64` × SWA-window-pruned tile counts. Both kernels
+   keep the existing SWA K-loop pruning + HCA split-mask mode from
+   P30. The pre-pass `D` kernel stays as-is.
+4. **CSA BWD picks up the V4 attention BWD split for its local
+   branch** — the CSA BWD launcher already routes the local SWA
+   contribution through `_v4_attention_bwd_kernel`; pointing it at
+   the new split kernels also lowers CSA BWD. The sparse branch
+   stays on `_v4_csa_attention_pool_sparse_bwd_kernel` with
+   `BLOCK_K` / `BLOCK_H` re-tuned against the new benchmark.
+5. **Unit-test ratchet** — re-run plan-4 G23..G28 fast + release
+   tiers, P31 G34b fast + release pool/topk tests, and P25
+   dispatch/log tests after each kernel change. Every kernel rewrite
+   is committed only after both fast and release tiers stay green.
+6. **EP8 proxy trace + profile report** — once all three targets are
+   met on the microbenchmarks, capture an EP8 proxy trace with
+   `progress/p32/run_baseline_trace_ep8_p32.sh` and render
+   `develop/profile/profile-after-p32-ep8-<YYYYMMDD>.{md,html}`.
+   Update `develop/perf/attention_perf.md` + `proxy_ep8.md`.
+7. **P32 summary** — `progress/p32/p32-summary.md` follows the
+   project-wide eight-section per-phase summary format (rule R2.1).
+
+### Design notes
+
+- **Why benchmark first.** Running the proxy EP8 training for every
+  kernel experiment costs ~10 minutes per iteration. The
+  microbenchmarks (CSA + V4 attention) finish each measurement in
+  seconds, so the optimisation loop is bound only by kernel
+  compilation time. Trace capture only happens at the end to confirm
+  the proxy-level delta.
+- **Multi-row tile vs SMEM at `head_dim=512`.** The local SWA
+  branch with `BLOCK_M=BLOCK_N=32`, bf16 inputs uses
+  `Q + K + V = 3 × 32 × 512 × 2 = 96 KiB` per program plus
+  `[BLOCK_M, BLOCK_N]` qk / p tiles in fp32 — comfortably under
+  MI355's 160 KiB SMEM budget. The sparse branch, if it stays on
+  the per-row design, only allocates one `[BLOCK_K=32, D=512]` pool
+  tile (32 KiB).
+- **CSA FWD per-row → multi-row migration.** The `tl.sum(k * q,
+  axis=1)` per-row dot product on AMD ROCm Triton cannot use the
+  tensor cores. Switching to `tl.dot(Q, tl.trans(K))` with
+  `BLOCK_M=32, BLOCK_N=32, head_dim=512` gives the same 4096
+  visible local pairs at full MFMA throughput.
+- **BWD split atomics cost vs recompute cost.** Re-materialising
+  `P` twice per `(m, n)` tile costs one extra `tl.dot(Q, K.T)` and
+  one `tl.exp` per tile. For SWA window = 128 with `BLOCK_M=BLOCK_N=32`,
+  each `(m, n)` tile is hit by both kernels exactly once → 2x
+  `Q @ K.T` work. Atomic-add into a 64 KiB `dK` / `dV` tile across
+  `H=64` heads × `4` m-blocks per K position is ~256 atomic ops per
+  K position; on MI355 each atomic_add is ~10 cycles, and these are
+  serialised inside the cache, so removing them is a strict win.
+- **Sparse BWD ceiling.** The sparse branch already uses head-block
+  tiling and `tl.dot` (P31 follow-up). Remaining knobs are
+  `BLOCK_K`, `BLOCK_H`, `num_warps`, and (if memory budget allows)
+  software pipelined K-tile loads.
+
+### Edge cases
+
+- **Numerics: bf16 BWD tolerance.** The split-BWD design re-issues
+  the QK^T matmul; bit-for-bit drift is expected within the existing
+  G24 / G27 bf16 release-tier budget (`dq / dk / dv atol = 2e-1`,
+  `dsink atol = 5e-2`). Tests must pass the existing budget; no
+  budget relaxation in P32.
+- **HCA split-mask BWD.** The dK/dV kernel must iterate the same
+  `(local SWA window, pool keys)` set the FWD kernel uses; the P30
+  split-mask FWD path runs two K loops (pruned local SWA + pool
+  suffix). The new dK/dV kernel mirrors this.
+- **CSA FWD sink interaction.** The single-kernel join (2a) shares
+  the sink contribution with the local branch's online softmax. If
+  P32 escalates to the LSE-merge variant (2b), sink is applied
+  AFTER the merge so the final softmax denominator is correct.
+
+### P32 close-out hand-off
+
+Closes when:
+
+1. `progress/p31/bench_csa_attention_ep8.py` reports FWD ≤ 6 ms and
+   BWD ≤ 15 ms at the EP8 production shape.
+2. `progress/p32/bench_v4_attention_ep8.py` reports BWD ≤ 15 ms for
+   both cr=0 and cr=128 shapes.
+3. Plan-4 G23..G28 + P31 G34b fast + release tiers all pass.
+4. EP8 proxy trace + report show positive headline TFLOP/s/GPU vs
+   P31b (`709.3` baseline from `develop/perf/proxy_ep8.md`) and no
+   banned warnings.
+5. `develop/perf/attention_perf.md` + `proxy_ep8.md` updated with
+   the P32 row.
