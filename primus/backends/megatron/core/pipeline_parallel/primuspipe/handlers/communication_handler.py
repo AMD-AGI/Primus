@@ -21,6 +21,22 @@ COMMUNICATION_NODE_CACHE = []
 SEND_NODE_CACHE = [[], []]  # send_fwd_nodes, send_bwd_nodes
 
 
+def reset_pp_comm_caches():
+    """Clear module-level pipeline-parallel communication caches.
+
+    These caches retain references to ``SchedulerNode`` objects (whose ``args``
+    hold GPU send/recv buffers) across handler calls. They are normally drained
+    inside ``batch_p2p_communication_handler``, but a step may early-return
+    before that drain runs, leaving stale entries that pin GPU memory until the
+    next cross-rank communication. Call this once per training step (at the
+    start of ``PrimusPipelineParallelLauncher.run``) to ensure step-to-step
+    isolation.
+    """
+    COMMUNICATION_NODE_CACHE.clear()
+    SEND_NODE_CACHE[0].clear()
+    SEND_NODE_CACHE[1].clear()
+
+
 def _async_send_recv_op(
     *,
     send_prev_nodes: Optional[list[SchedulerNode]],

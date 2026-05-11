@@ -24,14 +24,23 @@ except (ImportError, ModuleNotFoundError):
     # Transformer Engine not found
     pass
 
-# Check if Primus-Turbo is installed
+# Check if Primus-Turbo is installed.
+#
+# Probe the *deep* import path that the HAVE_TURBO branch below actually uses.
+# A shallow ``import primus_turbo`` succeeds even when ``primus_turbo.pytorch``
+# fails to initialize (e.g. when its transitive ``aiter`` import is broken in
+# the runtime environment), which would otherwise let us enter the HAVE_TURBO
+# branch and crash at module-load time when the deep import is performed.
 HAVE_TURBO = False
 try:
-    import primus_turbo  # pylint: disable=W0611
+    from primus_turbo.pytorch.core.low_precision import (  # noqa: F401  pylint: disable=W0611
+        ScaleDtype,
+        ScalingGranularity,
+    )
 
     HAVE_TURBO = True
 except (ImportError, ModuleNotFoundError):
-    # Primus-Turbo not found
+    # Primus-Turbo not importable (not installed, or a transitive dep is broken).
     pass
 
 

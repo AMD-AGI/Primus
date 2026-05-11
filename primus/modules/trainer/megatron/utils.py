@@ -343,6 +343,39 @@ def fwd_bwd_wrapper(func, mode, minibatch=None, chunk=None):
     return wrapper
 
 
+def combined_fwd_bwd_wrapper(func, fwd_minibatch, fwd_chunk, bwd_minibatch, bwd_chunk):
+    """Record a single combined forward+backward call as both an ``fwd`` event
+    and a ``bwd`` event sharing the same ``[start, end]`` interval.
+
+    Used by ``megatron_combined_fwd_bkwd_handler`` so that nodes collapsed into
+    a combined FB group still appear in the dump_pp_data output. Without this
+    the visualizer's per-rank F/B/W totals are heavily under-counted on ranks
+    that hit the steady state (the F and B halves are interleaved inside
+    ``combined_forward_backward_step`` and cannot be timed separately).
+    """
+
+    def wrapper(*args, **kwargs):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        start.record()
+        res = func(*args, **kwargs)
+        end.record()
+
+        global _GLOBAL_PP_VIS_EVENTS_PER_ITER
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_start"].append(start)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_end"].append(end)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_minibatch"].append(fwd_minibatch)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_chunk"].append(fwd_chunk)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_start"].append(start)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_end"].append(end)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_minibatch"].append(bwd_minibatch)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_chunk"].append(bwd_chunk)
+        return res
+
+    return wrapper
+
+
 def set_dump_pp_data_patch():
     from megatron.core.pipeline_parallel import schedules
 
