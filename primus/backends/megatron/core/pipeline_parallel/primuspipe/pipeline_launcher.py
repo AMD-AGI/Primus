@@ -24,6 +24,9 @@ from megatron.training import get_args
 from primus.backends.megatron.core.pipeline_parallel.primuspipe.handlers import (
     megatron_primuspipe_handler_dict,
 )
+from primus.backends.megatron.core.pipeline_parallel.primuspipe.handlers.communication_handler import (
+    reset_pp_comm_caches,
+)
 from primus.core.pipeline_parallel.handler.wgrad_handler import WGradRunningCache
 from primus.core.pipeline_parallel.scheduler.schedule_table_factory import (
     produce_schedule_instance,
@@ -50,13 +53,14 @@ class PrimusPipelineParallelLauncher:
             "1f1b",
             "1f1b-interleaved",
             "zero-bubble",
+            "zero-bubble-heuristic",
             "zbv-formatted",
             "v-half",
             "v-min",
         )
 
-        if self.pp_algorithm in ("1f1b", "zero-bubble"):
-            assert self.vpp_size == 1, "1f1b and zero-bubble require vpp_size to be 1"
+        if self.pp_algorithm in ("1f1b", "zero-bubble", "zero-bubble-heuristic"):
+            assert self.vpp_size == 1, f"{self.pp_algorithm} requires vpp_size to be 1"
         if self.pp_algorithm in ("zbv-formatted", "v-half", "v-min"):
             assert self.vpp_size == 2, "zbv-formatted, v-half, and v-min require vpp_size to be 2"
 
@@ -150,16 +154,42 @@ class PrimusPipelineParallelLauncher:
         adjust_tensor_shapes_fn: Optional[Callable] = None,
         p2p_communicator: Optional[P2PCommunicator] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        force_all_reduce: Optional[bool] = False,
     ):
+        # Reset per-step state so step N+1 does not inherit GPU-tensor-holding
+        # references from step N. ``forward_data_store`` accumulates loss dicts
+        # on the last pipeline stage; the comm caches (COMMUNICATION_NODE_CACHE
+        # / SEND_NODE_CACHE) may retain SchedulerNode references whose
+        # ``args["send_buffers"]`` / ``args["recv_buffers"]`` pin GPU memory
+        # whenever the previous step early-returned in
+        # ``batch_p2p_communication_handler``.
+        self.forward_data_store.clear()
+        reset_pp_comm_caches()
+
+        args = get_args()
         kwargs = {}
         if self.pp_algorithm == "zbv-formatted":
-            kwargs["combined_forward_backward"] = get_args().overlap_moe_expert_parallel_comm
+            kwargs["combined_forward_backward"] = args.overlap_moe_expert_parallel_comm
 
-        offload = get_args().offload
+        offload = args.offload
         if self.pp_algorithm in ("zbv-formatted", "v-half", "v-min"):
             kwargs["offload"] = offload
         else:
             assert not offload, f"offload is not supported for {self.pp_algorithm} pp algorithm"
+
+        if self.pp_algorithm == "zero-bubble-heuristic":
+            pp_max_mem = getattr(args, "pp_max_mem", None)
+            if pp_max_mem is not None:
+                kwargs["max_mem"] = pp_max_mem
+            pp_cost_f = getattr(args, "pp_cost_f", None)
+            if pp_cost_f is not None:
+                kwargs["cost_f"] = pp_cost_f
+            pp_cost_b = getattr(args, "pp_cost_b", None)
+            if pp_cost_b is not None:
+                kwargs["cost_b"] = pp_cost_b
+            pp_cost_w = getattr(args, "pp_cost_w", None)
+            if pp_cost_w is not None:
+                kwargs["cost_w"] = pp_cost_w
 
         self.schedule_instance = produce_schedule_instance(
             self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches, **kwargs
@@ -278,7 +308,12 @@ class PrimusPipelineParallelLauncher:
                 node.args["send_tensor_shapes"] = send_tensor_shapes
                 node.args["pp_group"] = pg_collection.pp
 
-        self.schedule_runner.run(self.schedule_table, self.pp_rank)
+        if args.dump_pp_data:
+            from primus.modules.trainer.megatron.utils import schedule_wrapper
+
+            schedule_wrapper(self.schedule_runner.run)(self.schedule_table, self.pp_rank)
+        else:
+            self.schedule_runner.run(self.schedule_table, self.pp_rank)
 
         # Launch any remaining grad reductions
         if no_sync_context is not None:
@@ -301,6 +336,7 @@ class PrimusPipelineParallelLauncher:
                 model,
                 total_num_tokens if config.calculate_per_token_loss else None,
                 pg_collection=pg_collection,
+                force_all_reduce=force_all_reduce,
             )
 
         assert WGradRunningCache.is_empty(), "WGradRunningCache is not empty"

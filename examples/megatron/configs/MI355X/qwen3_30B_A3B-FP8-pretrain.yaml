@@ -56,7 +56,15 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      gradient_accumulation_fusion: true
+      # optimizer
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
 
       # ckpt
       finetune: false
@@ -76,6 +84,7 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false # bug
 
       # deepep
       use_turbo_deepep: true
@@ -83,7 +92,7 @@ modules:
       moe_router_dtype: fp32
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
+      turbo_deepep_num_cu: 80
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
@@ -91,9 +100,10 @@ modules:
       turbo_sync_free_moe_stage: 1
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
+      gradient_accumulation_fusion: true

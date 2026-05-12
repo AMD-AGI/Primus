@@ -1,0 +1,11 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 4 Scout 17B-16E training"
+
+model:
+  name: "llama4"
+  flavor: "17bx16e"
+  hf_assets_path: "meta-llama/Llama-4-Scout-17B-16E"
+  converters:
+    - primus_turbo
+    - quantize.linear.float8

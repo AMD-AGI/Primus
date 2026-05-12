@@ -6,7 +6,7 @@ on:
     - cron: '0 16 * * *'
 
 env:
-  PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
+  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:

@@ -86,7 +86,7 @@ For TorchTitan, there are three layers of YAML involved:
 
 At runtime:
 
-- `modules.pre_trainer.model: llama3.1_8B.yaml` is resolved as  
+- `modules.pre_trainer.model: llama3.1_8B.yaml` is resolved as
   `primus/configs/models/torchtitan/llama3.1_8B.yaml`.
 - The TorchTitan launcher reads the `job` and `model` sections and wires up
   the actual PyTorch model + training loop.
@@ -277,4 +277,3 @@ hooked up correctly.
 Once these steps are done, your new TorchTitan model config behaves like any
 other TorchTitan model in Primus and can be used in experiments, sweeps,
 and CI.
-

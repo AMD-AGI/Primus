@@ -1,6 +1,6 @@
 patch_primus_pipeline: false
 
-pp_algorithm: "1f1b-interleaved" # "1f1b", "1f1b-interleaved", "zero-bubble", "zbv-formatted", "v-half", "v-min"
+pp_algorithm: "1f1b-interleaved" # "1f1b", "1f1b-interleaved", "zero-bubble", "zero-bubble-heuristic", "zbv-formatted", "v-half", "v-min"
 
 communication_method: "async_p2p" # "async_p2p", "batch_p2p"
 
@@ -9,3 +9,9 @@ debug_scheduler_table: false
 offload: false
 
 offload_ops: "" # attn |(Not support yet) basic_gemm, row_parallel_gemm, column_parallel_gemm, grouped_linear
+
+# zero-bubble-heuristic specific configs
+pp_max_mem: null    # Max activation memory per stage (null = unlimited)
+pp_cost_f: null     # Forward cost per stage (scalar or list, null = default 1000)
+pp_cost_b: null     # Backward cost per stage (scalar or list, null = default 1000)
+pp_cost_w: null     # W-grad cost per stage (scalar or list, null = default 1000)

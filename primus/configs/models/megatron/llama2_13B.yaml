@@ -1,0 +1,12 @@
+extends:
+  - llama2_base.yaml
+
+tokenizer_type: Llama2Tokenizer
+tokenizer_model: meta-llama/Llama-2-13b-hf
+
+group_query_attention: false
+
+ffn_hidden_size: 13824
+hidden_size: 5120
+num_attention_heads: 40
+num_layers: 40

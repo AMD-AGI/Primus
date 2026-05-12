@@ -5,15 +5,11 @@
 ###############################################################################
 
 import os
-import subprocess
-import sys
-import time
 
 import pytest
 from absl.testing import absltest
 
-from primus.core.utils import logger
-from tests.utils import PrimusUT
+from tests.utils import PrimusUT, run_training_script
 
 SKIP_TEST = os.getenv("JAX_SKIP_UT", "0") == "1"
 
@@ -36,49 +32,11 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_maxtext_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
-    do_print_at_runtime = True
-    run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
-    run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
-
     cmd = ["bash", shell_entry]
     if extra_args:
         cmd.extend(extra_args)
 
-    try:
-        logger.info(f"[{tag}] Begin MaxText run...")
-        start = time.time()
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=run_stdout,
-            stderr=run_stderr,
-            text=True,
-            env=env,
-        )
-        logger.info(f"[{tag}] End run, time={time.time() - start:.3f} s")
-
-        with open(train_log_path, "r") as f:
-            stdout_output = f.read()
-
-        return stdout_output, ""
-
-    except subprocess.CalledProcessError as e:
-        stderr_output = e.stderr or ""
-        stdout_output = e.stdout or ""
-        if os.path.exists(train_log_path):
-            try:
-                with open(train_log_path, "r") as f:
-                    stdout_output = f.read()
-            except Exception as log_err:
-                logger.warning(f"[{tag}] Failed to read train log: {log_err}")
-
-        if "after training is done" in stdout_output:
-            logger.warning(f"[{tag}] Training likely succeeded despite return code != 0.")
-            logger.warning(f"stderr excerpt:\n{stderr_output[:1000]}")
-        else:
-            raise AssertionError(f"Shell script failed: {stderr_output.strip()}")
-
-    return stdout_output, stderr_output
+    return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
 class TestMaxTextTrainer(PrimusUT):

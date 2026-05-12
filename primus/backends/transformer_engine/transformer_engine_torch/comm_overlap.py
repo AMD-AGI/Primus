@@ -95,10 +95,17 @@ if is_te_min_version("2.0"):
     )
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-    from transformer_engine.pytorch.tensor.quantized_tensor import (
-        QuantizedTensor,
-        Quantizer,
-    )
+
+    try:
+        from transformer_engine.pytorch.tensor.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
+    except ModuleNotFoundError:
+        from transformer_engine.pytorch.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
 
     class CommOverlapBase:
         def __init__(self, buffer_shape: List[int], buffer_dtype: torch.dtype, group_name: str, tp_size: int):
