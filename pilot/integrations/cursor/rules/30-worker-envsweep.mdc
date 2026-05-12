@@ -19,6 +19,9 @@ Only when:
 
 ## Inputs
 
+- `session_id`: from `tuning_state.yaml`.
+- `round_id`: outer-loop round at which this sweep fires (used to bucket
+  the result so multiple sweeps across rounds coexist).
 - `base_plan_ref`: the locked structural baseline.
 - `candidate_envs`: candidate flag list derived from
   `DiagnosisReport.env_suspect`.
@@ -44,11 +47,17 @@ Per-call hard caps (per `envsweep.md`): **≤ 5 flags, ≤ 8 combinations,
 
 ## Output contract
 
-Write an `EnvSweepResult` (§8.5) to:
+The trace dir is taken from `tuning.yaml::stages.env_sweep.dir` (defaults
+to `trace/env_sweep`), anchored under `log_dir_prefix = state/<session_id>`.
+Bucket per round so multiple sweeps coexist. Write an `EnvSweepResult`
+(`pilot/schemas/env_sweep_result.schema.json`) to:
 
 ```
-pilot/state/round_<N>/env_sweep_<sweep_id>.yaml
+state/<session_id>/trace/env_sweep/r<round_id>/result.yaml
 ```
+
+(no `pilot/state/round_<N>/env_sweep_<sweep_id>.yaml` segment — the round
+sub-dir IS the slot, one ENV_SWEEP per round.)
 
 Return:
 
@@ -57,7 +66,7 @@ stage: ENV_SWEEP
 status: success
 artifacts:
   - kind: EnvSweepResult
-    ref: pilot/state/round_<N>/env_sweep_<id>.yaml
+    ref: state/<session_id>/trace/env_sweep/r<round_id>/result.yaml
 summary:
   headline: "best_delta=+<x>%, merged <K> flags into baseline"
   key_metrics:

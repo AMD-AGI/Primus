@@ -2,7 +2,6 @@
 
 **Status**: PREFLIGHT row v1; remaining stages stub
 **Read by**: Orchestrator (per `prompts/orchestrator.md` reading scope)
-**Anchors**: README §3.1 main flow · §12.2 failure paths · §S1 calibration interaction
 
 This document is the **sole authority** for Orchestrator routing decisions. Each stage row defines: trigger / inputs / produces / valid next states / on_fail mapping / counts_against_budget.
 

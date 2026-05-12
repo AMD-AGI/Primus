@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/knowledge_draft.schema.json",
   "title": "KnowledgeDraft",
-  "description": "LLM-emitted draft, written ONLY to state/knowledge_drafts/. Curator promotes to KnowledgeEntry via PR. See README.supplements.md §S4.2.",
+  "description": "LLM-emitted draft, written ONLY to state/knowledge_drafts/. Curator promotes to KnowledgeEntry via PR.",
   "x-status": "stub",
   "type": "object",
   "required": ["draft_id", "draft_kind", "binding", "claim", "evidence"],

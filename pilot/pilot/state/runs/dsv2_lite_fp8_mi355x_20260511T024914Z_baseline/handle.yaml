@@ -1,0 +1,52 @@
+schema_version: '1.0'
+run_id: dsv2_lite_fp8_mi355x_20260511T024914Z_baseline
+created_at: '2026-05-11T02:57:42+00:00'
+cluster_config_ref: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/cluster.yaml
+plan:
+  base_ref: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/examples/megatron/configs/MI355X/deepseek_v2_lite-FP8-pretrain.yaml
+  effective_ref: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/plan.effective.yaml
+  overrides:
+    train_iters: 20
+launch:
+  mode: single
+  nnodes: 1
+  gpus_per_node: 8
+  master_addr: 127.0.0.1
+  master_port: 36063
+  cmd: bash /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/examples/run_pretrain.sh
+  env_diff:
+    EXP: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/plan.effective.yaml
+    NNODES: '1'
+    GPUS_PER_NODE: '8'
+    MASTER_ADDR: 127.0.0.1
+    MASTER_PORT: '36063'
+    TRAIN_LOG: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/train.log
+    NODE_RANK: '0'
+  pid: 38392
+  slurm_job_id: null
+  slurm_step_id: null
+log:
+  stdout: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/train.log
+  stderr: null
+  exit_code_sentinel: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/exit_code.txt
+profile:
+  enabled: true
+  skipped_reason: null
+  knobs:
+    profile: true
+    use_pytorch_profiler: true
+    profile_step_start: 5
+    profile_step_end: 6
+    profile_ranks:
+    - 0
+    tensorboard_dir: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/profile/tb
+    torch_profiler_use_gzip: true
+    torch_profiler_record_shapes: false
+    torch_profiler_with_stack: false
+    disable_profiler_activity_cpu: false
+  trace_dir: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/dsv2_lite_fp8_mi355x_20260511T024914Z_baseline/profile/tb
+  warnings: []
+  train_iters_bumped: false
+status: completed
+exit_code: 0
+wallclock_s: 742.13

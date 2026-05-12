@@ -1,0 +1,86 @@
+{
+  "schema_version": "0.1",
+  "run_id": "real_e2e_escape_demo_r1_c1_a8d6ecac",
+  "captured_iter_start": 5,
+  "captured_iter_end": 6,
+  "captured_iter_count": 1,
+  "ranks": [
+    0
+  ],
+  "trace_files": [
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[deepseek_v2_lite-pretrain]-rank[0].1778305199219479945.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/deepseek_v2_lite-pretrain/tensorboard/primus-megatron-exp[deepseek_v2_lite-pretrain]-rank[0].1778305199219479945.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 16422109,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464208688185288.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464208688185288.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 378915,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464275109976166.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464275109976166.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 381102,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464357044724396.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464357044724396.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 381459,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464439951843815.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464439951843815.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 380309,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465818477668914.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465818477668914.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 379909,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465883572914084.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465883572914084.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 382270,
+      "format": "chrome_trace_v1"
+    },
+    {
+      "rank": 0,
+      "path": "profile/tb/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465965372426211.pt.trace.json.gz",
+      "origin_path": "/shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465965372426211.pt.trace.json.gz",
+      "origin": "primus_exp_root",
+      "bytes": 379787,
+      "format": "chrome_trace_v1"
+    }
+  ],
+  "warnings": [
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/deepseek_v2_lite-pretrain/tensorboard/primus-megatron-exp[deepseek_v2_lite-pretrain]-rank[0].1778305199219479945.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464208688185288.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464275109976166.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464357044724396.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778464439951843815.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465818477668914.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465883572914084.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override",
+    "trace originated outside run_dir at /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/output/amd/root/llama3.2_1B-pretrain/tensorboard/primus-megatron-exp[llama3.2_1B-pretrain]-rank[0].1778465965372426211.pt.trace.json.gz; this is the Primus tensorboard_path_patches.py override"
+  ]
+}

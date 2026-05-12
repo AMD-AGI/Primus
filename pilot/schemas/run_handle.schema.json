@@ -121,6 +121,20 @@
       }
     },
 
+    "profile": {
+      "type": "object",
+      "description": "Decision record from pilot.tools.profile.inject. See skills/workflow/profile.md.",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "skipped_reason": {"type": ["string", "null"]},
+        "knobs": {"type": "object", "additionalProperties": true},
+        "trace_dir": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "train_iters_bumped": {"type": "boolean"}
+      }
+    },
+
     "status": {
       "type": "string",
       "enum": ["launching", "running", "completed", "failed", "killed", "unknown"],

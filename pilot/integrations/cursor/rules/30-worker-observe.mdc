@@ -12,7 +12,10 @@ parallelizable).
 
 ## Inputs
 
-- `run_id`: passed by the Orchestrator / Execute step.
+- `session_id`: from `tuning_state.yaml`.
+- `trial_id`: candidate run identifier (e.g. `r1_c2_<hash>`). The run is
+  addressed by the tool as `--run-id t<trial_id>` and lives in
+  `state/<session_id>/trace/t<trial_id>/`.
 - `plan_ref`: path to the corresponding plan (records the Snapshot's
   `plan_id` ownership).
 
@@ -27,18 +30,27 @@ Diagnose Worker; do not pre-classify bottlenecks here).
 
 ## Allowed Tools
 
-- `python -m pilot.tools.observe snapshot --run_id <id>` — primary entry
-  point.
-- `python -m pilot.tools.observe compare_loss --run_id <id> --reference <ref>`
+- `python -m pilot.tools.observe snapshot --run-id t<trial_id> --log-dir state/<session_id>/trace --save`
+  — primary entry point; persists to
+  `state/<session_id>/trace/t<trial_id>/snapshots/<ts>.yaml`. Flag is
+  `--run-id` (hyphen).
+- `python -m pilot.tools.observe compare_loss --run-id t<trial_id> --log-dir state/<session_id>/trace --reference <ref>`
   — when reused by CORRECTNESS-LITE.
 
 ## Output contract
 
-Write a `Snapshot` (§8.3) to:
+The trace dir is taken from
+`tuning.yaml::stages.optimize_loop.dir_pattern` (defaults to
+`trace/t{trial_id}`), anchored under `log_dir_prefix = state/<session_id>`.
+`observe snapshot --save` writes the terminal `Snapshot`
+(`pilot/schemas/run_snapshot.schema.json`) to:
 
 ```
-pilot/state/round_<N>/snapshot_<run_id>.yaml
+state/<session_id>/trace/t<trial_id>/snapshots/<ts>.yaml
 ```
+
+(no `round_<N>/snapshot_<run_id>.yaml` segment — the trial dir IS the
+slot, one OBSERVE per candidate run.)
 
 Return:
 
@@ -47,7 +59,7 @@ stage: OBSERVE
 status: success
 artifacts:
   - kind: Snapshot
-    ref: pilot/state/round_<N>/snapshot_<run_id>.yaml
+    ref: state/<session_id>/trace/t<trial_id>/snapshots/<ts>.yaml
 summary:
   headline: "tps=<x>, comm=<y>, bubble=<z>, status=<completed|early_stopped|oom>"
   key_metrics:

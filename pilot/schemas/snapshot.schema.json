@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/snapshot.schema.json",
   "title": "Snapshot",
-  "description": "Output of observe.snapshot(). Runtime metrics for one plan. See README.md §8.3.",
+  "description": "Output of observe.snapshot(). Runtime metrics for one plan.",
   "x-status": "stub",
   "type": "object",
   "required": ["run_id", "plan_id", "metrics", "status"],

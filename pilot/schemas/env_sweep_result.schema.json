@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/env_sweep_result.schema.json",
   "title": "EnvSweepResult",
-  "description": "Output of inner-loop EnvSweep. See README.md §8.5.",
+  "description": "Output of inner-loop EnvSweep.",
   "x-status": "stub",
   "type": "object",
   "required": ["sweep_id", "parent_plan", "candidates", "selected_diff"],

@@ -1,0 +1,233 @@
+{
+  "schema_version": "0.2",
+  "_doc": "Bucketing rules for pilot.tools.trace_analyze. Patterns are case-insensitive Python regex matched against chrome-trace event 'name' field. First match wins, so order matters: put more-specific patterns first. Edit this file (no code change needed) and re-run the analyzer to update coverage. Validate by inspecting the per-bucket top-kernel listing in trace_analysis.md and watching unknown_ratio drop.",
+  "_calibration_target": "deepseek_v2_lite-FP8 baseline on MI355X (ROCm/RCCL + primus_turbo + transformer_engine + ck_tile + Triton)",
+  "buckets": [
+    {
+      "id": "comm_collective",
+      "_what": "RCCL collective kernels. ROCm collapses ALL collectives (alltoall, allreduce, allgather, reduce_scatter, broadcast, p2p) into a single ncclDevKernel_Generic_1. Disambiguation by CPU-side nccl:* user_annotation is a pending improvement; until then everything goes to this bucket.",
+      "patterns": [
+        "ncclDevKernel",
+        "ncclKernel",
+        "rcclDevKernel",
+        "rcclKernel"
+      ]
+    },
+    {
+      "id": "comm_moe_dispatch",
+      "_what": "MoE expert-parallel dispatch/combine via deepep (intra-node + helper kernels). Includes routing, permute/unpermute, multihot conversion, layout computation. Logically EP comm even though not RCCL.",
+      "patterns": [
+        "deep_ep::intranode::",
+        "deep_ep::internode::",
+        "deep_ep::layout::",
+        "deep_ep::notify_dispatch",
+        "_permute_kernel",
+        "_unpermute_kernel",
+        "_row_id_map_pass",
+        "_indices_to_multihot",
+        "_multihot_to_indices",
+        "fused_scaling_group_sum_routing",
+        "primus_turbo::compute_group_offs",
+        "moe_dispatch",
+        "moe_combine"
+      ]
+    },
+    {
+      "id": "comm_alltoall_nvidia",
+      "_what": "Reserved for nvidia (NCCL) where alltoall has its own kernel name. Empty on ROCm.",
+      "patterns": [
+        "nccl.*alltoall",
+        "rccl.*alltoall"
+      ]
+    },
+    {
+      "id": "comm_allreduce_nvidia",
+      "_what": "Reserved for nvidia. On ROCm see comm_collective.",
+      "patterns": [
+        "nccl.*allreduce",
+        "rccl.*allreduce",
+        "bucketed_allreduce",
+        "_grad_allreduce"
+      ]
+    },
+    {
+      "id": "comm_allgather_nvidia",
+      "patterns": [
+        "nccl.*allgather",
+        "rccl.*allgather",
+        "bucketed_allgather"
+      ]
+    },
+    {
+      "id": "comm_reduce_scatter_nvidia",
+      "patterns": [
+        "nccl.*reducescatter",
+        "rccl.*reducescatter",
+        "bucketed_reduce_scatter"
+      ]
+    },
+    {
+      "id": "comm_p2p",
+      "patterns": [
+        "nccl.*send",
+        "nccl.*recv",
+        "rccl.*send",
+        "rccl.*recv",
+        "pp_p2p_"
+      ]
+    },
+    {
+      "id": "compute_attention",
+      "patterns": [
+        "fmha_v3",
+        "fmha_fwd",
+        "fmha_bwd",
+        "aiter::fmha",
+        "aiter::mha",
+        "flash_attn",
+        "flash_fwd",
+        "flash_bwd",
+        "attention_kernel",
+        "mha_fwd",
+        "mha_bwd",
+        "mla_",
+        "pa_fwd",
+        "pa_bwd"
+      ]
+    },
+    {
+      "id": "compute_norm_act",
+      "patterns": [
+        "rmsnorm_fwd",
+        "rmsnorm_bwd",
+        "layernorm_fwd",
+        "layernorm_bwd",
+        "te_norm",
+        "_softmax_",
+        "softmax_kernel",
+        "fused_swiglu",
+        "fused_silu",
+        "fused_gelu",
+        "swiglu_fwd",
+        "swiglu_bwd",
+        "fused.*sigmoid_silu"
+      ]
+    },
+    {
+      "id": "compute_gemm_fp8_grouped",
+      "_what": "FP8 grouped GEMM (ck_tile QuantGroupedGemmKernel) and its helpers — the dominant compute kernel for MoE FP8.",
+      "patterns": [
+        "QuantGroupedGemmKernel",
+        "quantgroupedgemm",
+        "compute_grouped_gemm_fp8",
+        "grouped_gemm_variable_k",
+        "primus_turbo::grouped_gemm"
+      ]
+    },
+    {
+      "id": "compute_gemm",
+      "_what": "Dense GEMM (rocBLAS Cijk_, hipblaslt, ck_tile gemm).",
+      "patterns": [
+        "Cijk_",
+        "ck_tile.*gemm",
+        "ck_tile::gfx950_t",
+        "tensor::.*::matmul",
+        "te_gemm",
+        "te_module_layernorm_mlp",
+        "cutlass",
+        "cublasLt",
+        "hipblaslt",
+        "rocblas_.*gemm",
+        "Hgemm_",
+        "ampere_.*_gemm",
+        "sm.*_xmma_gemm"
+      ]
+    },
+    {
+      "id": "compute_fp8_prep",
+      "_what": "Per-tensor / per-row FP8 cast, scale, amax — overhead specific to FP8 path. Lump separately so we can see how much FP8 admin costs us.",
+      "patterns": [
+        "_amax_reduce",
+        "_amax_compute",
+        "amax_reduce",
+        "amax_final_reduce",
+        "amax_kernel",
+        "compute_scale_from_amax",
+        "_cast_transpose",
+        "cast_transpose",
+        "fp8_cast",
+        "fp8_quant",
+        "primus_turbo::reduce_row_kernel",
+        "primus_turbo::unary_kernel",
+        "primus_turbo::compute_scale"
+      ]
+    },
+    {
+      "id": "compute_optim",
+      "patterns": [
+        "_adam",
+        "adamw_",
+        "fusedadam",
+        "fused_adam",
+        "apply_grad",
+        "multi_tensor_apply",
+        "te_fp8_amax",
+        "unscale_",
+        "amp_unscale",
+        "_zero_optim_step"
+      ]
+    },
+    {
+      "id": "compute_other",
+      "_what": "Catch-all for elementwise / reduce / cat / pointwise math. Should ideally NOT be the largest bucket.",
+      "patterns": [
+        "elementwise_kernel",
+        "vectorized_elementwise",
+        "vectorized_templated_elementwise",
+        "reduce_kernel",
+        "indexselect",
+        "scatter",
+        "gather",
+        "embedding_dense",
+        "embedding_sparse",
+        "CatArrayBatchedCopy",
+        "triton_poi_fused",
+        "triton_per_fused",
+        "triton_red_fused",
+        "cross_entropy_kernel",
+        "element_mul_kernel",
+        "compute_grad_weight",
+        "krn_partials_per_segment",
+        "krn_partial_segment_offset",
+        "compute_num_of_partial_segments",
+        "_kernel<"
+      ]
+    },
+    {
+      "id": "memcpy",
+      "patterns": [
+        "cudamemcpy",
+        "hipmemcpy",
+        "memcpyhtod",
+        "memcpydtoh",
+        "memcpydtod",
+        "Memset",
+        "Memcpy DtoD",
+        "Memcpy DtoH",
+        "Memcpy HtoD"
+      ]
+    },
+    {
+      "id": "schedule_overhead",
+      "_what": "CPU-side framework overhead. Not currently mixed into wall-clock fractions because we filter to GPU kernels for ratios; kept here for record.",
+      "patterns": [
+        "cudalaunchkernel",
+        "hiplaunchkernel",
+        "c10d::wait",
+        "c10d::work",
+        "stream::sync",
+        "torch::profiler"
+      ]
+    }
+  ]
+}

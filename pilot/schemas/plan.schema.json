@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/plan.schema.json",
   "title": "Plan",
-  "description": "A configuration to be executed. env stored as diff against env_baseline. See README.md §8.2.",
+  "description": "A configuration to be executed. env stored as diff against env_baseline.",
   "x-status": "stub",
   "type": "object",
   "required": ["plan_id", "parallelism", "runtime"],

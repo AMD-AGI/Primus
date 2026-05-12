@@ -4,14 +4,7 @@ This file is the canonical entry for any AI agent (Cursor / Claude Code / Codex 
 
 ---
 
-## 1. Language
-
-- **All git-tracked files under `pilot/` are written in English.** This includes `skills/**/*.md`, `prompts/**/*.md`, `tools/**/*.py` (docstrings + comments), `schemas/**/*.json` (descriptions), `agent/**`, `integrations/**`, and the root design docs.
-- **No mixed-language files.** If a Chinese mirror is needed (e.g. `README.cn.md`), keep it in a separate file; never mix CN and EN inside one file.
-- **The English version is the source of truth.** When CN and EN diverge, EN wins.
-- Rationale: Skills are LLM prompt fuel. English maximizes cross-LLM compatibility (Claude / GPT / Gemini / Codex / Grok), aligns with industry convention (DeepSpeed / Megatron / vLLM), and avoids tokenizer waste.
-
-## 2. Layer discipline
+## 1. Layer discipline
 
 | Layer | What goes here | What does NOT |
 |-------|----------------|---------------|
@@ -23,16 +16,16 @@ This file is the canonical entry for any AI agent (Cursor / Claude Code / Codex 
 | `integrations/<framework>/` | Thin adapter per framework. **Only place agent SDKs may appear.** | Domain logic |
 | `agent/` | Optional Python reference harness (fallback runtime). | Anything that should be framework-agnostic — that belongs in `tools/` |
 
-## 3. Non-negotiables
+## 2. Non-negotiables
 
 1. **Pilot core (`skills/` + `prompts/` + `tools/` + `schemas/` + `state/`) does NOT import any agent SDK.** SDK deps (`anthropic`, `cursor-client`, `openai`, ...) live only under `integrations/<framework>/` (and optionally under `agent/`).
 2. **Tools expose process / MCP boundaries**, not Python function boundaries. Every tool module must support `python -m pilot.tools.<module> <subcommand>`. A unified shorthand `python -m pilot <module> <subcommand>` (see `pilot/cli/main.py`) is provided for discoverability and dispatches to the same `_cli()` — both forms are equivalent.
 3. **State is the file system.** No in-memory shared state across stages. Cross-stage memory goes through `state/`.
-4. **Subagent isolation is the framework's job, not Pilot's.** Pilot only specifies the boundary table (§13.2 of `README.md`) — `subagent.spawn` is a protocol abstraction, concrete impl injected by `integrations/<framework>/`.
+4. **Subagent isolation is the framework's job, not Pilot's.** Pilot only specifies the boundary; `subagent.spawn` is a protocol abstraction, concrete impl injected by `integrations/<framework>/`.
 5. **`SubagentResult.summary < 200 tokens`** — enforced by schema validation. Workers exceeding it are rejected.
-6. **Every Pilot tool requires a `cluster.yaml`** (see §4 below). Tools must NOT discover cluster topology, spawn containers, ssh between nodes, or invoke `salloc`/`sbatch`. The runtime environment is a *prerequisite*, not a Pilot concern.
+6. **Every Pilot tool requires a `cluster.yaml`** (see §3 below). Tools must NOT discover cluster topology, spawn containers, ssh between nodes, or invoke `salloc`/`sbatch`. The runtime environment is a *prerequisite*, not a Pilot concern.
 
-## 4. Universal tool input contract: `cluster.yaml`
+## 3. Universal tool input contract: `cluster.yaml`
 
 Every command under `python -m pilot.tools.<module>` takes exactly one mandatory environmental input: a `cluster.yaml` file conforming to `schemas/cluster_config.schema.json`. It is resolved in this priority order:
 
@@ -74,19 +67,12 @@ Without a single declarative input, every tool would re-invent its own cluster d
 - `SETUP.md` — **human-facing** prerequisite guide: how to bring up the container / SLURM allocation and write the matching `cluster.yaml`. If you find yourself wanting a tool to "auto-discover" the cluster, redirect the user there instead.
 - `skills/workflow/preflight.md` §3 — the consumer pattern (how PREFLIGHT translates `cluster.yaml` into a LaunchPlan).
 
-## 5. Required reading by role
+## 4. Required reading by role
 
 - **Orchestrator role** must read: `prompts/orchestrator.md`, `skills/workflow/state_machine.md`, `skills/workflow/orchestration.md`. Nothing else.
 - **Stage Worker role** must read: `prompts/worker/_envelope.md` + the `prompts/worker/<stage>.md` for its stage + the Skill scope listed there. Do NOT pull other Skill subtrees.
 
-## 6. Canonical docs
-
-- `README.md` — main design spec (English, canonical).
-- `README.supplements.md` — §S1–§S4 supplements (calibration / correctness reference / parallel execution / LEARN governance).
-- `README.cn.md` — Chinese mirror of `README.md` (kept for human readers; not source of truth).
-- `notes/archive/` — historical drafts (v1 README, NEW.md, etc.); read-only.
-
-## 7. When uncertain
+## 5. When uncertain
 
 - Default action: **read more Skill, write less code**. Pilot is knowledge-first.
 - If Skill rules are ambiguous, prefer the conservative choice (smaller search step, tighter constraint, more explicit logging).

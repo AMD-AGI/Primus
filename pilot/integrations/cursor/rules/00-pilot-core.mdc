@@ -1,14 +1,22 @@
 ---
-description: Pilot core invariants (state-first + role isolation); applies to all Pilot sessions
+description: Pilot Orchestrator core rules and per-round decision loop
 alwaysApply: true
 ---
 
-# Pilot Core Invariants
+# Pilot Orchestrator — Core Rules & Decision Loop
 
-You are driving **Primus Pilot** in this project. Read `@pilot/AGENTS.md` and
-`@pilot/README.md` for the full picture. The four rules below always hold.
+You are driving **Primus Pilot** in this project, in the **Orchestrator**
+role. Read `@pilot/AGENTS.md` first — `AGENTS.md §4` is the authoritative
+per-role reading scope.
 
-## 1. State-first protocol
+This rule has two halves: the three rules that always hold (Part I) and the
+five-step recipe you must follow each round (Part II).
+
+---
+
+## Part I — Always-true rules
+
+### 1. State-first protocol
 
 - **The State Layer is the single source of truth.** `pilot/state/*.yaml` is
   your working memory; your context only carries pointers.
@@ -18,7 +26,7 @@ You are driving **Primus Pilot** in this project. Read `@pilot/AGENTS.md` and
 - Everything else (Snapshot / CandidatePool / DiagnosisReport / EnvSweepResult)
   must **not** sit in context; once consumed, run `state.trim()`.
 
-## 2. Strict separation of the two roles
+### 2. Strict separation of the two roles
 
 - **You = Orchestrator**: only advance the state machine, spawn subagents,
   update pointers. Do not read stage-specific business Skills.
@@ -29,28 +37,102 @@ You are driving **Primus Pilot** in this project. Read `@pilot/AGENTS.md` and
   `skills/optimization/**` Markdown — that's a regression to the single-agent
   anti-pattern.
 
-## 3. Three-step ritual at every stage exit
-
-Whenever a stage ends (a Worker returns, or you finish a lightweight stage
-inline), run in order:
-
-1. `state.checkpoint()` — persist the current `tuning_state.yaml` plus
-   relevant artifacts under `pilot/state/checkpoints/rN/`.
-2. `state.trim()` — discard every non-pointer field from context.
-3. Append a single-line summary to `TuningState.stage_history` in context.
-
-## 4. Tool-call boundaries
+### 3. Tool-call boundaries
 
 - Pilot's business actions are exposed at process or MCP boundaries — see
   `@.cursor/rules/90-tool-invocation.mdc`.
 - Do not use inline Python to mimic a Pilot Tool (e.g. don't compute OOM risk
   yourself — call `constraint.estimate_mem`; that is the only authority).
 
-## Consequences of violating these rules
+---
 
-- After ~5 rounds you start "forgetting" / repeating searches (see
-  `pilot/README.md` §13.1).
-- Loss of auditability: decision provenance cannot be replayed.
-- Triggers the `CONTEXT_OVERFLOW` failure loop, forcing `state.handoff()`.
+## Part II — Per-round decision loop
 
-When in doubt, the core invariants beat convenience.
+Each round must follow the five steps below, in order. Do not skip steps;
+do not merge them.
+
+```
+decide → spawn → apply → checkpoint → trim
+```
+
+### 1. decide
+
+From `pilot/state/tuning_state.yaml`, read:
+- `current_stage`
+- `round_id`
+- `champion_id`
+- `budget_used`
+
+Use the transition table in `@pilot/skills/workflow/state_machine.md` to
+determine `next_stage`. Don't guess, don't skip; follow the table.
+
+### 2. spawn
+
+Use Cursor's **Task tool** to spawn a Stage Worker. The prompt comes from
+this repo:
+
+| next_stage | Worker rule |
+|------------|-------------|
+| `PREFLIGHT` | `@.cursor/rules/30-worker-preflight.mdc` |
+| `PROJECTION` | `@.cursor/rules/30-worker-projection.mdc` |
+| `SMOKE` | `@.cursor/rules/30-worker-smoke.mdc` |
+| `BASELINE` | `@.cursor/rules/30-worker-baseline.mdc` |
+| `CORRECTNESS` / `CORRECTNESS_LITE` | `@.cursor/rules/30-worker-correctness.mdc` |
+| `OBSERVE` | `@.cursor/rules/30-worker-observe.mdc` |
+| `DIAGNOSE` | `@.cursor/rules/30-worker-diagnose.mdc` |
+| `RE_PLAN` | `@.cursor/rules/30-worker-replan.mdc` |
+| `ENV_SWEEP` | `@.cursor/rules/30-worker-envsweep.mdc` |
+
+Lightweight stages (`EXECUTE` / `SETTLE` / state-machine bookkeeping)
+**do not spawn** — handle them inline by shelling out to the relevant Tool.
+
+When you spawn, the Worker's input must be **pointers only**:
+`{snapshot_ref, plan_graph_ref, diagnosis_ref, ...}`. Do not inline already-
+parsed payloads.
+
+### 3. apply
+
+The Worker returns a `SubagentResult` (schema:
+`pilot/schemas/subagent_result.schema.json`). You read only:
+- `status`
+- `summary.headline` (one line)
+- `suggested_transition`
+- `artifacts[*].ref` (storage references; do not read the contents)
+
+Cross-check against the `on_fail` / `reentry_when` rules in
+`state_machine.md` to determine the final `next_stage`. Don't blindly accept
+`suggested_transition`.
+
+### 4. checkpoint
+
+```bash
+python -m pilot.tools.state checkpoint --session $SESSION_ID --stage $STAGE
+```
+
+Persists `tuning_state.yaml` plus stage artifacts under
+`pilot/state/checkpoints/r$ROUND/`. Also append a single-line summary to
+`TuningState.stage_history` in context.
+
+### 5. trim
+
+```bash
+python -m pilot.tools.state trim \
+  --keep session_id,current_stage,round_id,champion_id,budget_used,last_decision_summary
+```
+
+After trim, your context should be back under 2K tokens. If still over, fire
+`state.handoff()` (`@.cursor/rules/20-state-hygiene.mdc`).
+
+---
+
+## Part III — Loop exit conditions
+
+After every `apply`, check the three termination conditions:
+
+- All `TargetVector.constraints` satisfied **and** `primary` no longer
+  improving meaningfully → `REPORT`.
+- `gain < ε_stop` for two consecutive rounds **and** the frontier has no
+  high-priority candidates → `REPORT`.
+- `budget_used > budget.total_gpu_h` or `round_id >= max_rounds` → `REPORT`.
+
+Otherwise: return to **decide**.

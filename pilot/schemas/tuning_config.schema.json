@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/tuning_config.schema.json",
+  "title": "TuningConfig",
+  "description": "Session-wide bootstrap config produced by `pilot session init`. Lives at `state/<session_id>/tuning.yaml` and is the canonical source for: (a) the log-directory layout convention every stage of this session must follow — `log_dir_prefix/<trace_subdir>/<stage>`; (b) the consolidated inputs (plan, cluster_config, target, budget, base_overrides); (c) per-stage defaults (iters, timeouts, trace dirs). Other artifacts in the same session directory (target_vector.yaml, tuning_state.yaml, r0 checkpoint) are mirrored from this file. See `skills/workflow/orchestration.md` §0.3 (bootstrap protocol).",
+  "x-status": "v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "session_id",
+    "created_at",
+    "plan",
+    "cluster_config",
+    "log_dir_prefix",
+    "trace_subdir",
+    "target",
+    "stages"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable identifier; matches the directory name `state/<session_id>/`."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "plan": {
+      "type": "string",
+      "description": "Path to the base Primus exp YAML (e.g. `examples/megatron/configs/MI355X/deepseek_v2_lite-FP8-pretrain.yaml`). Relative paths are repo-rooted."
+    },
+    "cluster_config": {
+      "type": "string",
+      "description": "Path to the cluster.yaml that every Pilot tool will consume."
+    },
+    "log_dir_prefix": {
+      "type": "string",
+      "description": "Root directory under which every stage of this session writes its trace artifacts. Conventionally `state/<session_id>`; relative paths are anchored at the pilot package root."
+    },
+    "trace_subdir": {
+      "type": "string",
+      "default": "trace",
+      "description": "Sub-directory under `log_dir_prefix` that contains per-stage trace folders. Full per-stage path = `{log_dir_prefix}/{trace_subdir}/{stage}`. Defaults to `trace`."
+    },
+    "target": {
+      "type": "object",
+      "required": ["primary", "constraints", "budget"],
+      "additionalProperties": true,
+      "properties": {
+        "primary": {
+          "type": "string",
+          "description": "Primary objective metric (e.g. `median_tflops`, `tps`, `per_token_cost_usd`)."
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Hard constraints (e.g. `finite_loss: true`, `max_iter_time_regression_pct: 5.0`)."
+        },
+        "budget": {
+          "type": "object",
+          "required": ["rounds", "candidates_per_round", "smoke_iters", "train_iters", "timeout_s"],
+          "additionalProperties": true,
+          "properties": {
+            "rounds": {"type": "integer", "minimum": 0},
+            "candidates_per_round": {"type": "integer", "minimum": 1},
+            "smoke_iters": {"type": "integer", "minimum": 1},
+            "train_iters": {"type": "integer", "minimum": 1},
+            "timeout_s": {"type": "integer", "minimum": 1}
+          }
+        },
+        "base_overrides": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Plan-level overrides applied to every stage's launch (e.g. `micro_batch_size: 1`, `global_batch_size: 8`)."
+        }
+      }
+    },
+    "stages": {
+      "type": "object",
+      "description": "Per-stage defaults. Each block specifies the trace directory (relative to `log_dir_prefix`, must lie under `trace_subdir/`) and optional iter/timeout overrides for that stage. The `optimize_loop` block uses `dir_pattern` with `{trial_id}` substitution to namespace each tuning trial under `trace/t1`, `trace/t2`, ...",
+      "additionalProperties": true,
+      "required": ["preflight", "projection", "smoke", "baseline", "optimize_loop", "report"],
+      "properties": {
+        "preflight":    {"$ref": "#/$defs/StageBlock"},
+        "projection":   {"$ref": "#/$defs/StageBlock"},
+        "smoke":        {"$ref": "#/$defs/StageBlock"},
+        "baseline":     {"$ref": "#/$defs/StageBlock"},
+        "optimize_loop": {
+          "type": "object",
+          "required": ["dir_pattern"],
+          "additionalProperties": true,
+          "properties": {
+            "dir_pattern": {
+              "type": "string",
+              "description": "Path pattern (relative to log_dir_prefix) for per-trial trace dirs. Must contain `{trial_id}` — substituted with `t1`, `t2`, ... at trial launch."
+            },
+            "iters": {"type": "integer", "minimum": 1},
+            "timeout_s": {"type": "integer", "minimum": 1}
+          }
+        },
+        "report":       {"$ref": "#/$defs/StageBlock"},
+        "env_sweep":    {"$ref": "#/$defs/StageBlock"},
+        "correctness":  {"$ref": "#/$defs/StageBlock"}
+      }
+    },
+    "related": {
+      "type": "object",
+      "description": "Pointers to other artifacts living next to tuning.yaml in the same session directory.",
+      "additionalProperties": true,
+      "properties": {
+        "target_vector_ref": {"type": "string"},
+        "tuning_state_ref":  {"type": "string"}
+      }
+    },
+    "node": {
+      "type": "string",
+      "description": "Optional informational hint (e.g. `mi355-gpu-26`). Not consumed by tools; for human readability."
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "StageBlock": {
+      "type": "object",
+      "required": ["dir"],
+      "additionalProperties": true,
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Trace directory for this stage, relative to log_dir_prefix. Convention: `<trace_subdir>/<stage_name>`."
+        },
+        "iters": {"type": "integer", "minimum": 1},
+        "timeout_s": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

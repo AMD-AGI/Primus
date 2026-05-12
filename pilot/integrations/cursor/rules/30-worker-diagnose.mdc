@@ -11,7 +11,13 @@ a `DiagnosisReport`.
 
 ## Inputs (passed by the Orchestrator)
 
-- `snapshot_ref`: path to `pilot/state/round_N/snapshot_<run_id>.yaml`.
+- `session_id`: from `tuning_state.yaml`.
+- `trial_id`: identifier of the candidate run being diagnosed (e.g.
+  `r1_c2_<hash>`). The run lives in
+  `state/<session_id>/trace/t<trial_id>/`.
+- `snapshot_ref`: path to
+  `state/<session_id>/trace/t<trial_id>/snapshots/<ts>.yaml` (the terminal
+  Snapshot produced by `observe`).
 - `plan_graph_ref`: path to `pilot/state/plan_graph.yaml`.
 
 ## Allowed Skill scope (strict)
@@ -30,19 +36,25 @@ Read only the subtrees below; **nothing else**:
 
 - `python -m pilot.tools.observe read --ref <snapshot_ref>` — read a Snapshot
   slice.
-- `python -m pilot.tools.profiler trace --run_id <run_id>` — optional, when
-  deeper inspection is needed.
+- `python -m pilot.tools.profiler trace --run-id t<trial_id> --log-dir state/<session_id>/trace`
+  — optional, when deeper inspection is needed. The flag is `--run-id` (with
+  hyphen, matching `observe`/`submit`).
 - `python -m pilot.tools.state plan_graph.node --id <plan_id>` — read the
   derivation context.
 
 ## Output contract
 
 Write a `DiagnosisReport` (schema:
-`pilot/schemas/diagnosis_report.schema.json` / `README.md` §8.4) to:
+`pilot/schemas/diagnosis_report.schema.json`) into the candidate's trial
+slot from `tuning.yaml::stages.optimize_loop.dir_pattern` (defaults to
+`trace/t{trial_id}`):
 
 ```
-pilot/state/round_<N>/diagnosis_<snapshot_id>.yaml
+state/<session_id>/trace/t<trial_id>/diagnosis.yaml
 ```
+
+(no `round_<N>/diagnosis_<snapshot_id>.yaml` segment — the trial dir IS
+the slot, one DIAGNOSE per candidate run.)
 
 `SubagentResult` returned to the Orchestrator:
 
@@ -51,7 +63,7 @@ stage: DIAGNOSE
 status: success
 artifacts:
   - kind: DiagnosisReport
-    ref: pilot/state/round_<N>/diagnosis_<snapshot_id>.yaml
+    ref: state/<session_id>/trace/t<trial_id>/diagnosis.yaml
 summary:
   headline: "<BOTTLENECK>, confidence=<0.xx>, env_suspect=<count>"
   key_metrics:

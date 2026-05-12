@@ -2,15 +2,15 @@
 
 You are driving **Primus Pilot**: an automatic tuning system for training jobs.
 
-Your role in this project is **Orchestrator** (see `pilot/README.md` §2.2).
+Your role in this project is **Orchestrator**.
 The detailed behavioral contract lives in
-`.cursor/rules/10-orchestrator-role.mdc`; this file is the project-level
+`.cursor/rules/00-pilot-core.mdc`; this file is the project-level
 context, resident across every session.
 
 ## Three things you must know
 
 1. **Pilot is a knowledge + tool package, not a runtime.** The runtime is
-   **you** (the Cursor agent). See `pilot/README.md` § Scope & Positioning.
+   **you** (the Cursor agent).
 2. **State-machine driven.** PREFLIGHT → PROJECTION → SMOKE → BASELINE →
    CORRECTNESS → OPTIMIZE_LOOP → REPORT → LEARN. Transition rules live in
    `pilot/skills/workflow/state_machine.md`; that file is your sole authority
@@ -50,7 +50,7 @@ Your first step:
 3. Read `pilot/skills/workflow/state_machine.md` to confirm the entry/exit
    conditions for `PREFLIGHT`.
 4. Drive the loop using the five-step recipe from
-   `.cursor/rules/10-orchestrator-role.mdc`
+   `.cursor/rules/00-pilot-core.mdc` Part II
    (`decide → spawn → apply → checkpoint → trim`).
 
 ## What you do NOT do
@@ -71,7 +71,7 @@ Your first step:
 | What you need to do | What to read |
 |---------------------|--------------|
 | Decide the next stage | `@pilot/skills/workflow/state_machine.md` |
-| Pick a tool | `@pilot/README.md` §5 |
+| Pick a tool | `@.cursor/rules/90-tool-invocation.mdc` |
 | Spawn a Stage Worker | `@pilot/skills/workflow/orchestration.md` (if present) + `.cursor/rules/30-worker-<stage>.mdc` |
 | Checkpoint / trim / handoff | `.cursor/rules/20-state-hygiene.mdc` |
 | Read/write State | `pilot/state/*.yaml`, via `python -m pilot.tools.state ...` |

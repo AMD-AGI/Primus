@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/cluster_profile.schema.json",
   "title": "ClusterProfile",
-  "description": "Output of preflight.run(). Hardware peaks + RCCL baseline curves (3 scopes) + cluster-level env_baseline + blacklist refs. Reused across jobs by version + age. See README.md §8.1, skills/workflow/preflight.md. Schema 2.0 changes: rccl_baseline restructured into {intra_node, inter_node, world} scopes; intra_node uses per-node columnar layout to capture node-level uniformity. Single-node mode populates intra_node only and leaves inter_node/world as null.",
+  "description": "Output of preflight.run(). Hardware peaks + RCCL baseline curves (3 scopes) + cluster-level env_baseline + blacklist refs. Reused across jobs by version + age. See skills/workflow/preflight.md. Schema 2.0 changes: rccl_baseline restructured into {intra_node, inter_node, world} scopes; intra_node uses per-node columnar layout to capture node-level uniformity. Single-node mode populates intra_node only and leaves inter_node/world as null.",
   "x-status": "v2",
   "type": "object",
   "required": [

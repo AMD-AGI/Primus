@@ -196,13 +196,29 @@ def run(
     *,
     plan_path: str | Path,
     overrides: dict[str, Any] | None = None,
+    env_overrides: dict[str, str] | None = None,
     run_id: str | None = None,
     log_dir: str | Path = "state/runs",
     liveness_s: int = 5,
     foreground: bool = False,
     foreground_timeout_s: int | None = None,
+    profile: bool = True,
 ) -> dict[str, Any]:
     """Launch a training job. Returns a SubagentResult dict.
+
+    Parameters
+    ----------
+    overrides:
+        Trainer overrides merged into ``modules.pre_trainer.overrides`` of the
+        Primus exp YAML (per-run; recorded into ``handle.plan.overrides``).
+    env_overrides:
+        Per-run environment variables overlaid onto the launcher env AFTER
+        ``_compose_env`` and AFTER the inherited parent environment.  Lets a
+        replan candidate flip e.g. ``turbo_deepep_use_comm_stream`` (trainer
+        override) and ``RCCL_MSCCL_ENABLE`` (env) in the same launch without
+        mutating the caller's ``os.environ`` (which would leak across
+        challengers). Recorded into ``handle.launch.env_diff`` as well so
+        post-mortem can see what env each run actually used.
 
     In detached mode (default), this returns once the subprocess has been
     spawned and survived ``liveness_s`` seconds without crashing. In
@@ -211,6 +227,7 @@ def run(
     """
     started = time.time()
     overrides = overrides or {}
+    env_overrides = env_overrides or {}
     base_path = Path(plan_path).resolve()
     if not base_path.exists():
         raise _SubmitError("USAGE", f"--plan file not found: {base_path}")
@@ -238,6 +255,20 @@ def run(
     # Effective plan = base + overrides
     base_plan = _load_yaml(base_path)
     effective_plan = _apply_overrides(base_plan, overrides)
+
+    # PROFILE injection (skills/workflow/profile.md). Default-on; produces a
+    # rank-0 chrome trace covering 1 steady iter (warmup=5, capture=1) which
+    # the trace_analyze tool then turns into a trace_analysis.md.
+    profile_decision: dict[str, Any] = {"enabled": False, "skipped_reason": "submit was invoked with profile=False"}
+    if profile:
+        try:
+            from pilot.tools import profile as _profile
+            effective_plan, profile_decision = _profile.inject(effective_plan, run_dir, enabled=True)
+        except Exception as exc:  # noqa: BLE001
+            profile_decision = {
+                "enabled": False,
+                "skipped_reason": f"profile.inject raised {type(exc).__name__}: {exc}",
+            }
     effective_path = run_dir / "plan.effective.yaml"
     _atomic_write_yaml(effective_path, effective_plan)
 
@@ -263,10 +294,14 @@ def run(
         f"({cmd_str}); rc=$?; echo $rc > {shlex.quote(str(sentinel))}; exit $rc"
     )
 
-    # Compose final env: inherit current, then overlay env_diff
+    # Compose final env: inherit current, overlay env_diff (launcher
+    # plumbing), then per-run env_overrides (replan-driven knobs).
     spawn_env = os.environ.copy()
     for k, v in env_diff.items():
         spawn_env[k] = v
+    for k, v in env_overrides.items():
+        spawn_env[k] = str(v)
+        env_diff[k] = str(v)
 
     # Persist initial handle (status=launching)
     handle: dict[str, Any] = {
@@ -296,6 +331,7 @@ def run(
             "stderr": None,
             "exit_code_sentinel": str(sentinel),
         },
+        "profile": profile_decision,
         "status": "launching",
         "exit_code": None,
         "wallclock_s": None,
@@ -339,6 +375,7 @@ def run(
             handle["status"] = "completed" if rc == 0 else "failed"
         handle["exit_code"] = rc
         handle["wallclock_s"] = round(time.time() - started, 2)
+        _maybe_collect_profile(handle, run_dir)
         _atomic_write_yaml(handle_path, handle, schema_name="run_handle")
         log_fp.close()
         return _build_subagent_result(handle, started)
@@ -461,8 +498,40 @@ def status(
         except Exception:
             pass
 
+    if handle["status"] in ("completed", "failed"):
+        _maybe_collect_profile(handle, handle_path.parent)
+
     _atomic_write_yaml(handle_path, handle, schema_name="run_handle")
     return _status_view(handle)
+
+
+def _maybe_collect_profile(handle: dict[str, Any], run_dir: Path) -> None:
+    """Best-effort: write trace_meta.json once the run is terminal.
+
+    Idempotent: a second call won't overwrite a non-empty meta with an empty one.
+    Failures are silent (recorded in handle["profile"]["warnings"]).
+    """
+    profile_decision = handle.get("profile") or {}
+    if not profile_decision.get("enabled"):
+        return
+    meta_path = run_dir / "profile" / "trace_meta.json"
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+            if existing.get("trace_files"):
+                return
+        except Exception:
+            pass
+    try:
+        from pilot.tools import profile as _profile
+        meta = _profile.collect(run_dir, wait_s=30)
+    except Exception as exc:  # noqa: BLE001
+        warnings = profile_decision.setdefault("warnings", [])
+        warnings.append(f"profile.collect raised {type(exc).__name__}: {exc}")
+        return
+    if not meta.get("trace_files"):
+        warnings = profile_decision.setdefault("warnings", [])
+        warnings.append("profile.collect found no trace files; analyzer will refuse this run")
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +832,10 @@ def _cli() -> int:
         "--foreground-timeout-s", type=int, default=None,
         help="Wallclock cap for --foreground; subprocess is killed on timeout.",
     )
+    p_run.add_argument(
+        "--no-profile", action="store_true",
+        help="Disable the default torch.profiler injection (1-iter trace at iter 5..6 on rank-0).",
+    )
 
     # cancel
     p_cancel = sub.add_parser("cancel", help="Terminate a running job by run_id.")
@@ -793,6 +866,7 @@ def _cli() -> int:
                 liveness_s=args.liveness_s,
                 foreground=args.foreground,
                 foreground_timeout_s=args.foreground_timeout_s,
+                profile=not args.no_profile,
             )
             _emit(result)
             return _EXIT_OK if result["status"] in ("running", "completed") else _EXIT_STAGE_FAILED

@@ -2,11 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/diagnosis_report.schema.json",
   "title": "DiagnosisReport",
-  "description": "Output of Diagnose worker. Bottleneck classification + env_suspect + candidate_axes. See README.md §8.4.",
-  "x-status": "stub",
+  "description": "Output of Diagnose worker. Bottleneck classification + env_suspect + candidate_axes. See skills/workflow/diagnose.md.",
+  "x-status": "v1",
   "type": "object",
   "required": ["snapshot_id", "bottleneck", "confidence"],
+  "additionalProperties": false,
   "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
     "snapshot_id": {"type": "string"},
     "bottleneck": {
       "type": "string",
@@ -20,27 +22,99 @@
       "description": "Suspected env flags; if non-empty, triggers EnvSweep before structural Re-Plan.",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "flag": {"type": "string"},
           "reason": {"type": "string"},
           "hint": {"type": "string"}
-        }
+        },
+        "required": ["flag", "reason"]
       }
     },
     "candidate_axes": {
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "axis": {"type": "string"},
           "type": {"type": "string", "enum": ["structural", "cluster_shared", "weakly_local", "strongly_local"]},
-          "candidates": {"type": "array"}
-        }
+          "candidates": {"type": "array"},
+          "expected_gain_band_pct": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {"type": "number"},
+            "description": "[low, high] expected speedup percentage band; informs Re-Plan priority."
+          },
+          "est_cost_gpu_h": {"type": "number", "minimum": 0},
+          "rationale": {"type": "string"}
+        },
+        "required": ["axis", "type"]
       }
     },
     "suggested_strategy": {
       "type": "string",
       "enum": ["Champion-Challenger", "Per-Plan", "Successive_Halving"]
+    },
+    "suggested_transition": {
+      "type": "object",
+      "description": "Where the orchestrator should go next. Driven by §7 failure routing or §8 reentry triggers in skills/workflow/diagnose.md.",
+      "additionalProperties": false,
+      "required": ["to", "reason"],
+      "properties": {
+        "to": {
+          "type": "string",
+          "enum": [
+            "OPTIMIZE_LOOP.REPLAN",
+            "OPTIMIZE_LOOP.EXECUTE",
+            "PREFLIGHT",
+            "PROJECTION",
+            "ABORT",
+            "WAIT"
+          ]
+        },
+        "reason": {"type": "string"},
+        "counts_against_budget": {"type": "boolean"},
+        "hint": {"type": "string"}
+      }
+    },
+    "meta": {
+      "type": "object",
+      "description": "Informational signals the engine used to reach its verdict. Schema is open to allow new sources without bumping version. The agent MUST NOT consume meta as ground truth; it is for review/audit/test only.",
+      "additionalProperties": true,
+      "properties": {
+        "bottleneck_extended": {
+          "type": "string",
+          "description": "Optional super-set of `bottleneck` that includes synthetic classes not in the schema enum (REGRESSION, INVALID_CONFIG, NUMERICAL, HANG, CANCELLED).",
+          "enum": [
+            "COMM_BOUND", "PIPELINE_BOUND", "MEMORY_BOUND", "COMPUTE_BOUND",
+            "REGRESSION", "INVALID_CONFIG", "NUMERICAL", "HANG", "CANCELLED", "UNKNOWN"
+          ]
+        },
+        "rule_id": {"type": "string", "description": "First rule that fired (e.g. R3b_PROFILER_LESS_COMM)."},
+        "iter_ms_steady_median": {"type": ["number", "null"]},
+        "tflops_steady_median": {"type": ["number", "null"]},
+        "tflops_pct_of_peak": {"type": ["number", "null"]},
+        "iter_ms_cv": {"type": ["number", "null"]},
+        "iters_observed": {"type": ["integer", "null"]},
+        "mem_pct": {"type": ["number", "null"]},
+        "bubble_ratio_estimate": {"type": ["number", "null"]},
+        "bubble_ratio_source": {"type": "string", "enum": ["profiler", "fallback", "n/a"]},
+        "comm_ratio": {"type": ["number", "null"]},
+        "strategy_rationale": {"type": "string"},
+        "thresholds": {"type": "object", "description": "Effective thresholds used (after override file merge)."},
+        "trace_evidence": {
+          "type": "object",
+          "description": "Snapshot of the trace_analysis fields the engine consulted (added in v2; informational).",
+          "additionalProperties": true
+        },
+        "skipped_axes": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Axes the engine considered but skipped (e.g. structural axis but no Plan provided)."
+        }
+      }
     }
   }
 }

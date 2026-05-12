@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/reference_curve.schema.json",
   "title": "ReferenceCurve",
-  "description": "T0 / T1 reference loss curve (tokens-aligned). Used by correctness gates. See README.supplements.md §S2.5.",
+  "description": "T0 / T1 reference loss curve (tokens-aligned). Used by correctness gates.",
   "x-status": "stub",
   "type": "object",
   "required": ["reference_id", "tier", "binding", "trajectory", "noise"],

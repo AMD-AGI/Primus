@@ -3,7 +3,6 @@
 **Status**: detailed-design v1
 **Read by**: Preflight Stage Worker
 **Domain**: stage-protocol authority
-**Anchors**: README §3.1 (stage 1) · §5 Tools · §8.1 ClusterProfile · §12.2 failure paths · §S3.5 Blacklist · §S1 Calibration
 
 This document is the **single authoritative protocol** for the PREFLIGHT stage. Everything else (tool CLI, worker prompt, schema fields) is derived from it.
 
@@ -387,7 +386,7 @@ This is the only stage that can invalidate calibration. Document it here so the 
 | `cluster.yaml` field-by-field schema (universal tool input) | `schemas/cluster_config.schema.json` |
 | Universal tool input contract & lifecycle | `AGENTS.md` §4 |
 | ClusterProfile field-by-field schema | `schemas/cluster_profile.schema.json` |
-| Blacklist schema and §S3.5 | `schemas/blacklist.schema.json`, `README.supplements.md` §S3.5 |
+| Blacklist schema | `schemas/blacklist.schema.json` |
 | Where Orchestrator decides cache-hit vs re-run | `skills/workflow/state_machine.md` (PREFLIGHT entry rules) |
 | Worker role prompt (what "you are" reads as) | `prompts/worker/preflight.md` |
 | CLI surface | `tools/preflight.py` |

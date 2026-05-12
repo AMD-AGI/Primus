@@ -45,7 +45,7 @@ consume natively.
 
 | v2 role | Cursor side |
 |---------|-------------|
-| **Orchestrator** (main session) | Cursor's main Agent session; picks up its role from `AGENTS.md` + `rules/10-orchestrator-role.mdc` |
+| **Orchestrator** (main session) | Cursor's main Agent session; picks up its role from `AGENTS.md` + `rules/00-pilot-core.mdc` |
 | **Stage Worker** (one-shot subagent) | Cursor's Task tool spawns a child agent; prompt comes from `rules/30-worker-*.mdc` (Agent Requested mode) |
 | **State Layer** | Direct read/write of `pilot/state/*.yaml` |
 | **Tool calls** | Shell to `python -m pilot.tools.*` or MCP (when enabled) |

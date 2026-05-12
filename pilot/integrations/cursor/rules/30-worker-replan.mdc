@@ -11,9 +11,15 @@ pool).
 
 ## Inputs
 
-- `diagnosis_ref`: `pilot/state/round_N/diagnosis_<id>.yaml`.
+- `session_id`: from `tuning_state.yaml`.
+- `round_id`: outer-loop round for which this CandidatePool is being
+  produced (used to bucket the output so each round's pool has its own
+  slot).
+- `diagnosis_ref`: path to the candidate's DiagnosisReport at
+  `state/<session_id>/trace/t<trial_id>/diagnosis.yaml` (output of the
+  preceding DIAGNOSE Worker).
 - `plan_graph_ref`: `pilot/state/plan_graph.yaml`.
-- `target_vector_ref`: `pilot/state/target_vector.yaml`.
+- `target_vector_ref`: `state/<session_id>/target_vector.yaml`.
 
 ## Allowed Skill scope
 
@@ -48,12 +54,17 @@ does not diverge across bottlenecks).
 
 ## Output contract
 
-Write a `CandidatePool` (schema:
-`pilot/schemas/candidate_pool.schema.json` / §8.10) to:
+The CandidatePool is round-meta-state (one per OPTIMIZE_LOOP round), so it
+lives under a session-scoped round bucket — sibling to
+`state/<session_id>/checkpoints/r<round_id>/`. Write a `CandidatePool`
+(schema: `pilot/schemas/candidate_pool.schema.json`) to:
 
 ```
-pilot/state/round_<N>/candidate_pool.yaml
+state/<session_id>/r<round_id>/candidate_pool.yaml
 ```
+
+(no `pilot/state/round_<N>/candidate_pool.yaml` segment — the new layout
+anchors everything under `state/<session_id>/`.)
 
 The 7 generation steps from `replan.md` must run end-to-end. `rejected[]`
 must include reasons; `priority` must be computed via the formula.
@@ -65,7 +76,7 @@ stage: RE_PLAN
 status: success
 artifacts:
   - kind: CandidatePool
-    ref: pilot/state/round_<N>/candidate_pool.yaml
+    ref: state/<session_id>/r<round_id>/candidate_pool.yaml
 summary:
   headline: "<BOTTLENECK>, <K> selected (<X> exploit + <Y> explore), top priority=<p>"
   key_metrics:

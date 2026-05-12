@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/tuning_state.schema.json",
   "title": "TuningState",
-  "description": "Persisted at each stage exit. Primary unit of resume / audit / replay. See README.md §8.7.",
+  "description": "Persisted at each stage exit. Primary unit of resume / audit / replay.",
   "x-status": "stub",
   "type": "object",
   "required": ["session_id", "current_stage", "stage_history"],

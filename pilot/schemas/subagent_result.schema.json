@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/subagent_result.schema.json",
   "title": "SubagentResult",
-  "description": "The ONLY structured payload a Stage Worker returns to the Orchestrator. Orchestrator reads only summary + suggested_transition + status. See README.md §8.11 + §13.2.",
+  "description": "The ONLY structured payload a Stage Worker returns to the Orchestrator. Orchestrator reads only summary + suggested_transition + status.",
   "x-status": "stub",
   "type": "object",
   "required": ["stage", "worker_id", "status", "summary"],

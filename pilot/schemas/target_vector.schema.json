@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/target_vector.schema.json",
   "title": "TargetVector",
-  "description": "User-supplied multi-objective target. Settle stop = all constraints met AND primary not improving. See README.md §8.6.",
+  "description": "User-supplied multi-objective target. Settle stop = all constraints met AND primary not improving.",
   "x-status": "stub",
   "type": "object",
   "required": ["primary", "constraints", "budget"],

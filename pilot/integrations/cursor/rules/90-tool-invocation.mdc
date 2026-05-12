@@ -6,8 +6,7 @@ alwaysApply: true
 # Tool Invocation Conventions
 
 Pilot's Tools are exposed at a **process or MCP boundary**, not as Python
-function calls (see `pilot/README.md` § Scope & Positioning, core invariants).
-Cursor has two ways to invoke them.
+function calls. Cursor has two ways to invoke them.
 
 ## Universal environmental input: `cluster.yaml`
 
@@ -75,17 +74,21 @@ parameter schemas, so Cursor performs type validation automatically.
 
 ## Which tools you can / cannot call
 
-Scope is defined by your role (see `@.cursor/rules/10-orchestrator-role.mdc`
+Scope is defined by your role (see `@.cursor/rules/00-pilot-core.mdc` Part I §2
 and `@.cursor/rules/30-worker-*.mdc`):
 
 | Role | Allowed |
 |------|---------|
 | Orchestrator | only `state.*` plus `subagent.spawn` (= Cursor Task tool) |
+| Preflight Worker | `preflight.run` / `preflight.env_probe` / `state.cluster_profile.*` |
+| Projection Worker | `profiler.run` / `constraint.estimate_mem` |
+| Smoke Worker | `submit.run --foreground` / `submit.cancel` / `observe.watch` / `observe.snapshot` |
+| Baseline Worker | `submit.run --foreground` / `submit.cancel` / `observe.watch` / `observe.snapshot` |
+| Observe Worker | `observe.snapshot` / `observe.compare_loss` |
 | Diagnose Worker | `observe.*` / `profiler.*` / `state.plan_graph.*` |
 | Re-Plan Worker | `constraint.*` / `state.plan_graph.*` |
 | EnvSweep Worker | `env_probe.sweep` / `constraint.check_env` |
-| Observe Worker | `observe.snapshot` / `observe.compare_loss` |
-| Correctness-Lite | `observe.compare_loss` |
+| Correctness / Correctness-Lite | `observe.compare_loss` |
 
 Out-of-scope calls violate `@.cursor/rules/00-pilot-core.mdc` rule 2
 (role separation).

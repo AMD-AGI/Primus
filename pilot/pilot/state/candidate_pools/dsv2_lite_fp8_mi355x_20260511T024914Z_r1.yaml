@@ -1,0 +1,404 @@
+schema_version: '1.0'
+round_id: 1
+status: ready
+diagnosis:
+  status: success
+  bottleneck: COMPUTE
+  candidate_axes:
+  - turbo_deepep_use_comm_stream
+  - turbo_deepep_num_cu
+  - gradient_accumulation_fusion
+  - micro_batch_size
+  measurement:
+    status: completed
+    median_iter_time_ms: 32064.0
+    median_tflops: 239.5
+    throughput_steps_per_s: 0.031188
+    final_loss: 5.12077
+    loss_finite: true
+    progress:
+      current_iter: 20
+      total_iters: 20
+      pct: 100.0
+      iters_per_min: 1.84
+      last_iter_at: '2026-05-11T03:09:43+00:00'
+      silent_for_s: 23.69
+    symptoms:
+      hang_suspected: false
+      oom_detected: false
+      nccl_error: false
+      cuda_error: false
+      python_error: false
+      loss_nan_or_inf: false
+      hang_threshold_s: 120.0
+      evidence: []
+  failure: null
+  source: engine
+  meta:
+    engine_report:
+      schema_version: '1.0'
+      snapshot_id: dsv2_lite_fp8_mi355x_20260511T024914Z_baseline
+      bottleneck: COMPUTE_BOUND
+      confidence: 0.85
+      evidence:
+      - "R4-A: compute_gemm_ratio=0.802 \u2265 COMPUTE_GEMM_HIGH=0.7 AND bubble_pct=0.006\
+        \ < BUBBLE_LOW=0.02 (gemm-dominated steady iter)"
+      recommended_skills:
+      - skills/optimization/compute/SKILL.md
+      - skills/optimization/comm/moe_dispatch.md
+      env_suspect:
+      - flag: turbo_deepep_use_comm_stream
+        reason: MoE EP comm rides the compute stream
+        hint: set true and re-profile
+      candidate_axes:
+      - axis: turbo_deepep_use_comm_stream
+        type: weakly_local
+        candidates:
+        - true
+        expected_gain_band_pct: &id001
+        - 3
+        - 8
+        rationale: MoE EP comm (7.2% of iter) shares stream with compute_gemm; overlap_pct=0.001
+          < OVERLAP_LOW=0.02 and only 2 GPU stream(s) observed
+      - axis: turbo_deepep_num_cu
+        type: weakly_local
+        candidates:
+        - 64
+        - 80
+        - 96
+        expected_gain_band_pct: &id002
+        - 1
+        - 5
+        rationale: MoE EP dispatch is 7.2% of iter; tune CU allocation
+      - axis: gradient_accumulation_fusion
+        type: weakly_local
+        candidates:
+        - true
+        expected_gain_band_pct:
+        - 1
+        - 3
+        rationale: "compute_other has 40282 kernels averaging 47.3 \xB5s each (launch-overhead\
+          \ dominated)"
+      - axis: micro_batch_size
+        type: structural
+        candidates:
+        - 16
+        - 18
+        expected_gain_band_pct:
+        - 2
+        - 6
+        rationale: compute_gemm_ratio=0.802 dominant and bubble_pct=0.006 tiny; bigger
+          batch amortizes launch & fills tile shapes
+      suggested_strategy: Successive_Halving
+      suggested_transition:
+        to: OPTIMIZE_LOOP.REPLAN
+        reason: compute_bound verdict via R4-A
+        counts_against_budget: true
+      meta:
+        rule_id: R4-A
+        bottleneck_extended: COMPUTE_BOUND
+        iter_ms_steady_median: 31999.297
+        comm_ratio: 0.0734
+        bubble_ratio_estimate: 0.0061
+        bubble_ratio_source: profiler
+        strategy_rationale: mixed axis types and > 6 candidate values; budget-aware
+          pruning
+        thresholds:
+          MEM_TIGHT_PCT: 0.92
+          BUBBLE_HIGH: 0.1
+          BUBBLE_MED: 0.05
+          BUBBLE_LOW: 0.02
+          COMM_HIGH: 0.2
+          COMM_VERY_HIGH: 0.3
+          COMM_LOW: 0.1
+          PURE_COMM_HIGH: 0.1
+          SERIAL_COMM_HIGH_MS: 5.0
+          COMPUTE_HIGH: 0.8
+          COMPUTE_GEMM_HIGH: 0.7
+          OVERLAP_LOW: 0.02
+          REGRESSION_PCT: 1.05
+          STALE_PROFILE_DAYS: 7.0
+        trace_evidence:
+          iter_wallclock_ms: 31999.297
+          ratios:
+            comm_ratio: 0.0734
+            comm_collective_ratio: 0.0013
+            comm_moe_dispatch_ratio: 0.0724
+            comm_p2p_ratio: 0.0
+            compute_ratio: 0.9212
+            compute_gemm_ratio: 0.8024
+            compute_attention_ratio: 0.0072
+            compute_fp8_prep_ratio: 0.0326
+            compute_norm_act_ratio: 0.0189
+            compute_optim_ratio: 0.0006
+            compute_other_ratio: 0.0596
+            memcpy_ratio: 0.0
+            bubble_ratio: 0.0061
+            schedule_overhead_ratio: 0.0
+          cost_breakdown:
+            pure_compute_pct: 0.9205
+            pure_comm_pct: 0.0727
+            overlap_pct: 0.0007
+            bubble_pct: 0.0061
+            longest_serialized_comm_ms: 16.077
+          phases:
+            fwd_pct: 0.03831552924428309
+            bwd_pct: 0.9603881922780991
+            optim_pct: 0.00018622284108304004
+          streams_observed: 2
+          moe_shares_compute_stream: true
+          fp8_amax_share: 0.4966
+          attention_long_tail: false
+          compute_other_count: 40282
+          compute_other_avg_ms: 0.0473
+          warnings: []
+candidates:
+- id: r1_c1_bd2e3996
+  round_id: 1
+  priority: 0.0561
+  reason: 'turbo_deepep_use_comm_stream=True :: MoE EP comm (7.2% of iter) shares
+    stream with compute_gemm; overlap_pct=0.001 < OVERLAP_LOW=0.02 and only 2 GPU
+    stream(s) observed'
+  overrides:
+    wandb_project: Primus_DeepSeek_Pretrain
+    stderr_sink_level: DEBUG
+    moe_router_force_load_balancing: true
+    log_avg_skip_iterations: 2
+    log_avg_reset_interval: 50
+    train_iters: 20
+    micro_batch_size: 14
+    global_batch_size: 896
+    seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+    max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+    lr: 1.0e-05
+    min_lr: 0.0
+    lr_warmup_iters: 2
+    lr_decay_iters: null
+    lr_decay_style: cosine
+    weight_decay: 0.1
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    eod_mask_loss: true
+    init_method_std: 0.008
+    norm_epsilon: 1.0e-06
+    tensor_model_parallel_size: ${PRIMUS_TP:1}
+    pipeline_model_parallel_size: ${PRIMUS_PP:1}
+    expert_model_parallel_size: ${PRIMUS_EP:8}
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    gradient_accumulation_fusion: false
+    mock_data: true
+    train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+    valid_data_path: null
+    test_data_path: null
+    multi_latent_attention: true
+    finetune: false
+    auto_continue_train: false
+    load: null
+    no_load_optim: null
+    no_load_rng: null
+    save: null
+    save_interval: 20000
+    no_save_optim: null
+    no_save_rng: null
+    disable_last_saving: true
+    ckpt_format: torch
+    eval_iters: 0
+    enable_primus_turbo: true
+    use_turbo_attention: true
+    use_turbo_grouped_mlp: true
+    use_turbo_deepep: true
+    moe_shared_expert_overlap: false
+    moe_router_dtype: fp32
+    turbo_deepep_num_cu: 64
+    turbo_deepep_use_comm_stream: true
+    turbo_sync_free_moe_stage: 2
+    cross_entropy_fusion_impl: te
+    cross_entropy_loss_fusion: true
+    fp8: e4m3
+    fp8_recipe: tensorwise
+  env_overrides: {}
+  axis_meta:
+    axis: turbo_deepep_use_comm_stream
+    value: true
+    type: weakly_local
+    channel: trainer_override
+    expected_gain_band_pct: *id001
+    rationale: MoE EP comm (7.2% of iter) shares stream with compute_gemm; overlap_pct=0.001
+      < OVERLAP_LOW=0.02 and only 2 GPU stream(s) observed
+    source: engine.candidate_axes
+    novelty_bonus: 1.2
+    stability_bonus: 1.0
+    priority_pre_bonus: 0.04675
+- id: r1_c2_ddef6e59
+  round_id: 1
+  priority: 0.05
+  reason: control rerun with current structure (engine path baseline)
+  overrides:
+    wandb_project: Primus_DeepSeek_Pretrain
+    stderr_sink_level: DEBUG
+    moe_router_force_load_balancing: true
+    log_avg_skip_iterations: 2
+    log_avg_reset_interval: 50
+    train_iters: 20
+    micro_batch_size: 14
+    global_batch_size: 896
+    seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+    max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+    lr: 1.0e-05
+    min_lr: 0.0
+    lr_warmup_iters: 2
+    lr_decay_iters: null
+    lr_decay_style: cosine
+    weight_decay: 0.1
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    eod_mask_loss: true
+    init_method_std: 0.008
+    norm_epsilon: 1.0e-06
+    tensor_model_parallel_size: ${PRIMUS_TP:1}
+    pipeline_model_parallel_size: ${PRIMUS_PP:1}
+    expert_model_parallel_size: ${PRIMUS_EP:8}
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    gradient_accumulation_fusion: false
+    mock_data: true
+    train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+    valid_data_path: null
+    test_data_path: null
+    multi_latent_attention: true
+    finetune: false
+    auto_continue_train: false
+    load: null
+    no_load_optim: null
+    no_load_rng: null
+    save: null
+    save_interval: 20000
+    no_save_optim: null
+    no_save_rng: null
+    disable_last_saving: true
+    ckpt_format: torch
+    eval_iters: 0
+    enable_primus_turbo: true
+    use_turbo_attention: true
+    use_turbo_grouped_mlp: true
+    use_turbo_deepep: true
+    moe_shared_expert_overlap: false
+    moe_router_dtype: fp32
+    turbo_deepep_num_cu: 64
+    turbo_deepep_use_comm_stream: false
+    turbo_sync_free_moe_stage: 2
+    cross_entropy_fusion_impl: te
+    cross_entropy_loss_fusion: true
+    fp8: e4m3
+    fp8_recipe: tensorwise
+  env_overrides: {}
+  axis_meta:
+    axis: _control
+    value: null
+    type: control
+    channel: control
+    source: engine.control
+    novelty_bonus: 1.0
+    stability_bonus: 1.0
+    priority_pre_bonus: 0.05
+- id: r1_c4_f25ab46f
+  round_id: 1
+  priority: 0.0306
+  reason: 'turbo_deepep_num_cu=80 :: MoE EP dispatch is 7.2% of iter; tune CU allocation'
+  overrides:
+    wandb_project: Primus_DeepSeek_Pretrain
+    stderr_sink_level: DEBUG
+    moe_router_force_load_balancing: true
+    log_avg_skip_iterations: 2
+    log_avg_reset_interval: 50
+    train_iters: 20
+    micro_batch_size: 14
+    global_batch_size: 896
+    seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+    max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+    lr: 1.0e-05
+    min_lr: 0.0
+    lr_warmup_iters: 2
+    lr_decay_iters: null
+    lr_decay_style: cosine
+    weight_decay: 0.1
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    eod_mask_loss: true
+    init_method_std: 0.008
+    norm_epsilon: 1.0e-06
+    tensor_model_parallel_size: ${PRIMUS_TP:1}
+    pipeline_model_parallel_size: ${PRIMUS_PP:1}
+    expert_model_parallel_size: ${PRIMUS_EP:8}
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    gradient_accumulation_fusion: false
+    mock_data: true
+    train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+    valid_data_path: null
+    test_data_path: null
+    multi_latent_attention: true
+    finetune: false
+    auto_continue_train: false
+    load: null
+    no_load_optim: null
+    no_load_rng: null
+    save: null
+    save_interval: 20000
+    no_save_optim: null
+    no_save_rng: null
+    disable_last_saving: true
+    ckpt_format: torch
+    eval_iters: 0
+    enable_primus_turbo: true
+    use_turbo_attention: true
+    use_turbo_grouped_mlp: true
+    use_turbo_deepep: true
+    moe_shared_expert_overlap: false
+    moe_router_dtype: fp32
+    turbo_deepep_num_cu: 80
+    turbo_deepep_use_comm_stream: false
+    turbo_sync_free_moe_stage: 2
+    cross_entropy_fusion_impl: te
+    cross_entropy_loss_fusion: true
+    fp8: e4m3
+    fp8_recipe: tensorwise
+  env_overrides: {}
+  axis_meta:
+    axis: turbo_deepep_num_cu
+    value: 80
+    type: weakly_local
+    channel: trainer_override
+    expected_gain_band_pct: *id002
+    rationale: MoE EP dispatch is 7.2% of iter; tune CU allocation
+    source: engine.candidate_axes
+    novelty_bonus: 1.2
+    stability_bonus: 1.0
+    priority_pre_bonus: 0.0255
+selection:
+  strategy: Per-Plan
+  pick_top_k: 3
+  selected:
+  - r1_c1_bd2e3996
+  - r1_c2_ddef6e59
+  - r1_c4_f25ab46f
+  rejected:
+  - axis: micro_batch_size
+    value: 18
+    reason: 'constraint: [''global_batch_size=896 must be divisible by micro_batch_size*dp=18
+      (dp=1)'']'
+derived_from:
+  primary: dsv2_lite_fp8_mi355x_20260511T024914Z_baseline
+  secondary: []
+source: engine
+engine_meta:
+  rule_id: R4-A
+  bottleneck: COMPUTE_BOUND
+  confidence: 0.85
+  skipped:
+  - 'micro_batch_size: constraint violations [''global_batch_size=896 must be divisible
+    by micro_batch_size*dp=18 (dp=1)'']'
+priority_formula: "priority(c) = gain_mid \xD7 max(0.05, confidence) / cost_proxy\
+  \ \xD7 novelty_bonus \xD7 stability_bonus"
+policy: exploit

@@ -1,0 +1,161 @@
+---
+description: Baseline Stage Worker — role and scope (full tuning-window run; produces the first run_history entry and the initial champion)
+alwaysApply: false
+---
+
+# Baseline Worker
+
+**You** are a one-shot Baseline Stage Worker, spawned by the Orchestrator
+after a successful SMOKE. Goal: run the same Plan that passed SMOKE for
+the **configured tuning window** (`train_iters` ≈ 20-100, not 20),
+capture the terminal `RunSnapshot`, and write it as the very first
+`run_history` entry. This snapshot becomes the **initial champion**
+(`tuning_state.champion_id`) that every later round is compared against.
+
+BASELINE counts as round 0 of measurement; it does **not** consume a
+tuning round (`counts_against_budget=false`) but it does spend `gpu_h`.
+
+## Inputs (passed by the Orchestrator)
+
+- `plan_ref`: the **same plan** that passed SMOKE (no parallelism /
+  precision changes between SMOKE and BASELINE — that invalidates the
+  comparison).
+- `cluster_config_ref`: path to `cluster.yaml`.
+- `session_id`: from `tuning_state.yaml` — the Worker writes artifacts under
+  `state/<session_id>/trace/baseline/`, never under the legacy flat
+  `state/runs/<run_id>/`.
+- `train_iters`: tuning-window length, default 20-100 depending on model
+  size and budget (from `target_vector.budget.train_iters`).
+- `timeout_s`: foreground wallclock cap.
+
+## Allowed Skill scope (strict)
+
+Read **only**:
+
+- `@pilot/skills/workflow/smoke.md` §4 — pass/fail table (BASELINE
+  reuses SMOKE's pass criteria, just at longer `train_iters`).
+- `@pilot/skills/workflow/observe.md` — Snapshot schema.
+
+**Do not** read `diagnose.md` / `replan.md` / `optimization/**` /
+`execution-model/**`. BASELINE is a *measurement*, not an analysis.
+
+## Allowed Tools
+
+| Tool | Purpose |
+|---|---|
+| `python -m pilot.tools.submit run --cluster-config <ref> --plan <ref> --override train_iters=<n> --run-id baseline --log-dir state/<session_id>/trace --foreground --foreground-timeout-s <cap>` | Launch the full-window run. The `--run-id baseline` label is a fixed per-session slot, not a disambiguating id. |
+| `python -m pilot.tools.observe watch --run-id baseline --log-dir state/<session_id>/trace --hang-threshold-s <s>` | Poll snapshots until terminal. |
+| `python -m pilot.tools.observe snapshot --run-id baseline --log-dir state/<session_id>/trace --save` | Capture the final snapshot (single source of truth for downstream stages). |
+| `python -m pilot.tools.submit cancel --run-id baseline --log-dir state/<session_id>/trace` | Only on a watcher-confirmed hang. |
+
+You **must not** call `tune_single.*`, `diagnose`, `replan`, `settle`.
+
+## Recipe
+
+```bash
+TRACE_DIR="state/$session_id/trace"   # session-scoped slot from tuning.yaml::log_dir_prefix
+
+python -m pilot.tools.submit run \
+  --cluster-config "$cluster_config_ref" \
+  --plan "$plan_ref" \
+  --override train_iters="$train_iters" \
+  --override save_interval=999999 \
+  --override eval_interval=999999 \
+  --run-id baseline \
+  --log-dir "$TRACE_DIR" \
+  --foreground --foreground-timeout-s "$timeout_s"
+
+python -m pilot.tools.observe watch \
+  --run-id baseline --log-dir "$TRACE_DIR" --hang-threshold-s 240
+
+python -m pilot.tools.observe snapshot \
+  --run-id baseline --log-dir "$TRACE_DIR" --save
+```
+
+`--run-id baseline` is a fixed per-stage label, not a disambiguating id —
+the old `<stage>_<timestamp>` pattern existed only because the legacy
+`state/runs/<run_id>/` namespace was flat across all sessions. With the
+per-session, per-stage trace layout there is exactly one BASELINE per
+session; re-entries simply overwrite the slot (or fail with a `run_id
+collision` — clear the dir first).
+
+Note: BASELINE's `train_iters` is typically **longer** than SMOKE's
+(20-100 vs 20), so raise `--hang-threshold-s` to absorb a slower first
+iteration on cold caches. Do **not** touch `global_batch_size`,
+`micro_batch_size`, `seq_length`, or any parallelism knob — they must
+match SMOKE for the snapshot to be a valid champion.
+
+## Output contract
+
+The terminal `RunSnapshot` is the deliverable. The trace dir is taken from
+`tuning.yaml::stages.baseline.dir` (defaults to `trace/baseline`), anchored
+under `log_dir_prefix = state/<session_id>`. Persist artifacts to:
+
+```
+state/<session_id>/trace/baseline/snapshots/<ts>.yaml
+```
+
+(no `<run_id>` sub-segment — the stage dir IS the slot, exactly one
+BASELINE per session).
+
+`SubagentResult`:
+
+```yaml
+stage: BASELINE
+status: success | tentative | failed
+artifacts:
+  - kind: RunSnapshot
+    ref: state/<session_id>/trace/baseline/snapshots/<ts>.yaml
+  - kind: RunHandle
+    ref: state/<session_id>/trace/baseline/handle.yaml
+summary:
+  headline: "BASELINE <iters_done>/<iters_target> rc=<exit_code> <wallclock>s; iter=<ms> tps=<x> loss=<y> <finite|nonfinite>"
+  key_metrics:
+    iter_time_ms: <float>             # → tuning_state.champion.score
+    tps: <float>
+    median_tflops: <float>            # the primary metric in this session's target_vector
+    loss_finite: <bool>
+    mem_peak_pct: <float>
+    progress_pct: <float>
+suggested_transition:
+  to: CORRECTNESS                     # explicit numeric-health gate; or directly OPTIMIZE_LOOP.DIAGNOSE in single-node v1
+  reason: "<short>"
+cost:
+  gpu_h: <float>
+  wallclock_s: <int>
+  tool_calls: <int>
+failure: null
+```
+
+### Pass / fail mapping
+
+Reuses `smoke.md` §4 (same RunSnapshot signals). The only differences:
+
+| Difference | SMOKE | BASELINE |
+|---|---|---|
+| `train_iters` | 20 | 20-100 (tuning window) |
+| `hang_threshold_s` default | 180 | 240 |
+| On `failed` (any kind) | → PROJECTION / DIAGNOSE per `smoke.md` | → ABORT (the same plan just passed SMOKE; a fail here is real) |
+
+BASELINE is the **commitment point** — if a run that passed SMOKE
+fails at BASELINE, escalate (`escalate_to_orchestrator=true`); do not
+silently re-PROJECT.
+
+## Hard constraints
+
+- Wallclock cap = caller-supplied `timeout_s` (typically 600-1800s).
+- Per-call context peak < 10K tokens.
+- `summary.headline` < 200 tokens.
+- Never re-run on a hang without `submit cancel` first.
+- Never tweak `--override` beyond `save_interval` / `eval_interval` (and
+  `train_iters`) — any other change invalidates the champion.
+
+## On failure
+
+```yaml
+failure:
+  kind: OOM | HANG | COLLECTIVE | CUDA | NUMERICAL | TOOL_ERROR | TIMEOUT | UNKNOWN
+  escalate_to_orchestrator: true       # BASELINE fail is a hard escalation
+  message: "<one-line evidence>"
+  evidence_ref: state/<session_id>/trace/baseline/train.log
+```

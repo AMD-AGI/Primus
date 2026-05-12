@@ -1,0 +1,107 @@
+schema_version: '1.0'
+run_id: real_e2e_plan_graph_demo_r1_c1_ce66df76
+snapshot_at: '2026-05-11T01:53:02+00:00'
+status: completed
+process:
+  pid: 6082
+  alive: false
+  exit_code: 0
+  wallclock_s: 65.89
+progress:
+  current_iter: 15
+  total_iters: 15
+  pct: 100.0
+  iters_per_min: 117.97
+  last_iter_at: '2026-05-11T01:52:42+00:00'
+  silent_for_s: 20.35
+metrics:
+  latest:
+    loss: 10.29522
+    iter_time_ms: 513.4
+    tflops: 578.4
+    consumed_samples: 480
+    learning_rate: 0.0
+    grad_norm: 24.238
+  history:
+    iters:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    loss:
+    - 11.84797
+    - 11.84854
+    - 11.78477
+    - 11.58124
+    - 11.43932
+    - 11.28789
+    - 11.06975
+    - 10.96944
+    - 10.78182
+    - 10.66051
+    - 10.59133
+    - 10.48823
+    - 10.39508
+    - 10.36379
+    - 10.29522
+    iter_time_ms:
+    - 19033.3
+    - 9860.7
+    - 668.2
+    - 515.8
+    - 517.6
+    - 721.0
+    - 520.6
+    - 498.8
+    - 494.8
+    - 531.3
+    - 501.0
+    - 507.4
+    - 493.8
+    - 519.5
+    - 513.4
+    tflops:
+    - 15.6
+    - 30.1
+    - 444.4
+    - 575.6
+    - 573.7
+    - 411.8
+    - 570.3
+    - 595.3
+    - 600.1
+    - 558.9
+    - 592.7
+    - 585.2
+    - 601.3
+    - 571.6
+    - 578.4
+  loss_finite: true
+symptoms:
+  hang_suspected: false
+  oom_detected: false
+  nccl_error: false
+  cuda_error: false
+  python_error: false
+  loss_nan_or_inf: false
+  hang_threshold_s: 120.0
+  evidence: []
+log:
+  ref: /shared/amdgpu/home/xiaoming_peng_qle/workspace/Primus/pilot/pilot/state/runs/real_e2e_plan_graph_demo_r1_c1_ce66df76/train.log
+  bytes: 471165
+  lines: 2500
+  tailed_bytes: 471165
+recommendation:
+  next: promote
+  reason: training reached terminal state with rc=0

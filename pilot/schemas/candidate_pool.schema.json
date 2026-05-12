@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/candidate_pool.schema.json",
   "title": "CandidatePool",
-  "description": "Output of Re-Plan worker. Priority-weighted candidates + Strategy Select decision. See README.md §8.10.",
+  "description": "Output of Re-Plan worker. Priority-weighted candidates + Strategy Select decision.",
   "x-status": "stub",
   "type": "object",
   "required": ["generated_at", "derived_from", "candidates", "selection"],

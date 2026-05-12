@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/shard_plan.schema.json",
   "title": "ShardPlan",
-  "description": "Sharded execution layout: K shards × N/K nodes per shard. See README.supplements.md §S3.2.",
+  "description": "Sharded execution layout: K shards × N/K nodes per shard.",
   "x-status": "stub",
   "type": "object",
   "required": ["mode", "shards"],

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://primus.ai/pilot/schemas/failure_report.schema.json",
   "title": "FailureReport",
-  "description": "Output of constraint.diagnose_failure(). Drives §12.2 state-machine failure transitions. See README.md §8.8.",
+  "description": "Output of constraint.diagnose_failure(). Drives state-machine failure transitions per skills/workflow/state_machine.md.",
   "x-status": "stub",
   "type": "object",
   "required": ["failure_kind", "suggested_transition"],
