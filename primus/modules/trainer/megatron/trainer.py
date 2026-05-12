@@ -1220,7 +1220,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
             )
         except Exception as e:
-            warning_rank_0(f"[MLflow] Artifact upload failed: {e}")
+            import logging
+
+            logging.getLogger(__name__).warning("[MLflow] Artifact upload failed: %s", e)
         finally:
             if mlflow_writer:
                 mlflow_writer.end_run()
@@ -2076,32 +2078,22 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         self.module_local_rank
                     )
                 # Collect GPU utilization for performance metrics
-                # Optimization: Sample only on DP rank 0 to avoid per-rank subprocess overhead,
-                # and rate-limit to avoid rocm-smi jitter at every log_interval.
-                # See: https://github.com/AMD-AGI/Primus/pull/439 (Copilot review)
+                # Every rank samples its own GPU util (rate-limited to avoid rocm-smi
+                # subprocess overhead) so the all_gather below gets real per-rank values.
                 if getattr(args, "mlflow_upload_performance_metrics", False):
-                    try:
-                        from megatron.core.parallel_state import get_data_parallel_rank
+                    import time
 
-                        is_dp_rank0 = get_data_parallel_rank() == 0
-                    except Exception:
-                        is_dp_rank0 = args.rank == 0
-
-                    if is_dp_rank0:
-                        import time
-
-                        now = time.time()
-                        should_sample = (
-                            self._last_rocm_gpu_util is None
-                            or (now - self._last_rocm_gpu_util_time) >= self._rocm_gpu_util_sample_interval
-                        )
-                        if should_sample:
-                            try:
-                                self._last_rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
-                                self._last_rocm_gpu_util_time = now
-                            except Exception:
-                                pass  # Keep previous cached value if any
-                    # Non-DP-rank-0 ranks use the cached/last-known value (or None initially)
+                    now = time.time()
+                    should_sample = (
+                        self._last_rocm_gpu_util is None
+                        or (now - self._last_rocm_gpu_util_time) >= self._rocm_gpu_util_sample_interval
+                    )
+                    if should_sample:
+                        try:
+                            self._last_rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                            self._last_rocm_gpu_util_time = now
+                        except Exception:
+                            pass  # Keep previous cached value if any
                     rocm_gpu_util = self._last_rocm_gpu_util
                 else:
                     rocm_gpu_util = None
