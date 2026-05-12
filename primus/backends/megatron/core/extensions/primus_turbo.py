@@ -35,26 +35,100 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import divide, get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
+from primus_turbo.pytorch.core import QuantizedTensor as PrimusTurboQuantizedTensor
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
     Format,
     ScaleDtype,
     ScalingGranularity,
+    ScalingRecipe,
     ScalingStrategy,
     check_fp8_support,
     check_mxfp4_support,
     check_mxfp8_support,
+    float4_e2m1fn_x2,
+    float8_e4m3,
 )
 from torch import Tensor
-from transformer_engine.pytorch.fp8 import (
-    DelayedScaling,
-    FP8GlobalStateManager,
-    Recipe,
-)
 from transformer_engine.pytorch.constants import dist_group_type
+from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+
+_dummy_wgrads = {}
+
+
+def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape.
+
+    Supports arbitrary rank (2D for plain Linear weights, 3D for stacked
+    grouped-linear weights ``(num_gemms, out_features, in_features)``, etc.).
+    Tensors are cached by ``(shape, dtype)`` so each distinct weight layout
+    only allocates one persistent buffer that gets reused across steps.
+    """
+    global _dummy_wgrads
+    key = (tuple(shape), dtype)
+    if key not in _dummy_wgrads:
+        _dummy_wgrads[key] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[key].fill_(0)
+    return _dummy_wgrads[key].detach()
+
+
+def _bridge_weight_grad(x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: torch.Tensor):
+    """Bridge quantized weight gradient to the original weight's ``main_grad``.
+
+    Must be called **before** the gemm so that in the backward pass the gemm
+    backward fires first (producing the real weight gradient) and then
+    ``_WeightGradBridge.backward`` receives it, writes it into
+    ``weight.main_grad``, and emits a dummy wgrad so that ``weight``'s
+    AccumulateGrad / DDP ``register_grad_ready`` hook fires in the correct
+    order.
+
+    Returns ``(x, quantized_weight)`` ready to be fed into the gemm op.
+    ``quantized_weight`` is ``weight_buffer`` on the quantized path or ``weight``
+    itself on the plain-gemm path.
+
+    NOTE: ``weight`` (the saved leaf parameter) and ``weight_buffer`` may have
+    different shapes (e.g. a 2D leaf flattened weight viewed as a 3D
+    grouped-linear weight).  The wgrad coming back from the gemm has the
+    quantized buffer's shape and is reshaped to match ``weight.main_grad``
+    before being accumulated.
+    """
+
+    class _WeightGradBridge(torch.autograd.Function):
+
+        @staticmethod
+        def forward(ctx, x, weight, quantized_weight):
+            ctx.save_for_backward(weight)
+            return x, quantized_weight
+
+        @staticmethod
+        def backward(ctx, grad_x, grad_quantized_weight):
+            (weight,) = ctx.saved_tensors
+            assert hasattr(weight, "main_grad"), "weight.main_grad should be set before backward pass."
+            assert hasattr(
+                weight, "grad_added_to_main_grad"
+            ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
+
+            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding quantized weight gradient to main grad twice.
+            if grad_quantized_weight.shape != weight.main_grad.shape:
+                grad_quantized_weight = grad_quantized_weight.reshape(weight.main_grad.shape)
+            weight.main_grad.add_(grad_quantized_weight)
+            weight.grad_added_to_main_grad = True
+
+            return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None
+
+    if weight_buffer is not None and weight_buffer.requires_grad:
+        return _WeightGradBridge.apply(x, weight, weight_buffer)
+
+    return _WeightGradBridge.apply(x, weight, weight)
 
 
 def use_split_wgrad_op():
@@ -1194,6 +1268,55 @@ class PrimusTurboGroupedMLP(GroupedMLP):
 
             self.activation_func_with_probs = _activation_func_with_probs
 
+        # Quantized weight buffers for grouped GEMM.  Lazily filled on the first
+        # microbatch of each step so that the high-precision ``weight1`` /
+        # ``weight2`` parameters can stay in fp32/bf16 master copies while the
+        # forward path consumes a cached quantized view.
+        self.is_first_microbatch = True
+        self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
+        self.register_buffer("quantized_weight1_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight2_buffer", None, persistent=False)
+
+    def _maybe_build_quantized_weight(
+        self,
+        weight_view: torch.Tensor,
+        quant_config: "PrimusTurboQuantConfig",
+        is_first_microbatch: bool,
+    ) -> Optional[PrimusTurboQuantizedTensor]:
+        """Build (or refresh) a ``PrimusTurboQuantizedTensor`` for a grouped weight view.
+
+        ``weight_view`` is the 3D ``(num_experts, K, N)`` view of the underlying
+        flat ``weight1`` / ``weight2`` parameter.  Quantization recipe / dtype
+        is selected from the active turbo quant config.  Returns ``None`` if
+        ``is_first_microbatch`` is False (the caller is expected to reuse the
+        previously-cached buffer).
+        """
+        if not is_first_microbatch:
+            return None
+
+        quant_config_internal = quant_config.data()
+        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+            weight_dtype = float4_e2m1fn_x2
+            weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
+        else:
+            weight_dtype = float8_e4m3
+            if quant_config.block_scaling() or quant_config.mxfp8_scaling():
+                weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
+            else:
+                weight_scaling_recipe = None
+
+        return PrimusTurboQuantizedTensor(
+            weight_view,
+            dest_dtype=weight_dtype,
+            granularity=quant_config_internal.granularity,
+            block_size=quant_config_internal.block_size,
+            scaling_recipe=weight_scaling_recipe,
+            scaling_recipe_for_trans=weight_scaling_recipe,
+            # NOTE: if current scaling is enabled, the backward gemm support TN and NN layout,
+            # so we don't need to cache the transpose of the weight
+            keep_trans_cache=not self.disable_parameter_transpose_cache or quant_config.current_scaling(),
+        )
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -1233,11 +1356,30 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
+
+            is_first_microbatch = self.is_first_microbatch
+
             if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp8_scaling()
+                    or quant_config.current_scaling()
+                    or quant_config.block_scaling()
+                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
+
+                # Build / refresh the cached quantized 3D weight on the first
+                # microbatch; subsequent microbatches reuse the cache.
+                if is_first_microbatch:
+                    self.quantized_weight1_buffer = self._maybe_build_quantized_weight(
+                        w1, quant_config, is_first_microbatch
+                    )
+
+                permuted_local_hidden_states, quantized_w1 = _bridge_weight_grad(
+                    permuted_local_hidden_states, self.weight1, self.quantized_weight1_buffer
+                )
                 fc1_output = pt.ops.grouped_gemm_fp8(
                     permuted_local_hidden_states,
-                    w1,
+                    quantized_w1,
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
@@ -1260,9 +1402,18 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+
+                    if is_first_microbatch:
+                        self.quantized_weight2_buffer = self._maybe_build_quantized_weight(
+                            w2, quant_config, is_first_microbatch
+                        )
+
+                    intermediate_parallel, quantized_w2 = _bridge_weight_grad(
+                        intermediate_parallel, self.weight2, self.quantized_weight2_buffer
+                    )
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
-                        w2,
+                        quantized_w2,
                         tokens_per_expert,
                         trans_b=False,
                         config=quant_config.data(),
@@ -1283,9 +1434,18 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+
+                    if is_first_microbatch:
+                        self.quantized_weight2_buffer = self._maybe_build_quantized_weight(
+                            w2, quant_config, is_first_microbatch
+                        )
+
+                    intermediate_parallel, quantized_w2 = _bridge_weight_grad(
+                        intermediate_parallel, self.weight2, self.quantized_weight2_buffer
+                    )
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
-                        w2,
+                        quantized_w2,
                         tokens_per_expert,
                         trans_b=False,
                         config=quant_config.data(),
@@ -1321,6 +1481,8 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 else:
                     h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)
+
+        self.is_first_microbatch = False
 
         return fc2_output, None
 
