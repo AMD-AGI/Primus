@@ -1,0 +1,55 @@
+extends:
+  - qwen2.5_base.yaml
+
+# Qwen3.5-35B-A3B — text/MoE stack (HF `text_config` on Qwen3_5MoeForConditionalGeneration).
+# Same family as Qwen3-Next (gated-delta linear attention + periodic full attention + shared expert MoE).
+# References: https://huggingface.co/Qwen/Qwen3.5-35B-A3B , ms-swift `qwen3_5_moe` model entries.
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen3.5-35B-A3B
+
+# Core
+num_layers: 40
+hidden_size: 2048
+ffn_hidden_size: 5120
+num_attention_heads: 16
+
+# MoE
+moe_layer_freq: "1"
+num_experts: 256
+moe_router_topk: 8
+moe_ffn_hidden_size: 512
+moe_shared_expert_intermediate_size: 512
+moe_shared_expert_gate: true
+moe_router_load_balancing_type: global_aux_loss
+moe_aux_loss_coeff: 0.001
+moe_router_dtype: fp32
+
+# GQA / QK norm (HF head_dim 256)
+group_query_attention: true
+num_query_groups: 2
+qk_layernorm: true
+kv_channels: 256
+
+# Linear attention (gated delta net) + full attention every 4 layers (HF full_attention_interval: 4)
+experimental_attention_variant: gated_delta_net
+linear_attention_freq: 4
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 128
+linear_value_head_dim: 128
+linear_num_key_heads: 16
+linear_num_value_heads: 32
+
+attention_output_gate: true
+apply_layernorm_1p: true
+apply_wd_to_qk_layernorm: true
+
+mtp_num_layers: 0
+
+rotary_base: 10000000
+rotary_percent: 0.25
+
+init_method_std: 0.02
+norm_epsilon: 1.0e-6
+
+bias_swiglu_fusion: false
