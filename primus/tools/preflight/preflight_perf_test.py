@@ -690,8 +690,30 @@ def _resolve_perf_config(args) -> Dict[str, Any]:
             raise ValueError(f"--intra-group-sizes: {bad} do not divide LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}")
 
     inter_group_sizes = _parse_csv_inter_group_list(inter_group_sizes_str, "--inter-group-sizes")
-    if needs_inter and not inter_group_sizes:
-        raise ValueError("--inter-group-sizes yielded no values")
+    if needs_inter:
+        if not inter_group_sizes:
+            raise ValueError("--inter-group-sizes yielded no values")
+        # Mirror the intra-side range check: catch integer values that
+        # ``_resolve_inter_group_sizes`` would silently drop (values < 2 or
+        # > num_nodes), so the user gets an explicit error instead of a
+        # surprise "Skip inter-node comm benchmark, no valid group sizes"
+        # at runtime. The "all" token is always valid (resolves to num_nodes).
+        # Skip the range check when num_nodes < 2: the runtime will skip the
+        # entire inter test and report num_nodes; raising here would emit a
+        # confusing message like "must be in [2, 1]".
+        num_nodes_inferred = WORLD_SIZE // LOCAL_WORLD_SIZE if LOCAL_WORLD_SIZE > 0 else 0
+        if num_nodes_inferred >= 2:
+            bad = [
+                g
+                for g in inter_group_sizes
+                if isinstance(g, int) and (g < 2 or g > num_nodes_inferred)
+            ]
+            if bad:
+                raise ValueError(
+                    f"--inter-group-sizes: {bad} are out of range "
+                    f"(must be in [2, {num_nodes_inferred}] or 'all'; "
+                    f"num_nodes={num_nodes_inferred})"
+                )
 
     ring_sizes_mb = _parse_csv_int_list(ring_sizes_str, "--ring-p2p-sizes-mb")
     if needs_ring and not ring_sizes_mb:

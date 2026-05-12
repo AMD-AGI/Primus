@@ -152,9 +152,17 @@ def write_markdown(args, sizes_in_mb, time_statistics):
             f.write(f"| {r_idx} | {' | '.join(formatted_values)}|\n")
         f.write("\n")
 
-        # bandwidth
-        log(f"=======InterNodeRingP2P bidirectional bandwidth - ringsize={num_nodes} - (GB/s)=======")
-        f.write(f"=======InterNodeRingP2P bidirectional bandwidth - ringsize={num_nodes} - (GB/s)=======\n")
+        # Aggregate ring throughput: sum of per-link unidirectional throughput
+        # across all ``num_nodes`` links in the ring. Each link carries ``size``
+        # bytes in one direction per iteration (the ring topology is
+        # unidirectional in data flow), and there are ``num_nodes`` such links,
+        # giving ``(size * num_nodes) / time``. Prior versions called this
+        # "bidirectional bandwidth"; the label was misleading because the
+        # formula does not (and should not) double-count the same bytes from
+        # both sender and receiver perspectives. The numerical values are
+        # unchanged from earlier reports.
+        log(f"=======InterNodeRingP2P aggregate ring throughput - ringsize={num_nodes} - (GB/s)=======")
+        f.write(f"=======InterNodeRingP2P aggregate ring throughput - ringsize={num_nodes} - (GB/s)=======\n")
         log(f"{'ring':<{4}} {' '.join(formatted_keys)}")
         f.write(f"| ring | {' | '.join(keys)}|\n")
         f.write(f"|----------{'|----------' * len(keys)}|\n")
