@@ -389,6 +389,10 @@ python tools/preflight_bisect/bisect.py \
 Adjust the `--preflight-env` lines to match your cluster. Per-trial logs and a
 final `summary.txt` are written under `--output-dir`.
 
+> Note: Set `--trial-timeout-sec` high enough for a healthy subset to finish.
+> Too small a timeout can turn slow-but-good trials into false failures, causing
+> the bisection to explore extra paths.
+>
 > Note: `--preflight-env KEY=VALUE` values are concatenated into a single
 > `srun --export=ALL,...` argument, so values must not contain commas or
 > whitespace. Keep comma-containing values as normal exported environment
