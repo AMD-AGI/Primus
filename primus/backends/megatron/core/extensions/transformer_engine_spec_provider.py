@@ -111,7 +111,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboLinear, "parallel linear")
-            if self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_parallel_linear and self.cfg.lfm_layer_types is None
             else TELinear
         )
 
