@@ -25,7 +25,7 @@ modules:
       training:
         local_batch_size: 3
         seq_len: 8192
-        mock_data: true
+        mock_data: false
         steps: 20
         gc_freq: 100
 
