@@ -635,10 +635,20 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                         window_size = (self.sink_sliding_window, 0)
                 else:
                     window_size = (self.sink_sliding_window, 0)
+
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
+
+        if qkv_format == "sbhd":
+            query = query.permute(1, 0, 2, 3)
+            key = key.permute(1, 0, 2, 3)
+            value = value.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            query = query.permute(0, 2, 1, 3)
+            key = key.permute(0, 2, 1, 3)
+            value = value.permute(0, 2, 1, 3)
 
         o = self.attn(
             query,
@@ -657,8 +667,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             **self.attn_kwargs,
         )
 
-        # NOTE(ruibin): The output of attn is BSHD. Use permute to convert the layout to SBHD.
-        o = o.permute(1, 0, 2, 3).contiguous()
+        if qkv_format == "sbhd":
+            o = o.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            o = o.permute(0, 2, 1, 3)
+
         o = o.view(o.shape[0], o.shape[1], -1)
 
         return o
