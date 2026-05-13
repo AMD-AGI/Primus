@@ -11,7 +11,7 @@ Use it to spot misconfiguration, hardware degradation, or perf outliers **before
 - **Wrapper script (no container)**: [`runner/run_preflight_direct.sh`](../runner/run_preflight_direct.sh) — see [`preflight-direct.md`](./preflight-direct.md).
 - **Implementation entrypoint**: `primus/cli/subcommands/preflight.py` → `primus/tools/preflight/preflight_perf_test.py`.
 
-> Looking for a faster, distributed-rendezvous-free per-node screen? See [`node-smoke.md`](./node-smoke.md) (and the [quick-start guide](./node-smoke-test-instruction.md)). The recommended workflow is **smoke first, preflight second** — see [§9 Comparison with node-smoke](#9-comparison-with-node-smoke).
+> Looking for a faster, distributed-rendezvous-free per-node screen? See [`node-smoke.md`](./node-smoke.md) (and the [quick-start guide](./node-smoke-test-instruction.md)). The recommended workflow is **smoke first, preflight second** — see [§10 Comparison with node-smoke](#10-comparison-with-node-smoke).
 
 ---
 
@@ -200,21 +200,40 @@ primus-cli direct -- preflight \
 
 ## 6. Reliability knobs
 
-Two knobs that are inert under happy-path conditions but matter at scale or on flaky networks.
+Three knobs that are inert under happy-path conditions but matter at scale or on flaky networks.
 
 ### 6.1 `--comm-cleanup-delay-sec FLOAT` (default `2.0`)
 
 Delay (seconds) after destroying NCCL/RCCL process groups before creating new ones. Prevents `Address already in use` from socket port-reuse races as preflight tears down and recreates communicators between phases.
 
-- Default `2.0` is sufficient up to ~64 nodes.
-- Increase (e.g. `5.0`) at very large scale (128+ nodes / 1000+ ranks).
-- Set to `0` to disable the sleep (barrier only).
+- This is the **small-subgroup** delay. Subgroups whose node count meets or exceeds `--comm-cleanup-large-threshold-nodes` (default `64`) use a fixed **60-second** drain instead — see §6.2.
+- Default `2.0` is sufficient for any subgroup smaller than the threshold.
+- Set to `0` to disable the sleep entirely (barrier only).
 
 ```bash
-primus-cli slurm srun -N 128 -- preflight --quick --comm-cleanup-delay-sec 5
+# Small/medium clusters: defaults are fine. Override only if you see
+# port-reuse races on very flaky networks.
+primus-cli slurm srun -N 8 -- preflight --quick --comm-cleanup-delay-sec 5
 ```
 
-### 6.2 `--dist-timeout-sec INT` (default `120`)
+### 6.2 `--comm-cleanup-large-threshold-nodes INT` (default `64`)
+
+Subgroup-size threshold (in nodes) above which the cleanup delay is forced to **60 seconds** (the Linux `tcp_fin_timeout` default) instead of `--comm-cleanup-delay-sec`.
+
+Why: large subgroups (e.g. the all-nodes inter-node communicator at 128 N) generate enough IB OOB `TIME_WAIT` sockets per node that a short delay can leave the ephemeral-port pool exhausted before the next phase tries to bind a new NCCL communicator. That is exactly the failure mode behind `Address already in use` at very large scale. Forcing a full 60 s drain after destroying a large subgroup empties the per-node `TIME_WAIT` pool and lets the next phase start clean.
+
+- Default `64` was chosen so most clusters get the fix automatically without anyone needing to think about it.
+- Lower (e.g. `--comm-cleanup-large-threshold-nodes 32`) on clusters with non-default kernel `TIME_WAIT` settings, narrower ephemeral port ranges, or known port-pressure quirks.
+- Set above your cluster's node count (e.g. `--comm-cleanup-large-threshold-nodes 9999`) to disable the long drain entirely. Useful only if you've also adjusted the kernel-side knobs from §7.
+
+```bash
+# Be more conservative: trigger the 60s drain on subgroups >= 32 nodes.
+primus-cli slurm srun -N 64 -- preflight --comm-cleanup-large-threshold-nodes 32
+```
+
+See §7 ("Running on very large clusters") for the recommended large-cluster invocation patterns.
+
+### 6.3 `--dist-timeout-sec INT` (default `120`)
 
 Timeout (seconds) for `torch.distributed.init_process_group`. If init does not complete within this many seconds, preflight writes the info report (when applicable) plus a `Distributed Init` failure section to the markdown report, prints a clear error, and exits `2` — instead of hanging indefinitely.
 
@@ -225,7 +244,118 @@ primus-cli direct -- preflight --perf-test --dist-timeout-sec 30
 
 ---
 
-## 7. Reporting
+## 7. Running on very large clusters (≥ 64 nodes)
+
+Beyond ~64 nodes, two practical concerns dominate that smaller runs never see. Read this section once if you operate clusters in this range; it explains the failure mode, the OS knobs that fix it at the system level, and the recommended preflight invocation patterns.
+
+### 7.1 Why "Address already in use" can surface at scale
+
+The preflight tool builds and tears down many NCCL/RCCL communicators in sequence so it can benchmark different group sizes. Each `ncclCommInit` opens InfiniBand out-of-band (OOB) sockets per peer pair; when the comm is destroyed, those sockets enter the kernel `TIME_WAIT` state and hold their ephemeral port for 60 s (the default Linux `tcp_fin_timeout`).
+
+The default Linux ephemeral-port range is `32768-60999` — about **28 000 ports per node**. At ~64 nodes the `TIME_WAIT` accumulation from a few back-to-back large-subgroup destroys gets close to that ceiling; at 128 + nodes a default invocation can exceed it, and the next phase's `bind()` fails:
+
+```
+NCCL WARN Call to bind failed: Address already in use
+```
+
+This is **not** a real training failure mode — production training jobs create their TP / DP / PP communicators **once** at startup and reuse them. The preflight tool is the only one that creates and destroys many large communicators in a short window, which is why the issue is preflight-specific.
+
+### 7.2 OS-level tuning (recommended on every large-cluster node)
+
+Two kernel settings make the per-node port budget much harder to exhaust and let the kernel reap `TIME_WAIT` sockets quickly. They are independent of preflight, complement the in-tool drain logic, and are good defaults for any RDMA / multi-NIC workload:
+
+```bash
+# 1) Allow outgoing connections to reuse ports still in TIME_WAIT.
+#    This is the single biggest win — ports become reusable in
+#    milliseconds instead of 60s.
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1
+
+# 2) Widen the ephemeral-port range from ~28k to ~64k ports.
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+
+# Persist across reboots:
+cat <<'EOF' | sudo tee /etc/sysctl.d/99-large-cluster.conf
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65535
+EOF
+sudo sysctl --system
+```
+
+If your cluster has these set already, preflight at 128 nodes effectively cannot run out of ephemeral ports — even the most aggressive run-everything invocation fits comfortably.
+
+### 7.3 In-tool mitigation: the size-aware cleanup delay
+
+Whether or not the OS-level knobs above are in place, preflight has a built-in safety mechanism. From §6.1–6.2:
+
+- For small subgroups (node count `< --comm-cleanup-large-threshold-nodes`, default 64) the cleanup delay between phases is `--comm-cleanup-delay-sec` (default 2 s).
+- For large subgroups (node count `≥ threshold`) preflight forces a **60-second drain** to fully empty the per-node `TIME_WAIT` pool before the next phase starts.
+
+At 128 N with default settings, this adds up to ~3 minutes of cumulative drain wait to the full perf run. That's the whole cost of the safety mechanism — perf measurements themselves are unaffected.
+
+If you want even more conservative behavior, lower the threshold:
+
+```bash
+# Trigger the 60s drain on subgroups >= 32 nodes too.
+primus-cli slurm srun -N 128 -- preflight \
+    --comm-cleanup-large-threshold-nodes 32
+```
+
+Conversely, if you've applied the §7.2 sysctl tunings and prefer faster runs:
+
+```bash
+# Disable the long drain (relies on tcp_tw_reuse=1 to recycle quickly).
+primus-cli slurm srun -N 128 -- preflight \
+    --comm-cleanup-large-threshold-nodes 9999
+```
+
+### 7.4 Recommended invocation patterns at very large scale
+
+For clusters at or beyond ~128 nodes, the most reliable and most informative way to use preflight is to **split the run into one test family per invocation** rather than one big run. This gives each test family a fresh per-node port pool, keeps wall-clock per invocation small, and makes it easy to identify which specific comm shape is degraded if a metric looks off.
+
+```bash
+# 1) GPU + intra-node fabric first (cheap, no inter-node OOB churn).
+primus-cli slurm srun -N 128 -- preflight \
+    --tests gemm,intra-allreduce,intra-alltoall
+
+# 2) Inter-node DP-style collectives, all-nodes group only.
+primus-cli slurm srun -N 128 -- preflight \
+    --tests inter-allreduce \
+    --inter-group-sizes all
+primus-cli slurm srun -N 128 -- preflight \
+    --tests inter-alltoall \
+    --inter-group-sizes all
+
+# 3) Inter-node PP-style ring P2P (the test that benefits most from
+#    isolation — it's the closest match to what real pipeline-parallel
+#    training actually exercises).
+primus-cli slurm srun -N 128 -- preflight \
+    --tests inter-ring-p2p
+
+# 4) Optional: pairwise inter-node P2P scan (useful for finding a
+#    single bad link, slower because it walks many pairs).
+primus-cli slurm srun -N 128 -- preflight \
+    --tests inter-p2p
+```
+
+Each invocation:
+
+- Tears down its own `WORLD` at exit, so the next invocation starts with a near-empty per-node port pool. The natural human gap between job submissions covers the 60 s drain naturally.
+- Touches only one `--tests` value, so you get a per-test wall clock and can re-run a single phase if its numbers look off without paying for the others.
+- Carries its own report under `--report-file-name` (or the wrapper-generated default), which makes archiving and comparison across runs straightforward.
+
+### 7.5 Decision flow
+
+| Cluster size | Recommended approach |
+|---|---|
+| ≤ 32 nodes | Single command, default knobs. Nothing special. |
+| 33-127 nodes | Single command, default knobs. The size-aware drain (§7.3) takes care of any large-subgroup pressure automatically. |
+| ≥ 128 nodes, OS tunings applied | Single command works, or split for diagnostic clarity. |
+| ≥ 128 nodes, OS tunings **not** applied | Recommended: split as in §7.4. As a fallback, one big run with default knobs should still complete because of the size-aware drain, but expect ~3 min of cumulative drain wait. |
+| ≥ 256 nodes | Always split as in §7.4, even with OS tunings — keeps every invocation snappy and makes regressions much easier to localize. |
+
+---
+
+## 8. Reporting
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -254,7 +384,7 @@ A `<name>_perf.md` produced by a default run contains, in order:
 
 ---
 
-## 8. Backward-compat aliases
+## 9. Backward-compat aliases
 
 | Flag | Equivalent | Notes |
 |---|---|---|
@@ -263,7 +393,7 @@ A `<name>_perf.md` produced by a default run contains, in order:
 
 ---
 
-## 9. Comparison with node-smoke
+## 10. Comparison with node-smoke
 
 | Aspect | `node-smoke` | `preflight` |
 |---|---|---|
@@ -279,7 +409,7 @@ A `<name>_perf.md` produced by a default run contains, in order:
 
 ---
 
-## 10. Validation & error handling
+## 11. Validation & error handling
 
 Preflight resolves the perf config **before** any distributed rendezvous. This means typos and bad sizes/group-sizes fail in seconds, not after a 120s NCCL init:
 
@@ -307,12 +437,12 @@ In default mode where info selectors are dropped because perf intent was set, th
 
 ---
 
-## 11. Operational tips
+## 12. Operational tips
 
 - **For multi-node runs, always use `primus-cli slurm`** (or `runner/run_preflight_direct.sh`) so distributed environment variables are set correctly.
 - **Insufficient CPU cores cause >30x perf slowdowns** — pass `srun -c <cores-per-node>` so RCCL's network proxy threads have CPU to spawn on. Verify with `srun -N 1 --gpus-per-node=8 bash -c 'nproc'`.
 - **For a quick environment snapshot**, prefer `--host --gpu --network` (no rendezvous, finishes in seconds even on broken networks).
-- **Between each communication test phase**, preflight performs a global barrier + sleep to prevent `Address already in use`. At very large scale, increase `--comm-cleanup-delay-sec`.
+- **Between each communication test phase**, preflight performs a global barrier + sleep to prevent `Address already in use`. The drain is **size-aware** — large subgroups (≥ `--comm-cleanup-large-threshold-nodes`, default 64) auto-trigger a 60 s drain. See §7 ("Running on very large clusters") for the full picture, including OS-level tuning recommendations.
 - **For pre-launch screening of a large cluster**, the recommended sequence is:
   1. `node-smoke` to prune broken nodes (`failing_nodes.txt`).
   2. `preflight --quick` on the surviving nodes for the perf sanity numbers.
@@ -320,13 +450,13 @@ In default mode where info selectors are dropped because perf intent was set, th
 
 ---
 
-## 12. Running preflight without a container
+## 13. Running preflight without a container
 
 If you cannot (or prefer not to) use a container, see [`preflight-direct.md`](./preflight-direct.md) for the step-by-step `runner/run_preflight_direct.sh` walkthrough — Python virtual-environment setup, SLURM invocation patterns, NCCL configuration for Broadcom and Pensando (AINIC) clusters, and many configurable-knob examples.
 
 ---
 
-## 13. See also
+## 14. See also
 
 - [`preflight-direct.md`](./preflight-direct.md) — quick-start guide for `runner/run_preflight_direct.sh` (no container).
 - [`node-smoke.md`](./node-smoke.md) — full reference for the per-node smoke test.
