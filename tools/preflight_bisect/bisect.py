@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 ###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 # Minimal Slurm nodelist bisection for Primus preflight --perf-test.
 # Run from repo root (or any cwd; script resolves repo root for runner/ path).
 #

@@ -1,5 +1,9 @@
 #!/bin/bash
 ###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 # fake_runner.sh — drop-in runner replacement for bisect.py testing.
 #
 # Simulates a bad node without running a real preflight, so that
