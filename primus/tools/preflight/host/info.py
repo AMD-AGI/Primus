@@ -17,6 +17,7 @@ from .host_probe import (
     get_cpu_info,
     get_gpu_count_rocm,
     get_gpu_count_rocm_fallback,
+    get_gpu_count_sysfs,
     get_hostname,
     get_kernel_version,
     get_memory_info,
@@ -96,13 +97,16 @@ def collect_host_info() -> List[Finding]:
     ib_count = sum(1 for d in pcie_devices if d["type"] == "Infiniband")
     eth_count = sum(1 for d in pcie_devices if d["type"] == "Ethernet")
 
-    # Use rocm-smi as fallback for GPU count (more reliable in containers).
-    # Only invoke on LOCAL_RANK 0 to avoid /dev/shm mutex contention at scale
-    # (rocm_smi_lib#88); non-zero ranks use HIP_VISIBLE_DEVICES / sysfs fallback.
-    from primus.tools.preflight.global_vars import LOCAL_RANK
+    # Primary: sysfs (KFD topology) — safe from any rank, no subprocess.
+    # Fallback: rocm-smi on LOCAL_RANK 0 only (subprocess, /dev/shm mutex).
+    gpu_count_sysfs = get_gpu_count_sysfs()
+    if gpu_count_sysfs > 0:
+        gpu_count_extra = gpu_count_sysfs
+    else:
+        from primus.tools.preflight.global_vars import LOCAL_RANK
 
-    gpu_count_rocm = get_gpu_count_rocm() if LOCAL_RANK == 0 else get_gpu_count_rocm_fallback()
-    gpu_count = max(gpu_count_pcie, gpu_count_rocm)
+        gpu_count_extra = get_gpu_count_rocm() if LOCAL_RANK == 0 else get_gpu_count_rocm_fallback()
+    gpu_count = max(gpu_count_pcie, gpu_count_extra)
 
     findings.append(
         Finding(
