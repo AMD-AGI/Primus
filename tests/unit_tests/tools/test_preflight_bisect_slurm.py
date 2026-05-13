@@ -18,9 +18,6 @@
 #   cd ~/Primus
 #   export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
 #   python3 -m pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
-
-
-
 # More complex example
 # --------------------------
 #   export NCCL_SOCKET_IFNAME=tw-eth0
@@ -126,11 +123,10 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
         str(BISECT_PY),
         "--nodelist", env["BISECT_NODELIST"],
         "--output-dir", str(tmp_path),
-        *preflight_env_args,
-        *extra_args,
     ]
     if env.get("BISECT_PARTITION"):
-        cmd[4:4] = ["--partition", env["BISECT_PARTITION"]]
+        cmd.extend(["--partition", env["BISECT_PARTITION"]])
+    cmd.extend([*preflight_env_args, *extra_args])
 
     result = subprocess.run(
         cmd,
@@ -142,7 +138,7 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
     summary_path = tmp_path / "summary.txt"
     summary_text = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
 
-    if result.returncode != 0 and not summary_text:
+    if result.returncode != 0:
         pytest.fail(
             f"bisect.py exited {result.returncode} and wrote no summary.\n"
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"

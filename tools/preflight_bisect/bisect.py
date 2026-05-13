@@ -124,8 +124,10 @@ def run_trial(
     # caller's environment (notably VENV_ACTIVATE) intact; the trailing K=V
     # pairs override / add on top. SLURM tokenizes --export on commas, so
     # values must not contain ',' or whitespace (NCCL flags never do).
+    export_val = "ALL"
     if args.preflight_env:
-        cmd.append("--export=ALL," + ",".join(args.preflight_env))
+        export_val += "," + ",".join(args.preflight_env)
+    cmd.append(f"--export={export_val}")
     cmd.append(str(runner))
     cmd.extend(
         [
@@ -165,7 +167,10 @@ def run_trial(
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                proc.wait(timeout=60)
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    pass  # process is stuck in D-state; SIGKILL is pending, move on
                 if args.scancel_user_on_hang:
                     subprocess.run(
                         ["scancel", "--signal=KILL", "--user", os.environ.get("USER", "")],
@@ -219,8 +224,9 @@ def write_summary(out_dir: Path, nodes: list[str], suspects: list[str], trials: 
         lines.append("SUSPECT_NODES: " + " ".join(sorted(set(suspects))))
     else:
         lines.append("SUSPECT_NODES: (none)")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(path.read_text(), end="")
+    summary = "\n".join(lines) + "\n"
+    path.write_text(summary, encoding="utf-8")
+    print(summary, end="")
 
 
 def main() -> int:
