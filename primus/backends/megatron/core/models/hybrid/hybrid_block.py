@@ -95,6 +95,7 @@ class HybridStack(MegatronModule):
         device=None,
         dtype=None,
         pg_collection: ProcessGroupCollection = None,
+        **kwargs,
     ) -> None:
         super().__init__(config=config)
         self.residual_in_fp32 = residual_in_fp32
@@ -109,6 +110,19 @@ class HybridStack(MegatronModule):
 
         # Required for pipeline parallel schedules
         self.input_tensor = None
+
+        # When called via MambaModel/build_module, ratios aren't forwarded.
+        # Fall back to global args so the YAML-configured values are picked up.
+        if hybrid_attention_ratio == 0.0 or hybrid_mlp_ratio == 0.0:
+            try:
+                from megatron.training import get_args
+                args = get_args()
+                if hybrid_attention_ratio == 0.0:
+                    hybrid_attention_ratio = getattr(args, 'hybrid_attention_ratio', 0.0) or 0.0
+                if hybrid_mlp_ratio == 0.0:
+                    hybrid_mlp_ratio = getattr(args, 'hybrid_mlp_ratio', 0.0) or 0.0
+            except (ImportError, AssertionError):
+                pass
 
         self.hybrid_attention_ratio = hybrid_attention_ratio
         self.hybrid_mlp_ratio = hybrid_mlp_ratio
@@ -139,7 +153,6 @@ class HybridStack(MegatronModule):
                     layer = build_module(
                         submodules.mamba_layer,
                         config=self.config,
-                        residual_in_fp32=residual_in_fp32,
                         layer_number=i + 1,
                         pg_collection=pg_collection,
                     )
@@ -240,6 +253,7 @@ class HybridStack(MegatronModule):
         rotary_pos_emb: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
+        **kwargs,
     ):
         """
         Forward function of the MambaStack class.

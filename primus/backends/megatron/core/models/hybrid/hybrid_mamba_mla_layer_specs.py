@@ -10,9 +10,6 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
-
-# Import MambaStack from relative path
-from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
@@ -20,6 +17,12 @@ from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSubmodules,
+)
+
+# Import HybridStack from relative path
+from primus.backends.megatron.core.models.hybrid.hybrid_block import (
+    HybridStack,
+    HybridStackSubmodules,
 )
 
 # Inference layers may not be available in older Megatron versions
@@ -52,8 +55,8 @@ moe = get_moe_module_spec(
 )
 
 hybrid_stack_spec = ModuleSpec(
-    module=MambaStack,
-    submodules=MambaStackSubmodules(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
         mamba_layer=ModuleSpec(
             module=MambaLayer,
             submodules=MambaLayerSubmodules(
