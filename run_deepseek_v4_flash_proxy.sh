@@ -175,6 +175,21 @@ export PRIMUS_STACK_GROUPED_WEIGHT_TRITON=${PRIMUS_STACK_GROUPED_WEIGHT_TRITON:-
 #   analytic rotation). Default ON since landing (2026-05-14).
 export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
 
+# P36 — sinkhorn_normalize Triton FWD/BWD fusion in
+#   hyper_connection.py.  Replaces the plan-5 P29 ``torch.compile``
+#   cached Sinkhorn body with a hand-rolled Triton kernel that runs
+#   the 1 + 2*(n_iters - 1) alternating row/col normalize trajectory
+#   in registers per row of the leading axis (V4-Flash uses K=4).
+#   Microbench at V4-Flash K=4 (B=1, S=4096):
+#     FWD 0.045 ms (vs eager 0.600 ms = 13.4x; vs P29 compiled 0.270
+#                   ms = 6.0x)
+#     BWD 0.105 ms (vs eager 1.520 ms = 14.5x; vs P29 compiled 0.628
+#                   ms = 6.0x)
+#   The compiled-region overhead (`Torch-Compiled Region` ~21 ms / 16
+#   calls + `CompiledFunctionBackward` ~41 ms / 16 calls) is removed
+#   entirely.  Default ON since landing (2026-05-14).
+export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

@@ -81,7 +81,45 @@ green (**94 passed, 331 deselected**).
 
 ## P36 — `sinkhorn_normalize` fusion
 
-Pending.
+Replaces the plan-5 P29 `torch.compile` Sinkhorn-Knopp normalize body
+in :func:`primus.backends.megatron.core.transformer.hyper_connection.sinkhorn_normalize`
+with a hand-rolled Triton FWD/BWD kernel pair.  The full 1 + 2*(n_iters
+- 1) alternating row/col normalize trajectory runs in registers per
+row of the leading axis (V4-Flash `K=4`: 16 fp32 / row stays in VGPRs
+for all 39 steps); BWD reads a cached FWD-trajectory buffer and walks
+the analytic VJP backward step-by-step.  Default ON via
+`PRIMUS_SINKHORN_TRITON=1`.  Routing precedence:
+`PRIMUS_SINKHORN_TRITON != "0" > use_compiled > eager` (the plan-5 P29
+compiled body stays reachable via `use_compiled=True` AND env=0).
+
+Bench: `deepseek-v4/develop/progress/p36/bench_sinkhorn.py`
+(`--mode {k4, k4_small, k8}`, raw JSON at
+`progress/p36/bench/{k4,k4_small,k8}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD GB/s | BWD GB/s |
+|---|---|---:|---:|---:|---:|
+| k4 (V4-Flash B=1, S=4096, K=4; 128 KiB x / call)        | eager    | 0.587 | 1.502 |  18.3 |   7.2 |
+| k4                                                       | compiled | 0.270 | 0.623 |  39.8 |  17.2 |
+| k4                                                       | triton   | 0.043 | 0.101 | 249.4 | 106.0 |
+| **k4 speedup vs eager**                                  |          | **13.62x** | **14.81x** | **+1265 %** | **+1372 %** |
+| **k4 speedup vs P29 compiled**                           |          | **6.26x**  | **6.15x**  | **+528 %**  | **+515 %**  |
+| k8 (forward-compat B=1, S=4096, K=8; 512 KiB x / call)   | eager    | 0.501 | 1.450 |  85.8 |  29.6 |
+| k8                                                       | compiled | 0.288 | 0.623 | 149.4 |  69.0 |
+| k8                                                       | triton   | 0.072 | 0.146 | 600.6 | 294.7 |
+| **k8 speedup vs eager**                                  |          | **7.00x**  | **9.94x**  | **+599 %**  | **+894 %**  |
+| **k8 speedup vs P29 compiled**                           |          | **4.02x**  | **4.27x**  | **+302 %**  | **+327 %**  |
+
+EP=8 proxy A/B: **iter-10 instantaneous 526.2 ms (compiled fallback)
+-> 515.0 ms (Triton), -11.2 ms / -2.1 %** at bf16-bit-identical
+`lm_loss` (9.258826 Triton vs 9.258817 compiled fallback; diff
+9e-6, well below the 1e-3 bf16 floor).  Matches microbench-predicted
+16 calls × 0.75 ms = **12.0 ms / iter** within profiler noise.  See
+`progress/p36/p36-summary.md` §4.2.
+
+Unit tests (G39): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p36_sinkhorn_triton.py`.
+**26 fast + 1 release-tier slow** all green; plan-4/5 ratchet stayed
+green (**95 passed, 357 deselected** in 73.27 s; the +1 vs P35 is the
+G39 release-tier V4-Flash test).
 
 ## P37 — HyperConnection elementwise fusion
 

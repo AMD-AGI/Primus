@@ -34,6 +34,7 @@ V4-Flash EP8 proxy.
 | **P33**        | TFLOP/s closed-form fix (SWA visible-pair pruning + HC fn matmul; no runtime change) | **603.3** | **444.2** | **14.64x** | same trace as `P32 final`; recomputed via plan-6 P33 patch (`primus.backends.megatron.patches.deepseek_v4_flops_patches`) |
 | **P34**        | `_stack_grouped_linear_weight` Triton FWD/BWD fusion (default ON) | **530.85** | **507.2** | **16.65x** | `progress/p34/runs/triton_on.iter_lines.txt` iter-10 throughput; eager fallback at same revision = 580.65 ms / 463.2 TFLOP/s/GPU |
 | **P35**        | `apply_interleaved_partial_rope` Triton FWD/BWD fusion (default ON) | **526.7** | **513.3** | **16.78x** | `progress/p35/runs/triton_on.iter_lines.txt` iter-10; eager fallback at same revision (`PRIMUS_ROPE_TRITON=0`) = 531.7 ms / 507.1 TFLOP/s/GPU |
+| **P36**        | `sinkhorn_normalize` Triton FWD/BWD fusion (default ON; replaces P29 compiled) | **515.0** | **520.4** | **17.16x** | `progress/p36/runs/triton_on.iter_lines.txt` iter-10; compiled fallback at same revision (`PRIMUS_SINKHORN_TRITON=0`) = 526.2 ms / 509.3 TFLOP/s/GPU |
 
 
 Notes:
@@ -150,3 +151,36 @@ kernels as 600 ms+ outliers.
   **16.78×**. Plan-4 / plan-5 release-tier `pytest.mark.slow` ratchet
   stayed green (94 passed, 331 deselected in 72.90 s; the +2 vs P34
   are the G38 release-tier Q + K shape tests).
+- **P36** (2026-05-14) — plan-6 P36 replaces the plan-5 P29
+  `torch.compile` Sinkhorn-Knopp body in
+  `hyper_connection.sinkhorn_normalize` with a hand-rolled Triton
+  FWD/BWD kernel pair.  The full `1 + 2*(n_iters - 1) = 39`
+  alternating row/col normalize trajectory runs in registers per row
+  of the leading axis (V4-Flash `K=4`: 16 fp32 / row); BWD reads a
+  cached FWD-trajectory HBM buffer (~10 MiB / call, negligible vs
+  ~170 GiB rank footprint) and walks the analytic VJP backward.
+  Default ON via `PRIMUS_SINKHORN_TRITON=1`; `=0` falls back to the
+  P29 compiled body (still reachable via `use_compiled=True`).
+  Routing precedence: `PRIMUS_SINKHORN_TRITON != "0" > use_compiled
+  > eager`.  Microbench at V4-Flash K=4 widths (B=1, S=4096, K=4,
+  bf16): **13.62x FWD / 14.81x BWD vs eager** (0.043 ms / 0.101 ms
+  triton vs 0.587 ms / 1.502 ms eager); **6.26x FWD / 6.15x BWD vs
+  P29 compiled** (0.270 ms / 0.623 ms compiled).  EP8 proxy A/B
+  (`run_deepseek_v4_flash_proxy.sh` with `PRIMUS_SINKHORN_TRITON`
+  toggled) gives iter-10 instantaneous **526.2 ms (compiled
+  fallback) -> 515.0 ms (Triton), -11.2 ms / -2.1 %**, matching the
+  microbench-predicted 12.0 ms / iter savings (16 calls × 0.75 ms
+  saved / call) within profiler noise.  `lm_loss[10]` is bf16-bit-
+  identical between paths (9.258826 Triton vs 9.258817 compiled
+  fallback; diff `9e-6`, well below the 1e-3 bf16 floor).  Unlike
+  P35 where the savings overlapped with prior BWD GPU work, P36
+  lives on the serial path through `HyperConnection.compute_weights`
+  and surfaces ~1:1 as wall-clock saving.  The vs-baseline ratchet
+  vs P28 jumps to **17.16×**.  Plan-4 / plan-5 release-tier
+  `pytest.mark.slow` ratchet stayed green (95 passed, 357 deselected
+  in 73.27 s; the +1 vs P35 is the G39 release-tier V4-Flash test).
+  Plan-5 G32 boundary kept observable via an `autouse=True`
+  `monkeypatch.setenv("PRIMUS_SINKHORN_TRITON", "0")` fixture in
+  `test_v4_p29_compiled_sinkhorn.py` (otherwise the default-on
+  Triton path would silently hijack all `use_compiled=True` calls
+  and the cache-hit assertion would fail).

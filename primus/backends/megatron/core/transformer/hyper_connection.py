@@ -55,6 +55,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn import (
+    SinkhornNormalizeFn,
+    is_triton_kernel_supported,
+    is_triton_path_enabled,
+)
+
 # ---------------------------------------------------------------------------
 # Plan-5 P29 fast path: torch.compile-fused Sinkhorn-Knopp.
 #
@@ -138,6 +144,7 @@ def sinkhorn_normalize(
     n_iters: int = 20,
     eps: float = 1e-6,
     use_compiled: bool = False,
+    use_triton: bool = False,
 ) -> torch.Tensor:
     """Project a non-negative ``[..., K, K]`` matrix onto the doubly-stochastic
     manifold via the Sinkhorn-Knopp algorithm.
@@ -175,10 +182,30 @@ def sinkhorn_normalize(
             unchanged (algorithm is identical; only the kernel boundary
             moves).  Default ``False`` until the V4 config flag
             ``use_v4_compiled_sinkhorn`` is flipped on.
+        use_triton: plan-6 P36 hand-rolled Triton FWD/BWD path.  When
+            ``True`` (or when the ``PRIMUS_SINKHORN_TRITON`` env knob is
+            not ``"0"`` and the input is supported), dispatch to
+            :class:`primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn.SinkhornNormalizeFn`.
+            The Triton path runs the full 1 + 2*(n_iters - 1) normalize
+            trajectory in registers per row of the leading axis and emits
+            exactly **one** FWD kernel + **one** BWD kernel -- no Dynamo
+            bookkeeping per call.  Routing precedence at the call site:
+            ``use_triton or PRIMUS_SINKHORN_TRITON=1 > use_compiled >
+            eager``.  Defaults to ``False``; production turns it on via
+            ``PRIMUS_SINKHORN_TRITON=1`` (default ON in the proxy
+            launcher and in :func:`is_triton_path_enabled`).
 
     Returns:
         Approximately doubly-stochastic ``[..., K, K]`` (same dtype as input).
     """
+    # Plan-6 P36: routing precedence is Triton > compiled > eager.  Env
+    # knob is default-ON; explicit `use_triton=True` forces the path
+    # even when the env is off (used by the G39 tests).  The Triton path
+    # gracefully falls back when the input shape / device is unsupported
+    # (`is_triton_kernel_supported`), so callers never have to special-
+    # case K out-of-range or CPU inputs.
+    if (use_triton or is_triton_path_enabled()) and is_triton_kernel_supported(logits):
+        return SinkhornNormalizeFn.apply(logits, n_iters, eps)
     if use_compiled:
         return _get_compiled_sinkhorn(n_iters, eps, logits.dtype)(logits)
     in_dtype = logits.dtype

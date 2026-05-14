@@ -20,4 +20,10 @@ Submodules:
 * :mod:`rope_interleaved_partial` — plan-6 P35 fused interleaved partial
   RoPE FWD/BWD (replaces the 9-op eager chain in
   :func:`primus.backends.megatron.core.transformer.dual_rope.apply_interleaved_partial_rope`).
+* :mod:`sinkhorn` — plan-6 P36 fused Sinkhorn-Knopp FWD/BWD (replaces
+  the plan-5 P29 ``torch.compile`` fast path in
+  :func:`primus.backends.megatron.core.transformer.hyper_connection.sinkhorn_normalize`).
+  Runs the full alternating row/col normalize trajectory in registers
+  per row of the leading axis; BWD recomputes the trajectory and walks
+  the analytic VJP backward step by step.
 """

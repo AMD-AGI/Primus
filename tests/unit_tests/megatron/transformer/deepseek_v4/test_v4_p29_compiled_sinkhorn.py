@@ -72,6 +72,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_p36_triton_sinkhorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the dispatcher to the plan-5 P29 compiled boundary this file
+    exists to test.
+
+    Plan-6 P36 added a Triton FWD/BWD kernel (default-on via the
+    ``PRIMUS_SINKHORN_TRITON=1`` env knob) whose routing precedence in
+    :func:`sinkhorn_normalize` is ``Triton > compiled > eager`` --
+    leaving the env knob at its default would silently route
+    ``use_compiled=True`` calls through the Triton path and skip the
+    compiled cache entirely, breaking the cache-hit assertion below.
+    Forcing ``PRIMUS_SINKHORN_TRITON=0`` for the duration of this file
+    keeps the compiled boundary observable.
+    """
+    monkeypatch.setenv("PRIMUS_SINKHORN_TRITON", "0")
+
+
 def _make_input(
     *,
     B: int,
