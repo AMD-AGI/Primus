@@ -3,7 +3,24 @@
 **Status**: v0.1 (under iteration; expect skill changes after first real-trace pass)
 **Stage**: pre-`OBSERVE` hook on every training run
 **Tool boundary**: `pilot.tools.profile.inject(plan, run_dir)` — pure function, no side effects on disk
-**Default**: ALWAYS ON. Disable with `submit --no-profile`.
+**Default**: ALWAYS ON.
+
+### Per-stage policy for `submit run --no-profile`
+
+| Stage | `--no-profile` allowed? | Notes |
+|---|---|---|
+| `SMOKE` | Yes, with a recorded reason | SMOKE is a liveness gate; a known profile-blocker (e.g. `PRIMUS_HIPBLASLT_TUNING=1`) may justify opting out. The reason must be echoed into `summary.headline`. |
+| `BASELINE` | **No** | BASELINE produces the champion snapshot; a trace-less champion poisons every downstream DIAGNOSE round. See `@.cursor/rules/30-worker-baseline.mdc`. |
+| `OPTIMIZE_LOOP.EXECUTE` | **No** | Trial snapshots must be comparable to the champion trace; `trace_analysis.md` rules require both sides to have traces. |
+| `CORRECTNESS` (full) | **No** | Same reasoning — the numerical-gate run is also the trial that feeds back into the loop. |
+| `CORRECTNESS_LITE` | N/A | Does not call `submit run`; reuses an existing run's snapshot. |
+| `ENV_SWEEP` | N/A | Uses `env_probe sweep`, not `submit run`. |
+
+If an internal `INVALID_PROFILE` fallback (see §5) self-disables profiling
+on a BASELINE-or-later run, the run's snapshot is **not** a valid
+champion / trial — the Orchestrator must re-run with the profile blocker
+removed (typically via ENV_SWEEP) rather than accept the trace-less
+snapshot.
 
 ---
 
@@ -114,7 +131,12 @@ python -m pilot.tools.profile inject \
     [--profile-step-start 5] \
     [--profile-step-end   6] \
     [--ranks 0,4]                   # comma-separated; default "0"
-    [--no-profile]                  # explicit kill switch (returns the plan unchanged)
+    [--no-profile]                  # explicit kill switch (returns the plan unchanged).
+                                    # Workers MUST NOT pass this from BASELINE
+                                    # onward — see the per-stage policy table at
+                                    # the top of this skill. Allowed only for
+                                    # SMOKE (with a recorded reason) and for
+                                    # debugging from a human shell.
     --out-plan  state/runs/<id>/plan.effective.profiled.yaml
 ```
 
@@ -151,6 +173,18 @@ Exit codes match the rest of `pilot.tools.*`:
 The PROFILE step is implicit: every Stage Worker that calls `submit run`
 gets the patched plan automatically. Workers do NOT need to read this skill
 unless they are debugging trace shape issues.
+
+**Hard rules for Workers / the inline Orchestrator** (mirrors
+`@.cursor/rules/00-pilot-core.mdc §I.4` and
+`@.cursor/rules/30-worker-baseline.mdc`):
+
+- From `BASELINE` onward, never pass `--no-profile` to `submit run`, and
+  never override `profile=false` / `use_pytorch_profiler=false` via
+  `--override`.
+- If `profile.inject` self-disables on a BASELINE-or-later run
+  (`decision.enabled=false` in `handle.yaml`), return
+  `failure.kind = INVALID_PROFILE, escalate_to_orchestrator=true`
+  instead of promoting the snapshot.
 
 The DIAGNOSE Worker, however, MUST refuse to classify any run whose
 `trace_meta.json` is missing or has empty `trace_files[]` — and instead

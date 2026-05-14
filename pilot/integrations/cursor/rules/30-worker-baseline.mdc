@@ -85,6 +85,30 @@ iteration on cold caches. Do **not** touch `global_batch_size`,
 `micro_batch_size`, `seq_length`, or any parallelism knob — they must
 match SMOKE for the snapshot to be a valid champion.
 
+### Profile is mandatory from BASELINE onward
+
+`submit run` injects a 1-iter torch.profiler trace by default (see
+`@pilot/skills/workflow/profile.md`). **BASELINE must keep that default
+on**:
+
+- Do **not** pass `--no-profile` to `submit run`.
+- Do **not** add `profile=false` / `use_pytorch_profiler=false` via
+  `--override`.
+- If `submit run` reports `profile.enabled=false` in `handle.yaml`
+  (e.g. an internal `INVALID_PROFILE` fallback fired because of
+  `PRIMUS_HIPBLASLT_TUNING=1` or a captured-iter OOM), treat the run
+  as **invalid champion material** and return
+  `status: failed, failure.kind=INVALID_PROFILE,
+  escalate_to_orchestrator=true` — do not promote a trace-less
+  snapshot to `tuning_state.champion_id`.
+
+Rationale: BASELINE's snapshot is the substrate every later DIAGNOSE
+round compares against. A champion without a trace forces all
+downstream rounds into pure-heuristic mode and silently degrades
+`trace_analysis.md`. The cost of one extra iter of profile overhead
+(~+5-10% on the captured iter, see `profile.md §5`) is negligible
+compared to that.
+
 ## Output contract
 
 The terminal `RunSnapshot` is the deliverable. The trace dir is taken from
@@ -149,13 +173,25 @@ silently re-PROJECT.
 - Never re-run on a hang without `submit cancel` first.
 - Never tweak `--override` beyond `save_interval` / `eval_interval` (and
   `train_iters`) — any other change invalidates the champion.
+- **Never pass `--no-profile`** (or override `profile=false` /
+  `use_pytorch_profiler=false`). The profiler trace is a hard
+  contract of the BASELINE snapshot. A trace-less BASELINE is an
+  invalid champion — see "Profile is mandatory from BASELINE onward"
+  above.
 
 ## On failure
 
 ```yaml
 failure:
-  kind: OOM | HANG | COLLECTIVE | CUDA | NUMERICAL | TOOL_ERROR | TIMEOUT | UNKNOWN
+  kind: OOM | HANG | COLLECTIVE | CUDA | NUMERICAL | INVALID_PROFILE | TOOL_ERROR | TIMEOUT | UNKNOWN
   escalate_to_orchestrator: true       # BASELINE fail is a hard escalation
   message: "<one-line evidence>"
   evidence_ref: state/<session_id>/trace/baseline/train.log
 ```
+
+`INVALID_PROFILE` specifically covers "the run finished cleanly but
+the profiler trace is missing / empty / disabled" — i.e. the snapshot
+would pass numerically but is unusable as a champion. The Orchestrator
+must re-spawn BASELINE with profile re-enabled (or first ENV_SWEEP the
+profile-blocker, e.g. `PRIMUS_HIPBLASLT_TUNING=1`) instead of
+promoting it.

@@ -44,6 +44,34 @@ five-step recipe you must follow each round (Part II).
 - Do not use inline Python to mimic a Pilot Tool (e.g. don't compute OOM risk
   yourself — call `constraint.estimate_mem`; that is the only authority).
 
+### 4. Profile-trace is mandatory from BASELINE onward
+
+Every `submit run` you (or any spawned Worker) launch **from BASELINE
+onward** must carry the default torch.profiler injection. Concretely:
+
+- **Forbidden** anywhere in `BASELINE` / `OPTIMIZE_LOOP.EXECUTE` /
+  `CORRECTNESS` / any post-BASELINE re-run:
+  - `submit run --no-profile`
+  - `--override profile=false`
+  - `--override use_pytorch_profiler=false`
+- **Allowed only in SMOKE**, and only with a recorded reason (e.g. SMOKE
+  is exercising a known `PRIMUS_HIPBLASLT_TUNING=1` path that
+  `profile.md §3` lists as a hard incompatibility). The reason must
+  be echoed into `summary.headline`.
+- If `pilot.tools.profile.inject` self-disables (returns
+  `decision.enabled=false`) on a BASELINE-or-later run, the
+  Orchestrator must **not** promote the resulting snapshot — treat it
+  as `failure.kind = INVALID_PROFILE` and re-PROJECT (or ENV_SWEEP the
+  blocker first). See `@pilot/skills/workflow/profile.md §3` for the
+  incompatibility matrix and `@.cursor/rules/30-worker-baseline.mdc`
+  for the BASELINE-side enforcement.
+
+Rationale: every DIAGNOSE round after BASELINE compares trial traces
+against the champion trace. A champion (or trial) without a trace
+silently degrades `trace_analysis.md` to pure heuristics and breaks
+the COMPUTE/COMM/PIPELINE classification — exactly the regression
+that motivated profiling-by-default in the first place.
+
 ---
 
 ## Part II — Per-round decision loop
@@ -85,6 +113,9 @@ this repo:
 
 Lightweight stages (`EXECUTE` / `SETTLE` / state-machine bookkeeping)
 **do not spawn** — handle them inline by shelling out to the relevant Tool.
+When `EXECUTE` shells out to `submit run` for a trial, the same
+profile-mandatory rule from Part I §4 applies: never pass
+`--no-profile`, never override `profile=false`.
 
 When you spawn, the Worker's input must be **pointers only**:
 `{snapshot_ref, plan_graph_ref, diagnosis_ref, ...}`. Do not inline already-
