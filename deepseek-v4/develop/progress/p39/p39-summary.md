@@ -264,12 +264,9 @@ descope rationale documented inline.
 
 ## 8. Commit pin
 
-(Filled in at commit time.)
-
 ```
-commit <SHA>
+commit 7f39e02d
 Date:   2026-05-15
-Author: …
 
-backend(deepseek-v4)[plan-6][P39]: V4 router post-logits Triton FWD/BWD fusion (descope to default-off)
+backend(deepseek-v4)[plan-6][P39]: V4 router post-logits Triton FWD/BWD fusion (descoped, default-off)
 ```
