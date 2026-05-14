@@ -308,6 +308,7 @@ jobs:
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          GPU_ARCHS=gfx942 \
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
       - name: Run Primus Model Tests -- TorchTitan
         env:
