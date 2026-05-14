@@ -121,9 +121,42 @@ Unit tests (G39): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p36_si
 green (**95 passed, 357 deselected** in 73.27 s; the +1 vs P35 is the
 G39 release-tier V4-Flash test).
 
-## P37 — HyperConnection elementwise fusion
+## P37 — HyperConnection `compute_weights` tail fusion
 
-Pending.
+Replaces the 7-9 ATen elementwise ops in
+:meth:`primus.backends.megatron.core.transformer.hyper_connection.HyperMixer.compute_weights`
+between the `_packed_logits` GEMM and the
+`sinkhorn_normalize` call (3 slices + 3 fused-multiply-adds + 2
+sigmoid + 1 softmax + 2 eps adds) with a single Triton FWD kernel +
+single Triton BWD kernel.  Saves `(sigmoid(pre_logit),
+sigmoid(post_logit), softmax(comb_logit))` as fp32 state for
+backward; BWD walks the analytic VJP per-element and uses host-side
+`torch.sum` to reduce `d_base` / `d_scale` partials (avoids
+cross-block atomic adds).  Default ON via `PRIMUS_HC_TRITON=1`.
+The matmul inside `_packed_logits` and the `collapse` / `expand`
+matmul-adjacent glue stay eager.
+
+Bench: `deepseek-v4/develop/progress/p37/bench_hc_glue.py`
+(`--mode {v4, small}`, raw JSON at `progress/p37/bench/{v4,small}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD GB/s | BWD GB/s |
+|---|---|---:|---:|---:|---:|
+| v4 (V4-Flash B=1, S=4096, K=4; ~0.94 MiB FWD / call) | eager  | 0.102 | 0.405 |   9.6 |   3.4 |
+| v4                                                    | triton | 0.044 | 0.276 |  22.5 |   5.0 |
+| **v4 speedup**                                        |        | **2.34x** | **1.47x** | **+135 %** | **+47 %** |
+| small (B=2, S=64, K=4)                                | eager  | 0.097 | 0.405 |   0.3 |   0.1 |
+| small                                                 | triton | 0.041 | 0.268 |   0.7 |   0.2 |
+| **small speedup**                                     |        | **2.36x** | **1.51x** | **+136 %** | **+51 %** |
+
+EP=8 proxy A/B (iters 4-10 mean, excl. profile-end iter 7):
+**519.4 ms (eager tail) -> 516.1 ms (Triton), -3.3 ms / -0.64 %**
+at bf16-bit-identical `lm_loss` (9.258826 both A and B).  Matches
+microbench prediction of ~3 ms / iter (16 calls × 0.19 ms FWD+BWD
+delta).  Iter-10-instantaneous: 514.9 -> 512.1 ms.  See
+`progress/p37/p37-summary.md` §4.2.
+
+Unit tests (G40): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p37_hc_glue_triton.py`.
+**21 fast + 1 release-tier slow** all green.
 
 ## P38 — Indexer small-op fusion
 

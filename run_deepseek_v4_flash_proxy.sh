@@ -190,6 +190,18 @@ export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
 #   entirely.  Default ON since landing (2026-05-14).
 export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
 
+# P37 — HyperConnection compute_weights elemwise tail Triton fusion in
+#   hyper_connection.HyperMixer.compute_weights.  Fuses the 3 slices +
+#   3 fused-multiply-adds + 2 sigmoid + 1 softmax + 2 eps adds (the
+#   post-_packed_logits, pre-Sinkhorn chain) into one FWD + one BWD
+#   Triton kernel.  Microbench at V4-Flash K=4 (B=1, S=4096):
+#     FWD 0.044 ms (vs eager 0.102 ms = 2.34x)
+#     BWD 0.276 ms (vs eager 0.405 ms = 1.47x)
+#   The matmul inside _packed_logits stays as F.linear; collapse / expand
+#   (matmul-adjacent) stay eager too -- they are not net wins as
+#   separate Triton kernels.  Default ON since landing (2026-05-14).
+export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

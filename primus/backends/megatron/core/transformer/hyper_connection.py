@@ -55,6 +55,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+    hc_glue_compute_tail_triton,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+    is_triton_kernel_supported as _hc_glue_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+    is_triton_path_enabled as _hc_glue_enabled,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn import (
     SinkhornNormalizeFn,
     is_triton_kernel_supported,
@@ -305,15 +314,31 @@ class HyperMixer(nn.Module):
         K = self.hc_mult
         logits = self._packed_logits(x)  # [..., (2+K)*K], fp32
 
-        pre_logit = logits[..., :K] * self.scale[0] + self.base[:K]
-        post_logit = logits[..., K : 2 * K] * self.scale[1] + self.base[K : 2 * K]
-        comb_logit = logits[..., 2 * K :].view(*logits.shape[:-1], K, K) * self.scale[2] + self.base[
-            2 * K :
-        ].view(K, K)
+        out_dtype = x.dtype
+        # Plan-6 P37: fuse the elemwise tail (slice + scale + base +
+        # sigmoid/softmax + eps) into one Triton kernel when the env
+        # knob is on and the shape is supported.  Falls back to the
+        # eager chain for the unsupported case (CPU input, K not in
+        # the supported set, etc.).
+        if _hc_glue_enabled() and _hc_glue_supported(logits, K):
+            pre, post, comb = hc_glue_compute_tail_triton(
+                logits,
+                self.scale,
+                self.base,
+                K=K,
+                eps=self.eps,
+                out_dtype=torch.float32,
+            )
+        else:
+            pre_logit = logits[..., :K] * self.scale[0] + self.base[:K]
+            post_logit = logits[..., K : 2 * K] * self.scale[1] + self.base[K : 2 * K]
+            comb_logit = logits[..., 2 * K :].view(*logits.shape[:-1], K, K) * self.scale[2] + self.base[
+                2 * K :
+            ].view(K, K)
+            pre = torch.sigmoid(pre_logit) + self.eps  # (eps, 1+eps]
+            post = 2.0 * torch.sigmoid(post_logit)  # (0, 2)  no eps
+            comb = torch.softmax(comb_logit, dim=-1) + self.eps
 
-        pre = torch.sigmoid(pre_logit) + self.eps  # (eps, 1+eps]
-        post = 2.0 * torch.sigmoid(post_logit)  # (0, 2)  no eps
-        comb = torch.softmax(comb_logit, dim=-1) + self.eps
         comb = sinkhorn_normalize(
             comb,
             n_iters=self.sinkhorn_iters,
@@ -322,7 +347,6 @@ class HyperMixer(nn.Module):
         )
 
         # Cast back to the activation dtype to match downstream block compute.
-        out_dtype = x.dtype
         return pre.to(out_dtype), post.to(out_dtype), comb.to(out_dtype)
 
     @staticmethod

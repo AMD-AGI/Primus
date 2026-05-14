@@ -184,3 +184,28 @@ kernels as 600 ms+ outliers.
   `test_v4_p29_compiled_sinkhorn.py` (otherwise the default-on
   Triton path would silently hijack all `use_compiled=True` calls
   and the cache-hit assertion would fail).
+- **P37** (2026-05-14) — plan-6 P37 collapses the 7-9 ATen
+  elementwise ops in `HyperMixer.compute_weights` between the
+  `_packed_logits` GEMM and the `sinkhorn_normalize` call (3 slices
+  + 3 fused-multiply-adds + 2 sigmoid + 1 softmax + 2 eps adds)
+  into a single Triton FWD kernel + single Triton BWD kernel.
+  Saves `(sigmoid(pre_logit), sigmoid(post_logit),
+  softmax(comb_logit))` as fp32 state for backward; BWD walks the
+  analytic VJP per-element and uses host-side `torch.sum` to
+  reduce `d_base` / `d_scale` partials (avoids cross-block
+  atomic adds).  The matmul inside `_packed_logits` and the
+  `collapse` / `expand` matmul-adjacent glue stay eager.  Default
+  ON via `PRIMUS_HC_TRITON=1`; `=0` falls back to the eager body.
+  Microbench at V4-Flash widths (B=1, S=4096, K=4, bf16 output,
+  fp32 internal): **2.34x FWD / 1.47x BWD** (0.044 ms / 0.276 ms
+  triton vs 0.102 ms / 0.405 ms eager).  EP=8 proxy A/B
+  (`run_baseline_trace_ep8_p37.sh` with the env toggled) gives
+  iters 4-10 mean (excl. profile-end iter 7) **519.4 ms (eager
+  tail) -> 516.1 ms (Triton), -3.3 ms / -0.64 %**; iter-10
+  instantaneous **514.9 -> 512.1 ms**, matching the microbench-
+  predicted 3 ms / iter savings (16 calls × 0.19 ms saved / call).
+  `lm_loss[10]` is bf16-bit-identical between paths (9.258826 both
+  A and B).  The vs-baseline ratchet vs P28 nudges to **17.26×**
+  (8837.4 / 512.1).  Plan-4 / plan-5 release-tier `pytest.mark.slow`
+  ratchet stayed green (the +1 vs P36 is the G40 release-tier
+  V4-Flash test).
