@@ -151,6 +151,30 @@ export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
 export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-1}
 
+# ---------- Plan-6 elemwise-fusion knobs (default ON; A/B with =0) ----------
+# Each plan-6 phase that wins the EP=8 proxy A/B adds its env knob here as
+# default ON, mirroring the plan-5 P32 final precedent above. The kernel
+# code already defaults each to "1"; this block makes the runner script
+# self-document the recipe and lets users flip individual fusions to "0"
+# for A/B without editing source.
+#
+# P34 — stack_grouped_weight Triton FWD/BWD fusion in
+#   PrimusTurboGroupedMLP._stack_grouped_linear_weight.
+#   EP=8 proxy A/B win: 580.65 -> 530.85 ms / iter, -49.8 ms (-8.6%);
+#   TFLOP/s/GPU 463.2 -> 507.2, +9.5%; lm_loss bit-identical (pure
+#   layout transform). Default ON since 29baf151 (2026-05-14).
+export PRIMUS_STACK_GROUPED_WEIGHT_TRITON=${PRIMUS_STACK_GROUPED_WEIGHT_TRITON:-1}
+
+# P35 — apply_interleaved_partial_rope Triton FWD/BWD fusion in
+#   dual_rope.py. Collapses the 9-op eager chain (slice + reshape +
+#   four broadcast muls + stack + reshape + cat) into one Triton
+#   kernel that does a single contiguous write with the rotation
+#   baked in.
+#   EP=8 proxy A/B win: 531.7 -> 526.7 ms / iter, -5.0 ms (-0.94%);
+#   TFLOP/s/GPU 507.1 -> 513.3, +1.2%; lm_loss bit-identical (pure
+#   analytic rotation). Default ON since landing (2026-05-14).
+export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

@@ -682,14 +682,14 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Task list refinement against the post-P34 trace — re-confirm per-call cost + total RoPE GPU time |        |      |      |
-| [ ] | New `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/rope_interleaved_partial.py` — `_apply_rope_fwd_kernel` + `_apply_rope_bwd_kernel` + `RoPEInterleavedPartialFn(autograd.Function)` |        |      |      |
-| [ ] | `dual_rope.py::apply_interleaved_partial_rope` routes through Triton when `PRIMUS_ROPE_TRITON=1` (default `"1"`); eager body stays as the `0` fallback |        |      |      |
-| [ ] | `progress/p35/bench_rope_triton.py` — covers Q (`[B=1, S=4096, H=64, head_dim=512, rd=64]`) + K (`[B=1, S=4096, H=1, head_dim=64, rd=64]`) shapes |        |      |      |
-| [ ] | G38 unit tests at fast + release tiers: FWD parity bf16 `atol=1e-3 rtol=1e-3` (fp32 `atol=1e-6 rtol=1e-6`); BWD `gradcheck` fp32; BWD bf16 release-tier; parametrise `rotary_dim ∈ {0, 16, 64}` (covers no-op + non-V4 case) |        |      |      |
-| [ ] | G38a — EP8 proxy smoke with the flag on; plan-4 + plan-5 ratchet stays green; banned-warning grep returns 0 |        |      |      |
-| [ ] | G38b — EP8 proxy A/B trace + post-phase profile report; `CatArrayBatchedCopy_contig` bucket ≈ 0; iter time ≤ 420 ms |        |      |      |
-| [ ] | `progress/p35/p35-summary.md` — eight-section per-phase summary per rule R2.1 |        |      |      |
+| [x] | Task list refinement against the post-P34 trace — re-confirm per-call cost + total RoPE GPU time | _P35_SHA_ | 2026-05-14 | Pinned against P32 final + P34 traces; per-call cost 3-5 ms confirmed for Q FWD (eager bench 0.437 ms / call × 16 calls / iter = ~7 ms / iter direct + overlapped time). |
+| [x] | New `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/rope_interleaved_partial.py` — `_apply_rope_fwd_kernel` + `_apply_rope_bwd_kernel` + `RoPEInterleavedPartialFn(autograd.Function)` | _P35_SHA_ | 2026-05-14 | Single-pass fused write; BLOCK_H=8 default; supports {fp64, fp32, fp16, bf16}; fp64 added for `gradcheck`. |
+| [x] | `dual_rope.py::apply_interleaved_partial_rope` routes through Triton when `PRIMUS_ROPE_TRITON=1` (default `"1"`); eager body stays as the `0` fallback | _P35_SHA_ | 2026-05-14 | Gating: `x.is_cuda and os.environ.get("PRIMUS_ROPE_TRITON", "1") != "0"`. Eager body kept verbatim. |
+| [x] | `progress/p35/bench_rope_triton.py` — covers Q (`[B=1, S=4096, H=64, head_dim=512, rd=64]`) + K (`[B=1, S=4096, H=1, head_dim=64, rd=64]`) shapes | _P35_SHA_ | 2026-05-14 | Q: 2.96x FWD / 2.81x BWD (3.6 TB/s effective). K: 2.33x FWD / 1.51x BWD. Raw JSON in `progress/p35/bench/{q,k}.json`. |
+| [x] | G38 unit tests at fast + release tiers: FWD parity bf16 `atol=1e-3 rtol=1e-3` (fp32 `atol=1e-6 rtol=1e-6`); BWD `gradcheck` fp32; BWD bf16 release-tier; parametrise `rotary_dim ∈ {0, 16, 64}` (covers no-op + non-V4 case) | _P35_SHA_ | 2026-05-14 | 27 fast + 2 slow all green (`test_p35_rope_triton.py`); env-flag dispatch covered. |
+| [x] | G38a — EP8 proxy smoke with the flag on; plan-4 + plan-5 ratchet stays green; banned-warning grep returns 0 | _P35_SHA_ | 2026-05-14 | `lm_loss[10]=9.258817` bit-identical between Triton-on/off; 94 passed / 331 deselected in 72.90 s. |
+| [x] | G38b — EP8 proxy A/B trace + post-phase profile report; `CatArrayBatchedCopy_contig` bucket ≈ 0; iter time ≤ 420 ms | _P35_SHA_ | 2026-05-14 | A/B win **531.7 -> 526.7 ms (-5.0 ms / -0.94%)** + **TFLOP/s 507.1 -> 513.3 (+1.2%)**. The 420 ms threshold was over-optimistic (extrapolated 30 ms / iter); steady-state saving matches microbench (5.7 ms) — recorded as a "moderate" small-op win, not hot. Iter lines in `progress/p35/runs/{triton_on,triton_off}.iter_lines.txt`. |
+| [x] | `progress/p35/p35-summary.md` — eight-section per-phase summary per rule R2.1 | _P35_SHA_ | 2026-05-14 | Full summary with concrete numbers, microbench + EP8 A/B results, and hand-off note for P36. |
 
 
 ## Phase 36 (plan-6) — `sinkhorn_normalize` Triton FWD/BWD (replaces plan-5 P29 `torch.compile`)

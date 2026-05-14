@@ -37,9 +37,14 @@ This module exposes:
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
+
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.rope_interleaved_partial import (
+    RoPEInterleavedPartialFn,
+)
 
 # ---------------------------------------------------------------------------
 # YaRN scaling
@@ -196,6 +201,18 @@ def apply_interleaved_partial_rope(
         raise ValueError(f"rotary_dim must be even and <= head_dim ({head_dim}), got {rotary_dim}")
     if rotary_dim == 0:
         return x
+
+    # Plan-6 P35: route through the fused Triton kernel when on CUDA / HIP
+    # and the env knob is not "0".  The Triton path collapses the 9-op
+    # eager chain below (slice / reshape / four broadcast muls / stack /
+    # reshape / cat) into one kernel that does a single contiguous write
+    # with the rotation baked in -- removing the `CatArrayBatchedCopy_contig`
+    # bucket (~10 ms / 24 calls in the plan-5 P32 final trace) and the
+    # share of `elementwise_kernel_manual_unroll` that comes from the
+    # broadcast muls.  Eager body kept in tree as the `PRIMUS_ROPE_TRITON=0`
+    # fallback and as the G38 unit-test reference.
+    if x.is_cuda and os.environ.get("PRIMUS_ROPE_TRITON", "1") != "0":
+        return RoPEInterleavedPartialFn.apply(x, cos, sin, rotary_dim)
 
     orig_dtype = x.dtype
     nope = head_dim - rotary_dim

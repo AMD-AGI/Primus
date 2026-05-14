@@ -48,9 +48,36 @@ Unit tests (G37): `tests/unit_tests/megatron/extensions/test_stack_grouped_weigh
 (`pytest -m slow tests/unit_tests/megatron/transformer/deepseek_v4/`)
 stayed green (**92 passed, 304 deselected**).
 
-## P35 — RoPE fusion
+## P35 — `apply_interleaved_partial_rope`
 
-Pending (see `develop/plan-6/02-phase-details.md#phase-35`).
+Replaces the 9-op eager chain (`slice / reshape / 4 broadcast muls /
+stack / reshape / cat`) in
+:func:`primus.backends.megatron.core.transformer.dual_rope.apply_interleaved_partial_rope`
+with a single Triton kernel that does one contiguous write with the
+rotation baked in (nope prefix copied verbatim, rotary suffix rotated
+using interleaved `(2k, 2k+1)` pairing).  BWD applies the transpose
+rotation.  Default ON via `PRIMUS_ROPE_TRITON=1`.
+
+Bench: `deepseek-v4/develop/progress/p35/bench_rope_triton.py`
+(`--mode {q, k}`, raw JSON at `progress/p35/bench/{q,k}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD GB/s | BWD GB/s |
+|---|---|---:|---:|---:|---:|
+| Q (B=1, S=4096, H=64, head_dim=512, rd=64; 256 MiB / call) | eager  | 0.437 | 0.524 | 1230.6 | 1024.6 |
+| Q                                                          | triton | 0.148 | 0.187 | 3637.9 | 2878.1 |
+| **Q speedup**                                              |        | **2.96x** | **2.81x** | **+196 %** | **+181 %** |
+| K (B=1, S=4096, H=1,  head_dim=64,  rd=64; 0.5 MiB / call) | eager  | 0.064 | 0.140 |   24.6 |   11.2 |
+| K                                                          | triton | 0.027 | 0.093 |   57.2 |   17.0 |
+| **K speedup**                                              |        | **2.33x** | **1.51x** | **+133 %** | **+52 %** |
+
+EP=8 proxy A/B: **steady-state iter time 531.7 ms (eager) ->
+526.7 ms (Triton), -5.0 ms / -0.94 %** at bit-identical `lm_loss`
+(see `progress/p35/p35-summary.md` §4.2).  Smaller than P34 because
+RoPE was a moderate (not hot) small-op target.
+
+Unit tests (G38): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p35_rope_triton.py`.
+**27 fast + 2 release-tier slow** all green; plan-4/5 ratchet stayed
+green (**94 passed, 331 deselected**).
 
 ## P36 — `sinkhorn_normalize` fusion
 

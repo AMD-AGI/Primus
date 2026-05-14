@@ -33,6 +33,7 @@ V4-Flash EP8 proxy.
 | **P32 final**  | RoPE fix + split BWD + segreduce CSA BWD (defaults ON) | **603.3** | **1134.3** | **14.64x** | `tas-mi355x-20260514/p32_final_postropefix_defaults` smoke iter 10 |
 | **P33**        | TFLOP/s closed-form fix (SWA visible-pair pruning + HC fn matmul; no runtime change) | **603.3** | **444.2** | **14.64x** | same trace as `P32 final`; recomputed via plan-6 P33 patch (`primus.backends.megatron.patches.deepseek_v4_flops_patches`) |
 | **P34**        | `_stack_grouped_linear_weight` Triton FWD/BWD fusion (default ON) | **530.85** | **507.2** | **16.65x** | `progress/p34/runs/triton_on.iter_lines.txt` iter-10 throughput; eager fallback at same revision = 580.65 ms / 463.2 TFLOP/s/GPU |
+| **P35**        | `apply_interleaved_partial_rope` Triton FWD/BWD fusion (default ON) | **526.7** | **513.3** | **16.78x** | `progress/p35/runs/triton_on.iter_lines.txt` iter-10; eager fallback at same revision (`PRIMUS_ROPE_TRITON=0`) = 531.7 ms / 507.1 TFLOP/s/GPU |
 
 
 Notes:
@@ -131,3 +132,21 @@ kernels as 600 ms+ outliers.
   **16.65x** (8837.4 ms / 530.85 ms = 16.65). Plan-4 / plan-5
   release-tier `pytest.mark.slow` ratchet stayed green (92 passed,
   304 deselected in 115.88 s).
+- **P35** (2026-05-14) — plan-6 P35 collapses the 9-op eager chain in
+  `apply_interleaved_partial_rope` (slice / reshape / 4 broadcast muls /
+  stack / reshape / cat) into a single Triton kernel that does one
+  contiguous write with the rotation baked in. Default ON via
+  `PRIMUS_ROPE_TRITON=1`; `=0` falls back to the eager body (kept in
+  tree as the G38 reference). Microbench (V4-Flash EP=8 widths, bf16):
+  Q shape (B=1, S=4096, H=64, head_dim=512, rd=64) → **2.96x FWD /
+  2.81x BWD** (0.148 ms / 0.187 ms triton vs 0.437 ms / 0.524 ms eager
+  at 3.6 TB/s effective HBM BW); K shape → **2.33x FWD / 1.51x BWD**.
+  EP8 proxy A/B (`run_baseline_trace_ep8_p35.sh` with the env toggled)
+  gives steady-state iter time **531.7 ms (eager) -> 526.7 ms
+  (Triton), -5.0 ms / -0.94 %**, matching the microbench-predicted
+  5.7 ms / iter to within profiler noise. `lm_loss[10]` is
+  bit-identical (9.258817) between paths because the operation is a
+  pure analytic rotation. The vs-baseline ratchet vs P28 nudges to
+  **16.78×**. Plan-4 / plan-5 release-tier `pytest.mark.slow` ratchet
+  stayed green (94 passed, 331 deselected in 72.90 s; the +2 vs P34
+  are the G38 release-tier Q + K shape tests).

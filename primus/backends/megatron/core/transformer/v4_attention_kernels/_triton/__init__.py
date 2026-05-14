@@ -17,4 +17,7 @@ Submodules:
   path.
 * :mod:`v4_csa_attention_bwd` — backward kernel for the CSA path
   (``dq, dk_local, dv_local, dgathered, dsink``).
+* :mod:`rope_interleaved_partial` — plan-6 P35 fused interleaved partial
+  RoPE FWD/BWD (replaces the 9-op eager chain in
+  :func:`primus.backends.megatron.core.transformer.dual_rope.apply_interleaved_partial_rope`).
 """
