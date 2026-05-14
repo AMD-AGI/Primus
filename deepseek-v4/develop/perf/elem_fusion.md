@@ -197,6 +197,67 @@ shapes).
 Unit tests (G41): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p38_indexer_triton.py`.
 **16 fast + 1 release-tier slow** all green.
 
-## P39 — V4 hash router post-logits fusion
+## P39 — V4 router post-logits fusion (descoped, default-off)
 
-Pending.
+Fuses the post-logits chain shared between the learned topk router
+(`v4_topk_router.py::_compute_route`) and the hash router
+(`v4_hash_router.py::DeepseekV4HashRouter.forward`): `score_fn +
+gather + sum.clamp.div + scaling + sparse scatter (probs) + sparse
+scatter (routing_map)`.  One Triton FWD + one Triton BWD kernel;
+`score_function: tl.constexpr` emits 3 specialised binaries
+(softmax / sqrtsoftplus / sigmoid).  The dense `[N, E]` output tile
+is built entirely in registers -- the scatter target is constructed
+in VGPRs and written once, not store-then-loaded (the coherence
+bug we hit + fixed during development).
+
+**Descoped.**  At V4-Flash widths the microbench wins on
+`sqrtsoftplus` (V4 production setting: 1.56x FWD / 1.22x BWD) but
+the EP=8 proxy A/B (10-iter smoke, ON vs OFF) shows the ~1 ms / iter
+aggregate gain is submerged in the ~±2-3 ms NCCL / dispatch
+variance band.  `softmax` BWD regresses by ~30% because eager
+`softmax_backward` is an Inductor-fused kernel.  Default OFF;
+opt-in via `PRIMUS_V4_ROUTER_TRITON=1`.
+
+Bench: `deepseek-v4/develop/progress/p39/bench_router_post.py`
+(`--mode {v4, small} --score-fn {softmax, sigmoid, sqrtsoftplus}`,
+raw JSON at `progress/p39/bench/{v4_sqrtsoftplus,v4_softmax,small}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD GB/s | BWD GB/s |
+|---|---|---:|---:|---:|---:|
+| v4 (V4-Flash N=4096, E=256, K=8, **sqrtsoftplus**)            | eager  | 0.072 | 0.183 | 134.8 |  70.4 |
+| v4 sqrtsoftplus                                                | triton | 0.046 | 0.150 | 210.5 |  85.8 |
+| **v4 sqrtsoftplus speedup**                                    |        | **1.56x** | **1.22x** | **+56 %** | **+22 %** |
+| v4 (V4-Flash N=4096, E=256, K=8, **softmax**)                  | eager  | 0.046 | 0.108 | 209.3 | 118.7 |
+| v4 softmax                                                     | triton | 0.047 | 0.148 | 208.3 |  86.8 |
+| **v4 softmax delta**                                           |        | **1.00x** | **0.73x** | **0 %** | **-27 %** |
+| small (N=128, E=32, K=4, sqrtsoftplus)                         | eager  | 0.065 | 0.183 |   0.6 |   0.3 |
+| small                                                          | triton | 0.044 | 0.201 |   0.9 |   0.3 |
+| **small speedup**                                              |        | **1.49x** | **0.91x** | **+50 %** | **-9 %** |
+
+EP=8 proxy A/B (10-iter smoke, mean iters 4-10):
+**513.1 ms (eager) -> 514.5 ms (Triton), +1.4 ms within ~±2-3 ms
+noise band**.  lm_loss **bit-identical** iter-by-iter (parity
+table in `progress/p39/p39-summary.md` §4.2): every step prints the
+exact same 6-digit decimal (11.16446, 10.94438, 10.38210, ...,
+9.257534).  Same descope precedent as P38.
+
+Unit tests (G42): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p39_router_post_triton.py`.
+**21 passed + 3 skipped** (shape-variant guards).
+
+## Plan-6 cumulative perf summary
+
+| phase | iter time (ms) | delta vs prev (ms) | TFLOP/s/GPU | default | speedup vs prev |
+|------|---:|---:|---:|---|---:|
+| P28 baseline (plan-5 anchor)  | 8837.0 |       -- |    77.5 | -- | 1.00x |
+| P32 final (plan-5 close)      |  603.0 |  -8234.0 |  1134.0 | -- | 14.64x |
+| P34 close (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`) | 525.0 | -78.0 | 507.2 | **ON** | 1.15x |
+| P35 close (`PRIMUS_ROPE_TRITON=1`)                  | 520.7 |  -4.3 | 513.3 | **ON** | 1.01x |
+| P36 close (`PRIMUS_SINKHORN_TRITON=1`)              | 515.0 |  -5.7 | 520.4 | **ON** | 1.01x |
+| P37 close (`PRIMUS_HC_TRITON=1`)                    | 512.1 |  -2.9 | 521.4 | **ON** | 1.01x |
+| P38 close (`PRIMUS_INDEXER_TRITON=0` -- descoped)   | 512.1 |   0.0 | 521.4 | off   | 1.00x |
+| P39 close (`PRIMUS_V4_ROUTER_TRITON=0` -- descoped) | 513.1 |  +1.0 | 521.4 | off   | 1.00x |
+
+Cumulative plan-6 win vs P28 anchor: **-124.4 ms / iter (-19.5 %)**;
+TFLOP/s/GPU 77.5 -> 521.4 = **6.73x throughput**.  Plan-6 ships four
+default-on kernels (P34..P37) and two opt-in kernels (P38 / P39)
+that hold microbench wins but lose to noise in the proxy.

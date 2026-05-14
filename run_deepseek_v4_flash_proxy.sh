@@ -213,6 +213,17 @@ export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
 #   kernel stays available for future tuning + small-shape paths.
 export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
 
+# P39 — V4 Router post-logits Triton FWD/BWD fusion (shared by topk +
+#   hash router).  Descoped to **default OFF** (same precedent as P38).
+#   Microbench at V4-Flash widths (N=4096, E=256, K=8) does win on
+#   `sqrtsoftplus` (1.56x FWD / 1.22x BWD), but the EP=8 proxy A/B
+#   (10 iters each) shows ~534 ms / iter both ways and lm_loss
+#   bit-identical -- the per-call savings (~1 ms / iter aggregate)
+#   are submerged in dispatch + grouped-MLP variance.  Kernel ships
+#   behind the env knob, ready for future tuning.  Set
+#   PRIMUS_V4_ROUTER_TRITON=1 to enable.
+export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-0}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

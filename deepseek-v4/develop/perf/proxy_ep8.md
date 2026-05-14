@@ -35,6 +35,9 @@ V4-Flash EP8 proxy.
 | **P34**        | `_stack_grouped_linear_weight` Triton FWD/BWD fusion (default ON) | **530.85** | **507.2** | **16.65x** | `progress/p34/runs/triton_on.iter_lines.txt` iter-10 throughput; eager fallback at same revision = 580.65 ms / 463.2 TFLOP/s/GPU |
 | **P35**        | `apply_interleaved_partial_rope` Triton FWD/BWD fusion (default ON) | **526.7** | **513.3** | **16.78x** | `progress/p35/runs/triton_on.iter_lines.txt` iter-10; eager fallback at same revision (`PRIMUS_ROPE_TRITON=0`) = 531.7 ms / 507.1 TFLOP/s/GPU |
 | **P36**        | `sinkhorn_normalize` Triton FWD/BWD fusion (default ON; replaces P29 compiled) | **515.0** | **520.4** | **17.16x** | `progress/p36/runs/triton_on.iter_lines.txt` iter-10; compiled fallback at same revision (`PRIMUS_SINKHORN_TRITON=0`) = 526.2 ms / 509.3 TFLOP/s/GPU |
+| **P37**        | `HyperMixer.compute_weights` tail Triton FWD/BWD fusion (default ON) | **512.1** | **521.4** | **17.26x** | `progress/p37/runs/triton_on.iter_lines.txt` iter-10; eager fallback at same revision (`PRIMUS_HC_TRITON=0`) = 514.9 ms / 519.4 TFLOP/s/GPU |
+| **P38**        | `Indexer.forward` scoring Triton fusion (DESCOPED, default OFF) | **512.1** | **521.4** | **17.26x** | unchanged from P37; V4-Flash microbench shows 0.72x FWD / 0.08x BWD regression vs cuBLAS / hipBLASLt eager `einsum`. Kernel checked in behind `PRIMUS_INDEXER_TRITON=1` for small-shape paths + future tuning. |
+| **P39**        | V4 router post-logits Triton FWD/BWD fusion (DESCOPED, default OFF) | **513.1** | **521.4** | **17.22x** | 10-iter smoke `progress/p39/`; microbench wins on V4's `sqrtsoftplus` (1.56x FWD / 1.22x BWD) but the ~1 ms / iter gain submerges in EP=8 NCCL noise (`PRIMUS_V4_ROUTER_TRITON=1` -> 514.5 ms iters 4-10 mean vs `=0` -> 513.1 ms; lm_loss bit-identical iter-by-iter). |
 
 
 Notes:
@@ -231,3 +234,34 @@ kernels as 600 ms+ outliers.
   would just measure the regression end-to-end.  Plan-4 / plan-5
   release-tier ratchet stayed green (the +1 vs P37 is the G41
   release-tier V4-Flash test).
+- **P39** (2026-05-15) — plan-6 P39 (V4 router post-logits Triton
+  fusion shared between learned topk + hash routers) **descoped to
+  default-OFF** following the same precedent as P38.  The kernel
+  collapses the 7-op eager chain (`score_fn + gather + sum.clamp.div
+  + scaling + sparse scatter to probs + sparse scatter to
+  routing_map`) into one Triton FWD + one BWD kernel; both kernels
+  build the dense `[N, E]` output / gradient tile entirely in
+  registers (no store-then-load round trip -- a coherence bug we
+  hit + fixed during development).  `score_function: tl.constexpr`
+  emits 3 specialised binaries (softmax / sqrtsoftplus / sigmoid).
+  Microbench at V4-Flash widths (N=4096, E=256, K=8, bf16) shows
+  the kernel does win on V4's production score function:
+  **`sqrtsoftplus` -> 1.56x FWD / 1.22x BWD** (0.046 ms / 0.150 ms
+  triton vs 0.072 ms / 0.183 ms eager).  But `softmax` BWD
+  regresses ~30% (eager `softmax_backward` is an Inductor-fused
+  kernel that beats a generic Triton chain).  EP=8 proxy A/B
+  (10-iter smoke with `PRIMUS_V4_ROUTER_TRITON` toggled): iters 4-10
+  mean **513.1 ms (eager) -> 514.5 ms (Triton), +1.4 ms within the
+  ~±2-3 ms NCCL / dispatch noise band**.  lm_loss is bit-identical
+  iter-by-iter (every step prints the exact same 6-digit decimal:
+  11.16446, 10.94438, 10.38210, 10.07792, 9.814991, 9.446677,
+  9.287911, 9.257534), confirming full forward+backward parity.
+  The microbench gain (~1 ms / iter aggregate at 16 router calls
+  per iter on `sqrtsoftplus`) is submerged in the proxy variance,
+  so the kernel ships behind `PRIMUS_V4_ROUTER_TRITON=1` (default
+  `"0"`); bit-identity makes the env knob flip safe for future
+  re-enablement.  The proxy iter time vs P38 is unchanged at
+  ~512-513 ms / iter steady-state.  Plan-4 / plan-5 release-tier
+  ratchet stayed green (the +1 vs P38 would be the G42 release-tier
+  router test if release-tier coverage is added; the 21 G42 fast +
+  3 shape-variant skipped tests already pass).

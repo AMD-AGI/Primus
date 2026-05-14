@@ -65,6 +65,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    is_triton_kernel_supported as _v4_router_triton_supported,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    is_triton_path_enabled as _v4_router_triton_enabled,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    v4_router_post_triton,
+)
+
 _VALID_SCORE_FUNCTIONS = {"softmax", "sigmoid", "sqrtsoftplus"}
 
 
@@ -110,15 +120,34 @@ def _compute_route(
     NOTE: this helper assumes ``logits`` is already shaped ``[N,
     num_experts]`` and in fp32. Callers are responsible for the cast.
     """
-    scores = v4_score_fn(logits, score_function=score_function)
-    original_scores = scores
-
+    # Pre-compute topk indices on the host (heavy GPU compute that
+    # benefits from being its own kernel).  When PRIMUS_V4_ROUTER_TRITON
+    # is on (and supported), route the rest of the chain through one
+    # fused Triton kernel; otherwise fall back to the eager body.
+    scores_for_selection = v4_score_fn(logits, score_function=score_function)
     if expert_bias is not None:
-        sel_score = scores + expert_bias.to(scores.dtype)
+        sel_score = scores_for_selection + expert_bias.to(scores_for_selection.dtype)
     else:
-        sel_score = scores
-
+        sel_score = scores_for_selection
     indices = sel_score.topk(topk, dim=-1).indices  # [N, K]
+
+    if _v4_router_triton_enabled() and _v4_router_triton_supported(logits, indices):
+        # The Triton kernel re-applies the score function inside (so
+        # it can save the full row for backward).  This keeps the
+        # eager path's bit-equivalent behaviour for the gathered
+        # weights at the cost of one extra pass over [N, E] of fp32
+        # logits -- negligible at V4-Flash widths.
+        probs, routing_map = v4_router_post_triton(
+            logits,
+            indices,
+            score_function=score_function,
+            topk_scaling_factor=topk_scaling_factor,
+            out_dtype=scores_for_selection.dtype,
+        )
+        return probs, routing_map
+
+    # Eager fallback (verbatim pre-P39 body).
+    original_scores = scores_for_selection
     weights = original_scores.gather(1, indices)  # [N, K]
 
     if score_function != "softmax":

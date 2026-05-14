@@ -56,6 +56,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    is_triton_kernel_supported as _v4_router_triton_supported,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    is_triton_path_enabled as _v4_router_triton_enabled,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+    v4_router_post_triton,
+)
 from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     _VALID_SCORE_FUNCTIONS,
     v4_score_fn,
@@ -203,12 +212,24 @@ class DeepseekV4HashRouter(nn.Module):
 
         # Learned scores (fp32) over the full expert axis.
         logits = F.linear(flat_hidden.to(torch.float32), self.weight.to(torch.float32))
-        scores = v4_score_fn(logits, score_function=self.score_function)  # [N, E]
 
         # Static expert assignment from the table — cast to long for gather.
         indices = self.tid2eid[flat_ids].long()  # [N, K]
 
-        # Routing weights: gather learned scores at the prescribed expert ids.
+        # Plan-6 P39: route the post-logits chain through one fused
+        # Triton kernel when PRIMUS_V4_ROUTER_TRITON=1 (default OFF).
+        if _v4_router_triton_enabled() and _v4_router_triton_supported(logits, indices):
+            probs, routing_map = v4_router_post_triton(
+                logits,
+                indices,
+                score_function=self.score_function,
+                topk_scaling_factor=self.topk_scaling_factor,
+                out_dtype=torch.float32,
+            )
+            return probs, routing_map
+
+        # Eager fallback (verbatim pre-P39 body).
+        scores = v4_score_fn(logits, score_function=self.score_function)  # [N, E]
         weights = scores.gather(1, indices)  # [N, K]
 
         if self.score_function != "softmax":
