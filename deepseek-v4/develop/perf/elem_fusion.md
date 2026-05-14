@@ -248,16 +248,30 @@ Unit tests (G42): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p39_ro
 
 | phase | iter time (ms) | delta vs prev (ms) | TFLOP/s/GPU | default | speedup vs prev |
 |------|---:|---:|---:|---|---:|
-| P28 baseline (plan-5 anchor)  | 8837.0 |       -- |    77.5 | -- | 1.00x |
-| P32 final (plan-5 close)      |  603.0 |  -8234.0 |  1134.0 | -- | 14.64x |
-| P34 close (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`) | 525.0 | -78.0 | 507.2 | **ON** | 1.15x |
-| P35 close (`PRIMUS_ROPE_TRITON=1`)                  | 520.7 |  -4.3 | 513.3 | **ON** | 1.01x |
-| P36 close (`PRIMUS_SINKHORN_TRITON=1`)              | 515.0 |  -5.7 | 520.4 | **ON** | 1.01x |
-| P37 close (`PRIMUS_HC_TRITON=1`)                    | 512.1 |  -2.9 | 521.4 | **ON** | 1.01x |
-| P38 close (`PRIMUS_INDEXER_TRITON=0` -- descoped)   | 512.1 |   0.0 | 521.4 | off   | 1.00x |
-| P39 close (`PRIMUS_V4_ROUTER_TRITON=0` -- descoped) | 513.1 |  +1.0 | 521.4 | off   | 1.00x |
+| P28 baseline (plan-5 anchor)  | 8837.4 |       -- |    77.5 | -- | 1.00x |
+| P32 final (plan-5 close)      |  603.3 |  -8234.1 |  1134.3*| -- | 14.66x |
+| P33 corrected denominator     |  603.3 |     0.0  |  444.2  | -- |  1.00x |
+| P34 close (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`) | 530.85 | -72.45 | 507.2 | **ON** | 1.14x |
+| P35 close (`PRIMUS_ROPE_TRITON=1`)                  | 526.7 |  -4.15 | 513.3 | **ON** | 1.01x |
+| P36 close (`PRIMUS_SINKHORN_TRITON=1`)              | 515.0 | -11.7  | 520.4 | **ON** | 1.02x |
+| P37 close (`PRIMUS_HC_TRITON=1`)                    | 512.1 |  -2.9  | 521.4 | **ON** | 1.01x |
+| P38 close (`PRIMUS_INDEXER_TRITON=0` -- descoped)   | 512.1 |   0.0  | 521.4 | off    | 1.00x |
+| P39 close (`PRIMUS_V4_ROUTER_TRITON=0` -- descoped) | 513.1 |  +1.0  | 521.4 | off    | 1.00x |
+| **P40 final (15-iter clean bake-off)**              |**510.6** | **-2.5** | **524.9** | -- | **1.00x** |
 
-Cumulative plan-6 win vs P28 anchor: **-124.4 ms / iter (-19.5 %)**;
-TFLOP/s/GPU 77.5 -> 521.4 = **6.73x throughput**.  Plan-6 ships four
-default-on kernels (P34..P37) and two opt-in kernels (P38 / P39)
-that hold microbench wins but lose to noise in the proxy.
+(* TFLOP/s/GPU at P32 final is the pre-correction denominator; P33
+onward use the closed-form-corrected denominator -- not directly
+comparable across the P32/P33 boundary.  The iter-time speedup
+column is the apples-to-apples one.)
+
+**Plan-6 contribution (delta vs P32 final iter time at 603.3 ms):
+-92.7 ms / iter saved (-15.4 %)** on the EP=8 V4-Flash 8-layer
+proxy.  **Cumulative speedup vs P28 anchor: 17.31x mean / 17.34x
+best (iter 13).**  TFLOP/s/GPU under the P33-corrected denominator
+climbs from **444.2 -> 524.9 (mean iters 8-15) / 525.9 (best,
+iter 13) = +18.2 % throughput**.
+
+Plan-6 ships four default-on kernels (P34..P37) and two opt-in
+kernels (P38 / P39) that hold microbench wins but lose to noise
+in the proxy.  P40 is the close-out (perf docs + cumulative bake-
+off + status pinning); see `progress/p40/p40-summary.md`.

@@ -152,11 +152,19 @@ export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
 export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-1}
 
 # ---------- Plan-6 elemwise-fusion knobs (default ON; A/B with =0) ----------
-# Each plan-6 phase that wins the EP=8 proxy A/B adds its env knob here as
-# default ON, mirroring the plan-5 P32 final precedent above. The kernel
-# code already defaults each to "1"; this block makes the runner script
-# self-document the recipe and lets users flip individual fusions to "0"
-# for A/B without editing source.
+# Plan-6 P40 close-out (2026-05-15): each plan-6 phase that wins the EP=8
+# proxy A/B adds its env knob here as default ON, mirroring the plan-5 P32
+# final precedent above.  Phases that microbench-win but proxy-noise-lose
+# (P38, P39) ship as default OFF with the kernel checked in for future
+# tuning.  Cumulative plan-6 win at this composition (P34..P37 ON, P38/P39
+# OFF): **-92.7 ms / iter (-15.4 %) vs plan-5 P32 final**; steady-state
+# iter time 510.6 ms / 524.9 TFLOP/s/GPU (peak HBM 172.3 GiB / rank).
+# See `deepseek-v4/develop/perf/proxy_ep8.md` row `P40 final` and
+# `progress/p40/p40-summary.md` for the full close-out write-up.
+#
+# The kernel code already defaults each to "1" / "0" appropriately; this
+# block makes the runner script self-document the recipe and lets users
+# flip individual fusions for A/B without editing source.
 #
 # P34 — stack_grouped_weight Triton FWD/BWD fusion in
 #   PrimusTurboGroupedMLP._stack_grouped_linear_weight.

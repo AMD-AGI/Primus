@@ -38,6 +38,7 @@ V4-Flash EP8 proxy.
 | **P37**        | `HyperMixer.compute_weights` tail Triton FWD/BWD fusion (default ON) | **512.1** | **521.4** | **17.26x** | `progress/p37/runs/triton_on.iter_lines.txt` iter-10; eager fallback at same revision (`PRIMUS_HC_TRITON=0`) = 514.9 ms / 519.4 TFLOP/s/GPU |
 | **P38**        | `Indexer.forward` scoring Triton fusion (DESCOPED, default OFF) | **512.1** | **521.4** | **17.26x** | unchanged from P37; V4-Flash microbench shows 0.72x FWD / 0.08x BWD regression vs cuBLAS / hipBLASLt eager `einsum`. Kernel checked in behind `PRIMUS_INDEXER_TRITON=1` for small-shape paths + future tuning. |
 | **P39**        | V4 router post-logits Triton FWD/BWD fusion (DESCOPED, default OFF) | **513.1** | **521.4** | **17.22x** | 10-iter smoke `progress/p39/`; microbench wins on V4's `sqrtsoftplus` (1.56x FWD / 1.22x BWD) but the ~1 ms / iter gain submerges in EP=8 NCCL noise (`PRIMUS_V4_ROUTER_TRITON=1` -> 514.5 ms iters 4-10 mean vs `=0` -> 513.1 ms; lm_loss bit-identical iter-by-iter). |
+| **P40 final**  | Plan-6 close-out: cumulative bake-off with all plan-6 default-on knobs (P34/P35/P36/P37); P38/P39 default OFF | **510.6** (best 509.5) | **524.9** (best 525.9) | **17.31x** (best 17.34x) | `progress/p40/p40-summary.md` §3; 15-iter clean smoke (`p40_bakeoff_plan6_defaults`); steady-state iters 8-15 mean. Plan-6 contribution vs P32 final: **-92.7 ms / iter (-15.4 %)** at +18.2 % throughput (`444.2 -> 524.9 TFLOP/s/GPU`). |
 
 
 Notes:
@@ -265,3 +266,25 @@ kernels as 600 ms+ outliers.
   ratchet stayed green (the +1 vs P38 would be the G42 release-tier
   router test if release-tier coverage is added; the 21 G42 fast +
   3 shape-variant skipped tests already pass).
+- **P40 final** (2026-05-15) — plan-6 close-out.  15-iter EP=8
+  proxy bake-off with all plan-6 default-on flags enabled
+  (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`, `PRIMUS_ROPE_TRITON=1`,
+  `PRIMUS_SINKHORN_TRITON=1`, `PRIMUS_HC_TRITON=1`) and the two
+  descoped knobs off (`PRIMUS_INDEXER_TRITON=0`,
+  `PRIMUS_V4_ROUTER_TRITON=0`) -- the plan-6 production state.
+  Steady-state iters 8-15 (post-warmup clean window) show
+  **mean 510.6 ms / iter, 524.9 TFLOP/s/GPU; best iter 13 at
+  509.5 ms / 525.9 TFLOP/s/GPU**.  Peak HBM / rank: 172.3 GiB
+  (59.84 %).  Cumulative speedup vs the P28 anchor:
+  `8837.4 / 510.6 = 17.31x` mean (best iter 17.34x).  Plan-6
+  contribution vs the plan-5 P32 final iter time (603.3 ms):
+  **-92.7 ms / iter saved (-15.4 %)**; vs the P33-corrected
+  TFLOP/s denominator (444.2 TFLOP/s/GPU): **+18.2 % throughput
+  (444.2 -> 524.9)**.  See `progress/p40/p40-summary.md` for the
+  full close-out: per-phase iter-time decomposition,
+  roadmap-target gap analysis (510.6 ms vs the original 385 ms
+  target — the 125 ms shortfall sits in V4 attention kernels,
+  not elementwise fusion, and is plan-7 scope), plan-7 follow-up
+  candidates inherited from P37 (`collapse` / `expand` /
+  `HyperHead.forward`), P38 (tensor-core-friendly Indexer tiles),
+  and P39 (Inductor-tier softmax BWD; dispatcher input fusion).
