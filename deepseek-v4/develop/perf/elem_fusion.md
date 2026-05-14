@@ -158,9 +158,44 @@ delta).  Iter-10-instantaneous: 514.9 -> 512.1 ms.  See
 Unit tests (G40): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p37_hc_glue_triton.py`.
 **21 fast + 1 release-tier slow** all green.
 
-## P38 — Indexer small-op fusion
+## P38 — `Indexer.forward` scoring fusion (descoped, default-off)
 
-Pending.
+Fuses the `einsum + relu + mul + sum + causal_mask` scoring chain
+in `Indexer.forward` into one Triton FWD + one Triton BWD kernel.
+Materialises the causal mask inline
+(`tl.where((p+1)*compress_ratio - 1 <= s, acc, -inf)`) -- no
+`[S, P]` mask tensor.  BWD recomputes the per-tile `relu` mask
+(FlashAttention-style) instead of saving it.
+
+**Descoped.** At V4-Flash widths (B=1, S=4096, P=1024, H=8, Hd=128)
+the eager `einsum` maps to a cuBLAS / hipBLASLt batched-matmul that
+already runs at ~28 TFLOP/s on MI355.  The generic Triton kernel
+under-utilises tensor cores (BLOCK_S=BLOCK_P=32 vs cuBLAS's 128x128
+choice) and the BWD's three `tl.atomic_add` calls per program create
+~12x contention.  Default OFF; opt-in via `PRIMUS_INDEXER_TRITON=1`.
+
+Bench: `deepseek-v4/develop/progress/p38/bench_indexer.py`
+(`--mode {v4, small}`, raw JSON at
+`progress/p38/bench/{v4,small}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD TFLOP/s | BWD TFLOP/s |
+|---|---|---:|---:|---:|---:|
+| V4-Flash (B=1, S=4096, P=1024, H=8, Hd=128, bf16; 8.6 GFLOP / call) | eager  | 0.306 | 0.489 |  28.1 |  52.7 |
+| V4-Flash                                                            | triton | 0.424 | 6.457 |  20.2 |   4.0 |
+| **V4-Flash regression vs eager**                                    |        | **-39 %** | **-1220 %** |   |   |
+| small (B=2, S=128, P=32, H=8, Hd=128, bf16)                         | eager  | 0.176 | 0.256 |   0.1 |   0.2 |
+| small                                                                | triton | 0.053 | 0.226 |   0.3 |   0.2 |
+| **small speedup**                                                    |        | **3.35x** | **1.14x** |   |   |
+
+EP=8 proxy A/B not run because the V4-Flash microbench already
+shows the regression dominates; running the proxy with the
+Triton path on would just measure that regression end-to-end.  See
+`progress/p38/p38-summary.md` for the descope discussion + follow-
+ups (tensor-core-friendly tile sizes; FWD-only fusion at small
+shapes).
+
+Unit tests (G41): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p38_indexer_triton.py`.
+**16 fast + 1 release-tier slow** all green.
 
 ## P39 — V4 hash router post-logits fusion
 

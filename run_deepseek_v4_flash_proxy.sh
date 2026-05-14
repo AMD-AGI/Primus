@@ -202,6 +202,17 @@ export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
 #   separate Triton kernels.  Default ON since landing (2026-05-14).
 export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
 
+# P38 — Indexer.forward scoring Triton fusion.  Descoped (default OFF)
+#   because the eager `einsum + relu + mul + sum + causal_mask` chain
+#   already maps to a cuBLAS / hipBLASLt batched-matmul that runs at
+#   ~28 TFLOP/s on MI355 at V4-Flash widths (B=1, S=4096, P=1024, H=8,
+#   Hd=128).  The generic Triton kernel here is FWD-competitive only at
+#   small shapes (3.35x FWD at B=2, S=128, P=32) but regresses ~30% at
+#   the production V4-Flash shape and BWD regresses ~12x due to cross-
+#   tile atomic_add traffic on dq / dk / dw.  Keep the env knob so the
+#   kernel stays available for future tuning + small-shape paths.
+export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

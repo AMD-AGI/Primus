@@ -209,3 +209,25 @@ kernels as 600 ms+ outliers.
   (8837.4 / 512.1).  Plan-4 / plan-5 release-tier `pytest.mark.slow`
   ratchet stayed green (the +1 vs P36 is the G40 release-tier
   V4-Flash test).
+- **P38** (2026-05-14) — plan-6 P38 (`Indexer.forward` scoring
+  Triton fusion) **descoped per the explicit clause in
+  `plan-6/02-phase-details.md` §"Task list refinement"**.  The
+  eager `einsum + relu + mul + sum + causal_mask` chain at V4-Flash
+  widths (B=1, S=4096, P=1024, H=8, Hd=128) is dominated by a
+  cuBLAS / hipBLASLt batched-matmul that runs at ~28 TFLOP/s on
+  MI355.  The generic Triton kernel under-utilises tensor cores
+  (BLOCK_S=BLOCK_P=32 vs cuBLAS's 128x128 tile) and the BWD's
+  three `tl.atomic_add` calls per program (on `dq` / `dk` / `dw`)
+  create ~12x contention.  Microbench at V4-Flash widths:
+  **FWD 0.424 ms (triton) vs 0.306 ms (eager) -> 0.72x regression;
+  BWD 6.457 ms (triton) vs 0.489 ms (eager) -> 0.08x regression
+  (12x slower).**  Small-shape paths (B=2, S=128, P=32) still win
+  (3.35x FWD speedup) -- the kernel is checked in for future
+  tuning + small-shape paths via `PRIMUS_INDEXER_TRITON=1` (default
+  `"0"`).  The proxy iter time vs P37 is therefore unchanged
+  (still ~512.1 ms / iter steady-state).  No EP=8 A/B trace
+  collected because the V4-Flash microbench already shows the
+  regression dominates; running the proxy with the Triton path on
+  would just measure the regression end-to-end.  Plan-4 / plan-5
+  release-tier ratchet stayed green (the +1 vs P37 is the G41
+  release-tier V4-Flash test).
