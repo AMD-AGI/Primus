@@ -9,7 +9,7 @@
 > findability. Rules are atomic and self-contained — pick the section
 > first, then read the rule.
 >
-> Last updated: 2026-05-13 (P32 perf-table cell format).
+> Last updated: 2026-05-15 (R2.6 per-phase trace + tgz archival rule).
 
 ---
 
@@ -120,6 +120,33 @@ When a task runs the EP8 proxy and end-to-end performance improves,
 update `develop/perf/proxy_ep8.md` with the new steady iter time and
 TFLOP/s/GPU. Keep intermediate rows when they explain an optimisation
 step or regression (for example, dense-only P30 before HCA split-mask).
+
+### R2.6 — Per-phase trace + tgz archival
+**STANDING RULE since plan-6 P40 close-out (commit `b08975bc`).**
+Every phase that ships a runtime-affecting change closes with a
+chrome-trace capture using
+`develop/progress/p<id>/run_baseline_trace_ep8_p<id>.sh` (or the
+phase-appropriate trace launcher).  After the trace lands, **`cd`
+into the directory that holds the `.pt.trace.json` file and
+compress it to a `.tgz` of the same base name** so the artefact
+travels alongside the JSON (and a future profile re-run does not
+overwrite the previous trace).  The expected dance is:
+
+```bash
+bash deepseek-v4/develop/progress/p<id>/run_baseline_trace_ep8_p<id>.sh
+cd output/<team>/<user>/<exp-name>/tensorboard
+for f in *.pt.trace.json; do tar -czf "${f%.json}.tgz" "$f"; done
+```
+
+The resulting `<basename>.tgz` lives in the same directory as the
+`<basename>.pt.trace.json`.  Neither artefact is committed (R6.1
+covers both extensions), but the tgz is the canonical hand-off
+artefact for re-running profile analysis and is referenced from
+`develop/profile/profile-after-p<id>-ep<N>-<YYYYMMDD>.md`.
+
+The compression typically buys 10-20x size reduction (P40 trace:
+65.3 MiB JSON → 4.3 MiB tgz).  Use this archived copy before
+deleting the JSON.
 
 ---
 
