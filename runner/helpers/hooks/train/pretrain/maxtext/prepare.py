@@ -105,32 +105,124 @@ def prepare_dataset_if_needed(
 
 def install_maxtext_dependencies() -> None:
     """
-    Install required system packages for MaxText/JAX on every node.
+    Ensure required RDMA / InfiniBand system packages for multi-node
+    JAX/MaxText training are present.
 
-    This mirrors the original examples/run_pretrain.sh `install_pkgs_for_maxtext`
-    function, but is now part of the pretrain hook pipeline so it runs
-    regardless of dataset_type.
+    The package list is exclusively RDMA / IB / verbs / netlink related
+    (``librdmacm-dev``, ``rdmacm-utils``, ``infiniband-diags``, ``perftest``,
+    ``libibverbs-*``, ``libibumad*``, ``libnl-*`` ...). These are only needed
+    for cross-node communication, so this step is intentionally skipped on
+    single-node runs (``NNODES <= 1``), which makes single-node MaxText
+    launches work cleanly even on minimal images with no apt connectivity.
+
+    Behaviour (when ``NNODES > 1``):
+      - If all packages are already installed (typical for pre-built JAX
+        multi-node images), this is a fast no-op (no apt invocation).
+      - Only actually-missing packages are installed; ``apt-get update``
+        runs first so this works in containers whose apt index has not
+        been populated yet.
+      - apt failures are logged as warnings rather than fatal errors: a
+        missing optional system library should not bring down the whole
+        training pipeline. The user can bake the packages into the image
+        or rerun once apt connectivity is restored.
+
+    Note on package names:
+      ``libibnetdisc5`` was renamed to ``libibnetdisc5t64`` starting from
+      Ubuntu 24.04 (noble) due to the time_t transition. We list the new
+      name; on older releases dpkg-query will simply report it as missing
+      and the warning path will be taken.
     """
-    log_info("========== Install required packages for Jax/MaxText ==========")
-
-    # Keep the original package list and behaviour; use a single shell command
-    # to preserve the existing `uname -r` expansion.
-    cmd = (
-        "apt install iproute2 -y && "
-        "apt install -y "
-        "libelf-dev "
-        "gcc make libtool autoconf "
-        "librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool "
-        "libibverbs-dev rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers "
-        "libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev"
-    )
+    import os
 
     try:
-        subprocess.run(cmd, shell=True, check=True)
-    except subprocess.CalledProcessError as exc:
-        log_error_and_exit(f"Failed to install MaxText dependencies (exit code {exc.returncode})")
+        nnodes = int(os.environ.get("NNODES", "1"))
+    except ValueError:
+        nnodes = 1
 
-    log_info("========== Install required packages for Jax/MaxText Done ==========")
+    if nnodes <= 1:
+        log_info(
+            f"NNODES={nnodes}, single-node run: skipping RDMA/IB system package "
+            "install (these packages are only needed for multi-node training)."
+        )
+        return
+
+    log_info(
+        f"NNODES={nnodes}, multi-node run: ensuring RDMA/IB system packages "
+        "for Jax/MaxText are installed."
+    )
+
+    pkgs = [
+        "iproute2",
+        "libelf-dev",
+        "gcc",
+        "make",
+        "libtool",
+        "autoconf",
+        "librdmacm-dev",
+        "rdmacm-utils",
+        "infiniband-diags",
+        "ibverbs-utils",
+        "perftest",
+        "ethtool",
+        "libibverbs-dev",
+        "rdma-core",
+        "strace",
+        "libibmad5",
+        "libibnetdisc5t64",
+        "ibverbs-providers",
+        "libibumad-dev",
+        "libibumad3",
+        "libibverbs1",
+        "libnl-3-dev",
+        "libnl-route-3-dev",
+    ]
+
+    def _missing(pkg_list):
+        out = []
+        for p in pkg_list:
+            r = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Status}", p],
+                capture_output=True,
+                text=True,
+            )
+            if "install ok installed" not in r.stdout:
+                out.append(p)
+        return out
+
+    missing = _missing(pkgs)
+    if not missing:
+        log_info("All MaxText system packages already installed; skipping apt.")
+        return
+
+    log_info(f"Missing system packages, attempting apt install: {' '.join(missing)}")
+
+    steps = [
+        ["apt-get", "update"],
+        ["apt-get", "install", "-y", "--no-install-recommends", *missing],
+    ]
+    for cmd in steps:
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            log_info(
+                f"WARNING: '{' '.join(cmd)}' failed (exit {exc.returncode}). "
+                "MaxText system-package install was not completed. If you are "
+                "using a pre-built image, consider baking these packages into "
+                "the image. Continuing with training launch."
+            )
+            return
+        except FileNotFoundError:
+            log_info(
+                f"WARNING: '{cmd[0]}' not found. Skipping system-package install."
+            )
+            return
+
+    still_missing = _missing(missing)
+    if still_missing:
+        log_info(
+            "WARNING: The following packages are still missing after apt install: "
+            f"{' '.join(still_missing)}. Continuing with training launch."
+        )
 
 
 # ---------- Main ----------
