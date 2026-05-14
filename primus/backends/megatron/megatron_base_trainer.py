@@ -6,9 +6,13 @@
 
 import os
 
-from primus.backends.megatron.training.global_vars import set_primus_global_variables
+from primus.backends.megatron.training.global_vars import (
+    get_mlflow_writer,
+    set_primus_global_variables,
+)
+from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -37,6 +41,11 @@ class MegatronBaseTrainer(BaseTrainer):
         """
         super().cleanup(on_error=on_error)
 
+        if not on_error:
+            self._finalize_mlflow_artifacts()
+        else:
+            self._end_mlflow_run()
+
         exit_fast = os.environ.get("PRIMUS_EXIT_FAST", "0") == "1"
 
         if exit_fast and not on_error:
@@ -50,6 +59,45 @@ class MegatronBaseTrainer(BaseTrainer):
             except Exception:  # pragma: no cover
                 pass
             os._exit(0)
+
+    def _finalize_mlflow_artifacts(self):
+        """Generate/upload Megatron training artifacts after the core runtime finishes."""
+        args = self.backend_args
+        tensorboard_dir = getattr(args, "tensorboard_dir", None)
+        save_dir = getattr(args, "save", None)
+        exp_root_path = None
+        if save_dir:
+            save_dir_abs = os.path.abspath(save_dir)
+            if os.path.basename(save_dir_abs) == "checkpoints":
+                exp_root_path = os.path.dirname(save_dir_abs)
+        if exp_root_path is None and tensorboard_dir:
+            tensorboard_dir_abs = os.path.abspath(tensorboard_dir)
+            if os.path.basename(tensorboard_dir_abs) == "tensorboard":
+                exp_root_path = os.path.dirname(tensorboard_dir_abs)
+                log_rank_0(f"[MLflow] Fallback exp_root_path from tensorboard_dir: {exp_root_path}")
+
+        try:
+            upload_mlflow_artifacts(
+                tensorboard_dir=tensorboard_dir,
+                exp_root_path=exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", False),
+                upload_logs=getattr(args, "mlflow_upload_logs", False),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+                tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
+            )
+        except Exception as e:
+            warning_rank_0(f"[MLflow] Artifact finalization failed: {e}")
+        finally:
+            self._end_mlflow_run()
+
+    def _end_mlflow_run(self):
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            mlflow_writer.end_run()
 
     def _patch_parse_args(self):
         """Patch Megatron's parse_args to return pre-configured Primus arguments."""
