@@ -147,8 +147,7 @@ def install_maxtext_dependencies() -> None:
         return
 
     log_info(
-        f"NNODES={nnodes}, multi-node run: ensuring RDMA/IB system packages "
-        "for Jax/MaxText are installed."
+        f"NNODES={nnodes}, multi-node run: ensuring RDMA/IB system packages " "for Jax/MaxText are installed."
     )
 
     pkgs = [
@@ -212,9 +211,7 @@ def install_maxtext_dependencies() -> None:
             )
             return
         except FileNotFoundError:
-            log_info(
-                f"WARNING: '{cmd[0]}' not found. Skipping system-package install."
-            )
+            log_info(f"WARNING: '{cmd[0]}' not found. Skipping system-package install.")
             return
 
     still_missing = _missing(missing)
