@@ -108,10 +108,18 @@ K_topk=512, swa_window=128, bf16, sink=on`).
 | Config | Iter time | TFLOP/s/GPU | vs P31b |
 |---|---:|---:|---:|
 | P31b replay on `mi355-gpu-8` (sanity) | 963.0 ms | 710.6 | — |
-| **P32 shipped (default)** | **890.5 ms** | **768.4** | **−7.7 % iter, +8.1 % TFLOP/s** |
+| **P32 shipped (default)** | **887.2 ms** | **771.3** | **−7.9 % iter, +8.5 % TFLOP/s** |
 | P32 opt-in `..._SEGREDUCE=1` only | 1114.8 ms | 613.8 | +15.7 % iter (regression) |
-| P32 opt-in `..._USE_SPLIT=1 ..._SEGREDUCE=1` | 1152.9 ms | 593.6 | +19.7 % iter (regression) |
+| P32 opt-in `..._USE_SPLIT=1 ..._SEGREDUCE=1` | 1149.9 ms | 595.1 | +19.4 % iter (regression) |
 | P32 fallback CSA FWD monolithic | 1189.2 ms | 575.4 | +23.4 % iter (regression) |
+
+> Verified by a clean A/B run on `mi355-gpu-8` / `dev_primus_wenx_693`
+> after the default flip (logs:
+> `progress/p32/AB_shipped.log` and `progress/p32/AB_optin.log`). The
+> two opt-in env vars `PRIMUS_V4_ATTN_BWD_USE_SPLIT=1
+> PRIMUS_V4_CSA_BWD_SEGREDUCE=1` are **microbench-optimal** but
+> **proxy-regressive** (30 % iter time, −23 % TFLOP/s/GPU). They are
+> intentionally not the shipped default.
 
 ### Trace kernel attribution (steady profiler window)
 
