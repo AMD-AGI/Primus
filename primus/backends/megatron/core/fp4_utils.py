@@ -39,6 +39,7 @@ except (ImportError, ModuleNotFoundError):
     # Primus-Turbo not found
     pass
 
+MXFP4_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -81,7 +82,7 @@ if HAVE_TE and HAVE_TURBO:
             fp4_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.MX_BLOCKWISE,
                 format=Format.E2M1_X2,
-                block_size=32,
+                block_size=MXFP4_SCALING_BLOCK_SIZE,
                 scale_dtype=ScaleDtype.E8M0,
             )
         else:

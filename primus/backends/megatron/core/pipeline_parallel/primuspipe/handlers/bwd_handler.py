@@ -97,7 +97,12 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
     if get_args().dump_pp_data:
         backward_step_ = fwd_bwd_wrapper(backward_step_, "bwd", minibatch=node.mini_batch, chunk=node.chunk)
 
-    WGRAD_RUNNING_CACHE.set_current_minibatch_and_chunk(node.mini_batch, node.chunk)
+    if node.func_type == FuncType.B:
+        WGRAD_RUNNING_CACHE.set_current_minibatch_and_chunk(node.mini_batch, node.chunk)
+    else:
+        # BW nodes include weight-gradient computation and have no later W node
+        # to flush the cache, so let appended wgrad closures execute inline.
+        WGRAD_RUNNING_CACHE.clear_current_minibatch_and_chunk()
 
     input_tensor_grad = backward_step_(**kwargs)
 
