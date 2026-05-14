@@ -31,6 +31,7 @@ V4-Flash EP8 proxy.
 | P32            | CSA FWD split (local + sparse + LSE merge)     | 890.5          | 768.4       | 9.92x       | trace `1778476971738245137`, `profile-after-p32-ep8-20260511.md` |
 | **P32 RoPE-fix** | dual-RoPE cast cos/sin to bf16 (no fp32 upcast) | **665.0**    | **1029.8**  | **13.29x** | `tas-mi355x-20260514/p32_postropefix_shipped` smoke iter 8 |
 | **P32 final**  | RoPE fix + split BWD + segreduce CSA BWD (defaults ON) | **603.3** | **1134.3** | **14.64x** | `tas-mi355x-20260514/p32_final_postropefix_defaults` smoke iter 10 |
+| **P33**        | TFLOP/s closed-form fix (SWA visible-pair pruning + HC fn matmul; no runtime change) | **603.3** | **444.2** | **14.64x** | same trace as `P32 final`; recomputed via plan-6 P33 patch (`primus.backends.megatron.patches.deepseek_v4_flops_patches`) |
 
 
 Notes:
@@ -87,3 +88,24 @@ kernels as 600 ms+ outliers.
   debugging by setting either flag to `0`. The total P32 win over
   P28 baseline is **14.64x** (8837 ms → 603 ms / iter) and over
   P31b is **1.60x** (965 ms → 603 ms / iter).
+- **P33** (2026-05-14, no runtime change) — plan-6 P33 corrects two
+  closed-form gaps in `deepseek_v4_flops_patches.compute_v4_flops`:
+  (a) the `attn_scores` term now counts only causal-visible
+  `(q, k)` pairs surviving the SWA + pool + sparse top-K masks
+  rather than the legacy `S_eff^2 / 2` upper bound (16x over-count
+  on the dense / HCA local branches at `swa=128, S_eff=16384`),
+  and (b) a new `hc` row covers the HyperConnection
+  `HyperMixer.fn` + `HyperHead.fn` matmuls that were previously
+  ignored (8x per-layer mixer + trunk head, ~1.25 TFLOP/iter at
+  V4-Flash proxy shape — small but non-zero so future closure-of-loop
+  comparisons stay strict).  The corrected total drops from
+  5468 TFLOP/iter (legacy / P32 final headline) to 2144 TFLOP/iter
+  (P33), and TFLOP/s/GPU drops correspondingly from 1134.3 to
+  **444.2** at the same 603.3 ms iter time.  This is the honest
+  number going forward; all plan-6 perf comparisons are gauged
+  against this denominator.  The `vs baseline` column stays
+  **14.64x** because the iter-time speedup vs P28 is unchanged —
+  only the TFLOP/s headline moves.  Per-component recomputed
+  breakdown is logged at rank 0 on the first
+  `num_floating_point_operations` call (look for
+  `[Patch:megatron.deepseek_v4.flops_reporting]` lines).

@@ -54,6 +54,24 @@ wrapper:
 Convention follows upstream Megatron: pure-FMAC counts internally, then a
 single ``forward_backward_factor (3) * fma_factor (2) = 6`` multiplier at
 the end.
+
+Plan-6 P33 closes two known gaps in the plan-3 P20 closed form:
+
+* SWA visible-pair pruning — :func:`_attn_scores_fmac_per_layer` now
+  counts only causal-visible ``(q, k)`` pairs surviving the per-layer
+  SWA + pool + sparse top-K masks (via :func:`_visible_pairs`).  The
+  legacy ``B * n * d * S_eff^2`` upper bound over-counted the local
+  branch by ``S_eff / swa_window`` once plan-5 P30+ made kernels honor
+  per-row SWA pruning (~128x at the V4-Flash proxy shape).
+* HyperConnection matmul accounting — the new ``hc`` row of
+  :class:`_V4FlopsBreakdown` counts ``HyperMixer.fn`` (``K*D ->
+  (2+K)*K`` per token, twice per layer) and ``HyperHead.fn`` (``K*D
+  -> K`` per token, once at the trunk end and per MTP depth).  These
+  matmuls were not in the plan-3 P20 form.
+
+See ``deepseek-v4/develop/plan-6/02-phase-details.md#phase-33`` for
+the design and ``develop/progress/p33/p33-summary.md`` for the
+per-component delta vs the legacy formula.
 """
 
 from __future__ import annotations
@@ -64,7 +82,6 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
-
 
 # ---------------------------------------------------------------------------
 # Shared constants (mirror Megatron's expansion factors)
@@ -176,6 +193,81 @@ def _attn_qkv_o_fmac_per_layer(
     return batch_size * seq_len_eff * (qkv + o_proj)
 
 
+def _local_visible_pairs(swa_window: int, seq_len_eff: int) -> int:
+    """Causal-visible ``(q, k)`` pair count for the local SWA branch.
+
+    Each query at position ``q`` attends to keys in
+    ``[max(0, q - swa_window + 1), q]``.  Summed over
+    ``q in [0, seq_len_eff)`` the count is:
+
+    * ``swa_window * seq_len_eff - swa_window * (swa_window - 1) // 2`` for
+      ``0 < swa_window < seq_len_eff`` (queries below ``swa_window - 1``
+      see only ``q + 1`` keys, queries above saturate at ``swa_window``).
+    * ``seq_len_eff * (seq_len_eff + 1) // 2`` for the full-causal
+      fallback (``swa_window == 0`` or ``>= seq_len_eff``).
+    """
+    s = int(seq_len_eff)
+    w = int(swa_window)
+    if w <= 0 or w >= s:
+        return s * (s + 1) // 2
+    return w * s - w * (w - 1) // 2
+
+
+def _pool_visible_pairs(compress_ratio: int, seq_len_eff: int) -> int:
+    """Causal-visible ``(q, p)`` pair count for the HCA compressed pool.
+
+    Pool slot ``p`` covers source positions ``[p*c, (p+1)*c)`` with
+    ``c == compress_ratio``; slot ``p`` is visible to query ``q`` iff
+    ``(p+1) * c - 1 <= q``.  Summed over queries, the count equals
+    ``sum_{m=1..seq_len_eff} floor(m / c)`` with closed form
+    ``c * n * (n - 1) // 2 + n * (T - c*n + 1)`` where ``n = T // c`` and
+    ``T = seq_len_eff``.
+    """
+    c = int(compress_ratio)
+    t = int(seq_len_eff)
+    if c <= 0 or t <= 0:
+        return 0
+    n = t // c
+    if n == 0:
+        return 0
+    return c * n * (n - 1) // 2 + n * (t - c * n + 1)
+
+
+def _visible_pairs(
+    *,
+    swa_window: int,
+    compress_ratio: int,
+    index_topk: int,
+    seq_len_eff: int,
+) -> int:
+    """Total causal-visible ``(q, k)`` pair count for one V4 attention layer.
+
+    Plan-6 P33 closed form — see
+    ``deepseek-v4/develop/perf/attention_perf.md`` "Test Shape And Counting"
+    for the per-branch derivation.
+
+    * ``cr == 0`` (dense + SWA): local SWA pairs only.
+    * ``cr == 128`` (HCA): local SWA pairs + causal pool pairs.
+    * ``cr == 4`` (CSA): local SWA pairs + sparse top-K pairs
+      (``min(index_topk, pool) * seq_len_eff``); top-K is treated as
+      fully visible because the indexer assigns each query a per-row
+      causal-respecting pool subset.
+    """
+    local = _local_visible_pairs(swa_window, seq_len_eff)
+    cr = int(compress_ratio)
+    if cr == 0:
+        return local
+
+    pool = max(1, int(seq_len_eff) // cr)
+    if cr == 128:
+        return local + _pool_visible_pairs(cr, seq_len_eff)
+    if cr == 4:
+        sparse_keys = min(int(index_topk) if index_topk else pool, pool)
+        return local + sparse_keys * int(seq_len_eff)
+    # Forward-compatible: any other ratio is treated as full pool cross-attn.
+    return local + pool * int(seq_len_eff)
+
+
 def _attn_scores_fmac_per_layer(
     *,
     batch_size: int,
@@ -184,38 +276,29 @@ def _attn_scores_fmac_per_layer(
     head_dim: int,
     compress_ratio: int,
     index_topk: int,
+    swa_window: int,
 ) -> int:
     """FMAC for the attention score matmuls.
 
-    Uses Megatron's "/2 causal" convention for the local part: average key
-    count per query is ``S_eff / 2``, so the (QK + PV) pair costs
-    ``2 * n * d * S_eff * (S_eff / 2) = n * d * S_eff^2`` FMAC per
-    micro-batch element.
+    Plan-6 P33 rewrite: counts only the causal-visible ``(query, key)``
+    pairs surviving the per-layer mask (SWA + pool + sparse top-K) — the
+    plan-3 P20 ``S_eff^2`` upper bound over-counted dense / HCA local
+    attention by ``S_eff / swa_window`` (16x at ``swa=128, S_eff=4096``)
+    once plan-5 P30 SWA K-loop pruning made the per-layer kernels track
+    visible pairs only.
 
-    For HCA (``compress_ratio==128``) the local cost is unchanged and a
-    cross-attn-style ``S_eff x P`` term is added (no causal halving on the
-    pool side because the pool aggregates past tokens); for CSA
-    (``compress_ratio==4``) the same local cost is paid and a sparse
-    top-K cross-attn term over ``min(index_topk, P)`` keys is added.
+    FMAC = ``2 * num_heads * head_dim * visible_pairs``: one ``n*d`` for
+    the ``QK^T`` matmul + one ``n*d`` for the ``PV`` matmul, summed over
+    visible ``(q, k)`` pairs.  The forward + backward * FMA expansion is
+    applied once at the end in :class:`_V4FlopsBreakdown`.
     """
-    n_d_S2 = num_heads * head_dim * seq_len_eff * seq_len_eff
-    local_fmac = batch_size * n_d_S2  # local causal (QK + PV combined via /2)
-
-    if compress_ratio == 0:
-        return local_fmac
-
-    pool = max(1, seq_len_eff // compress_ratio)
-
-    if compress_ratio == 128:
-        sparse_keys = pool  # HCA: every query attends to every pool key.
-    elif compress_ratio == 4:
-        sparse_keys = min(int(index_topk), pool)  # CSA top-K.
-    else:
-        # Forward-compatible: treat any other compressed ratio as dense+full pool.
-        sparse_keys = pool
-
-    sparse_fmac = 2 * batch_size * num_heads * seq_len_eff * sparse_keys * head_dim
-    return local_fmac + sparse_fmac
+    pairs = _visible_pairs(
+        swa_window=swa_window,
+        compress_ratio=compress_ratio,
+        index_topk=index_topk,
+        seq_len_eff=seq_len_eff,
+    )
+    return 2 * batch_size * num_heads * head_dim * pairs
 
 
 def _compressor_fmac_per_layer(
@@ -307,6 +390,53 @@ def _moe_fmac_per_layer(
     return batch_size * seq_len_eff * (router + routed + shared)
 
 
+def _hc_mixer_fmac_per_layer(
+    *,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    hc_mult: int,
+) -> int:
+    """FMAC for the two ``HyperMixer.fn`` matmuls in one V4 hybrid layer.
+
+    Each :class:`HyperMixer` projects the un-packed K streams
+    ``[B, S, K*D] -> [B, S, (2+K)*K]``; the V4 hybrid layer runs two
+    mixers per layer (one before / one inside the attention sub-block,
+    and one for the FFN sub-block — see
+    ``primus.backends.megatron.core.transformer.hyper_connection``).
+
+    The leading axis is ``B * S`` (not ``B * S * hc_mult``) because the
+    K stream lifting that packs streams into the sequence axis happens
+    *after* the mixer.  The (small) ``HyperMixer.expand`` matmul
+    ``comb @ x`` is left out by design (see plan-6 P33 spec).
+    """
+    if hc_mult <= 0:
+        return 0
+    n_d = hc_mult * hidden_size
+    return 2 * batch_size * seq_len * n_d * ((2 + hc_mult) * hc_mult)
+
+
+def _hc_head_fmac(
+    *,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    hc_mult: int,
+    mtp_num_layers: int,
+) -> int:
+    """FMAC for the ``HyperHead.fn`` matmuls (trunk end + per MTP depth).
+
+    Each :class:`HyperHead` projects ``[B, S, K*D] -> [B, S, K]`` to
+    produce the sigmoid weights for the final K-stream collapse.  V4 has
+    one head at the trunk end and one head per MTP depth (each with its
+    own ``num_nextn_predict_layers`` copies).
+    """
+    if hc_mult <= 0:
+        return 0
+    n_d = hc_mult * hidden_size
+    return (1 + mtp_num_layers) * batch_size * seq_len * n_d * hc_mult
+
+
 def _mtp_eh_proj_fmac(
     *,
     batch_size: int,
@@ -344,7 +474,15 @@ def _logits_fmac(
 
 @dataclass(frozen=True)
 class _V4FlopsBreakdown:
-    """Per-component FMAC totals (multiply-only, pre fwd+bwd / FMA scaling)."""
+    """Per-component FMAC totals (multiply-only, pre fwd+bwd / FMA scaling).
+
+    Plan-6 P33 adds the ``hc`` field for HyperConnection matmuls
+    (``HyperMixer.fn`` + ``HyperHead.fn``).  Field added at the end so
+    existing positional callers and the breakdown log ordering stay
+    stable; ``hc`` defaults to 0 so historical pickles / external
+    consumers that built the dataclass with 7 positional args keep
+    working.
+    """
 
     attn_qkv_o: int
     attn_scores: int
@@ -353,6 +491,7 @@ class _V4FlopsBreakdown:
     moe: int
     mtp: int
     logits: int
+    hc: int = 0
 
     def total_fmac(self) -> int:
         return (
@@ -363,6 +502,7 @@ class _V4FlopsBreakdown:
             + self.moe
             + self.mtp
             + self.logits
+            + self.hc
         )
 
     def to_total_flops(self) -> int:
@@ -398,23 +538,19 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         mtp_num_layers=mtp_num_layers,
     )
 
-    moe_ffn_hidden_size = int(
-        getattr(args, "moe_ffn_hidden_size", None) or args.ffn_hidden_size
-    )
+    moe_ffn_hidden_size = int(getattr(args, "moe_ffn_hidden_size", None) or args.ffn_hidden_size)
     moe_router_topk = int(getattr(args, "moe_router_topk", 1) or 1)
     num_experts = int(getattr(args, "num_experts", 1) or 1)
-    shared_expert_ffn_hidden_size = int(
-        getattr(args, "moe_shared_expert_intermediate_size", 0) or 0
-    )
+    shared_expert_ffn_hidden_size = int(getattr(args, "moe_shared_expert_intermediate_size", 0) or 0)
     num_hash_layers = int(getattr(args, "num_hash_layers", 0) or 0)
 
     index_topk = int(getattr(args, "index_topk", 0) or 0)
     index_head_dim = int(getattr(args, "index_head_dim", 0) or 0)
     index_n_heads = int(getattr(args, "index_n_heads", 0) or 0)
 
-    padded_vocab_size = int(
-        getattr(args, "padded_vocab_size", None) or args.vocab_size
-    )
+    swa_window = int(getattr(args, "attn_sliding_window", 0) or 0)
+
+    padded_vocab_size = int(getattr(args, "padded_vocab_size", None) or args.vocab_size)
 
     # ---- decoder layers ----
     attn_qkv_o = 0
@@ -422,6 +558,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
     compressor = 0
     indexer = 0
     moe = 0
+    hc = 0
 
     for layer_idx in range(num_layers):
         ratio = int(decoder_ratios[layer_idx])
@@ -443,6 +580,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
             head_dim=head_dim,
             compress_ratio=ratio,
             index_topk=index_topk,
+            swa_window=swa_window,
         )
         compressor += _compressor_fmac_per_layer(
             batch_size=batch_size,
@@ -469,6 +607,12 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
             is_hash_layer=(layer_idx < num_hash_layers),
             shared_expert_ffn_hidden_size=shared_expert_ffn_hidden_size,
         )
+        hc += _hc_mixer_fmac_per_layer(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+        )
 
     # ---- MTP layers (one full V4 layer per depth + eh_proj per depth) ----
     mtp_attn_qkv_o = 0
@@ -476,6 +620,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
     mtp_compressor = 0
     mtp_indexer = 0
     mtp_moe = 0
+    mtp_hc = 0
     for depth in range(mtp_num_layers):
         ratio = int(mtp_ratios[depth]) if depth < len(mtp_ratios) else 0
         mtp_attn_qkv_o += _attn_qkv_o_fmac_per_layer(
@@ -495,6 +640,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
             head_dim=head_dim,
             compress_ratio=ratio,
             index_topk=index_topk,
+            swa_window=swa_window,
         )
         mtp_compressor += _compressor_fmac_per_layer(
             batch_size=batch_size,
@@ -523,12 +669,26 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
             is_hash_layer=False,
             shared_expert_ffn_hidden_size=shared_expert_ffn_hidden_size,
         )
+        mtp_hc += _hc_mixer_fmac_per_layer(
+            batch_size=batch_size,
+            seq_len=seq_len,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+        )
 
     attn_qkv_o += mtp_attn_qkv_o
     attn_scores += mtp_attn_scores
     compressor += mtp_compressor
     indexer += mtp_indexer
     moe += mtp_moe
+    hc += mtp_hc
+    hc += _hc_head_fmac(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        hidden_size=hidden_size,
+        hc_mult=hc_mult,
+        mtp_num_layers=mtp_num_layers,
+    )
 
     mtp = _mtp_eh_proj_fmac(
         batch_size=batch_size,
@@ -553,6 +713,7 @@ def compute_v4_flops(args: Any, batch_size: int) -> Tuple[int, _V4FlopsBreakdown
         moe=moe,
         mtp=mtp,
         logits=logits,
+        hc=hc,
     )
     return breakdown.to_total_flops(), breakdown
 
@@ -594,6 +755,7 @@ def _emit_breakdown(
         ("moe", _tflops(breakdown.moe)),
         ("mtp_eh_proj", _tflops(breakdown.mtp)),
         ("logits", _tflops(breakdown.logits)),
+        ("hc", _tflops(breakdown.hc)),
     ]
 
     log_rank_0(
@@ -604,9 +766,7 @@ def _emit_breakdown(
         f"mtp_num_layers={int(getattr(args, 'mtp_num_layers', 0) or 0)}"
     )
     for name, tflops in rows:
-        log_rank_0(
-            f"[Patch:megatron.deepseek_v4.flops_reporting]   {name:<12s} = {tflops:9.3f} TFLOP"
-        )
+        log_rank_0(f"[Patch:megatron.deepseek_v4.flops_reporting]   {name:<12s} = {tflops:9.3f} TFLOP")
     log_rank_0(
         f"[Patch:megatron.deepseek_v4.flops_reporting]   {'TOTAL':<12s} = "
         f"{total_flops / 1.0e12:9.3f} TFLOP / global-batch"
@@ -734,8 +894,7 @@ def patch_v4_flops_reporting(ctx: PatchContext):
     )
     if rebound:
         log_rank_0(
-            "[Patch:megatron.deepseek_v4.flops_reporting] rebound trainer "
-            f"import bindings: {rebound}"
+            "[Patch:megatron.deepseek_v4.flops_reporting] rebound trainer " f"import bindings: {rebound}"
         )
     else:
         log_rank_0(

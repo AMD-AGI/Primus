@@ -642,16 +642,16 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Task list refinement — re-anchor SWA visible-pair formula on `develop/perf/attention_perf.md` "Test Shape And Counting" block; pin per-`compress_ratio` `_visible_pairs` formulas |        |      |      |
-| [ ] | `_visible_pairs(swa_window, compress_ratio, index_topk, seq_len_eff)` helper in `deepseek_v4_flops_patches.py` covering dense (cr=0), HCA (cr=128), CSA (cr=4) |        |      |      |
-| [ ] | `_attn_scores_fmac_per_layer` rewrite — replace `S_eff^2 / 2` local term with `2 * num_heads * head_dim * _visible_pairs(...)`; HCA / CSA sparse terms keep visible-pair convention with docstring update |        |      |      |
-| [ ] | `_hc_matmul_fmac_per_layer` (new) — HyperMixer `fn.weight` matmul counted twice per decoder layer + once per `HyperHead` (trunk end + per MTP depth) |        |      |      |
-| [ ] | `_V4FlopsBreakdown` gains `hc: int` field at end of dataclass; `_log_breakdown` prints new `hc` row after `logits` (grep stability) |        |      |      |
-| [ ] | G36 — SWA visible-pair unit test (parametrised `swa ∈ {128}, S ∈ {4096}, cr ∈ {0, 4, 128}, hc_mult ∈ {1, 4}`) using independent reference loop |        |      |      |
-| [ ] | G36a — HC matmul unit test (V4-Flash 8-layer proxy config; hand-computed int64 byte-equal reference) |        |      |      |
-| [ ] | Existing G16 / G17 byte-equal tests stay green (no change to non-V4 dispatch fall-through) |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` gains `P33 corrected TFLOP/s` row reusing P32 final iter-time; footnote documents denominator change |        |      |      |
-| [ ] | `progress/p33/p33-summary.md` — eight-section per-phase summary per rule R2.1 |        |      |      |
+| [x] | Task list refinement — re-anchor SWA visible-pair formula on `develop/perf/attention_perf.md` "Test Shape And Counting" block; pin per-`compress_ratio` `_visible_pairs` formulas | pending | 2026-05-07 |      |
+| [x] | `_visible_pairs(swa_window, compress_ratio, index_topk, seq_len_eff)` helper in `deepseek_v4_flops_patches.py` covering dense (cr=0), HCA (cr=128), CSA (cr=4) | pending | 2026-05-07 |      |
+| [x] | `_attn_scores_fmac_per_layer` rewrite — replace `S_eff^2 / 2` local term with `2 * num_heads * head_dim * _visible_pairs(...)`; HCA / CSA sparse terms keep visible-pair convention with docstring update | pending | 2026-05-07 |      |
+| [x] | `_hc_matmul_fmac_per_layer` (new) — HyperMixer `fn.weight` matmul counted twice per decoder layer + once per `HyperHead` (trunk end + per MTP depth) | pending | 2026-05-07 |      |
+| [x] | `_V4FlopsBreakdown` gains `hc: int` field at end of dataclass; `_log_breakdown` prints new `hc` row after `logits` (grep stability) | pending | 2026-05-07 |      |
+| [x] | G36 — SWA visible-pair unit test (parametrised `swa ∈ {128}, S ∈ {4096}, cr ∈ {0, 4, 128}, hc_mult ∈ {1, 4}`) using independent reference loop | pending | 2026-05-07 |      |
+| [x] | G36a — HC matmul unit test (V4-Flash 8-layer proxy config; hand-computed int64 byte-equal reference) | pending | 2026-05-07 |      |
+| [x] | Existing G16 / G17 byte-equal tests stay green (no change to non-V4 dispatch fall-through) | pending | 2026-05-07 | G16 `_hand_attn_scores` updated to new visible-pair convention; G17 untouched |
+| [x] | `develop/perf/proxy_ep8.md` gains `P33 corrected TFLOP/s` row reusing P32 final iter-time; footnote documents denominator change | pending | 2026-05-07 |      |
+| [x] | `progress/p33/p33-summary.md` — eight-section per-phase summary per rule R2.1 | pending | 2026-05-07 |      |
 
 
 ## Phase 34 (plan-6) — `_stack_grouped_linear_weight` Triton FWD/BWD fusion
