@@ -32,6 +32,7 @@ V4-Flash EP8 proxy.
 | **P32 RoPE-fix** | dual-RoPE cast cos/sin to bf16 (no fp32 upcast) | **665.0**    | **1029.8**  | **13.29x** | `tas-mi355x-20260514/p32_postropefix_shipped` smoke iter 8 |
 | **P32 final**  | RoPE fix + split BWD + segreduce CSA BWD (defaults ON) | **603.3** | **1134.3** | **14.64x** | `tas-mi355x-20260514/p32_final_postropefix_defaults` smoke iter 10 |
 | **P33**        | TFLOP/s closed-form fix (SWA visible-pair pruning + HC fn matmul; no runtime change) | **603.3** | **444.2** | **14.64x** | same trace as `P32 final`; recomputed via plan-6 P33 patch (`primus.backends.megatron.patches.deepseek_v4_flops_patches`) |
+| **P34**        | `_stack_grouped_linear_weight` Triton FWD/BWD fusion (default ON) | **530.85** | **507.2** | **16.65x** | `progress/p34/runs/triton_on.iter_lines.txt` iter-10 throughput; eager fallback at same revision = 580.65 ms / 463.2 TFLOP/s/GPU |
 
 
 Notes:
@@ -109,3 +110,24 @@ kernels as 600 ms+ outliers.
   breakdown is logged at rank 0 on the first
   `num_floating_point_operations` call (look for
   `[Patch:megatron.deepseek_v4.flops_reporting]` lines).
+- **P34** (2026-05-14) — plan-6 P34 replaces the eager
+  `torch.stack(weights, dim=0).transpose(1, 2).contiguous()` chain
+  inside `PrimusTurboGroupedMLP._stack_grouped_linear_weight` with a
+  single Triton kernel that does a fused `[K, N] -> [N, K]` tile-level
+  transpose with per-expert int64 pointer dispatch. Default ON via
+  `PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`; setting it to `0` falls
+  back to the bit-identical eager chain. Microbench at V4-Flash EP=8
+  widths shows **6.0x FWD / 3.9x BWD** at fc1 (E=32, K=4096, N=4096,
+  bf16; 0.470 ms / 0.599 ms triton vs 2.821 ms / 2.329 ms eager) and
+  **5.3x FWD / 3.2x BWD** at fc2 (E=32, K=4096, N=2048, bf16; 0.280 ms
+  / 0.411 ms triton vs 1.495 ms / 1.314 ms eager). EP8 proxy A/B on
+  the same script (`progress/p34/run_baseline_trace_ep8_p34.sh`) with
+  the env flag toggled gives **steady-state iter time 580.65 ms
+  (eager) -> 530.85 ms (Triton), -49.8 ms / -8.6 %**, matching the
+  microbench prediction of 16 fc1 × 2.35 ms + 16 fc2 × 1.22 ms ≈ 57 ms
+  / iter to within profiler noise. `lm_loss[10]` is bit-identical
+  between the two paths (9.258817) because the operation is a pure
+  layout transform. The vs-baseline ratchet vs P28 jumps to
+  **16.65x** (8837.4 ms / 530.85 ms = 16.65). Plan-4 / plan-5
+  release-tier `pytest.mark.slow` ratchet stayed green (92 passed,
+  304 deselected in 115.88 s).

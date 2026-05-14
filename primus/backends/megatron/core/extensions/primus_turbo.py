@@ -49,6 +49,9 @@ from torch import Tensor
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
 
+from primus.backends.megatron.core.extensions._triton.stack_grouped_weight import (
+    stack_grouped_weight,
+)
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
 
@@ -1306,8 +1309,21 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
             self.activation_func_with_probs = _activation_func_with_probs
 
     def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
+        """Stack per-expert ``weight{i}`` tensors into a contiguous ``[E, N, K]``
+        buffer for grouped-GEMM consumption.
+
+        Plan-6 P34 routes this through the
+        :mod:`primus.backends.megatron.core.extensions._triton.stack_grouped_weight`
+        Triton kernel by default — it collapses the eager
+        ``torch.stack + transpose(1, 2) + contiguous`` chain (two full
+        passes over the per-expert weight data, ~289.6 ms / 32 calls in
+        the plan-5 P32 final EP=8 trace) into a single ``[K, N] -> [N, K]``
+        tile-transpose with fused stacking.  Set
+        ``PRIMUS_STACK_GROUPED_WEIGHT_TRITON=0`` to fall back to the
+        eager chain (kept for A/B testing and as the G37 reference path).
+        """
         weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
-        return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
+        return stack_grouped_weight(weights)
 
     def forward(
         self,

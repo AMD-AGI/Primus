@@ -395,11 +395,12 @@ class TestG36SWAVisiblePairs:
     def test_swa_pruned_attn_scores_matches_proxy_overcount_ratio(self):
         """Per-layer over-count ratio between legacy ``S_eff^2`` and the
         SWA-pruned visible-pair count is ``S_eff / (2*swa) + O(1/S)`` for
-        swa < S_eff.  At the V4-Flash proxy shape (S=4096, hc_mult=4,
-        S_eff=16384, swa=128) the legacy local term ``S_eff^2`` is
-        ``S_eff / swa = 128x`` the visible-pair-derived local FMAC of
-        ``2 * swa * S_eff - swa * (swa - 1)`` — pin that ratio at >= 100x
-        so a regression that silently reverts to ``S_eff^2`` is caught.
+        swa < S_eff (the factor of 2 comes from counting both the QK^T
+        and PV matmul halves of the attention score).  At the V4-Flash
+        proxy shape (S=4096, hc_mult=4, S_eff=16384, swa=128) that ratio
+        is ``16384 / (2 * 128) = 64`` — pin it at >= 60x so a regression
+        that silently reverts to the legacy ``S_eff^2`` form is caught
+        while leaving 4-5x of headroom for off-by-one fringe corrections.
         """
         S_eff = 16384
         swa = 128
@@ -407,7 +408,7 @@ class TestG36SWAVisiblePairs:
         swa_local_pairs = swa * S_eff - swa * (swa - 1) // 2
         new_local = 2 * swa_local_pairs  # 2 * visible_pairs (QK + PV)
         ratio = legacy_local / new_local
-        assert ratio >= 100, f"SWA over-count ratio collapsed: {ratio:.2f}"
+        assert ratio >= 60, f"SWA over-count ratio collapsed: {ratio:.2f}"
 
 
 # ---------------------------------------------------------------------------
