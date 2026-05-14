@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# Plan-5 P28 — DeepSeek-V4 Flash perf-baseline PROXY runner.
+# DeepSeek-V4 Flash perf PROXY runner (latest config: plan-5 P32 final).
 #
 # Wraps `run_deepseek_v4.sh` with a V4-Flash production-shape proxy:
 #
@@ -18,43 +18,71 @@
 #                                                3 cr=4, 2 cr=128)
 #   - parallel         TP=1 PP=1 EP=8           (single-node 8 GPU)
 #   - seq_length       4096 (default)           (V4 pretrain target;
-#                                                CALIBRATE DOWN if OOM —
 #                                                set PRIMUS_SEQ_LENGTH=2048
 #                                                / 1024 / 512 on the
-#                                                command line; the chosen
-#                                                value lands in the P28
-#                                                bottleneck report)
+#                                                command line if OOM)
 #
-# All four plan-5 perf knobs default ON:
+# Plan-5 perf knobs default ON:
 #   - USE_V4_TRITON_ATTENTION       (cr ∈ {0, 128} -> Primus Triton kernel)
 #   - USE_V4_TRITON_CSA_ATTENTION   (cr == 4       -> Primus Triton CSA)
 #   - USE_TURBO_DEEPEP              (PrimusTurboDeepEPTokenDispatcher)
 #   - TURBO_USE_GROUPED_MLP         (Turbo grouped-GEMM MoE expert path)
+#   - USE_V4_COMPILED_SINKHORN      (P29: torch.compile-fused Sinkhorn,
+#                                    kills the 7.6 s aten::sum fp32 reduce
+#                                    that dominated the P28 baseline)
 #
-# Plan-5 P29 (RESCOPED) adds a fifth perf knob, also ON by default in
-# the proxy after G32 + G33b green:
-#   - USE_V4_COMPILED_SINKHORN      (torch.compile-fused HyperMixer
-#                                    Sinkhorn-Knopp projection — kills
-#                                    the 7.6 s aten::sum fp32 reduce
-#                                    that dominated the P28 baseline).
+# Plan-5 P32 final attention-kernel knobs (also default ON in code; surfaced
+# here for visibility / easy A/B):
+#   - PRIMUS_V4_ATTN_BWD_USE_SPLIT  (atomic-free split V4 attention BWD:
+#                                    dQ kernel + dK/dV kernel, each writes
+#                                    its own disjoint tiles via tl.store
+#                                    instead of atomic_add on a shared buf)
+#   - PRIMUS_V4_CSA_BWD_SEGREDUCE   (atomic-free CSA pool BWD via per-visit
+#                                    partial buffer + sorted inverse-index
+#                                    segmented reduction into dpool)
+#
+# These two relied on the **plan-5 P32 dual-RoPE bf16 cast fix** in
+# `apply_interleaved_partial_rope` (`primus/backends/megatron/core/transformer/
+# dual_rope.py`) to actually win in the proxy: pre-fix, cos/sin from
+# `position_ids.float() * inv_freq` was fp32, so `bf16 * fp32 = fp32`
+# silently upcast Q / K leaving RoPE — every V4 attention kernel paid 2x
+# HBM traffic and ran the slow fp32-specialised Triton binary, inflating
+# kernel times 1.8-7x in the proxy and masking the split / segreduce wins.
+# The one-line cast of cos/sin to `x.dtype` after the unsqueeze lets the
+# microbench-optimal kernels also win end-to-end. See
+# `deepseek-v4/develop/progress/p32/p32-summary.md` for the full
+# diagnostic walk-through.
 #
 # USE_TURBO_ATTENTION stays OFF — Turbo would take precedence over the V4
 # Triton dense path in `DeepseekV4Attention.forward` (plan-4 P27 dispatch
 # precedence: turbo > v4_triton > eager for cr ∈ {0, 128}).
+#
+# Steady-state perf (P32 final, mi355-gpu-8 / dev_primus_wenx_693,
+# iter 10 of 10, ${VAR:-DEFAULT} only):
+#
+#   iter time       :  603 ms / iter   (vs P28 baseline 8837 ms; 14.64x)
+#   TFLOP/s/GPU     :  1134            (vs P28 baseline 77.5)
+#   HBM peak / rank :  ~170 GiB
 #
 # Every override is `${VAR:-DEFAULT}`-guarded, so the caller can flip any
 # knob via `PRIMUS_SEQ_LENGTH=2048 ./run_deepseek_v4_flash_proxy.sh` etc.
 # without editing the script.
 #
 # Usage:
-#   ./run_deepseek_v4_flash_proxy.sh                 # 10-iter smoke (G31)
-#   TRAIN_ITERS=20 ./run_deepseek_v4_flash_proxy.sh  # longer warmup pass
-#   PROFILE=True  ./run_deepseek_v4_flash_proxy.sh   # ineffective —
-#       run_deepseek_v4.sh hard-codes --disable_tensorboard True; for
-#       chrome-trace capture, use the self-contained
-#       `deepseek-v4/develop/progress/p28/run_baseline_trace_ep8.sh`
-#       instead (mirrors the plan-4 P25 / plan-3 P23 profile-script
-#       pattern).
+#   ./run_deepseek_v4_flash_proxy.sh                                # 10-iter smoke
+#   TRAIN_ITERS=20 ./run_deepseek_v4_flash_proxy.sh                 # longer warmup pass
+#   PRIMUS_V4_ATTN_BWD_USE_SPLIT=0 ./run_deepseek_v4_flash_proxy.sh # fall back to
+#                                                                   #   monolithic V4 BWD
+#   PRIMUS_V4_CSA_BWD_SEGREDUCE=0 ./run_deepseek_v4_flash_proxy.sh  # fall back to
+#                                                                   #   gather+atomic CSA BWD
+#   PRIMUS_V4_DIAG_TIME=1 ./run_deepseek_v4_flash_proxy.sh          # dump per-call
+#                                                                   #   cuda.Event timings for
+#                                                                   #   v4_attention (rank 0)
+#
+# Profile is intentionally OFF in this script (this is the SMOKE / perf
+# runner, not the trace capture). For chrome-trace capture use
+# `deepseek-v4/develop/progress/p32/run_baseline_trace_ep8_p32_final.sh`
+# (mirrors the plan-4 P25 / plan-3 P23 profile-script pattern).
 ###############################################################################
 set -euo pipefail
 
@@ -114,6 +142,21 @@ export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-True}
 #   turbo > v4_triton > eager       for cr ∈ {0, 128}
 #   v4_triton_csa > eager           for cr == 4 ).
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
+
+# ---------- Plan-5 P32 final attention-kernel knobs (split + segreduce) -----
+# Both default ON in the kernel code post-RoPE-fix; surface them here so
+# the proxy script self-documents the P32 final perf recipe and so a quick
+# A/B fallback is a single env-var flip. See header for the full root-cause
+# write-up.
+export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
+export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-1}
+
+# ---------- Profile OFF in the proxy smoke runner ---------------------------
+# This script is the steady-state perf / smoke runner — kineto profiling
+# stays OFF to avoid contaminating the iter timer with profiler-collection
+# overhead. For chrome-trace capture use
+# `deepseek-v4/develop/progress/p32/run_baseline_trace_ep8_p32_final.sh`.
+export PROFILE=${PROFILE:-False}
 
 # ---------- Bookkeeping -----------------------------------------------------
 # Distinguish the proxy run output dir from the smoke run output dir so the

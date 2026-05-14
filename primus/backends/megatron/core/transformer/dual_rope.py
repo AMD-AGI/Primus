@@ -197,6 +197,7 @@ def apply_interleaved_partial_rope(
     if rotary_dim == 0:
         return x
 
+    orig_dtype = x.dtype
     nope = head_dim - rotary_dim
     x_nope = x[..., :nope]
     x_rope = x[..., nope:]
@@ -210,8 +211,17 @@ def apply_interleaved_partial_rope(
     # broadcast across H. cos starts as ``position_ids.shape + [rd/2]``;
     # after unsqueeze it becomes ``position_ids.shape + [1, rd/2]`` which
     # broadcasts naturally against ``even`` of shape ``[..., H, rd/2]``.
-    cos = cos.unsqueeze(-2)
-    sin = sin.unsqueeze(-2)
+    # Cast cos/sin to x's dtype so the rotation does not promote bf16
+    # inputs to fp32 -- otherwise the entire Q/K leaving RoPE doubles
+    # in HBM size and the downstream attention kernel runs 6-7x slower
+    # (see plan-5 P32 microbench-vs-proxy gap diagnostic).  Math is done
+    # in bf16 because the freqs come from
+    # ``position_ids.float() * inv_freq`` which is already a
+    # single-precision rounding of the integer position; casting the
+    # final cos/sin to bf16 keeps numerics indistinguishable from the
+    # bf16-only reference flash-attn path used at every other site.
+    cos = cos.unsqueeze(-2).to(orig_dtype)
+    sin = sin.unsqueeze(-2).to(orig_dtype)
 
     rot_even = even * cos - odd * sin
     rot_odd = even * sin + odd * cos

@@ -9,7 +9,7 @@
 > findability. Rules are atomic and self-contained — pick the section
 > first, then read the rule.
 >
-> Last updated: 2026-05-09 (P30 perf-table rule).
+> Last updated: 2026-05-13 (P32 perf-table cell format).
 
 ---
 
@@ -102,9 +102,19 @@ attribution table inside `refinement.md` get committed**.
 ### R2.5 — Performance table upkeep
 When a task optimises V4 attention kernels, update
 `develop/perf/attention_perf.md` after the attention operator unit tests
-pass. The table entry must record the new FWD / BWD TFLOP/s for every
-affected attention family (`compress_ratio == 0`, `4`, and / or `128`)
-using the table's documented shape and FLOP-counting convention.
+pass. The table entry must record the new FWD / BWD wall-clock time and
+TFLOP/s for every affected attention family (`compress_ratio == 0`, `4`,
+and / or `128`) using the table's documented shape and FLOP-counting
+convention.
+
+**Cell format (STANDING DECISION since P32, 2026-05-13).** Every cell
+added on or after P31b uses `<ms> ms | <tflops> tflops` — the wall-clock
+per-kernel-launch median (from trace or microbench) and the effective
+TFLOP/s derived from that wall-clock via the documented visible-pair
+count. Older rows (Baseline / P29 / P30a / P30b / P31) stay frozen in
+the legacy TFLOP/s-only format as the historical record; never
+back-fill them. The cell-format header in the table is the
+single source of truth — keep it in sync when the convention changes.
 
 When a task runs the EP8 proxy and end-to-end performance improves,
 update `develop/perf/proxy_ep8.md` with the new steady iter time and

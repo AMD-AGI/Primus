@@ -53,8 +53,12 @@ Forward signature:
 
 from __future__ import annotations
 
+import atexit
+import collections
 import logging
 import math
+import os
+import statistics
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
@@ -87,6 +91,52 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# P32 diagnostic: collect in-context cuda.Event timings of v4_attention
+# ---------------------------------------------------------------------------
+
+
+class _DeepseekV4AttentionDiag:
+    """Accumulator for ``PRIMUS_V4_DIAG_TIME=1`` per-call timings."""
+
+    _per_mode: dict[str, list[float]] = collections.defaultdict(list)
+    _registered: bool = False
+    shape_logged: dict[str, bool] = {}
+
+    @classmethod
+    def record(cls, *, mode: str, ms: float, swa: int) -> None:
+        cls._per_mode[mode].append(ms)
+        if not cls._registered:
+            cls._registered = True
+            atexit.register(cls.dump)
+
+    @classmethod
+    def dump(cls) -> None:
+        if not cls._per_mode:
+            return
+        rank = os.environ.get("RANK", "0")
+        try:
+            local_rank = int(rank)
+        except (TypeError, ValueError):
+            local_rank = 0
+        if local_rank != 0:
+            return
+        print("[PRIMUS_V4_DIAG_TIME] v4_attention inline cuda.Event timings:", flush=True)
+        for mode, vs in cls._per_mode.items():
+            if not vs:
+                continue
+            # Drop first 3 to skip warmup.
+            stable = vs[3:] if len(vs) > 3 else vs
+            print(
+                f"  mode={mode:<6s}  n={len(vs):4d}  "
+                f"all_med={statistics.median(vs):7.3f}ms  "
+                f"warm_med={statistics.median(stable):7.3f}ms  "
+                f"warm_min={min(stable):7.3f}ms  "
+                f"warm_max={max(stable):7.3f}ms",
+                flush=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +864,45 @@ class DeepseekV4Attention(MLASelfAttention):
         ``hca_local_seqlen``; the kernel then runs local SWA and pool
         visibility as two loops under one joint softmax.
         """
+        # Plan-5 P32: opt-in microbench-vs-proxy timing harness, gated
+        # by ``PRIMUS_V4_DIAG_TIME=1``. Adds a synchronous cuda.Event
+        # span around the kernel call and dumps per-mode median/min/max
+        # at process exit (rank 0 only). Used to root-cause the dual-RoPE
+        # bf16 -> fp32 upcast bug that made every V4 attention kernel
+        # run 1.8-7x slower in the proxy than in the standalone bench;
+        # left in-tree for future microbench-vs-proxy regressions.
+        if os.environ.get("PRIMUS_V4_DIAG_TIME", "0") == "1":
+            mode = "hca" if hca_local_seqlen > 0 else "dense"
+            if not _DeepseekV4AttentionDiag.shape_logged.get(mode, False):
+                _DeepseekV4AttentionDiag.shape_logged[mode] = True
+                print(
+                    f"[PRIMUS_V4_DIAG_TIME] mode={mode}  "
+                    f"q={tuple(q.shape)}/{q.dtype}/contig={q.is_contiguous()}  "
+                    f"k={tuple(k.shape)}/{k.dtype}/contig={k.is_contiguous()}  "
+                    f"v={tuple(v.shape)}/{v.dtype}/contig={v.is_contiguous()}  "
+                    f"swa={swa_window} hca_local={hca_local_seqlen}",
+                    flush=True,
+                )
+            torch.cuda.synchronize()
+            ev_s = torch.cuda.Event(enable_timing=True)
+            ev_e = torch.cuda.Event(enable_timing=True)
+            ev_s.record()
+            out = v4_attention(
+                q,
+                k,
+                v,
+                sink=self.attn_sink,
+                swa_window=int(swa_window) if (attn_mask is None or hca_local_seqlen > 0) else 0,
+                additive_mask=attn_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+                hca_local_seqlen=int(hca_local_seqlen),
+            )
+            ev_e.record()
+            torch.cuda.synchronize()
+            _DeepseekV4AttentionDiag.record(mode=mode, ms=ev_s.elapsed_time(ev_e), swa=swa_window)
+            return out
         return v4_attention(
             q,
             k,

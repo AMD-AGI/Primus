@@ -1,6 +1,11 @@
 # P32 Summary — Operator-Microbenchmark-Driven Attention Kernel Speed-Ups
 
 > Plan-5 P32. Main report: `../../profile/profile-after-p32-ep8-20260511.{md,html}`.
+> Late addendum (2026-05-14): dual-RoPE bf16 cast fix in
+> `apply_interleaved_partial_rope` — see the **RoPE fp32-upcast root cause**
+> section at the bottom for the full diagnostic walk-through and the
+> resulting **14.64× win over the P28 baseline** (1.60× over the originally
+> shipped P32 defaults).
 
 ## Objective
 
@@ -200,3 +205,134 @@ Documented so they are not retried without new evidence:
 3. **EP8 + opt-in microbench-optimal end-to-end test**: keep the env vars in
    the perf-tuning harness so a future kernel iteration that closes the HBM gap
    can flip the defaults without code changes.
+
+## RoPE fp32-upcast root cause — addendum (2026-05-14)
+
+The "split / segreduce regress in proxy by 30 %" finding above was a
+**symptom**, not the cause. Trace re-inspection on `20260514` showed
+that even the **shipped monolithic** `_v4_attention_bwd_kernel` was
+running at 30-33 ms / call in the proxy (vs 17.3 ms in the standalone
+bench), and `_v4_attention_fwd_kernel` was 5.74 ms / call (vs 0.78 ms
+in bench) — i.e. **every V4 attention kernel was 1.8-7× slower in the
+proxy than in the bench**, regardless of which BWD path was selected.
+The split / segreduce regression was just amplified by the same
+multiplier.
+
+### Diagnostic walk-through
+
+The discrepancy was systematically narrowed by ruling out:
+
+1. **Shape mismatch** — added MQA-expand-view (`kv.expand(...)`) and
+   HCA cat-materialised K/V cases to the standalone bench; both
+   produced bench numbers (0.66-0.93 ms FWD) regardless of stride
+   pattern.
+2. **GPU clock throttling** — ran the bench in tight-loop sustained
+   mode for 300 iterations; per-iter drift was `< 0.1 ms` from first
+   10 to last 10 (no warm-up regression).
+3. **HBM allocator pressure** — pre-allocated 0 / 50 / 100 / 140 /
+   170 GB of bf16 blocks in 256 MiB chunks with checker-board frees;
+   kernel times stayed `0.82 / 17.31` ms (no pressure-driven slow-down).
+4. **HSA / NVTE env vars** — `HSA_NO_SCRATCH_RECLAIM=1`,
+   `NVTE_CK_USES_BWD_V3=1` had `< 1 %` impact on the bench.
+5. **`torch.profiler` overhead** — bench numbers were identical with
+   profiler active vs not (kineto/roctracer is `O(μs)` per kernel).
+6. **Per-GPU regressions** — swept all 8 GPUs in the same process,
+   all reported 0.74-0.79 ms FWD / 17.24-17.28 ms BWD.
+7. **Whole-node thermal coupling** — 8 concurrent processes each
+   running the bench on its own GPU; all kept bench numbers (0.74-0.78
+   FWD / 17.23-17.27 BWD) — no shared throttle envelope.
+8. **Triton autotune state** — the V4 attention kernel is **not**
+   autotuned (fixed `BLOCK_M=BLOCK_N=32, num_warps=8`); same compiled
+   binary in both contexts.
+9. **PyTorch profiler "Dispatch Kernel" category** — verified the
+   `dur` field is the actual GPU execution time (matches the in-process
+   `cuda.Event` reading exactly: trace `5.74 ms` ↔ in-process `5.88 ms`).
+10. **Multi-process distributed init** — instrumented the kernel call
+    inside `deepseek_v4_attention.py` with `cuda.Event` timers gated by
+    `PRIMUS_V4_DIAG_TIME=1`. In-process timings agreed with the trace
+    (dense `5.88 ms`, hca `6.87 ms`), so the slow-down was not a
+    profiler artefact — it really was running at that speed in the
+    proxy.
+11. **Tensor properties** — the `PRIMUS_V4_DIAG_TIME=1` hook also
+    dumped `shape / stride / dtype / contiguity` on the first call per
+    mode. The dump revealed the smoking gun:
+
+    ```
+    [PRIMUS_V4_DIAG_TIME] tensor info (dense):
+      q: shape=(1,64,4096,512) stride=(134217728,512,32768,1) dtype=torch.float32
+      k: shape=(1,64,4096,512) stride=(2097152,0,512,1)    dtype=torch.float32
+      v: shape=(1,64,4096,512) stride=(2097152,0,512,1)    dtype=torch.float32
+    ```
+
+    Q / K / V leaving RoPE were **`torch.float32`**, not `torch.bfloat16`
+    as bench. Re-running the standalone bench with `dtype=torch.float32`
+    reproduced the proxy numbers exactly:
+
+    | Path  | bench bf16 | bench fp32 | proxy in-process |
+    |---|---:|---:|---:|
+    | dense FWD | 0.78 ms | **5.65 ms** | **5.88 ms** |
+    | hca FWD | 0.93 ms | **6.73 ms** | **6.87 ms** |
+
+### Root cause
+
+`apply_interleaved_partial_rope` in `dual_rope.py` was silently
+promoting Q / K to fp32 because `cos / sin` came from
+`freqs = position_ids.float().unsqueeze(-1) * self.inv_freq` (fp32)
+and `bf16 * fp32` follows PyTorch's standard type-promotion rule
+producing `fp32`. The rotated even / odd halves were therefore fp32,
+the `torch.stack + torch.cat` concatenation back with the bf16 nope
+half then re-promoted the result, and Q / K reached `v4_attention`
+as fully fp32 tensors — doubling their HBM footprint and forcing the
+Triton kernel onto its (much slower) fp32 dtype-specialised code path.
+
+### Fix
+
+One-line cast in `apply_interleaved_partial_rope`: after the
+`unsqueeze(-2)` on `cos / sin`, cast both to `x.dtype` so the rotation
+math stays at the caller's precision. Math accuracy is preserved
+because the freqs are already rounded to single-precision before
+becoming `cos / sin`; rounding `cos / sin` itself to bf16 is
+indistinguishable from the bf16-only reference path used by
+flash-attention everywhere else in the stack.
+
+### Result
+
+| Configuration | iter time | TFLOP/s/GPU | vs P28 | vs P31b |
+|---|---:|---:|---:|---:|
+| P28 baseline | 8837 ms | 77.5 | — | — |
+| P31b shipped (no RoPE fix) | 965 ms | 709 | 9.16× | — |
+| **P32 shipped + RoPE fp32 bug** | 887 ms | 768 | 9.96× | 1.09× |
+| **P32 shipped + RoPE bf16 fix** | **665 ms** | **1030** | **13.29×** | **1.45×** |
+| **P32 final (split + segreduce + RoPE fix)** | **603 ms** | **1134** | **14.64×** | **1.60×** |
+
+### Default flip
+
+With the RoPE bf16 fix in place, the operator-microbench winners
+(split BWD + CSA BWD segreduce) also win the EP8 proxy by **+14 %**
+iter time, exactly what the microbench had been predicting. Both
+env vars therefore now **default to ON**:
+
+- `PRIMUS_V4_ATTN_BWD_USE_SPLIT=1` (was 0)
+- `PRIMUS_V4_CSA_BWD_SEGREDUCE=1` (was 0)
+
+Set either to `0` to fall back to the monolithic / gather+atomic path
+for kernel-engineering A/B work. Loss numerics are preserved across
+all configurations (max delta `< 1e-3` relative at iter 10).
+
+### Microbench-vs-proxy hygiene going forward
+
+Two artefacts now ship with the perf-tuning harness so a future
+microbench-vs-proxy gap can be diagnosed in minutes rather than days:
+
+1. **`PRIMUS_V4_DIAG_TIME=1`** — the in-process diagnostic hook on
+   `DeepseekV4Attention._attention_forward_via_v4_triton` (kept
+   in-tree; `cuda.Event` synchronous span around the kernel call, dump
+   on shutdown). First-call dump includes
+   `shape / stride / dtype / contiguity` so any future call-site that
+   silently changes the dtype shows up immediately.
+2. **Proxy-mode bench** (P32 P0): `bench_v4_attention_ep8.py` /
+   `bench_csa_attention_ep8.py` both gained
+   `L2Flusher` (512 MiB default eviction buffer between iters) and
+   input buffer rotation (`--n-input-copies 4`). These ruled out L2
+   cache artefacts for the (very large) V4 attention working set;
+   they remain useful for smaller-working-set kernels.

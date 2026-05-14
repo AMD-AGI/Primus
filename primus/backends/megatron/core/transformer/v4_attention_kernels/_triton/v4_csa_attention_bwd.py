@@ -1216,7 +1216,7 @@ def _launch_v4_csa_attention_pool_bwd(
     perm32 = None
     bin_ptr = None
     dpool_partial = None
-    use_segreduce = use_split_sparse and os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE", "0") == "1"
+    use_segreduce = use_split_sparse and os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE", "1") == "1"
     if use_segreduce:
         partial_dtype_name = os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DTYPE", "fp32")
         if partial_dtype_name == "bf16":
@@ -1720,19 +1720,24 @@ def _launch_v4_csa_attention_pool_bwd(
         # ...)``.
     elif use_split_sparse:
         BLOCK_H = int(os.getenv("PRIMUS_V4_CSA_BWD_SPARSE_BLOCK_H", "64"))
-        # Plan-5 P32: ``PRIMUS_V4_CSA_BWD_SEGREDUCE=1`` (default OFF)
-        # picks the segmented-reduction path which writes per-visit
-        # dpool contributions to a compact ``[B, M, K_topk, D]``
-        # partial buffer (no atomics) and then folds them into
-        # ``dpool[B, P, D]`` via a sorted inverse index. The segreduce
-        # path wins the standalone CSA BWD microbench (16.31 ms vs
-        # 24.83 ms gather/atomic) but regresses end-to-end EP8 proxy
-        # throughput (1153 ms vs 1115 ms / iter) because the 4 GiB
-        # partial buffer's HBM read/write traffic competes with the
-        # concurrent MoE work. Default is the gather + atomic_add path
-        # which is faster end-to-end; segreduce is opt-in for kernel
-        # tuning. ``perm32``, ``bin_ptr`` and ``dpool_partial`` were
-        # built above on the
+        # Plan-5 P32: ``PRIMUS_V4_CSA_BWD_SEGREDUCE=1`` is now the
+        # default — wins both the standalone CSA BWD microbench
+        # (16.31 ms vs 24.83 ms gather/atomic) and the EP8 proxy
+        # (578 ms vs 665 ms / iter) after the P32 dual-RoPE bf16-cast
+        # fix.  Pre-fix, ``apply_interleaved_partial_rope`` was
+        # promoting Q/K to fp32 (cos/sin came from
+        # ``position_ids.float()`` and bf16*fp32=fp32), which 2x'd
+        # Q/K HBM traffic, inflated *every* attention kernel time
+        # 1.8-7x in the proxy trace, and made the gather + atomic
+        # path look faster end-to-end purely because the segreduce
+        # 4 GiB partial buffer competed against artificially-bloated
+        # attention traffic. Setting ``PRIMUS_V4_CSA_BWD_SEGREDUCE=0``
+        # falls back to gather + atomic for kernel-tuning. The
+        # segmented-reduction path writes per-visit dpool
+        # contributions to a compact ``[B, M, K_topk, D]`` partial
+        # buffer (no atomics) and then folds them into
+        # ``dpool[B, P, D]`` via a sorted inverse index. ``perm32``,
+        # ``bin_ptr`` and ``dpool_partial`` were built above on the
         # default stream BEFORE the local kernels were launched, so
         # they're ready by the time the sparse stream gets here.
         if use_segreduce:

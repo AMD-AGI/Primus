@@ -29,6 +29,8 @@ V4-Flash EP8 proxy.
 | P31            | CSA in-kernel top-K gather/scatter (cr=4)      | 4317.0         | 158.5       | 2.04x       | `profile-after-p31-ep8-20260509.md`, P31 smoke |
 | P31b           | CSA dense-local + sparse head-block BWD split  | 964.8          | 709.3       | 9.15x       | trace `1778324637328675032`, P31b smoke        |
 | P32            | CSA FWD split (local + sparse + LSE merge)     | 890.5          | 768.4       | 9.92x       | trace `1778476971738245137`, `profile-after-p32-ep8-20260511.md` |
+| **P32 RoPE-fix** | dual-RoPE cast cos/sin to bf16 (no fp32 upcast) | **665.0**    | **1029.8**  | **13.29x** | `tas-mi355x-20260514/p32_postropefix_shipped` smoke iter 8 |
+| **P32 final**  | RoPE fix + split BWD + segreduce CSA BWD (defaults ON) | **603.3** | **1134.3** | **14.64x** | `tas-mi355x-20260514/p32_final_postropefix_defaults` smoke iter 10 |
 
 
 Notes:
@@ -61,3 +63,27 @@ kernels as 600 ms+ outliers.
   CSA local FWD; previously `_v4_csa_attention_pool_fwd_kernel` was
   **123.1 ms / 3 launches**) and `_v4_csa_attention_pool_sparse_bwd_kernel`
   at **72.5 ms / 3 launches** (vs P31b 80.8 ms).
+- **P32 RoPE-fix** (2026-05-14) — `apply_interleaved_partial_rope` was
+  silently upcasting Q/K to fp32 because `cos = position_ids.float() *
+  inv_freq` produced an fp32 tensor and `bf16 * fp32 = fp32`. Every
+  V4 attention kernel in the EP8 proxy was paying **2x HBM traffic
+  for fp32 Q/K** plus running the Triton kernel against the slower
+  fp32-dtype-specialised code path; in-process `cuda.Event` timings
+  before the fix showed dense FWD = 5.88 ms / hca FWD = 6.87 ms
+  (matches trace), and the isolated bench at fp32 reproduces those
+  numbers exactly (5.65 / 6.73 ms) — proving the dtype upcast was
+  the *only* source of the 1.8-7x microbench-vs-proxy gap. The fix
+  is a one-line cast of `cos/sin` to `x.dtype` after the unsqueeze.
+  Post-fix in-process timings drop to dense FWD = 0.82 ms and hca
+  FWD = 0.97 ms, matching bench bf16 (0.78 / 0.93 ms). Loss numerics
+  preserved to bf16 precision (max delta `< 1e-3` relative across
+  10 iters).
+- **P32 final** — after the RoPE bf16 fix, the operator-microbench
+  winners (split BWD + CSA BWD segmented-reduction) also win the EP8
+  proxy by ~14 % (603 vs 665 ms / iter), exactly the gap the
+  microbench had predicted all along. Both env flags now default ON
+  (`PRIMUS_V4_ATTN_BWD_USE_SPLIT=1`, `PRIMUS_V4_CSA_BWD_SEGREDUCE=1`),
+  monolithic V4 BWD and gather+atomic CSA BWD remain reachable for
+  debugging by setting either flag to `0`. The total P32 win over
+  P28 baseline is **14.64x** (8837 ms → 603 ms / iter) and over
+  P31b is **1.60x** (965 ms → 603 ms / iter).
