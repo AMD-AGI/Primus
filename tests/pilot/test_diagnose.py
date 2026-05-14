@@ -78,8 +78,12 @@ def _trace_with(
 def test_R4_A_compute_bound_gemm_dominant() -> None:
     trace = _trace_with(
         ratios={"compute_gemm_ratio": 0.80, "compute_ratio": 0.92, "comm_ratio": 0.07},
-        cost_breakdown={"pure_compute_pct": 0.92, "pure_comm_pct": 0.07,
-                        "overlap_pct": 0.001, "bubble_pct": 0.006},
+        cost_breakdown={
+            "pure_compute_pct": 0.92,
+            "pure_comm_pct": 0.07,
+            "overlap_pct": 0.001,
+            "bubble_pct": 0.006,
+        },
     )
     report = diag.run(trace_analysis=trace)
     assert report["bottleneck"] == "COMPUTE_BOUND"
@@ -91,8 +95,12 @@ def test_R4_A_compute_bound_gemm_dominant() -> None:
 def test_R4_DEFAULT_low_confidence_when_nothing_dominates() -> None:
     trace = _trace_with(
         ratios={"compute_ratio": 0.40, "comm_ratio": 0.15},  # below all thresholds
-        cost_breakdown={"pure_compute_pct": 0.40, "pure_comm_pct": 0.15,
-                        "overlap_pct": 0.0, "bubble_pct": 0.05},
+        cost_breakdown={
+            "pure_compute_pct": 0.40,
+            "pure_comm_pct": 0.15,
+            "overlap_pct": 0.0,
+            "bubble_pct": 0.05,
+        },
     )
     report = diag.run(trace_analysis=trace)
     assert report["bottleneck"] == "COMPUTE_BOUND"
@@ -108,9 +116,13 @@ def test_R4_DEFAULT_low_confidence_when_nothing_dominates() -> None:
 def test_R3_strong_when_comm_ratio_very_high() -> None:
     trace = _trace_with(
         ratios={"comm_ratio": 0.45, "compute_ratio": 0.50},
-        cost_breakdown={"pure_comm_pct": 0.30, "pure_compute_pct": 0.50,
-                        "overlap_pct": 0.10, "bubble_pct": 0.10,
-                        "longest_serialized_comm_ms": 100.0},
+        cost_breakdown={
+            "pure_comm_pct": 0.30,
+            "pure_compute_pct": 0.50,
+            "overlap_pct": 0.10,
+            "bubble_pct": 0.10,
+            "longest_serialized_comm_ms": 100.0,
+        },
     )
     report = diag.run(trace_analysis=trace)
     assert report["bottleneck"] == "COMM_BOUND"
@@ -121,9 +133,13 @@ def test_R3_strong_when_comm_ratio_very_high() -> None:
 def test_R3_two_signals() -> None:
     trace = _trace_with(
         ratios={"comm_ratio": 0.22, "compute_ratio": 0.70},
-        cost_breakdown={"pure_comm_pct": 0.15, "pure_compute_pct": 0.65,
-                        "overlap_pct": 0.05, "bubble_pct": 0.05,
-                        "longest_serialized_comm_ms": 1.0},
+        cost_breakdown={
+            "pure_comm_pct": 0.15,
+            "pure_compute_pct": 0.65,
+            "overlap_pct": 0.05,
+            "bubble_pct": 0.05,
+            "longest_serialized_comm_ms": 1.0,
+        },
     )
     report = diag.run(trace_analysis=trace)
     assert report["bottleneck"] == "COMM_BOUND"
@@ -139,28 +155,32 @@ def test_R3_two_signals() -> None:
 def test_R2_pipeline_bubble_requires_pp_gt_1() -> None:
     trace = _trace_with(
         ratios={"compute_ratio": 0.70, "compute_gemm_ratio": 0.50},
-        cost_breakdown={"pure_compute_pct": 0.70, "pure_comm_pct": 0.05,
-                        "overlap_pct": 0.0, "bubble_pct": 0.20},
+        cost_breakdown={
+            "pure_compute_pct": 0.70,
+            "pure_comm_pct": 0.05,
+            "overlap_pct": 0.0,
+            "bubble_pct": 0.20,
+        },
     )
     plan = {
-        "modules": {
-            "pre_trainer": {"overrides": {"pipeline_model_parallel_size": 4,
-                                           "micro_batch_size": 1}}
-        }
+        "modules": {"pre_trainer": {"overrides": {"pipeline_model_parallel_size": 4, "micro_batch_size": 1}}}
     }
     report = diag.run(trace_analysis=trace, plan=plan)
     assert report["bottleneck"] == "PIPELINE_BOUND"
     assert report["meta"]["rule_id"] == "R2-A"
     # Should also recommend VPP as a structural axis
-    assert any(a["axis"] == "virtual_pipeline_model_parallel_size"
-               for a in report["candidate_axes"])
+    assert any(a["axis"] == "virtual_pipeline_model_parallel_size" for a in report["candidate_axes"])
 
 
 def test_R2_skipped_when_pp_eq_1() -> None:
     trace = _trace_with(
         ratios={"compute_ratio": 0.70, "compute_gemm_ratio": 0.50},
-        cost_breakdown={"pure_compute_pct": 0.70, "pure_comm_pct": 0.05,
-                        "overlap_pct": 0.0, "bubble_pct": 0.20},
+        cost_breakdown={
+            "pure_compute_pct": 0.70,
+            "pure_comm_pct": 0.05,
+            "overlap_pct": 0.0,
+            "bubble_pct": 0.20,
+        },
     )
     report = diag.run(trace_analysis=trace)  # no plan → pp defaults to 1
     assert report["bottleneck"] != "PIPELINE_BOUND"
@@ -207,8 +227,7 @@ def test_R5_regression_overlay() -> None:
     trace = _trace_with(
         iter_ms=15_000.0,
         ratios={"compute_gemm_ratio": 0.80, "compute_ratio": 0.92},
-        cost_breakdown={"pure_compute_pct": 0.92, "bubble_pct": 0.006,
-                        "iter_wallclock_ms": 15_000.0},
+        cost_breakdown={"pure_compute_pct": 0.92, "bubble_pct": 0.006, "iter_wallclock_ms": 15_000.0},
     )
     champion = {"metrics": {"history": {"iter_time_ms": [10_000, 10_000, 10_500, 10_400]}}}
     report = diag.run(trace_analysis=trace, champion_snapshot=champion)
@@ -227,20 +246,39 @@ def test_R5_regression_overlay() -> None:
 def test_axis_turbo_deepep_use_comm_stream_when_shared() -> None:
     """The hallmark pds_lite case: MoE EP comm and GEMM live on stream 0."""
     trace = _trace_with(
-        ratios={"comm_moe_dispatch_ratio": 0.07, "compute_gemm_ratio": 0.80,
-                "compute_ratio": 0.92},
-        cost_breakdown={"pure_compute_pct": 0.92, "pure_comm_pct": 0.07,
-                        "overlap_pct": 0.001, "bubble_pct": 0.006},
+        ratios={"comm_moe_dispatch_ratio": 0.07, "compute_gemm_ratio": 0.80, "compute_ratio": 0.92},
+        cost_breakdown={
+            "pure_compute_pct": 0.92,
+            "pure_comm_pct": 0.07,
+            "overlap_pct": 0.001,
+            "bubble_pct": 0.006,
+        },
         pipeline_streams=2,
         kernels_full=[
-            {"name": "deep_ep_dispatch", "name_short": "deep_ep_dispatch",
-             "bucket": "comm_moe_dispatch", "wall_ms": 1500.0, "wall_pct": 0.05,
-             "self_ms": 1500.0, "calls": 100, "p50_ms": 15.0, "p99_ms": 20.0,
-             "streams": [0]},
-            {"name": "ck_tile_kernel", "name_short": "ck_tile_kernel",
-             "bucket": "compute_gemm_fp8_grouped", "wall_ms": 24000.0, "wall_pct": 0.80,
-             "self_ms": 24000.0, "calls": 1000, "p50_ms": 24.0, "p99_ms": 40.0,
-             "streams": [0]},
+            {
+                "name": "deep_ep_dispatch",
+                "name_short": "deep_ep_dispatch",
+                "bucket": "comm_moe_dispatch",
+                "wall_ms": 1500.0,
+                "wall_pct": 0.05,
+                "self_ms": 1500.0,
+                "calls": 100,
+                "p50_ms": 15.0,
+                "p99_ms": 20.0,
+                "streams": [0],
+            },
+            {
+                "name": "ck_tile_kernel",
+                "name_short": "ck_tile_kernel",
+                "bucket": "compute_gemm_fp8_grouped",
+                "wall_ms": 24000.0,
+                "wall_pct": 0.80,
+                "self_ms": 24000.0,
+                "calls": 1000,
+                "p50_ms": 24.0,
+                "p99_ms": 40.0,
+                "streams": [0],
+            },
         ],
     )
     report = diag.run(trace_analysis=trace)
@@ -252,20 +290,39 @@ def test_axis_turbo_deepep_use_comm_stream_when_shared() -> None:
 
 def test_axis_NOT_turbo_when_already_separate_streams() -> None:
     trace = _trace_with(
-        ratios={"comm_moe_dispatch_ratio": 0.07, "compute_gemm_ratio": 0.80,
-                "compute_ratio": 0.92},
-        cost_breakdown={"pure_compute_pct": 0.92, "pure_comm_pct": 0.07,
-                        "overlap_pct": 0.06, "bubble_pct": 0.006},  # high overlap
+        ratios={"comm_moe_dispatch_ratio": 0.07, "compute_gemm_ratio": 0.80, "compute_ratio": 0.92},
+        cost_breakdown={
+            "pure_compute_pct": 0.92,
+            "pure_comm_pct": 0.07,
+            "overlap_pct": 0.06,
+            "bubble_pct": 0.006,
+        },  # high overlap
         pipeline_streams=4,  # multiple streams
         kernels_full=[
-            {"name": "deep_ep_dispatch", "name_short": "deep_ep_dispatch",
-             "bucket": "comm_moe_dispatch", "wall_ms": 1500.0, "wall_pct": 0.05,
-             "self_ms": 1500.0, "calls": 100, "p50_ms": 15.0, "p99_ms": 20.0,
-             "streams": [14]},  # comm stream
-            {"name": "ck_tile_kernel", "name_short": "ck_tile_kernel",
-             "bucket": "compute_gemm_fp8_grouped", "wall_ms": 24000.0, "wall_pct": 0.80,
-             "self_ms": 24000.0, "calls": 1000, "p50_ms": 24.0, "p99_ms": 40.0,
-             "streams": [0]},
+            {
+                "name": "deep_ep_dispatch",
+                "name_short": "deep_ep_dispatch",
+                "bucket": "comm_moe_dispatch",
+                "wall_ms": 1500.0,
+                "wall_pct": 0.05,
+                "self_ms": 1500.0,
+                "calls": 100,
+                "p50_ms": 15.0,
+                "p99_ms": 20.0,
+                "streams": [14],
+            },  # comm stream
+            {
+                "name": "ck_tile_kernel",
+                "name_short": "ck_tile_kernel",
+                "bucket": "compute_gemm_fp8_grouped",
+                "wall_ms": 24000.0,
+                "wall_pct": 0.80,
+                "self_ms": 24000.0,
+                "calls": 1000,
+                "p50_ms": 24.0,
+                "p99_ms": 40.0,
+                "streams": [0],
+            },
         ],
     )
     report = diag.run(trace_analysis=trace)
@@ -306,22 +363,151 @@ def test_emits_micro_batch_size_when_plan_provided() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Engine-emitted axes added after session 20260513T024603Z
+# (axis_taxonomy.md §§2.6-2.10). These are the axes that previously had to
+# be hand-injected by the orchestrator. Now the engine sees them on its own.
+# ---------------------------------------------------------------------------
+
+
+def test_emits_fp8_recipe_when_fp8_prep_high_and_default_recipe() -> None:
+    """The +24.85% winner from session R4. FP8 prep > 0.02 and recipe still
+    on default `tensorwise` → engine must emit `fp8_recipe=delayed` so REPLAN
+    sees it without orchestrator hand-injection."""
+    trace = _trace_with(
+        ratios={
+            "compute_fp8_prep_ratio": 0.05,
+            "compute_gemm_ratio": 0.50,
+            "compute_ratio": 0.85,
+            "comm_ratio": 0.10,
+        },
+        cost_breakdown={"pure_compute_pct": 0.85, "bubble_pct": 0.05},
+    )
+    plan = {"modules": {"pre_trainer": {"overrides": {"fp8_recipe": "tensorwise"}}}}
+    report = diag.run(trace_analysis=trace, plan=plan)
+    axes = {a["axis"]: a for a in report["candidate_axes"]}
+    assert "fp8_recipe" in axes, axes
+    assert axes["fp8_recipe"]["candidates"] == ["delayed"]
+    assert axes["fp8_recipe"]["expected_gain_band_pct"][0] >= 5
+
+
+def test_does_not_emit_fp8_recipe_when_already_delayed() -> None:
+    trace = _trace_with(
+        ratios={"compute_fp8_prep_ratio": 0.05, "compute_ratio": 0.85},
+        cost_breakdown={"pure_compute_pct": 0.85},
+    )
+    plan = {"modules": {"pre_trainer": {"overrides": {"fp8_recipe": "delayed"}}}}
+    report = diag.run(trace_analysis=trace, plan=plan)
+    assert "fp8_recipe" not in {a["axis"] for a in report["candidate_axes"]}
+
+
+def test_emits_apply_rope_fusion_when_attention_significant() -> None:
+    """Session R9 winner (+2.61%). attention_ratio >= 0.03 with rope_fusion
+    off → engine must emit it as a candidate."""
+    trace = _trace_with(
+        ratios={"compute_attention_ratio": 0.05, "compute_gemm_ratio": 0.50, "compute_ratio": 0.85},
+        cost_breakdown={"pure_compute_pct": 0.85},
+    )
+    plan = {"modules": {"pre_trainer": {"overrides": {"apply_rope_fusion": False}}}}
+    report = diag.run(trace_analysis=trace, plan=plan)
+    axes = {a["axis"]: a for a in report["candidate_axes"]}
+    assert "apply_rope_fusion" in axes
+    assert axes["apply_rope_fusion"]["candidates"] == [True]
+
+
+def test_emits_omp_num_threads_env_suspect_when_bubble_high() -> None:
+    """Session R7 winner (+3.34%). Host-launch bubble high → OMP_NUM_THREADS
+    is an env_suspect."""
+    trace = _trace_with(
+        ratios={"compute_ratio": 0.50, "comm_ratio": 0.10},
+        cost_breakdown={
+            "pure_compute_pct": 0.50,
+            "pure_comm_pct": 0.10,
+            "overlap_pct": 0.0,
+            "bubble_pct": 0.30,
+        },
+    )
+    report = diag.run(trace_analysis=trace, plan={"modules": {"pre_trainer": {"overrides": {}}}})
+    flags = {s["flag"] for s in report["env_suspect"]}
+    assert "OMP_NUM_THREADS" in flags
+
+
+def test_emits_manual_gc_axis_when_bubble_high() -> None:
+    trace = _trace_with(
+        ratios={"compute_ratio": 0.50, "comm_ratio": 0.10},
+        cost_breakdown={"pure_compute_pct": 0.50, "bubble_pct": 0.25},
+    )
+    plan = {"modules": {"pre_trainer": {"overrides": {}}}}
+    report = diag.run(trace_analysis=trace, plan=plan)
+    axes = {a["axis"]: a for a in report["candidate_axes"]}
+    assert "manual_gc" in axes
+
+
+def test_emits_cuda_graph_with_known_blocker_tag() -> None:
+    """CUDA graphs are stack-blocked (axis_taxonomy.md §2.8) but the
+    engine still names the axis with axis_meta.known_blocker so REPLAN
+    can downrank instead of silently exhausting the search."""
+    trace = _trace_with(
+        ratios={"compute_ratio": 0.50, "comm_ratio": 0.10},
+        cost_breakdown={"pure_compute_pct": 0.50, "bubble_pct": 0.30},
+    )
+    plan = {"modules": {"pre_trainer": {"overrides": {}}}}
+    report = diag.run(trace_analysis=trace, plan=plan)
+    cg = next((a for a in report["candidate_axes"] if a["axis"] == "cuda_graph_impl"), None)
+    assert cg is not None, report["candidate_axes"]
+    assert cg.get("known_blocker") == "cuda_graph_family"
+
+
+def test_emits_rccl_proto_env_suspect_when_collectives_significant() -> None:
+    trace = _trace_with(
+        ratios={"comm_collective_ratio": 0.10, "comm_ratio": 0.20, "compute_ratio": 0.70},
+        cost_breakdown={
+            "pure_compute_pct": 0.70,
+            "pure_comm_pct": 0.20,
+            "overlap_pct": 0.0,
+            "bubble_pct": 0.05,
+        },
+    )
+    report = diag.run(trace_analysis=trace)
+    flags = {s["flag"] for s in report["env_suspect"]}
+    assert "RCCL_PROTO" in flags
+
+
 def test_strategy_per_plan_when_only_weakly_local() -> None:
     trace = _trace_with(
-        ratios={"compute_gemm_ratio": 0.80, "compute_ratio": 0.92,
-                "comm_moe_dispatch_ratio": 0.07},
-        cost_breakdown={"pure_compute_pct": 0.92, "pure_comm_pct": 0.07,
-                        "overlap_pct": 0.001, "bubble_pct": 0.006},
+        ratios={"compute_gemm_ratio": 0.80, "compute_ratio": 0.92, "comm_moe_dispatch_ratio": 0.07},
+        cost_breakdown={
+            "pure_compute_pct": 0.92,
+            "pure_comm_pct": 0.07,
+            "overlap_pct": 0.001,
+            "bubble_pct": 0.006,
+        },
         pipeline_streams=2,
         kernels_full=[
-            {"name": "deep_ep_dispatch", "name_short": "deep_ep_dispatch",
-             "bucket": "comm_moe_dispatch", "wall_ms": 1500.0, "wall_pct": 0.05,
-             "self_ms": 1500.0, "calls": 100, "p50_ms": 15.0, "p99_ms": 20.0,
-             "streams": [0]},
-            {"name": "ck_tile_kernel", "name_short": "ck_tile_kernel",
-             "bucket": "compute_gemm_fp8_grouped", "wall_ms": 24000.0, "wall_pct": 0.80,
-             "self_ms": 24000.0, "calls": 1000, "p50_ms": 24.0, "p99_ms": 40.0,
-             "streams": [0]},
+            {
+                "name": "deep_ep_dispatch",
+                "name_short": "deep_ep_dispatch",
+                "bucket": "comm_moe_dispatch",
+                "wall_ms": 1500.0,
+                "wall_pct": 0.05,
+                "self_ms": 1500.0,
+                "calls": 100,
+                "p50_ms": 15.0,
+                "p99_ms": 20.0,
+                "streams": [0],
+            },
+            {
+                "name": "ck_tile_kernel",
+                "name_short": "ck_tile_kernel",
+                "bucket": "compute_gemm_fp8_grouped",
+                "wall_ms": 24000.0,
+                "wall_pct": 0.80,
+                "self_ms": 24000.0,
+                "calls": 1000,
+                "p50_ms": 24.0,
+                "p99_ms": 40.0,
+                "streams": [0],
+            },
         ],
     )
     report = diag.run(trace_analysis=trace)

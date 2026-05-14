@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 _PILOT_ROOT: Path = Path(__file__).resolve().parent.parent
 _ENV_DEFAULT_RE = re.compile(r"^\$\{[^:}]+:(?P<default>[^}]+)\}$")
 
@@ -45,12 +44,7 @@ def _load_mapping(path: str | Path) -> dict[str, Any]:
 
 def _extract_overrides(plan: dict[str, Any]) -> dict[str, Any]:
     if "modules" in plan:
-        return (
-            plan.get("modules", {})
-            .get("pre_trainer", {})
-            .get("overrides", {})
-            or {}
-        )
+        return plan.get("modules", {}).get("pre_trainer", {}).get("overrides", {}) or {}
     if "overrides" in plan and isinstance(plan["overrides"], dict):
         return plan["overrides"]
     return plan
@@ -125,9 +119,7 @@ def check(plan: dict, cluster: dict) -> dict:
             f"(nnodes={nnodes}, gpus_per_node={gpus_per_node})"
         )
     elif world % model_parallel != 0:
-        violations.append(
-            f"world_size={world} must be divisible by tp*pp*ep*cp={model_parallel}"
-        )
+        violations.append(f"world_size={world} must be divisible by tp*pp*ep*cp={model_parallel}")
 
     mbs = _to_int(overrides.get("micro_batch_size"))
     gbs = _to_int(overrides.get("global_batch_size"))
@@ -147,24 +139,87 @@ def check(plan: dict, cluster: dict) -> dict:
         unit = mbs * dp
         if unit > 0 and gbs % unit != 0:
             violations.append(
-                f"global_batch_size={gbs} must be divisible by "
-                f"micro_batch_size*dp={unit} (dp={dp})"
+                f"global_batch_size={gbs} must be divisible by " f"micro_batch_size*dp={unit} (dp={dp})"
             )
 
     recompute_granularity = overrides.get("recompute_granularity")
     if recompute_granularity not in (None, "full", "selective"):
         violations.append(
-            "recompute_granularity must be one of null/full/selective, "
-            f"got {recompute_granularity!r}"
+            "recompute_granularity must be one of null/full/selective, " f"got {recompute_granularity!r}"
         )
     recompute_method = overrides.get("recompute_method")
     if recompute_method not in (None, "uniform", "block"):
-        violations.append(
-            f"recompute_method must be one of null/uniform/block, got {recompute_method!r}"
-        )
+        violations.append(f"recompute_method must be one of null/uniform/block, got {recompute_method!r}")
 
     if par["pp"] > 1 and train_iters is not None and train_iters < par["pp"]:
         warnings.append("train_iters is smaller than pipeline stages; timing may be noisy")
+
+    # ------------------------------------------------------------------
+    # Hard mutexes / required-companion table
+    # Single source of truth: skills/workflow/axis_taxonomy.md §2.14.
+    # Each rule corresponds to a Megatron / Primus assertion that fires
+    # at startup; surfacing them here keeps INVALID_CONFIG out of the
+    # trial path (replan.md §2 step ④).
+    # ------------------------------------------------------------------
+    pp = par["pp"]
+    vpp = _to_int(overrides.get("virtual_pipeline_model_parallel_size"), 1) or 1
+
+    def _is_truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    # MUTEX-CG-IMPL: Megatron arguments.py rejects --enable-cuda-graph and
+    # --cuda-graph-impl together.
+    if overrides.get("cuda_graph_impl") is not None and _is_truthy(overrides.get("enable_cuda_graph")):
+        violations.append(
+            "MUTEX-CG-IMPL: enable_cuda_graph and cuda_graph_impl are mutually "
+            "exclusive (Megatron arguments.py)"
+        )
+
+    # REQ-PP-DEFER-EMB: defer_embedding_wgrad_compute requires pp >= 2.
+    if _is_truthy(overrides.get("defer_embedding_wgrad_compute")) and pp < 2:
+        violations.append(
+            "REQ-PP-DEFER-EMB: defer_embedding_wgrad_compute=true requires "
+            f"pipeline_model_parallel_size >= 2 (got pp={pp})"
+        )
+
+    # REQ-PP-OVRLP-P2P: overlap_p2p_communication requires pp >= 2 AND vpp > 1.
+    if _is_truthy(overrides.get("overlap_p2p_communication")):
+        if pp < 2:
+            violations.append(
+                "REQ-PP-OVRLP-P2P: overlap_p2p_communication=true requires "
+                f"pipeline_model_parallel_size >= 2 (got pp={pp})"
+            )
+        elif vpp <= 1:
+            violations.append(
+                "REQ-PP-OVRLP-P2P: overlap_p2p_communication=true requires "
+                f"virtual_pipeline_model_parallel_size > 1 (got vpp={vpp})"
+            )
+
+    # MUTEX-DEEPEP-ROUTER / -SHAREDOVRLP / REQ-DEEPEP-LBAL: companion rules
+    # for the Primus turbo DeepEP path (axis_taxonomy.md §2.3 + §2.13).
+    if _is_truthy(overrides.get("use_turbo_deepep")):
+        router_dtype = overrides.get("moe_router_dtype")
+        if router_dtype is not None and str(router_dtype).strip().lower() not in ("fp32", "float32", ""):
+            violations.append(
+                "MUTEX-DEEPEP-ROUTER: use_turbo_deepep=true requires moe_router_dtype "
+                f"in {{unset, fp32}}; got {router_dtype!r} (DeepEP only supports float32 probs)"
+            )
+        if _is_truthy(overrides.get("moe_shared_expert_overlap")):
+            violations.append(
+                "MUTEX-DEEPEP-SHAREDOVRLP: use_turbo_deepep=true requires "
+                "moe_shared_expert_overlap=false (deepep_x_sharedovrlp_mutex)"
+            )
+        if overrides.get("moe_router_force_load_balancing") is not None and not _is_truthy(
+            overrides.get("moe_router_force_load_balancing")
+        ):
+            violations.append(
+                "REQ-DEEPEP-LBAL: use_turbo_deepep=true requires "
+                "moe_router_force_load_balancing=true (deepep_x_real_router_hang)"
+            )
 
     return {
         "valid": not violations,
@@ -175,7 +230,9 @@ def check(plan: dict, cluster: dict) -> dict:
             "gpus_per_node": gpus_per_node,
             "world_size": world,
             "model_parallel": model_parallel,
-            "data_parallel": world // model_parallel if model_parallel and world % model_parallel == 0 else None,
+            "data_parallel": (
+                world // model_parallel if model_parallel and world % model_parallel == 0 else None
+            ),
         },
     }
 
@@ -199,6 +256,35 @@ def check_env(env_diff: dict, baseline: dict) -> dict:
         warnings.append("NCCL_NET_GDR_LEVEL is ignored when NCCL_IB_DISABLE=1")
     if env_diff.get("RCCL_ENABLE_COLLTRACE") in (1, "1", True):
         warnings.append("RCCL_ENABLE_COLLTRACE can perturb timing; use only for diagnostics")
+
+    # MUTEX-PROFILE-HIPBLASLT (axis_taxonomy.md §2.14): profile.md §3 lists
+    # PRIMUS_HIPBLASLT_TUNING=1 as a hard incompatibility with torch.profiler
+    # injection. We only warn here because the env_diff doesn't carry the
+    # profile flag — the actual gating happens in pilot.tools.profile.inject
+    # — but flagging it lets ENV_SWEEP know it must coordinate with profile
+    # off for that one measurement.
+    if env_diff.get("PRIMUS_HIPBLASLT_TUNING") in (1, "1", True):
+        warnings.append(
+            "MUTEX-PROFILE-HIPBLASLT: PRIMUS_HIPBLASLT_TUNING=1 conflicts with "
+            "the default torch.profiler injection (skills/workflow/profile.md §3); "
+            "use only in SMOKE with --no-profile, never in BASELINE/EXECUTE"
+        )
+
+    # WARN-HSA-INTERRUPT-OFF (axis_taxonomy.md §2.14): empirically -13.28%
+    # TFLOPS on MI355X (session R9 t_r9_c2). Block unless the candidate's
+    # axis_meta acknowledges the regression.
+    if env_diff.get("HSA_ENABLE_INTERRUPT") in (0, "0", False):
+        ack = (
+            env_diff.get("__axis_meta__", {}).get("acknowledge_regression")
+            if isinstance(env_diff.get("__axis_meta__"), dict)
+            else False
+        )
+        if not ack:
+            violations.append(
+                "WARN-HSA-INTERRUPT-OFF: HSA_ENABLE_INTERRUPT=0 measured as -13.28% "
+                "TFLOPS on MI355X (axis_taxonomy.md §2.12). Set "
+                "axis_meta.acknowledge_regression=true to override."
+            )
 
     inherited = set((baseline or {}).keys()) & set(env_diff.keys())
     if inherited:

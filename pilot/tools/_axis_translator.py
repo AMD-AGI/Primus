@@ -52,12 +52,38 @@ _TRAINER_OVERRIDE_AXES: dict[str, str] = {
     "turbo_deepep_num_cu": "turbo_deepep_num_cu",
     "moe_shared_expert_overlap": "moe_shared_expert_overlap",
     "moe_router_force_load_balancing": "moe_router_force_load_balancing",
+    "moe_router_dtype": "moe_router_dtype",
+    "turbo_sync_free_moe_stage": "turbo_sync_free_moe_stage",
     "attention_kernel": "attention_backend",
     # Recompute / memory (strongly_local).
     "recompute_granularity": "recompute_granularity",
     "recompute_method": "recompute_method",
     "recompute_num_layers": "recompute_num_layers",
     "optimizer_offload": "optimizer_offload",
+    # FP8 / precision (axis_taxonomy.md §2.6).
+    "fp8_recipe": "fp8_recipe",
+    "accumulate_allreduce_grads_in_fp32": "accumulate_allreduce_grads_in_fp32",
+    "attention_softmax_in_fp32": "attention_softmax_in_fp32",
+    "attention_dropout": "attention_dropout",
+    # Megatron fusion knobs (axis_taxonomy.md §2.7).
+    "apply_rope_fusion": "apply_rope_fusion",
+    "bias_activation_fusion": "bias_activation_fusion",
+    "bias_dropout_fusion": "bias_dropout_fusion",
+    "masked_softmax_fusion": "masked_softmax_fusion",
+    # CUDA graphs (axis_taxonomy.md §2.8 — stack-blocked today; still
+    # registered so DIAGNOSE can name them and constraint.check can mutex
+    # them out).
+    "enable_cuda_graph": "enable_cuda_graph",
+    "external_cuda_graph": "external_cuda_graph",
+    "cuda_graph_impl": "cuda_graph_impl",
+    "cuda_graph_scope": "cuda_graph_scope",
+    # PP-only knobs (axis_taxonomy.md §2.9; gated by constraint.check).
+    "defer_embedding_wgrad_compute": "defer_embedding_wgrad_compute",
+    "overlap_p2p_communication": "overlap_p2p_communication",
+    "overlap_param_gather_with_optimizer_step": "overlap_param_gather_with_optimizer_step",
+    # Host-launch / runtime tuning (axis_taxonomy.md §2.10).
+    "manual_gc": "manual_gc",
+    "manual_gc_interval": "manual_gc_interval",
 }
 
 _STRUCTURAL_AXES: dict[str, str] = {
@@ -82,6 +108,22 @@ _ENV_AXES: dict[str, str] = {
     "RCCL_MSCCL_ENABLE": "RCCL_MSCCL_ENABLE",
     "PYTORCH_HIP_ALLOC_CONF": "PYTORCH_HIP_ALLOC_CONF",
     "PYTORCH_CUDA_ALLOC_CONF": "PYTORCH_CUDA_ALLOC_CONF",
+    # Host-launch / runtime tuning (axis_taxonomy.md §2.10).
+    "OMP_NUM_THREADS": "OMP_NUM_THREADS",
+    "GPU_MAX_HW_QUEUES": "GPU_MAX_HW_QUEUES",
+    "MIOPEN_FIND_MODE": "MIOPEN_FIND_MODE",
+    # RCCL extras (axis_taxonomy.md §2.11).
+    "RCCL_PROTO": "RCCL_PROTO",
+    "RCCL_ALGO": "RCCL_ALGO",
+    "RCCL_NTHREADS": "RCCL_NTHREADS",
+    "TORCH_NCCL_HIGH_PRIORITY": "TORCH_NCCL_HIGH_PRIORITY",
+    # ROCm / HSA (axis_taxonomy.md §2.12; HSA_ENABLE_INTERRUPT carries a
+    # DANGER note — engine must NEVER emit value=0 unless explicitly
+    # acknowledged).
+    "HSA_NO_SCRATCH_RECLAIM": "HSA_NO_SCRATCH_RECLAIM",
+    "HSA_ENABLE_INTERRUPT": "HSA_ENABLE_INTERRUPT",
+    # Profile-blocker (axis_taxonomy.md §2.14 MUTEX-PROFILE-HIPBLASLT).
+    "PRIMUS_HIPBLASLT_TUNING": "PRIMUS_HIPBLASLT_TUNING",
 }
 
 
@@ -127,11 +169,7 @@ def translate(axis: str, value: Any) -> AxisAction | None:
 
 
 def is_known(axis: str) -> bool:
-    return (
-        axis in _TRAINER_OVERRIDE_AXES
-        or axis in _STRUCTURAL_AXES
-        or axis in _ENV_AXES
-    )
+    return axis in _TRAINER_OVERRIDE_AXES or axis in _STRUCTURAL_AXES or axis in _ENV_AXES
 
 
 def channel_of(axis: str) -> Channel | None:

@@ -16,7 +16,6 @@ from __future__ import annotations
 from pilot.tools import _axis_translator as axt
 from pilot.tools import diagnose as diag
 
-
 # ---------------------------------------------------------------------------
 # Channel selection
 # ---------------------------------------------------------------------------
@@ -122,3 +121,98 @@ def test_diagnose_module_imports() -> None:
     """Sanity: diagnose import does not crash, so the engine -> translator
     contract above can actually be exercised at runtime."""
     assert hasattr(diag, "run")
+
+
+# ---------------------------------------------------------------------------
+# Catalog coverage for axes added after session 20260513T024603Z
+# (skills/workflow/axis_taxonomy.md §§2.6-2.13). These are the axes that
+# moved the champion in the first runnable session — they MUST be in the
+# catalog so REPLAN doesn't depend on orchestrator hand-injection.
+# ---------------------------------------------------------------------------
+
+
+def test_session_winning_axes_are_in_catalog() -> None:
+    """The four axes that promoted a champion in session 20260513T024603Z
+    must all be translatable. See IMPL_VS_DESIGN.md §2."""
+    winners = {
+        "turbo_deepep_num_cu": ("trainer_override", "turbo_deepep_num_cu"),
+        "fp8_recipe": ("trainer_override", "fp8_recipe"),
+        "OMP_NUM_THREADS": ("env", "OMP_NUM_THREADS"),
+        "apply_rope_fusion": ("trainer_override", "apply_rope_fusion"),
+    }
+    for axis, (channel, key) in winners.items():
+        action = axt.translate(
+            axis, "delayed" if axis == "fp8_recipe" else 4 if axis == "OMP_NUM_THREADS" else True
+        )
+        assert action is not None, f"session winner axis missing from catalog: {axis}"
+        assert action.channel == channel, f"{axis} on wrong channel: {action.channel}"
+        assert action.key == key, f"{axis} key mismatch: {action.key}"
+
+
+def test_fp8_recipe_renders_string() -> None:
+    a = axt.translate("fp8_recipe", "delayed")
+    assert a is not None and a.channel == "trainer_override"
+    assert a.rendered_value == "delayed"
+
+
+def test_omp_num_threads_renders_int_as_string_passthrough() -> None:
+    a = axt.translate("OMP_NUM_THREADS", 4)
+    assert a is not None and a.channel == "env"
+    assert a.rendered_value == "4"
+
+
+def test_megatron_fusion_axes_are_trainer_override() -> None:
+    for axis in (
+        "apply_rope_fusion",
+        "bias_activation_fusion",
+        "bias_dropout_fusion",
+        "masked_softmax_fusion",
+    ):
+        a = axt.translate(axis, True)
+        assert a is not None and a.channel == "trainer_override"
+        assert a.key == axis
+
+
+def test_pp_only_axes_translate_but_constraint_check_will_gate_them() -> None:
+    """defer_embedding_wgrad_compute / overlap_p2p_communication are valid
+    trainer overrides but require pp>=2 (axis_taxonomy.md §2.9). The
+    translator returns them; constraint.check rejects when pp<2."""
+    for axis in (
+        "defer_embedding_wgrad_compute",
+        "overlap_p2p_communication",
+        "overlap_param_gather_with_optimizer_step",
+    ):
+        a = axt.translate(axis, True)
+        assert a is not None and a.channel == "trainer_override"
+
+
+def test_cuda_graph_family_in_catalog_for_diagnose_visibility() -> None:
+    """CUDA graphs are stack-blocked on MI355X (axis_taxonomy.md §2.8) but
+    the translator still maps them so DIAGNOSE can name the axis and
+    REPLAN can attach axis_meta.known_blocker."""
+    for axis in ("enable_cuda_graph", "external_cuda_graph", "cuda_graph_impl", "cuda_graph_scope"):
+        a = axt.translate(axis, "local" if axis == "cuda_graph_impl" else True)
+        assert a is not None and a.channel == "trainer_override"
+
+
+def test_rccl_extras_and_hsa_in_env_channel() -> None:
+    for axis in (
+        "RCCL_PROTO",
+        "RCCL_ALGO",
+        "RCCL_NTHREADS",
+        "TORCH_NCCL_HIGH_PRIORITY",
+        "HSA_NO_SCRATCH_RECLAIM",
+        "HSA_ENABLE_INTERRUPT",
+        "GPU_MAX_HW_QUEUES",
+        "MIOPEN_FIND_MODE",
+        "PRIMUS_HIPBLASLT_TUNING",
+    ):
+        a = axt.translate(axis, "1")
+        assert a is not None and a.channel == "env"
+
+
+def test_moe_router_dtype_in_catalog() -> None:
+    """moe_router_dtype is registered (axis_taxonomy.md §2.13) so
+    constraint.check can enforce the DeepEP fp32 mutex."""
+    a = axt.translate("moe_router_dtype", "fp32")
+    assert a is not None and a.channel == "trainer_override"

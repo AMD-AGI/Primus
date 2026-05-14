@@ -20,7 +20,6 @@ import pytest
 
 from pilot.tools import plan_graph as pg
 
-
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
@@ -47,7 +46,10 @@ def test_add_node_requires_known_parent() -> None:
     g = pg.new(session_id="s1", root_id="baseline")
     with pytest.raises(pg.PlanGraphError):
         pg.add_node(
-            g, plan_id="x", parent="nope", round_id=1,
+            g,
+            plan_id="x",
+            parent="nope",
+            round_id=1,
             derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
         )
 
@@ -55,7 +57,10 @@ def test_add_node_requires_known_parent() -> None:
 def test_add_node_then_record_completed_lands_in_frontier() -> None:
     g = pg.new(session_id="s1", root_id="baseline", root_tps=100.0)
     g = pg.add_node(
-        g, plan_id="r1c1", parent="baseline", round_id=1,
+        g,
+        plan_id="r1c1",
+        parent="baseline",
+        round_id=1,
         derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
         reason="probe mbs+1",
     )
@@ -73,8 +78,13 @@ def test_add_node_then_record_completed_lands_in_frontier() -> None:
 
 def test_record_dead_excluded_from_frontier_forever() -> None:
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.add_node(g, plan_id="r1c1", parent="baseline", round_id=1,
-                   derived_axis={"axis": "mbs", "value": 2, "type": "structural"})
+    g = pg.add_node(
+        g,
+        plan_id="r1c1",
+        parent="baseline",
+        round_id=1,
+        derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
+    )
     g = pg.record_result(g, plan_id="r1c1", status="dead", reason="OOM at step 47")
     assert g["nodes"]["r1c1"]["status"] == "dead"
     assert "r1c1" not in g["frontier"]
@@ -88,8 +98,13 @@ def test_record_dead_excluded_from_frontier_forever() -> None:
 
 def test_promote_demotes_old_champion_and_resets_counter() -> None:
     g = pg.new(session_id="s1", root_id="baseline", root_tps=100.0)
-    g = pg.add_node(g, plan_id="r1c1", parent="baseline", round_id=1,
-                   derived_axis={"axis": "mbs", "value": 2, "type": "structural"})
+    g = pg.add_node(
+        g,
+        plan_id="r1c1",
+        parent="baseline",
+        round_id=1,
+        derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
+    )
     g = pg.record_result(g, plan_id="r1c1", status="completed", tps=120.0)
     g = pg.bump_promotion_counter(g)
     assert g["metadata"]["rounds_since_promotion"] == 1
@@ -154,41 +169,49 @@ def test_frontier_is_tps_sorted_desc() -> None:
 
 def test_exhausted_exact_match_for_structural() -> None:
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.mark_exhausted(g, around="baseline", axis="micro_batch_size", value=14,
-                         axis_type="structural")
-    assert pg.is_exhausted(g, around="baseline", axis="micro_batch_size", value=14,
-                          axis_type="structural")
-    assert not pg.is_exhausted(g, around="baseline", axis="micro_batch_size", value=15,
-                              axis_type="structural")
+    g = pg.mark_exhausted(g, around="baseline", axis="micro_batch_size", value=14, axis_type="structural")
+    assert pg.is_exhausted(g, around="baseline", axis="micro_batch_size", value=14, axis_type="structural")
+    assert not pg.is_exhausted(
+        g, around="baseline", axis="micro_batch_size", value=15, axis_type="structural"
+    )
 
 
 def test_exhausted_radius_for_weakly_local_numeric() -> None:
     """Numeric weakly_local axes have a ±25% radius (per plan_graph.md §5)."""
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.mark_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=80,
-                         axis_type="weakly_local")
+    g = pg.mark_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=80, axis_type="weakly_local"
+    )
     # 80 ± 25% = [60, 100]
-    assert pg.is_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=80,
-                          axis_type="weakly_local")
-    assert pg.is_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=64,
-                          axis_type="weakly_local")
-    assert pg.is_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=96,
-                          axis_type="weakly_local")
-    assert not pg.is_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=120,
-                              axis_type="weakly_local")
-    assert not pg.is_exhausted(g, around="baseline", axis="turbo_deepep_num_cu", value=40,
-                              axis_type="weakly_local")
+    assert pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=80, axis_type="weakly_local"
+    )
+    assert pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=64, axis_type="weakly_local"
+    )
+    assert pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=96, axis_type="weakly_local"
+    )
+    assert not pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=120, axis_type="weakly_local"
+    )
+    assert not pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_num_cu", value=40, axis_type="weakly_local"
+    )
 
 
 def test_exhausted_exact_match_for_boolean_weakly_local() -> None:
     """Booleans/enums always use exact match, even when type=weakly_local."""
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.mark_exhausted(g, around="baseline", axis="turbo_deepep_use_comm_stream",
-                         value=True, axis_type="weakly_local")
-    assert pg.is_exhausted(g, around="baseline", axis="turbo_deepep_use_comm_stream",
-                          value=True, axis_type="weakly_local")
-    assert not pg.is_exhausted(g, around="baseline", axis="turbo_deepep_use_comm_stream",
-                              value=False, axis_type="weakly_local")
+    g = pg.mark_exhausted(
+        g, around="baseline", axis="turbo_deepep_use_comm_stream", value=True, axis_type="weakly_local"
+    )
+    assert pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_use_comm_stream", value=True, axis_type="weakly_local"
+    )
+    assert not pg.is_exhausted(
+        g, around="baseline", axis="turbo_deepep_use_comm_stream", value=False, axis_type="weakly_local"
+    )
 
 
 def test_mark_exhausted_merges_rows() -> None:
@@ -297,8 +320,13 @@ def test_should_explore_round_honors_custom_K() -> None:
 
 def test_novelty_bonus_applies_to_unseen_axis() -> None:
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.add_node(g, plan_id="a", parent="baseline", round_id=1,
-                   derived_axis={"axis": "mbs", "value": 2, "type": "structural"})
+    g = pg.add_node(
+        g,
+        plan_id="a",
+        parent="baseline",
+        round_id=1,
+        derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
+    )
     # baseline has a sibling that already covers `mbs`; a new mbs candidate gets no bonus.
     assert pg.novelty_bonus_for(g, parent="baseline", axis="mbs") == 1.0
     # But a fresh axis under baseline does get the bonus.
@@ -307,14 +335,19 @@ def test_novelty_bonus_applies_to_unseen_axis() -> None:
 
 def test_novelty_bonus_handles_composite_axes() -> None:
     g = pg.new(session_id="s1", root_id="baseline")
-    g = pg.add_node(g, plan_id="a", parent="baseline", round_id=1,
-                   derived_axis={
-                       "axis": None,
-                       "composite": [
-                           {"axis": "mbs", "value": 2, "type": "structural"},
-                           {"axis": "tp",  "value": 2, "type": "structural"},
-                       ],
-                   })
+    g = pg.add_node(
+        g,
+        plan_id="a",
+        parent="baseline",
+        round_id=1,
+        derived_axis={
+            "axis": None,
+            "composite": [
+                {"axis": "mbs", "value": 2, "type": "structural"},
+                {"axis": "tp", "value": 2, "type": "structural"},
+            ],
+        },
+    )
     # Both composite axes count as "seen" siblings.
     assert pg.novelty_bonus_for(g, parent="baseline", axis="mbs") == 1.0
     assert pg.novelty_bonus_for(g, parent="baseline", axis="tp") == 1.0
@@ -329,7 +362,7 @@ def test_stability_bonus_requires_two_championship_rounds() -> None:
     # Promote and demote a few rounds so baseline reclaims championship.
     g = pg.add_node(g, plan_id="x", parent="baseline", round_id=1, derived_axis=None)
     g = pg.record_result(g, plan_id="x", status="completed", tps=105.0)
-    g = pg.promote(g, plan_id="x", round_id=1)         # baseline shelved
+    g = pg.promote(g, plan_id="x", round_id=1)  # baseline shelved
     g = pg.promote(g, plan_id="baseline", round_id=2)  # baseline champion again
     # baseline.champion_at = [0, 2] → two rounds, bonus applies
     assert pg.stability_bonus_for(g, parent="baseline") == pg.DEFAULT_STABILITY_BONUS
@@ -358,8 +391,13 @@ def test_promotion_counter_resets_on_promote() -> None:
 
 def test_persist_and_load_round_trip(tmp_path: Path) -> None:
     g = pg.new(session_id="s1", root_id="baseline", root_tps=100.0)
-    g = pg.add_node(g, plan_id="r1c1", parent="baseline", round_id=1,
-                   derived_axis={"axis": "mbs", "value": 2, "type": "structural"})
+    g = pg.add_node(
+        g,
+        plan_id="r1c1",
+        parent="baseline",
+        round_id=1,
+        derived_axis={"axis": "mbs", "value": 2, "type": "structural"},
+    )
     g = pg.record_result(g, plan_id="r1c1", status="completed", tps=110.0)
     g = pg.mark_exhausted(g, around="baseline", axis="mbs", value=2, axis_type="structural")
     path = pg.persist(g, tmp_path / "plan_graph.yaml")
@@ -386,17 +424,22 @@ def test_settle_with_plan_graph_uses_rounds_since_promotion_for_stop() -> None:
     g["metadata"]["rounds_since_promotion"] = 1  # one stagnant round already
 
     history = [
-        {"id": "baseline", "measurement": {"status": "completed",
-                                            "median_iter_time_ms": 100.0,
-                                            "loss_finite": True}},
+        {
+            "id": "baseline",
+            "measurement": {"status": "completed", "median_iter_time_ms": 100.0, "loss_finite": True},
+        },
         # round 1: marginal gain, ≥ ε_stop but < ε_promote, no promotion
-        {"id": "r1", "measurement": {"status": "completed",
-                                      "median_iter_time_ms": 99.5,
-                                      "loss_finite": True},
-         "gain_vs_champion": 0.005},
+        {
+            "id": "r1",
+            "measurement": {"status": "completed", "median_iter_time_ms": 99.5, "loss_finite": True},
+            "gain_vs_champion": 0.005,
+        },
     ]
     result = tune_single.settle(
-        history, champion_id="baseline", plan_graph=g, round_id=1,
+        history,
+        champion_id="baseline",
+        plan_graph=g,
+        round_id=1,
     )
     # rounds_since_promotion is 1 going in; if we don't promote, the
     # post-round value is 2 → ≥ stagnation_rounds=2 → stop.
@@ -414,16 +457,21 @@ def test_settle_explore_round_does_not_stop_even_when_stagnant() -> None:
     g["metadata"]["rounds_since_promotion"] = 5  # well past stagnation
 
     history = [
-        {"id": "baseline", "measurement": {"status": "completed",
-                                            "median_iter_time_ms": 100.0,
-                                            "loss_finite": True}},
-        {"id": "explore_cand", "measurement": {"status": "completed",
-                                                "median_iter_time_ms": 101.0,
-                                                "loss_finite": True}},
+        {
+            "id": "baseline",
+            "measurement": {"status": "completed", "median_iter_time_ms": 100.0, "loss_finite": True},
+        },
+        {
+            "id": "explore_cand",
+            "measurement": {"status": "completed", "median_iter_time_ms": 101.0, "loss_finite": True},
+        },
     ]
     result = tune_single.settle(
-        history, champion_id="baseline", plan_graph=g,
-        round_id=6, is_explore_round=True,
+        history,
+        champion_id="baseline",
+        plan_graph=g,
+        round_id=6,
+        is_explore_round=True,
     )
     assert result["stop"] is False
     assert result["is_explore_round"] is True
@@ -446,12 +494,16 @@ def test_settle_emits_backtrack_signal_when_dead_rate_high() -> None:
     g = pg.shelve(g, plan_id="c")
 
     history = [
-        {"id": "baseline", "measurement": {"status": "completed",
-                                            "median_iter_time_ms": 100.0,
-                                            "loss_finite": True}},
+        {
+            "id": "baseline",
+            "measurement": {"status": "completed", "median_iter_time_ms": 100.0, "loss_finite": True},
+        },
     ]
     result = tune_single.settle(
-        history, champion_id="baseline", plan_graph=g, round_id=1,
+        history,
+        champion_id="baseline",
+        plan_graph=g,
+        round_id=1,
     )
     assert result["backtrack"]["fired"] is True
     assert result["backtrack"]["new_champion"] == "c"
@@ -466,23 +518,80 @@ def test_settle_legacy_path_without_plan_graph_still_works() -> None:
     from pilot.tools import tune_single
 
     history = [
-        {"id": "baseline", "measurement": {"status": "completed",
-                                            "median_iter_time_ms": 100.0,
-                                            "loss_finite": True}},
-        {"id": "c1", "measurement": {"status": "completed",
-                                      "median_iter_time_ms": 99.9,
-                                      "loss_finite": True},
-         "gain_vs_champion": 0.001},
-        {"id": "c2", "measurement": {"status": "completed",
-                                      "median_iter_time_ms": 99.8,
-                                      "loss_finite": True},
-         "gain_vs_champion": 0.001},
+        {
+            "id": "baseline",
+            "measurement": {"status": "completed", "median_iter_time_ms": 100.0, "loss_finite": True},
+        },
+        {
+            "id": "c1",
+            "measurement": {"status": "completed", "median_iter_time_ms": 99.9, "loss_finite": True},
+            "gain_vs_champion": 0.001,
+        },
+        {
+            "id": "c2",
+            "measurement": {"status": "completed", "median_iter_time_ms": 99.8, "loss_finite": True},
+            "gain_vs_champion": 0.001,
+        },
     ]
     result = tune_single.settle(history, champion_id="baseline")
     # Legacy semantics: last 2 entries both have gain < 0.005 → stop=True.
     assert result["stop"] is True
     assert result["backtrack"]["fired"] is False
     assert result["is_explore_round"] is False
+
+
+def test_bump_promotion_counter_invalid_blocked_does_not_increment() -> None:
+    """When a round was infrastructure-blocked (every candidate hit
+    INVALID_CONFIG / Megatron mutex), the round delivered no signal about
+    whether the search frontier is exhausted. It must not count toward
+    stagnation.
+
+    Reference: IMPL_VS_DESIGN.md §5; session 20260513T024603Z R2 false-stop
+    that the user had to override.
+    """
+    g = pg.new(session_id="s1", root_id="baseline", root_tps=100.0)
+    g = pg.bump_promotion_counter(g, invalid_blocked=True)
+    assert g["metadata"]["rounds_since_promotion"] == 0
+    assert g["metadata"]["invalid_blocked_rounds_total"] == 1
+    g = pg.bump_promotion_counter(g)
+    assert g["metadata"]["rounds_since_promotion"] == 1
+    assert g["metadata"]["invalid_blocked_rounds_total"] == 1
+
+
+def test_settle_invalid_blocked_round_does_not_trigger_stagnation_stop() -> None:
+    """End-to-end: an INVALID_CONFIG-blocked round followed by a normal
+    no-promote round must NOT stop the loop, even though the no-promote
+    counter alone would (stagnation_rounds=2). The blocked round is
+    discounted, leaving rounds_since_promotion at 1."""
+    from pilot.tools import tune_single
+
+    g = pg.new(session_id="s1", root_id="baseline", root_tps=100.0)
+    # R1: every candidate INVALID_CONFIG → invalid_blocked
+    g = pg.bump_promotion_counter(g, invalid_blocked=True)
+    history = [
+        {
+            "id": "baseline",
+            "measurement": {"status": "completed", "median_iter_time_ms": 100.0, "loss_finite": True},
+        },
+        # R2: a normal no-promote round (gain below epsilon_promote)
+        {
+            "id": "c1",
+            "measurement": {"status": "completed", "median_iter_time_ms": 99.9, "loss_finite": True},
+        },
+    ]
+    result = tune_single.settle(
+        history,
+        champion_id="baseline",
+        plan_graph=g,
+        round_id=2,
+        stagnation_rounds=2,
+    )
+    assert result["promoted"] is False
+    # Without the discount, rsp would have been bumped to 2 → stop=True.
+    # With discount, rsp stays at 1 (only the post-round increment counts).
+    assert (
+        result["stop"] is False
+    ), "stop fired even though one of the prior 2 rounds was infrastructure-blocked"
 
 
 def test_operations_are_pure() -> None:

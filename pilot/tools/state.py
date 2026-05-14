@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 _PILOT_ROOT: Path = Path(__file__).resolve().parent.parent
 _DEFAULT_KEEP = [
     "session_id",
@@ -95,10 +94,7 @@ def _round_id(tuning_state: dict[str, Any]) -> int:
 
 
 def _validate_minimal_state(tuning_state: dict[str, Any]) -> None:
-    missing = [
-        k for k in ("session_id", "current_stage", "stage_history")
-        if k not in tuning_state
-    ]
+    missing = [k for k in ("session_id", "current_stage", "stage_history") if k not in tuning_state]
     if missing:
         raise _StateError("USAGE", f"tuning_state missing required fields: {missing}")
     if not isinstance(tuning_state["stage_history"], list):
@@ -134,6 +130,55 @@ def trim(tuning_state: dict, *, keep: list[str]) -> dict:
     if not keep:
         raise _StateError("USAGE", "trim keep list cannot be empty")
     return {k: deepcopy(tuning_state[k]) for k in keep if k in tuning_state}
+
+
+def update_pointers(
+    session: str,
+    *,
+    fields: dict[str, Any] | None = None,
+    append_history: dict[str, Any] | None = None,
+    root: str = "state",
+) -> str:
+    """Granular write tool for the Orchestrator's per-round bookkeeping.
+
+    Replaces the read-yaml→mutate-dict-in-python→checkpoint pattern that
+    every round of session 20260513T024603Z hand-rolled in inline Python
+    (see ``IMPL_VS_DESIGN.md §4``). Two operations:
+
+    - ``fields``: shallow merge into the top-level ``tuning_state`` mapping.
+      Use for pointer-class fields the Orchestrator owns: ``current_stage``,
+      ``round_id``, ``champion_id``, ``budget_used``, ``last_decision_summary``,
+      ``current_plan_ref``, ``candidate_pool_ref``, ``plan_graph_ref``.
+    - ``append_history``: append one entry to ``stage_history`` (a YAML list).
+      The entry is added verbatim; the caller is responsible for shape
+      (``{stage, status, headline}`` per orchestration.md §3 step 2).
+
+    Both arguments are optional; the call still rewrites the file (and
+    a per-round checkpoint) so the ``checkpointed_at`` timestamp moves
+    forward — matching the state-hygiene ritual.
+
+    Returns the per-round checkpoint path (same shape as ``checkpoint``).
+
+    The session_id argument is used to locate the file. The ``root`` is
+    the same default as ``checkpoint``.
+    """
+    root_path = _resolve_pilot_path(root) / session
+    current_path = root_path / "tuning_state.yaml"
+    if not current_path.exists():
+        raise _StateError(
+            "USAGE",
+            f"tuning_state.yaml not found for session {session!r} at {current_path}",
+        )
+    state_doc = _load_data(current_path)
+    if fields:
+        for k, v in fields.items():
+            state_doc[k] = deepcopy(v)
+    if append_history is not None:
+        history = state_doc.setdefault("stage_history", [])
+        if not isinstance(history, list):
+            raise _StateError("USAGE", "stage_history must be a list")
+        history.append(deepcopy(append_history))
+    return checkpoint(state_doc, root=str(root_path))
 
 
 def handoff(session_id: str, *, reason: str, next_action_hint: str) -> str:
@@ -184,13 +229,25 @@ def _cli() -> int:
 
     p_trim = sub.add_parser("trim")
     p_trim.add_argument("--input", "-i", default="-", help="YAML/JSON state file, or '-' for stdin.")
-    p_trim.add_argument("--keep", action="append", default=[],
-                        help="Field to keep. Can be repeated or comma-separated.")
+    p_trim.add_argument(
+        "--keep", action="append", default=[], help="Field to keep. Can be repeated or comma-separated."
+    )
 
     p_handoff = sub.add_parser("handoff")
     p_handoff.add_argument("--session-id", required=True)
     p_handoff.add_argument("--reason", required=True)
     p_handoff.add_argument("--next-action-hint", required=True)
+
+    p_update = sub.add_parser(
+        "update_pointers",
+        help="Merge pointer-class fields and/or append a stage_history entry.",
+    )
+    p_update.add_argument("--session", required=True, help="Session id (directory name under <root>/).")
+    p_update.add_argument("--root", default="state")
+    p_update.add_argument(
+        "--fields", default=None, help="JSON object of pointer fields to merge (top-level shallow)."
+    )
+    p_update.add_argument("--append-history", default=None, help="JSON object to append to stage_history.")
 
     args = p.parse_args()
     try:
@@ -213,8 +270,26 @@ def _cli() -> int:
             )
             _emit({"stage": "STATE", "status": "success", "path": path})
             return 0
+        if args.cmd == "update_pointers":
+            fields = json.loads(args.fields) if args.fields else None
+            history_entry = json.loads(args.append_history) if args.append_history else None
+            if fields is not None and not isinstance(fields, dict):
+                raise _StateError("USAGE", "--fields must be a JSON object")
+            if history_entry is not None and not isinstance(history_entry, dict):
+                raise _StateError("USAGE", "--append-history must be a JSON object")
+            path = update_pointers(
+                args.session,
+                fields=fields,
+                append_history=history_entry,
+                root=args.root,
+            )
+            _emit({"stage": "STATE", "status": "success", "path": path})
+            return 0
     except _StateError as exc:
         _emit(_failure(exc.kind, str(exc)))
+        return 2
+    except json.JSONDecodeError as exc:
+        _emit(_failure("USAGE", f"invalid JSON argument: {exc}"))
         return 2
 
     return 2

@@ -43,7 +43,6 @@ from typing import Any
 
 from pilot.tools._schema import validate as _validate_schema
 
-
 # ---------------------------------------------------------------------------
 # Path anchoring (mirror the rest of the toolset)
 # ---------------------------------------------------------------------------
@@ -89,6 +88,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 def _atomic_write_yaml(path: Path, data: dict[str, Any], *, schema_name: str | None = None) -> None:
     import yaml
+
     if schema_name is not None:
         _validate_schema(data, schema_name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,9 @@ def _git_rev(repo_root: Path) -> str | None:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=str(repo_root),
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
         if out.returncode == 0:
             return out.stdout.strip()
@@ -177,12 +179,12 @@ def _summarize_preflight(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": status,
         "summary": {
-            "cluster_class":         profile.get("cluster_class"),
-            "gpus_per_node":         profile.get("gpus_per_node"),
-            "nnodes":                profile.get("nodes_total"),
-            "rccl_ar_256mb_gbs":     ar_256,
+            "cluster_class": profile.get("cluster_class"),
+            "gpus_per_node": profile.get("gpus_per_node"),
+            "nnodes": profile.get("nodes_total"),
+            "rccl_ar_256mb_gbs": ar_256,
             "peak_pct_of_spec_bf16": peak_pct,
-            "slow_nodes":            list(slow_nodes),
+            "slow_nodes": list(slow_nodes),
         },
         "warnings": warnings,
     }
@@ -216,16 +218,14 @@ def _summarize_smoke(handle: dict[str, Any], snapshot: dict[str, Any] | None) ->
         iters_done = prog.get("current_iter")
         iters_target = prog.get("total_iters")
         loss_finite = metrics.get("loss_finite")
-        for key, dest in (("iter_time_ms", "median_iter_time_ms"),
-                          ("tflops",       "median_tflops")):
+        for key, dest in (("iter_time_ms", "median_iter_time_ms"), ("tflops", "median_tflops")):
             vals = [v for v in (hist.get(key) or []) if v is not None]
             if vals:
                 if dest == "median_iter_time_ms":
                     median_iter_time_ms = round(statistics.median(vals), 2)
                 else:
                     median_tflops = round(statistics.median(vals), 2)
-        symptoms = {k: bool(v) for k, v in (snapshot.get("symptoms") or {}).items()
-                    if isinstance(v, bool)}
+        symptoms = {k: bool(v) for k, v in (snapshot.get("symptoms") or {}).items() if isinstance(v, bool)}
 
     warnings: list[str] = []
     if handle_status in ("launching", "running"):
@@ -240,8 +240,9 @@ def _summarize_smoke(handle: dict[str, Any], snapshot: dict[str, Any] | None) ->
         if loss_finite is False:
             status = "fail"
             warnings.append("loss is NaN or Inf")
-        elif any(symptoms.get(k, False) for k in
-                 ("oom_detected", "nccl_error", "cuda_error", "python_error")):
+        elif any(
+            symptoms.get(k, False) for k in ("oom_detected", "nccl_error", "cuda_error", "python_error")
+        ):
             status = "fail"
             warnings.append(f"hard symptom in evidence: {[k for k,v in symptoms.items() if v]}")
         elif iters_done is None or iters_target is None:
@@ -254,18 +255,18 @@ def _summarize_smoke(handle: dict[str, Any], snapshot: dict[str, Any] | None) ->
         warnings.append(f"unexpected handle.status={handle_status}")
 
     return {
-        "status":       status,
-        "run_id":       rid,
-        "handle_ref":   "",  # filled by caller (knows the file path)
+        "status": status,
+        "run_id": rid,
+        "handle_ref": "",  # filled by caller (knows the file path)
         "snapshot_ref": snapshot_ref,
         "summary": {
-            "iters_done":          iters_done,
-            "iters_target":        iters_target,
+            "iters_done": iters_done,
+            "iters_target": iters_target,
             "median_iter_time_ms": median_iter_time_ms,
-            "median_tflops":       median_tflops,
-            "loss_finite":         loss_finite,
-            "wallclock_s":         handle.get("wallclock_s"),
-            "exit_code":           exit_code,
+            "median_tflops": median_tflops,
+            "loss_finite": loss_finite,
+            "wallclock_s": handle.get("wallclock_s"),
+            "exit_code": exit_code,
         },
         "symptoms": symptoms,
         "warnings": warnings,
@@ -273,8 +274,22 @@ def _summarize_smoke(handle: dict[str, Any], snapshot: dict[str, Any] | None) ->
 
 
 def _score_measurement(measurement: dict[str, Any] | None) -> float | None:
+    """Translate a measurement dict into a single comparable scalar.
+
+    Supports the three fields ``settle.md`` §2 lists as primary metrics:
+      - ``median_iter_time_ms`` (lower is better → reciprocal as throughput proxy)
+      - ``median_tflops`` (higher is better; canonical for FP8 / mixed-precision runs)
+      - ``throughput_steps_per_s`` (higher is better)
+
+    Previously this function only knew the first and the third; ``median_tflops``
+    was silently None — which is what caused the auto-report's
+    ``improvement=None%`` headline through all 13 rounds of session
+    20260513T024603Z (see ``IMPL_VS_DESIGN.md §1``).
+    """
     if not measurement:
         return None
+    if measurement.get("median_tflops"):
+        return float(measurement["median_tflops"])
     if measurement.get("median_iter_time_ms"):
         return 1000.0 / float(measurement["median_iter_time_ms"])
     if measurement.get("throughput_steps_per_s"):
@@ -288,7 +303,16 @@ def _summarize_tuning_state(tuning_state: dict[str, Any], ref: str | None = None
     champion_id = tuning_state.get("champion_id")
     if champion is None and champion_id:
         champion = next((r for r in history if r.get("id") == champion_id), None)
+    # Baseline lookup: prefer an explicit BASELINE-stage entry, but fall back
+    # to common naming conventions (`baseline_r0`, `baseline`) when callers
+    # don't tag stages — observed in session 20260513T024603Z where settle
+    # records measurements under `id=baseline_r0` with no `stage` field.
     baseline = next((r for r in history if r.get("stage") == "BASELINE"), None)
+    if baseline is None:
+        baseline = next(
+            (r for r in history if isinstance(r.get("id"), str) and r["id"].startswith("baseline")),
+            None,
+        )
     champion_score = _score_measurement((champion or {}).get("measurement"))
     baseline_score = _score_measurement((baseline or {}).get("measurement"))
     improvement_pct = None
@@ -324,8 +348,6 @@ def _decide_verdict(stages: dict[str, Any]) -> dict[str, Any]:
     sm = stages.get("smoke")
 
     blockers: list[str] = []
-    next_action = "wait"
-    overall = "incomplete"
 
     if pf and pf.get("status") == "fail":
         blockers.append("PREFLIGHT failed; cluster baseline is unsafe.")
@@ -435,10 +457,7 @@ def build(
         handle = _load_yaml(handle_path)
         _validate_schema(handle, "run_handle")
 
-        snap_path = (
-            Path(smoke_snapshot).resolve() if smoke_snapshot
-            else _latest_snapshot(run_dir)
-        )
+        snap_path = Path(smoke_snapshot).resolve() if smoke_snapshot else _latest_snapshot(run_dir)
         snap = None
         if snap_path:
             snap = _load_yaml(snap_path)
@@ -525,9 +544,9 @@ def render_markdown_text(report: dict[str, Any]) -> str:
     verdict = report.get("verdict", {})
     overall = verdict.get("overall", "?")
     badge = {
-        "pass":       "PASS",
-        "warn":       "PASS (with warnings)",
-        "fail":       "FAIL",
+        "pass": "PASS",
+        "warn": "PASS (with warnings)",
+        "fail": "FAIL",
         "incomplete": "INCOMPLETE",
     }.get(overall, overall.upper())
 
@@ -552,8 +571,7 @@ def render_markdown_text(report: dict[str, Any]) -> str:
         p("")
         p(f"- **Session**: `{tuning.get('session_id')}`")
         p(f"- **Rounds**: `{tuning.get('rounds')}`")
-        p(f"- **Runs**: `{tuning.get('run_count')}`  "
-          f"(failed=`{tuning.get('failed_runs')}`)")
+        p(f"- **Runs**: `{tuning.get('run_count')}`  " f"(failed=`{tuning.get('failed_runs')}`)")
         p(f"- **Champion**: `{tuning.get('champion_id')}`")
         p(f"- **Improvement vs baseline**: `{tuning.get('improvement_pct')}%`")
         champion = tuning.get("champion") or {}
@@ -587,10 +605,11 @@ def render_markdown_text(report: dict[str, Any]) -> str:
     else:
         sm = pf.get("summary") or {}
         p(f"- **Status**: `{pf.get('status')}`")
-        p(f"- **Cluster class**: `{sm.get('cluster_class')}`  "
-          f"(nodes={sm.get('nnodes')}, gpus_per_node={sm.get('gpus_per_node')})")
-        p(f"- **AllReduce@256MB intra-node median**: "
-          f"`{sm.get('rccl_ar_256mb_gbs')} GB/s`")
+        p(
+            f"- **Cluster class**: `{sm.get('cluster_class')}`  "
+            f"(nodes={sm.get('nnodes')}, gpus_per_node={sm.get('gpus_per_node')})"
+        )
+        p(f"- **AllReduce@256MB intra-node median**: " f"`{sm.get('rccl_ar_256mb_gbs')} GB/s`")
         peak_pct = sm.get("peak_pct_of_spec_bf16")
         if peak_pct is not None:
             p(f"- **BF16 peak vs vendor spec**: `{peak_pct*100:.1f}%`")
@@ -613,8 +632,10 @@ def render_markdown_text(report: dict[str, Any]) -> str:
         p(f"- **Iterations**: `{s2.get('iters_done')}/{s2.get('iters_target')}`")
         p(f"- **Median iter time**: `{s2.get('median_iter_time_ms')} ms`")
         p(f"- **Median TFLOPS/GPU**: `{s2.get('median_tflops')}`")
-        p(f"- **Wallclock**: `{s2.get('wallclock_s')} s`  "
-          f"(exit_code=`{s2.get('exit_code')}`, loss_finite=`{s2.get('loss_finite')}`)")
+        p(
+            f"- **Wallclock**: `{s2.get('wallclock_s')} s`  "
+            f"(exit_code=`{s2.get('exit_code')}`, loss_finite=`{s2.get('loss_finite')}`)"
+        )
         sym = sm.get("symptoms") or {}
         flagged = [k for k, v in sym.items() if v]
         if flagged:
@@ -630,9 +651,11 @@ def render_markdown_text(report: dict[str, Any]) -> str:
         p("")
         p(f"## {label}")
         p("")
-        p("_skipped (stage not implemented yet)_"
-          if (report.get("stages") or {}).get(key) is None
-          else f"`{json.dumps((report['stages'])[key], indent=2)}`")
+        p(
+            "_skipped (stage not implemented yet)_"
+            if (report.get("stages") or {}).get(key) is None
+            else f"`{json.dumps((report['stages'])[key], indent=2)}`"
+        )
 
     # Artifacts
     p("")
@@ -674,26 +697,26 @@ def _build_subagent_result(report: dict[str, Any], yaml_path: Path, started_dt: 
         "status": "completed",
         "artifacts": [
             {"kind": "TuningReport", "ref": str(yaml_path)},
-            {"kind": "TuningReportMarkdown", "ref": str(yaml_path.with_suffix('.md'))},
+            {"kind": "TuningReportMarkdown", "ref": str(yaml_path.with_suffix(".md"))},
         ],
         "summary": {
             "headline": f"{verdict['overall']}: {verdict['headline']}",
             "key_metrics": {
-                "report_id":   report["report_id"],
-                "overall":     verdict["overall"],
+                "report_id": report["report_id"],
+                "overall": verdict["overall"],
                 "next_action": verdict["next_action"],
-                "blockers":    len(verdict.get("blockers") or []),
+                "blockers": len(verdict.get("blockers") or []),
             },
             "warnings": [],
         },
         "suggested_transition": {
             "to": {
-                "promote":         "DONE",
-                "retune":          "PROJECTION",
-                "rerun_smoke":     "SMOKE",
+                "promote": "DONE",
+                "retune": "PROJECTION",
+                "rerun_smoke": "SMOKE",
                 "rerun_preflight": "PREFLIGHT",
-                "diagnose":        "DIAGNOSE",
-                "wait":            "WAIT",
+                "diagnose": "DIAGNOSE",
+                "wait": "WAIT",
             }.get(verdict.get("next_action", "wait"), "WAIT"),
             "reason": verdict.get("headline", ""),
         },
@@ -702,11 +725,15 @@ def _build_subagent_result(report: dict[str, Any], yaml_path: Path, started_dt: 
             "wallclock_s": round(elapsed, 2),
             "tool_calls": 1,
         },
-        "failure": None if verdict["overall"] != "fail" else {
-            "kind": "REPORT_FAIL",
-            "message": verdict["headline"],
-            "escalate_to_orchestrator": True,
-        },
+        "failure": (
+            None
+            if verdict["overall"] != "fail"
+            else {
+                "kind": "REPORT_FAIL",
+                "message": verdict["headline"],
+                "escalate_to_orchestrator": True,
+            }
+        ),
     }
 
 
@@ -727,8 +754,7 @@ def _failure(kind: str, message: str) -> dict[str, Any]:
     return {
         "stage": "REPORT",
         "status": "failed",
-        "failure": {"kind": kind, "message": message,
-                    "escalate_to_orchestrator": True},
+        "failure": {"kind": kind, "message": message, "escalate_to_orchestrator": True},
     }
 
 
@@ -741,18 +767,30 @@ def _cli() -> int:
 
     p_b = sub.add_parser("build", help="Build a new report.")
     p_b.add_argument("--plan", required=True, help="Path to the Primus exp.yaml that was tuned.")
-    p_b.add_argument("--cluster-config", default=None,
-                     help="Optional: cluster.yaml path (recorded only; not validated here).")
-    p_b.add_argument("--cluster-profile", default=None,
-                     help="Path to a ClusterProfile yaml. Default: latest under state/cluster_profiles/.")
-    p_b.add_argument("--smoke-run-dir", default=None,
-                     help="Path to state/runs/<run_id>/ produced by `submit run`.")
-    p_b.add_argument("--smoke-run-id", default=None,
-                     help="Convenience: shorthand that resolves to state/runs/<id>/.")
-    p_b.add_argument("--smoke-snapshot", default=None,
-                     help="Optional: pin a specific snapshot YAML. Default: latest in <run_dir>/snapshots/.")
-    p_b.add_argument("--tuning-state", default=None,
-                     help="Optional: tuning_state.yaml from `pilot.tools.tune_single run`.")
+    p_b.add_argument(
+        "--cluster-config",
+        default=None,
+        help="Optional: cluster.yaml path (recorded only; not validated here).",
+    )
+    p_b.add_argument(
+        "--cluster-profile",
+        default=None,
+        help="Path to a ClusterProfile yaml. Default: latest under state/cluster_profiles/.",
+    )
+    p_b.add_argument(
+        "--smoke-run-dir", default=None, help="Path to state/runs/<run_id>/ produced by `submit run`."
+    )
+    p_b.add_argument(
+        "--smoke-run-id", default=None, help="Convenience: shorthand that resolves to state/runs/<id>/."
+    )
+    p_b.add_argument(
+        "--smoke-snapshot",
+        default=None,
+        help="Optional: pin a specific snapshot YAML. Default: latest in <run_dir>/snapshots/.",
+    )
+    p_b.add_argument(
+        "--tuning-state", default=None, help="Optional: tuning_state.yaml from `pilot.tools.tune_single run`."
+    )
     p_b.add_argument("--report-id", default=None)
     p_b.add_argument("--out-dir", default="state/reports")
     p_b.add_argument("--no-markdown", action="store_true", help="Skip markdown rendering.")
@@ -791,6 +829,7 @@ def _cli() -> int:
         return _EXIT_USAGE
     except Exception as exc:  # imported lazily so module always loads
         from pilot.tools._schema import SchemaValidationError
+
         if isinstance(exc, SchemaValidationError):
             _emit(_failure("TOOL_ERROR", f"schema validation failed: {exc}"))
             return _EXIT_USAGE

@@ -32,8 +32,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants (mirror of the Skill defaults — kept in lockstep with
@@ -180,9 +179,7 @@ def shelve(graph: dict[str, Any], *, plan_id: str, reason: str = "") -> dict[str
     g = copy.deepcopy(graph)
     node = _require_node(g, plan_id)
     if node["status"] != "completed":
-        raise PlanGraphError(
-            f"shelve requires status=completed, got {node['status']!r} for {plan_id}"
-        )
+        raise PlanGraphError(f"shelve requires status=completed, got {node['status']!r} for {plan_id}")
     node["status"] = "shelved"
     if reason:
         node["reason"] = reason
@@ -248,12 +245,14 @@ def mark_exhausted(
                 row["axis_type"] = axis_type
             g["updated_at"] = _now()
             return g
-    g["exhausted_neighborhoods"].append({
-        "around": around,
-        "axis": axis,
-        "axis_type": axis_type,
-        "tried": [value],
-    })
+    g["exhausted_neighborhoods"].append(
+        {
+            "around": around,
+            "axis": axis,
+            "axis_type": axis_type,
+            "tried": [value],
+        }
+    )
     g["updated_at"] = _now()
     return g
 
@@ -263,9 +262,34 @@ def mark_exhausted(
 # ---------------------------------------------------------------------------
 
 
-def bump_promotion_counter(graph: dict[str, Any]) -> dict[str, Any]:
+def bump_promotion_counter(
+    graph: dict[str, Any],
+    *,
+    invalid_blocked: bool = False,
+) -> dict[str, Any]:
+    """Increment ``rounds_since_promotion`` unless this round was infrastructure-blocked.
+
+    A round is **infrastructure-blocked** when every candidate it executed
+    failed ``constraint.check`` or returned an ``INVALID_CONFIG`` /
+    ``CANCELLED`` failure. In that case the round delivered no signal about
+    whether the search frontier is exhausted — it only tells us the
+    candidate generator hit a Megatron-side mutex (per
+    ``axis_taxonomy.md §2.14``). Counting it as a stagnation round is what
+    caused the spurious early-stop in session ``20260513T024603Z`` R2 (see
+    ``IMPL_VS_DESIGN.md §5``); the user had to override.
+
+    When ``invalid_blocked=True`` we record the round under
+    ``metadata.invalid_blocked_rounds_total`` for audit but do not bump
+    ``rounds_since_promotion``. Settle's stop-on-stagnation check then sees
+    the same counter as before the round, so the loop continues.
+    """
     g = copy.deepcopy(graph)
-    g["metadata"]["rounds_since_promotion"] = int(g["metadata"].get("rounds_since_promotion", 0)) + 1
+    if invalid_blocked:
+        g["metadata"]["invalid_blocked_rounds_total"] = (
+            int(g["metadata"].get("invalid_blocked_rounds_total", 0)) + 1
+        )
+    else:
+        g["metadata"]["rounds_since_promotion"] = int(g["metadata"].get("rounds_since_promotion", 0)) + 1
     g["updated_at"] = _now()
     return g
 
@@ -289,9 +313,7 @@ def reset_explore_counter(graph: dict[str, Any]) -> dict[str, Any]:
     explore-rounds counter (used by Settle's stop-deferral logic)."""
     g = copy.deepcopy(graph)
     g["metadata"]["rounds_since_explore"] = 0
-    g["metadata"]["explore_rounds_completed"] = int(
-        g["metadata"].get("explore_rounds_completed", 0)
-    ) + 1
+    g["metadata"]["explore_rounds_completed"] = int(g["metadata"].get("explore_rounds_completed", 0)) + 1
     g["updated_at"] = _now()
     return g
 
@@ -351,7 +373,10 @@ def is_exhausted(
         if atype == "weakly_local" and isinstance(value, (int, float)) and not isinstance(value, bool):
             for prior in tried:
                 if isinstance(prior, (int, float)) and not isinstance(prior, bool) and prior != 0:
-                    if abs(float(value) - float(prior)) / abs(float(prior)) <= _WEAKLY_LOCAL_NUMERIC_RADIUS_PCT:
+                    if (
+                        abs(float(value) - float(prior)) / abs(float(prior))
+                        <= _WEAKLY_LOCAL_NUMERIC_RADIUS_PCT
+                    ):
                         return True
             # boolean/enum weakly_local still falls through to exact match below
         if value in tried:
@@ -403,17 +428,13 @@ def pick_backtrack_target(graph: dict[str, Any]) -> str | None:
     return None
 
 
-def should_explore_round(
-    graph: dict[str, Any], *, explore_period_K: int | None = None
-) -> bool:
+def should_explore_round(graph: dict[str, Any], *, explore_period_K: int | None = None) -> bool:
     """True iff the next Re-Plan should be a Periodic Exploration round."""
     K = int(explore_period_K or graph["metadata"].get("explore_period_K", DEFAULT_EXPLORE_PERIOD_K))
     return int(graph["metadata"].get("rounds_since_explore", 0)) >= K
 
 
-def novelty_bonus_for(
-    graph: dict[str, Any], *, parent: str, axis: str
-) -> float:
+def novelty_bonus_for(graph: dict[str, Any], *, parent: str, axis: str) -> float:
     """Return DEFAULT_NOVELTY_BONUS if `axis` has not yet been used as
     ``derived_axis.axis`` under any direct child of ``parent``; else 1.0.
     """
@@ -448,6 +469,7 @@ def stability_bonus_for(graph: dict[str, Any], *, parent: str) -> float:
 def persist(graph: dict[str, Any], path: str | Path) -> str:
     """Atomically write the graph as YAML to ``path``."""
     import yaml  # local import: pilot core declares yaml as optional dep elsewhere
+
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -462,6 +484,7 @@ def persist(graph: dict[str, Any], path: str | Path) -> str:
 def load(path: str | Path) -> dict[str, Any]:
     """Read a graph back from disk."""
     import yaml
+
     return yaml.safe_load(Path(path).read_text())
 
 
@@ -553,19 +576,21 @@ def _cli() -> int:
             parsed_value: Any = json.loads(raw)
         except json.JSONDecodeError:
             parsed_value = raw
-        _emit({
-            "around": args.around,
-            "axis": args.axis,
-            "value": parsed_value,
-            "axis_type": args.axis_type,
-            "is_exhausted": is_exhausted(
-                load(args.path),
-                around=args.around,
-                axis=args.axis,
-                value=parsed_value,
-                axis_type=args.axis_type,
-            ),
-        })
+        _emit(
+            {
+                "around": args.around,
+                "axis": args.axis,
+                "value": parsed_value,
+                "axis_type": args.axis_type,
+                "is_exhausted": is_exhausted(
+                    load(args.path),
+                    around=args.around,
+                    axis=args.axis,
+                    value=parsed_value,
+                    axis_type=args.axis_type,
+                ),
+            }
+        )
         return 0
     return 2
 

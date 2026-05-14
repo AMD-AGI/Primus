@@ -12,8 +12,10 @@ Two CLIs:
     observe watch    --run-id <id> [--interval-s 5] [--max-snapshots N]
                                    [--until-terminal]
 
-`compare_loss` (CORRECTNESS gate) remains a stub for now; it requires a
-reference curve which only exists post-T0.
+`compare_loss` (CORRECTNESS gate) compares the trial's recent finite-loss
+window against a reference scalar / snapshot / saved reference curve. It
+is intentionally lightweight: a single-rank, log-derived health gate
+(`skills/workflow/correctness.md`).
 """
 
 from __future__ import annotations
@@ -30,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 from pilot.tools import submit as _submit
-
 
 # ---------------------------------------------------------------------------
 # Path helpers (mirror submit.py)
@@ -95,36 +96,46 @@ _RE_LR = _RE_KV_FLOAT("learning rate")
 _RE_GRAD_NORM = _RE_KV_FLOAT("grad norm")
 # Loss key is something like `lm loss` / `loss`. Megatron prints the dict keys
 # verbatim; pick whichever matches first.
-_RE_LOSS = re.compile(
-    r"(?:^|\|)\s*(?:lm\s+)?loss:\s*(?P<v>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|nan|inf|-inf)"
-)
+_RE_LOSS = re.compile(r"(?:^|\|)\s*(?:lm\s+)?loss:\s*(?P<v>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|nan|inf|-inf)")
 
 # Symptom regexes — case-insensitive.
 _SYMPTOM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # OOM (CUDA + ROCm flavors).
-    ("oom", re.compile(
-        r"(?i)\b(out of memory|cuda out of memory|hip out of memory|"
-        r"hipErrorOutOfMemory|cudaErrorMemoryAllocation)\b"
-    )),
+    (
+        "oom",
+        re.compile(
+            r"(?i)\b(out of memory|cuda out of memory|hip out of memory|"
+            r"hipErrorOutOfMemory|cudaErrorMemoryAllocation)\b"
+        ),
+    ),
     # NCCL / RCCL / collective watchdog timeouts.
-    ("nccl", re.compile(
-        r"(?i)\b(NCCL|RCCL)[A-Z_ ]*(error|failure|timeout|abort)|"
-        r"ProcessGroupNCCL.*Timeout|"
-        r"Watchdog caught collective operation timeout|"
-        r"NCCL_PROXY_TIMEOUT|"
-        r"NCCL WARN"
-    )),
+    (
+        "nccl",
+        re.compile(
+            r"(?i)\b(NCCL|RCCL)[A-Z_ ]*(error|failure|timeout|abort)|"
+            r"ProcessGroupNCCL.*Timeout|"
+            r"Watchdog caught collective operation timeout|"
+            r"NCCL_PROXY_TIMEOUT|"
+            r"NCCL WARN"
+        ),
+    ),
     # CUDA / HIP runtime errors (excluding the OOM ones we already captured).
-    ("cuda", re.compile(
-        r"(?i)\b(CUDA error|HIP error|hipError(?!OutOfMemory)|"
-        r"cudaError(?!MemoryAllocation)|illegal memory access|"
-        r"device-side assert)\b"
-    )),
+    (
+        "cuda",
+        re.compile(
+            r"(?i)\b(CUDA error|HIP error|hipError(?!OutOfMemory)|"
+            r"cudaError(?!MemoryAllocation)|illegal memory access|"
+            r"device-side assert)\b"
+        ),
+    ),
     # Python tracebacks / unhandled exceptions.
-    ("python_error", re.compile(
-        r"(?m)^(Traceback \(most recent call last\):|"
-        r"\s*RuntimeError:|\s*AssertionError:|\s*ValueError:)"
-    )),
+    (
+        "python_error",
+        re.compile(
+            r"(?m)^(Traceback \(most recent call last\):|"
+            r"\s*RuntimeError:|\s*AssertionError:|\s*ValueError:)"
+        ),
+    ),
 ]
 
 # Hang hints — these don't change `hang_suspected` directly (that's
@@ -279,19 +290,23 @@ def _parse_log(
         # Symptom matching (keep at most _EVIDENCE_CAP, most recent wins).
         for kind, pat in _SYMPTOM_PATTERNS:
             if pat.search(line):
-                evidence.append({
-                    "kind": kind,
-                    "line_no": offset,
-                    "line": line.strip()[:512],
-                })
+                evidence.append(
+                    {
+                        "kind": kind,
+                        "line_no": offset,
+                        "line": line.strip()[:512],
+                    }
+                )
                 break
         else:
             if _RE_HANG_HINT.search(line):
-                evidence.append({
-                    "kind": "hang_hint",
-                    "line_no": offset,
-                    "line": line.strip()[:512],
-                })
+                evidence.append(
+                    {
+                        "kind": "hang_hint",
+                        "line_no": offset,
+                        "line": line.strip()[:512],
+                    }
+                )
 
     result.evidence = evidence[-_EVIDENCE_CAP:]
     return result, meta
@@ -346,28 +361,37 @@ def _recommend(
 ) -> dict[str, str]:
     """Map status + symptoms to a next-step suggestion. Advisory only."""
     if any(symptoms_summary[k] for k in ("oom_detected", "nccl_error", "cuda_error")):
-        return {"next": "cancel_and_diagnose",
-                "reason": "hard symptom detected (OOM / collective / CUDA error)"}
+        return {
+            "next": "cancel_and_diagnose",
+            "reason": "hard symptom detected (OOM / collective / CUDA error)",
+        }
     if symptoms_summary["loss_nan_or_inf"]:
-        return {"next": "cancel_and_diagnose",
-                "reason": "loss is NaN or Inf"}
+        return {"next": "cancel_and_diagnose", "reason": "loss is NaN or Inf"}
     if symptoms_summary["hang_suspected"]:
-        return {"next": "cancel_and_diagnose",
-                "reason": f"no new iter line for >{hang_threshold_s:.0f}s while process alive"}
+        return {
+            "next": "cancel_and_diagnose",
+            "reason": f"no new iter line for >{hang_threshold_s:.0f}s while process alive",
+        }
     if handle_status == "completed":
         return {"next": "promote", "reason": "training reached terminal state with rc=0"}
     if handle_status == "failed":
-        return {"next": "escalate_diagnose",
-                "reason": "process exited with non-zero rc; check train.log + symptoms"}
+        return {
+            "next": "escalate_diagnose",
+            "reason": "process exited with non-zero rc; check train.log + symptoms",
+        }
     if handle_status == "killed":
         return {"next": "wait", "reason": "run was cancelled; nothing to observe"}
     if handle_status == "running" and process_alive:
         if progress_pct is not None and progress_pct >= 100.0:
             return {"next": "wait", "reason": "all iters logged; awaiting clean exit"}
-        return {"next": "continue",
-                "reason": f"training advancing ({progress_pct:.1f}%)"
+        return {
+            "next": "continue",
+            "reason": (
+                f"training advancing ({progress_pct:.1f}%)"
                 if progress_pct is not None
-                else "training initializing; first iter not yet logged"}
+                else "training initializing; first iter not yet logged"
+            ),
+        }
     return {"next": "wait", "reason": f"status={handle_status}; no action yet"}
 
 
@@ -414,17 +438,13 @@ def snapshot(
 
     # 4) Symptoms.
     kinds_seen: set[str] = {ev["kind"] for ev in parsed.evidence}
-    hang_suspected = bool(
-        process_alive
-        and silent_for_s is not None
-        and silent_for_s > hang_threshold_s
-    )
+    hang_suspected = bool(process_alive and silent_for_s is not None and silent_for_s > hang_threshold_s)
     symptoms_summary = {
-        "hang_suspected":  hang_suspected,
-        "oom_detected":    "oom" in kinds_seen,
-        "nccl_error":      "nccl" in kinds_seen,
-        "cuda_error":      "cuda" in kinds_seen,
-        "python_error":    "python_error" in kinds_seen,
+        "hang_suspected": hang_suspected,
+        "oom_detected": "oom" in kinds_seen,
+        "nccl_error": "nccl" in kinds_seen,
+        "cuda_error": "cuda" in kinds_seen,
+        "python_error": "python_error" in kinds_seen,
         "loss_nan_or_inf": parsed.saw_loss_nan_or_inf,
     }
 
@@ -443,12 +463,12 @@ def snapshot(
     # 7) Latest metrics.
     latest = iters[-1] if iters else None
     latest_metrics: dict[str, Any] = {
-        "loss":             latest.loss if latest else None,
-        "iter_time_ms":     latest.iter_time_ms if latest else None,
-        "tflops":           latest.tflops if latest else None,
+        "loss": latest.loss if latest else None,
+        "iter_time_ms": latest.iter_time_ms if latest else None,
+        "tflops": latest.tflops if latest else None,
         "consumed_samples": latest.consumed_samples if latest else None,
-        "learning_rate":    latest.learning_rate if latest else None,
-        "grad_norm":        latest.grad_norm if latest else None,
+        "learning_rate": latest.learning_rate if latest else None,
+        "grad_norm": latest.grad_norm if latest else None,
     }
     # Sanitize NaN/Inf for JSON.
     for k, v in list(latest_metrics.items()):
@@ -468,8 +488,8 @@ def snapshot(
         },
         "progress": {
             "current_iter": current_iter,
-            "total_iters":  total_iters,
-            "pct":          pct,
+            "total_iters": total_iters,
+            "pct": pct,
             "iters_per_min": _iters_per_min(iters),
             "last_iter_at": last_iter_at.isoformat(timespec="seconds") if last_iter_at else None,
             "silent_for_s": silent_for_s,
@@ -477,13 +497,10 @@ def snapshot(
         "metrics": {
             "latest": latest_metrics,
             "history": {
-                "iters":        hist_iters,
-                "loss":         [None if (v is None or not math.isfinite(v)) else v
-                                 for v in hist_loss],
-                "iter_time_ms": [None if (v is None or not math.isfinite(v)) else v
-                                 for v in hist_iter_time],
-                "tflops":       [None if (v is None or not math.isfinite(v)) else v
-                                 for v in hist_tflops],
+                "iters": hist_iters,
+                "loss": [None if (v is None or not math.isfinite(v)) else v for v in hist_loss],
+                "iter_time_ms": [None if (v is None or not math.isfinite(v)) else v for v in hist_iter_time],
+                "tflops": [None if (v is None or not math.isfinite(v)) else v for v in hist_tflops],
             },
             "loss_finite": not parsed.saw_loss_nan_or_inf,
         },
@@ -493,9 +510,9 @@ def snapshot(
             "evidence": parsed.evidence,
         },
         "log": {
-            "ref":          str(log_path),
-            "bytes":        meta["bytes"],
-            "lines":        meta["lines"],
+            "ref": str(log_path),
+            "bytes": meta["bytes"],
+            "lines": meta["lines"],
             "tailed_bytes": meta["tailed_bytes"],
         },
         "recommendation": _recommend(
@@ -511,6 +528,7 @@ def snapshot(
     # Schema-validate before any caller touches the result. Catches both
     # parser drift and recommendation enum bugs at the source.
     from pilot.tools._schema import validate
+
     validate(snap, "run_snapshot")
 
     if save:
@@ -633,6 +651,21 @@ def _latest_loss_from_snapshot(snap: dict[str, Any]) -> float | None:
     return vals[-1] if vals else None
 
 
+def _loss_window_from_snapshot(snap: dict[str, Any], window: int) -> list[float]:
+    """Return up to ``window`` most-recent finite losses from snapshot history.
+
+    Used by ``compare_loss`` to reduce per-iter noise — comparing a single
+    iter's loss against a reference is too brittle (one warmup spike or one
+    profiler-perturbed iter and the gate flips). Comparing trailing medians
+    is what the design's correctness.md (TODO) asks for.
+    """
+    hist = ((snap.get("metrics") or {}).get("history") or {}).get("loss") or []
+    vals = [float(v) for v in hist if isinstance(v, (int, float)) and math.isfinite(float(v))]
+    if window <= 0 or not vals:
+        return vals
+    return vals[-window:]
+
+
 def _reference_loss(reference: dict[str, Any]) -> float | None:
     for key in ("loss", "final_loss", "reference_loss"):
         value = reference.get(key)
@@ -645,28 +678,83 @@ def _reference_loss(reference: dict[str, Any]) -> float | None:
     return None
 
 
+def _reference_window(reference: dict[str, Any], window: int) -> list[float]:
+    """Multi-point reference for compare_loss.
+
+    Order of preference:
+    1. ``reference.window`` — explicit list of floats (canonical curve).
+    2. ``reference.snapshot.metrics.history.loss`` — derived from a saved
+       reference RunSnapshot.
+    3. ``reference.metrics.history.loss`` — when ``reference`` *is* a
+       snapshot.
+    4. ``[reference_loss(reference)]`` — singleton fallback (legacy).
+    """
+    win = reference.get("window")
+    if isinstance(win, list):
+        vals = [float(v) for v in win if isinstance(v, (int, float)) and math.isfinite(float(v))]
+        if vals:
+            return vals[-window:] if window > 0 else vals
+    if isinstance(reference.get("snapshot"), dict):
+        vals = _loss_window_from_snapshot(reference["snapshot"], window)
+        if vals:
+            return vals
+    if "metrics" in reference:
+        vals = _loss_window_from_snapshot(reference, window)
+        if vals:
+            return vals
+    scalar = _reference_loss(reference)
+    return [scalar] if scalar is not None else []
+
+
 def compare_loss(
     run_id: str,
     reference_curve: str,
     *,
     log_dir: str | Path = "state/runs",
     max_delta_pct: float = 25.0,
+    window: int = 5,
 ) -> dict[str, Any]:
-    """CORRECTNESS gate: short-window numeric health vs a reference loss.
+    """CORRECTNESS gate: trailing-window loss health vs a reference.
 
-    This first implementation is intentionally lightweight: it compares latest
-    finite loss against a reference scalar or snapshot-derived latest loss.
+    Compares the trial's median over its last ``window`` finite losses
+    against the reference's median over the same window length. This makes
+    the gate robust to single-iter spikes (warmup, profiler perturbation)
+    that the older single-point compare was sensitive to.
+
+    Pass criteria (all must hold):
+      - ``loss_finite=true`` on the snapshot.
+      - No hard symptom (oom / nccl / cuda / python error / loss nan/inf).
+      - At least one finite loss observed.
+      - If a reference is available, the relative delta of the trial median
+        vs the reference median is within ``max_delta_pct``.
+
+    The reference may be any of:
+      - a scalar (``reference.loss`` / ``final_loss`` / ``reference_loss``)
+      - a saved snapshot (``reference.snapshot``)
+      - an explicit window list (``reference.window``)
+      - a snapshot-shaped dict (with ``metrics.history.loss``).
     """
     snap_path = _latest_snapshot_path(run_id, log_dir)
     snap = _load_yaml_mapping(snap_path) if snap_path else snapshot(run_id, log_dir=log_dir, save=True)
     ref = _load_yaml_mapping(reference_curve)
-    loss = _latest_loss_from_snapshot(snap)
-    ref_loss = _reference_loss(ref)
+
+    trial_window = _loss_window_from_snapshot(snap, window)
+    ref_window = _reference_window(ref, window)
+    loss = _median(trial_window) if trial_window else _latest_loss_from_snapshot(snap)
+    ref_loss = _median(ref_window) if ref_window else _reference_loss(ref)
+
     loss_finite = bool((snap.get("metrics") or {}).get("loss_finite", True))
     symptoms = snap.get("symptoms") or {}
-    hard_symptom = any(bool(symptoms.get(k)) for k in (
-        "oom_detected", "nccl_error", "cuda_error", "python_error", "loss_nan_or_inf",
-    ))
+    hard_symptom = any(
+        bool(symptoms.get(k))
+        for k in (
+            "oom_detected",
+            "nccl_error",
+            "cuda_error",
+            "python_error",
+            "loss_nan_or_inf",
+        )
+    )
     delta_pct = None
     if loss is not None and ref_loss not in (None, 0):
         delta_pct = (loss - float(ref_loss)) / abs(float(ref_loss)) * 100.0
@@ -688,7 +776,19 @@ def compare_loss(
         "max_delta_pct": max_delta_pct,
         "loss_finite": loss_finite,
         "hard_symptom": hard_symptom,
+        "window": window,
+        "trial_window_size": len(trial_window),
+        "reference_window_size": len(ref_window),
     }
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +808,7 @@ def _failure(kind: str, message: str) -> dict[str, Any]:
     return {
         "stage": "OBSERVE",
         "status": "failed",
-        "failure": {"kind": kind, "message": message,
-                    "escalate_to_orchestrator": True},
+        "failure": {"kind": kind, "message": message, "escalate_to_orchestrator": True},
     }
 
 
@@ -725,28 +824,37 @@ def _cli() -> int:
     p_snap.add_argument("--log-dir", default="state/runs")
     p_snap.add_argument("--tail-bytes", type=int, default=_DEFAULT_TAIL_BYTES)
     p_snap.add_argument("--hang-threshold-s", type=float, default=_DEFAULT_HANG_THRESHOLD_S)
-    p_snap.add_argument("--save", action="store_true",
-                        help="Persist snapshot YAML under state/runs/<id>/snapshots/.")
+    p_snap.add_argument(
+        "--save", action="store_true", help="Persist snapshot YAML under state/runs/<id>/snapshots/."
+    )
 
     p_watch = sub.add_parser("watch", help="Poll snapshot in a loop.")
     p_watch.add_argument("--run-id", required=True)
     p_watch.add_argument("--log-dir", default="state/runs")
     p_watch.add_argument("--interval-s", type=float, default=5.0)
     p_watch.add_argument("--max-snapshots", type=int, default=None)
-    p_watch.add_argument("--no-until-terminal", action="store_true",
-                         help="Don't auto-stop when status becomes terminal.")
+    p_watch.add_argument(
+        "--no-until-terminal", action="store_true", help="Don't auto-stop when status becomes terminal."
+    )
     p_watch.add_argument("--tail-bytes", type=int, default=_DEFAULT_TAIL_BYTES)
     p_watch.add_argument("--hang-threshold-s", type=float, default=_DEFAULT_HANG_THRESHOLD_S)
-    p_watch.add_argument("--no-save", action="store_true",
-                         help="Don't persist per-tick YAML snapshots.")
-    p_watch.add_argument("--quiet", action="store_true",
-                         help="Suppress per-tick one-line summary.")
+    p_watch.add_argument("--no-save", action="store_true", help="Don't persist per-tick YAML snapshots.")
+    p_watch.add_argument("--quiet", action="store_true", help="Suppress per-tick one-line summary.")
 
-    p_cmp = sub.add_parser("compare_loss", help="(stub) CORRECTNESS gate.")
+    p_cmp = sub.add_parser(
+        "compare_loss",
+        help="CORRECTNESS_LITE gate: trailing-window loss vs reference.",
+    )
     p_cmp.add_argument("--run-id", required=True)
     p_cmp.add_argument("--reference", required=True)
     p_cmp.add_argument("--log-dir", default="state/runs")
     p_cmp.add_argument("--max-delta-pct", type=float, default=25.0)
+    p_cmp.add_argument(
+        "--window",
+        type=int,
+        default=5,
+        help="Trailing finite-loss window for both trial and reference medians.",
+    )
 
     args = p.parse_args()
     try:
@@ -778,12 +886,15 @@ def _cli() -> int:
             return _EXIT_OK
 
         if args.cmd == "compare_loss":
-            _emit(compare_loss(
-                args.run_id,
-                args.reference,
-                log_dir=args.log_dir,
-                max_delta_pct=args.max_delta_pct,
-            ))
+            _emit(
+                compare_loss(
+                    args.run_id,
+                    args.reference,
+                    log_dir=args.log_dir,
+                    max_delta_pct=args.max_delta_pct,
+                    window=args.window,
+                )
+            )
             return _EXIT_OK
 
     except _ObserveError as exc:
@@ -794,6 +905,7 @@ def _cli() -> int:
         return _EXIT_USAGE
     except Exception as exc:  # imported lazily so module always loads
         from pilot.tools._schema import SchemaValidationError
+
         if isinstance(exc, SchemaValidationError):
             _emit(_failure("TOOL_ERROR", f"schema validation failed: {exc}"))
             return _EXIT_USAGE

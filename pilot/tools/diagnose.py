@@ -196,8 +196,7 @@ def _build_evidence(trace: dict[str, Any]) -> dict[str, Any]:
         amax_self = sum(
             (k.get("self_ms") or 0.0)
             for k in fp8_kernels
-            if any(t in (k.get("name_short") or "").lower()
-                   for t in ("amax", "cast", "scale"))
+            if any(t in (k.get("name_short") or "").lower() for t in ("amax", "cast", "scale"))
         )
         all_self = sum((k.get("self_ms") or 0.0) for k in fp8_kernels) or 1.0
         fp8_amax_share = amax_self / all_self
@@ -228,8 +227,9 @@ def _build_evidence(trace: dict[str, Any]) -> dict[str, Any]:
             "pure_comm_pct": cb.get("pure_comm_pct", 0.0),
             "overlap_pct": cb.get("overlap_pct", 0.0),
             "bubble_pct": cb.get("bubble_pct", 0.0),
-            "longest_serialized_comm_ms": cb.get("longest_serialized_comm_ms",
-                                                  overlap_block.get("longest_serialized_comm_ms", 0.0)),
+            "longest_serialized_comm_ms": cb.get(
+                "longest_serialized_comm_ms", overlap_block.get("longest_serialized_comm_ms", 0.0)
+            ),
         },
         "phases": {
             "fwd_pct": (phases.get("fwd_ms") / iter_ms) if (iter_ms and phases.get("fwd_ms")) else None,
@@ -325,9 +325,21 @@ def _snapshot_iter_ms(snapshot: dict[str, Any] | None) -> float | None:
 
 
 _FAILURE_ROUTING = {
-    "OOM": ("MEMORY_BOUND", "MEMORY_BOUND", 0.95, "OPTIMIZE_LOOP.REPLAN", "oom; mark dead and try mem-relief axes"),
+    "OOM": (
+        "MEMORY_BOUND",
+        "MEMORY_BOUND",
+        0.95,
+        "OPTIMIZE_LOOP.REPLAN",
+        "oom; mark dead and try mem-relief axes",
+    ),
     "NCCL": ("COMM_BOUND", "COMM_BOUND", 0.85, "PREFLIGHT", "nccl error; re-probe env"),
-    "CUDA": ("COMPUTE_BOUND", "UNKNOWN", 1.00, "PREFLIGHT", "cuda error suggests hardware/driver issue; full re-collect"),
+    "CUDA": (
+        "COMPUTE_BOUND",
+        "UNKNOWN",
+        1.00,
+        "PREFLIGHT",
+        "cuda error suggests hardware/driver issue; full re-collect",
+    ),
     "PYTHON": ("COMPUTE_BOUND", "INVALID_CONFIG", 0.95, "OPTIMIZE_LOOP.REPLAN", "python_error; mark dead"),
     "NUMERICAL": ("COMPUTE_BOUND", "NUMERICAL", 1.00, "ABORT", "loss nan/inf; escalate to human"),
     "HUNG": ("COMM_BOUND", "HANG", 0.90, "OPTIMIZE_LOOP.REPLAN", "hung run; mark dead"),
@@ -367,14 +379,20 @@ def _classify_bottleneck(
     mem_pct = _snapshot_mem_pct(snapshot)
     if snapshot and (snapshot.get("symptoms") or {}).get("oom_detected"):
         evidence_lines.append("R1-OOM: snapshot.symptoms.oom_detected=true")
-        return {"bottleneck": "MEMORY_BOUND", "confidence": 0.95,
-                "rule_id": "R1-OOM", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "MEMORY_BOUND",
+            "confidence": 0.95,
+            "rule_id": "R1-OOM",
+            "evidence_lines": evidence_lines,
+        }
     if mem_pct is not None and mem_pct > th["MEM_TIGHT_PCT"]:
-        evidence_lines.append(
-            f"R1-MEM: mem_pct={mem_pct:.3f} > MEM_TIGHT_PCT={th['MEM_TIGHT_PCT']}"
-        )
-        return {"bottleneck": "MEMORY_BOUND", "confidence": 0.80,
-                "rule_id": "R1-MEM", "evidence_lines": evidence_lines}
+        evidence_lines.append(f"R1-MEM: mem_pct={mem_pct:.3f} > MEM_TIGHT_PCT={th['MEM_TIGHT_PCT']}")
+        return {
+            "bottleneck": "MEMORY_BOUND",
+            "confidence": 0.80,
+            "rule_id": "R1-MEM",
+            "evidence_lines": evidence_lines,
+        }
 
     pp = _plan_dim(plan, "pipeline_model_parallel_size", 1)
     bubble_pct = ev["cost_breakdown"]["bubble_pct"] or 0.0
@@ -388,14 +406,20 @@ def _classify_bottleneck(
         evidence_lines.append(
             f"R2-A: bubble_pct={bubble_pct:.3f} ≥ BUBBLE_HIGH={th['BUBBLE_HIGH']} (pp={pp})"
         )
-        return {"bottleneck": "PIPELINE_BOUND", "confidence": 0.85,
-                "rule_id": "R2-A", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "PIPELINE_BOUND",
+            "confidence": 0.85,
+            "rule_id": "R2-A",
+            "evidence_lines": evidence_lines,
+        }
     if pp > 1 and bubble_pct >= th["BUBBLE_MED"]:
-        evidence_lines.append(
-            f"R2-B: bubble_pct={bubble_pct:.3f} ≥ BUBBLE_MED={th['BUBBLE_MED']} (pp={pp})"
-        )
-        return {"bottleneck": "PIPELINE_BOUND", "confidence": 0.70,
-                "rule_id": "R2-B", "evidence_lines": evidence_lines}
+        evidence_lines.append(f"R2-B: bubble_pct={bubble_pct:.3f} ≥ BUBBLE_MED={th['BUBBLE_MED']} (pp={pp})")
+        return {
+            "bottleneck": "PIPELINE_BOUND",
+            "confidence": 0.70,
+            "rule_id": "R2-B",
+            "evidence_lines": evidence_lines,
+        }
 
     # ---- R3 Communication ---------------------------------------------
     A = comm_ratio >= th["COMM_HIGH"]
@@ -405,8 +429,12 @@ def _classify_bottleneck(
         evidence_lines.append(
             f"R3-A-strong: comm_ratio={comm_ratio:.3f} ≥ COMM_VERY_HIGH={th['COMM_VERY_HIGH']}"
         )
-        return {"bottleneck": "COMM_BOUND", "confidence": 0.90,
-                "rule_id": "R3-A-strong", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "COMM_BOUND",
+            "confidence": 0.90,
+            "rule_id": "R3-A-strong",
+            "evidence_lines": evidence_lines,
+        }
     if sum([A, B, C]) >= 2:
         flags = "".join(["A" if A else "", "B" if B else "", "C" if C else ""])
         evidence_lines.append(
@@ -414,41 +442,59 @@ def _classify_bottleneck(
             f"longest_serial_ms={serial_ms:.2f} ({serial_ms / iter_ms * 100:.1f}% of iter)"
         )
         bonus = 0.05 if (A and B and C) else 0.0
-        return {"bottleneck": "COMM_BOUND", "confidence": min(1.0, 0.80 + bonus),
-                "rule_id": f"R3-{flags}", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "COMM_BOUND",
+            "confidence": min(1.0, 0.80 + bonus),
+            "rule_id": f"R3-{flags}",
+            "evidence_lines": evidence_lines,
+        }
     if A:
         evidence_lines.append(
             f"R3-A-weak: comm_ratio={comm_ratio:.3f} ≥ COMM_HIGH={th['COMM_HIGH']} "
             "but only 1/3 sub-signals fired"
         )
-        return {"bottleneck": "COMM_BOUND", "confidence": 0.70,
-                "rule_id": "R3-A-weak", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "COMM_BOUND",
+            "confidence": 0.70,
+            "rule_id": "R3-A-weak",
+            "evidence_lines": evidence_lines,
+        }
 
     # ---- R4 Compute (default) -----------------------------------------
     compute_gemm_ratio = ev["ratios"].get("compute_gemm_ratio") or 0.0
     compute_ratio = ev["ratios"].get("compute_ratio") or 0.0
-    if (compute_gemm_ratio >= th["COMPUTE_GEMM_HIGH"]
-            and bubble_pct < th["BUBBLE_LOW"]):
+    if compute_gemm_ratio >= th["COMPUTE_GEMM_HIGH"] and bubble_pct < th["BUBBLE_LOW"]:
         evidence_lines.append(
             f"R4-A: compute_gemm_ratio={compute_gemm_ratio:.3f} ≥ COMPUTE_GEMM_HIGH={th['COMPUTE_GEMM_HIGH']} "
             f"AND bubble_pct={bubble_pct:.3f} < BUBBLE_LOW={th['BUBBLE_LOW']} (gemm-dominated steady iter)"
         )
-        return {"bottleneck": "COMPUTE_BOUND", "confidence": 0.85,
-                "rule_id": "R4-A", "evidence_lines": evidence_lines}
-    if (compute_ratio >= th["COMPUTE_HIGH"]
-            and comm_ratio < th["COMM_LOW"]):
+        return {
+            "bottleneck": "COMPUTE_BOUND",
+            "confidence": 0.85,
+            "rule_id": "R4-A",
+            "evidence_lines": evidence_lines,
+        }
+    if compute_ratio >= th["COMPUTE_HIGH"] and comm_ratio < th["COMM_LOW"]:
         evidence_lines.append(
             f"R4-B: compute_ratio={compute_ratio:.3f} ≥ COMPUTE_HIGH={th['COMPUTE_HIGH']} "
             f"AND comm_ratio={comm_ratio:.3f} < COMM_LOW={th['COMM_LOW']}"
         )
-        return {"bottleneck": "COMPUTE_BOUND", "confidence": 0.75,
-                "rule_id": "R4-B", "evidence_lines": evidence_lines}
+        return {
+            "bottleneck": "COMPUTE_BOUND",
+            "confidence": 0.75,
+            "rule_id": "R4-B",
+            "evidence_lines": evidence_lines,
+        }
     evidence_lines.append(
         f"R4-DEFAULT: no other rule fired "
         f"(comm={comm_ratio:.3f} bubble={bubble_pct:.3f} compute_gemm={compute_gemm_ratio:.3f})"
     )
-    return {"bottleneck": "COMPUTE_BOUND", "confidence": 0.55,
-            "rule_id": "R4-DEFAULT", "evidence_lines": evidence_lines}
+    return {
+        "bottleneck": "COMPUTE_BOUND",
+        "confidence": 0.55,
+        "rule_id": "R4-DEFAULT",
+        "evidence_lines": evidence_lines,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -483,184 +529,325 @@ def _build_axes(
 
     pp = _plan_dim(plan, "pipeline_model_parallel_size", 1)
     ep = _plan_dim(plan, "expert_model_parallel_size", 1)
-    tp = _plan_dim(plan, "tensor_model_parallel_size", 1)
+    _plan_dim(plan, "tensor_model_parallel_size", 1)
     mbs = _plan_dim(plan, "micro_batch_size", 1)
     overrides = _plan_overrides(plan)
 
     # ---- MoE EP comm sharing the compute stream (env_suspect + axis) ----
-    if (moe_ratio >= 0.05
-            and overlap_pct < th["OVERLAP_LOW"]
-            and streams_observed <= 2
-            and moe_shares):
-        axes.append({
-            "axis": "turbo_deepep_use_comm_stream",
-            "type": "weakly_local",
-            "candidates": [True],
-            "expected_gain_band_pct": [3, 8],
-            "rationale": (
-                f"MoE EP comm ({moe_ratio*100:.1f}% of iter) shares stream with compute_gemm; "
-                f"overlap_pct={overlap_pct:.3f} < OVERLAP_LOW={th['OVERLAP_LOW']} "
-                f"and only {streams_observed} GPU stream(s) observed"
-            ),
-        })
-        env_suspect.append({
-            "flag": "turbo_deepep_use_comm_stream",
-            "reason": "MoE EP comm rides the compute stream",
-            "hint": "set true and re-profile",
-        })
+    if moe_ratio >= 0.05 and overlap_pct < th["OVERLAP_LOW"] and streams_observed <= 2 and moe_shares:
+        axes.append(
+            {
+                "axis": "turbo_deepep_use_comm_stream",
+                "type": "weakly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [3, 8],
+                "rationale": (
+                    f"MoE EP comm ({moe_ratio*100:.1f}% of iter) shares stream with compute_gemm; "
+                    f"overlap_pct={overlap_pct:.3f} < OVERLAP_LOW={th['OVERLAP_LOW']} "
+                    f"and only {streams_observed} GPU stream(s) observed"
+                ),
+            }
+        )
+        env_suspect.append(
+            {
+                "flag": "turbo_deepep_use_comm_stream",
+                "reason": "MoE EP comm rides the compute stream",
+                "hint": "set true and re-profile",
+            }
+        )
 
     # ---- MoE EP CU allocation ----
     if moe_ratio >= 0.05:
-        axes.append({
-            "axis": "turbo_deepep_num_cu",
-            "type": "weakly_local",
-            "candidates": [64, 80, 96],
-            "expected_gain_band_pct": [1, 5],
-            "rationale": f"MoE EP dispatch is {moe_ratio*100:.1f}% of iter; tune CU allocation",
-        })
+        axes.append(
+            {
+                "axis": "turbo_deepep_num_cu",
+                "type": "weakly_local",
+                "candidates": [64, 80, 96],
+                "expected_gain_band_pct": [1, 5],
+                "rationale": f"MoE EP dispatch is {moe_ratio*100:.1f}% of iter; tune CU allocation",
+            }
+        )
 
     # ---- Grad-reduction overlap ----
     if coll_ratio >= 0.05 and overlap_pct < th["OVERLAP_LOW"]:
-        axes.append({
-            "axis": "overlap_grad_reduce",
-            "type": "weakly_local",
-            "candidates": [True],
-            "expected_gain_band_pct": [1, 4],
-            "rationale": (
-                f"comm_collective ratio {coll_ratio*100:.1f}% with overlap_pct={overlap_pct:.3f} "
-                "(grad-reduction not overlapped)"
-            ),
-        })
-        axes.append({
-            "axis": "overlap_param_gather",
-            "type": "weakly_local",
-            "candidates": [True],
-            "expected_gain_band_pct": [1, 3],
-            "rationale": "DP zero-1/zero-2 param gather can overlap with bwd",
-        })
+        axes.append(
+            {
+                "axis": "overlap_grad_reduce",
+                "type": "weakly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [1, 4],
+                "rationale": (
+                    f"comm_collective ratio {coll_ratio*100:.1f}% with overlap_pct={overlap_pct:.3f} "
+                    "(grad-reduction not overlapped)"
+                ),
+            }
+        )
+        axes.append(
+            {
+                "axis": "overlap_param_gather",
+                "type": "weakly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [1, 3],
+                "rationale": "DP zero-1/zero-2 param gather can overlap with bwd",
+            }
+        )
 
     # ---- FP8 amax/cast hot path ----
     if fp8_prep >= 0.03 and ev.get("fp8_amax_share", 0) >= 0.5:
-        axes.append({
-            "axis": "MOE_PERMUTE_FUSION",
-            "type": "strongly_local",
-            "candidates": [True],
-            "expected_gain_band_pct": [2, 6],
-            "rationale": (
-                f"FP8 prep is {fp8_prep*100:.1f}% of iter and "
-                f"{ev['fp8_amax_share']*100:.0f}% of fp8_prep is amax/cast/scale "
-                "(permute fusion can absorb these)"
-            ),
-        })
+        axes.append(
+            {
+                "axis": "MOE_PERMUTE_FUSION",
+                "type": "strongly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [2, 6],
+                "rationale": (
+                    f"FP8 prep is {fp8_prep*100:.1f}% of iter and "
+                    f"{ev['fp8_amax_share']*100:.0f}% of fp8_prep is amax/cast/scale "
+                    "(permute fusion can absorb these)"
+                ),
+            }
+        )
+
+    # ---- FP8 recipe (axis_taxonomy.md §2.6 — empirically dominant) ----
+    # Trigger when FP8 prep is non-trivial AND the trainer is on the default
+    # `tensorwise` recipe. The `delayed` recipe removes per-iter amax in the
+    # FP8 hot path; observed +24.85% on DeepSeek-V2-Lite (session R4). This is
+    # *the* highest-prior axis on FP8 stacks and must be emitted by the engine
+    # so REPLAN doesn't depend on orchestrator hand-injection.
+    fp8_recipe_now = overrides.get("fp8_recipe")
+    if fp8_prep >= 0.02 and fp8_recipe_now in (None, "", "tensorwise"):
+        axes.append(
+            {
+                "axis": "fp8_recipe",
+                "type": "strongly_local",
+                "candidates": ["delayed"],
+                "expected_gain_band_pct": [10, 25],
+                "rationale": (
+                    f"compute_fp8_prep_ratio={fp8_prep:.3f} on default `tensorwise` recipe; "
+                    "`delayed` removes per-iter amax (axis_taxonomy.md §2.6)"
+                ),
+            }
+        )
 
     # ---- Attention long-tail ----
     if attn >= 0.05 and ev.get("attention_long_tail"):
-        axes.append({
-            "axis": "attention_kernel",
-            "type": "weakly_local",
-            "candidates": ["flash", "sdpa"],
-            "expected_gain_band_pct": [1, 5],
-            "rationale": f"attention is {attn*100:.1f}% of iter and shows long-tail kernels (p99 > 1.5 × p50)",
-        })
+        axes.append(
+            {
+                "axis": "attention_kernel",
+                "type": "weakly_local",
+                "candidates": ["flash", "sdpa"],
+                "expected_gain_band_pct": [1, 5],
+                "rationale": f"attention is {attn*100:.1f}% of iter and shows long-tail kernels (p99 > 1.5 × p50)",
+            }
+        )
+
+    # ---- RoPE fusion (axis_taxonomy.md §2.7) ----
+    # Fuses the RoPE rotation into attention; observed +2.61% (session R9)
+    # whenever attention is non-trivial and rope_fusion is left off.
+    if attn >= 0.03 and overrides.get("apply_rope_fusion") in (None, False, "false", 0):
+        axes.append(
+            {
+                "axis": "apply_rope_fusion",
+                "type": "weakly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [1, 4],
+                "rationale": (
+                    f"attention is {attn*100:.1f}% of iter with apply_rope_fusion off; "
+                    "RoPE-into-attention fusion removes a kernel per layer"
+                ),
+            }
+        )
 
     # ---- Small-kernel storm (launch overhead) ----
-    if (other >= 0.05
-            and ev.get("compute_other_count", 0) > 10000
-            and ev.get("compute_other_avg_ms", 0) < 0.05):
-        axes.append({
-            "axis": "gradient_accumulation_fusion",
-            "type": "weakly_local",
-            "candidates": [True],
-            "expected_gain_band_pct": [1, 3],
-            "rationale": (
-                f"compute_other has {ev['compute_other_count']} kernels averaging "
-                f"{ev['compute_other_avg_ms']*1000:.1f} µs each (launch-overhead dominated)"
-            ),
-        })
+    if (
+        other >= 0.05
+        and ev.get("compute_other_count", 0) > 10000
+        and ev.get("compute_other_avg_ms", 0) < 0.05
+    ):
+        axes.append(
+            {
+                "axis": "gradient_accumulation_fusion",
+                "type": "weakly_local",
+                "candidates": [True],
+                "expected_gain_band_pct": [1, 3],
+                "rationale": (
+                    f"compute_other has {ev['compute_other_count']} kernels averaging "
+                    f"{ev['compute_other_avg_ms']*1000:.1f} µs each (launch-overhead dominated)"
+                ),
+            }
+        )
+        # Companion fusion knobs (axis_taxonomy.md §2.7); cheap to flip and
+        # they each shave a few launch-bound kernels.
+        for fuse_axis in ("masked_softmax_fusion", "bias_dropout_fusion"):
+            if overrides.get(fuse_axis) in (None, False, "false", 0):
+                axes.append(
+                    {
+                        "axis": fuse_axis,
+                        "type": "weakly_local",
+                        "candidates": [True],
+                        "expected_gain_band_pct": [0, 2],
+                        "rationale": ("small-kernel storm above; fusion removes a launch per block"),
+                    }
+                )
 
     # ---- Compute-bound: bigger MBS to amortize launch ----
-    if (gemm >= th["COMPUTE_GEMM_HIGH"]
-            and bubble_pct < th["BUBBLE_LOW"]
-            and comm < th["COMM_LOW"]):
+    if gemm >= th["COMPUTE_GEMM_HIGH"] and bubble_pct < th["BUBBLE_LOW"] and comm < th["COMM_LOW"]:
         if plan is None:
             skipped.append("micro_batch_size (structural; no plan provided)")
         else:
-            axes.append({
-                "axis": "micro_batch_size",
-                "type": "structural",
-                "candidates": [mbs + 2, mbs + 4],
-                "expected_gain_band_pct": [2, 6],
-                "rationale": (
-                    f"compute_gemm_ratio={gemm:.3f} dominant and bubble_pct={bubble_pct:.3f} "
-                    "tiny; bigger batch amortizes launch & fills tile shapes"
-                ),
-            })
+            axes.append(
+                {
+                    "axis": "micro_batch_size",
+                    "type": "structural",
+                    "candidates": [mbs + 2, mbs + 4],
+                    "expected_gain_band_pct": [2, 6],
+                    "rationale": (
+                        f"compute_gemm_ratio={gemm:.3f} dominant and bubble_pct={bubble_pct:.3f} "
+                        "tiny; bigger batch amortizes launch & fills tile shapes"
+                    ),
+                }
+            )
 
     # ---- EP-comm dominant (suggest reducing EP) ----
     if comm >= th["COMM_HIGH"] and gemm < 0.40:
         if plan is None:
             skipped.append("expert_model_parallel_size (structural; no plan provided)")
         elif ep > 1:
-            axes.append({
-                "axis": "expert_model_parallel_size",
-                "type": "structural",
-                "candidates": [max(1, ep // 2)],
-                "expected_gain_band_pct": [3, 10],
-                "rationale": (
-                    f"comm_ratio={comm:.3f} ≥ {th['COMM_HIGH']} and compute_gemm={gemm:.3f} < 0.40 "
-                    f"(EP={ep} comm-bound)"
-                ),
-            })
+            axes.append(
+                {
+                    "axis": "expert_model_parallel_size",
+                    "type": "structural",
+                    "candidates": [max(1, ep // 2)],
+                    "expected_gain_band_pct": [3, 10],
+                    "rationale": (
+                        f"comm_ratio={comm:.3f} ≥ {th['COMM_HIGH']} and compute_gemm={gemm:.3f} < 0.40 "
+                        f"(EP={ep} comm-bound)"
+                    ),
+                }
+            )
 
     # ---- VPP for PP bubble ----
     if pp > 1 and bubble_pct >= th["BUBBLE_HIGH"]:
         if plan is None:
             skipped.append("virtual_pipeline_model_parallel_size (structural; no plan provided)")
         else:
-            axes.append({
-                "axis": "virtual_pipeline_model_parallel_size",
-                "type": "structural",
-                "candidates": [2, 4],
-                "expected_gain_band_pct": [3, 8],
-                "rationale": f"bubble_pct={bubble_pct:.3f} with pp={pp}; VPP can split the bubble",
-            })
+            axes.append(
+                {
+                    "axis": "virtual_pipeline_model_parallel_size",
+                    "type": "structural",
+                    "candidates": [2, 4],
+                    "expected_gain_band_pct": [3, 8],
+                    "rationale": f"bubble_pct={bubble_pct:.3f} with pp={pp}; VPP can split the bubble",
+                }
+            )
 
     # ---- Memory pressure ----
     mem_pct = _snapshot_mem_pct(snapshot)
     if mem_pct is not None and mem_pct > th["MEM_TIGHT_PCT"]:
-        axes.append({
-            "axis": "recompute_granularity",
-            "type": "strongly_local",
-            "candidates": ["selective"],
-            "expected_gain_band_pct": [1, 5],
-            "rationale": f"mem_pct={mem_pct:.3f} > MEM_TIGHT_PCT={th['MEM_TIGHT_PCT']}",
-        })
+        axes.append(
+            {
+                "axis": "recompute_granularity",
+                "type": "strongly_local",
+                "candidates": ["selective"],
+                "expected_gain_band_pct": [1, 5],
+                "rationale": f"mem_pct={mem_pct:.3f} > MEM_TIGHT_PCT={th['MEM_TIGHT_PCT']}",
+            }
+        )
         if mem_pct > 0.95:
             if plan is None:
                 skipped.append("micro_batch_size (structural; no plan provided)")
             else:
-                axes.append({
-                    "axis": "micro_batch_size",
-                    "type": "structural",
-                    "candidates": [max(1, mbs - 1)],
-                    "expected_gain_band_pct": [0, 0],
-                    "rationale": f"mem_pct={mem_pct:.3f} very tight; reduce MBS to fit",
-                })
+                axes.append(
+                    {
+                        "axis": "micro_batch_size",
+                        "type": "structural",
+                        "candidates": [max(1, mbs - 1)],
+                        "expected_gain_band_pct": [0, 0],
+                        "rationale": f"mem_pct={mem_pct:.3f} very tight; reduce MBS to fit",
+                    }
+                )
 
     # ---- env_suspect (extra triggers beyond MoE shared-stream) ----
-    if coll_ratio >= 0.05 and not (overrides.get("RCCL_MSCCL_ENABLE")
-                                     or (plan or {}).get("env_diff", {}).get("RCCL_MSCCL_ENABLE")):
-        env_suspect.append({
-            "flag": "RCCL_MSCCL_ENABLE",
-            "reason": f"comm_collective is {coll_ratio*100:.1f}% of iter; algorithm pick can change collective shape",
-            "hint": "try true; algorithm pick can change collective shape",
-        })
+    env_diff = (plan or {}).get("env_diff", {}) or {}
+    if coll_ratio >= 0.05 and not (overrides.get("RCCL_MSCCL_ENABLE") or env_diff.get("RCCL_MSCCL_ENABLE")):
+        env_suspect.append(
+            {
+                "flag": "RCCL_MSCCL_ENABLE",
+                "reason": f"comm_collective is {coll_ratio*100:.1f}% of iter; algorithm pick can change collective shape",
+                "hint": "try true; algorithm pick can change collective shape",
+            }
+        )
+    # RCCL protocol/algorithm picks become candidates when collectives are a
+    # measurable share of iter (axis_taxonomy.md §2.11).
+    if coll_ratio >= 0.05 and not env_diff.get("RCCL_PROTO"):
+        env_suspect.append(
+            {
+                "flag": "RCCL_PROTO",
+                "reason": f"comm_collective is {coll_ratio*100:.1f}% of iter; protocol pick can shift latency floor",
+                "hint": "try LL128 first (Simple is the default fallback)",
+            }
+        )
     if mem_pct is not None and mem_pct >= 0.92:
-        env_suspect.append({
-            "flag": "PYTORCH_HIP_ALLOC_CONF",
-            "reason": "mem_pct ≥ 0.92",
-            "hint": "set `expandable_segments:True`",
-        })
+        env_suspect.append(
+            {
+                "flag": "PYTORCH_HIP_ALLOC_CONF",
+                "reason": "mem_pct ≥ 0.92",
+                "hint": "set `expandable_segments:True`",
+            }
+        )
+
+    # ---- Host-launch bubble env_suspects (axis_taxonomy.md §2.10) ----
+    # When the bubble is high relative to GPU work, the cause is usually
+    # CPU-side: OMP thread contention, GC pauses, or untuned HW queue depth.
+    # OMP_NUM_THREADS=4 was empirically +3.34% (session R7); manual_gc=true
+    # eliminates jitter from CPython's amortised collection.
+    if bubble_pct >= 0.20:
+        if not env_diff.get("OMP_NUM_THREADS"):
+            env_suspect.append(
+                {
+                    "flag": "OMP_NUM_THREADS",
+                    "reason": f"bubble_pct={bubble_pct:.3f} ≥ 0.20 (host-launch dominant)",
+                    "hint": "set 4 (PyTorch default oversubscribes EPYC threads)",
+                }
+            )
+        if overrides.get("manual_gc") in (None, False, "false", 0):
+            axes.append(
+                {
+                    "axis": "manual_gc",
+                    "type": "weakly_local",
+                    "candidates": [True],
+                    "expected_gain_band_pct": [0, 2],
+                    "rationale": (
+                        f"bubble_pct={bubble_pct:.3f} likely includes CPython GC pauses; "
+                        "manual_gc removes amortised-collection jitter"
+                    ),
+                }
+            )
+
+    # ---- CUDA graph family (axis_taxonomy.md §2.8 — stack-blocked) ----
+    # Engine still names the axes so REPLAN/ENV_SWEEP can register the
+    # known-blocker tag in axis_meta and downrank priority. This way the
+    # frontier surfaces "host-launch bubble exists, fix is upstream" as a
+    # signal instead of silently exhausting the search.
+    if bubble_pct >= 0.25 and overrides.get("cuda_graph_impl") is None:
+        axes.append(
+            {
+                "axis": "cuda_graph_impl",
+                "type": "strongly_local",
+                "candidates": ["local"],
+                "expected_gain_band_pct": [5, 20],
+                "rationale": (
+                    f"bubble_pct={bubble_pct:.3f} ≥ 0.25 (host-launch dominates); "
+                    "cuda graph capture would absorb the launch storm"
+                ),
+                "known_blocker": "cuda_graph_family",
+                "blocker_note": (
+                    "Megatron arguments.py:958 enum-vs-str bug + DeepEP intranode "
+                    "dispatch is not capture-friendly (axis_taxonomy.md §2.8). "
+                    "REPLAN should downrank by 0.1 until upstream lands."
+                ),
+            }
+        )
 
     return axes, env_suspect, skipped
 
@@ -790,18 +977,24 @@ def run(
 
     # ---- Suggested transition ----
     if bottleneck_extended == "REGRESSION":
-        transition = {"to": "OPTIMIZE_LOOP.REPLAN",
-                      "reason": "regression vs champion; this candidate is dead",
-                      "counts_against_budget": False,
-                      "hint": "do not derive from this plan"}
+        transition = {
+            "to": "OPTIMIZE_LOOP.REPLAN",
+            "reason": "regression vs champion; this candidate is dead",
+            "counts_against_budget": False,
+            "hint": "do not derive from this plan",
+        }
     elif "iter_boundary_fallback" in ev["warnings"]:
-        transition = {"to": "WAIT",
-                      "reason": "trace iter boundary used wallclock fallback; verdict deferred",
-                      "counts_against_budget": False}
+        transition = {
+            "to": "WAIT",
+            "reason": "trace iter boundary used wallclock fallback; verdict deferred",
+            "counts_against_budget": False,
+        }
     else:
-        transition = {"to": "OPTIMIZE_LOOP.REPLAN",
-                      "reason": f"{bottleneck.lower()} verdict via {rule_id}",
-                      "counts_against_budget": True}
+        transition = {
+            "to": "OPTIMIZE_LOOP.REPLAN",
+            "reason": f"{bottleneck.lower()} verdict via {rule_id}",
+            "counts_against_budget": True,
+        }
 
     # ---- Build report ----
     report = {
@@ -845,8 +1038,11 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="pilot.tools.diagnose")
     sub = p.add_subparsers(dest="cmd", required=True)
     p_run = sub.add_parser("run", help="Classify bottleneck from a trace_analysis.json.")
-    p_run.add_argument("--trace-analysis", required=True,
-                       help="Path to trace_analysis.json (per skills/workflow/trace_analysis.md)")
+    p_run.add_argument(
+        "--trace-analysis",
+        required=True,
+        help="Path to trace_analysis.json (per skills/workflow/trace_analysis.md)",
+    )
     p_run.add_argument("--snapshot", default=None, help="Optional RunSnapshot YAML")
     p_run.add_argument("--plan", default=None, help="Optional effective Plan YAML")
     p_run.add_argument("--cluster-profile", default=None, help="Optional ClusterProfile YAML")
@@ -854,8 +1050,9 @@ def main() -> int:
     p_run.add_argument("--plan-graph", default=None, help="Optional PlanGraph YAML")
     p_run.add_argument("--thresholds", default=None, help="Optional override file")
     p_run.add_argument("--out", default=None, help="Write the report JSON to this path")
-    p_run.add_argument("--snapshot-id", default=None,
-                       help="Override snapshot_id in the report (else inferred)")
+    p_run.add_argument(
+        "--snapshot-id", default=None, help="Override snapshot_id in the report (else inferred)"
+    )
     args = p.parse_args()
 
     try:
@@ -876,8 +1073,7 @@ def main() -> int:
             snapshot_id=args.snapshot_id,
         )
     except _DiagError as exc:
-        _emit({"stage": "DIAGNOSE", "status": "failed",
-               "failure": {"kind": exc.kind, "message": str(exc)}})
+        _emit({"stage": "DIAGNOSE", "status": "failed", "failure": {"kind": exc.kind, "message": str(exc)}})
         return _EXIT_USAGE if exc.kind == "USAGE" else _EXIT_TOOL_ERROR
 
     if args.out:

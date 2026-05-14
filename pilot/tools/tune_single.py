@@ -18,8 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pilot.tools import constraint, observe, plan_graph as pg, report, state, submit
 from pilot.tools import _axis_translator as _axt
+from pilot.tools import constraint, observe
+from pilot.tools import plan_graph as pg
+from pilot.tools import report, state, submit
 
 # `pilot.tools.diagnose` v2 is trace-driven; tune_single passes the
 # already-loaded trace_analysis dict when available (caller is responsible
@@ -29,8 +31,11 @@ try:
     from pilot.tools import diagnose as _diagnose_engine  # type: ignore
 except Exception:  # pragma: no cover
     _diagnose_engine = None
-from pilot.tools._cluster_config import ClusterConfigError, load_cluster_config, preflight_check
-
+from pilot.tools._cluster_config import (
+    ClusterConfigError,
+    load_cluster_config,
+    preflight_check,
+)
 
 # ---------------------------------------------------------------------------
 # Canonical Skill-sourced constants
@@ -56,22 +61,22 @@ _AXIS_COST_PROXY: dict[str, float] = {
 }
 
 # Re-Plan priority-formula extra factors. Source: skills/workflow/replan.md §3.
-_CONFIDENCE_FLOOR: float = 0.05         # priority(c) uses max(_CONFIDENCE_FLOOR, confidence)
-_DEFAULT_NOVELTY_BONUS: float = 1.20     # axis not yet seen as a sibling under same parent
-_DEFAULT_STABILITY_BONUS: float = 1.10   # parent has ≥2 entries in champion_history
+_CONFIDENCE_FLOOR: float = 0.05  # priority(c) uses max(_CONFIDENCE_FLOOR, confidence)
+_DEFAULT_NOVELTY_BONUS: float = 1.20  # axis not yet seen as a sibling under same parent
+_DEFAULT_STABILITY_BONUS: float = 1.10  # parent has ≥2 entries in champion_history
 
 # Special-purpose candidate priorities. Source: skills/workflow/replan.md §3.2.
-_DEFAULT_ENV_SUSPECT_PRIORITY: float = 0.6   # env_suspect not covered by an axis: 0.6 × confidence
-_DEFAULT_CONTROL_PRIORITY: float = 0.05      # engine-path control rerun (noise check)
+_DEFAULT_ENV_SUSPECT_PRIORITY: float = 0.6  # env_suspect not covered by an axis: 0.6 × confidence
+_DEFAULT_CONTROL_PRIORITY: float = 0.05  # engine-path control rerun (noise check)
 _DEFAULT_LEGACY_CONTROL_PRIORITY: float = 0.50  # legacy-path control rerun; see replan.md §6.
 
 # Settle thresholds. Source: skills/workflow/settle.md §4.
-_DEFAULT_EPSILON_PROMOTE: float = 0.02   # 2%: min relative gain to promote
-_DEFAULT_EPSILON_STOP: float = 0.005     # 0.5%: per-round gain that counts as "stagnant"
-_DEFAULT_STAGNATION_ROUNDS: int = 2      # consecutive stagnant rounds → STOP
-_DEFAULT_DEAD_RATE_BACKTRACK: float = 0.50      # subtree dead-rate that triggers Backtrack
-_DEFAULT_DEAD_RATE_WINDOW_ROUNDS: int = 2       # for how many rounds the dead-rate must hold
-_DEFAULT_EXPLORE_PERIOD_K: int = 3        # force one Explore round every K rounds
+_DEFAULT_EPSILON_PROMOTE: float = 0.02  # 2%: min relative gain to promote
+_DEFAULT_EPSILON_STOP: float = 0.005  # 0.5%: per-round gain that counts as "stagnant"
+_DEFAULT_STAGNATION_ROUNDS: int = 2  # consecutive stagnant rounds → STOP
+_DEFAULT_DEAD_RATE_BACKTRACK: float = 0.50  # subtree dead-rate that triggers Backtrack
+_DEFAULT_DEAD_RATE_WINDOW_ROUNDS: int = 2  # for how many rounds the dead-rate must hold
+_DEFAULT_EXPLORE_PERIOD_K: int = 3  # force one Explore round every K rounds
 
 _PILOT_ROOT: Path = Path(__file__).resolve().parent.parent
 _REPO_ROOT: Path = _PILOT_ROOT.parent
@@ -127,12 +132,7 @@ def _parse_override(spec: str) -> tuple[str, Any]:
 
 
 def _base_overrides(plan: dict[str, Any]) -> dict[str, Any]:
-    return (
-        plan.get("modules", {})
-        .get("pre_trainer", {})
-        .get("overrides", {})
-        or {}
-    )
+    return plan.get("modules", {}).get("pre_trainer", {}).get("overrides", {}) or {}
 
 
 def _latest_cluster_profile(root: str) -> dict[str, Any] | None:
@@ -186,7 +186,11 @@ def summarize_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "median_iter_time_ms": round(float(median_iter), 4) if median_iter else None,
         "median_tflops": round(float(median_tflops), 4) if median_tflops else None,
         "throughput_steps_per_s": round(throughput, 6) if throughput else None,
-        "final_loss": round(float(final_loss), 8) if isinstance(final_loss, (int, float)) and math.isfinite(float(final_loss)) else None,
+        "final_loss": (
+            round(float(final_loss), 8)
+            if isinstance(final_loss, (int, float)) and math.isfinite(float(final_loss))
+            else None
+        ),
         "loss_finite": bool(metrics.get("loss_finite", True)),
         "progress": snapshot.get("progress") or {},
         "symptoms": snapshot.get("symptoms") or {},
@@ -293,7 +297,12 @@ def _legacy_diagnose(
         "bottleneck": bottleneck,
         "candidate_axes": axes,
         "measurement": summary,
-        "failure": failure if failure["kind"] != "UNKNOWN" or summary.get("status") in ("failed", "killed", "hung", "unknown") else None,
+        "failure": (
+            failure
+            if failure["kind"] != "UNKNOWN"
+            or summary.get("status") in ("failed", "killed", "hung", "unknown")
+            else None
+        ),
         "source": "legacy",
     }
 
@@ -325,14 +334,24 @@ def _bridge_engine_to_legacy(
             legacy_axes.append(axis)
             seen.add(axis)
     if not legacy_axes:
-        legacy_axes = ["stability"] if extended in ("HANG", "NUMERICAL", "INVALID_CONFIG", "CANCELLED") else ["micro_batch_size", "tensor_model_parallel_size"]
+        legacy_axes = (
+            ["stability"]
+            if extended in ("HANG", "NUMERICAL", "INVALID_CONFIG", "CANCELLED")
+            else ["micro_batch_size", "tensor_model_parallel_size"]
+        )
 
     failure = constraint.diagnose_failure(snapshot)
-    if failure.get("kind") in (None, "UNKNOWN") and extended in ("HANG", "NUMERICAL", "INVALID_CONFIG", "CANCELLED"):
+    if failure.get("kind") in (None, "UNKNOWN") and extended in (
+        "HANG",
+        "NUMERICAL",
+        "INVALID_CONFIG",
+        "CANCELLED",
+    ):
         failure = {
             "kind": extended,
             "message": (report.get("evidence") or [extended])[0],
-            "suggested_transition": (report.get("suggested_transition") or {}).get("to") or "OPTIMIZE_LOOP.REPLAN",
+            "suggested_transition": (report.get("suggested_transition") or {}).get("to")
+            or "OPTIMIZE_LOOP.REPLAN",
         }
 
     return {
@@ -340,7 +359,12 @@ def _bridge_engine_to_legacy(
         "bottleneck": legacy_bottleneck,
         "candidate_axes": legacy_axes,
         "measurement": summary,
-        "failure": failure if failure.get("kind") not in (None, "UNKNOWN") or summary.get("status") in ("failed", "killed", "hung", "unknown") else None,
+        "failure": (
+            failure
+            if failure.get("kind") not in (None, "UNKNOWN")
+            or summary.get("status") in ("failed", "killed", "hung", "unknown")
+            else None
+        ),
         "source": "engine",
         "meta": {"engine_report": report},
     }
@@ -354,7 +378,9 @@ def _candidate_id(round_id: int, idx: int, overrides: dict[str, Any]) -> str:
     return f"r{round_id}_c{idx}_{digest}"
 
 
-def _dedupe_candidates(candidates: list[dict[str, Any]], history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_candidates(
+    candidates: list[dict[str, Any]], history: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for item in history:
         ovs = item.get("overrides") or {}
@@ -463,11 +489,13 @@ def _engine_replan(
                 value=meta.get("value"),
                 axis_type=meta.get("type"),
             ):
-                rejected_audit.append({
-                    "axis": meta.get("axis"),
-                    "value": meta.get("value"),
-                    "reason": "exhausted_neighborhoods hit",
-                })
+                rejected_audit.append(
+                    {
+                        "axis": meta.get("axis"),
+                        "value": meta.get("value"),
+                        "reason": "exhausted_neighborhoods hit",
+                    }
+                )
                 return
 
         # Novelty bonus: axis not yet seen as a sibling under the same parent.
@@ -485,11 +513,13 @@ def _engine_replan(
             skipped_unknown_axes.append(
                 f"{meta.get('axis', 'composite')}: constraint violations {verdict['violations']}"
             )
-            rejected_audit.append({
-                "axis": meta.get("axis"),
-                "value": meta.get("value"),
-                "reason": f"constraint: {verdict['violations']}",
-            })
+            rejected_audit.append(
+                {
+                    "axis": meta.get("axis"),
+                    "value": meta.get("value"),
+                    "reason": f"constraint: {verdict['violations']}",
+                }
+            )
             return
         # Stash bonuses in meta for audit / downstream inspection.
         meta = {
@@ -509,9 +539,7 @@ def _engine_replan(
         for value in entry.get("candidates") or []:
             action = _axt.translate(axis, value)
             if action is None:
-                skipped_unknown_axes.append(
-                    f"{axis}={value!r}: not in pilot.tools._axis_translator catalog"
-                )
+                skipped_unknown_axes.append(f"{axis}={value!r}: not in pilot.tools._axis_translator catalog")
                 continue
             plan_ov: dict[str, Any] = {}
             env_ov: dict[str, str] = {}
@@ -541,9 +569,7 @@ def _engine_replan(
             continue
         action = _axt.translate(flag, True)
         if action is None or action.channel != "env":
-            skipped_unknown_axes.append(
-                f"env_suspect {flag}: not an env-channel axis in translator catalog"
-            )
+            skipped_unknown_axes.append(f"env_suspect {flag}: not an env-channel axis in translator catalog")
             continue
         add(
             priority=_DEFAULT_ENV_SUSPECT_PRIORITY * confidence,
@@ -566,8 +592,13 @@ def _engine_replan(
         reason="control rerun with current structure (engine path baseline)",
         plan_overrides={},
         env_overrides={},
-        meta={"axis": "_control", "value": None, "type": "control", "channel": "control",
-              "source": "engine.control"},
+        meta={
+            "axis": "_control",
+            "value": None,
+            "type": "control",
+            "channel": "control",
+            "source": "engine.control",
+        },
     )
 
     candidates: list[dict[str, Any]] = []
@@ -587,7 +618,7 @@ def _engine_replan(
     candidates = _dedupe_candidates(candidates, history)[:max_candidates]
 
     selection = {
-        "strategy": "Per-Plan",        # single-node v1 default; see execution_strategy.md §6
+        "strategy": "Per-Plan",  # single-node v1 default; see execution_strategy.md §6
         "pick_top_k": len(candidates),
         "selected": [c["id"] for c in candidates],
         "rejected": rejected_audit,
@@ -637,7 +668,9 @@ def _legacy_replan(
     pp = constraint._to_int(overrides.get("pipeline_model_parallel_size"), 1) or 1  # noqa: SLF001
     ep = constraint._to_int(overrides.get("expert_model_parallel_size"), 1) or 1  # noqa: SLF001
     mbs = constraint._to_int(overrides.get("micro_batch_size"), 1) or 1  # noqa: SLF001
-    gbs = constraint._to_int(overrides.get("global_batch_size"), max(1, mbs * 8)) or max(1, mbs * 8)  # noqa: SLF001
+    gbs = constraint._to_int(overrides.get("global_batch_size"), max(1, mbs * 8)) or max(
+        1, mbs * 8
+    )  # noqa: SLF001
     _, _, world = constraint._cluster_world(cluster)  # noqa: SLF001
     axes = diagnosis.get("candidate_axes") or ["micro_batch_size"]
 
@@ -659,44 +692,70 @@ def _legacy_replan(
     _LEGACY_PRIORITY_TP_FLIP = 0.85
 
     if "micro_batch_size" in axes:
-        add(_LEGACY_PRIORITY_MBS_UP, "probe higher micro_batch_size for better compute occupancy", {
-            "micro_batch_size": mbs + 1,
-            "global_batch_size": max(gbs, (mbs + 1) * max(1, world // max(1, tp * pp * ep))),
-        })
+        add(
+            _LEGACY_PRIORITY_MBS_UP,
+            "probe higher micro_batch_size for better compute occupancy",
+            {
+                "micro_batch_size": mbs + 1,
+                "global_batch_size": max(gbs, (mbs + 1) * max(1, world // max(1, tp * pp * ep))),
+            },
+        )
         if mbs > 1:
-            add(_LEGACY_PRIORITY_MBS_DOWN, "reduce micro_batch_size after memory or stability signal", {
-                "micro_batch_size": max(1, mbs - 1),
-                "global_batch_size": max(1, gbs),
-            })
+            add(
+                _LEGACY_PRIORITY_MBS_DOWN,
+                "reduce micro_batch_size after memory or stability signal",
+                {
+                    "micro_batch_size": max(1, mbs - 1),
+                    "global_batch_size": max(1, gbs),
+                },
+            )
     if "tensor_model_parallel_size" in axes:
         for next_tp in (tp * 2, max(1, tp // 2)):
             if next_tp != tp and next_tp >= 1 and world % max(1, next_tp * pp * ep) == 0:
-                add(_LEGACY_PRIORITY_TP_FLIP, f"probe tensor_model_parallel_size={next_tp}", {
-                    "tensor_model_parallel_size": next_tp,
-                })
+                add(
+                    _LEGACY_PRIORITY_TP_FLIP,
+                    f"probe tensor_model_parallel_size={next_tp}",
+                    {
+                        "tensor_model_parallel_size": next_tp,
+                    },
+                )
     if "recompute" in axes or diagnosis.get("bottleneck") in ("MEMORY", "OOM"):
-        add(_LEGACY_PRIORITY_RECOMPUTE_FULL, "enable full block recompute to relieve activation memory", {
-            "recompute_granularity": "full",
-            "recompute_method": "block",
-            "recompute_num_layers": int(overrides.get("recompute_num_layers") or 1),
-        })
+        add(
+            _LEGACY_PRIORITY_RECOMPUTE_FULL,
+            "enable full block recompute to relieve activation memory",
+            {
+                "recompute_granularity": "full",
+                "recompute_method": "block",
+                "recompute_num_layers": int(overrides.get("recompute_num_layers") or 1),
+            },
+        )
 
-    add(_DEFAULT_LEGACY_CONTROL_PRIORITY,
+    add(
+        _DEFAULT_LEGACY_CONTROL_PRIORITY,
         "control rerun with current structure and fixed short train_iters",
-        {"train_iters": train_iters})
+        {"train_iters": train_iters},
+    )
 
     candidates: list[dict[str, Any]] = []
-    for idx, (priority, reason, cand_overrides) in enumerate(sorted(raw, key=lambda x: x[0], reverse=True), 1):
-        candidates.append({
-            "id": _candidate_id(round_id, idx, cand_overrides),
-            "round_id": round_id,
-            "priority": priority,
-            "reason": reason,
-            "overrides": cand_overrides,
-            "env_overrides": {},
-            "axis_meta": {"axis": None, "type": "legacy", "channel": "trainer_override",
-                          "source": "legacy.axis_name"},
-        })
+    for idx, (priority, reason, cand_overrides) in enumerate(
+        sorted(raw, key=lambda x: x[0], reverse=True), 1
+    ):
+        candidates.append(
+            {
+                "id": _candidate_id(round_id, idx, cand_overrides),
+                "round_id": round_id,
+                "priority": priority,
+                "reason": reason,
+                "overrides": cand_overrides,
+                "env_overrides": {},
+                "axis_meta": {
+                    "axis": None,
+                    "type": "legacy",
+                    "channel": "trainer_override",
+                    "source": "legacy.axis_name",
+                },
+            }
+        )
     candidates = _dedupe_candidates(candidates, history)[:max_candidates]
     return {
         "schema_version": "1.0",
@@ -779,6 +838,7 @@ def settle(
     plan_graph: dict[str, Any] | None = None,
     round_id: int | None = None,
     is_explore_round: bool = False,
+    invalid_blocked: bool = False,
 ) -> dict[str, Any]:
     """Pick a champion and decide whether the loop should stop.
 
@@ -841,11 +901,19 @@ def settle(
         # Settle returns when no promotion happened, so the value we read here
         # is the count BEFORE this round's increment. Predict the post-round
         # value: +1 if not promoted, 0 if promoted.
+        #
+        # Discount infrastructure-blocked rounds (see plan_graph.bump_promotion_counter):
+        # an INVALID_CONFIG-only round delivered no signal about whether the
+        # search frontier is exhausted, so it must not count toward stagnation
+        # (IMPL_VS_DESIGN.md §5; session 20260513T024603Z R2 false-stop).
         cur_rsp = int(plan_graph["metadata"].get("rounds_since_promotion", 0))
-        post_round_rsp = 0 if promoted else cur_rsp + 1
-        stagnant = (
-            stagnation_rounds > 0 and post_round_rsp >= stagnation_rounds
-        )
+        if promoted:
+            post_round_rsp = 0
+        elif invalid_blocked:
+            post_round_rsp = cur_rsp
+        else:
+            post_round_rsp = cur_rsp + 1
+        stagnant = stagnation_rounds > 0 and post_round_rsp >= stagnation_rounds
     else:
         # Legacy fallback for callers without a PlanGraph.
         recent = history[-stagnation_rounds:] if stagnation_rounds > 0 else []
@@ -854,10 +922,7 @@ def settle(
             for item in recent
             if isinstance(item.get("gain_vs_champion", 0.0), (int, float))
         ]
-        stagnant = (
-            len(recent_gains) >= stagnation_rounds
-            and all(g < epsilon_stop for g in recent_gains)
-        )
+        stagnant = len(recent_gains) >= stagnation_rounds and all(g < epsilon_stop for g in recent_gains)
 
     # Periodic Exploration Round is exempt from stagnation (settle.md §6 last ¶).
     if is_explore_round:
@@ -880,10 +945,7 @@ def settle(
                     "new_champion": target,
                 }
 
-    base_reason = (
-        "stagnation" if stagnant
-        else ("promoted new champion" if promoted else "kept champion")
-    )
+    base_reason = "stagnation" if stagnant else ("promoted new champion" if promoted else "kept champion")
     reason = f"{base_reason}; backtrack→{backtrack['new_champion']}" if backtrack["fired"] else base_reason
 
     return {
@@ -959,7 +1021,11 @@ def _run_one(
     )
     snap = observe.snapshot(run_id, log_dir=log_dir, save=True)
     measurement = summarize_snapshot(snap)
-    measurement["status"] = "completed" if submit_result["status"] == "completed" and snap["status"] == "completed" else snap["status"]
+    measurement["status"] = (
+        "completed"
+        if submit_result["status"] == "completed" and snap["status"] == "completed"
+        else snap["status"]
+    )
     trace_analysis: dict[str, Any] | None = None
     if analyze_trace and measurement["status"] == "completed":
         trace_analysis = _maybe_analyze_trace(run_id, log_dir)
@@ -1025,13 +1091,15 @@ def run_session(
 
     def checkpoint_stage(stage_name: str, status: str, headline: str) -> None:
         nonlocal latest_checkpoint
-        tuning_state["stage_history"].append({
-            "stage": stage_name,
-            "exit": status,
-            "round": tuning_state.get("round_id", 0),
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "headline": headline,
-        })
+        tuning_state["stage_history"].append(
+            {
+                "stage": stage_name,
+                "exit": status,
+                "round": tuning_state.get("round_id", 0),
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "headline": headline,
+            }
+        )
         latest_checkpoint = state.checkpoint(tuning_state, root=root)
 
     def finalize_report(note: str) -> dict[str, Any]:
@@ -1077,7 +1145,9 @@ def run_session(
         cluster_profile=cluster_profile_for_diag,
         plan=base_plan,
     )
-    checkpoint_stage("SMOKE", "success" if diagnosis.get("failure") is None else "failed", diagnosis["bottleneck"])
+    checkpoint_stage(
+        "SMOKE", "success" if diagnosis.get("failure") is None else "failed", diagnosis["bottleneck"]
+    )
     if diagnosis.get("failure"):
         tuning_state["failure"] = diagnosis["failure"]
         return finalize_report("single-node tuning stopped after SMOKE failure")
@@ -1094,7 +1164,9 @@ def run_session(
         log_dir=log_dir,
     )
     baseline["stage"] = "BASELINE"
-    baseline["measurement"]["status"] = "completed" if baseline["submit"]["status"] == "completed" else baseline["measurement"]["status"]
+    baseline["measurement"]["status"] = (
+        "completed" if baseline["submit"]["status"] == "completed" else baseline["measurement"]["status"]
+    )
     run_history.append(baseline)
     baseline_diag = diagnose(
         baseline["snapshot"],
@@ -1131,7 +1203,9 @@ def run_session(
     plan_graph_path = _resolve_pilot_path(root) / "plan_graphs" / f"{session}.yaml"
     plan_graph_path = Path(pg.persist(plan_graph, plan_graph_path))
     tuning_state["plan_graph_ref"] = str(plan_graph_path)
-    checkpoint_stage("BASELINE", "success", f"baseline iter={baseline['measurement'].get('median_iter_time_ms')}")
+    checkpoint_stage(
+        "BASELINE", "success", f"baseline iter={baseline['measurement'].get('median_iter_time_ms')}"
+    )
 
     for round_id in range(1, rounds + 1):
         tuning_state["round_id"] = round_id
@@ -1149,9 +1223,9 @@ def run_session(
         derive_policy = "exploit"
         if pg.should_explore_round(plan_graph):
             shelved = [
-                nid for nid in pg.frontier_excluding_dead(plan_graph)
-                if nid != plan_graph["champion"]
-                and plan_graph["nodes"][nid]["status"] == "shelved"
+                nid
+                for nid in pg.frontier_excluding_dead(plan_graph)
+                if nid != plan_graph["champion"] and plan_graph["nodes"][nid]["status"] == "shelved"
             ]
             if shelved:
                 derive_parent = shelved[0]
@@ -1181,7 +1255,9 @@ def run_session(
         pool_path = _resolve_pilot_path(root) / "candidate_pools" / f"{session}_r{round_id}.yaml"
         _atomic_write_yaml(pool_path, pool)
         tuning_state["candidate_pool_ref"] = str(pool_path)
-        checkpoint_stage("OPTIMIZE_LOOP.REPLAN", pool["status"], f"{len(pool['candidates'])} candidates ({derive_policy})")
+        checkpoint_stage(
+            "OPTIMIZE_LOOP.REPLAN", pool["status"], f"{len(pool['candidates'])} candidates ({derive_policy})"
+        )
         if not pool["candidates"]:
             break
 
@@ -1193,11 +1269,15 @@ def run_session(
             # (the graph captures `running` nodes so a kill / crash leaves
             # an auditable trail).
             axis_meta = cand.get("axis_meta") or {}
-            derived_axis = {
-                "axis": axis_meta.get("axis"),
-                "value": axis_meta.get("value"),
-                "type": axis_meta.get("type"),
-            } if axis_meta.get("axis") not in (None, "_control") else None
+            derived_axis = (
+                {
+                    "axis": axis_meta.get("axis"),
+                    "value": axis_meta.get("value"),
+                    "type": axis_meta.get("type"),
+                }
+                if axis_meta.get("axis") not in (None, "_control")
+                else None
+            )
             # PlanGraph nodes are keyed by the same id used in run_history
             # (the full run_id), so Settle's `champion_id` lookup matches.
             cand_node_id = f"{session}_{cand['id']}"
@@ -1225,8 +1305,7 @@ def run_session(
             run["candidate"] = cand
             score = score_measurement(run["measurement"])
             run["gain_vs_champion"] = (
-                (score / current_score - 1.0)
-                if score is not None and current_score else 0.0
+                (score / current_score - 1.0) if score is not None and current_score else 0.0
             )
             run_history.append(run)
             round_executed.append(cand_node_id)
@@ -1327,22 +1406,16 @@ def run_session(
         # fired and the loop is still stagnant, stop sticks.
         should_stop = settle_result["stop"]
         if should_stop:
-            shelved_exists = any(
-                n["status"] == "shelved" for n in plan_graph["nodes"].values()
-            )
-            already_explored = bool(
-                plan_graph["metadata"].get("explore_rounds_completed", 0) > 0
-            )
+            shelved_exists = any(n["status"] == "shelved" for n in plan_graph["nodes"].values())
+            already_explored = bool(plan_graph["metadata"].get("explore_rounds_completed", 0) > 0)
             if shelved_exists and not already_explored:
                 should_stop = False
 
         checkpoint_stage(
             "OPTIMIZE_LOOP.SETTLE",
             settle_result["status"],
-            settle_result["reason"] + (
-                " (stop deferred for explore round)"
-                if settle_result["stop"] and not should_stop else ""
-            ),
+            settle_result["reason"]
+            + (" (stop deferred for explore round)" if settle_result["stop"] and not should_stop else ""),
         )
         if should_stop:
             break
@@ -1386,8 +1459,12 @@ def _cli() -> int:
     p_run.add_argument("--cluster-config", required=True)
     p_run.add_argument("--plan", required=True)
     p_run.add_argument("--session-id", default=None)
-    p_run.add_argument("--override", action="append", default=[],
-                       help="Base override key=value applied before all tuning stages.")
+    p_run.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        help="Base override key=value applied before all tuning stages.",
+    )
     p_run.add_argument("--rounds", type=int, default=2)
     p_run.add_argument("--candidates-per-round", type=int, default=3)
     p_run.add_argument("--smoke-iters", type=int, default=20)
@@ -1406,14 +1483,16 @@ def _cli() -> int:
             cfg = load_cluster_config(args.cluster_config)
             snap = _load_yaml(args.snapshot)
             diag = diagnose(snap)
-            _emit(replan(
-                base_plan=_load_yaml(args.plan),
-                cluster=cfg.__dict__,
-                diagnosis=diag,
-                round_id=args.round_id,
-                max_candidates=args.max_candidates,
-                train_iters=args.train_iters,
-            ))
+            _emit(
+                replan(
+                    base_plan=_load_yaml(args.plan),
+                    cluster=cfg.__dict__,
+                    diagnosis=diag,
+                    round_id=args.round_id,
+                    max_candidates=args.max_candidates,
+                    train_iters=args.train_iters,
+                )
+            )
             return 0
         if args.cmd == "settle":
             data = _load_yaml(args.history)

@@ -77,6 +77,91 @@ Type drives both **search strategy** and **promotion budget** (a `cluster_shared
 | `PYTORCH_HIP_ALLOC_CONF` | env | weakly_local | `expandable_segments`, `max_split_size_mb` |
 | `PYTORCH_CUDA_ALLOC_CONF` | env | weakly_local | NV-side equivalent |
 
+### 2.6 FP8 / precision (mostly `strongly_local`)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `fp8_recipe` | `fp8_recipe` | strongly_local | `tensorwise|delayed|blockwise`. **Empirically dominant on MI355X**: switching default `tensorwise` → `delayed` removed per-iter amax in the FP8 hot path and yielded +24.85% on DeepSeek-V2-Lite (session `20260513T024603Z`, R4). Engine prior should be high when `compute_fp8_prep_ratio > 0.02`. |
+| `accumulate_allreduce_grads_in_fp32` | `accumulate_allreduce_grads_in_fp32` | weakly_local | precision/comm trade; rarely net-positive when allreduce is already overlapped |
+| `attention_softmax_in_fp32` | `attention_softmax_in_fp32` | weakly_local | numerical robustness vs throughput; flip false only when stability is verified |
+| `attention_dropout` | `attention_dropout` | weakly_local | float; setting 0.0 skips dropout RNG path on every attention block |
+
+### 2.7 Megatron fusion knobs (mostly `weakly_local`)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `apply_rope_fusion` | `apply_rope_fusion` | weakly_local | fuses RoPE into attention; observed +2.61% (session R9) when attention is ≥3% of iter |
+| `bias_activation_fusion` | `bias_activation_fusion` | weakly_local | only meaningful when MLP has bias; check model spec first |
+| `bias_dropout_fusion` | `bias_dropout_fusion` | weakly_local | same caveat as above |
+| `masked_softmax_fusion` | `masked_softmax_fusion` | weakly_local | reduces small-kernel storm; usually safe to leave on |
+
+### 2.8 CUDA graphs (`strongly_local`; **stack-blocked on MI355X+Megatron+DeepEP today**)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `enable_cuda_graph` | `enable_cuda_graph` | strongly_local | **HARD MUTEX** with `cuda_graph_impl` (Megatron `arguments.py` rejects them together) |
+| `external_cuda_graph` | `external_cuda_graph` | strongly_local | runs but DeepEP intranode dispatch is not capture-friendly → `HIP error: invalid argument` |
+| `cuda_graph_impl` | `cuda_graph_impl` | strongly_local | enum vs str bug in `arguments.py:958` (`'in <string>' requires string ...`) |
+| `cuda_graph_scope` | `cuda_graph_scope` | weakly_local | inert when `cuda_graph_impl` cannot be enabled |
+
+The whole family is recorded for engine completeness (so DIAGNOSE can flag launch-bubble even when it can't propose a fix). REPLAN should attach `axis_meta.known_blocker = "cuda_graph_family"` and downrank priority by 0.1 until the upstream bug lands.
+
+### 2.9 Pipeline-only knobs (require `pp >= 2`)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `defer_embedding_wgrad_compute` | `defer_embedding_wgrad_compute` | weakly_local | **HARD CONSTRAINT**: `pp >= 2` (Megatron asserts) |
+| `overlap_p2p_communication` | `overlap_p2p_communication` | weakly_local | **HARD CONSTRAINT**: `pp >= 2` AND `virtual_pipeline_model_parallel_size > 1` |
+| `overlap_param_gather_with_optimizer_step` | `overlap_param_gather_with_optimizer_step` | weakly_local | requires DistOpt; gain only meaningful with PP |
+
+### 2.10 Host-launch / runtime tuning (`weakly_local` env)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `manual_gc` | `manual_gc` | weakly_local | yields the GC tax to a deterministic interval |
+| `manual_gc_interval` | `manual_gc_interval` | weakly_local | int; only meaningful when `manual_gc=true` |
+| `OMP_NUM_THREADS` | env | weakly_local | empirically +3.34% at `OMP_NUM_THREADS=4` (session R7); the pytorch default of 1-or-cpu_count is bad on EPYC + MI355X |
+| `GPU_MAX_HW_QUEUES` | env | weakly_local | observed neutral; `2` is often enough for MI355X |
+| `MIOPEN_FIND_MODE` | env | weakly_local | `FAST` skips heuristic search; safe default |
+
+### 2.11 RCCL extras (mostly `strongly_local` env)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `RCCL_PROTO` | env | strongly_local | `LL|LL128|Simple`; algorithm pick affects collective shape |
+| `RCCL_ALGO` | env | strongly_local | `Ring|Tree|CollnetDirect`; usually `Tree` on small world, `Ring` on big |
+| `RCCL_NTHREADS` | env | weakly_local | int; tune only when comm is steady-state bound |
+| `TORCH_NCCL_HIGH_PRIORITY` | env | weakly_local | priority hint; observed neutral on MI355X |
+
+### 2.12 ROCm / HSA (`strongly_local` env, with one DANGER)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `HSA_NO_SCRATCH_RECLAIM` | env | weakly_local | `1` keeps scratch resident; observed neutral but cheap to try |
+| `HSA_ENABLE_INTERRUPT` | env | strongly_local | **DANGER**: setting `0` measured as **-13.28% TFLOPS** (session R9 `t_r9_c2`). Engine must NEVER emit `0` unless explicitly requested with `axis_meta.acknowledge_regression=true`. |
+
+### 2.13 MoE extras (`weakly_local`, with mutex)
+
+| Axis | YAML key / env | Type | Notes |
+|---|---|---|---|
+| `moe_router_dtype` | `moe_router_dtype` | weakly_local | **HARD CONSTRAINT**: must be `fp32` (or unset) when `use_turbo_deepep=true` (DeepEP only supports float32 probs) |
+| `turbo_sync_free_moe_stage` | `turbo_sync_free_moe_stage` | weakly_local | gated by Primus turbo path |
+
+### 2.14 Hard mutexes / required-companion table (consumed by `constraint.check`)
+
+The engine enforces this table verbatim — emitting a candidate that violates a row counts as `INVALID_CONFIG` *before* execution.
+
+| Rule id | Trigger | Required | Source |
+|---|---|---|---|
+| `MUTEX-CG-IMPL` | `cuda_graph_impl` set | `enable_cuda_graph` MUST be unset | Megatron `arguments.py` assert |
+| `REQ-PP-DEFER-EMB` | `defer_embedding_wgrad_compute=true` | `pipeline_model_parallel_size >= 2` | Megatron assert |
+| `REQ-PP-OVRLP-P2P` | `overlap_p2p_communication=true` | `pipeline_model_parallel_size >= 2` AND `virtual_pipeline_model_parallel_size > 1` | Megatron assert |
+| `MUTEX-DEEPEP-ROUTER` | `use_turbo_deepep=true` | `moe_router_dtype` ∈ {unset, `"fp32"`} | DeepEP runtime check |
+| `MUTEX-DEEPEP-SHAREDOVRLP` | `use_turbo_deepep=true` | `moe_shared_expert_overlap=false` | empirical (deepep_x_sharedovrlp_mutex) |
+| `REQ-DEEPEP-LBAL` | `use_turbo_deepep=true` | `moe_router_force_load_balancing=true` | empirical (deepep_x_real_router_hang) |
+| `MUTEX-PROFILE-HIPBLASLT` | `profile=true` (default) | `PRIMUS_HIPBLASLT_TUNING` ∈ {unset, `"0"`} | known incompatibility (profile.md §3) |
+| `WARN-HSA-INTERRUPT-OFF` | env `HSA_ENABLE_INTERRUPT=0` | warn only; require `axis_meta.acknowledge_regression=true` | empirical (-13.28% TFLOPS) |
+
 ## 3. Exhausted-neighborhood radius
 
 Re-Plan dedups against `PlanGraph.exhausted_neighborhoods` using `(parent_plan_id, axis, value)` keys. The "value-equivalence" radius depends on type:
