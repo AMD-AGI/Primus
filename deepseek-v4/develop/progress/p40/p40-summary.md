@@ -180,10 +180,8 @@ for plan-6.
 
 ## 8. Commit pin
 
-(Filled in at commit time.)
-
 ```
-commit <SHA>
+commit b08975bc
 Date:   2026-05-15
 
 docs(deepseek-v4)[plan-6][P40]: plan-6 close-out -- proxy bake-off + perf docs + status pinning
