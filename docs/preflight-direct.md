@@ -353,10 +353,58 @@ srun ... runner/run_preflight_direct.sh --perf-test \
 
 ---
 
-## 9. See also
+## 9. Automated node bisection (finding the bad node in an NCCL hang)
+
+When a cluster-wide preflight run hangs or fails, use
+[`tools/preflight_bisect/bisect.py`](../tools/preflight_bisect/bisect.py) to
+run `preflight --perf-test` on smaller Slurm node subsets until suspect nodes
+are isolated.
+
+### Prerequisites
+
+1. Working non-container preflight setup from the sections above, with
+   `VENV_ACTIVATE` exported from a shared filesystem path.
+2. Run from the SLURM login/head node, where both `scontrol` and `srun` are
+   available.
+3. Run from inside a Slurm allocation, or provide a Slurm nodelist explicitly.
+
+### Example from inside an allocation
+
+```bash
+export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
+mkdir -p output
+
+python tools/preflight_bisect/bisect.py \
+    --nodelist "$SLURM_NODELIST" \
+    --output-dir "output/bisect-$(date +%Y%m%d-%H%M%S)" \
+    --trial-timeout-sec 600 \
+    --slurm-time 00:15:00 \
+    --preflight-env USING_AINIC=1 \
+    --preflight-env NCCL_IB_GID_INDEX=1 \
+    --preflight-env NCCL_CROSS_NIC=1 \
+    --preflight-env NCCL_PXN_DISABLE=0 \
+    2>&1 | tee output/bisect-latest.log
+```
+
+Adjust the `--preflight-env` lines to match your cluster. Per-trial logs and a
+final `summary.txt` are written under `--output-dir`.
+
+> Note: Set `--trial-timeout-sec` high enough for a healthy subset to finish.
+> Too small a timeout can turn slow-but-good trials into false failures, causing
+> the bisection to explore extra paths.
+>
+> Note: `--preflight-env KEY=VALUE` values are concatenated into a single
+> `srun --export=ALL,...` argument, so values must not contain commas or
+> whitespace. Keep comma-containing values as normal exported environment
+> variables.
+
+---
+
+## 10. See also
 
 - [Preflight](./preflight.md) — full reference for the `preflight` subcommand and its flags
 - [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md) — container-based and `primus-cli slurm` workflows
 - [`runner/run_preflight_direct.sh`](../runner/run_preflight_direct.sh) — the wrapper itself
 - [`primus/tools/preflight/`](../primus/tools/preflight/) — preflight implementation
+- [`tools/preflight_bisect/bisect.py`](../tools/preflight_bisect/bisect.py) — the bisection wrapper
 - AMD-AGI reference guide: [run-preflight-without-container.md](https://github.com/AMD-AGI/Primus/blob/dev/fuyuajin/preflight-without-container/docs/run-preflight-without-container.md)
