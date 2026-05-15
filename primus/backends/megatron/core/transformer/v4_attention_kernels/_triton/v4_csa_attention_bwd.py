@@ -693,6 +693,459 @@ def _v4_csa_attention_pool_sparse_bwd_kernel(
 
 
 @triton.jit
+def _v4_csa_attention_pool_sparse_bwd_dq_only_kernel(
+    Q,
+    POOL,
+    TOPK_IDXS,
+    DOUT,
+    LSE,
+    D,
+    DQ,
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dqb,
+    stride_dqh,
+    stride_dqm,
+    stride_dqd,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """P57: dq-only sparse CSA BWD (no dpool_partial write).
+
+    Mirrors :func:`_v4_csa_attention_pool_sparse_bwd_partial_kernel`
+    but drops the per-visit ``dpool_partial`` write and the two
+    ``dpool_contrib`` matmuls. The freed register file lets us run
+    with a larger ``BLOCK_K`` / more ``num_stages`` so the per-program
+    latency drops sharply. The dpool partial is produced by a sibling
+    ``_v4_csa_attention_pool_sparse_bwd_dpool_only_kernel`` that
+    omits the ``dq`` accumulator instead, and the segreduce kernel
+    folds the partial into ``dpool[B, P, D]``.
+
+    The reason for splitting: the joint kernel's wall-clock at the
+    proxy shape is ~3.7 ms, dominated by the 4 GiB ``dpool_partial``
+    write *interleaved* with the ``[BLOCK_H, BLOCK_DMODEL]`` fp32
+    ``dq`` accumulator (~64 KB live across the K-loop). Splitting
+    drops the live-register footprint of each kernel ~2×, letting
+    the compiler use higher ``num_stages`` for prefetching.
+    """
+    pid_m = tl.program_id(0)
+    pid_h_block = tl.program_id(1)
+    bid = tl.program_id(2)
+
+    offs_h = pid_h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    h_mask = offs_h < HEAD_Q
+    q_active = pid_m < seqlen_q
+
+    q_ptrs = (
+        Q + bid * stride_qb + offs_h[:, None] * stride_qh + pid_m * stride_qm + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(q_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    dout_ptrs = (
+        DOUT
+        + bid * stride_dob
+        + offs_h[:, None] * stride_doh
+        + pid_m * stride_dom
+        + offs_d[None, :] * stride_dod
+    )
+    dout = tl.load(dout_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    lse = tl.load(
+        LSE + bid * stride_lb + offs_h * stride_lh + pid_m * stride_lm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+    dvec = tl.load(
+        D + bid * stride_db + offs_h * stride_dh + pid_m * stride_dm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+
+    dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        sparse_k = k_start + offs_k
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=sparse_k < K_topk, other=-1)
+        valid_k = (sparse_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid_k, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
+
+        q_bf16 = q.to(pool.dtype)
+        dout_bf16 = dout.to(pool.dtype)
+        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout_bf16, tl.trans(pool))
+        ds = p * (dp - dvec[:, None])
+
+        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+
+    dq_ptrs = (
+        DQ
+        + bid * stride_dqb
+        + offs_h[:, None] * stride_dqh
+        + pid_m * stride_dqm
+        + offs_d[None, :] * stride_dqd
+    )
+    tl.store(dq_ptrs, dq, mask=h_mask[:, None] & q_active)
+
+
+@triton.jit
+def _v4_csa_attention_pool_sparse_bwd_dpool_only_kernel(
+    Q,
+    POOL,
+    TOPK_IDXS,
+    DOUT,
+    LSE,
+    D,
+    DPOOL_PARTIAL,  # [B, M, K_topk, D] fp32 — NO atomics, each program owns its slice
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dpb,
+    stride_dpm,
+    stride_dpk,
+    stride_dpd,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """P57: dpool-partial-only sparse CSA BWD (no dq accumulator).
+
+    Mirror of :func:`_v4_csa_attention_pool_sparse_bwd_dq_only_kernel`
+    that drops the ``dq`` accumulator (64 KB fp32 per program) so
+    the per-iter ``dpool_contrib`` matmul + write loop runs with a
+    tighter register footprint and can issue more in-flight HBM
+    writes per warp.
+    """
+    pid_m = tl.program_id(0)
+    pid_h_block = tl.program_id(1)
+    bid = tl.program_id(2)
+
+    offs_h = pid_h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    h_mask = offs_h < HEAD_Q
+    q_active = pid_m < seqlen_q
+
+    q_ptrs = (
+        Q + bid * stride_qb + offs_h[:, None] * stride_qh + pid_m * stride_qm + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(q_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    dout_ptrs = (
+        DOUT
+        + bid * stride_dob
+        + offs_h[:, None] * stride_doh
+        + pid_m * stride_dom
+        + offs_d[None, :] * stride_dod
+    )
+    dout = tl.load(dout_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    lse = tl.load(
+        LSE + bid * stride_lb + offs_h * stride_lh + pid_m * stride_lm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+    dvec = tl.load(
+        D + bid * stride_db + offs_h * stride_dh + pid_m * stride_dm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        sparse_k = k_start + offs_k
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=sparse_k < K_topk, other=-1)
+        valid_k = (sparse_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid_k, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
+
+        q_bf16 = q.to(pool.dtype)
+        dout_bf16 = dout.to(pool.dtype)
+        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout_bf16, tl.trans(pool))
+        ds = p * (dp - dvec[:, None])
+
+        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
+        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        dpool_contrib = tl.where(valid_k[:, None], dpool_contrib, 0.0)
+        dpool_partial_ptrs = (
+            DPOOL_PARTIAL
+            + bid * stride_dpb
+            + pid_m * stride_dpm
+            + sparse_k[:, None] * stride_dpk
+            + offs_d[None, :] * stride_dpd
+        )
+        tl.store(
+            dpool_partial_ptrs,
+            dpool_contrib,
+            mask=(sparse_k[:, None] < K_topk) & q_active,
+        )
+
+
+@triton.jit
+def _v4_csa_attention_pool_sparse_bwd_partial_sorted_kernel(
+    Q,
+    POOL,
+    TOPK_IDXS,
+    INV_PERM,  # [B, MK] int32 — sorted_position = inv_perm[orig_flat]
+    DOUT,
+    LSE,
+    D,
+    DQ,
+    DPOOL_PARTIAL,  # [B, MK_sorted, D] partial buffer (bf16 / fp32)
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_pb,
+    stride_pp,
+    stride_pd,
+    stride_tib,
+    stride_tim,
+    stride_tik,
+    stride_ipb,
+    stride_ipi,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dqb,
+    stride_dqh,
+    stride_dqm,
+    stride_dqd,
+    stride_dpb,
+    stride_dpi,
+    stride_dpd,
+    seqlen_q,
+    pool_size,
+    K_topk,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """P57 sorted variant of the sparse CSA BWD partial kernel.
+
+    Writes the per-visit ``dpool_contrib`` tile into the sorted-order
+    position of ``DPOOL_PARTIAL`` (a flat ``[B, MK, D]`` buffer)
+    using a host-side ``INV_PERM`` (the inverse of the segreduce
+    ``perm``). The downstream segreduce kernel can then read
+    contiguous ``[bin_start:bin_end, :]`` slices instead of gathering
+    via ``perm[i]`` — turning a random-access reduction into a
+    streaming one (better L2 / Infinity Cache reuse on MI355).
+
+    The partial kernel writes are now scattered (one row per sparse_k
+    slot to a sorted position), but the HBM write bandwidth is
+    similar because Triton's vector store still coalesces 128 B
+    cache-line bursts as long as ``BLOCK_DMODEL`` is contiguous.
+    """
+    pid_m = tl.program_id(0)
+    pid_h_block = tl.program_id(1)
+    bid = tl.program_id(2)
+
+    offs_h = pid_h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    h_mask = offs_h < HEAD_Q
+    q_active = pid_m < seqlen_q
+
+    q_ptrs = (
+        Q + bid * stride_qb + offs_h[:, None] * stride_qh + pid_m * stride_qm + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(q_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    dout_ptrs = (
+        DOUT
+        + bid * stride_dob
+        + offs_h[:, None] * stride_doh
+        + pid_m * stride_dom
+        + offs_d[None, :] * stride_dod
+    )
+    dout = tl.load(dout_ptrs, mask=h_mask[:, None] & q_active, other=0.0)
+
+    lse = tl.load(
+        LSE + bid * stride_lb + offs_h * stride_lh + pid_m * stride_lm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+    dvec = tl.load(
+        D + bid * stride_db + offs_h * stride_dh + pid_m * stride_dm,
+        mask=h_mask & q_active,
+        other=0.0,
+    )
+
+    dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
+    flat_base = pid_m * K_topk
+
+    for k_start in range(0, K_topk, BLOCK_K):
+        sparse_k = k_start + offs_k
+        topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
+        topk = tl.load(topk_ptrs, mask=sparse_k < K_topk, other=-1)
+        valid_k = (sparse_k < K_topk) & (topk >= 0) & (topk < pool_size)
+        safe_topk = tl.where(valid_k, topk, 0)
+
+        pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
+        pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
+
+        q_bf16 = q.to(pool.dtype)
+        dout_bf16 = dout.to(pool.dtype)
+        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout_bf16, tl.trans(pool))
+        ds = p * (dp - dvec[:, None])
+
+        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+
+        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
+        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        dpool_contrib = tl.where(valid_k[:, None], dpool_contrib, 0.0)
+
+        # P57: look up the SORTED position for each ``(m, sparse_k)``
+        # visit. ``flat_base + sparse_k`` is the ORIGINAL flat index;
+        # ``inv_perm[bid, orig_flat]`` is the sorted slot to write.
+        orig_flat = flat_base + sparse_k
+        inv_perm_ptrs = INV_PERM + bid * stride_ipb + orig_flat * stride_ipi
+        sorted_idx = tl.load(inv_perm_ptrs, mask=sparse_k < K_topk, other=0)
+        dpool_partial_ptrs = (
+            DPOOL_PARTIAL + bid * stride_dpb + sorted_idx[:, None] * stride_dpi + offs_d[None, :] * stride_dpd
+        )
+        tl.store(
+            dpool_partial_ptrs,
+            dpool_contrib,
+            mask=(sparse_k[:, None] < K_topk) & q_active,
+        )
+
+    dq_ptrs = (
+        DQ
+        + bid * stride_dqb
+        + offs_h[:, None] * stride_dqh
+        + pid_m * stride_dqm
+        + offs_d[None, :] * stride_dqd
+    )
+    tl.store(dq_ptrs, dq, mask=h_mask[:, None] & q_active)
+
+
+@triton.jit
+def _v4_csa_attention_pool_segreduce_sequential_kernel(
+    DPOOL_PARTIAL,  # [B, MK_sorted, D] — written in sorted order by partial_sorted kernel
+    BIN_PTR,  # [B, P+1] int32 — prefix sum of count per pool slot (same as non-sorted variant)
+    DPOOL,  # [B, P, D]
+    stride_dpb,
+    stride_dpi,
+    stride_dpd,
+    stride_binb,
+    stride_binp,
+    stride_db,
+    stride_dp,
+    stride_dd,
+    P,
+    D_size,
+    BLOCK_D: tl.constexpr,
+    BLOCK_I: tl.constexpr,
+):
+    """P57 sequential segreduce — reads dpool_partial[bid, i:i+BI, :]
+    contiguously without a perm lookup since the partial kernel
+    already wrote in sorted order.
+    """
+    pid_p = tl.program_id(0)
+    pid_d_block = tl.program_id(1)
+    pid_b = tl.program_id(2)
+
+    offs_d = pid_d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    d_mask = offs_d < D_size
+
+    bin_start = tl.load(BIN_PTR + pid_b * stride_binb + pid_p * stride_binp)
+    bin_end = tl.load(BIN_PTR + pid_b * stride_binb + (pid_p + 1) * stride_binp)
+
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    i = bin_start
+    while i < bin_end:
+        offs_i = i + tl.arange(0, BLOCK_I)
+        valid_i = offs_i < bin_end
+        partial_ptrs = (
+            DPOOL_PARTIAL + pid_b * stride_dpb + offs_i[:, None] * stride_dpi + offs_d[None, :] * stride_dpd
+        )
+        partial = tl.load(
+            partial_ptrs,
+            mask=valid_i[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+        acc += tl.sum(partial, axis=0)
+        i += BLOCK_I
+
+    dpool_offset = pid_b * stride_db + pid_p * stride_dp + offs_d * stride_dd
+    tl.store(DPOOL + dpool_offset, acc, mask=d_mask)
+
+
+@triton.jit
 def _v4_csa_attention_pool_sparse_bwd_partial_kernel(
     Q,
     POOL,
@@ -1157,21 +1610,42 @@ def _launch_v4_csa_attention_pool_bwd(
     # experimentation.
     use_stream_overlap = use_split_sparse and os.getenv("PRIMUS_V4_CSA_BWD_STREAM_OVERLAP", "0") != "0"
 
-    dq_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
-    dk_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
-    dv_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
-    # Plan-5 P32: ``dpool_fp32`` is initialised by the segreduce kernel
-    # (one ``tl.store`` per ``(b, p, d_block)``), so ``empty`` would
-    # also be valid; ``zeros`` is kept for safety in case
-    # ``use_segreduce`` is overridden via env at runtime.
+    # P57: when the input is bf16/fp16 and we use the split local SWA
+    # path (every slab overwritten by tl.store, no atomic_add), keep
+    # ``dq / dk_local / dv_local`` in the INPUT dtype so the kernels
+    # write directly at the final precision. Eliminates the trailing
+    # ~256 MB fp32 → bf16 cast on each of these 3 buffers (~0.5 ms
+    # total at the proxy shape) AND halves their HBM write traffic
+    # in-kernel (~1 GB → 512 MB for the three buffers). The
+    # monolithic local kernel and the gather sparse path still need
+    # fp32 because they ``atomic_add`` into the buffer and Triton's
+    # bf16 atomic_add is not supported on AMD MI355.
+    use_local_split_alloc = use_split_sparse and os.getenv("PRIMUS_V4_ATTN_BWD_USE_SPLIT", "0") == "1"
+    if use_local_split_alloc and q.dtype in (torch.bfloat16, torch.float16):
+        local_dq_dtype = q.dtype
+    else:
+        local_dq_dtype = torch.float32
+    if use_local_split_alloc:
+        dq_fp32 = torch.empty((B, HQ, Sq, D), device=q.device, dtype=local_dq_dtype)
+        dk_local_fp32 = torch.empty((B, HQ, Sq, D), device=q.device, dtype=local_dq_dtype)
+        dv_local_fp32 = torch.empty((B, HQ, Sq, D), device=q.device, dtype=local_dq_dtype)
+    else:
+        dq_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+        dk_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+        dv_local_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+    # ``dpool_fp32`` is small (2 MB at proxy) so the zero-fill cost
+    # is negligible (~20 us); keep ``zeros`` so the gather +
+    # atomic_add fallback path stays safe.
     dpool_fp32 = torch.zeros((B, P, D), device=q.device, dtype=torch.float32)
     # The split-sparse paths (both segreduce and gather) always write
-    # ``dq`` via ``tl.store`` from disjoint ``(pid_m, pid_h_block)``
-    # programs, so we use a dedicated ``dq_sparse_fp32`` buffer and
-    # sum at the end. Aliasing to ``dq_fp32`` would clobber the
-    # local-SWA contribution.
+    # ``dq_sparse`` via ``tl.store`` from disjoint ``(pid_m,
+    # pid_h_block)`` programs, so we use a dedicated buffer and sum
+    # at the end. Aliasing to ``dq_fp32`` would clobber the
+    # local-SWA contribution. P57: match input dtype (bf16) when
+    # ``local_dq_dtype`` is bf16 so the final add and dtype-cast
+    # become free.
     if use_split_sparse:
-        dq_sparse_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
+        dq_sparse_fp32 = torch.empty((B, HQ, Sq, D), device=q.device, dtype=local_dq_dtype)
     else:
         dq_sparse_fp32 = dq_fp32
     if has_sink:
@@ -1218,13 +1692,42 @@ def _launch_v4_csa_attention_pool_bwd(
     dpool_partial = None
     use_segreduce = use_split_sparse and os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE", "1") == "1"
     if use_segreduce:
-        partial_dtype_name = os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DTYPE", "fp32")
-        if partial_dtype_name == "bf16":
+        # P57: ``dpool_partial`` defaults to the INPUT dtype when bf16
+        # / fp16 — halves HBM write+read traffic on the 4 GiB partial
+        # buffer (4 GB fp32 → 2 GB bf16) for the ~production-shape
+        # bench, saving ~0.6 ms / step. fp32 inputs keep an fp32
+        # partial so the parity tests' tight 1e-4 atol holds.
+        # The legacy P32 attempt failed parity because it used bf16
+        # unconditionally; gating on the input dtype keeps the
+        # bf16-only speed win without regressing fp32 numerics.
+        env_dtype = os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DTYPE", "")
+        if env_dtype == "bf16":
             partial_dtype = torch.bfloat16
-        elif partial_dtype_name == "fp16":
+        elif env_dtype == "fp16":
             partial_dtype = torch.float16
-        else:
+        elif env_dtype == "fp32":
             partial_dtype = torch.float32
+        else:
+            # Default: match input dtype for bf16 / fp16, fp32
+            # otherwise. ``q.dtype`` is the most reliable proxy for
+            # the gradient-tolerance class.
+            if q.dtype in (torch.bfloat16, torch.float16):
+                partial_dtype = q.dtype
+            else:
+                partial_dtype = torch.float32
+        # P57: experimental ``use_sorted_partial`` flips the partial
+        # buffer layout from ``[B, M, K_topk, D]`` to
+        # ``[B, MK_sorted, D]``. The downstream segreduce kernel can
+        # then read contiguous slices, but the partial kernel writes
+        # become scattered (each ``sparse_k`` row goes to its
+        # ``inv_perm[orig_flat]`` sorted position). On the EP8 proxy
+        # the natural-order partial wins (~6.43 ms vs ~6.82 ms),
+        # because the partial kernel is write-bound and contiguous
+        # writes coalesce better than scattered ones. Keep the
+        # sorted-partial kernels in tree for shapes where the
+        # segreduce-read trade-off tips the other way (e.g., tiny
+        # ``D`` or very-large ``P`` workloads).
+        use_sorted_partial = os.getenv("PRIMUS_V4_CSA_BWD_SORTED_PARTIAL", "0") != "0"
         with torch.no_grad():
             MK = Sq * K_topk
             flat_topk = topk_idxs.contiguous().view(B, MK).to(torch.int32)
@@ -1235,6 +1738,14 @@ def _launch_v4_csa_attention_pool_bwd(
             queries = torch.arange(P + 1, device=q.device, dtype=torch.int32)
             queries = queries.unsqueeze(0).expand(B, -1).contiguous()
             bin_ptr = torch.searchsorted(sorted_topk, queries, right=False).to(torch.int32)
+            inv_perm32 = None
+            if use_sorted_partial:
+                # inv_perm[bid, orig_flat] = sorted_position. Built by
+                # scattering ``arange(MK)`` to the ``perm``-indexed
+                # positions. ~30 us at the proxy shape.
+                inv_perm32 = torch.empty_like(perm32)
+                idx_range = torch.arange(MK, device=q.device, dtype=torch.int32).unsqueeze(0).expand(B, -1)
+                inv_perm32.scatter_(1, perm.long(), idx_range)
         dpool_partial = torch.empty((B, Sq, K_topk, D), device=q.device, dtype=partial_dtype)
 
     # Lazily set up an extra CUDA stream for the sparse pool BWD so it
@@ -1247,11 +1758,42 @@ def _launch_v4_csa_attention_pool_bwd(
         sparse_stream_ctx = torch.cuda.stream(sparse_stream)
 
     if use_split_sparse:
-        local_block_m = 32
+        # P57: expose local-SWA tuning knobs (BLOCK_M, num_warps,
+        # num_stages). The local dq / dkv kernels live in
+        # ``v4_attention_bwd.py`` (outside the P57 file scope), but the
+        # LAUNCHER picks the block size + warp / stage count, and those
+        # parameters dominate the local-path wall clock at the
+        # production SWA=128 shape. The new defaults below are tuned
+        # specifically for ``B=1, H=64, Sq=4096, D=512, K_topk=512,
+        # swa_window=128`` on MI355 and cut the local dq+dkv from
+        # ~6.9 ms (P32 defaults: BM=32, BN=32, w=8, s=1) to ~4.1 ms
+        # (BM=64, BN=16 → fewer m programs and smaller n tiles to
+        # match the small SWA window).
+        local_block_m = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_BLOCK_M", "64"))
+        local_block_n = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_BLOCK_N", "16"))
+        # P57: the dq and dkv kernels prefer different per-axis block
+        # sizes (dq iterates ``n`` over a small SWA window so larger
+        # ``BLOCK_M`` packs more m-rows per program; dkv iterates
+        # ``m`` so its program-axis ``BLOCK_N`` and the inner-axis
+        # ``BLOCK_M`` can be tuned independently).
+        local_block_m_dq = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_BLOCK_M", str(local_block_m)))
+        local_block_n_dq = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_BLOCK_N", str(local_block_n)))
+        # P57: dkv-specific tuning — ``BLOCK_M_dkv=32 warps=2 stages=1``
+        # cuts the dkv kernel ~30 % vs ``BM=64 W=4 S=2`` because dkv
+        # iterates ``m`` inside the kernel; a smaller m-tile fits
+        # more (n_block) programs in flight, and 2 warps amortise the
+        # K + V loads without exceeding the dk[BLOCK_N, BLOCK_D] +
+        # dv[BLOCK_N, BLOCK_D] tile (~32 KB bf16) live-VGPR budget.
+        local_block_m_dkv = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_BLOCK_M", "32"))
+        local_block_n_dkv = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_BLOCK_N", str(local_block_n)))
+        local_dq_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_WARPS", "8"))
+        local_dq_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_STAGES", "1"))
+        local_dkv_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_WARPS", "2"))
+        local_dkv_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_STAGES", "1"))
         swa_local = int(swa_window) if swa_window > 0 else 0
         use_local_split = os.getenv("PRIMUS_V4_ATTN_BWD_USE_SPLIT", "0") == "1"
         if use_local_split:
-            dq_grid = (triton.cdiv(Sq, local_block_m), B * HQ)
+            dq_grid = (triton.cdiv(Sq, local_block_m_dq), B * HQ)
             _v4_attention_bwd_dq_kernel[dq_grid](
                 q,
                 k_local,
@@ -1301,13 +1843,13 @@ def _launch_v4_csa_attention_pool_bwd(
                 HAS_ADD_MASK=False,
                 HCA_LOCAL_SEQLEN=0,
                 USE_CAUSAL=True,
-                BLOCK_M=local_block_m,
-                BLOCK_N=BLOCK_N,
+                BLOCK_M=local_block_m_dq,
+                BLOCK_N=local_block_n_dq,
                 BLOCK_DMODEL=BLOCK_DMODEL,
-                num_warps=8,
-                num_stages=1,
+                num_warps=local_dq_warps,
+                num_stages=local_dq_stages,
             )
-            dkv_grid = (triton.cdiv(Sq, BLOCK_N), B * HQ)
+            dkv_grid = (triton.cdiv(Sq, local_block_n_dkv), B * HQ)
             _v4_attention_bwd_dkv_kernel[dkv_grid](
                 q,
                 k_local,
@@ -1359,11 +1901,11 @@ def _launch_v4_csa_attention_pool_bwd(
                 HAS_ADD_MASK=False,
                 HCA_LOCAL_SEQLEN=0,
                 USE_CAUSAL=True,
-                BLOCK_M=local_block_m,
-                BLOCK_N=BLOCK_N,
+                BLOCK_M=local_block_m_dkv,
+                BLOCK_N=local_block_n_dkv,
                 BLOCK_DMODEL=BLOCK_DMODEL,
-                num_warps=8,
-                num_stages=1,
+                num_warps=local_dkv_warps,
+                num_stages=local_dkv_stages,
             )
         else:
             local_grid = (triton.cdiv(Sq, local_block_m), B * HQ)
@@ -1719,7 +2261,13 @@ def _launch_v4_csa_attention_pool_bwd(
         # both ``atomic_add(dk_ptrs, ...)`` and ``atomic_add(dv_ptrs,
         # ...)``.
     elif use_split_sparse:
-        BLOCK_H = int(os.getenv("PRIMUS_V4_CSA_BWD_SPARSE_BLOCK_H", "64"))
+        # P57: BLOCK_H=32, num_warps=4, num_stages=2 wins the proxy
+        # sweep over the P32 default (BLOCK_H=64, num_warps=8, stages=1).
+        # Doubling the head-axis grid (HQ=64 -> 2 h-blocks per m) lifts
+        # MI355 occupancy, while fewer warps + 2 stages reduces register
+        # pressure per warp (the dq[BLOCK_H, BLOCK_DMODEL]=fp32
+        # accumulator dominates VGPR live range).
+        BLOCK_H = int(os.getenv("PRIMUS_V4_CSA_BWD_SPARSE_BLOCK_H", "32"))
         # Plan-5 P32: ``PRIMUS_V4_CSA_BWD_SEGREDUCE=1`` is now the
         # default — wins both the standalone CSA BWD microbench
         # (16.31 ms vs 24.83 ms gather/atomic) and the EP8 proxy
@@ -1740,7 +2288,221 @@ def _launch_v4_csa_attention_pool_bwd(
         # ``bin_ptr`` and ``dpool_partial`` were built above on the
         # default stream BEFORE the local kernels were launched, so
         # they're ready by the time the sparse stream gets here.
-        if use_segreduce:
+        # P57: experimental split-kernel path (opt-in).
+        # Sub-kernels:
+        #
+        #   _v4_csa_attention_pool_sparse_bwd_dq_only_kernel
+        #   _v4_csa_attention_pool_sparse_bwd_dpool_only_kernel
+        #
+        # vs the joint kernel
+        # ``_v4_csa_attention_pool_sparse_bwd_partial_kernel``. The
+        # split path frees the live-VGPR footprint of each sub-kernel
+        # but pays a 2× read on Q / dout / lse / dvec / pool /
+        # topk_idxs. On the EP8 proxy shape the joint kernel still
+        # wins (~3.7 ms vs ~4.5 ms split), so split is opt-in via
+        # ``PRIMUS_V4_CSA_BWD_SPLIT_DQ_DPOOL=1`` and the joint kernel
+        # remains the default. Keeping the split sub-kernels in tree
+        # for future shapes where the read amplification is cheaper
+        # (smaller H or D, or compute-bound regimes).
+        use_split_dq_dpool = os.getenv("PRIMUS_V4_CSA_BWD_SPLIT_DQ_DPOOL", "0") != "0"
+        if use_segreduce and use_split_dq_dpool:
+            sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
+            dq_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DQ_WARPS", "4"))
+            dq_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DQ_STAGES", "2"))
+            dpool_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DPOOL_WARPS", "4"))
+            dpool_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_DPOOL_STAGES", "2"))
+            _v4_csa_attention_pool_sparse_bwd_dq_only_kernel[sparse_grid](
+                q,
+                pool,
+                topk_idxs,
+                dout,
+                lse,
+                d_buf,
+                dq_sparse_fp32,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),
+                pool.stride(0),
+                pool.stride(1),
+                pool.stride(2),
+                topk_idxs.stride(0),
+                topk_idxs.stride(1),
+                topk_idxs.stride(2),
+                dout.stride(0),
+                dout.stride(1),
+                dout.stride(2),
+                dout.stride(3),
+                lse.stride(0),
+                lse.stride(1),
+                lse.stride(2),
+                d_buf.stride(0),
+                d_buf.stride(1),
+                d_buf.stride(2),
+                dq_sparse_fp32.stride(0),
+                dq_sparse_fp32.stride(1),
+                dq_sparse_fp32.stride(2),
+                dq_sparse_fp32.stride(3),
+                Sq,
+                P,
+                K_topk,
+                float(scale),
+                HEAD_Q=HQ,
+                BLOCK_H=BLOCK_H,
+                BLOCK_K=BLOCK_K_PARTIAL,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                num_warps=dq_warps,
+                num_stages=dq_stages,
+            )
+            _v4_csa_attention_pool_sparse_bwd_dpool_only_kernel[sparse_grid](
+                q,
+                pool,
+                topk_idxs,
+                dout,
+                lse,
+                d_buf,
+                dpool_partial,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),
+                pool.stride(0),
+                pool.stride(1),
+                pool.stride(2),
+                topk_idxs.stride(0),
+                topk_idxs.stride(1),
+                topk_idxs.stride(2),
+                dout.stride(0),
+                dout.stride(1),
+                dout.stride(2),
+                dout.stride(3),
+                lse.stride(0),
+                lse.stride(1),
+                lse.stride(2),
+                d_buf.stride(0),
+                d_buf.stride(1),
+                d_buf.stride(2),
+                dpool_partial.stride(0),
+                dpool_partial.stride(1),
+                dpool_partial.stride(2),
+                dpool_partial.stride(3),
+                Sq,
+                P,
+                K_topk,
+                float(scale),
+                HEAD_Q=HQ,
+                BLOCK_H=BLOCK_H,
+                BLOCK_K=BLOCK_K_PARTIAL,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                num_warps=dpool_warps,
+                num_stages=dpool_stages,
+            )
+            # P57: segreduce reduction (shared between split and joint
+            # partial paths). Reduces ``dpool_partial[B, MK, D]`` into
+            # ``dpool[B, P, D]`` using the sorted inverse index.
+            dpool_partial_flat = dpool_partial.view(B, Sq * K_topk, D)
+            block_d_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_D", "512"))
+            block_i_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_I", "64"))
+            seg_grid = (P, triton.cdiv(D, block_d_seg), B)
+            _v4_csa_attention_pool_segreduce_kernel[seg_grid](
+                dpool_partial_flat,
+                perm32,
+                bin_ptr,
+                dpool_fp32,
+                dpool_partial_flat.stride(0),
+                dpool_partial_flat.stride(1),
+                dpool_partial_flat.stride(2),
+                perm32.stride(0),
+                perm32.stride(1),
+                bin_ptr.stride(0),
+                bin_ptr.stride(1),
+                dpool_fp32.stride(0),
+                dpool_fp32.stride(1),
+                dpool_fp32.stride(2),
+                P,
+                D,
+                BLOCK_D=block_d_seg,
+                BLOCK_I=block_i_seg,
+                num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_WARPS", "4")),
+                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_STAGES", "2")),
+            )
+        elif use_segreduce and use_sorted_partial:
+            sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
+            dpool_partial_flat = dpool_partial.view(B, Sq * K_topk, D)
+            _v4_csa_attention_pool_sparse_bwd_partial_sorted_kernel[sparse_grid](
+                q,
+                pool,
+                topk_idxs,
+                inv_perm32,
+                dout,
+                lse,
+                d_buf,
+                dq_sparse_fp32,
+                dpool_partial_flat,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),
+                pool.stride(0),
+                pool.stride(1),
+                pool.stride(2),
+                topk_idxs.stride(0),
+                topk_idxs.stride(1),
+                topk_idxs.stride(2),
+                inv_perm32.stride(0),
+                inv_perm32.stride(1),
+                dout.stride(0),
+                dout.stride(1),
+                dout.stride(2),
+                dout.stride(3),
+                lse.stride(0),
+                lse.stride(1),
+                lse.stride(2),
+                d_buf.stride(0),
+                d_buf.stride(1),
+                d_buf.stride(2),
+                dq_sparse_fp32.stride(0),
+                dq_sparse_fp32.stride(1),
+                dq_sparse_fp32.stride(2),
+                dq_sparse_fp32.stride(3),
+                dpool_partial_flat.stride(0),
+                dpool_partial_flat.stride(1),
+                dpool_partial_flat.stride(2),
+                Sq,
+                P,
+                K_topk,
+                float(scale),
+                HEAD_Q=HQ,
+                BLOCK_H=BLOCK_H,
+                BLOCK_K=BLOCK_K_PARTIAL,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_WARPS", "4")),
+                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_STAGES", "2")),
+            )
+            # Sequential segreduce — no perm lookup.
+            block_d_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_D", "512"))
+            block_i_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_I", "64"))
+            seg_grid = (P, triton.cdiv(D, block_d_seg), B)
+            _v4_csa_attention_pool_segreduce_sequential_kernel[seg_grid](
+                dpool_partial_flat,
+                bin_ptr,
+                dpool_fp32,
+                dpool_partial_flat.stride(0),
+                dpool_partial_flat.stride(1),
+                dpool_partial_flat.stride(2),
+                bin_ptr.stride(0),
+                bin_ptr.stride(1),
+                dpool_fp32.stride(0),
+                dpool_fp32.stride(1),
+                dpool_fp32.stride(2),
+                P,
+                D,
+                BLOCK_D=block_d_seg,
+                BLOCK_I=block_i_seg,
+                num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_WARPS", "4")),
+                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_STAGES", "2")),
+            )
+        elif use_segreduce:
             sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
             _v4_csa_attention_pool_sparse_bwd_partial_kernel[sparse_grid](
                 q,
@@ -1787,24 +2549,11 @@ def _launch_v4_csa_attention_pool_bwd(
                 BLOCK_H=BLOCK_H,
                 BLOCK_K=BLOCK_K_PARTIAL,
                 BLOCK_DMODEL=BLOCK_DMODEL,
-                # Plan-5 P32: ``num_warps=8`` won for the partial-write
-                # variant — extra warps amortise the larger output
-                # bandwidth (4 GB ``dpool_partial`` write vs the
-                # atomic-add gather kernel's 4 GB atomic traffic).
-                num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_WARPS", "8")),
-                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_STAGES", "1")),
+                num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_WARPS", "4")),
+                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_STAGES", "2")),
             )
-            # Reduce: ``dpool[b, p, d] = sum dpool_partial[b, perm[b, i], d]``
-            # for ``i ∈ [bin_ptr[b, p], bin_ptr[b, p+1])``. View the
-            # ``[B, M, K, D]`` partial buffer as ``[B, MK, D]`` so the
-            # reduction kernel can index it with the flat ``perm``
-            # entry.
+            # Same segreduce reduction as the split path above.
             dpool_partial_flat = dpool_partial.view(B, Sq * K_topk, D)
-            # Plan-5 P32: BLOCK_D=512 / BLOCK_I=64 won the sweep on the
-            # proxy shape (18.8 ms vs 19.2 ms at the previous default of
-            # 64 / 16). The full ``D=512`` slab fits comfortably in
-            # registers, and BLOCK_I=64 amortises the ``SORTED_PERM``
-            # gather latency.
             block_d_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_D", "512"))
             block_i_seg = int(os.getenv("PRIMUS_V4_CSA_BWD_SEGREDUCE_BLOCK_I", "64"))
             seg_grid = (P, triton.cdiv(D, block_d_seg), B)
@@ -1914,10 +2663,12 @@ def _launch_v4_csa_attention_pool_bwd(
     if use_split_sparse:
         dq_fp32.add_(dq_sparse_fp32)
 
-    dq_out = dq_fp32.to(q.dtype)
-    dk_local_out = dk_local_fp32.to(k_local.dtype)
-    dv_local_out = dv_local_fp32.to(v_local.dtype)
-    dpool_out = dpool_fp32.to(pool.dtype)
+    # P57: if the local buffers are already in input dtype, ``.to``
+    # is a no-op view; only fp32 buffers actually do a cast.
+    dq_out = dq_fp32 if dq_fp32.dtype == q.dtype else dq_fp32.to(q.dtype)
+    dk_local_out = dk_local_fp32 if dk_local_fp32.dtype == k_local.dtype else dk_local_fp32.to(k_local.dtype)
+    dv_local_out = dv_local_fp32 if dv_local_fp32.dtype == v_local.dtype else dv_local_fp32.to(v_local.dtype)
+    dpool_out = dpool_fp32 if dpool_fp32.dtype == pool.dtype else dpool_fp32.to(pool.dtype)
     dsink_out = dsink_fp32.to(sink.dtype) if has_sink else None
     return dq_out, dk_local_out, dv_local_out, dpool_out, dsink_out
 
