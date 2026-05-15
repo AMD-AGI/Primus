@@ -8,8 +8,16 @@
 Megatron enums Patches
 """
 
+from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
+
+
+def _is_fp4_can_patch(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    fp4 = bool(getattr(args, "fp4", False))
+
+    return fp4 and is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
@@ -17,7 +25,7 @@ from primus.modules.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description="Override Megatron enums to use Primus implementation when fp4 is enabled",
-    condition=lambda ctx: getattr(get_args(ctx), "fp4", False),
+    condition=_is_fp4_can_patch,
 )
 def patch_enums(ctx: PatchContext):
     from megatron.core import enums
@@ -35,7 +43,7 @@ def patch_enums(ctx: PatchContext):
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp4_context to use Primus implementation when fp4 is enabled",
-    condition=lambda ctx: getattr(get_args(ctx), "fp4", False),
+    condition=_is_fp4_can_patch,
 )
 def patch_fp4_context(ctx: PatchContext):
     """
