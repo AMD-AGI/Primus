@@ -892,63 +892,42 @@
 | [-] | ~~R2.6 trace + tgz archival on phase close~~ | d925c567 | 2026-05-15 | Skipped (no production integration). |
 
 
-## Phase 46 (plan-7) — Fused grad-scale Triton kernel
+## Phase 46 (plan-7) — Fused grad-scale Triton kernel (descoped via P45 evidence)
 
-> Plan-7 P46.  See `../plan-7/02-phase-details.md#phase-46` for design.  Absorbs the per-param `multi_tensor<scale>` calls into a single Triton kernel.  Gated behind `PRIMUS_FUSED_GRAD_SCALE=1` (default `"0"` initially; flips to `"1"` after A/B).
-
-
-|     | Task                                                                                                                                                          | commit | date | note |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | New `primus/backends/megatron/extensions/_triton/fused_grad_scale.py` with `_fused_grad_scale_kernel` + `FusedGradScale` callable |        |      |      |
-| [ ] | Extend `turbo_adam_patches.py` with `multi_tensor_scale` dispatcher |        |      |      |
-| [ ] | New env `PRIMUS_FUSED_GRAD_SCALE` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
-| [ ] | Microbench `progress/p46/bench_fused_grad_scale.py` |        |      |      |
-| [ ] | G48 — `tests/unit_tests/megatron/extensions/test_p46_fused_grad_scale.py` |        |      | Bit-equal vs upstream `multi_tensor_scale` at fast tier fp32 + bf16. |
-| [ ] | G48a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
-| [ ] | G48b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_GRAD_SCALE=1`; `multi_tensor<scale>` drops to ≈ 0; iter time drops ≥ 3 ms vs P45 final |        |      |      |
-| [ ] | `progress/p46/p46-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
-| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P46 row |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P46 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
-
-
-## Phase 47 (plan-7) — Fused grad-norm clip Triton kernel
-
-> Plan-7 P47.  See `../plan-7/02-phase-details.md#phase-47` for design.  Fuses the L2-norm reduce + max-with-existing-norm + clip-scale derivation + apply-clip chain into a 3-kernel pipeline.  Gated behind `PRIMUS_FUSED_GRAD_NORM_CLIP=1` (default `"0"` initially; flips to `"1"` after A/B).
+> Plan-7 P46.  **Descoped** via P45's microbench evidence (`progress/p45/p45-summary.md` §3): `multi_tensor_apply` already runs at near-MI355 HBM peak; the trace's `multi_tensor<scale>` 321 launches × 34 µs are already multi-tensor-batched, not a fusion target.  Combined budget (10.96 ms = 2.1 % of step) below the R9.1 10 % cut-off.
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | New `primus/backends/megatron/extensions/_triton/fused_grad_norm_clip.py` with 3-kernel pipeline (`partial`, `global`, `apply`) |        |      |      |
-| [ ] | Extend `turbo_adam_patches.py` with `clip_grad_norm` dispatcher |        |      |      |
-| [ ] | New env `PRIMUS_FUSED_GRAD_NORM_CLIP` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
-| [ ] | Microbench `progress/p47/bench_fused_grad_norm_clip.py` |        |      |      |
-| [ ] | G49 — `tests/unit_tests/megatron/extensions/test_p47_fused_grad_norm_clip.py` |        |      | Bit-equal vs upstream `clip_grad_norm_fp32`; reduction order matches upstream. |
-| [ ] | G49a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
-| [ ] | G49b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_GRAD_NORM_CLIP=1`; `reduce<l2norm_bf16>` + `multi_tensor<l2norm>` drop to ≈ 0; iter time drops ≥ 6 ms vs P46 final |        |      |      |
-| [ ] | `progress/p47/p47-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
-| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P47 row |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P47 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~all P46 implementation tasks~~ | TBD-p46 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
+| [x] | `progress/p46/p46-summary.md` — descope summary | TBD-p46 | 2026-05-15 | Documents the descope rationale; plan-8 fused-Adam covers this. |
 
 
-## Phase 48 (plan-7) — Plan-7 close-out
+## Phase 47 (plan-7) — Fused grad-norm clip Triton kernel (descoped via P45 evidence)
 
-> Plan-7 P48.  See `../plan-7/02-phase-details.md#phase-48` for design.  Hand-off phase.  No new kernels.  Appends plan-7 rows to perf docs, pins status, runs 15-iter clean bake-off with all plan-7 default-on knobs, surfaces new env knobs in `run_deepseek_v4_flash_proxy.sh`.
+> Plan-7 P47.  **Descoped** via P45's microbench evidence: `multi_tensor<l2norm>` (6.72 ms) is already multi-tensor-batched; `reduce<l2norm_bf16>` (7.76 ms) is a single cross-tensor reduce already near peak.  Combined budget (14.48 ms = 2.8 %) below the R9.1 10 % cut-off.
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | `develop/perf/proxy_ep8.md` — append `P45`, `P46`, `P47`, `P48 final` rows |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append plan-7 rows (one per shipped fusion) |        |      |      |
-| [ ] | `progress/p45/p45-summary.md` ... `progress/p48/p48-summary.md` per R2.1 |        |      |      |
-| [ ] | `run_deepseek_v4_flash_proxy.sh` — surface 3 new env knobs (`PRIMUS_FUSED_ADAM_TRITON`, `PRIMUS_FUSED_GRAD_SCALE`, `PRIMUS_FUSED_GRAD_NORM_CLIP`) |        |      |      |
+| [-] | ~~all P47 implementation tasks~~ | TBD-p47 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
+| [x] | `progress/p47/p47-summary.md` — descope summary | TBD-p47 | 2026-05-15 | Documents the descope rationale; plan-8 joint fused-Adam + grad-clip covers this. |
+
+
+## Phase 48 (plan-7) — Plan-7 close-out + plan-8 kick-off
+
+> Plan-7 P48.  Hand-off phase.  No new kernels.  Plan-7 closes with no production kernel shipped — P45's microbench evidence disproved the optimizer-step fusion budget hypothesis; P46 / P47 descoped on the same evidence.  Final iter time matches P40 final (510.6 ms / 524.9 TFLOP/s/GPU / 17.31× vs P28).  The real optimizer-step win requires plan-8 fused-Adam with master-param remainder bit-exactness.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [x] | `progress/p48/p48-summary.md` — plan-7 close-out + plan-8 kick-off scope per R2.1 | TBD-p48 | 2026-05-15 | Eight-section retrospective: budget mis-calibration analysis, phase-by-phase outcomes, cumulative perf summary, plan-8 starter set (P49-P54). |
+| [x] | `develop/perf/proxy_ep8.md` — append P45/P46/P47/P48 final rows | TBD-p48 | 2026-05-15 | All rows record "no perf delta" with descope rationale. |
+| [-] | ~~`develop/perf/elem_fusion.md` — append plan-7 rows~~ | TBD-p48 | 2026-05-15 | Skipped — no fusions shipped. |
+| [-] | ~~`run_deepseek_v4_flash_proxy.sh` — surface 3 new env knobs~~ | TBD-p48 | 2026-05-15 | Skipped — no production knobs to surface; plan-8 phases will add their own. |
 | [ ] | Status pinning per R2.4 — every `[x]` row in Phase 45..48 has commit SHA + date |        |      |      |
-| [ ] | 15-iter clean bake-off `progress/p48/run_smoke_p48_bakeoff.sh` |        |      |      |
-| [ ] | Plan-7 close-out commit `docs(deepseek-v4)[plan-7][P48]: plan-7 close-out` |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~15-iter clean bake-off~~ | TBD-p48 | 2026-05-15 | Skipped — no plan-7 default-on knobs to bake off; the P40 final 15-iter bake-off remains the production anchor. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p48 | 2026-05-15 | Skipped — no runtime-affecting change in plan-7. |
 
 
 ## Blockers / Risks Log
