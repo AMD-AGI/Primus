@@ -93,12 +93,38 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # paths route through the Primus-owned Triton FlashAttention kernel
     # in ``v4_attention_kernels/v4_attention.py`` instead of the
     # eager-Python softmax. Precedence is
-    # ``use_turbo_attention > use_v4_triton_attention > eager``.
+    # ``use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager``.
     # Plan-4 P26: ``use_v4_triton_csa_attention=True`` enables the CSA
     # (``compress_ratio == 4``) Triton kernel; precedence is
-    # ``use_v4_triton_csa_attention > eager``.
+    # ``use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager``.
     use_v4_triton_attention: bool = False
     use_v4_triton_csa_attention: bool = False
+
+    # ---- DeepSeek-V4 plan-8 tilelang attention kernels (default OFF) ----
+    # Plan-8 P57 close-out 2 (2026-05-15): tilelang is an OPTIONAL
+    # dependency.  When the container has tilelang installed at the
+    # plan-8-pinned version and a caller sets
+    # ``use_v4_tilelang_attention=True`` (or
+    # ``use_v4_tilelang_csa_attention=True`` for the CSA family), the
+    # ``v4_attention`` / ``v4_csa_attention`` dispatcher routes through
+    # the tilelang FWD/BWD instead of the plan-4 / plan-5 Triton path.
+    # When tilelang is NOT installed the dispatcher prints a one-time
+    # rank-0 warning and falls back to Triton -- training continues
+    # without error.  Defaults False so the default container (which
+    # does not include tilelang) works out of the box.
+    #
+    # Replaces the legacy ``PRIMUS_V4_TILELANG_ATTN`` env knob; the env
+    # var is no longer consulted.  See
+    # ``primus/backends/megatron/core/transformer/v4_attention_kernels/_tilelang/__init__.py``
+    # for the dispatcher; the precedence is:
+    #   cr ∈ {0, 128}:
+    #     use_turbo_attention > use_v4_tilelang_attention
+    #                         > use_v4_triton_attention > eager
+    #   cr == 4:
+    #     use_v4_tilelang_csa_attention
+    #                         > use_v4_triton_csa_attention > eager
+    use_v4_tilelang_attention: bool = False
+    use_v4_tilelang_csa_attention: bool = False
 
     # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
     # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-

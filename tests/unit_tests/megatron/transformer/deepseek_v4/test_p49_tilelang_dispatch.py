@@ -8,11 +8,13 @@
 
 Asserts that:
 
-* :func:`is_tilelang_path_enabled` correctly tracks the env knob.
+* :func:`should_dispatch` requires the caller to pass ``enabled=True``
+  (replaces the legacy ``PRIMUS_V4_TILELANG_ATTN`` env knob at plan-8
+  P57 close-out 2).
 * :func:`is_tilelang_kernel_available` returns False for every plan-8
   kernel at P49 (none registered yet).
 * :func:`should_dispatch` falls through with a single rank-0 warning
-  when the env knob is set but no kernel has landed yet.
+  when the caller passes ``enabled=True`` but no kernel has landed yet.
 * Importing the tilelang dispatcher module does NOT trigger a tilelang
   JIT compile (lazy import contract).
 * Registering an available kernel via :func:`register_available_kernel`
@@ -52,44 +54,43 @@ def _reset_dispatcher_state(module):
 
 
 # ---------------------------------------------------------------------------
-# G49.1: env knob predicate
+# G49.1: ``enabled`` parameter contract on ``should_dispatch``
+# (Plan-8 P57 close-out 2 replaced the env knob with a per-call flag
+# plumbed from the ``use_v4_tilelang_*`` config fields.)
 # ---------------------------------------------------------------------------
 
 
-class TestG49EnvKnob:
-    def test_default_off(self):
+class TestG49EnabledParam:
+    def test_default_off_when_enabled_false(self):
         from primus.backends.megatron.core.transformer.v4_attention_kernels import (
             _tilelang,
         )
 
-        with _env("PRIMUS_V4_TILELANG_ATTN", None):
-            assert _tilelang.is_tilelang_path_enabled() is False
+        _reset_dispatcher_state(_tilelang)
+        assert _tilelang.should_dispatch("v4_attention_fwd", enabled=False) is False
 
-    def test_explicit_zero(self):
+    def test_default_off_when_enabled_omitted(self):
         from primus.backends.megatron.core.transformer.v4_attention_kernels import (
             _tilelang,
         )
 
-        with _env("PRIMUS_V4_TILELANG_ATTN", "0"):
-            assert _tilelang.is_tilelang_path_enabled() is False
+        _reset_dispatcher_state(_tilelang)
+        # No ``enabled`` kwarg -> defaults to False -> dispatch off.
+        assert _tilelang.should_dispatch("v4_attention_fwd") is False
 
-    def test_explicit_one(self):
+    def test_env_knob_no_longer_consulted(self):
+        """The legacy ``PRIMUS_V4_TILELANG_ATTN`` env var is gone.
+
+        Setting it must NOT enable dispatch — only the explicit
+        ``enabled=True`` kwarg does.
+        """
         from primus.backends.megatron.core.transformer.v4_attention_kernels import (
             _tilelang,
         )
 
+        _reset_dispatcher_state(_tilelang)
         with _env("PRIMUS_V4_TILELANG_ATTN", "1"):
-            assert _tilelang.is_tilelang_path_enabled() is True
-
-    def test_unrelated_truthy_value_does_not_enable(self):
-        """Only the literal string ``"1"`` enables — ``"true"`` does not."""
-        from primus.backends.megatron.core.transformer.v4_attention_kernels import (
-            _tilelang,
-        )
-
-        for v in ("true", "TRUE", "yes", "2"):
-            with _env("PRIMUS_V4_TILELANG_ATTN", v):
-                assert _tilelang.is_tilelang_path_enabled() is False, f"value {v!r} should NOT enable"
+            assert _tilelang.should_dispatch("v4_attention_fwd", enabled=False) is False
 
 
 # ---------------------------------------------------------------------------
@@ -148,32 +149,30 @@ class TestG49DispatcherFallthrough:
         )
 
         _reset_dispatcher_state(_tilelang)
-        with _env("PRIMUS_V4_TILELANG_ATTN", None):
-            assert _tilelang.should_dispatch("v4_attention_fwd") is False
+        # Default behavior: caller does not pass ``enabled``, dispatch off.
+        assert _tilelang.should_dispatch("v4_attention_fwd") is False
 
-    def test_should_dispatch_warns_once_when_env_set_but_kernel_missing(self):
+    def test_should_dispatch_warns_once_when_enabled_but_kernel_missing(self):
         from primus.backends.megatron.core.transformer.v4_attention_kernels import (
             _tilelang,
         )
 
         _reset_dispatcher_state(_tilelang)
-        with _env("PRIMUS_V4_TILELANG_ATTN", "1"):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                assert _tilelang.should_dispatch("v4_attention_fwd") is False
-                # Second call should not re-warn.
-                assert _tilelang.should_dispatch("v4_attention_fwd") is False
-            messages = [str(w.message) for w in caught]
-            # Filter out unrelated tilelang import / version-pin warnings — we
-            # only assert about the kernel-fallback warning.
-            fallback_msgs = [m for m in messages if "is not available" in m]
-            assert len(fallback_msgs) == 1, (
-                f"expected one fallback warning per kernel name; got "
-                f"{len(fallback_msgs)}: {fallback_msgs}"
-            )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert _tilelang.should_dispatch("v4_attention_fwd", enabled=True) is False
+            # Second call should not re-warn.
+            assert _tilelang.should_dispatch("v4_attention_fwd", enabled=True) is False
+        messages = [str(w.message) for w in caught]
+        # Filter out unrelated tilelang import / version-pin warnings — we
+        # only assert about the kernel-fallback warning.
+        fallback_msgs = [m for m in messages if "is not available" in m]
+        assert len(fallback_msgs) == 1, (
+            f"expected one fallback warning per kernel name; got " f"{len(fallback_msgs)}: {fallback_msgs}"
+        )
 
-    def test_should_dispatch_true_when_env_and_registered(self):
-        """When tilelang is importable + env=1 + kernel registered, dispatch."""
+    def test_should_dispatch_true_when_enabled_and_registered(self):
+        """When tilelang is importable + ``enabled=True`` + kernel registered, dispatch."""
         from primus.backends.megatron.core.transformer.v4_attention_kernels import (
             _tilelang,
         )
@@ -184,12 +183,11 @@ class TestG49DispatcherFallthrough:
             pytest.skip("tilelang not installed")
 
         _reset_dispatcher_state(_tilelang)
-        with _env("PRIMUS_V4_TILELANG_ATTN", "1"):
-            _tilelang.register_available_kernel("v4_attention_fwd")
-            try:
-                assert _tilelang.should_dispatch("v4_attention_fwd") is True
-            finally:
-                _reset_dispatcher_state(_tilelang)
+        _tilelang.register_available_kernel("v4_attention_fwd")
+        try:
+            assert _tilelang.should_dispatch("v4_attention_fwd", enabled=True) is True
+        finally:
+            _reset_dispatcher_state(_tilelang)
 
 
 # ---------------------------------------------------------------------------

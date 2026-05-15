@@ -35,6 +35,19 @@ from primus.backends.megatron.core.transformer.indexer import Indexer  # noqa: E
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (  # noqa: E402
     IndexerScoreFn,
     is_triton_kernel_supported,
+)
+
+# Plan-8 P57 close-out 2 (2026-05-15): the TestG41TopKParity class
+# exercises the *post-einsum tail* Triton path (gated by
+# ``PRIMUS_INDEXER_TRITON``), not the legacy P38 full-fuse path
+# (gated by ``PRIMUS_INDEXER_TRITON_FULL``).  Pre-P57R2 the test
+# imported ``is_triton_path_enabled`` from the legacy module by
+# mistake, which masked the gate behavior; the dispatch in
+# ``Indexer.forward`` already routed through the tail path so the
+# topk parity assertions still ran the right code.  Switch the
+# import here to the post-tail module so the gate check matches
+# the env var the test sets.
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (  # noqa: E402
     is_triton_path_enabled,
 )
 
@@ -64,9 +77,7 @@ def _eager_score(
     out_dtype: torch.dtype,
 ):
     """Eager reference matching the pre-P38 body exactly."""
-    relu = torch.nn.functional.relu(
-        torch.einsum("bshd,bpd->bshp", q_i.float(), k_icomp.float())
-    )
+    relu = torch.nn.functional.relu(torch.einsum("bshd,bpd->bshp", q_i.float(), k_icomp.float()))
     scores = (relu * w_i.float().unsqueeze(-1)).sum(dim=2)
     B, S, P = scores.shape
     t_idx = torch.arange(S, device=scores.device).unsqueeze(1)
@@ -77,9 +88,7 @@ def _eager_score(
     return scores.to(out_dtype)
 
 
-def _build_inputs(
-    *, B: int, S: int, P: int, H: int, HD: int, dtype: torch.dtype, seed: int
-):
+def _build_inputs(*, B: int, S: int, P: int, H: int, HD: int, dtype: torch.dtype, seed: int):
     gen = torch.Generator(device="cuda").manual_seed(seed)
     q_i = torch.randn((B, S, H, HD), dtype=dtype, device="cuda", generator=gen)
     k_icomp = torch.randn((B, P, HD), dtype=dtype, device="cuda", generator=gen)
@@ -111,9 +120,7 @@ class TestG41ForwardParity:
         finite_e = torch.isfinite(s_e)
         finite_t = torch.isfinite(s_t)
         torch.testing.assert_close(finite_e, finite_t)
-        torch.testing.assert_close(
-            s_t[finite_t].float(), s_e[finite_e].float(), atol=atol, rtol=rtol
-        )
+        torch.testing.assert_close(s_t[finite_t].float(), s_e[finite_e].float(), atol=atol, rtol=rtol)
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,14 @@ export PROFILE=True
 export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
 export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-1}
 
+# Plan-8 P57 close-out 2: tilelang attention CLI flags (default OFF).
+# Tilelang is NOT bundled in the default Primus container; leave both
+# flags off so the dispatcher stays on the plan-4 / plan-5 Triton path.
+# Set USE_V4_TILELANG_ATTENTION=True (or _CSA_) to opt in when a
+# tilelang-equipped container is in use.
+export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
+export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
+
 # ---------- Plan-4 / Plan-5 perf knobs --------------------------------------
 export USE_V4_TRITON_ATTENTION=True
 export USE_V4_TRITON_CSA_ATTENTION=True
@@ -71,8 +79,8 @@ export PRIMUS_STACK_GROUPED_WEIGHT_TRITON=${PRIMUS_STACK_GROUPED_WEIGHT_TRITON:-
 export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
 export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
 export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
-export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
-export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-0}
+export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-1}
+export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 
 export PRECISION_TYPE=BF16
 export FP8=null
@@ -117,6 +125,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
+  --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   --turbo_deepep_num_cu "$TURBO_DEEPEP_NUM_CU" \

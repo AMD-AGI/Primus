@@ -24,7 +24,12 @@ torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA / HIP", allow_module_level=True)
 
-pytest.importorskip("tilelang", reason="tilelang not installed")
+# Plan-8 P57 close-out 2: a tilelang-free container has a partial
+# ``tilelang`` namespace package (from the vendored source tree) but
+# the ``tilelang.language`` submodule (built C-extension) is not
+# present.  Use the submodule as the gate so we skip cleanly in that
+# environment instead of erroring at import time.
+pytest.importorskip("tilelang.language", reason="tilelang not installed")
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4_attention_fwd_tilelang import (  # noqa: E402
     v4_attention_fwd_tilelang,

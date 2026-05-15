@@ -91,6 +91,8 @@ def _make_bare_attn(
     use_core_attention: bool = False,
     use_v4_triton_attention: bool = False,
     use_v4_triton_csa_attention: bool = False,
+    use_v4_tilelang_attention: bool = False,
+    use_v4_tilelang_csa_attention: bool = False,
     layer_number: int = 0,
 ) -> DeepseekV4Attention:
     """Build a bare :class:`DeepseekV4Attention` for runtime dispatch tests.
@@ -99,6 +101,9 @@ def _make_bare_attn(
     and populates only the attributes the dispatch path consults. The
     helper methods on the real class read these attributes by name; we
     do not need to subclass.
+
+    Plan-8 P57 close-out 2 added the two ``_use_v4_tilelang_*`` flags;
+    they default False so existing tests remain on the Triton path.
     """
     attn = DeepseekV4Attention.__new__(DeepseekV4Attention)
     attn.compress_ratio = int(compress_ratio)
@@ -106,6 +111,8 @@ def _make_bare_attn(
     attn._use_core_attention = bool(use_core_attention)
     attn._use_v4_triton_attention = bool(use_v4_triton_attention)
     attn._use_v4_triton_csa_attention = bool(use_v4_triton_csa_attention)
+    attn._use_v4_tilelang_attention = bool(use_v4_tilelang_attention)
+    attn._use_v4_tilelang_csa_attention = bool(use_v4_tilelang_csa_attention)
     return attn
 
 

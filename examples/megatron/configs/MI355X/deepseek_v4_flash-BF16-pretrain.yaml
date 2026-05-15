@@ -108,10 +108,20 @@ modules:
 
       # plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
       # Precedence in DeepseekV4Attention.forward:
-      #   use_turbo_attention > use_v4_triton_attention > eager        (cr ∈ {0, 128})
-      #   use_v4_triton_csa_attention > eager                          (cr == 4)
+      #   use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
+      #   use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager                 (cr == 4)
       use_v4_triton_attention: ${PRIMUS_USE_V4_TRITON_ATTENTION:false}
       use_v4_triton_csa_attention: ${PRIMUS_USE_V4_TRITON_CSA_ATTENTION:false}
+
+      # Plan-8 tilelang attention kernels (OPTIONAL — tilelang is NOT
+      # bundled in the default Primus container). When enabled, the
+      # V4 attention dispatcher routes through the tilelang FWD/BWD;
+      # when tilelang is not installed, the dispatcher prints a single
+      # rank-0 warning and falls back to Triton -- training continues
+      # without error. Replaces the legacy PRIMUS_V4_TILELANG_ATTN env
+      # knob (no longer consulted).
+      use_v4_tilelang_attention: ${PRIMUS_USE_V4_TILELANG_ATTENTION:false}
+      use_v4_tilelang_csa_attention: ${PRIMUS_USE_V4_TILELANG_CSA_ATTENTION:false}
 
       # plan-5 P29 (RESCOPED): wrap sinkhorn_normalize with a cached
       # torch.compile(fullgraph=True, dynamic=False) build. Default

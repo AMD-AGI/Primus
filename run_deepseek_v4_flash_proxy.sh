@@ -213,29 +213,34 @@ export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
 # P41 — Indexer.forward post-einsum tail Triton fusion.  Re-attempt
 #   of P38 that keeps the cuBLAS / hipBLASLt einsum eager and fuses
 #   only the bandwidth-bound tail (`relu + mul(w_i) + sum(H) +
-#   causal_mask`).  Microbench at V4-Flash widths wins big
-#   (FWD 4.30x, BWD 1.63x) but the EP=8 proxy A/B (10-iter smoke)
-#   shows ~0.2 ms / iter aggregate gain within the ±1 ms noise band
-#   and lm_loss bit-identical.  Same descope precedent as P38 / P39:
-#   default OFF; set PRIMUS_INDEXER_TRITON=1 to opt in.
+#   causal_mask`).
 #
-#   The env knob is **re-purposed** at P41: it now controls the
+#   Plan-8 P57 close-out 2 (2026-05-15): default flipped to ON.
+#   Microbench at V4-Flash widths is a clear positive
+#   (FWD 4.30x / BWD 1.63x); the EP=8 proxy A/B (10-iter smoke)
+#   showed ~0.2 ms / iter aggregate gain within the ±1 ms noise band
+#   (small but consistently positive).  We default ON so the
+#   bandwidth-bound tail is fused by default; set
+#   PRIMUS_INDEXER_TRITON=0 to revert to the eager body.
+#
+#   The env knob was re-purposed at P41: it now controls the
 #   post-einsum tail path.  Legacy P38 full-fuse path lives behind
 #   PRIMUS_INDEXER_TRITON_FULL (default OFF, kept in tree for small-
 #   shape paths and future tuning).
-export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
+export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-1}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 
 # P39 — V4 Router post-logits Triton FWD/BWD fusion (shared by topk +
-#   hash router).  Descoped to **default OFF** (same precedent as P38).
-#   Microbench at V4-Flash widths (N=4096, E=256, K=8) does win on
-#   `sqrtsoftplus` (1.56x FWD / 1.22x BWD), but the EP=8 proxy A/B
-#   (10 iters each) shows ~534 ms / iter both ways and lm_loss
-#   bit-identical -- the per-call savings (~1 ms / iter aggregate)
-#   are submerged in dispatch + grouped-MLP variance.  Kernel ships
-#   behind the env knob, ready for future tuning.  Set
-#   PRIMUS_V4_ROUTER_TRITON=1 to enable.
-export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-0}
+#   hash router).
+#
+#   Plan-8 P57 close-out 2 (2026-05-15): default flipped to ON.
+#   Microbench at V4-Flash widths (N=4096, E=256, K=8) wins on V4's
+#   production `sqrtsoftplus` score function (1.56x FWD / 1.22x BWD).
+#   P39 / P43 EP=8 proxy A/B was inside the proxy noise band, so the
+#   conservative landing posture left it default-OFF; for P57 R2 we
+#   default ON to keep the microbench-positive kernel on the production
+#   path.  Set PRIMUS_V4_ROUTER_TRITON=0 to revert to the eager body.
+export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling

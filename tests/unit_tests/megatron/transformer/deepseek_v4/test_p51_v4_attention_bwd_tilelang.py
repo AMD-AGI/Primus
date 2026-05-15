@@ -16,8 +16,6 @@ Validates the autograd flow end-to-end via
 :class:`V4AttentionTilelangFn`).
 """
 
-import os
-from contextlib import contextmanager
 
 import pytest
 
@@ -26,7 +24,11 @@ torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA / HIP", allow_module_level=True)
 
-pytest.importorskip("tilelang", reason="tilelang not installed")
+# Plan-8 P57 close-out 2: gate on the ``tilelang.language`` submodule
+# (the C-extension) rather than ``tilelang`` itself, because a
+# tilelang-free container can still have an empty namespace package
+# from the vendored source tree.
+pytest.importorskip("tilelang.language", reason="tilelang not installed")
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4_attention_autograd_tilelang import (  # noqa: E402
     V4AttentionTilelangFn,
@@ -35,22 +37,6 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4
 from primus.backends.megatron.core.transformer.v4_attention_kernels.reference import (  # noqa: E402
     eager_v4_attention,
 )
-
-
-@contextmanager
-def _env(key: str, value: str | None):
-    prev = os.environ.get(key)
-    if value is None:
-        os.environ.pop(key, None)
-    else:
-        os.environ[key] = value
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = prev
 
 
 def _build_inputs(*, B, HQ, HK, Sq, Sk, D, dtype, seed=20260515, has_sink=True):
@@ -170,8 +156,13 @@ class TestG51DispatcherRegistration:
         assert _tilelang.is_tilelang_kernel_available("v4_attention_bwd")
 
     def test_full_dispatch_uses_autograd_path(self):
-        """When env=1 and both FWD/BWD registered, the public
-        `v4_attention()` should route through `V4AttentionTilelangFn`."""
+        """When ``use_tilelang=True`` and both FWD/BWD are registered, the
+        public ``v4_attention()`` should route through ``V4AttentionTilelangFn``.
+
+        Plan-8 P57 close-out 2: the legacy ``PRIMUS_V4_TILELANG_ATTN``
+        env knob is gone; the caller now plumbs the config flag via
+        the ``use_tilelang`` kwarg.
+        """
         from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_attention import (
             v4_attention,
         )
@@ -179,24 +170,24 @@ class TestG51DispatcherRegistration:
         B, HQ, Sq, Sk, D = 1, 4, 32, 32, 64
         q, k, v, sink = _build_inputs(B=B, HQ=HQ, HK=1, Sq=Sq, Sk=Sk, D=D, dtype=torch.bfloat16)
         q.requires_grad_(True)
-        with _env("PRIMUS_V4_TILELANG_ATTN", "1"):
-            out = v4_attention(
-                q,
-                k,
-                v,
-                sink=sink,
-                swa_window=0,
-                additive_mask=None,
-                attn_dropout=0.0,
-                training=False,
-                scale=1.0 / (D**0.5),
-            )
-            # The grad_fn type chain tells us which autograd Function
-            # ran.  `V4AttentionTilelangFn` is the expected one.
-            assert out.grad_fn is not None
-            grad_fn_name = type(out.grad_fn).__name__
-            # The grad_fn name is the autograd.Function's class name
-            # plus "Backward".
-            assert (
-                "V4AttentionTilelang" in grad_fn_name
-            ), f"expected V4AttentionTilelangFn in grad_fn, got {grad_fn_name}"
+        out = v4_attention(
+            q,
+            k,
+            v,
+            sink=sink,
+            swa_window=0,
+            additive_mask=None,
+            attn_dropout=0.0,
+            training=False,
+            scale=1.0 / (D**0.5),
+            use_tilelang=True,
+        )
+        # The grad_fn type chain tells us which autograd Function
+        # ran.  `V4AttentionTilelangFn` is the expected one.
+        assert out.grad_fn is not None
+        grad_fn_name = type(out.grad_fn).__name__
+        # The grad_fn name is the autograd.Function's class name
+        # plus "Backward".
+        assert (
+            "V4AttentionTilelang" in grad_fn_name
+        ), f"expected V4AttentionTilelangFn in grad_fn, got {grad_fn_name}"

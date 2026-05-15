@@ -248,9 +248,22 @@ class TestG43EdgeCases:
         cpu_dot = torch.randn((1, 64, 8, 16), dtype=torch.float32)
         assert not is_triton_kernel_supported(cpu_dot, good_w)
 
-    def test_env_default_off(self):
+    def test_env_default_on(self):
+        """Plan-8 P57 close-out 2 (2026-05-15): flipped default to ON.
+
+        Microbench at V4-Flash widths is consistently positive
+        (FWD 4.30x / BWD 1.63x) and the EP=8 proxy A/B shows a small
+        but positive ~0.2 ms / iter gain.  The conservative descope
+        rationale from P41 / P43 was that the per-iter gain sat below
+        the proxy noise floor; for the production code path we default
+        the microbench-positive kernel ON.
+        """
         with _env("PRIMUS_INDEXER_TRITON", None):
-            # No env -> default OFF (proxy A/B has not flipped it yet).
+            assert is_triton_path_enabled()
+
+    def test_env_explicit_zero_disables(self):
+        """Setting ``PRIMUS_INDEXER_TRITON=0`` reverts to the eager body."""
+        with _env("PRIMUS_INDEXER_TRITON", "0"):
             assert not is_triton_path_enabled()
 
     def test_env_distinct_from_full(self):

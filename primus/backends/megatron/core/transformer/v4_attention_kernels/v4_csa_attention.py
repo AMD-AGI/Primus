@@ -273,6 +273,7 @@ def v4_csa_attention(
     attn_dropout: float,
     training: bool,
     scale: float,
+    use_tilelang: bool = False,
 ) -> torch.Tensor:
     """Triton-backed V4 CSA fused attention.
 
@@ -286,6 +287,12 @@ def v4_csa_attention(
     what CSA reduces to in that limit, and the dense kernel handles it
     natively. ``sparse_mask`` is unused on that path so it is allowed
     to be empty too.
+
+    ``use_tilelang`` is plumbed by ``DeepseekV4Attention.forward``
+    from the ``use_v4_tilelang_csa_attention`` config flag and only
+    triggers a tilelang dispatch when the relevant plan-8 P54 / P55
+    kernels are registered (otherwise the dispatcher warns once and
+    falls back here).
 
     Returns ``[B, H, Sq, D]`` in ``v_local.dtype``.
     """
@@ -307,11 +314,10 @@ def v4_csa_attention(
             scale=scale,
         )
 
-    # Plan-8 P49: tilelang dispatcher hook for the CSA family.
-    # Defaults OFF until both the env knob is set AND plan-8 P54 /
-    # P55 register their kernels.  Falls back to the Triton autograd
-    # path on any miss with a one-time rank-0 warning.
-    if _tilelang.should_dispatch("v4_csa_attention_fwd"):
+    # Plan-8 P49 / P57 close-out 2: tilelang dispatcher hook for the
+    # CSA family.  Defaults OFF; only fires when the caller passes
+    # ``use_tilelang=True`` (i.e. the config flag is set).
+    if _tilelang.should_dispatch("v4_csa_attention_fwd", enabled=use_tilelang):
         return _tilelang.v4_csa_attention_fwd_tilelang(
             q,
             k_local,
@@ -350,6 +356,7 @@ def v4_csa_attention_from_pool(
     attn_dropout: float,
     training: bool,
     scale: float,
+    use_tilelang: bool = False,
 ) -> torch.Tensor:
     """Triton-backed CSA attention that gathers sparse keys in-kernel.
 
@@ -358,6 +365,10 @@ def v4_csa_attention_from_pool(
     masked and contribute no probability mass. The backward kernel emits
     ``dpool`` with atomic scatter-add, avoiding the materialised
     ``[B, Sq, K_topk, D]`` gathered tensor and its autograd scatter.
+
+    ``use_tilelang`` is reserved for the plan-8 P54 / P55 from-pool
+    tilelang path (not landed); currently always falls through to
+    :class:`V4CSAPoolAttentionFn` (Triton).
     """
     K_topk = topk_idxs.shape[2]
     if K_topk == 0:
@@ -373,6 +384,12 @@ def v4_csa_attention_from_pool(
             scale=scale,
         )
 
+    # Plan-8 P57 close-out 2: from-pool tilelang path is not landed
+    # (P54 / P55 descoped); the gated dispatcher always returns False
+    # so this stays on the Triton autograd path.  We still consult
+    # the dispatcher so a future P54 / P55 landing can flip behavior
+    # without re-wiring this callsite.
+    del use_tilelang
     return V4CSAPoolAttentionFn.apply(
         q,
         k_local,

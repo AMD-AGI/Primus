@@ -51,10 +51,21 @@ attn_sink: true
 # the run script flips them via PRIMUS_USE_V4_TRITON_ATTENTION /
 # PRIMUS_USE_V4_TRITON_CSA_ATTENTION env vars (see run_deepseek_v4.sh).
 # Precedence in DeepseekV4Attention.forward:
-#   use_turbo_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
-#   use_v4_triton_csa_attention > eager                     (cr == 4)
+#   use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
+#   use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager                 (cr == 4)
 use_v4_triton_attention: false
 use_v4_triton_csa_attention: false
+
+# Plan-8 tilelang attention kernels (OPTIONAL dependency, default OFF).
+# Tilelang is NOT bundled in the default Primus container; enabling
+# these flags without a tilelang install logs a one-time rank-0
+# warning and falls back to the plan-4 / plan-5 Triton path -- training
+# continues without error.  Surface via PRIMUS_USE_V4_TILELANG_ATTENTION
+# / PRIMUS_USE_V4_TILELANG_CSA_ATTENTION env vars in run_deepseek_v4.sh.
+# Replaces the legacy PRIMUS_V4_TILELANG_ATTN env knob; that env var
+# is no longer consulted.
+use_v4_tilelang_attention: false
+use_v4_tilelang_csa_attention: false
 
 # Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
 # projection inside HyperMixer.compute_weights) with a cached

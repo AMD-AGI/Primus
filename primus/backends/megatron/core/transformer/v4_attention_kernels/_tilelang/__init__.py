@@ -12,8 +12,14 @@ attention kernels (cr ∈ {0, 4, 128}).  At P49 it ships only the
 
 * The pinned tilelang version probe (one-time module-import warning
   if the installed tilelang ≠ the plan-8 pin).
-* The :func:`is_tilelang_path_enabled` predicate reading the env
-  knob ``PRIMUS_V4_TILELANG_ATTN`` (default ``"0"``).
+* The :func:`should_dispatch` predicate that takes the per-call
+  ``enabled`` flag (from the ``use_v4_tilelang_attention`` /
+  ``use_v4_tilelang_csa_attention`` config flags surfaced by
+  ``DeepSeekV4TransformerConfig``).  Plan-8 P57 close-out 2: the
+  dispatcher no longer reads ``PRIMUS_V4_TILELANG_ATTN`` — callers
+  pass the config flag explicitly so a container without tilelang
+  installed can simply leave the flag ``False`` and never trigger
+  any tilelang import.
 * The :func:`is_tilelang_kernel_available` predicate that lets each
   plan-8 phase (P50..P55) register its kernel name as it lands.
   Empty at P49 — every dispatcher call falls through to the
@@ -32,23 +38,23 @@ functional wrappers ``v4_attention`` / ``v4_csa_attention``) is:
 .. code-block:: text
 
     cr ∈ {0, 128}:
-      use_turbo_attention > PRIMUS_V4_TILELANG_ATTN
+      use_turbo_attention > use_v4_tilelang_attention
                           > use_v4_triton_attention > eager
     cr == 4:
-      PRIMUS_V4_TILELANG_ATTN > use_v4_triton_csa_attention > eager
+      use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager
 
 At P49 (default-off + empty available-kernels set) the dispatcher
 emits **no** behaviour change vs the plan-7 P48 anchor.  Plan-4..7
 ratchet stays green by construction.
 
 R6.2 — Tilelang is vendored at ``tilelang/`` and NEVER edited.  This
-module imports it lazily so a missing install raises a clear error
-the first time the env knob is set, not at module import time.
+module imports it lazily so a missing install does not raise at
+module import time; it only logs a one-time rank-0 warning the
+first time a caller actually asks the dispatcher to use tilelang.
 """
 
 from __future__ import annotations
 
-import os
 import warnings
 from typing import Any, Set
 
@@ -63,19 +69,17 @@ TILELANG_VERSION_PIN: str = "0.1.9+cuda.gitbcb2da33"
 
 
 # ---------------------------------------------------------------------------
-# Env knob
+# Dispatch-enable signal (replaces the PRIMUS_V4_TILELANG_ATTN env knob)
 # ---------------------------------------------------------------------------
-
-
-def is_tilelang_path_enabled() -> bool:
-    """Return True iff ``PRIMUS_V4_TILELANG_ATTN == "1"``.
-
-    Default OFF — plan-8 phases land their kernels behind this knob
-    and the per-family parity gates + EP=8 proxy A/B confirm a
-    positive delta before the close-out decides whether to flip the
-    default to ``"1"`` at P56.
-    """
-    return os.environ.get("PRIMUS_V4_TILELANG_ATTN", "0") == "1"
+#
+# Plan-8 P57 close-out 2 (2026-05-15): the dispatcher no longer reads an
+# environment variable.  Callers pass ``enabled`` to :func:`should_dispatch`
+# from the V4 attention layer's config flag
+# (``use_v4_tilelang_attention`` / ``use_v4_tilelang_csa_attention``),
+# which is plumbed through :class:`DeepSeekV4TransformerConfig` from
+# the run-time CLI args.  Default-False everywhere — running on a
+# container without tilelang installed leaves the flag off and the
+# dispatcher never imports tilelang.
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +249,12 @@ def cache_dir() -> str:
     Defaults to ``output/.tilelang_cache/v4/`` (gitignored under
     ``output/``).  Override via ``PRIMUS_V4_TILELANG_CACHE_DIR``.
     """
-    override = os.environ.get("PRIMUS_V4_TILELANG_CACHE_DIR")
+    import os as _os
+
+    override = _os.environ.get("PRIMUS_V4_TILELANG_CACHE_DIR")
     if override:
         return override
-    return os.path.join("output", ".tilelang_cache", "v4")
+    return _os.path.join("output", ".tilelang_cache", "v4")
 
 
 # ---------------------------------------------------------------------------
@@ -297,10 +303,11 @@ def _maybe_warn_fallback(kernel_name: str) -> None:
 
     Hit conditions:
 
-    * ``PRIMUS_V4_TILELANG_ATTN=1`` but the kernel hasn't landed yet
-      (``is_tilelang_kernel_available`` returns False).
-    * ``PRIMUS_V4_TILELANG_ATTN=1`` but tilelang import failed (e.g.
-      missing install / version drift).
+    * Config flag ``use_v4_tilelang_attention`` /
+      ``use_v4_tilelang_csa_attention`` set but the kernel hasn't
+      landed yet (``is_tilelang_kernel_available`` returns False).
+    * Config flag set but tilelang import failed (e.g. missing
+      install / version drift).
 
     Once per kernel name per process.  Banned-warning ratchet is
     extended in `plan-8/03-test-strategy.md` to allow this string
@@ -321,7 +328,7 @@ def _maybe_warn_fallback(kernel_name: str) -> None:
         pass
     if rank == 0:
         warnings.warn(
-            f"[plan-8 P49] PRIMUS_V4_TILELANG_ATTN=1 but kernel "
+            f"[plan-8 P57] use_v4_tilelang_*=True but kernel "
             f"{kernel_name!r} is not available; falling back to the "
             "plan-4 / plan-5 Triton path.",
             RuntimeWarning,
@@ -329,20 +336,30 @@ def _maybe_warn_fallback(kernel_name: str) -> None:
         )
 
 
-def should_dispatch(kernel_name: str) -> bool:
+def should_dispatch(kernel_name: str, enabled: bool = False) -> bool:
     """Single dispatcher predicate used by ``v4_attention`` /
     ``v4_csa_attention`` wrappers.
 
-    Returns True iff:
-    1. ``PRIMUS_V4_TILELANG_ATTN=1``;
-    2. The named plan-8 kernel has been registered (P50..P55 land it);
-    3. The tilelang import succeeded at the pinned version (probed
+    Returns True iff all three conditions hold:
+
+    1. ``enabled`` is True (i.e. the caller passes the relevant
+       ``use_v4_tilelang_*`` config flag).
+    2. The named plan-8 kernel has been registered (P50..P55 land it).
+    3. The tilelang import succeeds at the pinned version (probed
        lazily on the first dispatcher call).
 
-    Otherwise emits a one-time warning + returns False so the caller
-    falls through to the Triton path.
+    Otherwise emits a one-time rank-0 warning + returns False so the
+    caller falls through to the Triton path.  ``enabled=False`` short-
+    circuits before any tilelang import attempt, so containers without
+    tilelang installed can leave the config flag off and the dispatcher
+    never touches tilelang.
+
+    Plan-8 P57 close-out 2 (2026-05-15): previously gated by the
+    ``PRIMUS_V4_TILELANG_ATTN`` env var; now driven by the caller's
+    config flag so default-off runs in tilelang-free containers do
+    not need to set or unset any env knob.
     """
-    if not is_tilelang_path_enabled():
+    if not enabled:
         return False
     if not _probe_tilelang():
         _maybe_warn_fallback(kernel_name)
@@ -362,7 +379,6 @@ __all__ = [
     "TILELANG_VERSION_PIN",
     "cache_dir",
     "is_tilelang_kernel_available",
-    "is_tilelang_path_enabled",
     "register_available_kernel",
     "should_dispatch",
     "v4_attention_bwd_tilelang",

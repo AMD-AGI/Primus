@@ -187,19 +187,25 @@ def v4_attention(
     training: bool,
     scale: float,
     hca_local_seqlen: int = 0,
+    use_tilelang: bool = False,
 ) -> torch.Tensor:
     """Triton- or tilelang-backed V4 dense / HCA attention.
 
     Drop-in replacement for :func:`eager_v4_attention` with identical
     signature and dtype contract.
 
-    Dispatch precedence (plan-8 P49):
+    Dispatch precedence (plan-8 P57 close-out 2):
 
-    * If ``PRIMUS_V4_TILELANG_ATTN=1`` AND the plan-8 P50 / P51
-      tilelang kernels are registered + tilelang importable at the
-      pinned version, route through the tilelang FWD/BWD.
+    * If ``use_tilelang=True`` AND the plan-8 P50 / P51 tilelang
+      kernels are registered + tilelang importable at the pinned
+      version, route through the tilelang FWD/BWD.
     * Otherwise, route through :class:`V4AttentionFn` (plan-4 P25
       Triton FWD + plan-5 P32 final split BWD).
+
+    ``use_tilelang`` is plumbed by ``DeepseekV4Attention.forward``
+    from the ``use_v4_tilelang_attention`` config flag.  Default-False
+    so containers without tilelang installed never trigger any
+    tilelang import.
 
     The MQA case (``K_H == 1``) is detected from ``k.shape[1]`` and
     each kernel internally broadcasts the single shared K / V head
@@ -207,11 +213,11 @@ def v4_attention(
 
     Returns ``[B, H, Sq, D]`` in ``v.dtype``.
     """
-    # Plan-8 P49: tilelang dispatcher hook.  Defaults OFF until both
-    # the env knob is set AND each plan-8 phase registers its kernel
-    # via `register_available_kernel(...)`.  Falls back to the Triton
-    # autograd path on any miss with a one-time rank-0 warning.
-    if _tilelang.should_dispatch("v4_attention_fwd"):
+    # Plan-8 P49 / P57 close-out 2: tilelang dispatcher hook.
+    # ``should_dispatch`` short-circuits on ``enabled=False`` so the
+    # tilelang import never fires on a container that does not have
+    # the package installed.
+    if _tilelang.should_dispatch("v4_attention_fwd", enabled=use_tilelang):
         # P51: route through the tilelang autograd Function when both
         # FWD + BWD kernels are registered, so gradients flow through
         # the tilelang path correctly.  When only the FWD is registered

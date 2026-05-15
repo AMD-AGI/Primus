@@ -1084,6 +1084,7 @@
 | [x] | `progress/p57/p57-summary.md` per R2.1 | 048e2254 | 2026-05-15 | Full close-out: targets table, proxy table, per-kernel attribution, methodology, optimisation surfaces, risks + plan-9 follow-ups. |
 | [x] | Status pinning per R1.3 / R2.4 | 048e2254 | 2026-05-15 | All Phase 57 rows pinned with commit SHA + date. |
 | [x] | R2.6 trace archival on phase close | 048e2254 | 2026-05-15 | 63 MiB rank-0 trace at `output/amd/tas-mi355x-20260515/p57_profile_triton_attn_perf_push_pp1_ep8_seq4096/tensorboard/primus-megatron-exp[p57_profile_triton_attn_perf_push_pp1_ep8_seq4096]-rank[0].1778856389610535345.pt.trace.json`; kernel summaries at `progress/p57/runs/p57_all_v4_kernels.txt` and `p57_kernel_summary.txt`. |
+| [x] | Close-out 2 — tilelang optional + CLI-driven; Indexer/Router Triton default ON | P57-CLOSE-2-SHA | 2026-05-15 | Replace `PRIMUS_V4_TILELANG_ATTN` env knob with two new CLI flags `use_v4_tilelang_attention` / `use_v4_tilelang_csa_attention` (default OFF) plumbed through `DeepSeekV4TransformerConfig` + `deepseek_v4_base.yaml` + `run_deepseek_v4.sh`; tilelang is an optional dependency (default container does not bundle it). `PRIMUS_INDEXER_TRITON` and `PRIMUS_V4_ROUTER_TRITON` defaults flipped from `"0"` to `"1"` (microbench-positive ops). G57 parity 176 passed / 82 skipped. EP=8 proxy re-trace iter mean 436.80 ms / 613.6 TFLOP/s/GPU (best 432.6 / 619.4) — within ±1 ms / ±1 TFLOP/s of the original P57 R2 trace (436.13 / 614.5). Run log: `progress/p57/runs/p57r2_no_tilelang_v2_proxy_trace.log`. |
 
 
 ## Blockers / Risks Log

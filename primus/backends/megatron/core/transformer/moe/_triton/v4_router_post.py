@@ -467,16 +467,17 @@ class V4RouterPostFn(torch.autograd.Function):
 
 
 def is_triton_path_enabled() -> bool:
-    """Return True iff ``PRIMUS_V4_ROUTER_TRITON == "1"``.
+    """Return True iff ``PRIMUS_V4_ROUTER_TRITON != "0"`` (default ``"1"``).
 
-    **Default-off** (P39 takes the same conservative landing posture
-    as P38: ship the kernel behind an env knob).  EP=8 proxy A/B
-    showed lm_loss bit-identity but the microbench gain
-    (1.56x FWD / 1.22x BWD on `sqrtsoftplus`) is submerged in
-    iter-time noise.  Available for future tuning / small-shape
-    paths.
+    Plan-8 P57 close-out 2 (2026-05-15): default flipped from ``"0"``
+    to ``"1"``.  Microbench at V4-Flash widths is a clear positive on
+    V4's production `sqrtsoftplus` score function (1.56x FWD / 1.22x
+    BWD); EP=8 proxy A/B (P39 / P43) sat inside the proxy noise band,
+    so we default the microbench-positive kernel ON to keep it on the
+    production path.  Set ``PRIMUS_V4_ROUTER_TRITON=0`` to revert to
+    the eager body.
     """
-    return os.environ.get("PRIMUS_V4_ROUTER_TRITON", "0") == "1"
+    return os.environ.get("PRIMUS_V4_ROUTER_TRITON", "1") != "0"
 
 
 def is_triton_kernel_supported(logits: torch.Tensor, indices: torch.Tensor) -> bool:

@@ -418,13 +418,19 @@ class IndexerScorePostFn(torch.autograd.Function):
 
 
 def is_triton_path_enabled() -> bool:
-    """Return True iff ``PRIMUS_INDEXER_TRITON == "1"``.
+    """Return True iff ``PRIMUS_INDEXER_TRITON != "0"`` (default ``"1"``).
 
     The env knob is **re-purposed** at P41 to mean "post-einsum tail
     fusion" (cheap, bandwidth-bound).  Legacy P38 full-fuse path
     lives behind ``PRIMUS_INDEXER_TRITON_FULL``.
+
+    Plan-8 P57 close-out 2 (2026-05-15): default flipped from ``"0"``
+    to ``"1"``.  Microbench at V4-Flash widths is consistently positive
+    (FWD 4.30x / BWD 1.63x) and the EP=8 proxy A/B shows a small but
+    positive ~0.2 ms / iter gain.  Set ``PRIMUS_INDEXER_TRITON=0`` to
+    revert to the eager Python body.
     """
-    return os.environ.get("PRIMUS_INDEXER_TRITON", "0") == "1"
+    return os.environ.get("PRIMUS_INDEXER_TRITON", "1") != "0"
 
 
 def is_triton_kernel_supported(dot: torch.Tensor, w_i: torch.Tensor) -> bool:

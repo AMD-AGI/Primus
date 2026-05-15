@@ -241,6 +241,38 @@ def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _coerce_optional_bool_flag(value: object, *, field_name: str) -> bool:
+    """Coerce a possibly-stringified yaml flag to a clean ``bool``.
+
+    Yaml interpolation like ``${PRIMUS_FOO:false}`` resolves to the
+    STRING ``"false"`` when the env var is unset, and the naive
+    ``bool("false") is True`` would silently flip a default-off knob
+    to on.  Accept the common string spellings explicitly and treat
+    everything else as truthy/falsy via the normal ``bool(...)`` rule.
+
+    Plan-8 P57 close-out 2 added this helper for the new
+    ``use_v4_tilelang_*`` flags; existing flags
+    (``use_v4_triton_*`` / ``use_v4_compiled_sinkhorn``) avoid the
+    issue because the V4 run scripts always pass them via
+    ``--<flag> "False"`` and the override parser coerces to a Python
+    ``False`` before the config ever sees a string.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("0", "false", "no", "off", ""):
+            return False
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        raise ValueError(
+            f"Unrecognised string value for boolean config flag "
+            f"{field_name!r}: {value!r}; expected one of "
+            "'true' / 'false' / '1' / '0' / 'yes' / 'no' / 'on' / 'off'."
+        )
+    return bool(value)
+
+
 def _per_head_rms_norm(x: torch.Tensor, *, eps: float) -> torch.Tensor:
     """Parameter-less per-head RMSNorm.
 
@@ -566,6 +598,43 @@ class DeepseekV4Attention(MLASelfAttention):
         if self._use_v4_triton_csa_attention and self.compress_ratio != 4:
             self._use_v4_triton_csa_attention = False
 
+        # Plan-8 P57 close-out 2: optional tilelang dispatch flags
+        # (replace the legacy PRIMUS_V4_TILELANG_ATTN env knob).  Each
+        # flag is layer-kind specific:
+        #
+        #   - ``use_v4_tilelang_attention``     -> cr ∈ {0, 128}
+        #     auto-disabled at non-dense/HCA layers symmetric to the
+        #     ``use_v4_triton_attention`` rule.
+        #   - ``use_v4_tilelang_csa_attention`` -> cr == 4
+        #     auto-disabled at non-CSA layers symmetric to the
+        #     ``use_v4_triton_csa_attention`` rule.
+        #
+        # When either flag is set but tilelang is not installed (or the
+        # plan-8 P50..P55 kernels are not registered) the dispatcher
+        # falls back to the Triton path with a one-time rank-0 warning;
+        # no runtime error is raised so the default container (which
+        # does NOT ship tilelang) just runs Triton transparently.
+        #
+        # We use a string-aware boolean coercion because the yaml
+        # default ``${PRIMUS_USE_V4_TILELANG_ATTENTION:false}`` resolves
+        # to the STRING ``"false"`` when the env var is unset, and
+        # ``bool("false") is True``.  Existing flags
+        # (``use_v4_triton_attention`` etc.) do not trip this because
+        # the V4 run scripts always pass them via ``--<flag> "False"``
+        # CLI which the override parser converts to a Python ``False``.
+        self._use_v4_tilelang_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_tilelang_attention", False),
+            field_name="use_v4_tilelang_attention",
+        )
+        if self._use_v4_tilelang_attention and self.compress_ratio not in (0, 128):
+            self._use_v4_tilelang_attention = False
+        self._use_v4_tilelang_csa_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_tilelang_csa_attention", False),
+            field_name="use_v4_tilelang_csa_attention",
+        )
+        if self._use_v4_tilelang_csa_attention and self.compress_ratio != 4:
+            self._use_v4_tilelang_csa_attention = False
+
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
         if submodules.core_attention is not None and self.compress_ratio == 0:
@@ -658,17 +727,26 @@ class DeepseekV4Attention(MLASelfAttention):
             if self._use_core_attention:
                 kernel = "core_attention (Turbo / TE flash)"
             elif self._use_v4_triton_attention:
-                kernel = "v4_attention (Triton, dense path)"
+                if self._use_v4_tilelang_attention:
+                    kernel = "v4_attention (tilelang->Triton fallback, dense path)"
+                else:
+                    kernel = "v4_attention (Triton, dense path)"
             else:
                 kernel = "v4_attention (eager Python, dense path)"
         elif self.compress_ratio == 128:
             if self._use_v4_triton_attention:
-                kernel = "v4_attention (Triton, HCA path)"
+                if self._use_v4_tilelang_attention:
+                    kernel = "v4_attention (tilelang->Triton fallback, HCA path)"
+                else:
+                    kernel = "v4_attention (Triton, HCA path)"
             else:
                 kernel = "v4_attention (eager Python, HCA path)"
         elif self.compress_ratio == 4:
             if self._use_v4_triton_csa_attention:
-                kernel = "v4_csa_attention_from_pool (Triton)"
+                if self._use_v4_tilelang_csa_attention:
+                    kernel = "v4_csa_attention_from_pool (tilelang->Triton fallback)"
+                else:
+                    kernel = "v4_csa_attention_from_pool (Triton)"
             else:
                 kernel = "v4_csa_attention (eager Python)"
         else:
@@ -898,6 +976,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 training=self.training,
                 scale=self._attention_scale(),
                 hca_local_seqlen=int(hca_local_seqlen),
+                use_tilelang=self._use_v4_tilelang_attention,
             )
             ev_e.record()
             torch.cuda.synchronize()
@@ -914,6 +993,7 @@ class DeepseekV4Attention(MLASelfAttention):
             training=self.training,
             scale=self._attention_scale(),
             hca_local_seqlen=int(hca_local_seqlen),
+            use_tilelang=self._use_v4_tilelang_attention,
         )
 
     def _attention_forward_via_core(
@@ -1110,6 +1190,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 attn_dropout=self.attn_dropout,
                 training=self.training,
                 scale=self._attention_scale(),
+                use_tilelang=self._use_v4_tilelang_csa_attention,
             )
 
         # 3) Eager fallback gathers per-query pool slices: [B, S, K, Dh].

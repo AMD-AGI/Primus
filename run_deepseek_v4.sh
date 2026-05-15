@@ -79,11 +79,23 @@ export FP8_RECIPE=null
 
 # Plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
 # Precedence in DeepseekV4Attention.forward:
-#   use_turbo_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
-#   use_v4_triton_csa_attention > eager                     (cr == 4)
+#   use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
+#   use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager                 (cr == 4)
 # These are V4-only; they have no effect on other model types.
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
+
+# Plan-8 tilelang attention kernels (OPTIONAL — default OFF).
+# Tilelang is NOT bundled in the default Primus container, so we leave
+# both flags off here.  When the container has tilelang installed at
+# the plan-8 pin AND the P50..P55 kernels are registered, set these
+# to True (e.g. in a sweep / experiment script) to route the dense /
+# HCA / CSA paths through tilelang.  Otherwise the dispatcher prints
+# a single rank-0 warning and falls back to the Triton path -- training
+# continues without error.  Replaces the legacy PRIMUS_V4_TILELANG_ATTN
+# env knob (no longer consulted).
+export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
+export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
 # cached torch.compile build. Default OFF here; the proxy script
@@ -150,6 +162,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
+  --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
