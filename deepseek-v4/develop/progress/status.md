@@ -853,24 +853,23 @@
 
 ## Phase 44 (plan-6) — V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel
 
-> Plan-6 P44.  See `../plan-6/02-phase-details.md#phase-44` for design.  Absorbs the per-head `out * scale + sinks` chain into `_v4_attention_fwd_kernel`'s epilogue.  Eliminates two separate `vec_elem<*>` launches per V4 attention call.  Gated behind `PRIMUS_V4_ATTN_FUSED_SINK=1` (default `"1"` after A/B).
+> Plan-6 P44.  See `../plan-6/02-phase-details.md#phase-44` for design.  **Descoped at task-list refinement** (2026-05-15) per R9.1 / R9.3.  The scoped target does not map to existing code — `attn_sink` is already absorbed into the softmax via a virtual row in `_v4_attention_fwd_kernel:289-295`, and `softmax_scale` is already a kernel parameter.  The trace bucket `vec_elem<mul_bf16>` AUnary 5.71 ms / iter (1.1 % of step) is unattributed and below the R9.1 10 % cut-off; future re-attempts need the forensic External-id helper first.  Plan-7 P45..P48 target the 42× larger Adam optimizer residual instead.
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Extend `_v4_attention_fwd_kernel` with optional `attn_sink [H]` argument; apply `out = out * scale + sinks[h]` in FWD epilogue |        |      |      |
-| [ ] | Extend `_v4_attention_bwd_kernel` with `d_attn_sink` via `tl.atomic_add` over the head axis |        |      |      |
-| [ ] | Python call-site cleanup: strip `out * scale + sinks` chain from `_attention_forward_via_triton` + `AttentionSinkApplier.forward` |        |      |      |
-| [ ] | New env `PRIMUS_V4_ATTN_FUSED_SINK` (default `"1"` after A/B) |        |      |      |
-| [ ] | Microbench `progress/p44/bench_v4_attention_sink_epilogue.py` |        |      |      |
-| [ ] | G46 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p44_attn_sink_epilogue.py` |        |      | FWD parity vs eager `kernel + out * scale + sinks` (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck` covers `d_attn_sink`; release-tier slow.  Parametrise `attn_sink ∈ {present, absent}`. |
-| [ ] | G46a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
-| [ ] | G46b — chrome-trace iter 6 → 7 with `PRIMUS_V4_ATTN_FUSED_SINK=1`; `vec_elem<mul_bf16>` AUnary drops ≥ 4 ms; iter time drops ≥ 2 ms vs P43 final |        |      |      |
-| [ ] | `progress/p44/p44-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [-] | ~~Extend `_v4_attention_fwd_kernel` with optional `attn_sink [H]`~~ | TBD-p44 | 2026-05-15 | Descoped — kernel already handles `sink` via virtual softmax row (plan-4 P25 design); no `out * scale + sinks` epilogue exists to fuse. |
+| [-] | ~~Extend `_v4_attention_bwd_kernel` with `d_attn_sink`~~ | TBD-p44 | 2026-05-15 | Descoped (same reason). |
+| [-] | ~~Python call-site cleanup~~ | TBD-p44 | 2026-05-15 | Descoped. |
+| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_SINK`~~ | TBD-p44 | 2026-05-15 | Descoped. |
+| [-] | ~~Microbench `progress/p44/bench_v4_attention_sink_epilogue.py`~~ | TBD-p44 | 2026-05-15 | Descoped. |
+| [-] | ~~G46 unit tests~~ | TBD-p44 | 2026-05-15 | Descoped. |
+| [-] | ~~G46a / G46b smoke + perf~~ | TBD-p44 | 2026-05-15 | Descoped. |
+| [x] | `progress/p44/p44-summary.md` — descope summary documenting why the originally-scoped target does not map to existing code | TBD-p44 | 2026-05-15 | Eight-section summary per R2.1: three independent observations (sink already in kernel, trace bucket unattributed, 1.1 % below R9.1 cut-off). |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P44 row |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P44 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P44 row~~ | TBD-p44 | 2026-05-15 | Skipped. |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P44 row~~ | TBD-p44 | 2026-05-15 | Skipped. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p44 | 2026-05-15 | Skipped. |
 
 
 ## Phase 45 (plan-7) — Custom Triton fused Adam (absorb ε-add into master functor)
