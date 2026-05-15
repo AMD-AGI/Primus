@@ -937,14 +937,15 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | `primus/backends/megatron/core/transformer/v4_attention_kernels/_tilelang/__init__.py` — stub module with `is_tilelang_path_enabled()` predicate + `NotImplementedError` stubs for the 4 plan-8 kernel entry points |        |      | Pinned tilelang version probe; env knob `PRIMUS_V4_TILELANG_ATTN` default `"0"`. |
-| [ ] | Dispatch precedence wiring in `DeepseekV4Attention.forward`: `use_turbo_attention > PRIMUS_V4_TILELANG_ATTN > use_v4_triton_attention > eager` (cr=0/128); `PRIMUS_V4_TILELANG_ATTN > use_v4_triton_csa_attention > eager` (cr=4) |        |      | One-time rank-0 log line per kernel kind when engaged. |
-| [ ] | Cache directory layout: `output/.tilelang_cache/v4/` gitignored; env override `PRIMUS_V4_TILELANG_CACHE_DIR` |        |      |      |
-| [ ] | `progress/p49/build_tilelang_kernels.sh` — AOT compile every shape variant of P50/P51/P52/P53/P54/P55 kernels |        |      | Skips phases whose kernels haven't landed yet. |
-| [ ] | G49 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p49_tilelang_dispatch.py` (predicate + lazy-import + plan-4..plan-7 ratchet at default-off) |        |      |      |
-| [ ] | `progress/p49/p49-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [x] | `primus/backends/megatron/core/transformer/v4_attention_kernels/_tilelang/__init__.py` — dispatcher module with `is_tilelang_path_enabled()` / `is_tilelang_kernel_available()` / `register_available_kernel()` / `should_dispatch()` predicates + 4 stub entry points + `cache_dir()` + pinned version probe | 73f763eb | 2026-05-15 | `PRIMUS_V4_TILELANG_ATTN` default `"0"`; pinned tilelang `0.1.9+cuda.gitbcb2da33`; lazy import. |
+| [x] | Dispatch precedence wiring: `should_dispatch()` hook added to `v4_attention.py::v4_attention(...)` and `v4_csa_attention.py::v4_csa_attention(...)` | 73f763eb | 2026-05-15 | Effective precedence: `use_turbo_attention > PRIMUS_V4_TILELANG_ATTN > use_v4_triton_attention > eager` (cr=0/128); `PRIMUS_V4_TILELANG_ATTN > use_v4_triton_csa_attention > eager` (cr=4). One-time rank-0 fallthrough warning on miss. |
+| [x] | Cache directory layout: `output/.tilelang_cache/v4/` (under existing gitignored `output/`); env override `PRIMUS_V4_TILELANG_CACHE_DIR` | 73f763eb | 2026-05-15 | R6.1 already covers `output/` recursively; no new gitignore entry needed. |
+| [x] | `progress/p49/build_tilelang_kernels.sh` — smoke probe (no-op at P49; P50..P55 will append per-phase AOT compile loops) | 73f763eb | 2026-05-15 | Prints dispatcher state to confirm wiring is alive. |
+| [x] | G49 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p49_tilelang_dispatch.py` (19 tests across 5 sub-classes) | 73f763eb | 2026-05-15 | All green; env predicate / availability registry / fallthrough+warning / stubs raise / version pin / cache dir / wrapper source audit. |
+| [x] | Plan-4..plan-8 ratchet check at default-off | 73f763eb | 2026-05-15 | `pytest tests/unit_tests/megatron/transformer/deepseek_v4/` → **451 passed, 1 pre-existing unrelated failure** (`test_v4_mtp.py::test_helper_pulls_norm_and_linear_from_v4_provider` — documented in plan-5 P29 summary), 101 skipped. |
+| [x] | `progress/p49/p49-summary.md` — eight-section per-phase summary per R2.1 | 73f763eb | 2026-05-15 |      |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ |        |      | Skipped — infra-only phase, no runtime behaviour change at default-off. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 73f763eb | 2026-05-15 | Skipped per R2.6 — infra-only phase, no runtime behaviour change at default-off. |
 
 
 ## Phase 50 (plan-8) — Dense FWD tilelang (cr=0)

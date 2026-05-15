@@ -193,4 +193,4 @@ implementation:
 * P51 will register `"v4_attention_bwd"`.
 * P54 will register `"v4_csa_attention_fwd"`.
 * P55 will register `"v4_csa_attention_bwd"`.
-* Feature commit SHA: TBD-p49.
+* Feature commit SHA: 73f763eb.
