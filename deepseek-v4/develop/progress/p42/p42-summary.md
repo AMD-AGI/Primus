@@ -121,4 +121,4 @@ revert precedent).
 * P44: V4 attention FWD epilogue (`out * scale + sinks`) absorbed
   into kernel.
 * Plan-7 P45..P48: optimizer-step fusion sweep.
-* Feature commit SHA: TBD-p42.
+* Feature commit SHA: 9898aaec.

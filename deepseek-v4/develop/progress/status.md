@@ -819,17 +819,17 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~Strided-input load helpers in `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, `_triton/v4_csa_attention_pool_sparse.py`~~ | TBD-p42 | 2026-05-15 | Descoped — high-risk plan-5 kernel modification deferred to plan-8 attention re-work. |
-| [-] | ~~Python call-site cleanup: drop `.contiguous()` / `.permute(...).contiguous()`~~ | TBD-p42 | 2026-05-15 | Descoped — top-5 eliminate candidates inventoried in `p42-summary.md` §3 for a future re-attempt. |
-| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_PERMUTE`~~ | TBD-p42 | 2026-05-15 | Descoped. |
-| [-] | ~~Microbench `progress/p42/bench_v4_attention_strided_input.py`~~ | TBD-p42 | 2026-05-15 | Descoped. |
-| [-] | ~~G44 unit tests~~ | TBD-p42 | 2026-05-15 | Descoped. |
-| [-] | ~~G44a / G44b smoke + perf~~ | TBD-p42 | 2026-05-15 | Descoped. |
-| [x] | `progress/p42/p42-summary.md` — descope summary + trace-attribution inventory | TBD-p42 | 2026-05-15 | Eight-section summary documenting the descope rationale + per-call-site eliminate-candidates with estimated savings + risk per R2.1. |
+| [-] | ~~Strided-input load helpers in `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, `_triton/v4_csa_attention_pool_sparse.py`~~ | 9898aaec | 2026-05-15 | Descoped — high-risk plan-5 kernel modification deferred to plan-8 attention re-work. |
+| [-] | ~~Python call-site cleanup: drop `.contiguous()` / `.permute(...).contiguous()`~~ | 9898aaec | 2026-05-15 | Descoped — top-5 eliminate candidates inventoried in `p42-summary.md` §3 for a future re-attempt. |
+| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_PERMUTE`~~ | 9898aaec | 2026-05-15 | Descoped. |
+| [-] | ~~Microbench `progress/p42/bench_v4_attention_strided_input.py`~~ | 9898aaec | 2026-05-15 | Descoped. |
+| [-] | ~~G44 unit tests~~ | 9898aaec | 2026-05-15 | Descoped. |
+| [-] | ~~G44a / G44b smoke + perf~~ | 9898aaec | 2026-05-15 | Descoped. |
+| [x] | `progress/p42/p42-summary.md` — descope summary + trace-attribution inventory | 9898aaec | 2026-05-15 | Eight-section summary documenting the descope rationale + per-call-site eliminate-candidates with estimated savings + risk per R2.1. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [-] | ~~`develop/perf/elem_fusion.md` — append P42 row~~ | TBD-p42 | 2026-05-15 | Skipped (no fusion shipped). |
-| [-] | ~~`develop/perf/proxy_ep8.md` — append P42 row~~ | TBD-p42 | 2026-05-15 | Skipped (no perf delta). |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p42 | 2026-05-15 | Skipped (no new trace; descoped at task-list refinement). |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P42 row~~ | 9898aaec | 2026-05-15 | Skipped (no fusion shipped). |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P42 row~~ | 9898aaec | 2026-05-15 | Skipped (no perf delta). |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 9898aaec | 2026-05-15 | Skipped (no new trace; descoped at task-list refinement). |
 
 
 ## Phase 43 (plan-6) — V4 router post-logits + Compressor APE elementwise Triton fusion
