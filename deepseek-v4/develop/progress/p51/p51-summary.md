@@ -167,4 +167,4 @@ the autograd Function + the 4-kernel chain work end-to-end via
   parametrisation.
 * Future P50 / P51 BWD work: sink BWD bf16 stability (keep
   intermediates fp32 throughout the dq tile chain).
-* Feature commit SHA: TBD-p51.
+* Feature commit SHA: ed654ca1.
