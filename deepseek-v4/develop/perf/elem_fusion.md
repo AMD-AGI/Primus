@@ -158,6 +158,36 @@ delta).  Iter-10-instantaneous: 514.9 -> 512.1 ms.  See
 Unit tests (G40): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p37_hc_glue_triton.py`.
 **21 fast + 1 release-tier slow** all green.
 
+## P41 — `Indexer.forward` post-einsum tail fusion (descoped, default-off)
+
+Bandwidth-bound re-attempt of the P38 Indexer scoring fusion that
+keeps `torch.einsum("bshd,bpd->bshp", q_i, k_icomp)` eager (cuBLAS
+wins on the matmul half) and fuses only the post-matmul tail:
+``relu + mul(w_i) + sum(H) + causal_mask`` into one Triton FWD +
+two Triton BWD kernels (`d_dot` + `d_w` split to avoid the P38
+cross-block ``atomic_add`` contention).
+
+Bench: `deepseek-v4/develop/progress/p41/bench_indexer_tail.py`
+(`--mode {v4, small}`, raw JSON at `progress/p41/bench/{v4,small}.json`).
+
+| shape | path | FWD median (ms) | BWD median (ms) | FWD GB/s | BWD GB/s |
+|---|---|---:|---:|---:|---:|
+| V4-Flash (B=1, S=4096, P=1024, H=8, Hd=128, bf16; 75.6 MiB / call) | eager tail  | 0.201 | 0.319 |  376.2 |  709.7 |
+| V4-Flash                                                            | triton tail | 0.047 | 0.196 | 1619.4 | 1154.6 |
+| **V4-Flash speedup**                                                |             | **4.30x** | **1.63x** | **+331 %** | **+63 %** |
+| small (B=2, S=128, P=32, H=8, Hd=128, bf16)                         | eager tail  | 0.097 | 0.140 |   1.6 |   3.2 |
+| small                                                                | triton tail | 0.026 | 0.167 |   5.9 |   2.7 |
+| **small speedup**                                                    |             | **3.81x** | **0.84x** | **+281 %** | **-15 %** |
+
+EP=8 proxy A/B (10-iter smoke, mean iters 8/9/10):
+**513.7 ms (eager tail) -> 513.9 ms (Triton tail), +0.2 ms within
+±1 ms noise band**.  lm_loss **bit-identical** iter-by-iter.
+Same descope precedent as P38 / P39.  Default OFF;
+`PRIMUS_INDEXER_TRITON=1` opts in.
+
+Unit tests (G43): `tests/unit_tests/megatron/transformer/deepseek_v4/test_p41_indexer_tail_triton.py`.
+**35 fast + 1 release-tier slow**, all green.
+
 ## P38 — `Indexer.forward` scoring fusion (descoped, default-off)
 
 Fuses the `einsum + relu + mul + sum + causal_mask` scoring chain

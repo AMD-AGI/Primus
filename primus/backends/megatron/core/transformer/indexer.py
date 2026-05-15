@@ -55,10 +55,19 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.inde
     indexer_score_triton,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
-    is_triton_kernel_supported as _indexer_triton_supported,
+    is_triton_kernel_supported as _indexer_triton_full_supported,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
-    is_triton_path_enabled as _indexer_triton_enabled,
+    is_triton_path_enabled as _indexer_triton_full_enabled,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+    indexer_score_post_triton,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+    is_triton_kernel_supported as _indexer_tail_triton_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+    is_triton_path_enabled as _indexer_tail_triton_enabled,
 )
 
 
@@ -170,12 +179,14 @@ class Indexer(nn.Module):
         #    q_i [B,S,H,Hd] · k_icomp[B,P,Hd] → relu[B,S,H,P]; w_i[B,S,H,1] → sum over H
         # 4) Causal mask + (effective topk capped at P).
         #
-        # Plan-6 P38: when PRIMUS_INDEXER_TRITON is on (and shape is
-        # supported), fuse the entire scoring+mask chain (einsum + relu
-        # + mul + sum + causal mask) into one Triton kernel.  Falls back
-        # to the eager body otherwise.
+        # Dispatch precedence (P41 re-routing):
+        #   PRIMUS_INDEXER_TRITON=1       → post-einsum tail fused
+        #                                    (einsum stays eager / cuBLAS).
+        #   PRIMUS_INDEXER_TRITON_FULL=1  → legacy P38 full-fuse path
+        #                                    (einsum + tail in one kernel).
+        #   else                          → fully eager.
         k_icomp_2d = k_icomp.squeeze(2)
-        if _indexer_triton_enabled() and _indexer_triton_supported(q_i, k_icomp_2d, w_i):
+        if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,
                 k_icomp_2d,
@@ -184,10 +195,19 @@ class Indexer(nn.Module):
                 out_dtype=hidden.dtype,
             )
         else:
-            relu = F.relu(torch.einsum("bshd,bpd->bshp", q_i, k_icomp_2d))
-            scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]
-            mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
-            scores = scores + mask.unsqueeze(0)  # [B, S, P]
+            dot = torch.einsum("bshd,bpd->bshp", q_i, k_icomp_2d)
+            if _indexer_tail_triton_enabled() and _indexer_tail_triton_supported(dot, w_i):
+                scores = indexer_score_post_triton(
+                    dot,
+                    w_i,
+                    compress_ratio=self.compress_ratio,
+                    out_dtype=hidden.dtype,
+                )
+            else:
+                relu = F.relu(dot)
+                scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]
+                mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
+                scores = scores + mask.unsqueeze(0)  # [B, S, P]
 
         topk_eff = min(K, P)
         topk_scores, topk_idxs = scores.topk(topk_eff, dim=-1)  # [B, S, topk_eff]

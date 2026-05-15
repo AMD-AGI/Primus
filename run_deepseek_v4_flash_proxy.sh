@@ -210,16 +210,21 @@ export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
 #   separate Triton kernels.  Default ON since landing (2026-05-14).
 export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
 
-# P38 — Indexer.forward scoring Triton fusion.  Descoped (default OFF)
-#   because the eager `einsum + relu + mul + sum + causal_mask` chain
-#   already maps to a cuBLAS / hipBLASLt batched-matmul that runs at
-#   ~28 TFLOP/s on MI355 at V4-Flash widths (B=1, S=4096, P=1024, H=8,
-#   Hd=128).  The generic Triton kernel here is FWD-competitive only at
-#   small shapes (3.35x FWD at B=2, S=128, P=32) but regresses ~30% at
-#   the production V4-Flash shape and BWD regresses ~12x due to cross-
-#   tile atomic_add traffic on dq / dk / dw.  Keep the env knob so the
-#   kernel stays available for future tuning + small-shape paths.
+# P41 — Indexer.forward post-einsum tail Triton fusion.  Re-attempt
+#   of P38 that keeps the cuBLAS / hipBLASLt einsum eager and fuses
+#   only the bandwidth-bound tail (`relu + mul(w_i) + sum(H) +
+#   causal_mask`).  Microbench at V4-Flash widths wins big
+#   (FWD 4.30x, BWD 1.63x) but the EP=8 proxy A/B (10-iter smoke)
+#   shows ~0.2 ms / iter aggregate gain within the ±1 ms noise band
+#   and lm_loss bit-identical.  Same descope precedent as P38 / P39:
+#   default OFF; set PRIMUS_INDEXER_TRITON=1 to opt in.
+#
+#   The env knob is **re-purposed** at P41: it now controls the
+#   post-einsum tail path.  Legacy P38 full-fuse path lives behind
+#   PRIMUS_INDEXER_TRITON_FULL (default OFF, kept in tree for small-
+#   shape paths and future tuning).
 export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
+export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 
 # P39 — V4 Router post-logits Triton FWD/BWD fusion (shared by topk +
 #   hash router).  Descoped to **default OFF** (same precedent as P38).

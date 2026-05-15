@@ -79,10 +79,10 @@ _SUPPORTED_H = (1, 2, 4, 8, 16)
 
 @triton.jit
 def _indexer_score_fwd_kernel(
-    Q_PTR,            # [B, S, H, Hd] - q_i
-    K_PTR,            # [B, P, Hd]    - k_icomp.squeeze(2)
-    W_PTR,            # [B, S, H]     - w_i
-    SCORES_PTR,       # [B, S, P]     - out (fp32 internal, cast OUT_DTYPE)
+    Q_PTR,  # [B, S, H, Hd] - q_i
+    K_PTR,  # [B, P, Hd]    - k_icomp.squeeze(2)
+    W_PTR,  # [B, S, H]     - w_i
+    SCORES_PTR,  # [B, S, P]     - out (fp32 internal, cast OUT_DTYPE)
     B,
     S,
     P,
@@ -134,11 +134,7 @@ def _indexer_score_fwd_kernel(
     for h in tl.static_range(0, H):
         # q [BLOCK_S, HD]: q_i[pid_b, s_offs, h, :]
         q_tile = tl.load(
-            Q_PTR
-            + pid_b * S * H * HD
-            + s_offs[:, None] * H * HD
-            + h * HD
-            + hd_idx[None, :],
+            Q_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
             mask=s_mask[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -168,10 +164,7 @@ def _indexer_score_fwd_kernel(
     acc = tl.where(allowed, acc, NEG_INF)
 
     tl.store(
-        SCORES_PTR
-        + pid_b * S * P
-        + s_offs[:, None] * P
-        + p_offs[None, :],
+        SCORES_PTR + pid_b * S * P + s_offs[:, None] * P + p_offs[None, :],
         acc.to(OUT_DTYPE),
         mask=s_mask[:, None] & p_mask[None, :],
     )
@@ -179,13 +172,13 @@ def _indexer_score_fwd_kernel(
 
 @triton.jit
 def _indexer_score_bwd_kernel(
-    DSCORES_PTR,      # [B, S, P]    grad in OUT_DTYPE
-    Q_PTR,            # [B, S, H, Hd]
-    K_PTR,            # [B, P, Hd]
-    W_PTR,            # [B, S, H]
-    DQ_PTR,           # [B, S, H, Hd] OUT (fp32)
-    DK_PTR,           # [B, P, Hd]    OUT (fp32, scattered)
-    DW_PTR,           # [B, S, H]     OUT (fp32)
+    DSCORES_PTR,  # [B, S, P]    grad in OUT_DTYPE
+    Q_PTR,  # [B, S, H, Hd]
+    K_PTR,  # [B, P, Hd]
+    W_PTR,  # [B, S, H]
+    DQ_PTR,  # [B, S, H, Hd] OUT (fp32)
+    DK_PTR,  # [B, P, Hd]    OUT (fp32, scattered)
+    DW_PTR,  # [B, S, H]     OUT (fp32)
     B,
     S,
     P,
@@ -247,11 +240,7 @@ def _indexer_score_bwd_kernel(
     for h in tl.static_range(0, H):
         # Reload q, k for this head (FlashAttention-style recompute).
         q_tile = tl.load(
-            Q_PTR
-            + pid_b * S * H * HD
-            + s_offs[:, None] * H * HD
-            + h * HD
-            + hd_idx[None, :],
+            Q_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
             mask=s_mask[:, None],
             other=0.0,
         ).to(tl.float32)
@@ -287,11 +276,7 @@ def _indexer_score_bwd_kernel(
         # Stores with atomic_add since multiple p_tiles/s_tiles touch
         # the same locations.
         tl.atomic_add(
-            DQ_PTR
-            + pid_b * S * H * HD
-            + s_offs[:, None] * H * HD
-            + h * HD
-            + hd_idx[None, :],
+            DQ_PTR + pid_b * S * H * HD + s_offs[:, None] * H * HD + h * HD + hd_idx[None, :],
             d_q,
             mask=s_mask[:, None],
         )
@@ -322,9 +307,7 @@ def _pick_block(s: int, p: int, h: int, hd: int) -> tuple[int, int]:
     if hd >= 256:
         block_s = 16
         block_p = 32
-    return min(block_s, triton.next_power_of_2(max(1, s))), min(
-        block_p, triton.next_power_of_2(max(1, p))
-    )
+    return min(block_s, triton.next_power_of_2(max(1, s))), min(block_p, triton.next_power_of_2(max(1, p)))
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +340,7 @@ class IndexerScoreFn(torch.autograd.Function):
         if q_i.dim() != 4:
             raise ValueError(f"q_i must be [B, S, H, Hd], got shape {tuple(q_i.shape)}")
         if k_icomp.dim() != 3:
-            raise ValueError(
-                f"k_icomp must be [B, P, Hd], got shape {tuple(k_icomp.shape)}"
-            )
+            raise ValueError(f"k_icomp must be [B, P, Hd], got shape {tuple(k_icomp.shape)}")
         if w_i.dim() != 3:
             raise ValueError(f"w_i must be [B, S, H], got shape {tuple(w_i.shape)}")
 
@@ -367,9 +348,7 @@ class IndexerScoreFn(torch.autograd.Function):
         Bk, P, HDk = k_icomp.shape
         Bw, Sw, Hw = w_i.shape
         if B != Bk or B != Bw:
-            raise ValueError(
-                f"Mismatched B: q={B} k={Bk} w={Bw}"
-            )
+            raise ValueError(f"Mismatched B: q={B} k={Bk} w={Bw}")
         if HD != HDk:
             raise ValueError(f"Mismatched Hd: q={HD} k={HDk}")
         if S != Sw:
@@ -460,19 +439,23 @@ class IndexerScoreFn(torch.autograd.Function):
 
 
 def is_triton_path_enabled() -> bool:
-    """Return True iff ``PRIMUS_INDEXER_TRITON == "1"``.  **Default-off**.
+    """Return True iff ``PRIMUS_INDEXER_TRITON_FULL == "1"``.
 
-    P38 is descoped at V4-Flash widths (cuBLAS einsum beats the
-    generic Triton kernel + BWD atomic_add contention regresses 12x).
-    The kernel is kept available for small-shape paths and for future
-    tuning.  Set ``PRIMUS_INDEXER_TRITON=1`` to opt-in.
+    **Re-purposed at P41:** the P38 full-fuse path is now gated by the
+    distinct env knob ``PRIMUS_INDEXER_TRITON_FULL`` (default ``"0"``).
+    The original ``PRIMUS_INDEXER_TRITON`` env now controls the cheaper
+    P41 post-einsum tail fusion in
+    :mod:`indexer_score_post`.
+
+    The full-fuse path is descoped at V4-Flash widths (cuBLAS einsum
+    beats the generic Triton kernel + BWD atomic_add contention
+    regresses 12x).  Kept available for small-shape paths and future
+    tuning.  Set ``PRIMUS_INDEXER_TRITON_FULL=1`` to opt-in.
     """
-    return os.environ.get("PRIMUS_INDEXER_TRITON", "0") == "1"
+    return os.environ.get("PRIMUS_INDEXER_TRITON_FULL", "0") == "1"
 
 
-def is_triton_kernel_supported(
-    q_i: torch.Tensor, k_icomp: torch.Tensor, w_i: torch.Tensor
-) -> bool:
+def is_triton_kernel_supported(q_i: torch.Tensor, k_icomp: torch.Tensor, w_i: torch.Tensor) -> bool:
     """Return True iff the input shapes / device support the Triton path."""
     if not q_i.is_cuda or not k_icomp.is_cuda or not w_i.is_cuda:
         return False
