@@ -814,23 +814,22 @@
 
 ## Phase 42 (plan-6) — Permute + `.contiguous()` absorption into V4 attention / CSA FWD inputs
 
-> Plan-6 P42.  See `../plan-6/02-phase-details.md#phase-42` for design.  Folds the explicit `.contiguous()` chain that materialises `gathered_k_v` / `q.contiguous()` / `kv.contiguous()` into the existing plan-5 V4 attention FWD kernels; no new Python kernel, just extend the existing kernels with strided-load helpers.  Gated behind `PRIMUS_V4_ATTN_FUSED_PERMUTE=1` (default `"1"` after proxy A/B confirms).
+> Plan-6 P42.  See `../plan-6/02-phase-details.md#phase-42` for design.  **Descoped at task-list refinement** (2026-05-15) per R9.1 / R9.3.  The 1303 `bf16_copy` launches that drive the 24.63 ms / iter bucket are spread across many call sites; top-5 eliminate-candidates account for ~3 % of the bucket (~0.7 ms / iter savings — below the proxy A/B noise floor), and the remaining ~97 % live in TE / Apex / Megatron / DeepEP pipeline machinery (out-of-model, needs upstream coordination).  Plan-7 P45..P47 target the 15× larger optimizer-step residual instead.
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Strided-input load helpers in `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, `_triton/v4_csa_attention_pool_sparse.py` |        |      | Add `PERMUTE_PATTERN: tl.constexpr` enum + per-pattern tile-load helpers. |
-| [ ] | Python call-site cleanup: drop `.contiguous()` / `.permute(...).contiguous()` from `DeepseekV4Attention._attention_forward_via_triton`, `csa_attention.py`, `compressor.py` |        |      | Each call site retains the eager fallback under `PRIMUS_V4_ATTN_FUSED_PERMUTE=0`. |
-| [ ] | New env `PRIMUS_V4_ATTN_FUSED_PERMUTE` (default `"1"` after A/B) |        |      |      |
-| [ ] | Microbench `progress/p42/bench_v4_attention_strided_input.py` — V4-Flash FWD/BWD with strided vs contiguous inputs |        |      |      |
-| [ ] | G44 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p42_strided_v4_attention.py` |        |      | FWD parity vs eager `.contiguous() + kernel` (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck`; release-tier `pytest.mark.slow`; parametrise `permute_pattern`. |
-| [ ] | G44a — 10-iter EP=8 proxy smoke; ratchet stays green; banned-warning grep returns 0 |        |      |      |
-| [ ] | G44b — chrome-trace iter 6 → 7 with `PRIMUS_V4_ATTN_FUSED_PERMUTE=1`; `vec_elem<bf16_copy>` + `elem_unroll<copy>` drop ≥ 20 ms; iter time drops ≥ 10 ms vs P41 final |        |      |      |
-| [ ] | `progress/p42/p42-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [-] | ~~Strided-input load helpers in `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, `_triton/v4_csa_attention_pool_sparse.py`~~ | TBD-p42 | 2026-05-15 | Descoped — high-risk plan-5 kernel modification deferred to plan-8 attention re-work. |
+| [-] | ~~Python call-site cleanup: drop `.contiguous()` / `.permute(...).contiguous()`~~ | TBD-p42 | 2026-05-15 | Descoped — top-5 eliminate candidates inventoried in `p42-summary.md` §3 for a future re-attempt. |
+| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_PERMUTE`~~ | TBD-p42 | 2026-05-15 | Descoped. |
+| [-] | ~~Microbench `progress/p42/bench_v4_attention_strided_input.py`~~ | TBD-p42 | 2026-05-15 | Descoped. |
+| [-] | ~~G44 unit tests~~ | TBD-p42 | 2026-05-15 | Descoped. |
+| [-] | ~~G44a / G44b smoke + perf~~ | TBD-p42 | 2026-05-15 | Descoped. |
+| [x] | `progress/p42/p42-summary.md` — descope summary + trace-attribution inventory | TBD-p42 | 2026-05-15 | Eight-section summary documenting the descope rationale + per-call-site eliminate-candidates with estimated savings + risk per R2.1. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P42 row |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P42 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P42 row~~ | TBD-p42 | 2026-05-15 | Skipped (no fusion shipped). |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P42 row~~ | TBD-p42 | 2026-05-15 | Skipped (no perf delta). |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p42 | 2026-05-15 | Skipped (no new trace; descoped at task-list refinement). |
 
 
 ## Phase 43 (plan-6) — V4 router post-logits + Compressor APE elementwise Triton fusion
