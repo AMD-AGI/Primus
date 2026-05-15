@@ -930,6 +930,155 @@
 | [-] | ~~R2.6 trace + tgz archival on phase close~~ | 0f95e812 | 2026-05-15 | Skipped — no runtime-affecting change in plan-7. |
 
 
+## Phase 49 (plan-8) — Tilelang infra + dispatcher
+
+> Plan-8 P49.  See `../plan-8/02-phase-details.md#phase-49` for design.  Ships the tilelang dispatcher + env knob (`PRIMUS_V4_TILELANG_ATTN`, default `"0"`) + cache-dir layout + AOT-build script.  No kernel lands here — P50..P55 fill the per-family kernels.  Tilelang `0.1.9+cuda.gitbcb2da33` is already installed inside `dev_primus_wenx_693`; the stub raises a clear `ImportError` if the version drifts.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | `primus/backends/megatron/core/transformer/v4_attention_kernels/_tilelang/__init__.py` — stub module with `is_tilelang_path_enabled()` predicate + `NotImplementedError` stubs for the 4 plan-8 kernel entry points |        |      | Pinned tilelang version probe; env knob `PRIMUS_V4_TILELANG_ATTN` default `"0"`. |
+| [ ] | Dispatch precedence wiring in `DeepseekV4Attention.forward`: `use_turbo_attention > PRIMUS_V4_TILELANG_ATTN > use_v4_triton_attention > eager` (cr=0/128); `PRIMUS_V4_TILELANG_ATTN > use_v4_triton_csa_attention > eager` (cr=4) |        |      | One-time rank-0 log line per kernel kind when engaged. |
+| [ ] | Cache directory layout: `output/.tilelang_cache/v4/` gitignored; env override `PRIMUS_V4_TILELANG_CACHE_DIR` |        |      |      |
+| [ ] | `progress/p49/build_tilelang_kernels.sh` — AOT compile every shape variant of P50/P51/P52/P53/P54/P55 kernels |        |      | Skips phases whose kernels haven't landed yet. |
+| [ ] | G49 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p49_tilelang_dispatch.py` (predicate + lazy-import + plan-4..plan-7 ratchet at default-off) |        |      |      |
+| [ ] | `progress/p49/p49-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ |        |      | Skipped — infra-only phase, no runtime behaviour change at default-off. |
+
+
+## Phase 50 (plan-8) — Dense FWD tilelang (cr=0)
+
+> Plan-8 P50.  See `../plan-8/02-phase-details.md#phase-50` for design.  New tilelang FlashAttention v2 FWD kernel (`v4_attention_fwd_tilelang.py`) with sink + SWA + additive-mask fusion + MQA broadcast.  Wraps with `@tilelang.jit` + `@tilelang.autotune` over MI355X-tuned block sizes (`block_M ∈ {16, 32}`, `block_N ∈ {16, 32, 64}`, `k_pack ∈ {1, 2}`, `panel_size ∈ {7, 8}`, etc.).  Drop-in replacement for `_triton/v4_attention_fwd.py`'s `_launch_v4_attention_fwd`.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `_tilelang/v4_attention_fwd_tilelang.py` with `@tilelang.jit` + `@tilelang.autotune` kernel + wrapper `v4_attention_fwd_tilelang(...)` |        |      | Returns `(out, lse)` with `out: q.dtype`, `lse: fp32`. |
+| [ ] | `V4AttentionFn.forward` dispatches to tilelang via `is_tilelang_path_enabled()` (set in P49) |        |      | Triton path stays as the fallback. |
+| [ ] | Microbench `progress/p50/bench_v4_attention_fwd_tilelang.py` — V4-Flash + smoke shapes; FWD vs Triton P25 |        |      | `iters=20, warmup=5, n_input_copies=4, l2_flush_mb=512`. |
+| [ ] | G50 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p50_v4_attention_fwd_tilelang.py` |        |      | Parity vs eager `reference.py::eager_v4_attention` bf16 `atol=2e-3 rtol=2e-3`; 16-combination parametrisation (MQA/MHA × sink × SWA × add_mask); release-tier slow at V4-Flash widths. |
+| [ ] | G50a — EP=8 10-iter proxy smoke with `PRIMUS_V4_TILELANG_ATTN=1` (cr=0 only — HCA/CSA still on Triton) |        |      | lm_loss within 5e-2 of P48 baseline; 0 banned warnings. |
+| [ ] | G50b — chrome-trace iter 6 → 7 + microbench numbers; ≥ 1.2× FWD speedup vs Triton target |        |      | If microbench loses, kernel still ships behind env knob default-off + regression documented in p50-summary.md. |
+| [ ] | `progress/p50/p50-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P50 row (cell format `<ms> ms \| <tflops>` per R2.5) |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 51 (plan-8) — Dense BWD tilelang (cr=0)
+
+> Plan-8 P51.  See `../plan-8/02-phase-details.md#phase-51` for design.  3-kernel split BWD (matches plan-5 P32 final Triton split BWD): `preprocess_kernel` (`Delta = (O * dO).sum(-1)`) + `dq_kernel` + `dkv_kernel` + optional `dsink_kernel`.  Re-materialises `P` from saved `LSE` per FlashAttention recipe.  No cross-block atomic_add traffic.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `_tilelang/v4_attention_bwd_tilelang.py` with 4 kernels (`preprocess`, `dq`, `dkv`, `dsink`) + wrapper |        |      | Matches `_triton/v4_attention_bwd.py` launcher signature. |
+| [ ] | `V4AttentionFn.backward` dispatches to tilelang via `is_tilelang_path_enabled()` |        |      |      |
+| [ ] | Microbench `progress/p51/bench_v4_attention_bwd_tilelang.py` — V4-Flash + smoke shapes; BWD vs plan-5 P32 final Triton split BWD |        |      |      |
+| [ ] | G51 — parity tests; 16-combination parametrisation; `gradcheck` fp32 fast tier; release-tier slow |        |      |      |
+| [ ] | G51a — EP=8 10-iter proxy smoke (cr=0 fully on tilelang) |        |      | lm_loss within 5e-2 of P48 baseline. |
+| [ ] | G51b — microbench ≥ 1.2× BWD speedup target |        |      |      |
+| [ ] | `progress/p51/p51-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P51 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 52 (plan-8) — HCA FWD tilelang (cr=128)
+
+> Plan-8 P52.  See `../plan-8/02-phase-details.md#phase-52` for design.  Reuses P50 dense FWD kernel with `hca_local_seqlen > 0` engaged + pool-only `[Sq_local, Sk_pool]` additive bias.  Joint softmax merges local SWA + compressed pool + per-head sink.  No new kernel file — extends P50.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Extend P50 FWD kernel with `hca_local_seqlen` parameter (constexpr `T.if_then_else` branch in the K-loop) |        |      | Mirrors plan-4 P25 Triton kernel's `HCA_LOCAL_SEQLEN` constexpr. |
+| [ ] | Wrapper API unchanged: `v4_attention_fwd_tilelang(...)` with `hca_local_seqlen > 0` |        |      |      |
+| [ ] | Microbench `progress/p52/bench_v4_hca_fwd_tilelang.py` |        |      |      |
+| [ ] | G52 — extend G50 release tier with `hca_local_seqlen ∈ {0, 4096}` + pool-only additive mask parametrisations |        |      |      |
+| [ ] | G52a — EP=8 10-iter proxy smoke (cr=0 + cr=128 on tilelang; CSA still on Triton) |        |      |      |
+| [ ] | G52b — microbench ≥ 1.15× FWD speedup target |        |      |      |
+| [ ] | `progress/p52/p52-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P52 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 53 (plan-8) — HCA BWD tilelang (cr=128)
+
+> Plan-8 P53.  See `../plan-8/02-phase-details.md#phase-53` for design.  Extends P51 split BWD with `hca_local_seqlen > 0`.  `dq_kernel` covers both local + pool branches; two-pass `dkv_kernel` invocation (one for `dk_local / dv_local`, one for `dk_pool / dv_pool`).  Sink BWD reuses P51.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Extend P51 BWD kernels with `hca_local_seqlen` parameter |        |      |      |
+| [ ] | Wrapper API unchanged |        |      |      |
+| [ ] | Microbench `progress/p53/bench_v4_hca_bwd_tilelang.py` |        |      |      |
+| [ ] | G53 — parity vs eager HCA BWD; `gradcheck` fp32 fast tier |        |      |      |
+| [ ] | G53a — EP=8 10-iter proxy smoke (cr=0 + cr=128 fully on tilelang) |        |      |      |
+| [ ] | G53b — microbench ≥ 1.15× BWD speedup target |        |      |      |
+| [ ] | `progress/p53/p53-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P53 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 54 (plan-8) — CSA FWD tilelang (cr=4)
+
+> Plan-8 P54.  See `../plan-8/02-phase-details.md#phase-54` for design.  New `_tilelang/v4_csa_attention_fwd_tilelang.py` implementing joint local SWA + sparse top-K + sink fused FWD.  One program per `(b, h, m)` row tile (single-row sparse tile keeps SMEM under 32 KiB at `head_dim=512`).  Two wrapper APIs: pre-gathered + in-kernel-gather-from-pool.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `_tilelang/v4_csa_attention_fwd_tilelang.py` with kernel + 2 wrapper APIs (`from_pool` + pre-gathered) |        |      | Borrows from `tilelang/examples/dsa_sparse_finetune/sparse_mla_fwd.py`. |
+| [ ] | `V4CSAAttentionFn.forward` dispatches to tilelang via `is_tilelang_path_enabled()` |        |      |      |
+| [ ] | Microbench `progress/p54/bench_v4_csa_fwd_tilelang.py` |        |      |      |
+| [ ] | G54 — parity vs `reference.py::eager_v4_csa_attention`; 24-combination parametrisation; release-tier slow |        |      |      |
+| [ ] | G54a — EP=8 10-iter proxy smoke (all three families on tilelang FWD; BWD still Triton for cr=4) |        |      |      |
+| [ ] | G54b — microbench ≥ 1.2× FWD speedup vs plan-5 P32 final Triton CSA sparse FWD |        |      |      |
+| [ ] | `progress/p54/p54-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P54 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 55 (plan-8) — CSA BWD tilelang (cr=4)
+
+> Plan-8 P55.  See `../plan-8/02-phase-details.md#phase-55` for design.  3-kernel pipeline (`dq_kernel`, `dkv_local_kernel`, `dpool_segreduce_kernel`) matching plan-5 P32 final segreduce design.  Both pool-BWD variants (gather + atomic, segreduce) ship behind sub-knob `PRIMUS_V4_TILELANG_CSA_BWD_SEGREDUCE`.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `_tilelang/v4_csa_attention_bwd_tilelang.py` with 3-kernel pipeline + sink BWD + 2 wrapper APIs |        |      | Borrows from `tilelang/examples/dsa_sparse_finetune/sparse_mla_bwd.py`. |
+| [ ] | `V4CSAAttentionFn.backward` dispatches to tilelang |        |      |      |
+| [ ] | Sub-env `PRIMUS_V4_TILELANG_CSA_BWD_SEGREDUCE` (default `"0"`) toggles between gather+atomic vs segreduce pool-BWD |        |      | Mirrors plan-5 P32 `PRIMUS_V4_CSA_BWD_SEGREDUCE`. |
+| [ ] | Microbench `progress/p55/bench_v4_csa_bwd_tilelang.py` |        |      |      |
+| [ ] | G55 — parity tests; both pool-BWD variants must pass; `gradcheck` fp32 fast tier |        |      |      |
+| [ ] | G55a — EP=8 10-iter proxy smoke (all three families fully on tilelang) |        |      |      |
+| [ ] | G55b — microbench ≥ 1.2× BWD speedup vs plan-5 P32 final Triton CSA gather+atomic BWD |        |      |      |
+| [ ] | `progress/p55/p55-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/attention_perf.md` — append P55 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 56 (plan-8) — Plan-8 close-out
+
+> Plan-8 P56.  See `../plan-8/02-phase-details.md#phase-56` for design.  Hand-off phase.  Appends plan-8 rows to perf docs, runs 15-iter clean bake-off with `PRIMUS_V4_TILELANG_ATTN=1`, surfaces env knob in `run_deepseek_v4_flash_proxy.sh` (default `"1"` only if bake-off saves ≥ 30 ms / iter vs P48 anchor).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | `develop/perf/attention_perf.md` — append P50/P51/P52/P53/P54/P55 rows (one per FWD / BWD pair) |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append `P50..P55 individual` rows + `P56 final` cumulative row |        |      |      |
+| [ ] | `progress/p49..p56/p4X-summary.md` per R2.1 |        |      |      |
+| [ ] | `run_deepseek_v4_flash_proxy.sh` — surface `PRIMUS_V4_TILELANG_ATTN` env knob |        |      | Default `"1"` only if bake-off saves ≥ 30 ms / iter vs P48. |
+| [ ] | Status pinning per R2.4 — every `[x]` row in Phase 49..56 has commit SHA + date |        |      |      |
+| [ ] | 15-iter clean bake-off `progress/p56/run_smoke_p56_bakeoff.sh` |        |      |      |
+| [ ] | Plan-8 close-out commit `docs(deepseek-v4)[plan-8][P56]: plan-8 close-out` |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
 ## Blockers / Risks Log
 
 
