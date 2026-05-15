@@ -469,6 +469,8 @@ def _v4_attention_bwd_dq_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACCUMULATE: tl.constexpr = False,
+    EXACT_TILES_M: tl.constexpr = False,
+    EXACT_TILES_N: tl.constexpr = False,
 ):
     """V4 attention BWD — dQ only (parallel over m-blocks, no atomics for dQ).
 
@@ -567,13 +569,21 @@ def _v4_attention_bwd_dq_kernel(
                 qk = tl.where(in_window, qk, NEG_INF)
             elif USE_CAUSAL:
                 qk = tl.where(offs_n[None, :] <= offs_m[:, None], qk, NEG_INF)
-        qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
-        qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+        # Plan-8 P57: EXACT_TILES_* skip the boundary masks when the
+        # launcher confirms ``seqlen_q % BLOCK_M == 0`` (resp. seqlen_k).
+        if not EXACT_TILES_N:
+            qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+        if not EXACT_TILES_M:
+            qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
         p = tl.exp(qk - lse[:, None])
         dp = tl.dot(dout, tl.trans(v))
         ds = p * (dp - dvec[:, None])
-        dq += tl.dot(ds.to(k.dtype), k) * sm_scale
+        # P57 cr=0 BWD: defer ``sm_scale`` to a single multiply after
+        # the n-loop, and fuse the inner ``dq += dot(ds, k)`` into an
+        # MFMA-acc form via ``tl.dot(..., acc=dq)``.  Numerics are
+        # bit-identical modulo fp32 associativity.
+        dq = tl.dot(ds.to(k.dtype), k, acc=dq)
 
     if HAS_ADD_MASK and HCA_LOCAL_SEQLEN > 0:
         for n_start in range(HCA_LOCAL_SEQLEN, seqlen_k, BLOCK_N):
@@ -603,13 +613,18 @@ def _v4_attention_bwd_dq_kernel(
             mask_load_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
             add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
             qk = qk + add_bias
-            qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
-            qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+            if not EXACT_TILES_N:
+                qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+            if not EXACT_TILES_M:
+                qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
             p = tl.exp(qk - lse[:, None])
             dp = tl.dot(dout, tl.trans(v))
             ds = p * (dp - dvec[:, None])
-            dq += tl.dot(ds.to(k.dtype), k) * sm_scale
+            dq = tl.dot(ds.to(k.dtype), k, acc=dq)
+
+    # P57 cr=0 BWD: fold ``sm_scale`` once after both loops.
+    dq = dq * sm_scale
 
     dq_ptrs = (
         DQ
@@ -685,31 +700,43 @@ def _v4_attention_bwd_dkv_kernel(
     # all m's, so we run it inside the same kernel after the local
     # branch finishes.
     ATOMIC_REDUCE: tl.constexpr = False,
+    # Plan-8 P57 — MQA head-split parallelism. When ``NUM_HEAD_GROUPS > 1``
+    # and ``HEAD_K != HEAD_Q`` (MQA), the kernel adds an extra grid dim
+    # ``pid_h_group = program_id(2)`` and each program owns
+    # ``HEAD_Q / NUM_HEAD_GROUPS`` query heads. Multiple head_group
+    # programs collide on the same MQA dK / dV slice, so writes are
+    # ``tl.atomic_add`` instead of ``tl.store``.
+    NUM_HEAD_GROUPS: tl.constexpr = 1,
+    EXACT_TILES_M: tl.constexpr = False,
+    EXACT_TILES_N: tl.constexpr = False,
 ):
     """V4 attention BWD — dK / dV only (parallel over n-blocks, no atomics for dK/dV).
 
     For MQA (``HEAD_K == 1``) every query head contributes to the same
     shared K / V, so this kernel must iterate ``H`` query heads per
     ``(b, n_block)``. We expose that via the ``HEAD_Q`` constexpr loop.
+
+    HCA pool n-blocks (``n_block_start >= HCA_LOCAL_SEQLEN``) are handled
+    by :func:`_v4_attention_bwd_dkv_pool_kernel`, which parallelises the
+    pool work across ``(m_block, b * qhid)``. We early-return here for
+    those blocks so we do not double-count the pool contribution.
     """
     pid_n = tl.program_id(0)
     pid_bh = tl.program_id(1)
+    pid_h_group = tl.program_id(2)
     bid = pid_bh // HEAD_K
     khid = pid_bh % HEAD_K
 
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
-    offs_n < seqlen_k
 
     NEG_INF: tl.constexpr = -1.0e30
 
-    # ``IS_POOL_BLOCK`` is True for HCA split-mask n-blocks in the pool
-    # suffix. The local SWA bounds use the pruned [n_start, n_start +
-    # SWA_WINDOW + BLOCK_N] window; the pool branch iterates all m's
-    # and uses the pool additive mask.
+    # HCA mode: pool n-blocks are handled by the dedicated pool kernel.
     if HCA_LOCAL_SEQLEN > 0:
-        n_block_start = pid_n * BLOCK_N
-        is_pool_block = n_block_start >= HCA_LOCAL_SEQLEN
+        if pid_n * BLOCK_N >= HCA_LOCAL_SEQLEN:
+            return
+        is_pool_block = False
     else:
         is_pool_block = False
 
@@ -811,17 +838,27 @@ def _v4_attention_bwd_dkv_kernel(
                 elif USE_CAUSAL:
                     qk = tl.where(offs_n[None, :] <= offs_m[:, None], qk, NEG_INF)
 
-            qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
-            qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+            if not EXACT_TILES_N:
+                qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+            if not EXACT_TILES_M:
+                qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
             p = tl.exp(qk - lse[:, None])
             dp = tl.dot(dout, tl.trans(v))
             ds = p * (dp - dvec[:, None])
 
-            dv += tl.dot(tl.trans(p.to(dout.dtype)), dout)
-            dk += tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+            # P57 cr=0 BWD: fuse the inner ``dv += dot(p, dout)`` and
+            # ``dk += dot(ds, q)`` into MFMA-acc form; defer ``sm_scale``
+            # on dk to a single multiply after the m-loop.
+            dv = tl.dot(tl.trans(p.to(dout.dtype)), dout, acc=dv)
+            dk = tl.dot(tl.trans(ds.to(q.dtype)), q, acc=dk)
     else:
-        for h_iter in range(0, HEAD_Q):
+        # MQA path. With NUM_HEAD_GROUPS > 1 the program owns a slice of
+        # query heads; otherwise it iterates all HEAD_Q heads.
+        head_per_group: tl.constexpr = HEAD_Q // NUM_HEAD_GROUPS
+        h_start = pid_h_group * head_per_group
+        h_end = h_start + head_per_group
+        for h_iter in range(h_start, h_end):
             qhid = h_iter
 
             for m_start in range(m_loop_start, m_loop_end, BLOCK_M):
@@ -872,15 +909,23 @@ def _v4_attention_bwd_dkv_kernel(
                     elif USE_CAUSAL:
                         qk = tl.where(offs_n[None, :] <= offs_m[:, None], qk, NEG_INF)
 
-                qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
-                qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+                if not EXACT_TILES_N:
+                    qk = tl.where(offs_n[None, :] < seqlen_k, qk, NEG_INF)
+                if not EXACT_TILES_M:
+                    qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
                 p = tl.exp(qk - lse[:, None])
                 dp = tl.dot(dout, tl.trans(v))
                 ds = p * (dp - dvec[:, None])
 
-                dv += tl.dot(tl.trans(p.to(dout.dtype)), dout)
-                dk += tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+                # P57 cr=0 BWD: same scale-defer + tl.dot(acc=) trick
+                # as the non-MQA branch above.
+                dv = tl.dot(tl.trans(p.to(dout.dtype)), dout, acc=dv)
+                dk = tl.dot(tl.trans(ds.to(q.dtype)), q, acc=dk)
+
+    # P57 cr=0 BWD: fold ``sm_scale`` on dk once after the (head x m)
+    # loop.  dv carries no scale.
+    dk = dk * sm_scale
 
     dk_ptrs = (
         DK
@@ -896,18 +941,230 @@ def _v4_attention_bwd_dkv_kernel(
         + offs_n[:, None] * stride_dvn
         + offs_d[None, :] * stride_dvd
     )
-    if ATOMIC_REDUCE:
-        # CSA pool BWD path: multiple ``(b, head, n_block)`` programs
-        # collapse into a single ``(b, n_block)`` global slice with
-        # ``stride_dkh = stride_dvh = 0`` so we need a fp32 atomic_add
-        # to merge them. There are only ~4 k such writes per BWD
-        # (vs the gather kernel's ~1 B fp32 atomic adds), so the
-        # atomic engine is not the bottleneck.
+    if ATOMIC_REDUCE or NUM_HEAD_GROUPS > 1:
+        # ``ATOMIC_REDUCE`` is set on the CSA pool BWD path (multiple
+        # ``(b, head, n_block)`` programs collapse into a single
+        # ``(b, n_block)`` global slice with ``stride_dkh = stride_dvh = 0``).
+        # ``NUM_HEAD_GROUPS > 1`` is the MQA head-split path: multiple
+        # head_group programs target the same MQA dK / dV slice. Both
+        # require fp32 atomic_add to merge.
         tl.atomic_add(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k, sem="relaxed")
         tl.atomic_add(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k, sem="relaxed")
     else:
         tl.store(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k)
         tl.store(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k)
+
+
+# ---------------------------------------------------------------------------
+# Plan-8 P57 — HCA pool dK / dV kernel
+#
+# The HCA split-mask BWD has a single "pool" n-block (P=Sk-HCA_LOCAL_SEQLEN
+# keys; typically 32 at V4-Flash widths). Folding the pool into the main
+# dK/dV kernel makes that single n-block program iterate every m-block ×
+# every query head — at H=64 / Sq=4096 / BLOCK_M=32 that is 8192 inner
+# iterations versus ~256 for a local-SWA n-block program (32× more work).
+#
+# This kernel parallelises pool work over ``m_block`` (one program per
+# ``(b, m_block)``) and iterates ``HEAD_Q`` heads internally. Each program
+# accumulates its (BLOCK_N, BLOCK_DMODEL) tile contribution in registers
+# (no per-head atomic) and atomic-adds the final tile into the shared
+# pool slice of dK / dV exactly twice (once for dk, once for dv) per
+# program. At V4-Flash widths the contention is 128-way per pool cell
+# instead of 8192-way for the m_block × qhid full grid, while still
+# extracting 128× more parallelism than the original single-program pool
+# branch.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _v4_attention_bwd_dkv_pool_kernel(
+    Q,
+    K,
+    V,
+    DOUT,
+    LSE,
+    D,
+    DK,  # fp32 buffer [B, K_H, Sk, D]
+    DV,  # fp32 buffer [B, K_H, Sk, D]
+    ADD_MASK,  # [Sq, P] additive pool mask
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_kb,
+    stride_kh,
+    stride_kn,
+    stride_kd,
+    stride_vb,
+    stride_vh,
+    stride_vn,
+    stride_vd,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dkb,
+    stride_dkh,
+    stride_dkn,
+    stride_dkd,
+    stride_dvb,
+    stride_dvh,
+    stride_dvn,
+    stride_dvd,
+    stride_ms,
+    stride_mn,
+    seqlen_q,
+    seqlen_k,
+    pool_size,
+    sm_scale,
+    HEAD_Q: tl.constexpr,
+    HEAD_K: tl.constexpr,
+    HCA_LOCAL_SEQLEN: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    """V4 HCA BWD — dK / dV for the pool keys (parallel m-blocks, head-loop inside)."""
+    pid_m = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    bid = pid_b
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    pool_n = tl.arange(0, BLOCK_N)
+    offs_n = HCA_LOCAL_SEQLEN + pool_n
+
+    NEG_INF: tl.constexpr = -1.0e30
+
+    pool_n_mask = pool_n < pool_size
+    q_load_mask = offs_m[:, None] < seqlen_q
+
+    # Per-(m_block, b) program iterates all query heads, accumulating in
+    # registers. For MQA (HK=1) all heads share the same (b, khid=0) K/V,
+    # so we reload K/V once at the start. For MHA (HK=HQ) we reload K/V
+    # per head inside the loop.
+    if HEAD_K == 1:
+        k_ptrs = K + bid * stride_kb + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kd
+        v_ptrs = V + bid * stride_vb + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd
+        kv_load_mask = pool_n_mask[:, None]
+        k_shared = tl.load(k_ptrs, mask=kv_load_mask, other=0.0)
+        v_shared = tl.load(v_ptrs, mask=kv_load_mask, other=0.0)
+        kt_shared = tl.trans(k_shared)
+        vt_shared = tl.trans(v_shared)
+
+    dk_acc = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
+    dv_acc = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
+
+    for qhid in range(0, HEAD_Q):
+        if HEAD_K == HEAD_Q:
+            khid = qhid
+        else:
+            khid = 0
+
+        q_ptrs = (
+            Q + bid * stride_qb + qhid * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+        )
+        dout_ptrs = (
+            DOUT
+            + bid * stride_dob
+            + qhid * stride_doh
+            + offs_m[:, None] * stride_dom
+            + offs_d[None, :] * stride_dod
+        )
+        lse_ptrs = LSE + bid * stride_lb + qhid * stride_lh + offs_m * stride_lm
+        dvec_ptrs = D + bid * stride_db + qhid * stride_dh + offs_m * stride_dm
+
+        q = tl.load(q_ptrs, mask=q_load_mask, other=0.0)
+        dout = tl.load(dout_ptrs, mask=q_load_mask, other=0.0)
+        lse = tl.load(lse_ptrs, mask=offs_m < seqlen_q, other=0.0)
+        dvec = tl.load(dvec_ptrs, mask=offs_m < seqlen_q, other=0.0)
+
+        if HEAD_K == 1:
+            kt = kt_shared
+            vt = vt_shared
+        else:
+            k_ptrs = (
+                K
+                + bid * stride_kb
+                + khid * stride_kh
+                + offs_n[:, None] * stride_kn
+                + offs_d[None, :] * stride_kd
+            )
+            v_ptrs = (
+                V
+                + bid * stride_vb
+                + khid * stride_vh
+                + offs_n[:, None] * stride_vn
+                + offs_d[None, :] * stride_vd
+            )
+            kv_load_mask = pool_n_mask[:, None]
+            k = tl.load(k_ptrs, mask=kv_load_mask, other=0.0)
+            v = tl.load(v_ptrs, mask=kv_load_mask, other=0.0)
+            kt = tl.trans(k)
+            vt = tl.trans(v)
+
+        qk = tl.dot(q, kt) * sm_scale
+        mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + pool_n[None, :] * stride_mn
+        mask_load_mask = (offs_m[:, None] < seqlen_q) & pool_n_mask[None, :]
+        add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
+        qk = qk + add_bias
+        qk = tl.where(pool_n_mask[None, :], qk, NEG_INF)
+        qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout, vt)
+        ds = p * (dp - dvec[:, None])
+
+        if HEAD_K == 1:
+            dk_acc += tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+            dv_acc += tl.dot(tl.trans(p.to(dout.dtype)), dout)
+        else:
+            # MHA path — each qhid maps to its own khid slice. Accumulator is
+            # not shared across heads; flush per-head with atomic_add.
+            dk_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+            dv_contrib = tl.dot(tl.trans(p.to(dout.dtype)), dout)
+            dk_ptrs_h = (
+                DK
+                + bid * stride_dkb
+                + khid * stride_dkh
+                + offs_n[:, None] * stride_dkn
+                + offs_d[None, :] * stride_dkd
+            )
+            dv_ptrs_h = (
+                DV
+                + bid * stride_dvb
+                + khid * stride_dvh
+                + offs_n[:, None] * stride_dvn
+                + offs_d[None, :] * stride_dvd
+            )
+            tl.atomic_add(dk_ptrs_h, dk_contrib, mask=pool_n_mask[:, None], sem="relaxed")
+            tl.atomic_add(dv_ptrs_h, dv_contrib, mask=pool_n_mask[:, None], sem="relaxed")
+
+    if HEAD_K == 1:
+        khid_final = 0
+        dk_ptrs = (
+            DK
+            + bid * stride_dkb
+            + khid_final * stride_dkh
+            + offs_n[:, None] * stride_dkn
+            + offs_d[None, :] * stride_dkd
+        )
+        dv_ptrs = (
+            DV
+            + bid * stride_dvb
+            + khid_final * stride_dvh
+            + offs_n[:, None] * stride_dvn
+            + offs_d[None, :] * stride_dvd
+        )
+        write_mask = pool_n_mask[:, None]
+        tl.atomic_add(dk_ptrs, dk_acc, mask=write_mask, sem="relaxed")
+        tl.atomic_add(dv_ptrs, dv_acc, mask=write_mask, sem="relaxed")
 
 
 # ---------------------------------------------------------------------------
@@ -970,8 +1227,14 @@ def _launch_v4_attention_bwd(
         int(swa_window) if ((not has_add_mask or hca_local_seqlen) and swa_window > 0) else 0
     )
 
-    BLOCK_M = 32
-    BLOCK_N = 32
+    # Plan-8 P57 sweep at V4-Flash widths (B=1 H=64 Sq=4096 D=512 P=32):
+    # ``BLOCK_M=64 BLOCK_N=16`` lifts dKV grid from 128 -> 256 programs
+    # (full 256-CU MI355 occupancy) and lets the Q tile (64x512) better
+    # amortise the per-m-block load. The wider Q matches MFMA 32x32x16
+    # output tile layout (two 32x16 tiles back-to-back) and gets the dKV
+    # kernel from ~6.7 ms (BM=BN=32) down to ~3.6 ms in the dense bench.
+    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_BWD_BLOCK_M", "64"))
+    BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_BWD_BLOCK_N", "16"))
     BLOCK_DMODEL = D
 
     # Allocate fp32 output buffers for atomic_add. Cast to input dtype
@@ -1020,6 +1283,14 @@ def _launch_v4_attention_bwd(
     else:
         stride_ms = 0
         stride_mn = 0
+
+    # Plan-8 P57: skip the boundary masks (``offs_m < seqlen_q`` /
+    # ``offs_n < seqlen_k``) when the launcher confirms the seqlens are
+    # exact multiples of BLOCK_M / BLOCK_N. Saves a per-inner-iter
+    # broadcast + tl.where on production V4-Flash widths where Sq=4096
+    # (BM=64) and Sk=4128 (BN=16) both divide cleanly.
+    exact_tiles_m = (Sq % BLOCK_M) == 0
+    exact_tiles_n = (Sk % BLOCK_N) == 0
 
     # Plan-5 P32: split BWD (dQ kernel + dK/dV kernel, no atomics for
     # dQ / dK / dV) is now the default — wins both the operator microbench
@@ -1084,10 +1355,41 @@ def _launch_v4_attention_bwd(
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_DMODEL=BLOCK_DMODEL,
-            num_warps=8,
-            num_stages=1,
+            EXACT_TILES_M=exact_tiles_m,
+            EXACT_TILES_N=exact_tiles_n,
+            # Plan-8 P57: ``num_warps=4 num_stages=2`` chosen by sweep at
+            # V4-Flash widths. ``num_warps=8`` (the original default) over
+            # -occupies VGPR/AGPR per program and starves the SIMDs;
+            # ``num_warps=4`` with ``num_stages=2`` (double-buffer K/V loads)
+            # is the dq sweet spot.
+            num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_WARPS", "4")),
+            num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_STAGES", "2")),
         )
-        dkv_grid = (triton.cdiv(Sk, BLOCK_N), B * HK)
+        # Plan-8 P57: in HCA mode the pool n-block(s) are handled by the
+        # dedicated pool kernel that parallelises over (m_block, b * qhid)
+        # — see ``_v4_attention_bwd_dkv_pool_kernel``. Skip the pool grid
+        # rows here so we don't double-count.
+        if hca_local_seqlen > 0:
+            dkv_n_blocks = triton.cdiv(hca_local_seqlen, BLOCK_N)
+        else:
+            dkv_n_blocks = triton.cdiv(Sk, BLOCK_N)
+        # Plan-8 P57: ``NUM_HEAD_GROUPS`` controls MQA head-split parallelism
+        # for the local dKV kernel. Default (1) keeps the original head loop;
+        # >1 splits the head loop and uses ``tl.atomic_add`` for dKV.
+        # The dense-bench sweep showed head-split is essentially neutral on
+        # MI355 at H=64 (HBM/atomic-bound, not compute-bound), so default 1.
+        num_head_groups = 1
+        if HQ > HK:
+            target = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS", "1"))
+            while target > 1 and HQ % target != 0:
+                target //= 2
+            num_head_groups = max(1, target)
+        dkv_grid = (dkv_n_blocks, B * HK, num_head_groups)
+        # Plan-8 P57: ``num_warps=4 num_stages=1`` chosen by sweep — the
+        # dKV kernel keeps K/V in registers across the m-loop, which makes
+        # the 8-warp / staged-pipeline variants thrash VGPR vs ``num_warps=4``.
+        dkv_num_warps = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_NUM_WARPS", "4"))
+        dkv_num_stages = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_NUM_STAGES", "1"))
         _v4_attention_bwd_dkv_kernel[dkv_grid](
             q,
             k,
@@ -1142,9 +1444,82 @@ def _launch_v4_attention_bwd(
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_DMODEL=BLOCK_DMODEL,
-            num_warps=8,
-            num_stages=1,
+            NUM_HEAD_GROUPS=num_head_groups,
+            EXACT_TILES_M=exact_tiles_m,
+            EXACT_TILES_N=exact_tiles_n,
+            num_warps=dkv_num_warps,
+            num_stages=dkv_num_stages,
         )
+        if hca_local_seqlen > 0 and os.getenv("PRIMUS_V4_ATTN_BWD_HCA_POOL", "1") == "1":
+            pool_size = Sk - hca_local_seqlen
+            pool_block_n = max(16, triton.next_power_of_2(pool_size))
+            # Plan-8 P57: pool kernel block_m is decoupled from the dKV
+            # block_m. dKV benefits from BM=64 (fewer programs each loading
+            # a wider Q tile); pool kernel benefits from a smaller BM (more
+            # programs => more parallelism over the head loop).
+            pool_block_m = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_BLOCK_M", str(BLOCK_M)))
+            pool_grid = (triton.cdiv(Sq, pool_block_m), B)
+            _v4_attention_bwd_dkv_pool_kernel[pool_grid](
+                q,
+                k,
+                v,
+                dout,
+                lse,
+                d_buf,
+                dk_fp32,
+                dv_fp32,
+                additive_mask,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                k.stride(3),
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                v.stride(3),
+                dout.stride(0),
+                dout.stride(1),
+                dout.stride(2),
+                dout.stride(3),
+                lse.stride(0),
+                lse.stride(1),
+                lse.stride(2),
+                d_buf.stride(0),
+                d_buf.stride(1),
+                d_buf.stride(2),
+                dk_fp32.stride(0),
+                dk_fp32.stride(1),
+                dk_fp32.stride(2),
+                dk_fp32.stride(3),
+                dv_fp32.stride(0),
+                dv_fp32.stride(1),
+                dv_fp32.stride(2),
+                dv_fp32.stride(3),
+                stride_ms,
+                stride_mn,
+                Sq,
+                Sk,
+                pool_size,
+                float(scale),
+                HEAD_Q=HQ,
+                HEAD_K=HK,
+                HCA_LOCAL_SEQLEN=hca_local_seqlen,
+                BLOCK_M=pool_block_m,
+                BLOCK_N=pool_block_n,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                # Plan-8 P57 sweep with dKV BM=64 BN=16: pool kernel
+                # ``num_warps=4 num_stages=1`` is the sweet spot. Higher
+                # num_stages adds Q/dout double-buffering overhead that
+                # doesn't pay off because the pool kernel keeps K/V in
+                # registers (single load) and the head-loop dominates
+                # the iteration count.
+                num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_WARPS", "4")),
+                num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_STAGES", "1")),
+            )
         dq_out = dq_fp32.to(q.dtype)
         dk_out = dk_fp32.to(k.dtype)
         dv_out = dv_fp32.to(v.dtype)
