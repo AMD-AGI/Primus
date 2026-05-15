@@ -879,17 +879,17 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [x] | `primus/backends/megatron/core/extensions/_triton/multi_tensor_add.py` — `multi_tensor_add_triton_per_tensor` + `_packed` variants | TBD-p45 | 2026-05-15 | Per-tensor launches in a loop (Triton stream-stacked) + single-kernel packed via CPU-side dispatch table. |
-| [x] | `tests/unit_tests/megatron/extensions/test_p45_multi_tensor_add.py` — G47 parity | TBD-p45 | 2026-05-15 | 8 tests (per-tensor + packed × 3 scales + variants + odd sizes). All pass. |
-| [x] | Microbench `progress/p45/bench_multi_tensor_add.py` + JSONs | TBD-p45 | 2026-05-15 | At n=743 V4-Flash mix: foreach 7.77 ms, triton_per_tensor 7.59 ms (1.02× = tied), triton_packed 33.95 ms (0.23× regression from CPU dispatch). |
-| [-] | ~~Replace TE / Apex fused-Adam call site~~ | TBD-p45 | 2026-05-15 | Descoped to plan-8 — requires bit-exact master-param remainder math + R6.2 prohibits third_party edits. |
-| [-] | ~~New env `PRIMUS_FUSED_ADAM_TRITON`~~ | TBD-p45 | 2026-05-15 | Descoped (no production integration shipped). |
-| [-] | ~~G47a / G47b smoke + trace~~ | TBD-p45 | 2026-05-15 | Descoped. |
-| [x] | `progress/p45/p45-summary.md` — eight-section per-phase summary | TBD-p45 | 2026-05-15 | Documents prototype shipped + microbench evidence + the disproved plan-7 budget hypothesis + plan-8 follow-up scope. |
+| [x] | `primus/backends/megatron/core/extensions/_triton/multi_tensor_add.py` — `multi_tensor_add_triton_per_tensor` + `_packed` variants | d925c567 | 2026-05-15 | Per-tensor launches in a loop (Triton stream-stacked) + single-kernel packed via CPU-side dispatch table. |
+| [x] | `tests/unit_tests/megatron/extensions/test_p45_multi_tensor_add.py` — G47 parity | d925c567 | 2026-05-15 | 8 tests (per-tensor + packed × 3 scales + variants + odd sizes). All pass. |
+| [x] | Microbench `progress/p45/bench_multi_tensor_add.py` + JSONs | d925c567 | 2026-05-15 | At n=743 V4-Flash mix: foreach 7.77 ms, triton_per_tensor 7.59 ms (1.02× = tied), triton_packed 33.95 ms (0.23× regression from CPU dispatch). |
+| [-] | ~~Replace TE / Apex fused-Adam call site~~ | d925c567 | 2026-05-15 | Descoped to plan-8 — requires bit-exact master-param remainder math + R6.2 prohibits third_party edits. |
+| [-] | ~~New env `PRIMUS_FUSED_ADAM_TRITON`~~ | d925c567 | 2026-05-15 | Descoped (no production integration shipped). |
+| [-] | ~~G47a / G47b smoke + trace~~ | d925c567 | 2026-05-15 | Descoped. |
+| [x] | `progress/p45/p45-summary.md` — eight-section per-phase summary | d925c567 | 2026-05-15 | Documents prototype shipped + microbench evidence + the disproved plan-7 budget hypothesis + plan-8 follow-up scope. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [-] | ~~`develop/perf/elem_fusion.md` — append P45 row~~ | TBD-p45 | 2026-05-15 | Skipped (no fusion that buys runtime — bench evidence shows tied with eager). |
-| [-] | ~~`develop/perf/proxy_ep8.md` — append P45 row~~ | TBD-p45 | 2026-05-15 | Skipped (no perf delta). |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p45 | 2026-05-15 | Skipped (no production integration). |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P45 row~~ | d925c567 | 2026-05-15 | Skipped (no fusion that buys runtime — bench evidence shows tied with eager). |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P45 row~~ | d925c567 | 2026-05-15 | Skipped (no perf delta). |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | d925c567 | 2026-05-15 | Skipped (no production integration). |
 
 
 ## Phase 46 (plan-7) — Fused grad-scale Triton kernel

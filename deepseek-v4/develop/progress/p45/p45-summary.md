@@ -177,4 +177,4 @@ requires:
   attack on the optimizer-step residual.
 * P46 / P47 will follow the same descope-on-evidence pattern
   (microbench-driven, not roadmap-driven).
-* Feature commit SHA: TBD-p45.
+* Feature commit SHA: d925c567.
