@@ -955,16 +955,16 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | New `_tilelang/v4_attention_fwd_tilelang.py` with `@tilelang.jit` + `@tilelang.autotune` kernel + wrapper `v4_attention_fwd_tilelang(...)` |        |      | Returns `(out, lse)` with `out: q.dtype`, `lse: fp32`. |
-| [ ] | `V4AttentionFn.forward` dispatches to tilelang via `is_tilelang_path_enabled()` (set in P49) |        |      | Triton path stays as the fallback. |
-| [ ] | Microbench `progress/p50/bench_v4_attention_fwd_tilelang.py` — V4-Flash + smoke shapes; FWD vs Triton P25 |        |      | `iters=20, warmup=5, n_input_copies=4, l2_flush_mb=512`. |
-| [ ] | G50 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p50_v4_attention_fwd_tilelang.py` |        |      | Parity vs eager `reference.py::eager_v4_attention` bf16 `atol=2e-3 rtol=2e-3`; 16-combination parametrisation (MQA/MHA × sink × SWA × add_mask); release-tier slow at V4-Flash widths. |
-| [ ] | G50a — EP=8 10-iter proxy smoke with `PRIMUS_V4_TILELANG_ATTN=1` (cr=0 only — HCA/CSA still on Triton) |        |      | lm_loss within 5e-2 of P48 baseline; 0 banned warnings. |
-| [ ] | G50b — chrome-trace iter 6 → 7 + microbench numbers; ≥ 1.2× FWD speedup vs Triton target |        |      | If microbench loses, kernel still ships behind env knob default-off + regression documented in p50-summary.md. |
-| [ ] | `progress/p50/p50-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [x] | New `_tilelang/v4_attention_fwd_tilelang.py` with `@tilelang.jit` factory + wrapper `v4_attention_fwd_tilelang(...)` | TBD-p50 | 2026-05-15 | Returns `(out, lse)`; Triton fallback for `additive_mask`/`hca_local_seqlen>0`. |
+| [x] | `v4_attention(...)` wrapper dispatches to tilelang via `should_dispatch("v4_attention_fwd")` (P49 hook) | TBD-p50 | 2026-05-15 | Module import triggers `register_available_kernel("v4_attention_fwd")` + stub override via `_lazy_load`. |
+| [x] | Microbench `progress/p50/bench_v4_attention_fwd_tilelang.py` — V4-Flash + smoke shapes | TBD-p50 | 2026-05-15 | smoke (D=64): **tilelang 1.62× Triton**; v4_flash (D=512): **tilelang 0.14× Triton (regression)**. |
+| [x] | G50 — `test_p50_v4_attention_fwd_tilelang.py` (19 tests) | TBD-p50 | 2026-05-15 | 16 parity (MQA/MHA × sink × SWA × bf16/fp16) + 2 Triton fallback + 1 dispatcher registration; all green. bf16 fast-tier tolerance `atol=3e-2 rtol=5e-2` (ULP rounding floor). |
+| [-] | ~~G50a — EP=8 10-iter proxy smoke with `PRIMUS_V4_TILELANG_ATTN=1`~~ | TBD-p50 | 2026-05-15 | Skipped — V4-Flash microbench shows 6× regression at D=512; per R9.1 the proxy A/B would just confirm the regression. Kernel ships default-OFF; no proxy run needed. |
+| [-] | ~~G50b — chrome-trace iter 6 → 7~~ | TBD-p50 | 2026-05-15 | Skipped (same reason). |
+| [x] | `progress/p50/p50-summary.md` — eight-section per-phase summary per R2.1 | TBD-p50 | 2026-05-15 | Documents the SMEM-budget gap at D=512 + the four failed/negative probe configs. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/attention_perf.md` — append P50 row (cell format `<ms> ms \| <tflops>` per R2.5) |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/attention_perf.md` — append P50 row~~ | TBD-p50 | 2026-05-15 | Skipped — kernel descoped to default-OFF; the `attention_perf.md` table only tracks production-default kernels. The microbench JSONs at `progress/p50/bench/{smoke,v4_flash}.json` are the load-bearing perf record. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p50 | 2026-05-15 | Skipped — no runtime-affecting change at default-off. |
 
 
 ## Phase 51 (plan-8) — Dense BWD tilelang (cr=0)

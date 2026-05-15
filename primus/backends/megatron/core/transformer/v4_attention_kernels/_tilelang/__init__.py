@@ -124,6 +124,71 @@ def register_available_kernel(name: str) -> None:
     _AVAILABLE_KERNELS.add(name)
 
 
+# Map kernel name -> submodule name to lazy-import.  Each submodule
+# registers its kernel name + overrides the stub in this namespace on
+# first import.
+_KERNEL_SUBMODULES: dict[str, str] = {
+    "v4_attention_fwd": "v4_attention_fwd_tilelang",
+    "v4_attention_bwd": "v4_attention_bwd_tilelang",
+    "v4_csa_attention_fwd": "v4_csa_attention_fwd_tilelang",
+    "v4_csa_attention_bwd": "v4_csa_attention_bwd_tilelang",
+}
+
+_LAZY_LOADED: Set[str] = set()
+
+
+def _lazy_load(name: str) -> bool:
+    """Import the submodule that implements kernel ``name`` (if landed).
+
+    Returns True iff the import succeeded.  Each plan-8 kernel
+    submodule's import-time code:
+
+    1. Calls :func:`register_available_kernel` to flip
+       :func:`is_tilelang_kernel_available` to True.
+    2. Replaces the module-level stub in this namespace via
+       ``setattr(<this module>, name + "_tilelang", real_fn)``.
+
+    Idempotent — subsequent calls no-op.
+    """
+    if name in _LAZY_LOADED:
+        return name in _AVAILABLE_KERNELS
+    _LAZY_LOADED.add(name)
+    sub = _KERNEL_SUBMODULES.get(name)
+    if sub is None:
+        return False
+    try:
+        from importlib import import_module
+
+        sub_mod = import_module(__name__ + "." + sub)
+    except ImportError as exc:
+        warnings.warn(
+            f"[plan-8] tilelang submodule {sub!r} import failed ({exc}); "
+            f"kernel {name!r} stays unavailable.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return False
+    # Override the stub: the submodule exposes a function with the same
+    # name as the submodule (e.g. `v4_attention_fwd_tilelang.py`
+    # exposes `v4_attention_fwd_tilelang`).  Importing the submodule
+    # would otherwise set `_tilelang.v4_attention_fwd_tilelang` to
+    # the SUBMODULE, shadowing the stub.  We restore the function
+    # attribute here.
+    real_fn = getattr(sub_mod, sub, None)
+    if real_fn is None:
+        warnings.warn(
+            f"[plan-8] tilelang submodule {sub!r} does not expose a "
+            f"function named {sub!r}; kernel {name!r} stays unavailable.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return False
+    import sys
+
+    sys.modules[__name__].__dict__[sub] = real_fn
+    return name in _AVAILABLE_KERNELS
+
+
 # ---------------------------------------------------------------------------
 # Tilelang import probe (lazy)
 # ---------------------------------------------------------------------------
@@ -282,6 +347,11 @@ def should_dispatch(kernel_name: str) -> bool:
     if not _probe_tilelang():
         _maybe_warn_fallback(kernel_name)
         return False
+    # Lazy-import the submodule that implements ``kernel_name``.
+    # The submodule's import-time code flips
+    # ``is_tilelang_kernel_available(...)`` to True and overrides
+    # the stub function in this namespace.  Cheap on subsequent calls.
+    _lazy_load(kernel_name)
     if not is_tilelang_kernel_available(kernel_name):
         _maybe_warn_fallback(kernel_name)
         return False
