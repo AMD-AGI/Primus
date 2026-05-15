@@ -213,4 +213,4 @@ fusion and the eager reference's exp + scale).
   partitioning so we can run `block_M=block_N=64` at D=512 with
   only partial Q/K/V residency in shared memory.  Until that
   lands, the V4-Flash widths stay on Triton.
-* Feature commit SHA: TBD-p50.
+* Feature commit SHA: af07de91.
