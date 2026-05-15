@@ -1055,6 +1055,32 @@
 | [-] | ~~R2.6 trace + tgz archival on phase close~~ | 19e41c9a | 2026-05-15 | Skipped — no runtime-affecting change in plan-8. |
 
 
+## Phase 57 (plan-8) — Triton V4 attention kernel perf push (cr=0/4/128 FWD + BWD)
+
+> Plan-8 P57.  See `../plan-8/02-phase-details.md#phase-57` for design.  Per-kernel wall-clock targets at V4-Flash widths (B=1, H=64, Sq=4096, D=512, swa=128, sink=True, bf16):
+> - **cr=0 BWD** 7.66 ms → **≤ 3.0 ms** (2.55×)
+> - **cr=4 FWD** 3.18 ms → **≤ 1.5 ms** (2.12×)
+> - **cr=4 BWD** 16.29 ms → **≤ 5.0 ms** (3.26×)
+> - **cr=128 BWD** 11.89 ms → **≤ 3.0 ms** (3.96×)
+>
+> Methodology: parallel best-of-N optimisation pass via `best-of-n-runner` subagents in isolated git worktrees, one subagent per target × optimisation angle.  Parent agent picks the fastest passing-parity result per target and integrates via cherry-pick / re-apply.  Iterates until targets met OR ≤ 3 rounds budget.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Baseline lock — pin current numbers in `progress/p57/baseline.md` |        |      | cr=0 BWD 7.66 ms; cr=4 FWD 3.18 ms; cr=4 BWD 16.29 ms; cr=128 BWD 11.89 ms (confirmed via fresh runs on `mi355-gpu-8` 2026-05-15). |
+| [ ] | Round-1 dispatch — launch N parallel `best-of-n-runner` subagents in isolated worktrees |        |      | One subagent per (target × optimisation angle).  Each owns a single kernel file in `_triton/`; no cross-file edits per subagent. |
+| [ ] | Round-1 collection — pick fastest passing-parity result per target |        |      |      |
+| [ ] | Round-1 integration — cherry-pick / re-apply winners; resolve cr=0/cr=128 BWD file conflict |        |      | Both touch `_triton/v4_attention_bwd.py`; merge serially with parity check between steps. |
+| [ ] | G57 parity ratchet — `pytest -q tests/unit_tests/megatron/transformer/deepseek_v4/` stays green |        |      |      |
+| [ ] | G57a smoke — EP=8 10-iter, lm_loss within 5e-2 of P48 |        |      |      |
+| [ ] | If targets missed > 10 %, Round-2 dispatch with refined angles |        |      |      |
+| [ ] | G57b — append `develop/perf/attention_perf.md` P57 row |        |      |      |
+| [ ] | `progress/p57/p57-summary.md` per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
 ## Blockers / Risks Log
 
 

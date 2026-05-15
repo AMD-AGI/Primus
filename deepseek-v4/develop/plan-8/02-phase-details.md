@@ -550,3 +550,143 @@
   phase row in `status.md` is marked `[-]` per R2.2.  The
   `p4X-summary.md` documents why (e.g. "tilelang SMEM budget
   exceeded at head_dim=512 even with block_M=16").
+
+---
+
+## Phase 57 — Triton V4 attention kernel perf push (cr=0/4/128 FWD + BWD)
+
+> Sourced from the user's post-plan-8 perf-push directive:
+> "优化 cr=0 BWD (7.65 ms → 3 ms), cr=4 FWD (3.18 ms → 1.5 ms),
+> cr=4 BWD (16.29 ms → 5 ms), cr=128 BWD (11.89 ms → 3 ms).
+> 可以开启多个 subagent 并发做."
+
+### Targets (V4-Flash widths, `B=1, H=64, Sq=4096, D=512, swa=128, sink=True, bf16`)
+
+| Kernel family | Current (P32 RoPE-fix final) | P57 target | Speedup |
+|---|---:|---:|---:|
+| `cr=0` BWD (dense + SWA + sink)                 |  7.66 ms (22.11 TF) | ≤ 3.0 ms | **2.55×** |
+| `cr=4` FWD (CSA: local SWA + sparse + sink)     |  3.18 ms (108.4 TF) | ≤ 1.5 ms | **2.12×** |
+| `cr=4` BWD (CSA dq + dkv_local + dpool sparse)  | 16.29 ms (52.50 TF) | ≤ 5.0 ms | **3.26×** |
+| `cr=128` BWD (HCA split-mask BWD)               | 11.89 ms (15.95 TF) | ≤ 3.0 ms | **3.96×** |
+
+### Optimisation surface — per-kernel ideas
+
+* **cr=0 BWD** (`_triton/v4_attention_bwd.py`, currently split dQ + dKV
+  with `PRIMUS_V4_ATTN_BWD_USE_SPLIT=1`):
+  - Cooperative groups for shared Q/K/V load between dQ + dKV passes.
+  - Persistent kernel layout that fuses both passes (one HBM read of
+    Q/K/V/dO instead of two).
+  - Better MFMA scheduling (`k_pack=2`, swizzle, num_stages tuning).
+  - Larger BLOCK_M / BLOCK_N when SMEM permits at `head_dim=512`.
+  - Tail-loop pruning: SWA + causal mask let many BWD tiles short-circuit.
+
+* **cr=4 FWD** (`_triton/v4_csa_attention_fwd.py`):
+  - Joint local SWA + sparse top-K load into shared (avoid re-reading
+    Q for the sparse branch).
+  - Larger top-K tile (K_topk read in fewer chunks).
+  - Vectorised gather for the sparse branch.
+  - In-register top-K reordering to avoid uncoalesced HBM gathers.
+
+* **cr=4 BWD** (`_triton/v4_csa_attention_bwd.py`):
+  - In-register dpool partial accumulation (avoid the 4 GiB partial
+    buffer; segreduce stays as a fallback).
+  - Sorted-inverse-index reordering to defeat HBM scatter contention.
+  - Cooperative groups for dq / dk_local / dpool sharing Q/K/V loads.
+  - Single-pass dq + dk_local + dpool kernel (vs current 3-kernel
+    pipeline) when SMEM permits.
+
+* **cr=128 BWD** (HCA split-mask, shares `v4_attention_bwd.py`):
+  - HCA-specific BWD split (separate kernel from dense BWD); local
+    branch reuses the dense BWD kernel, pool branch is a tiny pool-
+    only dKV kernel.
+  - Joint local + pool dq accumulation (avoid two passes over Q).
+  - Eliminate the cross-block dpool atomic_add via sorted-inverse-
+    index (same pattern as cr=4 segreduce).
+
+### Methodology — parallel best-of-N
+
+P57 runs as a parallel best-of-N optimisation pass:
+
+1. The parent agent spawns **N subagents in isolated git worktrees**
+   (via `best-of-n-runner`), one per target × optimisation angle.
+   Each subagent has:
+   - Read-only access to the existing kernel + bench harness.
+   - A clear target wall-clock + parity gate.
+   - License to modify ONLY its target kernel file in its worktree.
+2. Each subagent iterates: design → implement → microbench → parity
+   check → report. Returns its best result (wall-clock, parity
+   status, branch / patch) to the parent.
+3. The parent picks the **fastest result that passes parity** per
+   target and cherry-picks / re-applies into the main branch.
+4. If a target misses, the parent spawns a follow-up round with
+   refined angles.
+5. Final integration: `attention_perf.md` row + `progress/p57/p57-summary.md`
+   + status-pin commit.
+
+### Tasks (parent agent)
+
+1. **Baseline lock** — run
+   `progress/p32/bench_v4_attention_ep8.py --mode dense --warmup 3
+   --iters 10` (cr=0), `--mode hca` (cr=128), and
+   `progress/p31/bench_csa_attention_ep8.py --warmup 3 --iters 10`
+   (cr=4 FWD+BWD).  Pin baselines in `progress/p57/baseline.md`.
+
+2. **Subagent dispatch** — launch `best-of-n-runner` subagents in
+   parallel, one per optimisation angle.  Subagent prompt includes:
+   - Target wall-clock + parity tolerance.
+   - File scope (single kernel file in `_triton/`).
+   - Bench command + parity test command.
+   - Iteration budget (compile-fail / parity-fail / perf-regress
+     all count; subagent must converge in N tries).
+
+3. **Result collection** — each subagent returns a one-page
+   report: wall-clock numbers, parity-test result, branch name,
+   summary of what changed.
+
+4. **Integration** — apply winning patches via `git cherry-pick` /
+   `git apply --3way` into the main branch.  Resolve conflicts when
+   two targets share a file (e.g. cr=0 BWD + cr=128 BWD both touch
+   `_triton/v4_attention_bwd.py`).
+
+5. **G57 — parity ratchet** — run
+   `pytest -q tests/unit_tests/megatron/transformer/deepseek_v4/`
+   (with `--run-slow` for release-tier) and the plan-8 P49 G49
+   tests.  Pass count must not drop.
+
+6. **G57a — EP=8 proxy smoke** — 10-iter run with the new kernels
+   default-on; `lm_loss` within `5e-2` of the P48 baseline; no
+   banned warnings.
+
+7. **G57b — `attention_perf.md`** — append a P57 row with the
+   landed wall-clock numbers in the R2.5 cell format.
+
+8. **`progress/p57/p57-summary.md`** — eight-section per-phase
+   summary per R2.1.  Document per-target winner + descope rationale
+   for any miss.
+
+### Coordination notes (multi-subagent safety)
+
+* Each `best-of-n-runner` subagent uses its own git worktree under
+  `.worktrees/p57-<target>-<angle>/`.  Their commits land on
+  per-subagent branches (`dev/wenx/p57-<target>-<angle>`); the
+  main `dev/wenx/deepseek-v4` branch is **NOT** modified by the
+  subagents.
+* The parent agent picks the winner and re-applies via
+  `git cherry-pick` (or manual edits if the subagent's branch
+  diverged too far).
+* Conflict resolution: `cr=0 BWD` and `cr=128 BWD` both touch
+  `_triton/v4_attention_bwd.py`.  The parent merges them serially
+  (cr=0 first, then cr=128 layered on top), running parity after
+  each step.
+
+### Edge cases
+
+* **A target misses by < 10 %.**  Ship the kernel as-is (best
+  result wins); document the gap in `p57-summary.md` §"failed /
+  negative probes".
+* **A target misses by > 10 %.**  Re-spawn a second round of
+  subagents with refined optimisation angles.  Iterate until
+  the target is met OR the budget is exhausted (≤ 3 rounds).
+* **A parity test fails** (numerical regression).  The
+  optimisation is rejected; the kernel stays on the P32 RoPE-fix
+  final implementation.  Same precedent as P38 / P39 / P50.
