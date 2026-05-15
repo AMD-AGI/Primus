@@ -858,18 +858,18 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~Extend `_v4_attention_fwd_kernel` with optional `attn_sink [H]`~~ | TBD-p44 | 2026-05-15 | Descoped — kernel already handles `sink` via virtual softmax row (plan-4 P25 design); no `out * scale + sinks` epilogue exists to fuse. |
-| [-] | ~~Extend `_v4_attention_bwd_kernel` with `d_attn_sink`~~ | TBD-p44 | 2026-05-15 | Descoped (same reason). |
-| [-] | ~~Python call-site cleanup~~ | TBD-p44 | 2026-05-15 | Descoped. |
-| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_SINK`~~ | TBD-p44 | 2026-05-15 | Descoped. |
-| [-] | ~~Microbench `progress/p44/bench_v4_attention_sink_epilogue.py`~~ | TBD-p44 | 2026-05-15 | Descoped. |
-| [-] | ~~G46 unit tests~~ | TBD-p44 | 2026-05-15 | Descoped. |
-| [-] | ~~G46a / G46b smoke + perf~~ | TBD-p44 | 2026-05-15 | Descoped. |
-| [x] | `progress/p44/p44-summary.md` — descope summary documenting why the originally-scoped target does not map to existing code | TBD-p44 | 2026-05-15 | Eight-section summary per R2.1: three independent observations (sink already in kernel, trace bucket unattributed, 1.1 % below R9.1 cut-off). |
+| [-] | ~~Extend `_v4_attention_fwd_kernel` with optional `attn_sink [H]`~~ | 15b680ce | 2026-05-15 | Descoped — kernel already handles `sink` via virtual softmax row (plan-4 P25 design); no `out * scale + sinks` epilogue exists to fuse. |
+| [-] | ~~Extend `_v4_attention_bwd_kernel` with `d_attn_sink`~~ | 15b680ce | 2026-05-15 | Descoped (same reason). |
+| [-] | ~~Python call-site cleanup~~ | 15b680ce | 2026-05-15 | Descoped. |
+| [-] | ~~New env `PRIMUS_V4_ATTN_FUSED_SINK`~~ | 15b680ce | 2026-05-15 | Descoped. |
+| [-] | ~~Microbench `progress/p44/bench_v4_attention_sink_epilogue.py`~~ | 15b680ce | 2026-05-15 | Descoped. |
+| [-] | ~~G46 unit tests~~ | 15b680ce | 2026-05-15 | Descoped. |
+| [-] | ~~G46a / G46b smoke + perf~~ | 15b680ce | 2026-05-15 | Descoped. |
+| [x] | `progress/p44/p44-summary.md` — descope summary documenting why the originally-scoped target does not map to existing code | 15b680ce | 2026-05-15 | Eight-section summary per R2.1: three independent observations (sink already in kernel, trace bucket unattributed, 1.1 % below R9.1 cut-off). |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [-] | ~~`develop/perf/elem_fusion.md` — append P44 row~~ | TBD-p44 | 2026-05-15 | Skipped. |
-| [-] | ~~`develop/perf/proxy_ep8.md` — append P44 row~~ | TBD-p44 | 2026-05-15 | Skipped. |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p44 | 2026-05-15 | Skipped. |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P44 row~~ | 15b680ce | 2026-05-15 | Skipped. |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P44 row~~ | 15b680ce | 2026-05-15 | Skipped. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 15b680ce | 2026-05-15 | Skipped. |
 
 
 ## Phase 45 (plan-7) — Custom Triton fused Adam (absorb ε-add into master functor)

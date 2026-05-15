@@ -95,4 +95,4 @@ R2.2 de-scope convention.
 * Plan-7 P45..P48 now target the dominant residual instead (Adam
   optimizer step at ~242 ms / iter; 42× larger than the P44
   budget).
-* Feature commit SHA: TBD-p44.
+* Feature commit SHA: 15b680ce.
