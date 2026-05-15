@@ -1,0 +1,33 @@
+{
+  "config": {
+    "n_tensors": 743,
+    "shape_mix": "v4flash",
+    "iters": 20,
+    "warmup": 5,
+    "block_size": 8192,
+    "total_bytes": 15486025728
+  },
+  "results": {
+    "foreach": {
+      "mean_ms": 7.766393184661865,
+      "median_ms": 7.76520299911499,
+      "min_ms": 7.745128154754639,
+      "max_ms": 7.7915520668029785,
+      "gbps_median": 1994.2847250438865
+    },
+    "triton_per_tensor": {
+      "mean_ms": 7.5877893447875975,
+      "median_ms": 7.5870585441589355,
+      "min_ms": 7.55905818939209,
+      "max_ms": 7.636898040771484,
+      "gbps_median": 2041.1106145901904
+    },
+    "triton_packed": {
+      "mean_ms": 33.51866979598999,
+      "median_ms": 33.94845771789551,
+      "min_ms": 31.962963104248047,
+      "max_ms": 34.9244384765625,
+      "gbps_median": 456.16286479596783
+    }
+  }
+}

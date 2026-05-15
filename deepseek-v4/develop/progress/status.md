@@ -872,25 +872,24 @@
 | [-] | ~~R2.6 trace + tgz archival on phase close~~ | 15b680ce | 2026-05-15 | Skipped. |
 
 
-## Phase 45 (plan-7) — Custom Triton fused Adam (absorb ε-add into master functor)
+## Phase 45 (plan-7) — Multi-tensor BF16 add Triton prototype (production integration descoped)
 
-> Plan-7 P45.  See `../plan-7/02-phase-details.md#phase-45` for design.  Replaces the TE / Apex `multi_tensor_adam_master_param_remainder` + the separate BF16 ε-add chain with a single Triton kernel per multi-tensor group that does the full Adam step in registers.  Gated behind `PRIMUS_FUSED_ADAM_TRITON=1` (default `"0"` initially; flips to `"1"` only after the proxy A/B confirms a positive delta).
+> Plan-7 P45.  See `../plan-7/02-phase-details.md#phase-45` for design.  The originally-scoped target — replace the TE / Apex `multi_tensor_adam_master_param_remainder` with a custom Triton kernel — is descoped to plan-8.  P45 instead ships a **multi-tensor BF16 add Triton prototype** + microbench that **disproves** the plan-7 P45 budget hypothesis: the 743 `vec_elem<add_bf16>` launches in the P40 trace are **not** launch-overhead-dominated.  The microbench shows `torch._foreach_add_` (eager) already runs at ~2000 GB/s (near MI355 peak) at n=743; the Triton per-tensor variant ties at 1.02×.  No production integration; the prototype lives as a microbench / unit-test target for future plan-8 work.
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | New `primus/backends/megatron/extensions/_triton/fused_adam.py` with `_fused_adam_master_kernel` + `FusedAdamMasterParamRemainder` callable |        |      | Full Adam step in registers; bf16 cast + remainder accumulation fused at end. |
-| [ ] | New `primus/backends/megatron/patches/turbo_adam_patches.py` monkey-patch wrapping TE / Apex Adam call site |        |      | Probes for both TE + Apex variants; falls back to upstream on probe failure. |
-| [ ] | New env `PRIMUS_FUSED_ADAM_TRITON` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
-| [ ] | Microbench `progress/p45/bench_fused_adam.py` |        |      |      |
-| [ ] | G47 — `tests/unit_tests/megatron/extensions/test_p45_fused_adam_triton.py` |        |      | Bit-equal fp32; ULP ≤ 1 bf16 master; 10-step rollup ≤ 1e-3; release-tier 100-step loss curve vs upstream. |
-| [ ] | G47a — 10-iter EP=8 proxy smoke; ratchet stays green; banned-warning grep returns 0 (incl. new "Adam fused fallback to upstream" entry) |        |      |      |
-| [ ] | G47b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_ADAM_TRITON=1`; `vec_elem<add_bf16>` (Adam ε-add) + `multi_tensor<adam_master>` drop ≥ 150 ms; iter time drops ≥ 100 ms vs P44 final |        |      |      |
-| [ ] | `progress/p45/p45-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [x] | `primus/backends/megatron/core/extensions/_triton/multi_tensor_add.py` — `multi_tensor_add_triton_per_tensor` + `_packed` variants | TBD-p45 | 2026-05-15 | Per-tensor launches in a loop (Triton stream-stacked) + single-kernel packed via CPU-side dispatch table. |
+| [x] | `tests/unit_tests/megatron/extensions/test_p45_multi_tensor_add.py` — G47 parity | TBD-p45 | 2026-05-15 | 8 tests (per-tensor + packed × 3 scales + variants + odd sizes). All pass. |
+| [x] | Microbench `progress/p45/bench_multi_tensor_add.py` + JSONs | TBD-p45 | 2026-05-15 | At n=743 V4-Flash mix: foreach 7.77 ms, triton_per_tensor 7.59 ms (1.02× = tied), triton_packed 33.95 ms (0.23× regression from CPU dispatch). |
+| [-] | ~~Replace TE / Apex fused-Adam call site~~ | TBD-p45 | 2026-05-15 | Descoped to plan-8 — requires bit-exact master-param remainder math + R6.2 prohibits third_party edits. |
+| [-] | ~~New env `PRIMUS_FUSED_ADAM_TRITON`~~ | TBD-p45 | 2026-05-15 | Descoped (no production integration shipped). |
+| [-] | ~~G47a / G47b smoke + trace~~ | TBD-p45 | 2026-05-15 | Descoped. |
+| [x] | `progress/p45/p45-summary.md` — eight-section per-phase summary | TBD-p45 | 2026-05-15 | Documents prototype shipped + microbench evidence + the disproved plan-7 budget hypothesis + plan-8 follow-up scope. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P45 row |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P45 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P45 row~~ | TBD-p45 | 2026-05-15 | Skipped (no fusion that buys runtime — bench evidence shows tied with eager). |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append P45 row~~ | TBD-p45 | 2026-05-15 | Skipped (no perf delta). |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p45 | 2026-05-15 | Skipped (no production integration). |
 
 
 ## Phase 46 (plan-7) — Fused grad-scale Triton kernel
