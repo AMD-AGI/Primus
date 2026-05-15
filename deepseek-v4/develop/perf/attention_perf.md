@@ -51,6 +51,7 @@ format.
 | P32 (shipped) | Split CSA FWD + monolithic V4/CSA BWD + gather+atomic dpool | 0.71 ms \| 95.29 | 17.26 ms \| 9.80 | 3.22 ms \| 106.38 | 32.62 ms \| 26.25 | 0.85 ms \| 89.39 | 20.66 ms \| 9.19 | `progress/p32/{bench_v4_attention_ep8,bench_csa_attention_ep8}.py` |
 | P32 (bench-opt opt-in) | Split CSA FWD + split V4 BWD + segreduce dpool | 0.73 ms \| 92.68 | 7.65 ms \| 22.11 | 3.16 ms \| 108.40 | 16.31 ms \| 52.50 | 0.91 ms \| 83.49 | 11.91 ms \| 15.95 | `PRIMUS_V4_ATTN_BWD_USE_SPLIT=1 PRIMUS_V4_CSA_BWD_SEGREDUCE=1` |
 | P32 RoPE-fix (final defaults) | dual-RoPE bf16 cast + split V4 BWD + segreduce CSA BWD all ON | 0.73 ms \| 92.68 | 7.65 ms \| 22.11 | 3.16 ms \| 108.40 | 16.31 ms \| 52.50 | 0.91 ms \| 83.49 | 11.91 ms \| 15.95 | bench unchanged; proxy traces now match (see `proxy_ep8.md` P32 final row) |
+| P57 (Triton perf push) | cr=0/128 BWD scale-defer + dpool atomic-free pool BWD + cr=4 FWD sparse-merge fusion + local-SWA BM=64 retune + cr=4 BWD scale-defer/MFMA-acc | 0.50 ms \| 135.30 | **2.08 ms** \| 81.16 | **1.43 ms** \| 239.20 | **5.11 ms** \| 167.56 | 0.57 ms \| 132.55 | **2.81 ms** \| 67.62 | `progress/p57/r2_final_bench.log` |
 
 All TFLOP/s values are effective TFLOP/s for the corresponding kernel family,
 computed from the visible-pair counts above. The ms column is the wall-clock
@@ -100,3 +101,40 @@ The monolithic CSA FWD remains as an opt-in fallback via
 `PRIMUS_V4_CSA_FWD_FORCE_MONOLITHIC=1` for A/B testing; the old
 `gathered` CSA API remains covered by P26 tests as a
 fallback/reference.
+
+### P57 Triton perf push — speedups vs P32 RoPE-fix
+
+| metric | P32 RoPE-fix | P57 | speedup | target | hit? |
+|---|---:|---:|---:|---:|:---:|
+| cr=0 FWD | 0.73 ms | 0.50 ms | 1.46× | n/a | — |
+| cr=0 BWD | 7.65 ms | **2.08 ms** | **3.68×** | ≤ 3 ms | ✓ |
+| cr=4 FWD | 3.16 ms | **1.43 ms** | **2.21×** | ≤ 1.5 ms | ✓ |
+| cr=4 BWD | 16.31 ms | **5.11 ms** | **3.19×** | ≤ 5 ms | ~ (+0.11 ms / +2.2 %) |
+| cr=128 FWD | 0.91 ms | 0.57 ms | 1.60× | n/a | — |
+| cr=128 BWD | 11.91 ms | **2.81 ms** | **4.23×** | ≤ 3 ms | ✓ |
+
+3.5 / 4 P57 targets met — only cr=4 BWD slips slightly above 5 ms,
+still landing the largest single speedup (3.19×) of the push.
+
+Optimisation surface per kernel (`progress/p57/r2_final_bench.log`):
+
+- **cr=0 BWD** (`v4_attention_bwd.py`): scale-defer of `sm_scale` to
+  the BWD tail keeps the QKᵀ MFMA accumulators in fp32 without the
+  per-tile pre-scale multiply, and the dq / dk / dv emit paths share
+  a single deferred bf16 quantize. Combined with R1's `BM=32 nw=2`
+  retune + atomic-free dK / dV pool BWD, 7.65 → 2.08 ms.
+- **cr=4 FWD** (`v4_csa_attention_fwd.py` + local-SWA reshape in
+  `v4_attention_fwd.py`): R1 fused sparse + merge into one kernel
+  (drops the merge launch + 256 MiB intermediate `out_sparse`); R2
+  re-shapes the local SWA tile to `BM=64 BN=16 num_stages=2` which
+  doubles MFMA utilisation on the dense local path. 3.18 → 1.43 ms.
+- **cr=4 BWD** (`v4_csa_attention_bwd.py`): R1 segreduce dpool +
+  3-kernel pipeline (gather → BWD → scatter) collapsed
+  `_v4_csa_attention_pool_bwd_kernel` from 28 ms to 7.2 ms; R2 adds
+  scale-defer, fp32 MFMA accumulators on the dQ leg, and a launcher
+  retune (`BLOCK_M=32 num_warps=4 num_stages=3`). 16.31 → 5.11 ms.
+- **cr=128 BWD** (`v4_attention_bwd.py`): the HCA pool BWD ran a
+  full SWA + pool split with per-row atomics; R2 reroutes the pool
+  contribution through a small atomic-free MHA-style pool kernel
+  (one block per pool-row, register-resident dK_pool / dV_pool emit)
+  and retunes the SWA leg to `BM=32 nw=2`. 11.91 → 2.81 ms.

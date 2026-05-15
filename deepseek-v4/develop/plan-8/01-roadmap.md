@@ -94,12 +94,20 @@ close-out gates on all preceding phases.
 | **M3: HCA (cr=128) on tilelang** | FWD + BWD ship; combined cr=0 + cr=128 EP=8 proxy A/B shows ≥ 5 ms / iter additional savings | P52 + P53 | not started |
 | **M4: CSA (cr=4) on tilelang** | FWD + BWD ship; all three families on tilelang; combined EP=8 proxy A/B shows ≥ 15 ms / iter additional savings | P54 + P55 | not started |
 | **M5: Plan-8 close-out** | `attention_perf.md` + `proxy_ep8.md` rows pinned with 15-iter clean bake-off; `PRIMUS_V4_TILELANG_ATTN` default flips to `"1"` only if the cumulative EP=8 A/B beats the P48 anchor by ≥ 30 ms / iter | P56 | done (2026-05-15) |
-| **M6: Triton V4 attention perf push** | cr=0 BWD ≤ 3.0 ms, cr=4 FWD ≤ 1.5 ms, cr=4 BWD ≤ 5.0 ms, cr=128 BWD ≤ 3.0 ms at V4-Flash widths | P57 | not started |
+| **M6: Triton V4 attention perf push** | cr=0 BWD ≤ 3.0 ms, cr=4 FWD ≤ 1.5 ms, cr=4 BWD ≤ 5.0 ms, cr=128 BWD ≤ 3.0 ms at V4-Flash widths | P57 | done (2026-05-15) — **3.5 / 4 targets hit**: cr=0 BWD 2.08 ms (3.68×), cr=4 FWD 1.43 ms (2.22×), cr=4 BWD 5.11 ms (3.19×, +2.2 % over target), cr=128 BWD 2.81 ms (4.23×). Proxy iter time **436.13 ms / 614.5 TFLOP/s/GPU / 20.26×** vs P28 anchor (best iter 432.5 ms / 619.6). |
 
 End-of-plan-8 EP=8 proxy steady-iter target: **≤ 470 ms / iter, ≥
 570 TFLOP/s/GPU (P33-corrected denominator)**, ~`1.09×` over the
 plan-7 P48 anchor of 510.6 ms.  Best-effort, not a contract; per
 R9.1 any phase that regresses end-to-end ships default-off.
+
+**P57 close-out — both end-of-plan-8 EP=8 proxy targets exceeded**:
+proxy iter time **436.13 ms / iter** (target ≤ 470 ms, beaten by
+33.9 ms / 7.2 %); throughput **614.5 TFLOP/s/GPU** (target ≥ 570,
+beaten by 44.5 / 7.8 %).  Cumulative speedup vs P28 anchor reaches
+**20.26× mean (best iter 20.43×)**.  Plan-8 ratchet movement vs
+P48 final / P40 final (both 510.6 ms anchors): **+2.95× iter-time
+speedup, -74.5 ms / -14.6 % wall-clock, +17.1 % throughput**.
 
 ## Top Risks
 

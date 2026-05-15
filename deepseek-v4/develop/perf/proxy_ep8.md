@@ -47,6 +47,7 @@ V4-Flash EP8 proxy.
 | **P46**        | Fused grad-scale Triton — **DESCOPED via P45 evidence** | n/a | n/a | n/a | `progress/p46/p46-summary.md`. `multi_tensor<scale>` 321 launches already multi-tensor-batched. Budget 10.96 ms (2.1 %) below the R9.1 10 % cut-off. |
 | **P47**        | Fused grad-norm clip Triton — **DESCOPED via P45 evidence** | n/a | n/a | n/a | `progress/p47/p47-summary.md`. `multi_tensor<l2norm>` + `reduce<l2norm_bf16>` combined 14.48 ms (2.8 %) below cut-off; multi-tensor batching already at peak. |
 | **P48 final**  | Plan-7 close-out (no production kernel shipped; iter time matches P40 final) | **510.6** | **524.9** | **17.31x** | `progress/p48/p48-summary.md`. Plan-7 retrospective: P45 microbench disproved the optimizer-step fusion budget hypothesis; P46/P47 descoped on the same evidence; plan-8 scoped with the actual headroom (production fused-Adam + V4 attention BWD shared Q/K/V + forensic R9.3 helper). |
+| **P57**        | Plan-8 V4 attention Triton perf push (cr=0/4/128 FWD+BWD optimisations, parallel best-of-N) | **436.13** (best 432.5) | **614.5** (best 619.6) | **20.26x** (best 20.43x) | `progress/p57/runs/p57_proxy_trace.log` (10-iter trace run, iters 4-6+8-10 mean; iter 7 excluded as profile-end). Iter time vs P40 final 510.6 ms: **-74.5 ms / -14.6 %**; throughput +17.1 % (524.9 -> 614.5 TFLOP/s/GPU). Bench-vs-proxy gap closed: the four target microbench wins (cr=0 BWD 3.68x, cr=4 FWD 2.22x, cr=4 BWD 3.19x, cr=128 BWD 4.23x) surface ~1:1 at the proxy thanks to the P32 RoPE bf16 fix already in place. Trace kernels: `_v4_attention_bwd_dq_kernel` 8×0.77 ms = 6.15 ms; `_v4_attention_bwd_dkv_kernel` 8×0.90 ms = 7.21 ms; `_v4_attention_bwd_dkv_pool_mha_kernel` (cr=128 atomic-free pool BWD) 2×0.64 ms = 1.27 ms; `_v4_csa_attention_pool_sparse_bwd_partial_kernel` 3×2.72 ms = 8.17 ms; `_v4_csa_attention_pool_segreduce_kernel` 3×0.47 ms = 1.42 ms; `_v4_csa_attention_pool_sparse_merge_fwd_kernel` 3×0.98 ms = 2.93 ms; `_v4_attention_fwd_kernel` 8×0.44 ms = 3.51 ms. Total V4 attention budget ≈ 30.7 ms / iter (7.0 % of iter), down from ≈ 65 ms / iter at P32 final. `lm_loss[10]` = 9.224450 vs P32 final 9.258817 (-0.034; 0.37 % drift across 10 iters within bf16 noise band — attributable to the new fused sparse+merge FWD softmax tail, local-SWA `BM=64` tile retune, and scale-defer order changes in the BWD; operator parity tests all green at the same tolerance). |
 
 
 Notes:
@@ -274,6 +275,42 @@ kernels as 600 ms+ outliers.
   ratchet stayed green (the +1 vs P38 would be the G42 release-tier
   router test if release-tier coverage is added; the 21 G42 fast +
   3 shape-variant skipped tests already pass).
+- **P57** (2026-05-15) — plan-8 V4 attention Triton perf push.
+  Four optimisation targets selected from the P32 final post-RoPE-fix
+  microbench profile: cr=0 BWD (7.65 ms, ≤ 3 ms target), cr=4 FWD
+  (3.18 ms, ≤ 1.5 ms target), cr=4 BWD (16.31 ms, ≤ 5 ms target),
+  cr=128 BWD (11.91 ms, ≤ 3 ms target). Methodology: 4 parallel
+  best-of-N `best-of-n-runner` subagents in isolated git worktrees,
+  each owning one (kernel, target) pair so file-level conflicts are
+  impossible; round-1 + round-2 winners cherry-picked back into
+  `dev/wenx/deepseek-v4` and re-benched end-to-end. R2 winners:
+  cr=0 BWD `2.08 ms` (3.68×, hit), cr=4 FWD `1.43 ms` (2.22×, hit),
+  cr=4 BWD `5.11 ms` (3.19×, 2.2 % over target), cr=128 BWD
+  `2.81 ms` (4.23×, hit). 3.5 / 4 targets met; cr=4 BWD slips
+  0.11 ms above target but still posts the largest individual
+  speedup (3.19×). The proxy iter time drops from P40 final
+  510.6 ms / 524.9 TFLOP/s/GPU to **436.13 ms / 614.5 TFLOP/s/GPU**
+  (10-iter trace, iters 4-6 + 8-10 mean), or **-74.5 ms (-14.6 %)
+  wall-clock / +17.1 % throughput**.  Best iter 9 at 432.5 ms /
+  619.6 TFLOP/s/GPU. Total V4 attention budget in the trace drops
+  from ~65 ms / iter at P32 final to ~30.7 ms / iter (~7.0 % of
+  iter, 25 launches across 8 attention layers — see the table row
+  above and `progress/p57/runs/p57_all_v4_kernels.txt` for the
+  per-kernel breakdown). Loss drift over 10 iters is 0.034 (0.37 %)
+  inside the bf16 noise band; G57 release-tier operator parity is
+  green (90 passed / 80 skipped — same skip set as P32 final).
+  Cumulative speedup vs P28 anchor: `8837.4 / 436.13 = 20.26×`
+  mean (best iter 20.43×). Plan-8 ratchet movement vs P48 final:
+  **+2.95× iter-time speedup, +89.6 TFLOP/s/GPU throughput**.
+  Per-target optimisation surfaces: cr=0/128 BWD scale-defer + R1
+  atomic-free pool BWD + `BM=32 nw=2` retune; cr=4 FWD R1
+  sparse+merge fusion + R2 local-SWA `BM=64 BN=16 ST=2` tile
+  retune; cr=4 BWD R1 segreduce dpool + 3-kernel pipeline + R2
+  scale-defer / fp32 MFMA accumulators / launcher retune
+  (`BM=32 nw=4 ST=3`). All Triton (no tilelang); plan-8 P50-P56
+  tilelang work descoped at `head_dim=512` due to MI355 SMEM
+  budget (see `progress/p51/p51-summary.md` for the SMEM
+  partition blocker — plan-9 follow-up).
 - **P40 final** (2026-05-15) — plan-6 close-out.  15-iter EP=8
   proxy bake-off with all plan-6 default-on flags enabled
   (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON=1`, `PRIMUS_ROPE_TRITON=1`,

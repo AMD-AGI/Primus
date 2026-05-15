@@ -35,6 +35,7 @@ dtype contract (matches :func:`eager_v4_attention`):
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -236,8 +237,11 @@ def _v4_attention_fwd_kernel(
         v_load_mask = offs_n[:, None] < seqlen_k
         v = tl.load(v_ptrs, mask=v_load_mask, other=0.0)
 
-        # acc <- acc * alpha + p @ v (fp32 accumulator inside tl.dot)
-        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+        # P57 R2: fuse ``acc * alpha`` into the V-dot MFMA-acc input.
+        # AMD's Triton lowering threads ``acc`` directly into the MFMA
+        # C-tile, eliminating one fp32 register round-trip per K-tile.
+        # Same pattern as the cr=0 BWD's ``dq = tl.dot(ds, k, acc=dq)``.
+        acc = tl.dot(p.to(v.dtype), v, acc=acc * alpha[:, None])
         m_i = m_new
 
     # HCA split-mask pool branch. The local branch above prunes the SWA
@@ -282,7 +286,8 @@ def _v4_attention_fwd_kernel(
             v_load_mask = offs_n[:, None] < seqlen_k
             v = tl.load(v_ptrs, mask=v_load_mask, other=0.0)
 
-            acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+            # P57 R2: MFMA-acc fusion -- see local-branch comment above.
+            acc = tl.dot(p.to(v.dtype), v, acc=acc * alpha[:, None])
             m_i = m_new
 
     # Sink: virtual key column with value 0. The max-subtract trick
@@ -388,11 +393,31 @@ def _launch_v4_attention_fwd(
     out = torch.empty_like(q)
     lse = torch.empty((B, HQ, Sq), device=q.device, dtype=torch.float32)
 
-    # Tile choice — start conservative for SMEM at head_dim=512.
-    # Empirically validated on MI355X: 32×32 fits comfortably under
-    # 160 KiB SMEM budget; 64×64 will be revisited as a perf follow-up.
-    BLOCK_M = 32
-    BLOCK_N = 32
+    # P57 R2: tile sweep on V4-Flash widths (B=1, H=64, S=4096, D=512,
+    # SWA=128) finds (BLOCK_M=64, BLOCK_N=16, num_warps=8, num_stages=2)
+    # wins by **~17 %** on cr=4 FWD (1.69 -> 1.43 ms) and **~38 %** on
+    # cr=0 FWD (0.79 -> 0.49 ms). The intuition:
+    #
+    # * BLOCK_M=64 halves the program grid (vs the R1 32x32 layout) so
+    #   the SWA K-tile prefix is shared across twice as many query rows.
+    #   Q is loaded once per program -- bigger M tiles amortise the
+    #   Q-load over more K-tile iterations.
+    # * BLOCK_N=16 keeps the per-stage K/V tile at 16x512x2 = 16 KiB so
+    #   num_stages=2 double-buffering fits the LDS budget:
+    #   64 (Q) + 16*2 (K) + 16*2 (V) = 128 KiB << 160 KiB MI355X limit.
+    #   The R1 32x32 layout already needed 96 KiB at num_stages=1 and
+    #   would have hit 160 KiB at num_stages=2 -- no headroom.
+    # * num_stages=2 software-pipelines K/V loads against the
+    #   ``tl.dot`` + softmax update, hiding the HBM gather latency
+    #   that previously serialised the inner loop.
+    #
+    # Env-overridable so future shape regressions can fall back without
+    # rebuilding. The defaults are the per-shape winner from the R2
+    # sweep (`p57/r2_sweep_local.sh`).
+    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", "64"))
+    BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_N", "16"))
+    NUM_WARPS_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_WARPS", "8"))
+    NUM_STAGES_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_STAGES", "2"))
     BLOCK_DMODEL = D  # head_dim must be a power of 2 for tl.dot
 
     grid = (triton.cdiv(Sq, BLOCK_M), B * HQ)
@@ -450,8 +475,8 @@ def _launch_v4_attention_fwd(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_DMODEL=BLOCK_DMODEL,
-        num_warps=8,
-        num_stages=1,
+        num_warps=NUM_WARPS_FWD,
+        num_stages=NUM_STAGES_FWD,
     )
     return out, lse
 

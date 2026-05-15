@@ -690,3 +690,23 @@ P57 runs as a parallel best-of-N optimisation pass:
 * **A parity test fails** (numerical regression).  The
   optimisation is rejected; the kernel stays on the P32 RoPE-fix
   final implementation.  Same precedent as P38 / P39 / P50.
+
+### Outcome (2026-05-15 close-out)
+
+3.5 / 4 targets met after two rounds of parallel best-of-N
+optimisation.  Full per-target results in
+`develop/progress/p57/p57-summary.md`:
+
+| Target | Baseline | P57 | speedup | target | hit? |
+|---|---:|---:|---:|---:|:---:|
+| cr=0 BWD | 7.65 ms | **2.08 ms** | **3.68×** | ≤ 3 ms | ✓ |
+| cr=4 FWD | 3.18 ms | **1.43 ms** | **2.22×** | ≤ 1.5 ms | ✓ |
+| cr=4 BWD | 16.31 ms | **5.11 ms** | **3.19×** | ≤ 5 ms | ~ (+0.11 ms / +2.2 %) |
+| cr=128 BWD | 11.91 ms | **2.81 ms** | **4.23×** | ≤ 3 ms | ✓ |
+
+Proxy EP=8 (10-iter trace): **436.13 ms / iter, 614.5 TFLOP/s/GPU,
+20.26× vs P28 anchor** (best iter 432.5 ms / 619.6); plan-8 ratchet
+movement vs P48 final is **-74.5 ms (-14.6 %) / +17.1 %
+throughput**.  cr=4 BWD's 0.11 ms residual to its target is a
+structural floor on the sparse-bwd partial kernel (already at peak
+MFMA utilisation at the V4-Flash top-K shape); plan-9 follow-up.

@@ -789,6 +789,14 @@ def _v4_csa_attention_pool_sparse_bwd_dq_only_kernel(
 
     dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
 
+    # P57 R2: scale-defer + acc-form MFMA (mirror of the joint
+    # partial kernel). See the comment in
+    # ``_v4_csa_attention_pool_sparse_bwd_partial_kernel`` for the
+    # math.
+    pool_dtype = POOL.dtype.element_ty
+    q_scaled = (q.to(tl.float32) * sm_scale).to(pool_dtype)
+    dout_bf16 = dout.to(pool_dtype)
+
     for k_start in range(0, K_topk, BLOCK_K):
         sparse_k = k_start + offs_k
         topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
@@ -799,16 +807,16 @@ def _v4_csa_attention_pool_sparse_bwd_dq_only_kernel(
         pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
         pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
 
-        q_bf16 = q.to(pool.dtype)
-        dout_bf16 = dout.to(pool.dtype)
-        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.dot(q_scaled, tl.trans(pool))
         qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
 
         p = tl.exp(qk - lse[:, None])
         dp = tl.dot(dout_bf16, tl.trans(pool))
         ds = p * (dp - dvec[:, None])
 
-        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+        dq = tl.dot(ds.to(pool_dtype), pool, acc=dq)
+
+    dq = dq * sm_scale
 
     dq_ptrs = (
         DQ
@@ -905,6 +913,11 @@ def _v4_csa_attention_pool_sparse_bwd_dpool_only_kernel(
         other=0.0,
     )
 
+    # P57 R2: scale-defer (q-fold) — see partial kernel for math.
+    pool_dtype = POOL.dtype.element_ty
+    q_scaled = (q.to(tl.float32) * sm_scale).to(pool_dtype)
+    dout_bf16 = dout.to(pool_dtype)
+
     for k_start in range(0, K_topk, BLOCK_K):
         sparse_k = k_start + offs_k
         topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
@@ -915,17 +928,15 @@ def _v4_csa_attention_pool_sparse_bwd_dpool_only_kernel(
         pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
         pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
 
-        q_bf16 = q.to(pool.dtype)
-        dout_bf16 = dout.to(pool.dtype)
-        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.dot(q_scaled, tl.trans(pool))
         qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
 
         p = tl.exp(qk - lse[:, None])
         dp = tl.dot(dout_bf16, tl.trans(pool))
         ds = p * (dp - dvec[:, None])
 
-        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
-        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        dpool_contrib = tl.dot(tl.trans(ds.to(pool_dtype)), q_scaled)
+        dpool_contrib = tl.dot(tl.trans(p.to(pool_dtype)), dout_bf16, acc=dpool_contrib)
         dpool_contrib = tl.where(valid_k[:, None], dpool_contrib, 0.0)
         dpool_partial_ptrs = (
             DPOOL_PARTIAL
@@ -1043,6 +1054,11 @@ def _v4_csa_attention_pool_sparse_bwd_partial_sorted_kernel(
     dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
     flat_base = pid_m * K_topk
 
+    # P57 R2: scale-defer (q-fold) — see partial kernel for math.
+    pool_dtype = POOL.dtype.element_ty
+    q_scaled = (q.to(tl.float32) * sm_scale).to(pool_dtype)
+    dout_bf16 = dout.to(pool_dtype)
+
     for k_start in range(0, K_topk, BLOCK_K):
         sparse_k = k_start + offs_k
         topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
@@ -1053,19 +1069,17 @@ def _v4_csa_attention_pool_sparse_bwd_partial_sorted_kernel(
         pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
         pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
 
-        q_bf16 = q.to(pool.dtype)
-        dout_bf16 = dout.to(pool.dtype)
-        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.dot(q_scaled, tl.trans(pool))
         qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
 
         p = tl.exp(qk - lse[:, None])
         dp = tl.dot(dout_bf16, tl.trans(pool))
         ds = p * (dp - dvec[:, None])
 
-        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+        dq = tl.dot(ds.to(pool_dtype), pool, acc=dq)
 
-        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
-        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        dpool_contrib = tl.dot(tl.trans(ds.to(pool_dtype)), q_scaled)
+        dpool_contrib = tl.dot(tl.trans(p.to(pool_dtype)), dout_bf16, acc=dpool_contrib)
         dpool_contrib = tl.where(valid_k[:, None], dpool_contrib, 0.0)
 
         # P57: look up the SORTED position for each ``(m, sparse_k)``
@@ -1082,6 +1096,8 @@ def _v4_csa_attention_pool_sparse_bwd_partial_sorted_kernel(
             dpool_contrib,
             mask=(sparse_k[:, None] < K_topk) & q_active,
         )
+
+    dq = dq * sm_scale
 
     dq_ptrs = (
         DQ
@@ -1240,6 +1256,22 @@ def _v4_csa_attention_pool_sparse_bwd_partial_kernel(
 
     dq = tl.zeros([BLOCK_H, BLOCK_DMODEL], dtype=tl.float32)
 
+    # P57 R2: hoist q/dout dtype-cast and SCALE-DEFER ``sm_scale`` out
+    # of the K-loop. Pre-scaling ``q_bf16`` folds the ``sm_scale``
+    # factor that the kernel previously applied to ``qk`` (line:
+    # ``tl.dot(q_bf16, K^T) * sm_scale``) and to the first
+    # ``dpool_contrib`` matmul (``tl.dot(ds^T, q_bf16) * sm_scale``)
+    # — both are linear in q so factoring sm_scale into q is exact.
+    # ``dq`` accumulates ``Σ_k ds @ pool`` without sm_scale; a single
+    # ``dq *= sm_scale`` after the loop replaces the per-iter
+    # multiply on the ``[BLOCK_H, BLOCK_DMODEL]`` fp32 accumulator.
+    # Combined with ``tl.dot(..., acc=dq)`` (MFMA in-place
+    # accumulator), this drops ~3 fp32 multiplies + 1 fp32 add per
+    # K_topk/BLOCK_K=16 iteration on the proxy shape.
+    pool_dtype = POOL.dtype.element_ty
+    dout_bf16 = dout.to(pool_dtype)
+    q_scaled = (q.to(tl.float32) * sm_scale).to(pool_dtype)
+
     for k_start in range(0, K_topk, BLOCK_K):
         sparse_k = k_start + offs_k
         topk_ptrs = TOPK_IDXS + bid * stride_tib + pid_m * stride_tim + sparse_k * stride_tik
@@ -1250,23 +1282,24 @@ def _v4_csa_attention_pool_sparse_bwd_partial_kernel(
         pool_ptrs = POOL + bid * stride_pb + safe_topk[:, None] * stride_pp + offs_d[None, :] * stride_pd
         pool = tl.load(pool_ptrs, mask=valid_k[:, None], other=0.0)
 
-        q_bf16 = q.to(pool.dtype)
-        dout_bf16 = dout.to(pool.dtype)
-        qk = tl.dot(q_bf16, tl.trans(pool)) * sm_scale
+        qk = tl.dot(q_scaled, tl.trans(pool))
         qk = tl.where((h_mask[:, None] & valid_k[None, :] & q_active), qk, -1.0e30)
 
         p = tl.exp(qk - lse[:, None])
         dp = tl.dot(dout_bf16, tl.trans(pool))
         ds = p * (dp - dvec[:, None])
 
-        dq += tl.dot(ds.to(pool.dtype), pool) * sm_scale
+        dq = tl.dot(ds.to(pool_dtype), pool, acc=dq)
 
         # Plan-5 P32: write the per-visit dpool contribution to its own
         # compact slot in ``DPOOL_PARTIAL[b, m, k_slot, :]``. No atomic
         # needed because each ``(b, m, k_slot)`` slot is owned by
         # exactly one program × iteration.
-        dpool_contrib = tl.dot(tl.trans(ds.to(q.dtype)), q_bf16) * sm_scale
-        dpool_contrib += tl.dot(tl.trans(p.to(dout.dtype)), dout_bf16)
+        # P57 R2: ``q_scaled`` already carries the ``sm_scale`` factor,
+        # so the first matmul's ``* sm_scale`` is folded in. The
+        # ``acc=`` form on the second matmul fuses the fp32 add.
+        dpool_contrib = tl.dot(tl.trans(ds.to(pool_dtype)), q_scaled)
+        dpool_contrib = tl.dot(tl.trans(p.to(pool_dtype)), dout_bf16, acc=dpool_contrib)
         # Zero out invalid k slots so the reduction can sum them in
         # without first checking validity (the inverse index will skip
         # invalid visits anyway via the sentinel sort key, but a clean
@@ -1284,6 +1317,11 @@ def _v4_csa_attention_pool_sparse_bwd_partial_kernel(
             dpool_contrib,
             mask=(sparse_k[:, None] < K_topk) & q_active,
         )
+
+    # P57 R2: deferred ``sm_scale`` on the dq accumulator. Single
+    # ``[BLOCK_H, BLOCK_DMODEL]`` fp32 multiply replaces the per-iter
+    # ``* sm_scale`` inside the loop.
+    dq = dq * sm_scale
 
     dq_ptrs = (
         DQ
@@ -1607,7 +1645,11 @@ def _launch_v4_csa_attention_pool_bwd(
     # kernel cost (~7.6 ms) is shorter than the sparse path (~3 ms in
     # the segreduce variant), so there is little compute to hide. Set
     # ``PRIMUS_V4_CSA_BWD_STREAM_OVERLAP=1`` to re-enable for
-    # experimentation.
+    # experimentation. P57 R2 confirmed that enabling overlap
+    # actually doubles wall-clock to ~11 ms on the proxy shape — the
+    # two paths both saturate HBM read bandwidth, so concurrent
+    # execution serializes on memory traffic and adds stream
+    # synchronization overhead.
     use_stream_overlap = use_split_sparse and os.getenv("PRIMUS_V4_CSA_BWD_STREAM_OVERLAP", "0") != "0"
 
     # P57: when the input is bf16/fp16 and we use the split local SWA
@@ -1778,16 +1820,20 @@ def _launch_v4_csa_attention_pool_bwd(
         # ``BLOCK_M`` can be tuned independently).
         local_block_m_dq = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_BLOCK_M", str(local_block_m)))
         local_block_n_dq = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_BLOCK_N", str(local_block_n)))
-        # P57: dkv-specific tuning — ``BLOCK_M_dkv=32 warps=2 stages=1``
-        # cuts the dkv kernel ~30 % vs ``BM=64 W=4 S=2`` because dkv
-        # iterates ``m`` inside the kernel; a smaller m-tile fits
-        # more (n_block) programs in flight, and 2 warps amortise the
-        # K + V loads without exceeding the dk[BLOCK_N, BLOCK_D] +
-        # dv[BLOCK_N, BLOCK_D] tile (~32 KB bf16) live-VGPR budget.
-        local_block_m_dkv = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_BLOCK_M", "32"))
+        # P57 R2: dkv-specific tuning — ``BLOCK_M_dkv=16 warps=2 stages=1``
+        # wins post-R2 scale-defer (the dkv kernel's m-tile prefers
+        # smaller block sizes when the sparse partial path runs faster
+        # and exposes more concurrent CU slots). BM=16 is ~10 us faster
+        # than BM=32 at the proxy shape.
+        local_block_m_dkv = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_BLOCK_M", "16"))
         local_block_n_dkv = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_BLOCK_N", str(local_block_n)))
-        local_dq_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_WARPS", "8"))
-        local_dq_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_STAGES", "1"))
+        # P57 R2: ``DQ_WARPS=4, DQ_STAGES=2`` wins ~140 us over the
+        # R1 ``W=8, S=1`` default. The dq kernel iterates ``n`` over
+        # a small SWA=128 window, so 4 warps fit the working set in
+        # registers and 2 stages prefetch the next K/V tile while the
+        # current MFMA chain executes.
+        local_dq_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_WARPS", "4"))
+        local_dq_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DQ_STAGES", "2"))
         local_dkv_warps = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_WARPS", "2"))
         local_dkv_stages = int(os.getenv("PRIMUS_V4_CSA_BWD_LOCAL_DKV_STAGES", "1"))
         swa_local = int(swa_window) if swa_window > 0 else 0
@@ -2550,7 +2596,7 @@ def _launch_v4_csa_attention_pool_bwd(
                 BLOCK_K=BLOCK_K_PARTIAL,
                 BLOCK_DMODEL=BLOCK_DMODEL,
                 num_warps=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_WARPS", "4")),
-                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_STAGES", "2")),
+                num_stages=int(os.getenv("PRIMUS_V4_CSA_BWD_PARTIAL_STAGES", "3")),
             )
             # Same segreduce reduction as the split path above.
             dpool_partial_flat = dpool_partial.view(B, Sq * K_topk, D)

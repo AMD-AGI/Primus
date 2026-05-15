@@ -1212,6 +1212,11 @@ def _launch_v4_csa_attention_pool_fwd_split(
     #   2× larger and 3-stage pipelining ran out of resources.
     # * num_stages=3 overlaps pool gather → `tl.dot` → softmax update
     #   across 3 K-tile iterations, hiding the gather latency.
+    #
+    # P57 R2 re-confirmed the BLOCK_K/stages winner via a fresh BK x
+    # ST x NW sweep (`p57/r2_sweep.sh`); BLOCK_K=32 ran out of LDS at
+    # num_stages>=2 and regressed 2-3 x. The R2 win for cr=4 FWD comes
+    # from the *local-SWA* kernel re-tile, not this kernel.
     BLOCK_H = 64 if HQ >= 64 else triton.next_power_of_2(HQ)
     if BLOCK_H > HQ:
         BLOCK_H = max(triton.next_power_of_2(HQ), 16)

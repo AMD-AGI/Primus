@@ -750,6 +750,10 @@ def _v4_attention_bwd_dkv_kernel(
     kv_load_mask = offs_n[:, None] < seqlen_k
     k = tl.load(k_ptrs, mask=kv_load_mask, other=0.0)
     v = tl.load(v_ptrs, mask=kv_load_mask, other=0.0)
+    # R2: hoist tl.trans outside the m-loop. Lets the JIT keep kt / vt
+    # in registers across iterations instead of re-transposing every step.
+    kt = tl.trans(k)
+    vt = tl.trans(v)
 
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -816,7 +820,7 @@ def _v4_attention_bwd_dkv_kernel(
             lse = tl.load(lse_ptrs, mask=offs_m < seqlen_q, other=0.0)
             dvec = tl.load(dvec_ptrs, mask=offs_m < seqlen_q, other=0.0)
 
-            qk = tl.dot(q, tl.trans(k)) * sm_scale
+            qk = tl.dot(q, kt) * sm_scale
 
             if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
                 mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + offs_n[None, :] * stride_mn
@@ -844,7 +848,7 @@ def _v4_attention_bwd_dkv_kernel(
                 qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
             p = tl.exp(qk - lse[:, None])
-            dp = tl.dot(dout, tl.trans(v))
+            dp = tl.dot(dout, vt)
             ds = p * (dp - dvec[:, None])
 
             # P57 cr=0 BWD: fuse the inner ``dv += dot(p, dout)`` and
@@ -887,7 +891,7 @@ def _v4_attention_bwd_dkv_kernel(
                 lse = tl.load(lse_ptrs, mask=offs_m < seqlen_q, other=0.0)
                 dvec = tl.load(dvec_ptrs, mask=offs_m < seqlen_q, other=0.0)
 
-                qk = tl.dot(q, tl.trans(k)) * sm_scale
+                qk = tl.dot(q, kt) * sm_scale
 
                 if HAS_ADD_MASK and HCA_LOCAL_SEQLEN == 0:
                     mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + offs_n[None, :] * stride_mn
@@ -915,7 +919,7 @@ def _v4_attention_bwd_dkv_kernel(
                     qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
 
                 p = tl.exp(qk - lse[:, None])
-                dp = tl.dot(dout, tl.trans(v))
+                dp = tl.dot(dout, vt)
                 ds = p * (dp - dvec[:, None])
 
                 # P57 cr=0 BWD: same scale-defer + tl.dot(acc=) trick
@@ -1168,6 +1172,264 @@ def _v4_attention_bwd_dkv_pool_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Plan-8 P57 R2 — atomic-free MHA pool dK / dV kernel
+#
+# The R1 ``_v4_attention_bwd_dkv_pool_kernel`` MHA branch parallelises over
+# m-blocks (one program per ``(b, m_block)``) and atomic-adds the per-head
+# dK / dV contribution INSIDE the head loop:
+#
+#     for qhid in range(HEAD_Q):  # 64 heads
+#         tl.atomic_add(dk_ptrs[qhid], dk_contrib)
+#         tl.atomic_add(dv_ptrs[qhid], dv_contrib)
+#
+# At V4-Flash widths (B=1 H=64 Sq=4096 BM=64) this fires
+#   m_blocks × heads × 2 = 64 × 64 × 2 = 8192
+# ``tl.atomic_add`` instructions per pool kernel invocation, each on a
+# (BLOCK_N=32, D=512) fp32 tile. Even at ``sem="relaxed"`` the L2 atomic
+# engine on MI355 serialises 64-way contention on each per-head pool
+# cache line — the pool kernel is dominated by atomic stalls.
+#
+# R2 rewrite: SWAP the loop nesting. Parallelise over ``(b, qhid)`` (one
+# program per query head, owning the unique ``DK / DV[bid, qhid, pool, :]``
+# slice). The kernel pre-loads ``K / V[qhid, pool]`` ONCE, then iterates
+# all m-blocks for that head, accumulating ``dk_acc / dv_acc`` in
+# registers. The final write is a single ``tl.store`` per program — no
+# atomic at all.
+#
+# Grid: ``(HEAD_Q, B)`` = (64, 1) at V4-Flash → 64 programs. That's only
+# 25% of MI355's 256 CUs, but each program now has ~64 m-iter × dense
+# matmul work (≈ heavy enough to saturate VALU+MFMA in its CU).
+#
+# Per-program HBM:
+#   * K / V[qhid, pool] = 2 × 32 × 512 × 2 B = 64 KiB (loaded once)
+#   * Q / dout[qhid, *] = 2 × Sq × D × 2 B = 8 MiB total per program
+#   * dK / dV[qhid, pool] = 2 × 32 × 512 × 4 B = 128 KiB (stored once)
+#
+# Compared to the R1 pool kernel:
+#   * Total Q / dout HBM reads UNCHANGED (64 programs × 64 m-iter ==
+#     R1's 64 programs × 64 head-iter).
+#   * Total K / V HBM reads DROP ~64× (each (head, pool) tile loaded
+#     exactly once instead of once per m-block).
+#   * Atomic_add instructions DROP from 8192 → 0.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _v4_attention_bwd_dkv_pool_mha_kernel(
+    Q,
+    K,
+    V,
+    DOUT,
+    LSE,
+    D,
+    DK,
+    DV,
+    ADD_MASK,
+    stride_qb,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_kb,
+    stride_kh,
+    stride_kn,
+    stride_kd,
+    stride_vb,
+    stride_vh,
+    stride_vn,
+    stride_vd,
+    stride_dob,
+    stride_doh,
+    stride_dom,
+    stride_dod,
+    stride_lb,
+    stride_lh,
+    stride_lm,
+    stride_db,
+    stride_dh,
+    stride_dm,
+    stride_dkb,
+    stride_dkh,
+    stride_dkn,
+    stride_dkd,
+    stride_dvb,
+    stride_dvh,
+    stride_dvn,
+    stride_dvd,
+    stride_ms,
+    stride_mn,
+    seqlen_q,
+    pool_size,
+    sm_scale,
+    HCA_LOCAL_SEQLEN: tl.constexpr,
+    DK_POOL_OFFSET: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    POOL_EXACT: tl.constexpr,
+    EXACT_TILES_M: tl.constexpr,
+    M_SPLIT: tl.constexpr,
+):
+    """MHA-only atomic-free HCA pool dK / dV kernel.
+
+    Parallelism: ``(M_SPLIT * HEAD_Q, B)`` — ``M_SPLIT`` programs per
+    ``(b, qhid)``. ``M_SPLIT=1`` is the pure atomic-free design (one
+    program owns the full pool slice for its head); ``M_SPLIT>1`` shards
+    the m-loop into ``M_SPLIT`` chunks and merges with ``M_SPLIT``-way
+    ``tl.atomic_add`` per (b, qhid, pool, :) slice — the contention is
+    bounded by ``M_SPLIT`` and the extra programs lift HBM utilisation.
+
+    Constraints: ``HEAD_K == HEAD_Q`` (MHA only). The MQA path keeps
+    using the original :func:`_v4_attention_bwd_dkv_pool_kernel`.
+    """
+    pid_hm = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    bid = pid_b
+    qhid = pid_hm // M_SPLIT
+    pid_m_chunk = pid_hm % M_SPLIT
+    khid = qhid  # MHA invariant
+
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    pool_n = tl.arange(0, BLOCK_N)
+    offs_n = HCA_LOCAL_SEQLEN + pool_n
+
+    NEG_INF: tl.constexpr = -1.0e30
+
+    # Pre-load K / V for this (bid, khid) pool slice ONCE.
+    k_ptrs = (
+        K + bid * stride_kb + khid * stride_kh + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kd
+    )
+    v_ptrs = (
+        V + bid * stride_vb + khid * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd
+    )
+    if POOL_EXACT:
+        k_tile = tl.load(k_ptrs)
+        v_tile = tl.load(v_ptrs)
+    else:
+        pool_n_mask = pool_n < pool_size
+        kv_load_mask = pool_n_mask[:, None]
+        k_tile = tl.load(k_ptrs, mask=kv_load_mask, other=0.0)
+        v_tile = tl.load(v_ptrs, mask=kv_load_mask, other=0.0)
+    kt = tl.trans(k_tile)
+    vt = tl.trans(v_tile)
+
+    dk_acc = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
+    dv_acc = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
+
+    # Shard the m-loop into M_SPLIT contiguous chunks; each program owns
+    # one chunk of m-blocks. Chunk size is ``ceil(num_m_blocks / M_SPLIT)``
+    # rounded up so the last chunk may be shorter.
+    num_m_blocks = (seqlen_q + BLOCK_M - 1) // BLOCK_M
+    m_chunk_size = (num_m_blocks + M_SPLIT - 1) // M_SPLIT
+    m_block_lo = pid_m_chunk * m_chunk_size
+    m_block_hi = m_block_lo + m_chunk_size
+    if m_block_hi > num_m_blocks:
+        m_block_hi = num_m_blocks
+    m_loop_start = m_block_lo * BLOCK_M
+    m_loop_end = m_block_hi * BLOCK_M
+    if m_loop_end > seqlen_q:
+        m_loop_end = seqlen_q
+
+    for m_start in range(m_loop_start, m_loop_end, BLOCK_M):
+        offs_m = m_start + tl.arange(0, BLOCK_M)
+
+        q_ptrs = (
+            Q + bid * stride_qb + qhid * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+        )
+        dout_ptrs = (
+            DOUT
+            + bid * stride_dob
+            + qhid * stride_doh
+            + offs_m[:, None] * stride_dom
+            + offs_d[None, :] * stride_dod
+        )
+        lse_ptrs = LSE + bid * stride_lb + qhid * stride_lh + offs_m * stride_lm
+        dvec_ptrs = D + bid * stride_db + qhid * stride_dh + offs_m * stride_dm
+
+        if EXACT_TILES_M:
+            q_local = tl.load(q_ptrs)
+            dout_local = tl.load(dout_ptrs)
+            lse = tl.load(lse_ptrs)
+            dvec = tl.load(dvec_ptrs)
+        else:
+            q_load_mask = offs_m[:, None] < seqlen_q
+            q_local = tl.load(q_ptrs, mask=q_load_mask, other=0.0)
+            dout_local = tl.load(dout_ptrs, mask=q_load_mask, other=0.0)
+            lse = tl.load(lse_ptrs, mask=offs_m < seqlen_q, other=0.0)
+            dvec = tl.load(dvec_ptrs, mask=offs_m < seqlen_q, other=0.0)
+
+        # qk = Q @ K.T then scale + additive bias. We *cannot* defer the
+        # scale across the softmax (exp(scale*x) ≠ exp(x)), so scale stays
+        # on the qk path.
+        qk = tl.dot(q_local, kt) * sm_scale
+        mask_ptrs = ADD_MASK + offs_m[:, None] * stride_ms + pool_n[None, :] * stride_mn
+        if POOL_EXACT and EXACT_TILES_M:
+            add_bias = tl.load(mask_ptrs).to(tl.float32)
+        else:
+            if POOL_EXACT:
+                mask_load_mask = offs_m[:, None] < seqlen_q
+            elif EXACT_TILES_M:
+                mask_load_mask = pool_n[None, :] < pool_size
+            else:
+                mask_load_mask = (offs_m[:, None] < seqlen_q) & (pool_n[None, :] < pool_size)
+            add_bias = tl.load(mask_ptrs, mask=mask_load_mask, other=0.0).to(tl.float32)
+        qk = qk + add_bias
+        if not POOL_EXACT:
+            qk = tl.where(pool_n[None, :] < pool_size, qk, NEG_INF)
+        if not EXACT_TILES_M:
+            qk = tl.where(offs_m[:, None] < seqlen_q, qk, NEG_INF)
+
+        p = tl.exp(qk - lse[:, None])
+        dp = tl.dot(dout_local, vt)
+        ds = p * (dp - dvec[:, None])
+
+        # R2 scale-defer for dk: accumulate ds.T @ Q without sm_scale,
+        # fold the single multiply after the m-loop. dv carries no scale.
+        dv_acc = tl.dot(tl.trans(p.to(dout_local.dtype)), dout_local, acc=dv_acc)
+        dk_acc = tl.dot(tl.trans(ds.to(q_local.dtype)), q_local, acc=dk_acc)
+
+    dk_acc = dk_acc * sm_scale
+
+    # Plan-8 P57 R2: DK / DV may either be the full ``[B, HK, Sk, D]``
+    # fp32 buffer (then ``DK_POOL_OFFSET == HCA_LOCAL_SEQLEN`` so we
+    # land on the pool slice) or a pool-only ``[B, HK, pool_size, D]``
+    # fp32 sidecar (then ``DK_POOL_OFFSET == 0``). The latter is the
+    # default R2 path: the full ``dk_out / dv_out`` allocate in the
+    # input dtype and we cast the small sidecar to bf16 at the end —
+    # saves the big ``dk_fp32 -> bf16`` cast.
+    offs_n_dk = DK_POOL_OFFSET + pool_n
+    dk_ptrs = (
+        DK
+        + bid * stride_dkb
+        + khid * stride_dkh
+        + offs_n_dk[:, None] * stride_dkn
+        + offs_d[None, :] * stride_dkd
+    )
+    dv_ptrs = (
+        DV
+        + bid * stride_dvb
+        + khid * stride_dvh
+        + offs_n_dk[:, None] * stride_dvn
+        + offs_d[None, :] * stride_dvd
+    )
+    if M_SPLIT == 1:
+        if POOL_EXACT:
+            tl.store(dk_ptrs, dk_acc)
+            tl.store(dv_ptrs, dv_acc)
+        else:
+            write_mask = pool_n[:, None] < pool_size
+            tl.store(dk_ptrs, dk_acc, mask=write_mask)
+            tl.store(dv_ptrs, dv_acc, mask=write_mask)
+    else:
+        if POOL_EXACT:
+            tl.atomic_add(dk_ptrs, dk_acc, sem="relaxed")
+            tl.atomic_add(dv_ptrs, dv_acc, sem="relaxed")
+        else:
+            write_mask = pool_n[:, None] < pool_size
+            tl.atomic_add(dk_ptrs, dk_acc, mask=write_mask, sem="relaxed")
+            tl.atomic_add(dv_ptrs, dv_acc, mask=write_mask, sem="relaxed")
+
+
+# ---------------------------------------------------------------------------
 # Python launcher
 # ---------------------------------------------------------------------------
 
@@ -1227,21 +1489,64 @@ def _launch_v4_attention_bwd(
         int(swa_window) if ((not has_add_mask or hca_local_seqlen) and swa_window > 0) else 0
     )
 
-    # Plan-8 P57 sweep at V4-Flash widths (B=1 H=64 Sq=4096 D=512 P=32):
-    # ``BLOCK_M=64 BLOCK_N=16`` lifts dKV grid from 128 -> 256 programs
-    # (full 256-CU MI355 occupancy) and lets the Q tile (64x512) better
-    # amortise the per-m-block load. The wider Q matches MFMA 32x32x16
-    # output tile layout (two 32x16 tiles back-to-back) and gets the dKV
-    # kernel from ~6.7 ms (BM=BN=32) down to ~3.6 ms in the dense bench.
-    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_BWD_BLOCK_M", "64"))
+    # Plan-8 P57 R2 sweep at V4-Flash widths (B=1 H=64 Sq=4096 D=512 P=32):
+    # R1 settled on ``BLOCK_M=64 BLOCK_N=16``; the R2 sweep — once the
+    # MHA pool kernel went atomic-free with ``M_SPLIT=4`` — discovered
+    # ``BLOCK_M=32`` with ``dKV num_warps=2`` cuts cr=128 HCA BWD from
+    # 3.79 ms to ~3.44 ms AND cr=0 dense BWD from 3.01 ms to ~2.77 ms.
+    # Why BM=32 now wins:
+    #
+    #   * dq: smaller Q tile (32×D=512=32KiB vs 64×512=64KiB) drops VGPR
+    #     pressure enough to run ``num_warps=2`` (1 warp = 64 threads
+    #     per program) instead of nw=4 — same overall warp occupancy
+    #     across the grid but the per-warp register budget doubles and
+    #     k-axis matmul (D=512) pipelines without VGPR spilling.
+    #   * dkv (local SWA): the m-loop is 5 iter at BM=32 (vs 3 iter at
+    #     BM=64), but each iter loads half the Q/dout tile (32×512×2 B
+    #     each) so per-iter HBM is halved. Total per-program HBM is
+    #     roughly the same; the win is reduced per-iter register pressure
+    #     enabling ``num_warps=2``.
+    #   * pool (MHA atomic-free): more m-blocks per program (128 at
+    #     BM=32 vs 64 at BM=64) lets the ``M_SPLIT=4`` shard cleanly
+    #     into 32 m-iter per program (vs 16) and fills the SIMDs.
+    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_BWD_BLOCK_M", "32"))
     BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_BWD_BLOCK_N", "16"))
     BLOCK_DMODEL = D
 
-    # Allocate fp32 output buffers for atomic_add. Cast to input dtype
-    # before returning.
-    dq_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=torch.float32)
-    dk_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=torch.float32)
-    dv_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=torch.float32)
+    # Plan-8 P57 R2: dq/dk/dv output buffer strategy
+    # ----------------------------------------------
+    # dq is written by ``_v4_attention_bwd_dq_kernel`` via ``tl.store``
+    # (no atomic_add — each (b, qhid, m_block) program owns a unique
+    # slice). So we let the kernel write directly into the input dtype
+    # and skip the final fp32 -> bf16 cast (~ 0.15 ms saved at V4-Flash
+    # widths). The dq accumulator inside the kernel remains fp32 for the
+    # n-loop reduction; only the final store converts.
+    #
+    # dk / dv are similar for the MHA non-MQA case (NUM_HEAD_GROUPS=1):
+    # the dKV kernel ``tl.store``s the local-SWA slice with no atomic.
+    # The HCA pool kernel still uses atomic_add (M_SPLIT > 1) which
+    # requires fp32, so we keep a SEPARATE small fp32 pool sidecar
+    # buffer of shape ``[B, HK, pool_size, D]`` and merge it into the
+    # full bf16 dk / dv at the end.
+    #
+    # For MQA (HK != HQ) or NUM_HEAD_GROUPS > 1: keep the original
+    # fp32-everywhere path since dKV uses atomic_add.
+    dq_fp32 = torch.zeros((B, HQ, Sq, D), device=q.device, dtype=q.dtype)
+    use_native_dkv_dtype = (HQ == HK) and (q.dtype in (torch.bfloat16, torch.float16))
+    if use_native_dkv_dtype:
+        dk_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=k.dtype)
+        dv_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=v.dtype)
+    else:
+        dk_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=torch.float32)
+        dv_fp32 = torch.zeros((B, HK, Sk, D), device=q.device, dtype=torch.float32)
+    # Pool-side fp32 sidecar (only allocated when HCA + MHA + native dtype dKV).
+    if use_native_dkv_dtype and hca_local_seqlen > 0:
+        pool_size_alloc = Sk - hca_local_seqlen
+        dk_pool_fp32 = torch.zeros((B, HK, pool_size_alloc, D), device=q.device, dtype=torch.float32)
+        dv_pool_fp32 = torch.zeros((B, HK, pool_size_alloc, D), device=q.device, dtype=torch.float32)
+    else:
+        dk_pool_fp32 = None
+        dv_pool_fp32 = None
     if has_sink:
         dsink_fp32 = torch.zeros((HQ,), device=q.device, dtype=torch.float32)
         sink_arg = sink.to(torch.float32) if sink.dtype != torch.float32 else sink
@@ -1357,22 +1662,28 @@ def _launch_v4_attention_bwd(
             BLOCK_DMODEL=BLOCK_DMODEL,
             EXACT_TILES_M=exact_tiles_m,
             EXACT_TILES_N=exact_tiles_n,
-            # Plan-8 P57: ``num_warps=4 num_stages=2`` chosen by sweep at
-            # V4-Flash widths. ``num_warps=8`` (the original default) over
-            # -occupies VGPR/AGPR per program and starves the SIMDs;
-            # ``num_warps=4`` with ``num_stages=2`` (double-buffer K/V loads)
-            # is the dq sweet spot.
-            num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_WARPS", "4")),
-            num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_STAGES", "2")),
+            # Plan-8 P57 R2: ``num_warps=2 num_stages=1`` is the new sweet
+            # spot once BLOCK_M dropped from 64 -> 32. With a 32×D Q tile
+            # the dq inner loop fits in the per-warp register budget with
+            # only 1 warp/64-thread wave, doubling the per-warp register
+            # budget vs the R1 nw=4 default and removing the K/V double-
+            # buffer (num_stages=2) cost since the loop now runs short.
+            num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_WARPS", "2")),
+            num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_DQ_NUM_STAGES", "1")),
         )
         # Plan-8 P57: in HCA mode the pool n-block(s) are handled by the
         # dedicated pool kernel that parallelises over (m_block, b * qhid)
         # — see ``_v4_attention_bwd_dkv_pool_kernel``. Skip the pool grid
         # rows here so we don't double-count.
+        # Plan-8 P57 R2: per-kernel BN override. Default uses the global
+        # BLOCK_N (BN=16 from R1 sweep). Setting ``PRIMUS_V4_ATTN_BWD_DKV_BLOCK_N``
+        # lets us test wider K-tiles in the dKV kernel without affecting
+        # the dq / pool paths.
+        dkv_block_n = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_BLOCK_N", str(BLOCK_N)))
         if hca_local_seqlen > 0:
-            dkv_n_blocks = triton.cdiv(hca_local_seqlen, BLOCK_N)
+            dkv_n_blocks = triton.cdiv(hca_local_seqlen, dkv_block_n)
         else:
-            dkv_n_blocks = triton.cdiv(Sk, BLOCK_N)
+            dkv_n_blocks = triton.cdiv(Sk, dkv_block_n)
         # Plan-8 P57: ``NUM_HEAD_GROUPS`` controls MQA head-split parallelism
         # for the local dKV kernel. Default (1) keeps the original head loop;
         # >1 splits the head loop and uses ``tl.atomic_add`` for dKV.
@@ -1385,10 +1696,13 @@ def _launch_v4_attention_bwd(
                 target //= 2
             num_head_groups = max(1, target)
         dkv_grid = (dkv_n_blocks, B * HK, num_head_groups)
-        # Plan-8 P57: ``num_warps=4 num_stages=1`` chosen by sweep — the
-        # dKV kernel keeps K/V in registers across the m-loop, which makes
-        # the 8-warp / staged-pipeline variants thrash VGPR vs ``num_warps=4``.
-        dkv_num_warps = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_NUM_WARPS", "4"))
+        # Plan-8 P57 R2: ``num_warps=2 num_stages=1`` paired with BM=32.
+        # The 32×D Q tile + persistent K/V tile fit in the 2-warp register
+        # budget; bumping to nw=4 doubles spills (m-loop is 5 iter at
+        # BM=32 so the wider warp budget hurts more than the SIMD-fill
+        # benefit). num_stages>1 also costs more than it pays because
+        # the K/V are loaded once before the m-loop.
+        dkv_num_warps = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_NUM_WARPS", "2"))
         dkv_num_stages = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_NUM_STAGES", "1"))
         _v4_attention_bwd_dkv_kernel[dkv_grid](
             q,
@@ -1442,87 +1756,236 @@ def _launch_v4_attention_bwd(
             HCA_LOCAL_SEQLEN=hca_local_seqlen,
             USE_CAUSAL=use_causal,
             BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
+            BLOCK_N=dkv_block_n,
             BLOCK_DMODEL=BLOCK_DMODEL,
             NUM_HEAD_GROUPS=num_head_groups,
             EXACT_TILES_M=exact_tiles_m,
-            EXACT_TILES_N=exact_tiles_n,
+            EXACT_TILES_N=(Sk % dkv_block_n) == 0,
             num_warps=dkv_num_warps,
             num_stages=dkv_num_stages,
         )
         if hca_local_seqlen > 0 and os.getenv("PRIMUS_V4_ATTN_BWD_HCA_POOL", "1") == "1":
             pool_size = Sk - hca_local_seqlen
             pool_block_n = max(16, triton.next_power_of_2(pool_size))
-            # Plan-8 P57: pool kernel block_m is decoupled from the dKV
-            # block_m. dKV benefits from BM=64 (fewer programs each loading
-            # a wider Q tile); pool kernel benefits from a smaller BM (more
-            # programs => more parallelism over the head loop).
-            pool_block_m = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_BLOCK_M", str(BLOCK_M)))
-            pool_grid = (triton.cdiv(Sq, pool_block_m), B)
-            _v4_attention_bwd_dkv_pool_kernel[pool_grid](
-                q,
-                k,
-                v,
-                dout,
-                lse,
-                d_buf,
-                dk_fp32,
-                dv_fp32,
-                additive_mask,
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                q.stride(3),
-                k.stride(0),
-                k.stride(1),
-                k.stride(2),
-                k.stride(3),
-                v.stride(0),
-                v.stride(1),
-                v.stride(2),
-                v.stride(3),
-                dout.stride(0),
-                dout.stride(1),
-                dout.stride(2),
-                dout.stride(3),
-                lse.stride(0),
-                lse.stride(1),
-                lse.stride(2),
-                d_buf.stride(0),
-                d_buf.stride(1),
-                d_buf.stride(2),
-                dk_fp32.stride(0),
-                dk_fp32.stride(1),
-                dk_fp32.stride(2),
-                dk_fp32.stride(3),
-                dv_fp32.stride(0),
-                dv_fp32.stride(1),
-                dv_fp32.stride(2),
-                dv_fp32.stride(3),
-                stride_ms,
-                stride_mn,
-                Sq,
-                Sk,
-                pool_size,
-                float(scale),
-                HEAD_Q=HQ,
-                HEAD_K=HK,
-                HCA_LOCAL_SEQLEN=hca_local_seqlen,
-                BLOCK_M=pool_block_m,
-                BLOCK_N=pool_block_n,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                # Plan-8 P57 sweep with dKV BM=64 BN=16: pool kernel
-                # ``num_warps=4 num_stages=1`` is the sweet spot. Higher
-                # num_stages adds Q/dout double-buffering overhead that
-                # doesn't pay off because the pool kernel keeps K/V in
-                # registers (single load) and the head-loop dominates
-                # the iteration count.
-                num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_WARPS", "4")),
-                num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_STAGES", "1")),
-            )
-        dq_out = dq_fp32.to(q.dtype)
-        dk_out = dk_fp32.to(k.dtype)
-        dv_out = dv_fp32.to(v.dtype)
+            pool_exact = pool_size == pool_block_n
+            # Plan-8 P57 R2: use the atomic-free MHA pool kernel when
+            # HEAD_K == HEAD_Q (production V4-Flash widths). Parallelism
+            # is over (qhid, b) instead of (m_block, b); each program
+            # owns the unique dK / dV[bid, qhid, pool, :] slice and writes
+            # it with ``tl.store`` after accumulating across all m-blocks
+            # in registers — no atomic_add at all. Eliminates the 8192
+            # per-launch atomic_add stalls of the R1 MHA pool path.
+            #
+            # For MQA (HK=1, multiple qhids share one khid slice) we still
+            # need to merge across heads; fall back to the original pool
+            # kernel which atomic-adds in the head loop.
+            use_mha_pool = (HQ == HK) and (os.getenv("PRIMUS_V4_ATTN_BWD_POOL_MHA", "1") == "1")
+            if use_mha_pool:
+                # Plan-8 P57 R2: pool M_SPLIT controls m-loop sharding.
+                # M_SPLIT=1 = pure atomic-free (64 progs); M_SPLIT=N adds
+                # N-way atomic_add per (b, qhid, pool) slice but lifts the
+                # program count to N*HQ (better HBM bandwidth utilization
+                # at the cost of contention). Default 4 = 256 progs.
+                pool_m_split = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_M_SPLIT", "4"))
+                num_m_blocks = triton.cdiv(Sq, BLOCK_M)
+                while pool_m_split > num_m_blocks:
+                    pool_m_split //= 2
+                pool_m_split = max(1, pool_m_split)
+                pool_grid = (HQ * pool_m_split, B)
+                # Plan-8 P57 R2: pool kernel writes to fp32 sidecar (so
+                # ``M_SPLIT > 1`` atomic_add works). The kernel uses
+                # offset ``HCA_LOCAL_SEQLEN + pool_n`` along the seqlen
+                # axis, so we pass a "virtual" full-seqlen view of the
+                # pool buffer: a tensor of shape (B, HK, Sk, D) where the
+                # data starts ``HCA_LOCAL_SEQLEN`` BEFORE the pool
+                # buffer's actual base. We accomplish this by passing the
+                # pool buffer's base pointer with an *offset* base
+                # subtracted via the seqlen stride. PyTorch tensors don't
+                # support negative offsets cleanly, so instead we pass
+                # the pool buffer's storage with seqlen stride and tell
+                # the kernel to subtract HCA_LOCAL_SEQLEN — see the
+                # ``DK_SEQ_OFFSET`` constexpr below.
+                if dk_pool_fp32 is not None:
+                    pool_dk_buf = dk_pool_fp32
+                    pool_dv_buf = dv_pool_fp32
+                    pool_dk_strides = (
+                        dk_pool_fp32.stride(0),
+                        dk_pool_fp32.stride(1),
+                        dk_pool_fp32.stride(2),
+                        dk_pool_fp32.stride(3),
+                    )
+                    pool_dv_strides = (
+                        dv_pool_fp32.stride(0),
+                        dv_pool_fp32.stride(1),
+                        dv_pool_fp32.stride(2),
+                        dv_pool_fp32.stride(3),
+                    )
+                    pool_hca_arg = 0  # pool buffer is pool-only; no HCA_LOCAL offset
+                else:
+                    pool_dk_buf = dk_fp32
+                    pool_dv_buf = dv_fp32
+                    pool_dk_strides = (
+                        dk_fp32.stride(0),
+                        dk_fp32.stride(1),
+                        dk_fp32.stride(2),
+                        dk_fp32.stride(3),
+                    )
+                    pool_dv_strides = (
+                        dv_fp32.stride(0),
+                        dv_fp32.stride(1),
+                        dv_fp32.stride(2),
+                        dv_fp32.stride(3),
+                    )
+                    pool_hca_arg = hca_local_seqlen
+                _v4_attention_bwd_dkv_pool_mha_kernel[pool_grid](
+                    q,
+                    k,
+                    v,
+                    dout,
+                    lse,
+                    d_buf,
+                    pool_dk_buf,
+                    pool_dv_buf,
+                    additive_mask,
+                    q.stride(0),
+                    q.stride(1),
+                    q.stride(2),
+                    q.stride(3),
+                    k.stride(0),
+                    k.stride(1),
+                    k.stride(2),
+                    k.stride(3),
+                    v.stride(0),
+                    v.stride(1),
+                    v.stride(2),
+                    v.stride(3),
+                    dout.stride(0),
+                    dout.stride(1),
+                    dout.stride(2),
+                    dout.stride(3),
+                    lse.stride(0),
+                    lse.stride(1),
+                    lse.stride(2),
+                    d_buf.stride(0),
+                    d_buf.stride(1),
+                    d_buf.stride(2),
+                    pool_dk_strides[0],
+                    pool_dk_strides[1],
+                    pool_dk_strides[2],
+                    pool_dk_strides[3],
+                    pool_dv_strides[0],
+                    pool_dv_strides[1],
+                    dv_fp32.stride(2),
+                    dv_fp32.stride(3),
+                    stride_ms,
+                    stride_mn,
+                    Sq,
+                    pool_size,
+                    float(scale),
+                    HCA_LOCAL_SEQLEN=hca_local_seqlen,
+                    DK_POOL_OFFSET=pool_hca_arg,
+                    BLOCK_M=BLOCK_M,
+                    BLOCK_N=pool_block_n,
+                    BLOCK_DMODEL=BLOCK_DMODEL,
+                    POOL_EXACT=pool_exact,
+                    EXACT_TILES_M=exact_tiles_m,
+                    M_SPLIT=pool_m_split,
+                    # Plan-8 P57 R2: ``num_warps=4 num_stages=3`` for the
+                    # atomic-free MHA pool kernel. Pool m-loop is long
+                    # (Sq/(BM*M_SPLIT) = 32 iter at BM=32 M_SPLIT=4) so
+                    # 3-stage pipelining of Q+dout loads pays off.
+                    num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_WARPS", "4")),
+                    num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_STAGES", "3")),
+                )
+            else:
+                # Plan-8 P57: pool kernel block_m is decoupled from the dKV
+                # block_m. dKV benefits from BM=64 (fewer programs each loading
+                # a wider Q tile); pool kernel benefits from a smaller BM (more
+                # programs => more parallelism over the head loop).
+                pool_block_m = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_BLOCK_M", str(BLOCK_M)))
+                pool_grid = (triton.cdiv(Sq, pool_block_m), B)
+                _v4_attention_bwd_dkv_pool_kernel[pool_grid](
+                    q,
+                    k,
+                    v,
+                    dout,
+                    lse,
+                    d_buf,
+                    dk_fp32,
+                    dv_fp32,
+                    additive_mask,
+                    q.stride(0),
+                    q.stride(1),
+                    q.stride(2),
+                    q.stride(3),
+                    k.stride(0),
+                    k.stride(1),
+                    k.stride(2),
+                    k.stride(3),
+                    v.stride(0),
+                    v.stride(1),
+                    v.stride(2),
+                    v.stride(3),
+                    dout.stride(0),
+                    dout.stride(1),
+                    dout.stride(2),
+                    dout.stride(3),
+                    lse.stride(0),
+                    lse.stride(1),
+                    lse.stride(2),
+                    d_buf.stride(0),
+                    d_buf.stride(1),
+                    d_buf.stride(2),
+                    dk_fp32.stride(0),
+                    dk_fp32.stride(1),
+                    dk_fp32.stride(2),
+                    dk_fp32.stride(3),
+                    dv_fp32.stride(0),
+                    dv_fp32.stride(1),
+                    dv_fp32.stride(2),
+                    dv_fp32.stride(3),
+                    stride_ms,
+                    stride_mn,
+                    Sq,
+                    Sk,
+                    pool_size,
+                    float(scale),
+                    HEAD_Q=HQ,
+                    HEAD_K=HK,
+                    HCA_LOCAL_SEQLEN=hca_local_seqlen,
+                    BLOCK_M=pool_block_m,
+                    BLOCK_N=pool_block_n,
+                    BLOCK_DMODEL=BLOCK_DMODEL,
+                    # Plan-8 P57 sweep with dKV BM=64 BN=16: pool kernel
+                    # ``num_warps=4 num_stages=1`` is the sweet spot. Higher
+                    # num_stages adds Q/dout double-buffering overhead that
+                    # doesn't pay off because the pool kernel keeps K/V in
+                    # registers (single load) and the head-loop dominates
+                    # the iteration count.
+                    num_warps=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_WARPS", "4")),
+                    num_stages=int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_NUM_STAGES", "1")),
+                )
+        # Plan-8 P57 R2: cast outputs back to input dtype only when not
+        # already in the input dtype. dq is always allocated in q.dtype
+        # (no atomic), so this is a no-op. dk / dv may be either:
+        #   * native bf16 (HQ == HK MHA path) — no cast needed for the
+        #     local-SWA part; only the pool sidecar (if present) needs
+        #     a fp32 -> bf16 cast that we splice into the pool slice.
+        #   * fp32 (MQA or grouped paths) — full cast at the end.
+        dq_out = dq_fp32 if dq_fp32.dtype == q.dtype else dq_fp32.to(q.dtype)
+        if dk_fp32.dtype != k.dtype:
+            dk_out = dk_fp32.to(k.dtype)
+        else:
+            dk_out = dk_fp32
+        if dv_fp32.dtype != v.dtype:
+            dv_out = dv_fp32.to(v.dtype)
+        else:
+            dv_out = dv_fp32
+        if dk_pool_fp32 is not None and hca_local_seqlen > 0:
+            # Splice the pool sidecar (fp32) into the pool slice of the
+            # bf16 dk_out / dv_out buffers.
+            dk_out[..., hca_local_seqlen:, :] = dk_pool_fp32.to(dk_out.dtype)
+            dv_out[..., hca_local_seqlen:, :] = dv_pool_fp32.to(dv_out.dtype)
         dsink_out = dsink_fp32.to(sink.dtype) if has_sink else None
         return dq_out, dk_out, dv_out, dsink_out
 
