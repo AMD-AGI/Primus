@@ -832,25 +832,23 @@
 | [-] | ~~R2.6 trace + tgz archival on phase close~~ | 9898aaec | 2026-05-15 | Skipped (no new trace; descoped at task-list refinement). |
 
 
-## Phase 43 (plan-6) — V4 router post-logits + Compressor APE elementwise Triton fusion
+## Phase 43 (plan-6) — V4 router post-logits 50-iter A/B re-attempt + Compressor APE fusion
 
-> Plan-6 P43.  See `../plan-6/02-phase-details.md#phase-43` for design.  Re-attempts the P39 router post-logits fusion with 50-iter / 3-run aggregate methodology to defeat NCCL noise + introduces a new Compressor APE Triton kernel (`x.reshape(B, P, ratio, D) * ape[:ratio, :] → sum(2) → + bias`).  Two new env knobs: `PRIMUS_V4_ROUTER_TRITON` (default `"1"` after A/B) and `PRIMUS_COMPRESSOR_APE_TRITON` (default `"1"` after A/B).
+> Plan-6 P43.  See `../plan-6/02-phase-details.md#phase-43` for design.  P43 ships the **measurement methodology improvement** (50-iter × 3-run aggregate, n=135 per side) that cleanly converts the P39 "descoped due to noise" verdict into "descoped because the proxy A/B measures a clean +0.62 ms / iter regression at the 0.19 ms noise floor".  The router post-logits Triton kernel (existing from P39) stays in tree, default OFF.  The Compressor APE elementwise fusion sub-task is **descoped at task-list refinement** per R9.1 (~3-4 ms / iter savings, below the 51 ms / iter 10 % cut-off).
 
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Re-attempt P39 router post-logits: add per-`score_fn` tile-shape autotune table; 50-iter / 3-run aggregate microbench |        |      | Re-uses existing `_v4_router_post_fwd_kernel` / `_v4_router_post_bwd_kernel` from P39. |
-| [ ] | New Compressor APE Triton kernel — `primus/backends/megatron/core/transformer/_triton/compressor_ape.py` |        |      | FWD: `reshape + mul(ape) + sum(ratio) + add(bias)` in one kernel; BWD: `d_x` broadcast, `d_ape` + `d_bias` via cross-block `tl.atomic_add`. |
-| [ ] | `Compressor.forward` routing gates on `PRIMUS_COMPRESSOR_APE_TRITON=1` |        |      |      |
-| [ ] | Microbench `progress/p43/bench_router_post_v2.py` (50-iter, 3-run aggregate) + `progress/p43/bench_compressor_ape.py` |        |      |      |
-| [ ] | G45 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p43_compressor_ape_triton.py` |        |      | FWD parity (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck`; release-tier slow.  G42 (P39) carries green. |
-| [ ] | G45a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
-| [ ] | G45b — chrome-trace + 3-run aggregate proxy A/B; combined iter time drops ≥ 3 ms vs P42 final |        |      | If 3-run mean is within ±1 ms band, router default stays `"0"` (descope precedent). |
-| [ ] | `progress/p43/p43-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [x] | 50-iter × 3-run EP=8 proxy A/B — `progress/p43/run_smoke_p43_router_ab.sh` + `progress/p43/aggregate_router_ab.py` | TBD-p43 | 2026-05-15 | A (eager) mean = 509.55 ms (stdev 2.10 ms); B (triton) mean = 510.17 ms (stdev 2.35 ms); delta B-A = **+0.62 ms / iter** (regression) at noise floor ±0.19 ms; **3.2× noise**, statistically significant. |
+| [x] | P39 router descope **re-affirmed** with rigorous data | TBD-p43 | 2026-05-15 | `PRIMUS_V4_ROUTER_TRITON` default stays `"0"`; kernel ships in tree for future tuning. |
+| [-] | ~~New Compressor APE Triton kernel~~ | TBD-p43 | 2026-05-15 | Descoped at task-list refinement; estimated savings ~3-4 ms / iter is below the R9.1 10 % cut-off (51 ms / iter at P40 anchor 510 ms). |
+| [-] | ~~`Compressor.forward` routing gate `PRIMUS_COMPRESSOR_APE_TRITON`~~ | TBD-p43 | 2026-05-15 | Descoped (no kernel shipped). |
+| [-] | ~~G45 unit tests~~ | TBD-p43 | 2026-05-15 | Descoped. |
+| [x] | `progress/p43/p43-summary.md` — eight-section per-phase summary per R2.1 | TBD-p43 | 2026-05-15 | Includes per-run breakdown, aggregated stats, microbench-vs-proxy discrepancy analysis, plan-8 follow-up notes. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/elem_fusion.md` — append P43 row(s) |        |      |      |
-| [ ] | `develop/perf/proxy_ep8.md` — append P43 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P43 row(s)~~ | TBD-p43 | 2026-05-15 | Skipped (no fusion shipped). |
+| [x] | `develop/perf/proxy_ep8.md` — append P43 row | TBD-p43 | 2026-05-15 | 3-run aggregate result + descope reaffirmation. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p43 | 2026-05-15 | Skipped (no new fused kernel; the A/B runs are smoke-only without the profiler, so no chrome-trace JSON to compress). |
 
 
 ## Phase 44 (plan-6) — V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel
