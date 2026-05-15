@@ -1,0 +1,76 @@
+{
+  "report_id": "2026-W20",
+  "content_type": "weekly-report",
+  "title": "Primus Weekly Engineering Report — 2026-W20",
+  "report_path": "docs/weekly_reports/2026-W20-primus-weekly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/main/docs/weekly_reports/2026-W20-primus-weekly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-05-11T00:00:00+08:00",
+    "end": "2026-05-15T09:01:00+08:00"
+  },
+  "generated_at": "2026-05-15T09:01:00+08:00",
+  "merged_pr_count": 7,
+  "category_breakdown": {
+    "Bug Fix": 1,
+    "Performance Optimization": 1,
+    "Turbo/Dependency Version Update": 0,
+    "CI/Infra": 0,
+    "Refactor": 1,
+    "Docs": 0,
+    "Other": 4
+  },
+  "megatron_status": {
+    "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "pin_date": "2026-03-06",
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "266562f32cc3fcee90fd706f2d2732791b8ba022",
+    "upstream_head_date": "2026-05-14",
+    "commit_gap": 505,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021",
+    "pin_date": "2025-10-15",
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "a2a0d99e333b27fe314359ff9c9d918a3c5363f6",
+    "upstream_head_date": "2026-05-14",
+    "commit_gap": 644,
+    "recommendation": "urgent sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "monthly_in_repo",
+    "month_start_ts": "2026-05-01T00:00:00+08:00",
+    "current_ci_commit": "ef5b58ea3de0a2956d57dba518be466b7a092442",
+    "month_start_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+    "current_benchmark_commit": "ef5b58ea3de0a2956d57dba518be466b7a092442",
+    "month_start_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+    "current_aiter_commit": "857f4d15775a29af153a2c68a2f8e8a8d696c986",
+    "month_start_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+    "current_triton_commit": "88b227e23f0445f3f695bad05bbf1a363b4f50e0",
+    "month_start_triton_commit": null,
+    "drift_commits": 32,
+    "benchmark_drift_commits": 37,
+    "recommendation": "monitor"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "urgent sync",
+    "primus_turbo": "monitor"
+  },
+  "key_findings": [
+    "7 PRs merged to main in the 2026-W20 window (Bug Fix: 1, Performance Optimization: 1, Refactor: 1, Other: 4). No backend dependency pin moved this week (PRIMUS_TURBO_COMMIT, PRIMUS_TURBO_AITER_COMMIT, TRITON_COMMIT in .github/workflows/{ci,benchmark}.yaml are byte-identical to W19 values).",
+    "PR #644 is a large pipeline-parallel + projection + TE-GEMM rewrite: adds primus/backends/megatron/core/extensions/te_wgrad_store.py, expands zbpp_gemm.py (~+700 lines), threads a wgrad split through the Primus pipeline launcher / primuspipe handlers (bwd_handler, combined_fwd_bkwd_handler, communication_handler, wgrad_handler), refreshes the projection memory + performance models under primus/core/projection/**, and adds legacy_grouped_mlp_wgrad_patches.py plus updated general_gemm_workspace_patches.py and te_wgrad_split_patches.py to align with the current TE general-gemm API.",
+    "PR #722 unifies Primus-Turbo patch gating behind a single enable_primus_turbo eligibility helper, moves fp4_patches.py and fp8_patches.py under primus/backends/megatron/patches/turbo/, adds a TE FP8 blockwise-scaling support override that lets HIP/ROCm environments use the Primus implementation path (primus/backends/transformer_engine/pytorch/fp8.py), and rewires the existing Turbo TE-spec-provider, GPT output-layer, MoE dispatcher, and RMSNorm patches to consume the shared helper. Does not move the Turbo pin itself.",
+    "PR #439 adds TraceLens trace-analysis + MLflow upload integration: ~+1.2k-line primus/backends/megatron/training/mlflow_artifacts.py plus mlflow_setup.py, primus/core/utils/rocm_mem_info.py, mlflow_upload_tracelens_report / mlflow_tracelens_output_format config knobs in primus_megatron_module.yaml and the Megatron trainer, auto-installs TraceLens from GitHub on demand, and uploads XLSX/CSV reports to MLflow artifacts/trace_analysis/. Adds ~+660-line tests/backends/megatron/test_mlflow_artifacts.py and test_mlflow_setup.py.",
+    "PR #594 adds primus/backends/megatron/patches/zebra_llama_flops_patches.py (~+174 lines) to fix hybrid (Mamba-style) TFLOPS accounting, ships an MI355X mamba_370M-pretrain.yaml, and updates the existing MI300X mamba_370M-pretrain.yaml.",
+    "PR #725 (Bug Fix) rewrites runner/helpers/hooks/train/pretrain/maxtext/prepare.py so the RDMA / IB / verbs / netlink apt install is skipped on single-node JAX/MaxText runs (NNODES <= 1), uses dpkg-query to install only actually-missing packages on multi-node runs, gates libibnetdisc5 vs libibnetdisc5t64 on Ubuntu 22.04 vs 24.04, and downgrades apt failures from fatal exits to warnings.",
+    "Model coverage: PR #709 lands qwen3_5_35B_A3B Megatron support with MI300X/MI355X BF16 + FP8 example pretrain configs, a Primus model config, requirements bump and trainer test entry; PR #662 refreshes MI355X glm5 / minimax_m2.5 BF16/FP8 example configs and adds examples/moe_package/run_glm5_4layers_proxy.sh plus a Primus CLI ROCm tech-blog update.",
+    "Megatron-LM upstream drift: pin d3528a21 (2026-03-06) is now 505 commits behind upstream HEAD 266562f3 (2026-05-14), +47 since W19. Highlights since W19: fully remove legacy code (#4759), TE → 2.15.0 (#4682), mamba-ssm/causal-conv1d minor bumps (#4712), Support recomputing in HybridModel (#4496), [training migration] Migrate mamba builder (#4550), Integrate LayerWiseDistributedOptimizer with DDP buffer infrastructure (#4509), NCCL UB memory + dereg fix (#4492), one-flag inference detector (#4617), periodic GPU sniff tests (#4662). Recommendation: plan sync (unchanged).",
+    "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is now 644 commits behind upstream HEAD a2a0d99e (2026-05-14), +34 since W19. Highlights since W19: [GraphTrainer] Add Context Parallel support (#3305), AutoParallel AOT FX trace integration (#2725), passes.py refactor into focused modules (#3319), multi-FSDP-PG overlap_fsdp_ag_rs_pass (#3351), minimal_fx_tracer generalized to module + optimizer roots (#3164), selective activation remat refactored in-place (#3270), Remove MoE expert for-loop fallback (#3308), [Quantization] class factory MXFP8/Float8 GroupedExperts _owner fix (#3251), [LoRA] add LoRA converter + rename quantization to converters (#3264), [rl] switch to vllm v2 engine (#3330), RL observability spans (#3234). Recommendation: urgent sync (unchanged).",
+    "Primus-Turbo monthly drift (May): no further movement in W20. CI pin remains 32 commits ahead of May month-start (333b68d7 → ef5b58ea, Primus-Turbo #320), benchmark pin remains 37 commits ahead (a4488f6c → ef5b58ea); AITER pin remains at 857f4d15; TRITON_COMMIT remains at 88b227e2. The two YAML pins are still in sync. Recommendation: monitor.",
+    "Backend-gap reports were not regenerated this week: no submodule SHA changed (Megatron-LM, torchtitan, Megatron-Bridge, Emerging-Optimizers, HummingbirdXT, maxtext are all unchanged on origin/main); no PRIMUS_TURBO_* or TRITON_COMMIT value moved; no other tracked backend-version source moved in the weekly window."
+  ]
+}
