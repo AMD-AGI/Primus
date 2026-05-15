@@ -42,6 +42,7 @@ from typing import Optional
 
 import torch
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_bwd import (
     _launch_v4_attention_bwd,
 )
@@ -187,18 +188,42 @@ def v4_attention(
     scale: float,
     hca_local_seqlen: int = 0,
 ) -> torch.Tensor:
-    """Triton-backed V4 dense / HCA attention.
+    """Triton- or tilelang-backed V4 dense / HCA attention.
 
     Drop-in replacement for :func:`eager_v4_attention` with identical
-    signature and dtype contract. Routes through :class:`V4AttentionFn`
-    so autograd works.
+    signature and dtype contract.
 
-    The MQA case (``K_H == 1``) is detected from ``k.shape[1]`` and the
-    kernel internally broadcasts the single shared K / V head across
-    the query heads.
+    Dispatch precedence (plan-8 P49):
+
+    * If ``PRIMUS_V4_TILELANG_ATTN=1`` AND the plan-8 P50 / P51
+      tilelang kernels are registered + tilelang importable at the
+      pinned version, route through the tilelang FWD/BWD.
+    * Otherwise, route through :class:`V4AttentionFn` (plan-4 P25
+      Triton FWD + plan-5 P32 final split BWD).
+
+    The MQA case (``K_H == 1``) is detected from ``k.shape[1]`` and
+    each kernel internally broadcasts the single shared K / V head
+    across the query heads.
 
     Returns ``[B, H, Sq, D]`` in ``v.dtype``.
     """
+    # Plan-8 P49: tilelang dispatcher hook.  Defaults OFF until both
+    # the env knob is set AND each plan-8 phase registers its kernel
+    # via `register_available_kernel(...)`.  Falls back to the Triton
+    # autograd path on any miss with a one-time rank-0 warning.
+    if _tilelang.should_dispatch("v4_attention_fwd"):
+        return _tilelang.v4_attention_fwd_tilelang(
+            q,
+            k,
+            v,
+            sink=sink,
+            additive_mask=additive_mask,
+            swa_window=swa_window,
+            attn_dropout=attn_dropout,
+            training=training,
+            scale=scale,
+            hca_local_seqlen=hca_local_seqlen,
+        )
     return V4AttentionFn.apply(
         q,
         k,

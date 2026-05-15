@@ -59,6 +59,7 @@ from typing import Optional
 
 import torch
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_csa_attention_bwd import (
     _launch_v4_csa_attention_bwd,
     _launch_v4_csa_attention_pool_bwd,
@@ -306,6 +307,23 @@ def v4_csa_attention(
             scale=scale,
         )
 
+    # Plan-8 P49: tilelang dispatcher hook for the CSA family.
+    # Defaults OFF until both the env knob is set AND plan-8 P54 /
+    # P55 register their kernels.  Falls back to the Triton autograd
+    # path on any miss with a one-time rank-0 warning.
+    if _tilelang.should_dispatch("v4_csa_attention_fwd"):
+        return _tilelang.v4_csa_attention_fwd_tilelang(
+            q,
+            k_local,
+            v_local,
+            gathered,
+            sparse_mask=sparse_mask,
+            sink=sink,
+            swa_window=swa_window,
+            attn_dropout=attn_dropout,
+            training=training,
+            scale=scale,
+        )
     return V4CSAAttentionFn.apply(
         q,
         k_local,
