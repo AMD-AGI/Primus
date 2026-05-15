@@ -171,4 +171,4 @@ plan-6 original 310 ms goal.
 
 * Plan-7 close-out commit (this commit) pins all plan-7 phase
   summaries + the plan-8 kick-off scope.
-* Feature commit SHA: TBD-p48.
+* Feature commit SHA: 0f95e812.

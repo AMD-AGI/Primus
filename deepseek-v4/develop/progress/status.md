@@ -899,8 +899,8 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~all P46 implementation tasks~~ | TBD-p46 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
-| [x] | `progress/p46/p46-summary.md` — descope summary | TBD-p46 | 2026-05-15 | Documents the descope rationale; plan-8 fused-Adam covers this. |
+| [-] | ~~all P46 implementation tasks~~ | 0f95e812 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
+| [x] | `progress/p46/p46-summary.md` — descope summary | 0f95e812 | 2026-05-15 | Documents the descope rationale; plan-8 fused-Adam covers this. |
 
 
 ## Phase 47 (plan-7) — Fused grad-norm clip Triton kernel (descoped via P45 evidence)
@@ -910,8 +910,8 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~all P47 implementation tasks~~ | TBD-p47 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
-| [x] | `progress/p47/p47-summary.md` — descope summary | TBD-p47 | 2026-05-15 | Documents the descope rationale; plan-8 joint fused-Adam + grad-clip covers this. |
+| [-] | ~~all P47 implementation tasks~~ | 0f95e812 | 2026-05-15 | Descoped via P45 microbench evidence; no kernel shipped. |
+| [x] | `progress/p47/p47-summary.md` — descope summary | 0f95e812 | 2026-05-15 | Documents the descope rationale; plan-8 joint fused-Adam + grad-clip covers this. |
 
 
 ## Phase 48 (plan-7) — Plan-7 close-out + plan-8 kick-off
@@ -921,13 +921,13 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [x] | `progress/p48/p48-summary.md` — plan-7 close-out + plan-8 kick-off scope per R2.1 | TBD-p48 | 2026-05-15 | Eight-section retrospective: budget mis-calibration analysis, phase-by-phase outcomes, cumulative perf summary, plan-8 starter set (P49-P54). |
-| [x] | `develop/perf/proxy_ep8.md` — append P45/P46/P47/P48 final rows | TBD-p48 | 2026-05-15 | All rows record "no perf delta" with descope rationale. |
-| [-] | ~~`develop/perf/elem_fusion.md` — append plan-7 rows~~ | TBD-p48 | 2026-05-15 | Skipped — no fusions shipped. |
-| [-] | ~~`run_deepseek_v4_flash_proxy.sh` — surface 3 new env knobs~~ | TBD-p48 | 2026-05-15 | Skipped — no production knobs to surface; plan-8 phases will add their own. |
+| [x] | `progress/p48/p48-summary.md` — plan-7 close-out + plan-8 kick-off scope per R2.1 | 0f95e812 | 2026-05-15 | Eight-section retrospective: budget mis-calibration analysis, phase-by-phase outcomes, cumulative perf summary, plan-8 starter set (P49-P54). |
+| [x] | `develop/perf/proxy_ep8.md` — append P45/P46/P47/P48 final rows | 0f95e812 | 2026-05-15 | All rows record "no perf delta" with descope rationale. |
+| [-] | ~~`develop/perf/elem_fusion.md` — append plan-7 rows~~ | 0f95e812 | 2026-05-15 | Skipped — no fusions shipped. |
+| [-] | ~~`run_deepseek_v4_flash_proxy.sh` — surface 3 new env knobs~~ | 0f95e812 | 2026-05-15 | Skipped — no production knobs to surface; plan-8 phases will add their own. |
 | [ ] | Status pinning per R2.4 — every `[x]` row in Phase 45..48 has commit SHA + date |        |      |      |
-| [-] | ~~15-iter clean bake-off~~ | TBD-p48 | 2026-05-15 | Skipped — no plan-7 default-on knobs to bake off; the P40 final 15-iter bake-off remains the production anchor. |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p48 | 2026-05-15 | Skipped — no runtime-affecting change in plan-7. |
+| [-] | ~~15-iter clean bake-off~~ | 0f95e812 | 2026-05-15 | Skipped — no plan-7 default-on knobs to bake off; the P40 final 15-iter bake-off remains the production anchor. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 0f95e812 | 2026-05-15 | Skipped — no runtime-affecting change in plan-7. |
 
 
 ## Blockers / Risks Log
