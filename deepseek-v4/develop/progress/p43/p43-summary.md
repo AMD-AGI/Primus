@@ -157,4 +157,4 @@ No code change.  Plan-4/5/6 ratchet stays green by construction.
   absorbed into the FWD kernel.
 * Plan-7 P45..P48: optimizer-step fusion sweep (the dominant
   residual at this point).
-* Feature commit SHA: TBD-p43.
+* Feature commit SHA: 77ab0caa.

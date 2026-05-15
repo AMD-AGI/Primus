@@ -839,16 +839,16 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [x] | 50-iter × 3-run EP=8 proxy A/B — `progress/p43/run_smoke_p43_router_ab.sh` + `progress/p43/aggregate_router_ab.py` | TBD-p43 | 2026-05-15 | A (eager) mean = 509.55 ms (stdev 2.10 ms); B (triton) mean = 510.17 ms (stdev 2.35 ms); delta B-A = **+0.62 ms / iter** (regression) at noise floor ±0.19 ms; **3.2× noise**, statistically significant. |
-| [x] | P39 router descope **re-affirmed** with rigorous data | TBD-p43 | 2026-05-15 | `PRIMUS_V4_ROUTER_TRITON` default stays `"0"`; kernel ships in tree for future tuning. |
-| [-] | ~~New Compressor APE Triton kernel~~ | TBD-p43 | 2026-05-15 | Descoped at task-list refinement; estimated savings ~3-4 ms / iter is below the R9.1 10 % cut-off (51 ms / iter at P40 anchor 510 ms). |
-| [-] | ~~`Compressor.forward` routing gate `PRIMUS_COMPRESSOR_APE_TRITON`~~ | TBD-p43 | 2026-05-15 | Descoped (no kernel shipped). |
-| [-] | ~~G45 unit tests~~ | TBD-p43 | 2026-05-15 | Descoped. |
-| [x] | `progress/p43/p43-summary.md` — eight-section per-phase summary per R2.1 | TBD-p43 | 2026-05-15 | Includes per-run breakdown, aggregated stats, microbench-vs-proxy discrepancy analysis, plan-8 follow-up notes. |
+| [x] | 50-iter × 3-run EP=8 proxy A/B — `progress/p43/run_smoke_p43_router_ab.sh` + `progress/p43/aggregate_router_ab.py` | 77ab0caa | 2026-05-15 | A (eager) mean = 509.55 ms (stdev 2.10 ms); B (triton) mean = 510.17 ms (stdev 2.35 ms); delta B-A = **+0.62 ms / iter** (regression) at noise floor ±0.19 ms; **3.2× noise**, statistically significant. |
+| [x] | P39 router descope **re-affirmed** with rigorous data | 77ab0caa | 2026-05-15 | `PRIMUS_V4_ROUTER_TRITON` default stays `"0"`; kernel ships in tree for future tuning. |
+| [-] | ~~New Compressor APE Triton kernel~~ | 77ab0caa | 2026-05-15 | Descoped at task-list refinement; estimated savings ~3-4 ms / iter is below the R9.1 10 % cut-off (51 ms / iter at P40 anchor 510 ms). |
+| [-] | ~~`Compressor.forward` routing gate `PRIMUS_COMPRESSOR_APE_TRITON`~~ | 77ab0caa | 2026-05-15 | Descoped (no kernel shipped). |
+| [-] | ~~G45 unit tests~~ | 77ab0caa | 2026-05-15 | Descoped. |
+| [x] | `progress/p43/p43-summary.md` — eight-section per-phase summary per R2.1 | 77ab0caa | 2026-05-15 | Includes per-run breakdown, aggregated stats, microbench-vs-proxy discrepancy analysis, plan-8 follow-up notes. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [-] | ~~`develop/perf/elem_fusion.md` — append P43 row(s)~~ | TBD-p43 | 2026-05-15 | Skipped (no fusion shipped). |
-| [x] | `develop/perf/proxy_ep8.md` — append P43 row | TBD-p43 | 2026-05-15 | 3-run aggregate result + descope reaffirmation. |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p43 | 2026-05-15 | Skipped (no new fused kernel; the A/B runs are smoke-only without the profiler, so no chrome-trace JSON to compress). |
+| [-] | ~~`develop/perf/elem_fusion.md` — append P43 row(s)~~ | 77ab0caa | 2026-05-15 | Skipped (no fusion shipped). |
+| [x] | `develop/perf/proxy_ep8.md` — append P43 row | 77ab0caa | 2026-05-15 | 3-run aggregate result + descope reaffirmation. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 77ab0caa | 2026-05-15 | Skipped (no new fused kernel; the A/B runs are smoke-only without the profiler, so no chrome-trace JSON to compress). |
 
 
 ## Phase 44 (plan-6) — V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel
