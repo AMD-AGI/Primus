@@ -79,4 +79,4 @@ The plan-8 P54 status row in `progress/status.md` is marked
 * `tilelang/examples/deepseek_v4/sparse_attn_fwd_sm90.py` is
   a sm90-specific reference; an MI355X port would still need
   the SMEM partitioning fix to beat Triton.
-* Feature commit SHA: TBD-p54.
+* Feature commit SHA: 19e41c9a.

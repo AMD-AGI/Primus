@@ -62,4 +62,4 @@ The plan-8 P53 status row in `progress/status.md` is marked
 
 * Plan-9: revisit when (a) the SMEM gap closes and (b) the
   sink-BWD bf16 fix lands.
-* Feature commit SHA: TBD-p53.
+* Feature commit SHA: 19e41c9a.

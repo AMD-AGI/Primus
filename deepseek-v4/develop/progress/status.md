@@ -993,9 +993,9 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~Extend P50 FWD kernel with `hca_local_seqlen` parameter~~ | TBD-p52 | 2026-05-15 | Descoped — V4-Flash SMEM-gap structural; HCA call sites already route through Triton via P50 wrapper's `_kernel_supports(hca_local_seqlen>0) == False`. |
-| [-] | ~~Microbench / G52 / smoke / perf~~ | TBD-p52 | 2026-05-15 | Skipped — see p52-summary.md. |
-| [x] | `progress/p52/p52-summary.md` — descope summary | TBD-p52 | 2026-05-15 | Documents the three observations driving descope: P50 regression, Triton fallback already correct, plan-9 + upstream scope. |
+| [-] | ~~Extend P50 FWD kernel with `hca_local_seqlen` parameter~~ | 19e41c9a | 2026-05-15 | Descoped — V4-Flash SMEM-gap structural; HCA call sites already route through Triton via P50 wrapper's `_kernel_supports(hca_local_seqlen>0) == False`. |
+| [-] | ~~Microbench / G52 / smoke / perf~~ | 19e41c9a | 2026-05-15 | Skipped — see p52-summary.md. |
+| [x] | `progress/p52/p52-summary.md` — descope summary | 19e41c9a | 2026-05-15 | Documents the three observations driving descope: P50 regression, Triton fallback already correct, plan-9 + upstream scope. |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
 
 
@@ -1006,9 +1006,9 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~Extend P51 BWD kernels with `hca_local_seqlen`~~ | TBD-p53 | 2026-05-15 | Descoped — same SMEM-gap blocker as P52 + sink-BWD bf16 issue (P51). HCA BWD call sites route through Triton via P51 wrapper. |
-| [-] | ~~Microbench / G53 / smoke / perf~~ | TBD-p53 | 2026-05-15 | Skipped — see p53-summary.md. |
-| [x] | `progress/p53/p53-summary.md` — descope summary | TBD-p53 | 2026-05-15 |      |
+| [-] | ~~Extend P51 BWD kernels with `hca_local_seqlen`~~ | 19e41c9a | 2026-05-15 | Descoped — same SMEM-gap blocker as P52 + sink-BWD bf16 issue (P51). HCA BWD call sites route through Triton via P51 wrapper. |
+| [-] | ~~Microbench / G53 / smoke / perf~~ | 19e41c9a | 2026-05-15 | Skipped — see p53-summary.md. |
+| [x] | `progress/p53/p53-summary.md` — descope summary | 19e41c9a | 2026-05-15 |      |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
 
 
@@ -1019,9 +1019,9 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~New `_tilelang/v4_csa_attention_fwd_tilelang.py` + kernel + wrappers~~ | TBD-p54 | 2026-05-15 | Descoped — V4-Flash CSA SMEM profile (Q + K_local + V_local + Gathered + acc fragments ~110 KiB at single-row tile) sits in the same regression band as P50/P51. The plan-5 P31 Triton kernel is already at the SMEM optimum. |
-| [-] | ~~G54 / microbench / smoke / perf~~ | TBD-p54 | 2026-05-15 | Skipped — see p54-summary.md. |
-| [x] | `progress/p54/p54-summary.md` — descope summary | TBD-p54 | 2026-05-15 |      |
+| [-] | ~~New `_tilelang/v4_csa_attention_fwd_tilelang.py` + kernel + wrappers~~ | 19e41c9a | 2026-05-15 | Descoped — V4-Flash CSA SMEM profile (Q + K_local + V_local + Gathered + acc fragments ~110 KiB at single-row tile) sits in the same regression band as P50/P51. The plan-5 P31 Triton kernel is already at the SMEM optimum. |
+| [-] | ~~G54 / microbench / smoke / perf~~ | 19e41c9a | 2026-05-15 | Skipped — see p54-summary.md. |
+| [x] | `progress/p54/p54-summary.md` — descope summary | 19e41c9a | 2026-05-15 |      |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
 
 
@@ -1032,9 +1032,9 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~New `_tilelang/v4_csa_attention_bwd_tilelang.py` + 3-kernel pipeline~~ | TBD-p55 | 2026-05-15 | Descoped — same blockers as P54 + sink-BWD bf16 issue from P51 + plan-5 P32 final segreduce design already at SMEM optimum. |
-| [-] | ~~Sub-env / G55 / microbench / smoke / perf~~ | TBD-p55 | 2026-05-15 | Skipped — see p55-summary.md. |
-| [x] | `progress/p55/p55-summary.md` — descope summary | TBD-p55 | 2026-05-15 |      |
+| [-] | ~~New `_tilelang/v4_csa_attention_bwd_tilelang.py` + 3-kernel pipeline~~ | 19e41c9a | 2026-05-15 | Descoped — same blockers as P54 + sink-BWD bf16 issue from P51 + plan-5 P32 final segreduce design already at SMEM optimum. |
+| [-] | ~~Sub-env / G55 / microbench / smoke / perf~~ | 19e41c9a | 2026-05-15 | Skipped — see p55-summary.md. |
+| [x] | `progress/p55/p55-summary.md` — descope summary | 19e41c9a | 2026-05-15 |      |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
 
 
@@ -1045,14 +1045,14 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [-] | ~~`develop/perf/attention_perf.md` — append plan-8 rows~~ | TBD-p56 | 2026-05-15 | Skipped — plan-8 ships no production-default kernel; the row would just repeat the plan-7 P48 anchor. |
-| [-] | ~~`develop/perf/proxy_ep8.md` — append plan-8 rows~~ | TBD-p56 | 2026-05-15 | Skipped — same reason. P48 anchor (510.6 ms / 524.9 TFLOP/s/GPU / 17.31× vs P28) unchanged at P56 close-out. |
-| [x] | `progress/p49..p56/p4X-summary.md` per R2.1 | TBD-p56 | 2026-05-15 | All 8 plan-8 phase summaries committed (P49 shipped, P50/P51 default-OFF kernels, P52..P55 descoped, P56 close-out). |
-| [-] | ~~`run_deepseek_v4_flash_proxy.sh` — surface `PRIMUS_V4_TILELANG_ATTN` env knob~~ | TBD-p56 | 2026-05-15 | Skipped — env knob remains default-OFF; the proxy script does not need to surface it for plan-8 (callers can set it manually for opt-in testing). |
-| [x] | Status pinning per R2.4 — every `[x]` row in Phase 49..56 has commit SHA + date | TBD-p56 | 2026-05-15 | All P49..P56 rows pinned via the status-pin commits. |
-| [-] | ~~15-iter clean bake-off~~ | TBD-p56 | 2026-05-15 | Skipped — no plan-8 default-on knobs to bake off; the P48 final 15-iter bake-off remains the production anchor. |
-| [x] | Plan-8 close-out commit `docs(deepseek-v4)[plan-8][P56]: plan-8 close-out` | TBD-p56 | 2026-05-15 | This commit; see p56-summary.md §6 for plan-9 starter set. |
-| [-] | ~~R2.6 trace + tgz archival on phase close~~ | TBD-p56 | 2026-05-15 | Skipped — no runtime-affecting change in plan-8. |
+| [-] | ~~`develop/perf/attention_perf.md` — append plan-8 rows~~ | 19e41c9a | 2026-05-15 | Skipped — plan-8 ships no production-default kernel; the row would just repeat the plan-7 P48 anchor. |
+| [-] | ~~`develop/perf/proxy_ep8.md` — append plan-8 rows~~ | 19e41c9a | 2026-05-15 | Skipped — same reason. P48 anchor (510.6 ms / 524.9 TFLOP/s/GPU / 17.31× vs P28) unchanged at P56 close-out. |
+| [x] | `progress/p49..p56/p4X-summary.md` per R2.1 | 19e41c9a | 2026-05-15 | All 8 plan-8 phase summaries committed (P49 shipped, P50/P51 default-OFF kernels, P52..P55 descoped, P56 close-out). |
+| [-] | ~~`run_deepseek_v4_flash_proxy.sh` — surface `PRIMUS_V4_TILELANG_ATTN` env knob~~ | 19e41c9a | 2026-05-15 | Skipped — env knob remains default-OFF; the proxy script does not need to surface it for plan-8 (callers can set it manually for opt-in testing). |
+| [x] | Status pinning per R2.4 — every `[x]` row in Phase 49..56 has commit SHA + date | 19e41c9a | 2026-05-15 | All P49..P56 rows pinned via the status-pin commits. |
+| [-] | ~~15-iter clean bake-off~~ | 19e41c9a | 2026-05-15 | Skipped — no plan-8 default-on knobs to bake off; the P48 final 15-iter bake-off remains the production anchor. |
+| [x] | Plan-8 close-out commit `docs(deepseek-v4)[plan-8][P56]: plan-8 close-out` | 19e41c9a | 2026-05-15 | This commit; see p56-summary.md §6 for plan-9 starter set. |
+| [-] | ~~R2.6 trace + tgz archival on phase close~~ | 19e41c9a | 2026-05-15 | Skipped — no runtime-affecting change in plan-8. |
 
 
 ## Blockers / Risks Log

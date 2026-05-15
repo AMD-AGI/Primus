@@ -187,4 +187,4 @@ Plan-8 ships valuable scaffolding even without proxy delta:
   ships no production-default kernel, so the row would just
   repeat the plan-7 P48 anchor.
 * Plan-9 kick-off scope pinned in §4 above.
-* Feature commit SHA: TBD-p56.
+* Feature commit SHA: 19e41c9a.

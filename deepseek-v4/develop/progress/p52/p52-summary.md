@@ -83,4 +83,4 @@ per the R2.2 de-scope convention.
   hand-tuned config), revisit P52 + ship the HCA extension via
   the constexpr `hca_local_seqlen` branch.
 * P53 (HCA BWD) inherits the same descope rationale.
-* Feature commit SHA: TBD-p52.
+* Feature commit SHA: 19e41c9a.

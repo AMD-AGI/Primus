@@ -68,4 +68,4 @@ The plan-8 P55 status row in `progress/status.md` is marked
   partitioning lands, (b) the sink-BWD bf16 fix is in place,
   and (c) the CSA FWD tilelang (P54 follow-up) is shipped + wins
   at V4-Flash widths.
-* Feature commit SHA: TBD-p55.
+* Feature commit SHA: 19e41c9a.
