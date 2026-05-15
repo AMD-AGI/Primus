@@ -209,5 +209,5 @@ at ~0.05 ms × 3 = ~0.15 ms, `_indexer_score_post_bwd_ddot_kernel`
 * Plan-7 candidate inventory `progress/p41/p41-candidates.md`
   pins the next 4 phase IDs (P42 / P43 / P44 in plan-6 +
   plan-7 P45..P48).
-* Feature commit SHA: TBD-p41.
+* Feature commit SHA: 9444f8ae.
 * Status pin commit follows R1.3 / R2.4.
