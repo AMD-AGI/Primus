@@ -55,7 +55,7 @@ strings + the referenced names live in an enclosing function's
 local scope (e.g. ``q_shape`` defined inside the JIT factory).
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -333,6 +333,86 @@ def _get_or_compile_kernel(
     return kernel
 
 
+def v4_attention_fwd_tilelang_with_lse(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    sink: Optional[torch.Tensor] = None,
+    additive_mask: Optional[torch.Tensor] = None,
+    swa_window: int = 0,
+    attn_dropout: float = 0.0,
+    training: bool = False,
+    scale: Optional[float] = None,
+    hca_local_seqlen: int = 0,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Same dispatch logic as :func:`v4_attention_fwd_tilelang` but
+    also returns the saved ``LSE`` tensor when the tilelang path
+    runs.
+
+    When the wrapper falls back to Triton, ``LSE`` is computed by
+    the Triton launcher and returned alongside ``out``; the
+    autograd Function in P51 saves it for backward.
+    """
+    if attn_dropout > 0.0 and training:
+        return _launch_v4_attention_fwd(
+            q,
+            k,
+            v,
+            sink=sink,
+            swa_window=swa_window,
+            additive_mask=additive_mask,
+            scale=scale if scale is not None else 1.0 / (q.shape[-1] ** 0.5),
+            hca_local_seqlen=hca_local_seqlen,
+        )
+    if not _kernel_supports(
+        sink=sink,
+        swa_window=swa_window,
+        additive_mask=additive_mask,
+        hca_local_seqlen=hca_local_seqlen,
+    ):
+        return _launch_v4_attention_fwd(
+            q,
+            k,
+            v,
+            sink=sink,
+            swa_window=swa_window,
+            additive_mask=additive_mask,
+            scale=scale if scale is not None else 1.0 / (q.shape[-1] ** 0.5),
+            hca_local_seqlen=hca_local_seqlen,
+        )
+    if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
+        raise ValueError(
+            "v4_attention_fwd_tilelang expects q / k / v of rank 4 "
+            f"(got q.dim={q.dim()}, k.dim={k.dim()}, v.dim={v.dim()})"
+        )
+    B, HQ, Sq, D = q.shape
+    _, HK, Sk, _ = k.shape
+    assert HK in (1, HQ)
+    has_sink = sink is not None
+    kernel = _get_or_compile_kernel(
+        batch=B,
+        heads_q=HQ,
+        heads_k=HK,
+        seq_q=Sq,
+        seq_k=Sk,
+        dim=D,
+        has_sink=has_sink,
+        swa_window=int(swa_window),
+        dtype=q.dtype,
+    )
+    if not has_sink:
+        sink_arg = torch.zeros(HQ, device=q.device, dtype=q.dtype)
+    else:
+        sink_arg = sink
+    q_c = q.contiguous()
+    k_c = k.contiguous()
+    v_c = v.contiguous()
+    sink_c = sink_arg.contiguous()
+    out, lse = kernel(q_c, k_c, v_c, sink_c)
+    return out, lse
+
+
 def v4_attention_fwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -361,85 +441,24 @@ def v4_attention_fwd_tilelang(
     the Triton wrapper but not used — dropout on attention is off
     in production V4 (plan-4 P25 design note); P50 inherits that
     contract.
+
+    Note: this entry point is the **plain** (no-autograd) wrapper.
+    For the autograd-aware path used by V4AttentionFn, the call
+    site uses :func:`v4_attention_fwd_tilelang_with_lse` directly
+    so it can save ``LSE`` for backward.
     """
-    if attn_dropout > 0.0 and training:
-        # Plan-4 P25 contract: dropout-off in production.  If a unit
-        # test exercises dropout-on, fall back to the Triton path
-        # which has the dropout knob plumbed (we don't replicate it
-        # in P50 — the proxy never hits this branch).
-        out, _ = _launch_v4_attention_fwd(
-            q,
-            k,
-            v,
-            sink=sink,
-            swa_window=swa_window,
-            additive_mask=additive_mask,
-            scale=scale if scale is not None else 1.0 / (q.shape[-1] ** 0.5),
-            hca_local_seqlen=hca_local_seqlen,
-        )
-        return out
-
-    if not _kernel_supports(
+    out, _ = v4_attention_fwd_tilelang_with_lse(
+        q,
+        k,
+        v,
         sink=sink,
-        swa_window=swa_window,
         additive_mask=additive_mask,
+        swa_window=swa_window,
+        attn_dropout=attn_dropout,
+        training=training,
+        scale=scale,
         hca_local_seqlen=hca_local_seqlen,
-    ):
-        out, _ = _launch_v4_attention_fwd(
-            q,
-            k,
-            v,
-            sink=sink,
-            swa_window=swa_window,
-            additive_mask=additive_mask,
-            scale=scale if scale is not None else 1.0 / (q.shape[-1] ** 0.5),
-            hca_local_seqlen=hca_local_seqlen,
-        )
-        return out
-
-    if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
-        raise ValueError(
-            "v4_attention_fwd_tilelang expects q / k / v of rank 4 "
-            f"(got q.dim={q.dim()}, k.dim={k.dim()}, v.dim={v.dim()})"
-        )
-
-    B, HQ, Sq, D = q.shape
-    Bk, HK, Sk, Dk = k.shape
-    Bv, HKv, Skv, Dv = v.shape
-    assert Bk == B and Bv == B
-    assert (HKv, Skv, Dv) == (HK, Sk, D)
-    assert Dk == D
-    assert HK in (1, HQ), f"K_H must be 1 (MQA) or {HQ} (MHA); got {HK}"
-
-    has_sink = sink is not None
-    kernel = _get_or_compile_kernel(
-        batch=B,
-        heads_q=HQ,
-        heads_k=HK,
-        seq_q=Sq,
-        seq_k=Sk,
-        dim=D,
-        has_sink=has_sink,
-        swa_window=int(swa_window),
-        dtype=q.dtype,
     )
-
-    # Tilelang kernel needs concrete sink tensor; pass a zero buffer
-    # when sink is absent (the kernel's `if has_sink` branch leaves
-    # it unread).
-    if not has_sink:
-        sink_arg = torch.zeros(HQ, device=q.device, dtype=q.dtype)
-    else:
-        sink_arg = sink
-
-    # Make inputs contiguous (tilelang assumes row-major contiguous
-    # tensors in the prim_func signature).
-    q_c = q.contiguous()
-    k_c = k.contiguous()
-    v_c = v.contiguous()
-    sink_c = sink_arg.contiguous()
-
-    out, _lse = kernel(q_c, k_c, v_c, sink_c)
     return out
 
 

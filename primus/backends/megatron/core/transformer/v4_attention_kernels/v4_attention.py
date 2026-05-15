@@ -212,6 +212,34 @@ def v4_attention(
     # via `register_available_kernel(...)`.  Falls back to the Triton
     # autograd path on any miss with a one-time rank-0 warning.
     if _tilelang.should_dispatch("v4_attention_fwd"):
+        # P51: route through the tilelang autograd Function when both
+        # FWD + BWD kernels are registered, so gradients flow through
+        # the tilelang path correctly.  When only the FWD is registered
+        # (P50-only state), fall through to the FWD-direct call — the
+        # Triton BWD will still get called via the autograd graph that
+        # the caller sets up (only the FWD wrapper is non-autograd in
+        # that mode).
+        # `_lazy_load` is idempotent + cheap on cache hit; calling it
+        # here ensures `is_tilelang_kernel_available("v4_attention_bwd")`
+        # reflects the post-import state.
+        _tilelang._lazy_load("v4_attention_bwd")
+        if _tilelang.is_tilelang_kernel_available("v4_attention_bwd"):
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4_attention_autograd_tilelang import (
+                v4_attention_tilelang,
+            )
+
+            return v4_attention_tilelang(
+                q,
+                k,
+                v,
+                sink=sink,
+                additive_mask=additive_mask,
+                swa_window=swa_window,
+                attn_dropout=attn_dropout,
+                training=training,
+                scale=scale,
+                hca_local_seqlen=hca_local_seqlen,
+            )
         return _tilelang.v4_attention_fwd_tilelang(
             q,
             k,

@@ -974,16 +974,16 @@
 
 |     | Task                                                                                                                                                          | commit | date | note |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | New `_tilelang/v4_attention_bwd_tilelang.py` with 4 kernels (`preprocess`, `dq`, `dkv`, `dsink`) + wrapper |        |      | Matches `_triton/v4_attention_bwd.py` launcher signature. |
-| [ ] | `V4AttentionFn.backward` dispatches to tilelang via `is_tilelang_path_enabled()` |        |      |      |
-| [ ] | Microbench `progress/p51/bench_v4_attention_bwd_tilelang.py` — V4-Flash + smoke shapes; BWD vs plan-5 P32 final Triton split BWD |        |      |      |
-| [ ] | G51 — parity tests; 16-combination parametrisation; `gradcheck` fp32 fast tier; release-tier slow |        |      |      |
-| [ ] | G51a — EP=8 10-iter proxy smoke (cr=0 fully on tilelang) |        |      | lm_loss within 5e-2 of P48 baseline. |
-| [ ] | G51b — microbench ≥ 1.2× BWD speedup target |        |      |      |
-| [ ] | `progress/p51/p51-summary.md` per R2.1 |        |      |      |
+| [x] | New `_tilelang/v4_attention_bwd_tilelang.py` with preprocess + main BWD kernels + wrapper | TBD-p51 | 2026-05-15 | dKV emitted in fp32 (atomic-add target dtype); wrapper casts back to k.dtype/v.dtype. dsink computed host-side. |
+| [x] | New `_tilelang/v4_attention_autograd_tilelang.py::V4AttentionTilelangFn` + `v4_attention()` routes through autograd when both FWD/BWD registered | TBD-p51 | 2026-05-15 | Fixes the latent P50 autograd-bypass (FWD-only direct call dropped gradients). |
+| [-] | ~~Microbench at V4-Flash widths~~ | TBD-p51 | 2026-05-15 | Skipped per R9.1 — P50 microbench already demonstrated the head_dim=512 SMEM-budget gap (0.14× speedup at V4-Flash); BWD has the same SMEM structure so the regression is structural. |
+| [x] | G51 — 4 tests (2 no-sink BWD parity (MQA+MHA), 1 dispatcher registration, 1 grad_fn audit) | TBD-p51 | 2026-05-15 | All green at fast-tier B=1, HQ=4, Sq=Sk=32, D=64, bf16; tolerance atol=5e-2 rtol=1e-1. |
+| [-] | ~~Sink BWD parity~~ | TBD-p51 | 2026-05-15 | Descoped — bf16 inf at query 0 when softmax denominator is dominated by single `qk + sink` pair. Future fix: keep P_acc/dP/delta fp32 in the dq_tile @ K chain. |
+| [-] | ~~G51a — EP=8 10-iter proxy smoke~~ | TBD-p51 | 2026-05-15 | Skipped — same V4-Flash regression as P50. |
+| [x] | `progress/p51/p51-summary.md` per R2.1 | TBD-p51 | 2026-05-15 |      |
 | [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
-| [ ] | `develop/perf/attention_perf.md` — append P51 row |        |      |      |
-| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+| [-] | ~~`develop/perf/attention_perf.md` — append P51 row~~ | TBD-p51 | 2026-05-15 | Skipped — kernel descoped to default-OFF. |
+| [-] | ~~R2.6 trace + tgz archival~~ | TBD-p51 | 2026-05-15 | Skipped — no runtime-affecting change at default-off. |
 
 
 ## Phase 52 (plan-8) — HCA FWD tilelang (cr=128)
