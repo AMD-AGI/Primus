@@ -1,14 +1,24 @@
 # 01 — Plan-6 Roadmap
 
-> Plan-6 is **strictly bounded** to eight phases that take the
-> V4-Flash single-node EP=8 training step from its plan-5 P32 final
-> state (`603 ms / iter, 1134 TFLOP/s/GPU`, `14.64×` over P28) to
-> the next bottleneck the trace exposes — the elemwise / layout-
-> transform tail dominated by `_stack_grouped_linear_weight`,
-> `apply_interleaved_partial_rope`, HyperConnection / Sinkhorn
-> glue, Indexer scoring, and V4 router post-logits. No additional
-> attention kernel work, no new model-arch change, no FP8 / FP4
-> / convergence run gets added here — those belong to future plans.
+> Plan-6 takes the V4-Flash single-node EP=8 training step from its
+> plan-5 P32 final state (`603 ms / iter, 1134 TFLOP/s/GPU`, `14.64×`
+> over P28) to the next bottleneck the trace exposes — the elemwise /
+> layout-transform tail dominated by `_stack_grouped_linear_weight`,
+> `apply_interleaved_partial_rope`, HyperConnection / Sinkhorn glue,
+> Indexer scoring, and V4 router post-logits. No additional attention
+> kernel work, no new model-arch change, no FP8 / FP4 / convergence
+> run gets added here — those belong to future plans.
+>
+> **Plan-6 was interim-closed at P40 (commit `b08975bc`)** with
+> the four default-on Triton fusions (P34/P35/P36/P37) and two
+> opt-in descoped paths (P38/P39).  Iter time 8837 ms → 510.6 ms
+> (`17.31×` over P28).  **P41 reopens plan-6** to re-target the
+> Indexer scoring chain — the P38 design fused `einsum + relu +
+> mul + sum + mask` but lost to cuBLAS on the matmul half; P41
+> keeps `einsum` eager and fuses **only** the post-matmul tail
+> (`relu + mul + sum + causal mask`).  P41 also seeds a trace-
+> driven candidate inventory for plan-7+ from the P40 trace's
+> remaining elementwise / reduce residuals.
 
 ## Per-phase deliverable convention
 
@@ -35,7 +45,11 @@ derived from that wall-clock.
 | **P37** | **HyperConnection elemwise Triton fusion** | core | (a) New `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/hyper_connection_glue.py` with three sub-kernels and their BWDs: (i) `_hc_post_linear_glue_kernel` — fuses `logits.slice(..K) * scale[0] + base[..K]` (pre), `2.0 * sigmoid(logits.slice(K..2K) * scale[1] + base[K..2K])` (post), `softmax(logits.slice(2K..) * scale[2] + base[2K..])` (comb-pre-sinkhorn) in one program over `[..., (2+K)*K]`; (ii) `_hc_collapse_kernel` — `(pre.unsqueeze(-1) * x).sum(-2)`; (iii) `_hc_expand_outer_kernel` — `post.unsqueeze(-1) * out.unsqueeze(-2)` (the `+ matmul(comb, x)` part stays as a `torch.matmul` call). (b) `HyperMixer.compute_weights` / `collapse` / `expand` and `HyperHead.forward` route through the new Triton path when `PRIMUS_HC_TRITON=1` (default `1`). (c) microbench `progress/p37/bench_hyper_connection.py` covers `[B=1, S=4096, K=4, D=4096]` for each sub-kernel. (d) EP8 proxy A/B trace + post-phase profile report. | (1) G40 (FWD output parity vs eager within bf16 `atol=1e-3 rtol=1e-3` for each sub-kernel + composed end-to-end mixer / head parity + BWD `gradcheck` fp32) passes at fast + release tiers. (2) Plan-5 G32 (P29 compiled Sinkhorn boundary) + plan-4 ratchet stays green. (3) EP8 proxy iter time drops by ≥ 15 ms vs P36. | not started |
 | **P38** | **`Indexer.forward` scoring Triton FWD/BWD** | core | (a) New `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/indexer_score.py` with `_indexer_score_fwd_kernel` / `_indexer_score_bwd_kernel` + `torch.autograd.Function`. FWD fuses `einsum(q_i [B, S, H, Hd], k_icomp [B, P, Hd]) → relu → mul(w_i.unsqueeze(-1)) → sum(-2) → + causal_mask` into one kernel; causal mask materialises inline via `tl.where(s_end <= t, 0, -inf)` per tile (no host-side mask tensor). BWD recomputes `relu` mask, accumulates `dq_i / dk_icomp / dw_i`. (b) `Indexer.forward` routes through the Triton path when `PRIMUS_INDEXER_TRITON=1` (default `1`); `topk` and the `where(isneginf, -1, ...) + pad cat` tail stay on host-side. (c) microbench `progress/p38/bench_indexer.py` covers `[B=1, S=4096, P=1024, H=8, Hd=128]`. (d) EP8 proxy A/B trace + post-phase profile report. | (1) G41 (FWD scores parity vs eager within bf16 `atol=5e-3 rtol=5e-3`, `topk_idxs` bit-equal at fast + release tiers + BWD `gradcheck` fp32) passes. (2) Plan-4 ratchet stays green. (3) EP8 proxy iter time drops by ≥ 10 ms vs P37 (Indexer runs only on `compress_ratio == 4` layers = 3 of 8 in the proxy). | not started |
 | **P39** | **V4 Router post-logits Triton FWD/BWD (hash + topk shared)** | core | (a) New `primus/backends/megatron/core/transformer/moe/_triton/v4_router_post.py` with `_v4_router_post_fwd_kernel` / `_v4_router_post_bwd_kernel` + `torch.autograd.Function`. FWD takes `logits [N, E]` (+ optional `expert_bias [E]` + optional `topk_indices [N, K]` for hash) and writes (i) `probs [N, E]` sparse (mostly 0) and (ii) `routing_map [N, E] bool` in one program. Internally: `score_fn (softmax / sigmoid / sqrtsoftplus) → [add bias →] topk-K (tournament in registers for K ≤ 8) → gather → denom → scale → sparse scatter`. BWD reverses the chain (score_fn VJP + scatter back to `dlogits`). (b) Both `DeepseekV4LearnedRouter._compute_route` and `DeepseekV4HashRouter.forward` route through the new Triton path when `PRIMUS_V4_ROUTER_TRITON=1` (default `1`); hash router pre-computes `tid2eid[token_ids]` host-side and passes the K-indices as a kwarg so the same kernel handles both. (c) microbench `progress/p39/bench_router_post.py` covers `[N=4096, E=256, K=6]` × 3 score functions × {with / without bias}. (d) EP8 proxy A/B trace + post-phase profile report. | (1) G42 (FWD `probs / routing_map` bit-equal vs eager across 3 score functions × {with / without bias} × {hash / topk} + BWD `gradcheck` fp32) passes at fast + release tiers. (2) Plan-2 P14 router tests stay green. (3) EP8 proxy iter time drops by ≥ 5 ms vs P38. | not started |
-| **P40** | **Plan-6 close-out — `elem_fusion.md` + cumulative perf table** | enablement | (a) New `develop/perf/elem_fusion.md` — one row per shipped fusion (P34..P39); cell format `<ms> ms \| <tflops or throughput>` per R2.5; columns: Phase / Target op / Eager baseline / Triton-fused / Speedup / Source bench / EP8 proxy delta. (b) `develop/perf/proxy_ep8.md` gains one row per phase (`P33 corrected TFLOP/s`, `P34`, ..., `P40 final`); the `P40 final` row records the cumulative speedup vs plan-5 P32 final. (c) `progress/p33/p33-summary.md` ... `p40/p40-summary.md` — one R2.1 eight-section summary per phase. (d) `run_deepseek_v4_flash_proxy.sh` surfaces all six new env knobs (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON`, `PRIMUS_ROPE_TRITON`, `PRIMUS_SINKHORN_TRITON`, `PRIMUS_HC_TRITON`, `PRIMUS_INDEXER_TRITON`, `PRIMUS_V4_ROUTER_TRITON`) under `${VAR:-1}`-guard, with header notes per the plan-5 P32 final precedent. (e) Status pinning per R2.4 — every `[x]` row in Phase 33..40 gets the commit SHA + date. | (1) `elem_fusion.md` exists with one row per shipped fusion. (2) `proxy_ep8.md` `P40 final` row pinned to the final EP8 proxy steady-iter number. (3) Every Phase 33..40 status row in `progress/status.md` is `[x]` with a commit SHA. (4) Every `p3X-summary.md` follows R2.1. | not started |
+| **P40** | **Plan-6 close-out — `elem_fusion.md` + cumulative perf table** | enablement | (a) New `develop/perf/elem_fusion.md` — one row per shipped fusion (P34..P39); cell format `<ms> ms \| <tflops or throughput>` per R2.5; columns: Phase / Target op / Eager baseline / Triton-fused / Speedup / Source bench / EP8 proxy delta. (b) `develop/perf/proxy_ep8.md` gains one row per phase (`P33 corrected TFLOP/s`, `P34`, ..., `P40 final`); the `P40 final` row records the cumulative speedup vs plan-5 P32 final. (c) `progress/p33/p33-summary.md` ... `p40/p40-summary.md` — one R2.1 eight-section summary per phase. (d) `run_deepseek_v4_flash_proxy.sh` surfaces all six new env knobs (`PRIMUS_STACK_GROUPED_WEIGHT_TRITON`, `PRIMUS_ROPE_TRITON`, `PRIMUS_SINKHORN_TRITON`, `PRIMUS_HC_TRITON`, `PRIMUS_INDEXER_TRITON`, `PRIMUS_V4_ROUTER_TRITON`) under `${VAR:-1}`-guard, with header notes per the plan-5 P32 final precedent. (e) Status pinning per R2.4 — every `[x]` row in Phase 33..40 gets the commit SHA + date. | (1) `elem_fusion.md` exists with one row per shipped fusion. (2) `proxy_ep8.md` `P40 final` row pinned to the final EP8 proxy steady-iter number. (3) Every Phase 33..40 status row in `progress/status.md` is `[x]` with a commit SHA. (4) Every `p3X-summary.md` follows R2.1. | done (2026-05-15, `b08975bc`) |
+| **P41** | **`Indexer.forward` post-einsum tail Triton fusion + plan-7 candidate inventory** | core + planning | (a) New `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/indexer_score_post.py` with `_indexer_score_post_fwd_kernel`, `_indexer_score_post_bwd_kernel`, `IndexerScorePostFn`.  FWD takes `dot [B, S, H, P]` (pre-`relu`, the output of `torch.einsum("bshd,bpd->bshp", q_i, k_icomp)`) + `w_i [B, S, H]`; emits `scores [B, S, P]` after `relu → mul(w) → sum(H) → + causal_mask`; mask materialises inline via `tl.where((p+1)*compress_ratio - 1 <= s, acc, -inf)`.  BWD takes `d_scores [B, S, P]` + saved `dot` (no new state vs P38's recomputed mask trick); emits `d_dot [B, S, H, P]` (zero where `dot ≤ 0`) and `d_w_i [B, S, H]` (`sum_p(d_scores * relu(dot))`).  The einsum + einsum backward stay eager — cuBLAS / hipBLASLt wins per the P38 descope analysis. (b) `Indexer.forward` re-routing: `PRIMUS_INDEXER_TRITON` is **re-purposed** to mean "post-einsum tail fusion" with default `"1"`; legacy P38 full-fuse path moves behind `PRIMUS_INDEXER_TRITON_FULL` (default `"0"`, kept in tree for small-shape paths).  Eager body stays as the `"0"` fallback. (c) microbench `progress/p41/bench_indexer_tail.py` covers V4-Flash and a smoke shape; reports FWD + BWD `<ms> ms \| <effective TFLOP/s or GB/s>`.  Bench compares: eager tail / Triton tail / legacy P38 full-fuse.  (d) EP8 proxy A/B trace + post-phase profile report.  (e) New `progress/p41/p41-candidates.md` — trace-driven inventory of additional fusion targets surfaced by the P40 trace's elementwise / reduce buckets; each row pins (i) the kernel name + total ms + launch count from the P40 trace, (ii) the upstream Python source line, (iii) the estimated savings, (iv) the proposed phase id (P42, P43, plan-7, etc.). | (1) G43 (FWD `scores` parity vs eager extracted tail within bf16 `atol=5e-3 rtol=5e-3` + post-`topk` `topk_idxs` bit-equal + BWD `gradcheck` fp32 fast tier + release-tier shape `pytest.mark.slow`) passes. (2) Plan-4/5/6 ratchet stays green. (3) Microbench wins: FWD ≥ 1.5x eager tail, BWD ≥ 1.5x eager tail (the einsum stays eager so the matmul half does not compete with cuBLAS).  (4) EP8 proxy iter time drops by ≥ 2 ms vs P40 final.  Default flips to `"1"` only if the proxy A/B confirms a positive delta (R9.1 / plan-5 P32 RoPE precedent). | not started |
+| **P42** | **Permute + `.contiguous()` absorption into V4 attention / CSA FWD inputs** | core | (a) Update `_v4_attention_fwd_kernel`, `_v4_csa_attention_pool_sparse_fwd_kernel`, and their BWD partners so the layout-transform that currently materialises `gathered_k_v` / `q.contiguous()` / `kv.contiguous()` is folded into the per-program tile-load (read directly from the strided / permuted source).  No new Python kernel; modify the existing plan-5 kernels to accept the pre-permute layout + a "permute_pattern: tl.constexpr" enum so each call site picks the right read layout. (b) Strip the matching `.contiguous()` / `.permute(...).contiguous()` calls from `DeepseekV4Attention.forward` (cr=0 / cr=128 path), `csa_attention.py`, and `compressor.py` (gathered-KV materialisation). (c) Gated behind `PRIMUS_V4_ATTN_FUSED_PERMUTE` (default `"1"`).  Eager fallback keeps the explicit `.contiguous()` chain. (d) microbench `progress/p42/bench_v4_attention_strided_input.py` measures FWD/BWD wall-clock at V4-Flash widths (`[B=1, S=4096, H=64, head_dim=512]` dense + CSA sparse top-K) with strided vs contiguous inputs. (e) EP8 proxy A/B trace + post-phase profile report. | (1) G44 (FWD parity vs eager `.contiguous() + kernel` within bf16 `atol=1e-3 rtol=1e-3` + BWD `gradcheck` fp32 fast tier + release-tier slow). (2) Plan-4/5/6 ratchet stays green. (3) Trace `vec_elem<bf16_copy>` + `elem_unroll<copy>` buckets drop by ≥ 20 ms / iter combined. (4) EP8 proxy iter time drops by ≥ 10 ms vs P41 final.  Default flips to `"1"` only on proxy A/B win. | not started |
+| **P43** | **V4 router post-logits + Compressor APE elementwise Triton fusion** | core | (a) Re-attempt of P39 with measurement methodology hardened: 50-iter A/B, 3 proxy-run aggregation, per-`score_fn` specialised tile sizes.  Re-use `_v4_router_post_fwd_kernel` / `_v4_router_post_bwd_kernel` from P39, add a "fast path" tile shape autotune table for `score_fn=sqrtsoftplus` (V4 production).  Gated behind `PRIMUS_V4_ROUTER_TRITON` (carry over from P39, default `"1"` after this phase if A/B wins). (b) New `primus/backends/megatron/core/transformer/_triton/compressor_ape.py` with `_compressor_ape_fwd_kernel` + BWD: fuses `x.reshape(B, P, ratio, D) * ape[:ratio, :].unsqueeze(0).unsqueeze(0) → sum(2) → + bias` chain in `Compressor.forward`.  Gated behind `PRIMUS_COMPRESSOR_APE_TRITON=1` (default `"1"` after A/B). (c) microbench `progress/p43/bench_router_post_v2.py` (50-iter, 3-run aggregate) + `progress/p43/bench_compressor_ape.py` (V4-Flash `[B=1, S=4096, ratio=4, D=4096]`). (d) EP8 proxy A/B trace + post-phase profile report. | (1) G45 (Compressor APE FWD parity vs eager `reshape + mul + sum + add` within bf16 `atol=1e-3 rtol=1e-3` + BWD `gradcheck` fp32). (2) G42 (P39 router parity) carries over green at all 3 score functions × {bias / no-bias} × {hash / topk}. (3) Microbench: router post 50-iter mean ≥ 1.5× eager on `sqrtsoftplus`; Compressor APE ≥ 2× eager. (4) EP8 proxy iter time drops by ≥ 3 ms / iter vs P42 final.  Defaults flip only on combined A/B win. | not started |
+| **P44** | **V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel** | core | (a) Update `_v4_attention_fwd_kernel` to (i) accept an optional `attn_sink [H]` parameter and (ii) apply the per-head scalar mul + sink add in the FWD epilogue (after the softmax + V matmul) instead of as a separate `vec_elem<mul_bf16>` / `vec_elem<add_bf16>` chain.  BWD picks up `d_attn_sink` in the existing BWD kernel via `tl.atomic_add` over the head axis.  No new Python kernel — extend P25 / P32 plan-4 kernels. (b) Strip the `out * scale + sinks` chain from `deepseek_v4_attention.py::_attention_forward_via_triton` and `attn_sink.py::AttentionSinkApplier.forward`. (c) Gated behind `PRIMUS_V4_ATTN_FUSED_SINK=1` (default `"1"`). (d) microbench `progress/p44/bench_v4_attention_sink_epilogue.py` at V4-Flash widths. (e) EP8 proxy A/B trace + post-phase profile report. | (1) G46 (FWD parity vs eager epilogue within bf16 `atol=1e-3 rtol=1e-3` + BWD `gradcheck` fp32 + release-tier slow). (2) Plan-4/5/6 ratchet stays green. (3) Trace `vec_elem<mul_bf16>` AUnary bucket drops by ≥ 4 ms (from 5.71 ms × 12 launches). (4) EP8 proxy iter time drops by ≥ 2 ms / iter vs P43 final.  Default flips to `"1"` only on A/B win. | not started |
 
 ## Dependency Graph
 
@@ -46,9 +60,10 @@ P34[P34 stack_grouped_weight Triton]
 P35[P35 RoPE Triton]
 P36[P36 Sinkhorn Triton]
 P37[P37 HyperConnection elemwise Triton]
-P38[P38 Indexer scoring Triton]
-P39[P39 Router post-logits Triton]
-P40[P40 close-out]
+P38[P38 Indexer scoring full-fuse - descoped]
+P39[P39 Router post-logits Triton - descoped]
+P40[P40 interim close-out]
+P41[P41 Indexer post-einsum tail + plan-7 inventory]
 
 P33 --> P34
 P34 --> P35
@@ -57,6 +72,10 @@ P36 --> P37
 P37 --> P38
 P38 --> P39
 P39 --> P40
+P40 --> P41
+P41 --> P42
+P42 --> P43
+P43 --> P44
 ```
 
 P33 ships first because every downstream phase's `proxy_ep8.md`
@@ -68,8 +87,15 @@ time) — getting it right early gives the biggest wall-clock
 delta and makes downstream A/B traces easier to read. P35..P39
 are linearly chained for per-phase trace clarity (each phase's
 A/B trace is against the immediately preceding phase's final
-state, so the per-phase delta is unambiguous). P40 close-out
-gates on all preceding phases being green.
+state, so the per-phase delta is unambiguous). P40 (interim)
+close-out gates on all preceding phases being green.  **P41
+reopens the plan after the close-out** to revisit the P38
+descope: the post-P40 trace shows the Indexer scoring chain is
+still a per-CSA-layer residual at ~2-3 ms / iter; P41 keeps the
+einsum eager (cuBLAS wins) and fuses only the post-einsum
+elementwise + reduce + causal-mask tail.  P41 also doubles as
+the kick-off for plan-7 by inventorying further elementwise /
+reduce fusion candidates from the P40 trace.
 
 ## Milestones
 
@@ -80,7 +106,9 @@ gates on all preceding phases being green.
 | **M2: Grouped-MLP stack Triton-fused** | `_stack_grouped_linear_weight` runs via Triton FWD/BWD; `hipMemcpyWithStream` trace bucket drops by ≥ 200 ms; EP8 iter time ≤ 450 ms | P34 | not started |
 | **M3: RoPE Triton-fused** | `apply_interleaved_partial_rope` runs via Triton FWD/BWD; `CatArrayBatchedCopy_contig` trace bucket ≈ 0 | P35 | not started |
 | **M4: Sinkhorn / HyperConnection / Indexer / Router fused** | Each of P36..P39 lands behind its own default-on env flag; per-phase EP8 proxy A/B trace shows a positive delta | P36..P39 | not started |
-| **M5: Plan-6 close-out** | `elem_fusion.md` finalised with one row per fusion; `proxy_ep8.md` `P40 final` row pinned; every p3X-summary.md follows R2.1 | P40 | not started |
+| **M5: Plan-6 interim close-out** | `elem_fusion.md` finalised with one row per fusion; `proxy_ep8.md` `P40 final` row pinned; every p3X-summary.md follows R2.1 | P40 | done (2026-05-15, `b08975bc`) |
+| **M6: Indexer tail re-attempt + plan-7 inventory** | Indexer post-einsum tail Triton FWD/BWD lands with `PRIMUS_INDEXER_TRITON` re-purposed (default ON once proxy A/B confirms); `progress/p41/p41-candidates.md` enumerates plan-7+ fusion candidates from the P40 trace | P41 | not started |
+| **M7: In-model elemwise residual eliminated** | `.contiguous()` / permute absorbed into V4 attention input loads; V4 router post-logits + Compressor APE elemwise fused; V4 attention FWD epilogue (`out * scale + sinks`) absorbed | P42 + P43 + P44 | not started |
 
 End-of-plan-6 EP8 proxy steady-iter target: **≤ 310 ms / iter,
 ≥ 2200 TFLOP/s/GPU (post-P33 correction)**, ~`2×` over plan-5 P32 final
@@ -89,7 +117,12 @@ not a contract**; any phase that regresses end-to-end iter time
 ships with its env default flipped to `0` and the regression goes
 in the phase's "failed / negative probes" section (precedent: plan-5
 P32 split-BWD / segreduce defaults default-OFF then default-ON
-after the RoPE bug was fixed).
+after the RoPE bug was fixed).  The interim close-out at P40 landed
+at **510.6 ms / 524.9 TFLOP/s/GPU (mean iters 8-15)** — short of
+the 310 ms target but at the limit of what elementwise fusion can
+buy.  P41 + plan-7 will need to attack the Adam optimizer step
+(40% of step) and the V4 attention BWD shared-Q/K/V-load
+opportunity to close the remaining gap.
 
 ## Top Risks
 

@@ -786,6 +786,175 @@
 | [x] | Plan-6 close-out commit `docs(deepseek-v4)[plan-6][P40]: plan-6 close-out — elem_fusion.md + cumulative proxy_ep8 row + status pinning` | b08975bc | 2026-05-15 | Plan-6 close-out shipped. |
 
 
+## Phase 41 (plan-6) — `Indexer.forward` post-einsum tail Triton fusion + plan-7 candidate inventory
+
+> Plan-6 P41 (re-opens plan-6 after the P40 interim close).
+> See `../plan-6/02-phase-details.md#phase-41` for design.
+> User direction (2026-05-15): keep `torch.einsum("bshd,bpd->bshp", q_i, k_icomp)` eager (cuBLAS / hipBLASLt wins at V4-Flash widths per P38 descope analysis); fuse **only** the post-einsum tail `relu → mul(w_i) → sum(H) → + causal_mask` into one Triton FWD + one Triton BWD kernel.  `PRIMUS_INDEXER_TRITON` is re-purposed to mean "post-einsum tail" (default `"1"` if proxy A/B wins, else `"0"`); legacy P38 full-fuse path moves behind `PRIMUS_INDEXER_TRITON_FULL` (default `"0"`).  Also: seed plan-7 from the P40 trace's remaining elementwise / reduce residuals — `progress/p41/p41-candidates.md` enumerates the top-30 unfused buckets with per-bucket trace evidence + proposed phase id.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Task-list refinement — re-measure per-CSA-layer Indexer scoring residual cost on the post-P40 trace; if < 1 ms / iter, descope the kernel and ship only the candidates inventory |        |      |      |
+| [ ] | `primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/indexer_score_post.py` — new file with `_indexer_score_post_fwd_kernel`, `_indexer_score_post_bwd_kernel`, `IndexerScorePostFn` |        |      | FWD takes `dot [B, S, H, P]` + `w_i [B, S, H]`, emits `scores [B, S, P]`; BWD takes `d_scores` + saved `dot` + `w_i`, emits `d_dot` + `d_w_i`. Causal mask materialises inline via `tl.where`. |
+| [ ] | `Indexer.forward` re-routing: re-purpose `PRIMUS_INDEXER_TRITON` (default `"1"` after proxy A/B); move legacy P38 full-fuse behind `PRIMUS_INDEXER_TRITON_FULL` |        |      | Eager einsum stays as the bf16 cuBLAS / hipBLASLt path; only the post-einsum tail routes through Triton. Eager body remains the `"0"` fallback. |
+| [ ] | Microbench `progress/p41/bench_indexer_tail.py` — V4-Flash + smoke shapes; three paths compared (eager tail / P41 Triton tail / legacy P38 full-fuse) |        |      | `iters=20, warmup=5, n_input_copies=4, l2_flush_mb=512`. Targets ≥ 1.5× FWD + ≥ 1.5× BWD on V4-Flash. |
+| [ ] | EP=8 proxy A/B trace — `progress/p41/run_baseline_trace_ep8_p41.sh` + `develop/profile/profile-after-p41-ep8-<YYYYMMDD>.{md,html}` |        |      | A = `PRIMUS_INDEXER_TRITON=0` (P40 production), B = `PRIMUS_INDEXER_TRITON=1` (P41 tail-only). Render with the P28 baseline-report tooling. |
+| [ ] | G43 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p41_indexer_tail_triton.py` |        |      | FWD parity vs eager tail (`atol=5e-3 rtol=5e-3` bf16); post-`topk` `topk_idxs` bit-equal; BWD `gradcheck` fp32 fast tier; release-tier `pytest.mark.slow`; parametrise `compress_ratio ∈ {1, 4, 16}`. |
+| [ ] | G43a — 10-iter EP=8 proxy smoke + plan-4/5/6 ratchet stays green; banned-warning grep returns 0; `lm_loss` within 5e-2 of post-P40 baseline |        |      |      |
+| [ ] | G43b — chrome-trace iter 6 → 7 with `PRIMUS_INDEXER_TRITON=1`; Indexer scoring elementwise chain ≈ 0; iter time drops ≥ 2 ms vs P40 final |        |      | If proxy A/B regresses, `PRIMUS_INDEXER_TRITON` default stays `"0"` and `p41-summary.md` documents the regression. |
+| [ ] | `progress/p41/p41-candidates.md` — trace-driven inventory of further fusion targets (P42 / P43 / P44 / plan-7 P0 candidates) | TBD-p41 | 2026-05-15 | Drafted from post-P40 trace `1778800838095839437`; covers in-model (~30 ms fusable) + optimizer-step (~165 ms fusable) buckets with per-bucket trace evidence + estimated savings + proposed phase id. |
+| [ ] | `progress/p41/p41-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 — commit SHA + date filled in once feature commit lands |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P41 row (cell format per R2.5: `<ms> ms \| <effective TFLOP/s or GB/s>`) |        |      | Three columns: eager tail / P41 Triton tail / legacy P38 full-fuse. |
+| [ ] | `develop/perf/proxy_ep8.md` — append P41 row pinned to the EP=8 proxy steady-iter number |        |      |      |
+| [ ] | `run_deepseek_v4_flash_proxy.sh` — header note refresh + clarify the re-purposed `PRIMUS_INDEXER_TRITON` semantics |        |      | Add `PRIMUS_INDEXER_TRITON_FULL` knob with `:-0` default + comment explaining the P38 / P41 split. |
+
+
+## Phase 42 (plan-6) — Permute + `.contiguous()` absorption into V4 attention / CSA FWD inputs
+
+> Plan-6 P42.  See `../plan-6/02-phase-details.md#phase-42` for design.  Folds the explicit `.contiguous()` chain that materialises `gathered_k_v` / `q.contiguous()` / `kv.contiguous()` into the existing plan-5 V4 attention FWD kernels; no new Python kernel, just extend the existing kernels with strided-load helpers.  Gated behind `PRIMUS_V4_ATTN_FUSED_PERMUTE=1` (default `"1"` after proxy A/B confirms).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Strided-input load helpers in `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, `_triton/v4_csa_attention_pool_sparse.py` |        |      | Add `PERMUTE_PATTERN: tl.constexpr` enum + per-pattern tile-load helpers. |
+| [ ] | Python call-site cleanup: drop `.contiguous()` / `.permute(...).contiguous()` from `DeepseekV4Attention._attention_forward_via_triton`, `csa_attention.py`, `compressor.py` |        |      | Each call site retains the eager fallback under `PRIMUS_V4_ATTN_FUSED_PERMUTE=0`. |
+| [ ] | New env `PRIMUS_V4_ATTN_FUSED_PERMUTE` (default `"1"` after A/B) |        |      |      |
+| [ ] | Microbench `progress/p42/bench_v4_attention_strided_input.py` — V4-Flash FWD/BWD with strided vs contiguous inputs |        |      |      |
+| [ ] | G44 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p42_strided_v4_attention.py` |        |      | FWD parity vs eager `.contiguous() + kernel` (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck`; release-tier `pytest.mark.slow`; parametrise `permute_pattern`. |
+| [ ] | G44a — 10-iter EP=8 proxy smoke; ratchet stays green; banned-warning grep returns 0 |        |      |      |
+| [ ] | G44b — chrome-trace iter 6 → 7 with `PRIMUS_V4_ATTN_FUSED_PERMUTE=1`; `vec_elem<bf16_copy>` + `elem_unroll<copy>` drop ≥ 20 ms; iter time drops ≥ 10 ms vs P41 final |        |      |      |
+| [ ] | `progress/p42/p42-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P42 row |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P42 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 43 (plan-6) — V4 router post-logits + Compressor APE elementwise Triton fusion
+
+> Plan-6 P43.  See `../plan-6/02-phase-details.md#phase-43` for design.  Re-attempts the P39 router post-logits fusion with 50-iter / 3-run aggregate methodology to defeat NCCL noise + introduces a new Compressor APE Triton kernel (`x.reshape(B, P, ratio, D) * ape[:ratio, :] → sum(2) → + bias`).  Two new env knobs: `PRIMUS_V4_ROUTER_TRITON` (default `"1"` after A/B) and `PRIMUS_COMPRESSOR_APE_TRITON` (default `"1"` after A/B).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Re-attempt P39 router post-logits: add per-`score_fn` tile-shape autotune table; 50-iter / 3-run aggregate microbench |        |      | Re-uses existing `_v4_router_post_fwd_kernel` / `_v4_router_post_bwd_kernel` from P39. |
+| [ ] | New Compressor APE Triton kernel — `primus/backends/megatron/core/transformer/_triton/compressor_ape.py` |        |      | FWD: `reshape + mul(ape) + sum(ratio) + add(bias)` in one kernel; BWD: `d_x` broadcast, `d_ape` + `d_bias` via cross-block `tl.atomic_add`. |
+| [ ] | `Compressor.forward` routing gates on `PRIMUS_COMPRESSOR_APE_TRITON=1` |        |      |      |
+| [ ] | Microbench `progress/p43/bench_router_post_v2.py` (50-iter, 3-run aggregate) + `progress/p43/bench_compressor_ape.py` |        |      |      |
+| [ ] | G45 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p43_compressor_ape_triton.py` |        |      | FWD parity (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck`; release-tier slow.  G42 (P39) carries green. |
+| [ ] | G45a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
+| [ ] | G45b — chrome-trace + 3-run aggregate proxy A/B; combined iter time drops ≥ 3 ms vs P42 final |        |      | If 3-run mean is within ±1 ms band, router default stays `"0"` (descope precedent). |
+| [ ] | `progress/p43/p43-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P43 row(s) |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P43 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 44 (plan-6) — V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel
+
+> Plan-6 P44.  See `../plan-6/02-phase-details.md#phase-44` for design.  Absorbs the per-head `out * scale + sinks` chain into `_v4_attention_fwd_kernel`'s epilogue.  Eliminates two separate `vec_elem<*>` launches per V4 attention call.  Gated behind `PRIMUS_V4_ATTN_FUSED_SINK=1` (default `"1"` after A/B).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | Extend `_v4_attention_fwd_kernel` with optional `attn_sink [H]` argument; apply `out = out * scale + sinks[h]` in FWD epilogue |        |      |      |
+| [ ] | Extend `_v4_attention_bwd_kernel` with `d_attn_sink` via `tl.atomic_add` over the head axis |        |      |      |
+| [ ] | Python call-site cleanup: strip `out * scale + sinks` chain from `_attention_forward_via_triton` + `AttentionSinkApplier.forward` |        |      |      |
+| [ ] | New env `PRIMUS_V4_ATTN_FUSED_SINK` (default `"1"` after A/B) |        |      |      |
+| [ ] | Microbench `progress/p44/bench_v4_attention_sink_epilogue.py` |        |      |      |
+| [ ] | G46 — `tests/unit_tests/megatron/transformer/deepseek_v4/test_p44_attn_sink_epilogue.py` |        |      | FWD parity vs eager `kernel + out * scale + sinks` (bf16 `atol=1e-3 rtol=1e-3`); BWD `gradcheck` covers `d_attn_sink`; release-tier slow.  Parametrise `attn_sink ∈ {present, absent}`. |
+| [ ] | G46a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
+| [ ] | G46b — chrome-trace iter 6 → 7 with `PRIMUS_V4_ATTN_FUSED_SINK=1`; `vec_elem<mul_bf16>` AUnary drops ≥ 4 ms; iter time drops ≥ 2 ms vs P43 final |        |      |      |
+| [ ] | `progress/p44/p44-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P44 row |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P44 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 45 (plan-7) — Custom Triton fused Adam (absorb ε-add into master functor)
+
+> Plan-7 P45.  See `../plan-7/02-phase-details.md#phase-45` for design.  Replaces the TE / Apex `multi_tensor_adam_master_param_remainder` + the separate BF16 ε-add chain with a single Triton kernel per multi-tensor group that does the full Adam step in registers.  Gated behind `PRIMUS_FUSED_ADAM_TRITON=1` (default `"0"` initially; flips to `"1"` only after the proxy A/B confirms a positive delta).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `primus/backends/megatron/extensions/_triton/fused_adam.py` with `_fused_adam_master_kernel` + `FusedAdamMasterParamRemainder` callable |        |      | Full Adam step in registers; bf16 cast + remainder accumulation fused at end. |
+| [ ] | New `primus/backends/megatron/patches/turbo_adam_patches.py` monkey-patch wrapping TE / Apex Adam call site |        |      | Probes for both TE + Apex variants; falls back to upstream on probe failure. |
+| [ ] | New env `PRIMUS_FUSED_ADAM_TRITON` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
+| [ ] | Microbench `progress/p45/bench_fused_adam.py` |        |      |      |
+| [ ] | G47 — `tests/unit_tests/megatron/extensions/test_p45_fused_adam_triton.py` |        |      | Bit-equal fp32; ULP ≤ 1 bf16 master; 10-step rollup ≤ 1e-3; release-tier 100-step loss curve vs upstream. |
+| [ ] | G47a — 10-iter EP=8 proxy smoke; ratchet stays green; banned-warning grep returns 0 (incl. new "Adam fused fallback to upstream" entry) |        |      |      |
+| [ ] | G47b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_ADAM_TRITON=1`; `vec_elem<add_bf16>` (Adam ε-add) + `multi_tensor<adam_master>` drop ≥ 150 ms; iter time drops ≥ 100 ms vs P44 final |        |      |      |
+| [ ] | `progress/p45/p45-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P45 row |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P45 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 46 (plan-7) — Fused grad-scale Triton kernel
+
+> Plan-7 P46.  See `../plan-7/02-phase-details.md#phase-46` for design.  Absorbs the per-param `multi_tensor<scale>` calls into a single Triton kernel.  Gated behind `PRIMUS_FUSED_GRAD_SCALE=1` (default `"0"` initially; flips to `"1"` after A/B).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `primus/backends/megatron/extensions/_triton/fused_grad_scale.py` with `_fused_grad_scale_kernel` + `FusedGradScale` callable |        |      |      |
+| [ ] | Extend `turbo_adam_patches.py` with `multi_tensor_scale` dispatcher |        |      |      |
+| [ ] | New env `PRIMUS_FUSED_GRAD_SCALE` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
+| [ ] | Microbench `progress/p46/bench_fused_grad_scale.py` |        |      |      |
+| [ ] | G48 — `tests/unit_tests/megatron/extensions/test_p46_fused_grad_scale.py` |        |      | Bit-equal vs upstream `multi_tensor_scale` at fast tier fp32 + bf16. |
+| [ ] | G48a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
+| [ ] | G48b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_GRAD_SCALE=1`; `multi_tensor<scale>` drops to ≈ 0; iter time drops ≥ 3 ms vs P45 final |        |      |      |
+| [ ] | `progress/p46/p46-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P46 row |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P46 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 47 (plan-7) — Fused grad-norm clip Triton kernel
+
+> Plan-7 P47.  See `../plan-7/02-phase-details.md#phase-47` for design.  Fuses the L2-norm reduce + max-with-existing-norm + clip-scale derivation + apply-clip chain into a 3-kernel pipeline.  Gated behind `PRIMUS_FUSED_GRAD_NORM_CLIP=1` (default `"0"` initially; flips to `"1"` after A/B).
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | New `primus/backends/megatron/extensions/_triton/fused_grad_norm_clip.py` with 3-kernel pipeline (`partial`, `global`, `apply`) |        |      |      |
+| [ ] | Extend `turbo_adam_patches.py` with `clip_grad_norm` dispatcher |        |      |      |
+| [ ] | New env `PRIMUS_FUSED_GRAD_NORM_CLIP` (default `"0"`, flips to `"1"` after A/B) |        |      |      |
+| [ ] | Microbench `progress/p47/bench_fused_grad_norm_clip.py` |        |      |      |
+| [ ] | G49 — `tests/unit_tests/megatron/extensions/test_p47_fused_grad_norm_clip.py` |        |      | Bit-equal vs upstream `clip_grad_norm_fp32`; reduction order matches upstream. |
+| [ ] | G49a — 10-iter EP=8 proxy smoke; ratchet stays green |        |      |      |
+| [ ] | G49b — chrome-trace iter 6 → 7 with `PRIMUS_FUSED_GRAD_NORM_CLIP=1`; `reduce<l2norm_bf16>` + `multi_tensor<l2norm>` drop to ≈ 0; iter time drops ≥ 6 ms vs P46 final |        |      |      |
+| [ ] | `progress/p47/p47-summary.md` — eight-section per-phase summary per R2.1 |        |      |      |
+| [ ] | Status pinning per R1.3 / R2.4 |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append P47 row |        |      |      |
+| [ ] | `develop/perf/proxy_ep8.md` — append P47 row |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
+## Phase 48 (plan-7) — Plan-7 close-out
+
+> Plan-7 P48.  See `../plan-7/02-phase-details.md#phase-48` for design.  Hand-off phase.  No new kernels.  Appends plan-7 rows to perf docs, pins status, runs 15-iter clean bake-off with all plan-7 default-on knobs, surfaces new env knobs in `run_deepseek_v4_flash_proxy.sh`.
+
+
+|     | Task                                                                                                                                                          | commit | date | note |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---- | ---- |
+| [ ] | `develop/perf/proxy_ep8.md` — append `P45`, `P46`, `P47`, `P48 final` rows |        |      |      |
+| [ ] | `develop/perf/elem_fusion.md` — append plan-7 rows (one per shipped fusion) |        |      |      |
+| [ ] | `progress/p45/p45-summary.md` ... `progress/p48/p48-summary.md` per R2.1 |        |      |      |
+| [ ] | `run_deepseek_v4_flash_proxy.sh` — surface 3 new env knobs (`PRIMUS_FUSED_ADAM_TRITON`, `PRIMUS_FUSED_GRAD_SCALE`, `PRIMUS_FUSED_GRAD_NORM_CLIP`) |        |      |      |
+| [ ] | Status pinning per R2.4 — every `[x]` row in Phase 45..48 has commit SHA + date |        |      |      |
+| [ ] | 15-iter clean bake-off `progress/p48/run_smoke_p48_bakeoff.sh` |        |      |      |
+| [ ] | Plan-7 close-out commit `docs(deepseek-v4)[plan-7][P48]: plan-7 close-out` |        |      |      |
+| [ ] | R2.6 trace + tgz archival on phase close |        |      |      |
+
+
 ## Blockers / Risks Log
 
 

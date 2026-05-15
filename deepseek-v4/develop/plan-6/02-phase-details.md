@@ -854,3 +854,353 @@ total elementwise launches per iter.
   row in `status.md` is marked `[-]` (mirrors the plan-5 P31b
   `BLOCK_K=64` revert convention); the corresponding
   `p3X-summary.md` documents why.
+
+---
+
+## Phase 41 — `Indexer.forward` post-einsum tail Triton fusion + plan-7 candidate inventory
+
+> "关于 PRIMUS_INDEXER_TRITON，不需要把最开始的 einsum matmul
+> 也融合到 triton kernel 里面，而是把后面的小算子融合。然后再
+> 分析一下当前的 trace，我看到还有好多 elementwise / reduce 等
+> 类型的 kernel，找到更多可以使用 triton 融合的优化。" — user,
+> 2026-05-15 (post-P40 trace review).
+
+P41 reopens plan-6 after the interim close-out at P40 to do two
+things:
+
+1. **Re-attempt the Indexer scoring fusion that was descoped at
+   P38**, this time keeping the `einsum` matmul eager (cuBLAS /
+   hipBLASLt wins at V4-Flash widths per the P38 descope analysis)
+   and fusing **only** the post-einsum tail
+   (`relu → mul(w_i) → sum(H) → + causal mask`).  The mask
+   materialises inline via `tl.where` so no `[S, P]` host-side
+   mask tensor is allocated.
+
+2. **Seed plan-7 from the P40 trace**.  The four default-on
+   plan-6 fusions reduced the elementwise/reduce residual to
+   ~30 ms of in-model elementwise launches per iter; the next
+   tier (≥ 200 ms of optimizer / grad-clip elementwise) lives
+   outside the model and needs its own plan.  P41 inventories
+   both buckets in `progress/p41/p41-candidates.md` with
+   per-bucket trace evidence + estimated savings + proposed
+   phase id.
+
+### Tasks
+
+0. **Task list refinement** — re-measure the per-CSA-layer
+   Indexer scoring cost on the post-P40 trace.  If the chain is
+   < 1 ms / iter (i.e. it disappeared after P34..P37 absorbed
+   neighbouring elementwise launches), P41 ships only the
+   plan-7 inventory and the Indexer kernel work is descoped.
+1. **`primus/backends/megatron/core/transformer/v4_attention_kernels/_triton/indexer_score_post.py`** —
+   new file with `_indexer_score_post_fwd_kernel`,
+   `_indexer_score_post_bwd_kernel`, `IndexerScorePostFn`:
+   - FWD: takes `dot [B, S, H, P]` (output of the eager
+     `torch.einsum("bshd,bpd->bshp", q_i, k_icomp)`),
+     `w_i [B, S, H]`, plus scalars `(compress_ratio, S_eff,
+     P_eff)`; writes `scores [B, S, P]`.  Per program:
+     * Load a `[BLOCK_S, BLOCK_P]` tile of `(s_tile, p_tile)`;
+     * Inner unrolled loop over heads (`H: tl.constexpr`):
+       acc += `relu(dot[b, s, h, p]) * w_i[b, s, h]`;
+     * Apply causal mask inline
+       (`tl.where((p+1)*compress_ratio - 1 <= s, acc, -inf)`);
+     * Store as `OUT_DTYPE`.
+   - BWD: takes `d_scores [B, S, P]` + saved `dot [B, S, H, P]`
+     + `w_i [B, S, H]`; emits `d_dot [B, S, H, P]` and
+     `d_w_i [B, S, H]`:
+     * `d_dot[b, s, h, p] = d_scores[b, s, p] * w_i[b, s, h]`
+       where `dot[b, s, h, p] > 0`, else 0;
+     * `d_w_i[b, s, h] = sum_p(d_scores[b, s, p] * relu(dot[b, s, h, p]))`.
+     Saved `dot` is the same `dot` returned by the eager FWD
+     einsum (no extra HBM round-trip vs the P38 design).
+2. **`Indexer.forward` re-routing** — gate on the **re-purposed**
+   `PRIMUS_INDEXER_TRITON` env (default `"1"`):
+   * `"1"` (new default) → `dot = torch.einsum(q_i, k_icomp)`
+     stays eager; `IndexerScorePostFn.apply(dot, w_i,
+     compress_ratio)` runs the tail.
+   * `"0"` → full eager body (current default after P38 descope).
+   * Legacy P38 full-fuse path moves to a separate switch
+     `PRIMUS_INDEXER_TRITON_FULL` (default `"0"`).  Stays in tree
+     for small-shape paths and future tuning.
+3. **Microbench `progress/p41/bench_indexer_tail.py`** — V4-Flash
+   shape (`B=1, S=4096, P=1024, H=8, Hd=128, bf16`) + a smoke
+   shape; three paths bench-compared: eager tail (extracted from
+   `Indexer.forward`) / P41 Triton tail / legacy P38 full-fuse.
+   `iters=20, warmup=5, n_input_copies=4, l2_flush_mb=512`.
+4. **EP8 proxy A/B trace** —
+   `progress/p41/run_baseline_trace_ep8_p41.sh` with
+   `PRIMUS_INDEXER_TRITON=1`; render
+   `develop/profile/profile-after-p41-ep8-<YYYYMMDD>.{md,html}`.
+   A side is `PRIMUS_INDEXER_TRITON=0` (P40 production).
+5. **G43 — unit tests** —
+   `tests/unit_tests/megatron/transformer/deepseek_v4/test_p41_indexer_tail_triton.py`:
+   - FWD `scores` parity vs the eager **tail** (extracted into
+     a helper inside the test, identical math) within bf16
+     `atol=5e-3 rtol=5e-3`.
+   - Post-`topk` `topk_idxs` bit-equal vs the eager full chain
+     (the load-bearing contract from G41 carries over —
+     sparse top-K indices must match exactly).
+   - BWD `gradcheck` fp32 fast tier small shape.
+   - Release-tier shape `pytest.mark.slow`.
+   - Parametrise `compress_ratio ∈ {1, 4, 16}` so the causal
+     mask geometry is exercised across the boundary cases.
+6. **`progress/p41/p41-candidates.md`** — trace-driven inventory
+   of additional fusion targets (see "Plan-7 candidate
+   inventory" below).
+7. **Default flip note** — `PRIMUS_INDEXER_TRITON` default is
+   `"1"` ONLY if the EP=8 proxy A/B confirms a positive
+   delta (≥ 1 ms / iter at the same `lm_loss`).  If the proxy
+   A/B is within ± 1 ms (noise), the default stays at `"0"` and
+   the kernel ships as opt-in (mirrors P38 / P39 descope
+   precedent).
+
+### Design notes
+
+- **Why keep the einsum eager.** P38 fused the einsum + tail
+  into one Triton kernel and lost to cuBLAS / hipBLASLt at
+  V4-Flash widths (eager `einsum` 28 TFLOP/s vs Triton 20 TFLOP/s;
+  see `progress/p38/p38-summary.md` §4.3 for the tensor-core
+  utilisation comparison).  P41 only fuses the post-matmul tail
+  which is bandwidth-bound (not compute-bound), so the
+  comparison flips: Triton wins because every elementwise op
+  costs a full HBM round-trip.  The matmul half stays at cuBLAS
+  peak.
+- **Why save `dot` for BWD instead of recomputing `relu` mask.**
+  P38's "recompute the relu mask in BWD" trick saved
+  `H * S * P` bits of HBM but cost `BLOCK_S * BLOCK_P * H * Hd`
+  bf16 loads of `q_i` + `k_icomp` per program plus `H` `tl.dot`
+  invocations.  P41 already has `dot` in HBM (it's the eager
+  einsum output, which is needed for the FWD anyway); the BWD
+  reads `dot` once per `(b, s, p)` tile and derives the relu
+  mask in registers via `dot > 0`.  Net: one HBM read of
+  `dot [B, S, H, P]` bf16 = 67 MiB at V4-Flash widths, vs
+  P38's `q_i [B, S, H, Hd] + k_icomp [B, P, Hd]` = ~16 MiB +
+  `H` Triton tensor-core dots ≈ 8.6 GFLOP.  Despite the larger
+  HBM footprint, P41 BWD avoids the tensor-core under-utilisation
+  that killed P38 BWD.
+- **Causal mask materialised inline.** Same as P38 — no `[S, P]`
+  mask tensor.  The condition
+  `(p + 1) * compress_ratio - 1 <= s` is exact and cheap (one
+  fmadd + compare per element).
+- **No new state vs P38.** The eager einsum output `dot` is
+  the same activation `Indexer.forward` already saves for
+  backward (PyTorch's autograd captures it implicitly via the
+  einsum call).  P41 passes `dot` explicitly into
+  `IndexerScorePostFn.apply` so the saved tensor is identical
+  to the eager path and the autograd graph is unchanged.
+
+### Edge cases
+
+- **`compress_ratio == 1`** — degenerate case where every pool
+  position is "1 query token wide"; the causal mask collapses
+  to `p <= s`.  The G43 parametrisation exercises this.
+- **Sequences shorter than `compress_ratio * topk`** — same as
+  P38 (the trailing `topk + where + cat` host-side tail handles
+  sentinel substitution unchanged).
+- **`out_dtype` cast contract** — FWD writes `scores` as
+  `hidden.dtype` (the surrounding decoder layer's working dtype,
+  typically bf16); the BWD reads `d_scores` in `hidden.dtype`
+  and writes `d_dot` in bf16 + `d_w_i` in bf16 (the eager BWD
+  also casts to bf16 before propagating to the einsum BWD).
+- **`H` not a power of two** — V4-Flash uses `H = 8` which is
+  `tl.constexpr`-friendly; the kernel asserts `H` is a power of
+  two ≤ 16 and falls back to eager otherwise (mirrors P38's
+  `is_triton_kernel_supported` guard).
+
+### Plan-7 candidate inventory — sourced from the P40 trace
+
+The post-P40 chrome trace (`output/amd/tas-mi355x-20260514/
+p40_profile_plan6_close_pp1_ep8_seq4096/tensorboard/...
+1778800838095839437.pt.trace.json`) shows the steady-iter window
+at 523.67 ms with the following residual elementwise / reduce
+buckets — anything not already named "_v4_*" / "_sinkhorn_*" /
+"_hc_*" / "_apply_*" / "_stack_*" is still unfused.  P41 enrols
+these into `progress/p41/p41-candidates.md` with proposed phase
+ids (P42..P45 inside this plan if cheap, plan-7 otherwise):
+
+| trace bucket | total / iter | launches | proposed phase | in-model? | rationale |
+| --- | ---: | ---: | --- | --- | --- |
+| `vec_elem<add_bf16>` (Adam ε-add) | 170.99 ms | 743 | **plan-7 P0a** | optimizer | TE / Apex `AdamFunctorMasterParamRemainder` calls the BF16 ε-add as a separate functor (743 launches).  Folding ε-add into the master Adam multi-tensor kernel saves ~150 ms / iter.  Out-of-model, needs Apex / TE coordination. |
+| `multi_tensor<adam_master>` (TE fused Adam) | 45.92 ms | 321 | plan-7 P0b | optimizer | Already multi-tensor; further fusion needs a custom Triton optimizer kernel. |
+| `vec_elem<bf16_copy>` (`.contiguous()` after permute) | 24.63 ms | 1303 | **P42** | model | Highest-count residual.  Sourced by `permute(0, 3, 1, 2, 4).contiguous()` materialising `gathered_k_v` for CSA's sparse top-K branch + a similar permute in the V4 attention output projection.  Folding these into the consumer Triton kernels (CSA FWD/BWD already in plan-5) absorbs the copies. |
+| `vec_elem<bf16->fp32>` (pre-reduce promotion) | 20.99 ms | 1215 | plan-7 P1 | mixed | bf16 -> fp32 dtype promotion before `reduce_kernel`.  Mostly inside grad-norm clipping (`reduce<l2norm_bf16>` 7.76 ms is the consumer); the rest are inside the eager router post-logits path (P39 descope leftovers) and the dispatch / combine post-processing (TE / DeepEP). |
+| `multi_tensor<scale>` (grad-scaling pre-allreduce) | 10.96 ms | 321 | plan-7 P0c | optimizer | TE-owned; out-of-model. |
+| `vec_elem<mul_fp32>` (fp32 broadcast mul) | 9.59 ms | 109 | **P43** | model | Sourced by the eager V4 router post-logits chain (P39 descope leftovers — `softmax(logits) * scale -> scatter`) + `attn_sink` per-head scale broadcast + a few elementwise muls inside the V4 attention output projection.  P43 re-attempts P39 with a longer A/B (50-iter) to defeat NCCL noise and a measurement methodology that aggregates over multiple proxy runs. |
+| `elem_unroll<mul_bf16>` (manual-unroll bf16 mul) | 8.31 ms | 122 | P43 | model | Same source as above (`elementwise_kernel_manual_unroll<128, 8>` is the BF16-mul variant used by V4 router + post-softmax scale).  Captured by the same fusion in P43. |
+| `reduce<l2norm_bf16>` (grad-norm clipping) | 7.76 ms | 12 | plan-7 P0d | optimizer | TE multi-tensor + reduce; out-of-model.  Could fuse with `multi_tensor<l2norm>` (6.72 ms) → ~14 ms savings. |
+| `multi_tensor<l2norm>` (per-param L2) | 6.72 ms | 321 | plan-7 P0d | optimizer | Same as above. |
+| `elem_unroll<mul_fp32>` (manual-unroll fp32 mul) | 6.51 ms | 121 | P43 | model | Same as `vec_elem<mul_fp32>`. |
+| `vec_elem<mul_bf16>` (AUnary scalar mul) | 5.71 ms | 12 | **P44** | model | Sourced by the V4 attention output projection's `out * scale` per-head broadcast.  Currently 12 launches × 0.48 ms — one per V4 attention call.  Foldable into the V4 attention FWD epilogue. |
+| `vec_elem<add_fp32>` (fp32 add) | 5.20 ms | 36 | P43 | model | Mostly inside the eager router post-logits chain. |
+| `elem_unroll<copy>` (bf16 direct-copy) | 5.78 ms | 47 | P42 | model | Same source as `vec_elem<bf16_copy>` — implicit `.contiguous()` after a permute.  Captured by the same fusion. |
+
+**Plan-7 starter set (top-3 in-model targets):**
+
+| phase | target | est. savings | scope |
+| --- | --- | ---: | --- |
+| **P42** | Fold `.contiguous()` + permute into V4 attention / CSA FWD inputs (eliminate `bf16_copy` + `elem_unroll<copy>`) | ~30 ms / iter | extend plan-5 V4 attention kernels |
+| **P43** | V4 router post-logits with 50-iter A/B + per-`score_fn` specialised tile sizes (re-attempt P39 with better measurement) | ~5-10 ms / iter | extend plan-6 P39 |
+| **P44** | V4 attention output projection epilogue (`out * scale + sinks`) folded into FWD kernel | ~3-5 ms / iter | extend plan-5 V4 attention kernels |
+
+**Plan-7 starter set (top-2 optimizer-step targets):**
+
+| phase | target | est. savings | scope |
+| --- | --- | ---: | --- |
+| **plan-7 P45** | Custom Triton fused Adam kernel that absorbs the BF16 ε-add into the master functor | ~150 ms / iter | wrap TE call site; no third_party edits |
+| **plan-7 P47** | Fused grad-norm clip kernel (L2-norm reduce + max + scale) | ~14 ms / iter | wrap TE call site |
+
+---
+
+## Phase 42 — Permute + `.contiguous()` absorption into V4 attention / CSA FWD inputs
+
+> Sourced from `progress/p41/p41-candidates.md` row #1 (P40 trace top
+> residual at 24.63 ms / 1303 launches).
+
+P42 folds the `.contiguous()` + permute chain that materialises
+`gathered_k_v` / `q.contiguous()` / `kv.contiguous()` into the
+existing plan-5 V4 attention FWD kernels.  No new Python kernel —
+extend `_v4_attention_fwd_kernel`, `_v4_csa_attention_pool_sparse_fwd_kernel`,
+and their BWD partners to read directly from the strided / permuted
+source tensors so the explicit `.contiguous()` round-trip
+disappears.
+
+### Tasks
+
+1. **Kernel patch — strided input loads.** Add a
+   `PERMUTE_PATTERN: tl.constexpr` enum + strided-load helpers to
+   `_triton/v4_attention.py`, `_triton/v4_csa_attention.py`, and
+   `_triton/v4_csa_attention_pool_sparse.py`.  Each kernel accepts
+   the original (pre-permute) tensor + a strides tuple and emits
+   the per-program tile-load with the appropriate stride pattern.
+2. **Python call-site cleanup.** Remove the explicit
+   `.contiguous()` / `.permute(...).contiguous()` chains from:
+   - `DeepseekV4Attention._attention_forward_via_triton` (Q/KV
+     pre-pack for dense + HCA);
+   - `csa_attention.py::CsaAttention.forward` (gathered KV
+     materialisation);
+   - `compressor.py::Compressor.forward` (output reshape).
+3. **Env gate.** New `PRIMUS_V4_ATTN_FUSED_PERMUTE` env, default
+   `"1"`.  Eager fallback keeps the explicit `.contiguous()` chain.
+4. **Microbench
+   `progress/p42/bench_v4_attention_strided_input.py`** — FWD/BWD
+   wall-clock at V4-Flash widths (`[B=1, S=4096, H=64,
+   head_dim=512]`) with strided vs contiguous inputs across the 3
+   compress-ratio branches.
+5. **G44 unit tests** —
+   `tests/unit_tests/megatron/transformer/deepseek_v4/test_p42_strided_v4_attention.py`:
+   FWD parity vs eager `.contiguous() + kernel` within bf16
+   `atol=1e-3 rtol=1e-3`; BWD `gradcheck` fast tier fp32;
+   release-tier shape `pytest.mark.slow`.
+6. **EP8 proxy A/B trace + report.**
+
+### Design notes
+
+- The strided-load path uses `tl.load(ptr, mask, other=0,
+  cache_modifier=".cv")` so the L2 hits on the source tensor are
+  preserved.  Tile loads with a stride pattern that isn't unit-row
+  still hit at ~80% of contiguous bandwidth on MI355X.
+- The biggest win comes from the CSA `gathered_k_v` materialisation
+  which is ~13 ms / iter on its own (out of the 24.63 ms bucket).
+  Folding the gather into the kernel's per-program top-K select is
+  out of scope (that's a plan-5 P31 follow-up); P42 only absorbs
+  the post-gather `.permute(0, 3, 1, 2, 4).contiguous()`.
+
+---
+
+## Phase 43 — V4 router post-logits + Compressor APE elementwise Triton fusion
+
+> Sourced from `progress/p41/p41-candidates.md` row #2 (P40 trace
+> ~30 ms residual across `vec_elem<mul_fp32>` 9.59 ms +
+> `elem_unroll<mul_bf16>` 8.31 ms + `vec_elem<add_fp32>` 5.20 ms +
+> `elem_unroll<mul_fp32>` 6.51 ms).
+
+P43 is a two-pronged phase: (a) re-attempt the P39 router
+post-logits fusion with better measurement methodology, and (b)
+fuse the Compressor APE (per-position-encoding) elementwise chain.
+
+### Tasks
+
+1. **Router post-logits re-attempt.** Re-use the
+   `_v4_router_post_fwd_kernel` / `_v4_router_post_bwd_kernel`
+   pair from P39.  Add a per-`score_fn` tile-shape autotune table
+   that picks `(BLOCK_N, BLOCK_E)` based on the score function
+   constexpr.  Run a 50-iter EP8 proxy A/B with 3 independent runs
+   to defeat the ±1-3 ms NCCL noise floor that swamped P39.
+   Default `PRIMUS_V4_ROUTER_TRITON=1` if the aggregated mean
+   shows a positive delta.
+2. **Compressor APE Triton kernel.** New file
+   `primus/backends/megatron/core/transformer/_triton/compressor_ape.py`
+   with `_compressor_ape_fwd_kernel`, `_compressor_ape_bwd_kernel`,
+   `CompressorAPEFn`:
+   - FWD: takes `x [B, S, D]` + `ape [ratio, D]` + `bias [D]`;
+     reshapes inline to `[B, P, ratio, D]`, multiplies by `ape`,
+     reduces over `ratio`, adds `bias`; emits `out [B, P, D]`.
+   - BWD: `d_x` via broadcast multiply (no reduce); `d_ape` via
+     `sum` over `(b, p)` (tl.atomic_add for cross-block); `d_bias`
+     via `sum` over `(b, p)`.
+3. **Routing.** `Compressor.forward` gates on
+   `PRIMUS_COMPRESSOR_APE_TRITON=1` (default `"1"`).
+4. **Microbench
+   `progress/p43/bench_router_post_v2.py`** — 50-iter, 3-run
+   aggregate for the router on V4 production shape +
+   `progress/p43/bench_compressor_ape.py` for V4-Flash
+   `[B=1, S=4096, ratio=4, D=4096]`.
+5. **G45 unit tests** —
+   `tests/unit_tests/megatron/transformer/deepseek_v4/test_p43_compressor_ape_triton.py`:
+   FWD parity vs eager `reshape + mul + sum + add` within bf16
+   `atol=1e-3 rtol=1e-3`; BWD `gradcheck`; release-tier slow.
+   G42 (P39 router parity) carried green at all 3 score functions.
+6. **EP8 proxy A/B trace + report.**
+
+### Design notes
+
+- The Compressor APE chain runs **twice per CSA layer** (once for
+  the main pool, once for the Indexer's mini-pool) — 6 calls per
+  iter at V4-Flash.  Combined elementwise budget: ~3-5 ms / iter.
+- The P39 router re-attempt's success hinges on the 3-run
+  aggregate methodology.  If the 3-run mean is still within the
+  ±1 ms band, the router default stays at `"0"` (mirrors the
+  original P39 descope precedent).
+
+---
+
+## Phase 44 — V4 attention FWD epilogue (`out * scale + sinks`) absorbed into kernel
+
+> Sourced from `progress/p41/p41-candidates.md` row #3 (P40 trace
+> 5.71 ms × 12 launches `vec_elem<mul_bf16>` AUnary).
+
+P44 absorbs the per-head `out * scale + sinks` chain into the
+V4 attention FWD kernel epilogue.  The eager path issues a separate
+`vec_elem<mul_bf16>` (output scaling) + `vec_elem<add_bf16>` (sink
+addition) per V4 attention call; both are absorbed.
+
+### Tasks
+
+1. **Kernel patch.** Extend `_v4_attention_fwd_kernel` to accept
+   an optional `attn_sink [H]` argument; when provided, apply
+   `out = out * scale + attn_sink[h]` in the FWD epilogue (after
+   the softmax + V matmul).  Extend `_v4_attention_bwd_kernel` to
+   compute `d_attn_sink` via `tl.atomic_add` over the head axis.
+2. **Python call-site cleanup.** Strip the `out * scale + sinks`
+   chain from
+   `primus/backends/megatron/core/transformer/deepseek_v4_attention.py::_attention_forward_via_triton`
+   and `attn_sink.py::AttentionSinkApplier.forward`.
+3. **Env gate.** `PRIMUS_V4_ATTN_FUSED_SINK=1` (default `"1"`).
+4. **Microbench
+   `progress/p44/bench_v4_attention_sink_epilogue.py`** at
+   V4-Flash widths for the FWD epilogue alone vs the full FWD.
+5. **G46 unit tests** —
+   `tests/unit_tests/megatron/transformer/deepseek_v4/test_p44_attn_sink_epilogue.py`:
+   FWD parity vs eager `kernel + out * scale + sinks` within bf16
+   `atol=1e-3 rtol=1e-3`; BWD `gradcheck`; release-tier slow.
+6. **EP8 proxy A/B trace + report.**
+
+### Design notes
+
+- The `attn_sink` parameter is per-head (`[H]`) so absorbing it
+  costs zero extra HBM traffic per program (one fp32 broadcast in
+  registers).  The wins come from eliminating two separate kernel
+  launches per V4 attention call.
+- HCA + dense V4 attention paths both call the same kernel; CSA
+  has its own kernel and is **not** modified by P44 (it already
+  fuses the epilogue per the plan-5 P31 design).
