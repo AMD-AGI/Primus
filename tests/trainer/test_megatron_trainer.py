@@ -261,6 +261,34 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_gpt_oss_20B_sink_attention(self):
+        run_script(
+            self.__class__.__name__,
+            "gpt_oss_20B_sink_attention",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/gpt_oss_20B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "2",
+                "--global_batch_size",
+                "16",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+                "--use_sink_attention",
+                "1",
+                "--profile",
+                "0",
+                "--use_pytorch_profiler",
+                "0",
+            ],
+        )
+
     def test_mixtral_8x7B(self):
         run_script(
             self.__class__.__name__,
