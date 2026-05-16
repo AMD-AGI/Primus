@@ -191,24 +191,12 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         type=float,
         default=2.0,
         help="Delay (seconds) after destroying NCCL/RCCL process groups before "
-        "creating new ones.  Prevents 'Address already in use' errors from "
+        "creating new ones. Prevents 'Address already in use' errors from "
         "socket port reuse races. Set to 0 to disable the delay (barrier only). "
-        "Note: subgroups whose node count meets or exceeds "
-        "--comm-cleanup-large-threshold-nodes use a fixed 60s drain instead "
-        "(matches the Linux tcp_fin_timeout default).",
-    )
-    parser.add_argument(
-        "--comm-cleanup-large-threshold-nodes",
-        type=int,
-        default=64,
-        help="Subgroup-size threshold (in nodes) above which the cleanup delay "
-        "is forced to 60 seconds (the Linux tcp_fin_timeout default) instead "
-        "of --comm-cleanup-delay-sec. Large subgroups generate enough IB OOB "
-        "TIME_WAIT per node that a short delay can leave the ephemeral-port "
-        "pool exhausted before the next phase tries to bind a new NCCL comm. "
-        "Default: 64. Lower this (e.g. 32) on clusters with non-default kernel "
-        "TIME_WAIT settings or known port-pressure quirks; raise it (or set "
-        "above your cluster's node count) to disable the long drain entirely.",
+        "On very large clusters running tests that build all-N inter-node "
+        "subgroups, raise this to 60 (matches the Linux tcp_fin_timeout "
+        "default) -- or apply the OS-level tunings described in "
+        "docs/preflight.md (tcp_tw_reuse, wider ip_local_port_range).",
     )
 
     # Report output options

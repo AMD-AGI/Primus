@@ -180,19 +180,7 @@ def run_inter_node_comm(
             dist.barrier(device_ids=[torch.cuda.current_device()])
             if adjacent_group is not None:
                 dist.destroy_process_group(adjacent_group)
-            # Large subgroups (node count >= --comm-cleanup-large-threshold-nodes,
-            # default 64) generate enough IB OOB TIME_WAIT per node that the
-            # default short delay can't drain it before the next phase tries
-            # to bind a new NCCL communicator (this is what produces "Address
-            # already in use" at 128N). Wait the full Linux tcp_fin_timeout
-            # (60s) for these so the pool is fully reclaimed before the next
-            # adjacent_nodes level runs. Smaller subgroups keep the
-            # user-configured delay (default 2s).
-            if adjacent_nodes >= args.comm_cleanup_large_threshold_nodes:
-                delay = 60.0
-            else:
-                delay = args.comm_cleanup_delay_sec
-            barrier_after_comm_destroy(delay)
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]

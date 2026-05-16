@@ -200,42 +200,34 @@ primus-cli direct -- preflight \
 
 ## 6. Reliability knobs
 
-Three knobs that are inert under happy-path conditions but matter at scale or on flaky networks.
+Two knobs that are inert under happy-path conditions but matter at scale or on flaky networks.
 
 ### 6.1 `--comm-cleanup-delay-sec FLOAT` (default `2.0`)
 
 Delay (seconds) after destroying NCCL/RCCL process groups before creating new ones. Prevents `Address already in use` from socket port-reuse races as preflight tears down and recreates communicators between phases.
 
-- This is the **small-subgroup** delay. Subgroups whose node count meets or exceeds `--comm-cleanup-large-threshold-nodes` (default `64`) use a fixed **60-second** drain instead — see §6.2.
-- Default `2.0` is sufficient for any subgroup smaller than the threshold.
+- Default `2.0` is sufficient for the inter-node patterns preflight exercises today (allreduce ring/tree, p2p pairs, ring-p2p) at every cluster size.
 - Set to `0` to disable the sleep entirely (barrier only).
+- On very large clusters (≥ ~128 nodes) running tests that build all-N inter-node subgroups, raise this to **60** (matches the Linux `tcp_fin_timeout` default) so the per-node `TIME_WAIT` pool can fully drain between phases. The OS-level tunings in §7.2 are a stronger fix for the same failure and are recommended even when this knob is bumped.
 
 ```bash
 # Small/medium clusters: defaults are fine. Override only if you see
 # port-reuse races on very flaky networks.
 primus-cli slurm srun -N 8 -- preflight --quick --comm-cleanup-delay-sec 5
-```
 
-### 6.2 `--comm-cleanup-large-threshold-nodes INT` (default `64`)
-
-Subgroup-size threshold (in nodes) above which the cleanup delay is forced to **60 seconds** (the Linux `tcp_fin_timeout` default) instead of `--comm-cleanup-delay-sec`.
-
-Why: large subgroups (e.g. the all-nodes inter-node communicator at 128 N) generate enough IB OOB `TIME_WAIT` sockets per node that a short delay can leave the ephemeral-port pool exhausted before the next phase tries to bind a new NCCL communicator. That is exactly the failure mode behind `Address already in use` at very large scale. Forcing a full 60 s drain after destroying a large subgroup empties the per-node `TIME_WAIT` pool and lets the next phase start clean.
-
-- Default `64` was chosen so most clusters get the fix automatically without anyone needing to think about it.
-- Lower (e.g. `--comm-cleanup-large-threshold-nodes 32`) on clusters with non-default kernel `TIME_WAIT` settings, narrower ephemeral port ranges, or known port-pressure quirks.
-- Set above your cluster's node count (e.g. `--comm-cleanup-large-threshold-nodes 9999`) to disable the long drain entirely. Useful only if you've also adjusted the kernel-side knobs from §7.
-
-```bash
-# Be more conservative: trigger the 60s drain on subgroups >= 32 nodes.
-primus-cli slurm srun -N 64 -- preflight --comm-cleanup-large-threshold-nodes 32
+# Very large cluster running an inter-node alltoall over all N nodes
+# without the OS tunings from §7.2: raise the per-phase drain to 60 s
+# (matches the Linux tcp_fin_timeout default) to prevent EADDRINUSE.
+primus-cli slurm srun -N 128 -- preflight --comm-cleanup-delay-sec 60
 ```
 
 See §7 ("Running on very large clusters") for the recommended large-cluster invocation patterns.
 
-### 6.3 `--dist-timeout-sec INT` (default `120`)
+### 6.2 `--dist-timeout-sec INT` (default `120`)
 
 Timeout (seconds) for `torch.distributed.init_process_group`. If init does not complete within this many seconds, preflight writes the info report (when applicable) plus a `Distributed Init` failure section to the markdown report, prints a clear error, and exits `2` — instead of hanging indefinitely.
+
+> Note: §6 used to also document `--comm-cleanup-large-threshold-nodes`, which forced a 60 s drain whenever a destroyed subgroup met or exceeded a size threshold (default 64 nodes). That flag was removed; the same outcome is now achieved either by raising `--comm-cleanup-delay-sec` (uniform per-phase delay) or, preferably, by applying the OS-level tunings in §7.2 on every large-cluster node.
 
 ```bash
 # Fail fast if rendezvous does not work
@@ -283,30 +275,23 @@ sudo sysctl --system
 
 If your cluster has these set already, preflight at 128 nodes effectively cannot run out of ephemeral ports — even the most aggressive run-everything invocation fits comfortably.
 
-### 7.3 In-tool mitigation: the size-aware cleanup delay
+### 7.3 In-tool mitigation: the per-phase cleanup delay
 
-Whether or not the OS-level knobs above are in place, preflight has a built-in safety mechanism. From §6.1–6.2:
+Whether or not the OS-level knobs above are in place, preflight always inserts a global barrier + sleep between test phases. The sleep duration is `--comm-cleanup-delay-sec` (default `2.0`, see §6.1). At small/medium scale and for the inter-node patterns preflight exercises today (allreduce ring/tree, p2p pairs, ring-p2p), the default is sufficient.
 
-- For small subgroups (node count `< --comm-cleanup-large-threshold-nodes`, default 64) the cleanup delay between phases is `--comm-cleanup-delay-sec` (default 2 s).
-- For large subgroups (node count `≥ threshold`) preflight forces a **60-second drain** to fully empty the per-node `TIME_WAIT` pool before the next phase starts.
+The one case the default does **not** cover is running an inter-node test that builds an all-N subgroup at ≥ ~128 nodes (in particular `inter-alltoall --inter-group-sizes all`). The destroy of that subgroup generates enough IB OOB `TIME_WAIT` entries per node to come close to or exceed the default ephemeral-port pool. There are two ways to handle it, in order of preference:
 
-At 128 N with default settings, this adds up to ~3 minutes of cumulative drain wait to the full perf run. That's the whole cost of the safety mechanism — perf measurements themselves are unaffected.
+1. **Apply the §7.2 OS tunings** (`tcp_tw_reuse=1` and a wider `ip_local_port_range`). These let the kernel recycle `TIME_WAIT` ports in milliseconds, so even an aggressive run-everything invocation fits comfortably with the default 2 s delay.
+2. **Raise `--comm-cleanup-delay-sec`** to `60` (matches the Linux `tcp_fin_timeout` default), which forces the per-node pool to drain naturally between phases:
 
-If you want even more conservative behavior, lower the threshold:
+   ```bash
+   primus-cli slurm srun -N 128 -- preflight \
+       --comm-cleanup-delay-sec 60
+   ```
 
-```bash
-# Trigger the 60s drain on subgroups >= 32 nodes too.
-primus-cli slurm srun -N 128 -- preflight \
-    --comm-cleanup-large-threshold-nodes 32
-```
+   This adds up to ~3 minutes of cumulative drain wait to a full perf run. Perf measurements themselves are unaffected.
 
-Conversely, if you've applied the §7.2 sysctl tunings and prefer faster runs:
-
-```bash
-# Disable the long drain (relies on tcp_tw_reuse=1 to recycle quickly).
-primus-cli slurm srun -N 128 -- preflight \
-    --comm-cleanup-large-threshold-nodes 9999
-```
+The third lever — running each test family in its own invocation — is described in §7.4 and is independently useful regardless of which of (1) / (2) you pick.
 
 ### 7.4 Recommended invocation patterns at very large scale
 
@@ -348,9 +333,9 @@ Each invocation:
 | Cluster size | Recommended approach |
 |---|---|
 | ≤ 32 nodes | Single command, default knobs. Nothing special. |
-| 33-127 nodes | Single command, default knobs. The size-aware drain (§7.3) takes care of any large-subgroup pressure automatically. |
-| ≥ 128 nodes, OS tunings applied | Single command works, or split for diagnostic clarity. |
-| ≥ 128 nodes, OS tunings **not** applied | Recommended: split as in §7.4. As a fallback, one big run with default knobs should still complete because of the size-aware drain, but expect ~3 min of cumulative drain wait. |
+| 33-127 nodes | Single command, default knobs. The default 2 s per-phase drain handles every test pattern at this scale. |
+| ≥ 128 nodes, OS tunings applied | Single command works, or split for diagnostic clarity. The §7.2 sysctls let `tcp_tw_reuse=1` recycle ports immediately, so even all-N inter-node alltoall fits in the per-node pool. |
+| ≥ 128 nodes, OS tunings **not** applied | Apply the §7.2 sysctls (preferred), or raise `--comm-cleanup-delay-sec` to `60`, or split tests as in §7.4 — any one of these is sufficient. Combining the OS tunings with the per-test split gives the most reliable and fastest run. |
 | ≥ 256 nodes | Always split as in §7.4, even with OS tunings — keeps every invocation snappy and makes regressions much easier to localize. |
 
 ---
@@ -442,7 +427,7 @@ In default mode where info selectors are dropped because perf intent was set, th
 - **For multi-node runs, always use `primus-cli slurm`** (or `runner/run_preflight_direct.sh`) so distributed environment variables are set correctly.
 - **Insufficient CPU cores cause >30x perf slowdowns** — pass `srun -c <cores-per-node>` so RCCL's network proxy threads have CPU to spawn on. Verify with `srun -N 1 --gpus-per-node=8 bash -c 'nproc'`.
 - **For a quick environment snapshot**, prefer `--host --gpu --network` (no rendezvous, finishes in seconds even on broken networks).
-- **Between each communication test phase**, preflight performs a global barrier + sleep to prevent `Address already in use`. The drain is **size-aware** — large subgroups (≥ `--comm-cleanup-large-threshold-nodes`, default 64) auto-trigger a 60 s drain. See §7 ("Running on very large clusters") for the full picture, including OS-level tuning recommendations.
+- **Between each communication test phase**, preflight performs a global barrier + `--comm-cleanup-delay-sec` sleep (default 2 s) to prevent `Address already in use`. On very large clusters this default is sufficient *if* the OS-level tunings in §7.2 are applied; without them, raise the delay to 60 s when running tests that build all-N inter-node subgroups. See §7 ("Running on very large clusters") for the full picture.
 - **For pre-launch screening of a large cluster**, the recommended sequence is:
   1. `node-smoke` to prune broken nodes (`failing_nodes.txt`).
   2. `preflight --quick` on the surviving nodes for the perf sanity numbers.

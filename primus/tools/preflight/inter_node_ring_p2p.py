@@ -210,17 +210,7 @@ def run_inter_node_ring_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
 
     if _GLOBAL_PIPELINE_GROUP is not None:
         dist.destroy_process_group(_GLOBAL_PIPELINE_GROUP)
-    # On large clusters (num_nodes >= --comm-cleanup-large-threshold-nodes,
-    # default 64), each pipeline subgroup spans the full cluster (one rank
-    # per node) and generates substantial IB OOB TIME_WAIT at destroy time.
-    # Wait the full Linux tcp_fin_timeout (60s) so the next preflight phase
-    # doesn't try to bind into the still-draining pool. Smaller clusters
-    # keep the user-configured delay (default 2s).
-    if num_nodes >= args.comm_cleanup_large_threshold_nodes:
-        delay = 60.0
-    else:
-        delay = args.comm_cleanup_delay_sec
-    barrier_after_comm_destroy(delay)
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     # TODO (limou)
     # support plot

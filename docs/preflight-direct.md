@@ -267,7 +267,7 @@ See [Preflight](./preflight.md) for the full list. The most common are:
 - Mode selection: `--host`, `--gpu`, `--network`, `--perf-test`, `--tests`, `--quick`
 - Test tuning: `--comm-sizes-mb`, `--intra-comm-sizes-mb`, `--inter-comm-sizes-mb`, `--intra-group-sizes`, `--inter-group-sizes`, `--ring-p2p-sizes-mb`
 - Reporting: `--dump-path`, `--report-file-name`, `--disable-pdf`, `--plot`
-- Reliability: `--comm-cleanup-delay-sec`, `--comm-cleanup-large-threshold-nodes`, `--dist-timeout-sec`
+- Reliability: `--comm-cleanup-delay-sec`, `--dist-timeout-sec`
 
 If you do not pass `--report-file-name`, the wrapper auto-generates a unique one of the form:
 
@@ -375,19 +375,15 @@ $SRUN runner/run_preflight_direct.sh \
 #### G. Reliability knobs
 
 ```bash
-# Bump the small-subgroup cleanup delay (rarely needed; only useful on
-# very flaky networks or unusual kernel TIME_WAIT settings).
+# Bump the per-phase cleanup delay (rarely needed at small/medium
+# scale; only useful on very flaky networks or unusual kernel
+# TIME_WAIT settings).
 $SRUN runner/run_preflight_direct.sh --quick --comm-cleanup-delay-sec 5
 
-# Be more conservative: trigger the 60s drain on subgroups >= 32 nodes
-# instead of the default 64. Useful on clusters with narrow ephemeral
-# port ranges or known port-pressure quirks.
-$SRUN runner/run_preflight_direct.sh --comm-cleanup-large-threshold-nodes 32
-
-# Skip the 60s drain entirely (only safe if you've applied the
-# `tcp_tw_reuse=1` and wide `ip_local_port_range` sysctl tunings;
-# see preflight.md §7.2).
-$SRUN runner/run_preflight_direct.sh --comm-cleanup-large-threshold-nodes 9999
+# Very large cluster running an all-N inter-node alltoall without the
+# OS-level sysctl tunings from preflight.md §7.2: raise the per-phase
+# drain to 60 s (matches the Linux tcp_fin_timeout default).
+$SRUN runner/run_preflight_direct.sh --comm-cleanup-delay-sec 60
 
 # Fail fast if torch.distributed rendezvous can't complete in 30s
 $SRUN runner/run_preflight_direct.sh --perf-test --dist-timeout-sec 30
@@ -547,18 +543,7 @@ The script does `source "$VENV_ACTIVATE"`, which works for venv/uv but not direc
 
 This error occurs when NCCL/RCCL sockets are still in `TIME_WAIT` state from a recently destroyed process group, leaving the kernel ephemeral-port pool exhausted when the next phase tries to bind a new NCCL communicator.
 
-Preflight has a built-in mitigation: a barrier + sleep between test phases. The delay is **size-aware**:
-
-- Small subgroups (node count `< --comm-cleanup-large-threshold-nodes`, default 64) use `--comm-cleanup-delay-sec` (default 2 s).
-- Large subgroups (node count `≥` threshold) automatically use a fixed **60 s drain** (matches the Linux `tcp_fin_timeout` default).
-
-So for clusters in the 64-1024 node range you should not see this error on a default invocation. If you do:
-
-```bash
-# 1) Be more conservative: lower the threshold so the 60s drain
-#    triggers earlier (e.g. for >= 32-node subgroups).
-runner/run_preflight_direct.sh --comm-cleanup-large-threshold-nodes 32
-```
+Preflight inserts a global barrier + `--comm-cleanup-delay-sec` sleep (default 2 s) between test phases to mitigate this. At small/medium scale and for the inter-node patterns preflight exercises today (allreduce ring/tree, p2p pairs, ring-p2p), the default is sufficient. The one case the default does not fully cover is **inter-node alltoall built over all N nodes at ≥ ~128 nodes** — that destroy generates enough IB OOB `TIME_WAIT` per node to come close to or exceed the default ephemeral-port pool.
 
 The most reliable fix at large scale is **OS-level tuning** (do this once, per node):
 
@@ -567,6 +552,14 @@ The most reliable fix at large scale is **OS-level tuning** (do this once, per n
 # and widen the ephemeral port range from ~28k to ~64k.
 sudo sysctl -w net.ipv4.tcp_tw_reuse=1
 sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+```
+
+If you cannot apply the sysctls, raise the per-phase delay so the pool drains naturally between phases:
+
+```bash
+# Force a 60 s drain after every destroyed comm (matches the Linux
+# tcp_fin_timeout default). Adds ~3 min of cumulative wait at 128N.
+runner/run_preflight_direct.sh --comm-cleanup-delay-sec 60
 ```
 
 See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the full explanation, persistence, and recommended large-cluster invocation patterns (split tests into separate runs, etc.).
