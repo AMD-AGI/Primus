@@ -144,7 +144,10 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         type=str,
         default=None,
         help="Comma-separated list of inter-node group sizes to test. Use 'all' for "
-        "the full N-node group. Default: 2,4,all.",
+        "the full N-node group. Default: 2,4,all. Note: for inter-node alltoall "
+        "each value is clamped to 16 (real-world MoE training rarely dispatches "
+        "across more nodes); other inter-node tests use the requested sizes "
+        "unchanged. See docs/preflight.md \u00a75.2 for details.",
     )
 
     # Inter-node ring p2p sizes.
@@ -184,19 +187,22 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         "If init times out, preflight will write the info report and exit with failure.",
     )
 
-    # Communicator cleanup delay (prevents "Address already in use" from rapid
-    # destroy/recreate cycles in NCCL/RCCL)
+    # Communicator cleanup delay (cross-rank sync across destroy -> setup;
+    # the actual "Address already in use" defense is the inter-alltoall cap
+    # in --inter-group-sizes / inter_node_comm.py, not this delay).
     parser.add_argument(
         "--comm-cleanup-delay-sec",
         type=float,
         default=2.0,
-        help="Delay (seconds) after destroying NCCL/RCCL process groups before "
-        "creating new ones. Prevents 'Address already in use' errors from "
-        "socket port reuse races. Set to 0 to disable the delay (barrier only). "
-        "On very large clusters running tests that build all-N inter-node "
-        "subgroups, raise this to 60 (matches the Linux tcp_fin_timeout "
-        "default) -- or apply the OS-level tunings described in "
-        "docs/preflight.md (tcp_tw_reuse, wider ip_local_port_range).",
+        help="Delay (seconds) inserted between destroying NCCL/RCCL process "
+        "groups and creating new ones. Provides cross-rank synchronization "
+        "across the destroy/setup transition and gives the kernel a moment "
+        "to unlink closed-socket bookkeeping. Set to 0 to disable the sleep "
+        "(barrier only). The actual 'Address already in use' defense at "
+        "scale is the inter-node alltoall sub-group cap of 16 (see "
+        "--inter-group-sizes); widening net.ipv4.ip_local_port_range "
+        "(docs/preflight.md \u00a77.2) is the directly relevant OS knob if "
+        "you ever need more headroom.",
     )
 
     # Report output options

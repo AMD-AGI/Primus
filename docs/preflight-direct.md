@@ -356,6 +356,8 @@ $SRUN runner/run_preflight_direct.sh \
     --inter-group-sizes 2,all
 ```
 
+> Note: for `inter-alltoall` only, every requested per-group node count is internally clamped to **16** (real-world MoE training rarely dispatches across more nodes; see [`preflight.md` §5.2](./preflight.md#52-group-sizes) for the rationale). The other inter-node tests use the requested sizes unchanged. So on a 128-node cluster, `--tests inter-alltoall --inter-group-sizes all` actually runs at 16-node sub-groups, while `--tests inter-allreduce --inter-group-sizes all` runs at 128 nodes as written.
+
 #### E. Ring P2P sizes
 
 ```bash
@@ -375,21 +377,17 @@ $SRUN runner/run_preflight_direct.sh \
 #### G. Reliability knobs
 
 ```bash
-# Bump the per-phase cleanup delay (rarely needed at small/medium
-# scale; only useful on very flaky networks or unusual kernel
-# TIME_WAIT settings).
+# Bump the per-phase cleanup delay. Default 2.0 is sufficient at every
+# cluster size for the comm shapes preflight exercises (inter-alltoall
+# is internally capped at 16 nodes; see preflight.md §5.2). Only bump
+# this on very flaky networks or unusual kernel TIME_WAIT settings.
 $SRUN runner/run_preflight_direct.sh --quick --comm-cleanup-delay-sec 5
-
-# Very large cluster running an all-N inter-node alltoall without the
-# OS-level sysctl tunings from preflight.md §7.2: raise the per-phase
-# drain to 60 s (matches the Linux tcp_fin_timeout default).
-$SRUN runner/run_preflight_direct.sh --comm-cleanup-delay-sec 60
 
 # Fail fast if torch.distributed rendezvous can't complete in 30s
 $SRUN runner/run_preflight_direct.sh --perf-test --dist-timeout-sec 30
 ```
 
-> Operating clusters at ≥ 128 nodes? See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the recommended OS-level tunings (`tcp_tw_reuse`, wider `ip_local_port_range`) and per-test invocation patterns. The §7 guidance is the source of truth; this section just lists the relevant CLI knobs.
+> Operating clusters at ≥ 128 nodes? See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the recommended OS-level tunings (`tcp_tw_reuse`, wider `ip_local_port_range`) and per-test invocation patterns. With the §5.2 inter-alltoall cap in place, a default invocation is safe at every cluster size; the §7.2 sysctls remain best-practice for any RDMA workload.
 
 #### H. Reporting & output layout
 
@@ -541,25 +539,32 @@ The script does `source "$VENV_ACTIVATE"`, which works for venv/uv but not direc
 
 ### "Address already in use" during perf tests
 
-This error occurs when NCCL/RCCL sockets are still in `TIME_WAIT` state from a recently destroyed process group, leaving the kernel ephemeral-port pool exhausted when the next phase tries to bind a new NCCL communicator.
+This error occurs when peak simultaneous ESTAB sockets per node during an `ncclCommInit` exhausts the kernel ephemeral-port pool, so the next outgoing `bind()` walks the entire range without finding an allocatable port. (Despite the name and the `TIME_WAIT` framing in the kernel docs, accumulated `TIME_WAIT` count does *not* gate this for NCCL inter-node OOB — see [`preflight.md` §7.1](./preflight.md#71-why-address-already-in-use-used-to-surface-at-scale) for the mechanism and the empirical evidence.)
 
-Preflight inserts a global barrier + `--comm-cleanup-delay-sec` sleep (default 2 s) between test phases to mitigate this. At small/medium scale and for the inter-node patterns preflight exercises today (allreduce ring/tree, p2p pairs, ring-p2p), the default is sufficient. The one case the default does not fully cover is **inter-node alltoall built over all N nodes at ≥ ~128 nodes** — that destroy generates enough IB OOB `TIME_WAIT` per node to come close to or exceed the default ephemeral-port pool.
+Preflight has two complementary defenses:
 
-The most reliable fix at large scale is **OS-level tuning** (do this once, per node):
+1. The **inter-node alltoall sub-group is internally capped at 16 nodes** (see [`preflight.md` §5.2](./preflight.md#52-group-sizes)) — the only test that, at large scale, can push peak ESTAB anywhere near the per-node ephemeral pool. The cap eliminates this failure mode by construction.
+2. A **global barrier + `--comm-cleanup-delay-sec` sleep** (default 2 s) is inserted after every comm destroy, primarily for cross-rank synchronization across the destroy → setup transition.
+
+If you still see `Address already in use` (e.g. on a network with an unusually narrow ephemeral-port range), the directly relevant **OS-level tuning** is widening that range — best-practice for any RDMA host:
 
 ```bash
-# Allow outgoing connections to reuse TIME_WAIT ports immediately,
-# and widen the ephemeral port range from ~28k to ~64k.
-sudo sysctl -w net.ipv4.tcp_tw_reuse=1
+# Widen the ephemeral port range from ~28k to ~64k. This is the only
+# OS knob that directly addresses the binding constraint.
 sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+
+# General hygiene for hosts running mixed RDMA + repeated outgoing
+# TCP workloads (NCCL inter-node OOB by itself doesn't benefit from
+# this -- see preflight.md §7.2 for why).
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1
 ```
 
-If you cannot apply the sysctls, raise the per-phase delay so the pool drains naturally between phases:
+As a fallback, raise the per-phase delay:
 
 ```bash
-# Force a 60 s drain after every destroyed comm (matches the Linux
-# tcp_fin_timeout default). Adds ~3 min of cumulative wait at 128N.
-runner/run_preflight_direct.sh --comm-cleanup-delay-sec 60
+# Bump the per-phase delay (default 2 s) on a particularly stressed
+# network. Rarely needed in practice with the §5.2 alltoall cap.
+runner/run_preflight_direct.sh --comm-cleanup-delay-sec 5
 ```
 
 See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the full explanation, persistence, and recommended large-cluster invocation patterns (split tests into separate runs, etc.).

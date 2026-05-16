@@ -28,6 +28,18 @@ from primus.tools.preflight.utility import (
     log,
 )
 
+# Hard cap on the per-group node count for inter-node alltoall. Real-world
+# MoE training rarely dispatches across more than ~8 nodes (e.g. DeepSeek-V3's
+# largest published EP=64 spans 8 nodes with per-token dispatch capped at
+# 4 nodes), so 16 covers every published configuration with comfortable
+# headroom. Capping here also eliminates the dominant source of EADDRINUSE at
+# >=128 nodes -- uncapped all-N inter-node alltoall destroys generate enough
+# IB OOB TIME_WAIT per node to exhaust the default ephemeral-port pool.
+# Other inter-node tests (allreduce / p2p / ring-p2p) are unaffected.
+# Intentionally not exposed as a CLI flag: this is a known-safe ceiling for
+# the comm shapes preflight is supposed to characterize, not a tuning knob.
+_INTER_ALLTOALL_MAX_NODES = 16
+
 
 def _resolve_inter_group_sizes(
     group_sizes: Optional[Sequence[Union[int, str]]],
@@ -66,6 +78,12 @@ def run_inter_node_comm(
         sizes_mb: message sizes in MB.
         group_sizes: list of node group sizes; values > num_nodes are dropped.
             'all' is accepted as a synonym for num_nodes. Defaults to [2, 4, num_nodes].
+
+    Note:
+        The alltoall path additionally clamps every requested per-group node
+        count to ``_INTER_ALLTOALL_MAX_NODES`` (16) before deduping, regardless
+        of the cluster size or the user's ``--inter-group-sizes`` choice. The
+        allreduce path uses the requested sizes unchanged.
     """
     device = torch.device(f"cuda:{LOCAL_RANK}")
 
@@ -91,7 +109,22 @@ def run_inter_node_comm(
         log("Skip inter-node comm benchmark, no valid group sizes")
         return
 
-    cases = {comm: list(node_counts) for comm in ("allreduce", "alltoall") if comm in enabled_set}
+    cases = {}
+    for comm in ("allreduce", "alltoall"):
+        if comm not in enabled_set:
+            continue
+        if comm == "alltoall":
+            capped = sorted({min(c, _INTER_ALLTOALL_MAX_NODES) for c in node_counts})
+            if capped != list(node_counts):
+                log(
+                    f"  inter-alltoall: per-group node count capped at "
+                    f"{_INTER_ALLTOALL_MAX_NODES} (requested {list(node_counts)} -> "
+                    f"running {capped}). Real-world MoE alltoall rarely exceeds "
+                    f"~8 nodes; see docs/preflight.md \u00a75.2 for the rationale."
+                )
+            cases[comm] = capped
+        else:
+            cases[comm] = list(node_counts)
 
     warmup = get_warmup()
     iteration = get_iteration()
