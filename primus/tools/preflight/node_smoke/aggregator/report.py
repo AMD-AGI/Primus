@@ -31,6 +31,7 @@ from .summarizers import (
     _gpu_activity_rows,
     _gpu_low_level_outlier_rows,
     _host_limits_issue_rows,
+    _nic_excluded_rows,
     _nic_fw_drift_rows,
     _nic_issue_rows,
     _pretouch_hbm_rows,
@@ -136,10 +137,13 @@ def _write_nic_issues(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
 
 def _write_nic_port_count(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
     # ----- B.2 NIC port-count summary (helps spot "node X has fewer
-    # NICs than the cluster") -- always rendered, even when no per-port
-    # issue tripped. We flag any node whose port count differs from the
-    # cluster majority so operators can act on partial-degradation cases
-    # like 7/8 ports without having to set --expected-rdma-nics.
+    # training NICs than the cluster") -- always rendered, even when no
+    # per-port issue tripped. We flag any node whose **included** port
+    # count differs from the cluster majority so operators can act on
+    # partial-degradation cases like 7/8 ports without having to set
+    # --expected-rdma-nics. The count is taken from `included_ports`
+    # (i.e. after the training-NIC selector ran) so nodes that legitimately
+    # have extra frontend / storage RoCE NICs don't show up as anomalies.
     f.write("\n## NIC port-count summary\n\n")
     try:
         from collections import Counter
@@ -147,11 +151,19 @@ def _write_nic_port_count(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
         counts = []
         for n in nodes:
             nic = (n.get("tier1") or {}).get("nics") or {}
+            # Prefer the post-selector count; fall back to total ports
+            # for legacy JSONs written before --rdma-nic-allowlist
+            # existed (those don't have an `included_ports` key).
+            included = nic.get("included_ports")
+            if included is None:
+                count = len(nic.get("ports") or [])
+            else:
+                count = len(included)
             counts.append(
                 (
                     n.get("node_rank", "?"),
                     n.get("host", "?"),
-                    len(nic.get("ports") or []),
+                    count,
                 )
             )
         if not counts:
@@ -161,19 +173,70 @@ def _write_nic_port_count(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
             majority_count, _ = cnt.most_common(1)[0]
             anomalies = [(nr, h, c) for nr, h, c in counts if c != majority_count]
             f.write(
-                f"Cluster-majority port count: **{majority_count}** "
+                f"Cluster-majority training-NIC count: **{majority_count}** "
                 f"(seen on {cnt[majority_count]}/{len(counts)} nodes).\n\n"
             )
             if not anomalies:
                 f.write("*Every node reports the majority count.*\n")
             else:
-                f.write("| Node | Hostname | Ports found |\n")
-                f.write("|------|----------|-------------|\n")
+                f.write("| Node | Hostname | Training NICs found |\n")
+                f.write("|------|----------|---------------------|\n")
                 for nr, h, c in anomalies:
                     f.write(f"| {nr} | {h} | {c} |\n")
     except Exception as e:
         f.write(f"*NIC port-count summary failed to render: {e}*\n")
         _warn(f"nic-port-count render failed: {e}")
+
+
+def _write_nic_excluded(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
+    # ----- B.3 Excluded NIC ports -- informational only. Surfaces ports
+    # that the selector chain dropped from the training-NIC set so the
+    # operator can verify the heuristic / NCCL_IB_HCA / --rdma-nic-allowlist
+    # did what they expected (e.g. "are my front-end NICs still
+    # admin-down?"). Excluded ports do NOT contribute to the node FAIL
+    # signal; they live in `tier1.nics.excluded_ports` + `info_issues`.
+    f.write("\n## NIC excluded ports (informational)\n\n")
+    try:
+        rows = _nic_excluded_rows(nodes)
+        if not rows:
+            f.write(
+                "*No NIC ports were excluded -- every discovered RDMA "
+                "port is in the training-NIC set on every node.*\n"
+            )
+        else:
+            # Brief per-source summary so the operator immediately knows
+            # whether to expect output here (e.g. "yes, NCCL_IB_HCA is
+            # filtering out 4 ports/node like I configured").
+            from collections import Counter
+
+            src_counts = Counter(r["source"] for r in rows)
+            src_bits = []
+            for src, c in sorted(src_counts.items()):
+                pretty = {
+                    "cli": "--rdma-nic-allowlist",
+                    "env": "NCCL_IB_HCA env",
+                    "heuristic": "phys_state heuristic",
+                }.get(src, src)
+                src_bits.append(f"{c} via `{pretty}`")
+            f.write(
+                "Ports excluded from the training-NIC set "
+                + "(" + ", ".join(src_bits) + "). "
+                "Hard-fail rules (state ACTIVE, phys_state LinkUp, "
+                "RoCE v2 GIDs) did NOT run on these ports.\n\n"
+            )
+            f.write("| Node | Hostname | Source | Port + reason |\n")
+            f.write("|------|----------|--------|---------------|\n")
+            for row in rows:
+                msg = str(row["issue"]).replace("|", "/")
+                if len(msg) > 160:
+                    msg = msg[:157] + "..."
+                f.write(
+                    f"| {row['node_rank']} | {row['host']} | "
+                    f"`{row['source']}` | {msg} |\n"
+                )
+    except Exception as e:
+        f.write(f"*NIC excluded-ports section failed to render: {e}*\n")
+        _warn(f"nic-excluded render failed: {e}")
 
 
 def _write_host_limits(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
@@ -627,9 +690,9 @@ def write_smoke_report(
     -- many CI/CD pipelines and slack bots scrape ``smoke_report.md`` for
     specific ``##`` headings. Do NOT reorder or rename without a deliberate
     behavior change. The order matches the original monolithic writer
-    (header, A, A.2, B, B.2, C, GPU visibility, D-1, D-2, E, F-partial,
-    Tooling availability, G x3, Tier 2 perf summary [conditional],
-    Failing nodes [conditional]).
+    (header, A, A.2, B, B.2, B.3, C, GPU visibility, D-1, D-2, E,
+    F-partial, Tooling availability, G x3, Tier 2 perf summary
+    [conditional], Failing nodes [conditional]).
     """
     with open(report_path, "w", encoding="utf-8") as f:
         _write_header(f, nodes, passing, failing, expected)
@@ -637,6 +700,7 @@ def write_smoke_report(
         _write_nic_fw_drift(f, nodes)
         _write_nic_issues(f, nodes)
         _write_nic_port_count(f, nodes)
+        _write_nic_excluded(f, nodes)
         _write_host_limits(f, nodes)
         _write_gpu_visibility(f, nodes)
         _write_gpu_low_level(f, nodes)

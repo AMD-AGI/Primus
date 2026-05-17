@@ -209,7 +209,10 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     # All three are pure data-collection (millisecond-scale sysfs reads); the
     # heavy cluster-level drift detection happens at aggregation time.
     tier1_extra["fingerprint"] = _collect_node_fingerprint()
-    tier1_extra["nics"] = _collect_nic_status(expected_count=ns.expected_rdma_nics)
+    tier1_extra["nics"] = _collect_nic_status(
+        expected_count=ns.expected_rdma_nics,
+        allowlist=getattr(ns, "rdma_nic_allowlist", None),
+    )
     tier1_extra["host_limits"] = _collect_host_limits(
         ulimit_l_min_gb=ns.ulimit_l_min_gb,
         shm_min_gb=ns.shm_min_gb,
@@ -587,11 +590,37 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--dmesg-minutes", type=int, default=15, help="Window for dmesg --since (minutes).")
     # NIC / RDMA roll-call (B). expected_count=None means "report only";
     # set this to e.g. 8 to make a missing or down NIC port a node FAIL.
+    # The count is compared against the **included** (training-NIC) set
+    # resolved by the selector chain below, NOT the raw number of devices
+    # under /sys/class/infiniband (which on multi-role nodes can include
+    # frontend / management / storage RoCE NICs).
     pr.add_argument(
         "--expected-rdma-nics",
         type=int,
         default=None,
-        help="Expected RDMA NIC port count. If set, a count " "mismatch becomes a node FAIL.",
+        help="Expected RDMA training-NIC port count (compared against "
+        "the included set, not /sys/class/infiniband total). If "
+        "set, a count mismatch becomes a node FAIL.",
+    )
+    # Training-NIC selector. Many clusters expose more RDMA-capable
+    # ports than the training job will actually use (frontend /
+    # management / storage NICs). The hard-fail rules (state must be
+    # ACTIVE, phys_state must be LinkUp, RoCE v2 GID present, ...) only
+    # run against the included subset. Excluded ports stay visible in
+    # the JSON (under tier1.nics.excluded_ports + info_issues) for
+    # diagnostics. Precedence: this flag > NCCL_IB_HCA env > heuristic
+    # (auto-exclude phys_state in {Disabled, Sleep}).
+    pr.add_argument(
+        "--rdma-nic-allowlist",
+        type=str,
+        default=None,
+        help="Comma-separated device[:port] list of training NICs "
+        "(NCCL_IB_HCA syntax: `^...` for denylist, `=dev` for "
+        "exact-match, no `:port` = match any port on device). "
+        "Wins over the NCCL_IB_HCA env. When neither is set, the "
+        "collector auto-excludes ports whose phys_state is "
+        "Disabled or Sleep (admin-disabled ports) and treats every "
+        "other port as a training NIC.",
     )
     # Host-limits hard thresholds (C). Set to 0 to disable a check.
     pr.add_argument(

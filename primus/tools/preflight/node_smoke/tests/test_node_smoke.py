@@ -35,6 +35,11 @@ from primus.tools.preflight.node_smoke.collectors.gpu_processes import (
     _flatten_amd_smi_process_json,
     _parse_lsof_pcn,
 )
+from primus.tools.preflight.node_smoke.collectors.nics import (
+    _parse_nic_selector,
+    _resolve_selector,
+    _selector_matches,
+)
 from primus.tools.preflight.node_smoke.collectors.rocm_smi import (
     _parse_rocm_smi_ras_info_text,
 )
@@ -290,6 +295,7 @@ EXPECTED_SECTIONS = [
     "## NIC firmware drift across cluster",
     "## NIC / RDMA roll-call issues",
     "## NIC port-count summary",
+    "## NIC excluded ports (informational)",
     "## Host limits issues",
     "## GPU visibility issues",
     "## GPU low-level outliers (PCIe link / HBM)",
@@ -451,3 +457,417 @@ def test_pretouch_hbm_rows_includes_gpu_at_exact_threshold():
     ]
     rows = _pretouch_hbm_rows(nodes, threshold_gib=2.0)
     assert sorted(r["gpu"] for r in rows) == [0, 2]
+
+
+# ---------------------------------------------------------------------------
+# F. NIC training-NIC selector (NCCL_IB_HCA-style allowlist + heuristic
+#    fallback + precedence chain)
+#
+# These guard the operator-facing contract introduced when multi-role
+# clusters (front-end / storage RoCE NICs co-resident with the training
+# NICs) started showing up. The fail mode they protect against: 56 of 57
+# real production nodes were reported as FAIL because two unplugged
+# front-end ports showed `state=DOWN phys_state=Disabled`, even though
+# `NCCL_IB_HCA` explicitly listed only the 8 healthy back-end NICs.
+# ---------------------------------------------------------------------------
+
+
+def _install_synthetic_ib_tree(monkeypatch, base):
+    """Redirect `_collect_nic_status`'s sysfs reads at a tmp tree.
+
+    The collector hard-codes ``/sys/class/infiniband`` so we monkey-patch
+    its ``os.path.isdir`` / ``os.listdir`` / ``_read_text`` symbols to
+    rewrite that prefix to ``base``. We DELIBERATELY rewrite at the
+    string level (not via a chroot-style abstraction) because the
+    rewrite has to also fire for the recursive sub-paths the collector
+    constructs (``<base>/<dev>/ports/<port>/state`` etc.) -- the rewrite
+    must therefore intercept every path-shaped call inside the
+    collector, not just the entry-point listdir.
+    """
+    import os
+
+    real_listdir = os.listdir
+    real_isdir = os.path.isdir
+
+    def _isdir(p: str) -> bool:
+        if p == "/sys/class/infiniband":
+            return True
+        return real_isdir(p.replace("/sys/class/infiniband", str(base)))
+
+    def _listdir(p: str):
+        return real_listdir(p.replace("/sys/class/infiniband", str(base)))
+
+    def _read_text(path: str) -> str:
+        try:
+            with open(path.replace("/sys/class/infiniband", str(base)), "r") as fh:
+                return fh.read().strip()
+        except Exception:
+            return ""
+
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.collectors.nics.os.path.isdir", _isdir
+    )
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.collectors.nics.os.listdir", _listdir
+    )
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.collectors.nics._read_text", _read_text
+    )
+
+
+def test_parse_nic_selector_allowlist_with_ports():
+    """F.1 -- baseline NCCL_IB_HCA syntax: comma-separated `device:port`."""
+    sel = _parse_nic_selector("rocep158s0:1,rocep190s0:1")
+    assert sel["mode"] == "allowlist"
+    assert sel["entries"] == [
+        ("rocep158s0", False, 1),
+        ("rocep190s0", False, 1),
+    ]
+
+
+def test_parse_nic_selector_denylist_prefix():
+    """F.2 -- a leading `^` flips the whole selector to denylist."""
+    sel = _parse_nic_selector("^roceo12399,roceo12409")
+    assert sel["mode"] == "denylist"
+    # The ^ is stripped from the entries; only the global mode changes.
+    assert [e[0] for e in sel["entries"]] == ["roceo12399", "roceo12409"]
+
+
+def test_parse_nic_selector_exact_prefix():
+    """F.3 -- `=name` forces exact (not prefix) device-name matching."""
+    sel = _parse_nic_selector("=mlx5,mlx5_other")
+    assert sel["entries"][0] == ("mlx5", True, None)  # exact-match flag set
+    assert sel["entries"][1] == ("mlx5_other", False, None)
+
+
+def test_parse_nic_selector_no_port_matches_any_port():
+    """F.4 -- entries without `:port` accept any port on the device."""
+    sel = _parse_nic_selector("mlx5_0")
+    assert sel["entries"] == [("mlx5_0", False, None)]
+    assert _selector_matches(sel, "mlx5_0", 1) is True
+    assert _selector_matches(sel, "mlx5_0", 2) is True
+
+
+def test_parse_nic_selector_empty_is_passthrough():
+    """F.5 -- empty / whitespace-only input means 'no selector', so the
+    caller falls through to the next precedence layer (env / heuristic)
+    rather than treating it as 'allowlist nothing' (which would silently
+    exclude every port)."""
+    assert _parse_nic_selector("")["mode"] == "passthrough"
+    assert _parse_nic_selector("   ")["mode"] == "passthrough"
+    assert _parse_nic_selector("^")["mode"] == "passthrough"  # ^ but no entries
+    assert _parse_nic_selector(",, ,")["mode"] == "passthrough"
+
+
+def test_selector_matches_prefix_matches_mlx5_to_mlx5_0():
+    """F.6 -- NCCL prefix semantics: `mlx5` allowlist entry matches every
+    device that starts with `mlx5` (the historical NCCL behavior). This
+    is why operators must use `=mlx5` if they want exact-only matching."""
+    sel = _parse_nic_selector("mlx5")
+    assert _selector_matches(sel, "mlx5", 1) is True
+    assert _selector_matches(sel, "mlx5_0", 1) is True
+    assert _selector_matches(sel, "mlx5_bond_0", 1) is True
+    assert _selector_matches(sel, "rocep158s0", 1) is False
+
+
+def test_selector_matches_denylist_inverts():
+    """F.7 -- denylist semantics: ports NOT in the list pass; ports in
+    the list are rejected. This is the more ergonomic form for clusters
+    with many training NICs and a small handful of front-end ports."""
+    sel = _parse_nic_selector("^roceo12399,roceo12409")
+    # Listed -> excluded.
+    assert _selector_matches(sel, "roceo12399", 1) is False
+    assert _selector_matches(sel, "roceo12409", 1) is False
+    # Not listed -> included.
+    assert _selector_matches(sel, "rocep158s0", 1) is True
+
+
+def test_selector_matches_port_filter_is_per_port():
+    """F.8 -- `:port` suffix narrows the match to that specific port on
+    the device; the same device on a different port is NOT matched."""
+    sel = _parse_nic_selector("mlx5_0:2")
+    assert _selector_matches(sel, "mlx5_0", 2) is True
+    assert _selector_matches(sel, "mlx5_0", 1) is False
+
+
+def test_resolve_selector_cli_beats_env():
+    """F.9 -- precedence: when both the CLI flag and NCCL_IB_HCA env are
+    set, the CLI wins. Operators must be able to override their shell
+    env without touching it."""
+    sel = _resolve_selector(
+        allowlist_arg="mlx5_0:1",
+        env={"NCCL_IB_HCA": "rocep158s0:1"},
+    )
+    assert sel["source"] == "cli"
+    assert sel["entries"][0][0] == "mlx5_0"
+
+
+def test_resolve_selector_env_used_when_cli_absent():
+    """F.10 -- precedence: env is consulted only when the CLI flag is
+    unset. This is the most common case in production (operator sets
+    NCCL_IB_HCA once in their job script; smoke picks it up
+    transparently)."""
+    sel = _resolve_selector(
+        allowlist_arg=None,
+        env={"NCCL_IB_HCA": "rocep158s0:1"},
+    )
+    assert sel["source"] == "env"
+
+
+def test_resolve_selector_heuristic_when_both_absent():
+    """F.11 -- precedence fallback: when neither CLI nor env is set,
+    return a `heuristic` marker. The caller (`_collect_nic_status`)
+    handles this by auto-excluding ports whose `phys_state` is in
+    {Disabled, Sleep}."""
+    sel = _resolve_selector(allowlist_arg=None, env={})
+    assert sel["source"] == "heuristic"
+    # Document the heuristic's exact admin-down set so a future widening
+    # (e.g. to also exclude `Polling`) has to update this test
+    # deliberately. `Polling` MUST NOT be in here -- it means
+    # "actively looking for a link partner" which is a real failure on
+    # a port intended to be used.
+    assert sel["admin_down_phys_states"] == ["disabled", "sleep"]
+
+
+def test_resolve_selector_empty_string_falls_through_to_env():
+    """F.12 -- an empty `--rdma-nic-allowlist ''` must not silently
+    block out everything; it should behave the same as not passing the
+    flag at all and fall through to the env. Defensive against
+    shell-quoting accidents (`--rdma-nic-allowlist "$VAR"` when
+    `$VAR` is unset)."""
+    sel = _resolve_selector(
+        allowlist_arg="",
+        env={"NCCL_IB_HCA": "rocep158s0:1"},
+    )
+    assert sel["source"] == "env"
+
+
+def test_resolve_selector_blank_env_falls_through_to_heuristic():
+    """F.13 -- same defensive behavior for an empty NCCL_IB_HCA env
+    (some clusters export it unset / empty by accident). MUST fall
+    through to the heuristic rather than allowlist-nothing."""
+    sel = _resolve_selector(allowlist_arg=None, env={"NCCL_IB_HCA": ""})
+    assert sel["source"] == "heuristic"
+
+
+def test_collect_nic_status_env_allowlist_excludes_disabled_frontend_ports(
+    tmp_path, monkeypatch
+):
+    """F.14 -- end-to-end against a synthetic /sys/class/infiniband
+    mirroring the production failure mode: 12 IB devices (8 training +
+    2 storage ACTIVE + 2 frontend Disabled). With NCCL_IB_HCA listing
+    only the 8 training NICs, the collector must:
+      * include exactly the 8 listed devices,
+      * exclude the other 4 with a source=`env` info_issue each,
+      * emit ZERO hard issues,
+      * tag the Disabled ports with their state in the info_issue
+        (so an operator who reads excluded_ports can still see they
+        were unhealthy, just not relevant).
+    """
+    from primus.tools.preflight.node_smoke.collectors.nics import _collect_nic_status
+
+    # Synthetic sysfs tree.
+    base = tmp_path / "ib"
+    devices = [
+        # (name, state, phys_state, rate_str)
+        ("rocep158s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep190s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep206s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep222s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep28s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep62s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep79s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep96s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        # Storage / control-plane: ACTIVE but NOT in NCCL_IB_HCA.
+        ("rocep159s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("rocep29s0", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        # Front-end: Disabled, NOT in NCCL_IB_HCA -- the user's bug.
+        ("roceo12399", "1: DOWN", "3: Disabled", ""),
+        ("roceo12409", "1: DOWN", "3: Disabled", ""),
+    ]
+    import os
+
+    for name, state, phys, rate in devices:
+        port_dir = base / name / "ports" / "1"
+        port_dir.mkdir(parents=True)
+        (port_dir / "state").write_text(state)
+        (port_dir / "phys_state").write_text(phys)
+        (port_dir / "rate").write_text(rate)
+        (port_dir / "link_layer").write_text("Ethernet")
+        # One valid RoCE v2 GID on every ACTIVE port so the GID rule
+        # doesn't accidentally fail the test (which would mask the
+        # selector behavior we're trying to verify).
+        gids = port_dir / "gids"
+        gids.mkdir()
+        (gids / "0").write_text("fe80:0000:0000:0000:0000:0000:0000:0001")
+        types = port_dir / "gid_attrs" / "types"
+        types.mkdir(parents=True)
+        (types / "0").write_text("IB/RoCE v2")
+
+    _install_synthetic_ib_tree(monkeypatch, base)
+
+    monkeypatch.setenv(
+        "NCCL_IB_HCA",
+        "rocep158s0:1,rocep190s0:1,rocep206s0:1,rocep222s0:1,"
+        "rocep28s0:1,rocep62s0:1,rocep79s0:1,rocep96s0:1",
+    )
+
+    out = _collect_nic_status(expected_count=None)
+
+    # 12 ports total, 8 included, 4 excluded -- the headline assertion.
+    assert len(out["ports"]) == 12
+    assert len(out["included_ports"]) == 8
+    assert len(out["excluded_ports"]) == 4
+    # The 2 Disabled frontend ports and the 2 not-in-HCA storage ports.
+    assert set(out["excluded_ports"]) == {
+        "rocep159s0:1",
+        "rocep29s0:1",
+        "roceo12399:1",
+        "roceo12409:1",
+    }
+    # Selector metadata records the source so the operator can verify
+    # which precedence layer fired.
+    assert out["selector"]["source"] == "env"
+    # Zero hard issues -> node would PASS.
+    assert out["issues"] == []
+    # Every excluded port produced an info_issue mentioning the env
+    # source. The two Disabled ports MUST also carry their state info
+    # so operators investigating "are my frontend NICs still down?" can
+    # see it without opening every per-port record.
+    info = "\n".join(out["info_issues"])
+    assert "NCCL_IB_HCA" in info
+    assert "phys_state=Disabled" in info  # frontend ports
+    # ACTIVE-but-not-in-HCA ports do NOT need the state suffix (they're
+    # healthy, just reserved for sockets/storage).
+
+
+def test_collect_nic_status_heuristic_only_excludes_disabled_phys_state(
+    tmp_path, monkeypatch
+):
+    """F.15 -- with no env and no CLI selector, the heuristic must
+    auto-exclude `phys_state=Disabled` ports but MUST keep `phys_state=
+    Polling` (cable unplugged on an intended-up port) and `phys_state=
+    LinkUp with state=INIT` (driver/SM didn't finish bringup) in the
+    included set so they hard-fail. The whole point of choosing Disabled
+    as the exclusion signal is that it's the only phys_state that
+    unambiguously means "admin-down, not used"."""
+    from primus.tools.preflight.node_smoke.collectors.nics import _collect_nic_status
+
+    base = tmp_path / "ib"
+    devices = [
+        ("training_ok", "4: ACTIVE", "5: LinkUp", "400 Gb/sec"),
+        ("frontend_disabled", "1: DOWN", "3: Disabled", ""),
+        ("training_cable_pulled", "1: DOWN", "2: Polling", ""),
+        ("training_unconfigured", "2: INIT", "5: LinkUp", "400 Gb/sec"),
+    ]
+    for name, state, phys, rate in devices:
+        port_dir = base / name / "ports" / "1"
+        port_dir.mkdir(parents=True)
+        (port_dir / "state").write_text(state)
+        (port_dir / "phys_state").write_text(phys)
+        (port_dir / "rate").write_text(rate)
+        (port_dir / "link_layer").write_text("Ethernet")
+        gids = port_dir / "gids"
+        gids.mkdir()
+        (gids / "0").write_text("fe80:0000:0000:0000:0000:0000:0000:0001")
+        types = port_dir / "gid_attrs" / "types"
+        types.mkdir(parents=True)
+        (types / "0").write_text("IB/RoCE v2")
+
+    _install_synthetic_ib_tree(monkeypatch, base)
+    monkeypatch.delenv("NCCL_IB_HCA", raising=False)
+
+    out = _collect_nic_status(expected_count=None)
+
+    assert out["selector"]["source"] == "heuristic"
+    # Only the Disabled port is excluded by the heuristic.
+    assert out["excluded_ports"] == ["frontend_disabled:1"]
+    # The 3 remaining are included; the 2 broken-but-included ones produce
+    # hard issues.
+    assert set(out["included_ports"]) == {
+        "training_ok:1",
+        "training_cable_pulled:1",
+        "training_unconfigured:1",
+    }
+    issues_text = " ".join(out["issues"])
+    assert "training_cable_pulled" in issues_text  # state=DOWN
+    assert "training_unconfigured" in issues_text  # state=INIT
+    assert "training_ok" not in issues_text
+
+
+def test_collect_nic_status_empty_set_guard_when_everything_excluded(
+    tmp_path, monkeypatch
+):
+    """F.16 -- defense in depth: if the selector ends up excluding every
+    discovered port (e.g. operator typo'd --rdma-nic-allowlist, or the
+    whole RoCE card got admin-disabled), the node MUST still hard-fail.
+    A node with zero training NICs cannot participate in inter-node
+    training and silently passing it would be the worst possible
+    regression introduced by the selector feature."""
+    from primus.tools.preflight.node_smoke.collectors.nics import _collect_nic_status
+
+    base = tmp_path / "ib"
+    port_dir = base / "training_ok" / "ports" / "1"
+    port_dir.mkdir(parents=True)
+    (port_dir / "state").write_text("4: ACTIVE")
+    (port_dir / "phys_state").write_text("5: LinkUp")
+    (port_dir / "rate").write_text("400 Gb/sec")
+    (port_dir / "link_layer").write_text("Ethernet")
+
+    _install_synthetic_ib_tree(monkeypatch, base)
+    # CLI allowlist that matches NOTHING (typo or operator mistake).
+    out = _collect_nic_status(expected_count=None, allowlist="this_device_does_not_exist:1")
+
+    assert out["included_ports"] == []
+    assert out["excluded_ports"] == ["training_ok:1"]
+    # The empty-set guard fires -- node FAIL.
+    assert any(
+        "no included RDMA NIC ports" in issue for issue in out["issues"]
+    ), out["issues"]
+
+
+def test_collect_nic_status_expected_count_compares_included(
+    tmp_path, monkeypatch
+):
+    """F.17 -- the behavior change for --expected-rdma-nics: it must
+    compare against the *included* count, not the total /sys/class/
+    infiniband count. Otherwise `--expected-rdma-nics 8` would fail on
+    the very clusters this feature exists to help (12 devices, 8
+    training)."""
+    from primus.tools.preflight.node_smoke.collectors.nics import _collect_nic_status
+
+    base = tmp_path / "ib"
+    # 8 training + 2 frontend Disabled = 10 total ports, 8 training NICs.
+    for i in range(8):
+        d = base / f"trainnic{i}" / "ports" / "1"
+        d.mkdir(parents=True)
+        (d / "state").write_text("4: ACTIVE")
+        (d / "phys_state").write_text("5: LinkUp")
+        (d / "rate").write_text("400 Gb/sec")
+        (d / "link_layer").write_text("Ethernet")
+        gids = d / "gids"
+        gids.mkdir()
+        (gids / "0").write_text("fe80:0000:0000:0000:0000:0000:0000:0001")
+        types = d / "gid_attrs" / "types"
+        types.mkdir(parents=True)
+        (types / "0").write_text("IB/RoCE v2")
+    for i in range(2):
+        d = base / f"frontnic{i}" / "ports" / "1"
+        d.mkdir(parents=True)
+        (d / "state").write_text("1: DOWN")
+        (d / "phys_state").write_text("3: Disabled")
+        (d / "rate").write_text("")
+        (d / "link_layer").write_text("Ethernet")
+
+    _install_synthetic_ib_tree(monkeypatch, base)
+    monkeypatch.delenv("NCCL_IB_HCA", raising=False)
+
+    # With --expected-rdma-nics 8 on the heuristic path: the 2 Disabled
+    # ports get auto-excluded, leaving 8 included = matches expected.
+    out = _collect_nic_status(expected_count=8)
+    assert out["issues"] == [], out["issues"]
+    # And the inverse: --expected-rdma-nics 10 (treating the total
+    # `/sys/class/infiniband` count as the expected) MUST fail, because
+    # the comparison happens against the included set.
+    out = _collect_nic_status(expected_count=10)
+    assert any("!= expected 10" in i for i in out["issues"])

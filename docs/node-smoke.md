@@ -19,9 +19,16 @@ srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
 srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
      bash runner/run_node_smoke_direct.sh --tier2-perf
 
-# Hard-fail on partial NIC enumeration (e.g. 7 of 8 RDMA NICs):
+# Hard-fail on partial NIC enumeration (e.g. 7 of 8 RDMA NICs).
+# The count is compared against the *training-NIC* set after the
+# selector chain runs, so frontend / storage RoCE NICs do not count.
 srun ... bash runner/run_node_smoke_direct.sh --tier2-perf \
      --expected-rdma-nics 8
+
+# Explicitly pin the training-NIC selector (otherwise NCCL_IB_HCA env
+# is used; otherwise admin-disabled phys_state ports are auto-excluded):
+srun ... bash runner/run_node_smoke_direct.sh --tier2-perf \
+     --rdma-nic-allowlist 'rocep158s0:1,rocep190s0:1,rocep206s0:1,rocep222s0:1,rocep28s0:1,rocep62s0:1,rocep79s0:1,rocep96s0:1'
 
 # Single-node local check (no SLURM):
 bash runner/run_node_smoke_direct.sh
@@ -149,7 +156,14 @@ flowchart TD
 
 **B. NIC / RDMA roll-call** (`tier1.nics`):
 - Per port (read entirely from `/sys/class/infiniband` — no `ibv_devinfo`/`ibstat` dependency, works inside containers): `state`, `phys_state`, `rate`, netdev + MTU, total non-zero GIDs, RoCE v2 GID count
-- **Hard fail rules**: any port not `ACTIVE` / not `LinkUp`, any active port with zero RoCE v2 GIDs, NIC count != `--expected-rdma-nics N` (when set)
+- **Training-NIC selector** — many clusters expose more RDMA-capable ports than the training job uses (frontend / management / storage NICs). The hard-fail rules only run against the *included* subset. Precedence:
+  1. `--rdma-nic-allowlist 'rocep158s0:1,rocep190s0:1,...'` (full `NCCL_IB_HCA` syntax: comma-separated `device[:port]`, `^...` for denylist, `=dev` for exact-match, no `:port` to match any port on the device).
+  2. `NCCL_IB_HCA` env (same syntax) — mirrors what NCCL/RCCL itself will use, so the smoke test and the training launch agree by construction.
+  3. Heuristic: auto-exclude any port whose `phys_state` is `Disabled` or `Sleep` (admin-disabled at firmware/driver level — no SFP, BIOS port-disable, netdev admin-down). Real failure modes on a port that *is* meant to be used produce a different `phys_state` (`Polling`, `LinkErrorRecovery`, or `LinkUp` with `state!=ACTIVE`), so this heuristic does not mask cable / driver problems.
+  4. Fallback: every IB port must be ACTIVE / LinkUp.
+- Excluded ports stay visible in `tier1.nics.ports` and are summarised in `tier1.nics.excluded_ports` + `info_issues` for diagnostics. They do NOT contribute to the node FAIL signal.
+- **Hard fail rules** (only on the included set): port not `ACTIVE` / not `LinkUp`, active port with zero RoCE v2 GIDs (RoCE) or zero valid GIDs (IB), included-NIC count ≠ `--expected-rdma-nics N` (when set).
+- **Empty-set guard**: if every discovered port gets excluded, the node still hard-fails — a node with zero training NICs cannot participate in inter-node training.
 
 **C. Host limits / system tunables** (`tier1.host_limits`):
 - `RLIMIT_MEMLOCK`, `RLIMIT_NOFILE`, `RLIMIT_NPROC`
@@ -174,20 +188,21 @@ In order:
 1. **Status table** — one row per node with `node_rank`, hostname, PASS/FAIL, duration, top fail reason.
 2. **Stack drift across cluster** — for every scalar fingerprint key, outliers vs the cluster majority.
 3. **NIC firmware drift across cluster** — per-IB-device firmware drift.
-4. **NIC / RDMA roll-call issues** — every offending node + port.
-5. **NIC port-count summary** — cluster-majority port count and any node that disagrees (catches partial-NIC degradation without `--expected-rdma-nics`).
-6. **Host limits issues** — per-node hard-limit violations.
-7. **GPU visibility issues** — nodes where torch couldn't see the GPUs or amd-smi sees more GPUs than torch (stale ROCm / wedged amdgpu driver). Independent of every other collector.
-8. **GPU low-level outliers (PCIe link / HBM)** — per-GPU outliers vs the cluster majority on PCIe width/speed and HBM total.
-9. **XGMI link issues** — any non-XGMI GPU pair (intra-node collectives silently fall back to PCIe).
-10. **Cluster clock + time daemons** — wall-clock spread plus per-node time-daemon health.
-11. **Tooling self-latency (`rocm-smi --version`)** — slow / timed-out tool calls (precursor to a wedged amdgpu driver).
-12. **Tooling availability** — always-on inventory of `amd-smi` / `rocm-smi` / `lsof` per node, plus which Tier 1 checks have NO working tool on each node.
-13. **Busy GPUs / leaked processes** — foreign PIDs holding GPUs at smoke start (most common cause of training failing to launch on an otherwise-healthy node).
-14. **GPU pre-touch HBM usage outliers** — GPUs with non-trivial HBM in use BEFORE smoke touched the device.
-15. **GPU compute-activity outliers** — GPUs with `gfx_activity_pct >= --gpu-activity-warn-pct` at smoke start (warn-only).
-16. **Tier 2 perf summary** (conditional, only when at least one node ran Tier 2) — per-node GEMM TFLOPS / HBM GB/s as `min / median / max`, plus local RCCL GB/s.
-17. **Failing nodes — full reasons** (conditional, only when there are failing nodes) — every fail reason, expanded per node.
+4. **NIC / RDMA roll-call issues** — every offending node + port (included set only).
+5. **NIC port-count summary** — cluster-majority *training-NIC* count and any node that disagrees (catches partial-NIC degradation without `--expected-rdma-nics`). The count is taken from the included set, so nodes that legitimately have extra frontend / storage RoCE NICs don't show up as anomalies.
+6. **NIC excluded ports (informational)** — ports the selector chain dropped from the training-NIC set, grouped by source (`--rdma-nic-allowlist` / `NCCL_IB_HCA` / heuristic). Informational only; does not contribute to FAIL.
+7. **Host limits issues** — per-node hard-limit violations.
+8. **GPU visibility issues** — nodes where torch couldn't see the GPUs or amd-smi sees more GPUs than torch (stale ROCm / wedged amdgpu driver). Independent of every other collector.
+9. **GPU low-level outliers (PCIe link / HBM)** — per-GPU outliers vs the cluster majority on PCIe width/speed and HBM total.
+10. **XGMI link issues** — any non-XGMI GPU pair (intra-node collectives silently fall back to PCIe).
+11. **Cluster clock + time daemons** — wall-clock spread plus per-node time-daemon health.
+12. **Tooling self-latency (`rocm-smi --version`)** — slow / timed-out tool calls (precursor to a wedged amdgpu driver).
+13. **Tooling availability** — always-on inventory of `amd-smi` / `rocm-smi` / `lsof` per node, plus which Tier 1 checks have NO working tool on each node.
+14. **Busy GPUs / leaked processes** — foreign PIDs holding GPUs at smoke start (most common cause of training failing to launch on an otherwise-healthy node).
+15. **GPU pre-touch HBM usage outliers** — GPUs with non-trivial HBM in use BEFORE smoke touched the device.
+16. **GPU compute-activity outliers** — GPUs with `gfx_activity_pct >= --gpu-activity-warn-pct` at smoke start (warn-only).
+17. **Tier 2 perf summary** (conditional, only when at least one node ran Tier 2) — per-node GEMM TFLOPS / HBM GB/s as `min / median / max`, plus local RCCL GB/s.
+18. **Failing nodes — full reasons** (conditional, only when there are failing nodes) — every fail reason, expanded per node.
 
 Each section that does pure data shaping is wrapped in its own `try / except`, so a future schema bug in one section can't truncate the rest of the report. The two intentional EXCEPTIONS are **Tier 2 perf summary** and **Failing nodes — full reasons** — both deliberately propagate exceptions so a regression in either bubbles up rather than silently rendering a half-empty section.
 
@@ -210,7 +225,8 @@ The authoritative source of flags + defaults is `python -m primus.tools.prefligh
 | `--rccl-timeout-sec` | 30 | Hard timeout for the RCCL phase. |
 | `--skip-dmesg` | off | Skip dmesg scan (e.g. inside containers). |
 | `--dmesg-minutes` | 15 | dmesg `--since` window. |
-| `--expected-rdma-nics N` | auto-report-only | When set, NIC count mismatch becomes a node FAIL. |
+| `--expected-rdma-nics N` | auto-report-only | When set, a mismatch between the **included (training-NIC) count** and N becomes a node FAIL. Compares against the post-selector count, not the raw number of devices under `/sys/class/infiniband`. |
+| `--rdma-nic-allowlist LIST` | unset | Explicit training-NIC selector in `NCCL_IB_HCA` syntax (`device[:port],...`, `^...` denylist, `=dev` exact-match). Wins over `NCCL_IB_HCA` env. When neither this flag nor the env is set, the collector auto-excludes ports whose `phys_state` is `Disabled` or `Sleep`. |
 | `--ulimit-l-min-gb GB` | 32 | RLIMIT_MEMLOCK threshold (0 disables). |
 | `--shm-min-gb GB` | 8 | `/dev/shm` size threshold (0 disables). |
 | `--rocm-smi-timeout-sec SEC` | 5.0 | Hard timeout for the `rocm-smi --version` self-latency canary; hitting it is a node FAIL (driver likely wedging). |

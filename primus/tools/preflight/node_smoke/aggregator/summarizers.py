@@ -129,6 +129,34 @@ def _nic_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _nic_excluded_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-node NIC ports that were excluded from the training-NIC set.
+
+    Excluded ports are informational: they did not contribute to the
+    node FAIL signal, but operators sometimes want to see them
+    (e.g. "did the heuristic do what I expected?", "is my front-end
+    NIC still disabled or did it come back?"). Each row carries the
+    selector source so the operator can tell whether the exclusion
+    came from --rdma-nic-allowlist, NCCL_IB_HCA, or the
+    phys_state=Disabled/Sleep heuristic.
+    """
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        nic = (n.get("tier1") or {}).get("nics") or {}
+        sel = nic.get("selector") or {}
+        source = sel.get("source") or "?"
+        for issue in nic.get("info_issues", []) or []:
+            rows.append(
+                {
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "source": source,
+                    "issue": issue,
+                }
+            )
+    return rows
+
+
 def _host_limits_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Per-node host-limit hard violations (ulimit -l / /dev/shm too low)."""
     rows: List[Dict[str, Any]] = []
