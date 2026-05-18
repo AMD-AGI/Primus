@@ -301,4 +301,3 @@ For the full flag list and the aggregator subcommand, see `python -m primus.tool
 - `[preflight-direct.md](./preflight-direct.md)` — the heavier `preflight` tool with global rendezvous and inter-node bandwidth tests.
 - `[primus/cli/subcommands/node_smoke.py](../primus/cli/subcommands/node_smoke.py)` — the primus-cli subcommand wiring (two-phase dispatch: rank-N run + rank-0 aggregate).
 - `[primus/tools/preflight/node_smoke/cli.py](../primus/tools/preflight/node_smoke/cli.py)` — canonical flag definitions and per-node / aggregate phase bodies.
-

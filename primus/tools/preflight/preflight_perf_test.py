@@ -196,11 +196,7 @@ def _ensure_report_file_name(args: Any) -> str:
         except Exception:
             world = 1
         try:
-            local_world = int(
-                os.environ.get("LOCAL_WORLD_SIZE")
-                or os.environ.get("GPUS_PER_NODE")
-                or 8
-            )
+            local_world = int(os.environ.get("LOCAL_WORLD_SIZE") or os.environ.get("GPUS_PER_NODE") or 8)
         except (TypeError, ValueError):
             local_world = 8
         nnodes = max(1, (world or 1) // max(1, local_world))
@@ -251,8 +247,7 @@ def _announce_report_paths(args: Any) -> None:
                 continue
     if not found_any:
         print(
-            f"[Primus:Preflight] WARN: no report files found at "
-            f"{dump_path}/{name}{{,_perf}}.{{md,pdf}}",
+            f"[Primus:Preflight] WARN: no report files found at " f"{dump_path}/{name}{{,_perf}}.{{md,pdf}}",
             flush=True,
         )
 

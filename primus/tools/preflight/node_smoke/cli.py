@@ -523,9 +523,7 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
     return 0 if not failing and (expected is None or len(nodes) == expected) else 1
 
 
-def _announce_aggregate_paths(
-    dump_path: str, report_path: str, pass_path: str, fail_path: str
-) -> None:
+def _announce_aggregate_paths(dump_path: str, report_path: str, pass_path: str, fail_path: str) -> None:
     """Print absolute paths of aggregator outputs (R5).
 
     Replaces the bash wrapper's ``log_always Report: ...`` lines. Always
@@ -731,9 +729,7 @@ def _add_aggregate_flags(parser: argparse.ArgumentParser, include_dump_path: boo
     that flag with identical defaults / meaning, so we attach it once.
     """
     if include_dump_path:
-        parser.add_argument(
-            "--dump-path", default="output/preflight", help="Same as `run --dump-path`."
-        )
+        parser.add_argument("--dump-path", default="output/preflight", help="Same as `run --dump-path`.")
     parser.add_argument(
         "--expected-nodes",
         type=int,
@@ -771,7 +767,8 @@ def _add_aggregate_flags(parser: argparse.ArgumentParser, include_dump_path: boo
             "--hbm-busy-threshold-gib",
             type=float,
             default=2.0,
-            help="Pre-touch HBM-used threshold (GiB) used by the " "'GPU pre-touch HBM usage outliers' section.",
+            help="Pre-touch HBM-used threshold (GiB) used by the "
+            "'GPU pre-touch HBM usage outliers' section.",
         )
         parser.add_argument(
             "--gpu-activity-warn-pct",
@@ -837,9 +834,7 @@ def _resolve_aggregate_args_from_slurm(args: argparse.Namespace) -> argparse.Nam
                         f.write(proc.stdout)
                     expected_nodelist_file = candidate
                     n_hosts = sum(1 for line in proc.stdout.splitlines() if line.strip())
-                    _log(
-                        f"resolved expected nodelist ({n_hosts} nodes) -> {candidate}"
-                    )
+                    _log(f"resolved expected nodelist ({n_hosts} nodes) -> {candidate}")
                 else:
                     _warn(
                         "scontrol show hostnames returned empty / non-zero; "

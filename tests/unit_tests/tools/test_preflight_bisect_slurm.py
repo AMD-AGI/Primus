@@ -55,7 +55,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BISECT_PY = REPO_ROOT / "tools" / "preflight_bisect" / "bisect.py"
 FAKE_RUNNER = REPO_ROOT / "tools" / "preflight_bisect" / "fake_runner.sh"
@@ -121,8 +120,10 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
     cmd = [
         sys.executable,
         str(BISECT_PY),
-        "--nodelist", env["BISECT_NODELIST"],
-        "--output-dir", str(tmp_path),
+        "--nodelist",
+        env["BISECT_NODELIST"],
+        "--output-dir",
+        str(tmp_path),
     ]
     if env.get("BISECT_PARTITION"):
         cmd.extend(["--partition", env["BISECT_PARTITION"]])
@@ -166,18 +167,21 @@ def test_bisect_all_nodes_pass(tmp_path):
 
     summary_text = _run_bisect(
         extra_args=[
-            "--trial-timeout-sec", str(trial_timeout),
-            "--slurm-time", slurm_time,
-            "--runner", str(REAL_RUNNER),
+            "--trial-timeout-sec",
+            str(trial_timeout),
+            "--slurm-time",
+            slurm_time,
+            "--runner",
+            str(REAL_RUNNER),
         ],
         env=env,
         tmp_path=tmp_path,
         timeout=subprocess_timeout,
     )
 
-    assert "SUSPECT_NODES: (none)" in summary_text, (
-        f"Expected no suspect nodes for a healthy nodeset, but got:\n{summary_text}"
-    )
+    assert (
+        "SUSPECT_NODES: (none)" in summary_text
+    ), f"Expected no suspect nodes for a healthy nodeset, but got:\n{summary_text}"
 
 
 def test_bisect_identifies_bad_node(tmp_path):
@@ -198,17 +202,22 @@ def test_bisect_identifies_bad_node(tmp_path):
 
     summary_text = _run_bisect(
         extra_args=[
-            "--trial-timeout-sec", str(trial_timeout),
-            "--slurm-time", slurm_time,
-            "--runner", str(FAKE_RUNNER),
-            "--preflight-env", f"BAD_NODE={bad_node}",
-            "--max-concurrent-trials", "2",
+            "--trial-timeout-sec",
+            str(trial_timeout),
+            "--slurm-time",
+            slurm_time,
+            "--runner",
+            str(FAKE_RUNNER),
+            "--preflight-env",
+            f"BAD_NODE={bad_node}",
+            "--max-concurrent-trials",
+            "2",
         ],
         env=env,
         tmp_path=tmp_path,
         timeout=subprocess_timeout,
     )
 
-    assert f"SUSPECT_NODES: {bad_node}" in summary_text, (
-        f"Expected '{bad_node}' to be identified as the sole suspect, but got:\n{summary_text}"
-    )
+    assert (
+        f"SUSPECT_NODES: {bad_node}" in summary_text
+    ), f"Expected '{bad_node}' to be identified as the sole suspect, but got:\n{summary_text}"

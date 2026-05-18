@@ -504,15 +504,9 @@ def _install_synthetic_ib_tree(monkeypatch, base):
         except Exception:
             return ""
 
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.collectors.nics.os.path.isdir", _isdir
-    )
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.collectors.nics.os.listdir", _listdir
-    )
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.collectors.nics._read_text", _read_text
-    )
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.collectors.nics.os.path.isdir", _isdir)
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.collectors.nics.os.listdir", _listdir)
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.collectors.nics._read_text", _read_text)
 
 
 def test_parse_nic_selector_allowlist_with_ports():
@@ -650,9 +644,7 @@ def test_resolve_selector_blank_env_falls_through_to_heuristic():
     assert sel["source"] == "heuristic"
 
 
-def test_collect_nic_status_env_allowlist_excludes_disabled_frontend_ports(
-    tmp_path, monkeypatch
-):
+def test_collect_nic_status_env_allowlist_excludes_disabled_frontend_ports(tmp_path, monkeypatch):
     """F.14 -- end-to-end against a synthetic /sys/class/infiniband
     mirroring the production failure mode: 12 IB devices (8 training +
     2 storage ACTIVE + 2 frontend Disabled). With NCCL_IB_HCA listing
@@ -685,7 +677,6 @@ def test_collect_nic_status_env_allowlist_excludes_disabled_frontend_ports(
         ("roceo12399", "1: DOWN", "3: Disabled", ""),
         ("roceo12409", "1: DOWN", "3: Disabled", ""),
     ]
-    import os
 
     for name, state, phys, rate in devices:
         port_dir = base / name / "ports" / "1"
@@ -741,9 +732,7 @@ def test_collect_nic_status_env_allowlist_excludes_disabled_frontend_ports(
     # healthy, just reserved for sockets/storage).
 
 
-def test_collect_nic_status_heuristic_only_excludes_disabled_phys_state(
-    tmp_path, monkeypatch
-):
+def test_collect_nic_status_heuristic_only_excludes_disabled_phys_state(tmp_path, monkeypatch):
     """F.15 -- with no env and no CLI selector, the heuristic must
     auto-exclude `phys_state=Disabled` ports but MUST keep `phys_state=
     Polling` (cable unplugged on an intended-up port) and `phys_state=
@@ -795,9 +784,7 @@ def test_collect_nic_status_heuristic_only_excludes_disabled_phys_state(
     assert "training_ok" not in issues_text
 
 
-def test_collect_nic_status_empty_set_guard_when_everything_excluded(
-    tmp_path, monkeypatch
-):
+def test_collect_nic_status_empty_set_guard_when_everything_excluded(tmp_path, monkeypatch):
     """F.16 -- defense in depth: if the selector ends up excluding every
     discovered port (e.g. operator typo'd --rdma-nic-allowlist, or the
     whole RoCE card got admin-disabled), the node MUST still hard-fail.
@@ -821,14 +808,10 @@ def test_collect_nic_status_empty_set_guard_when_everything_excluded(
     assert out["included_ports"] == []
     assert out["excluded_ports"] == ["training_ok:1"]
     # The empty-set guard fires -- node FAIL.
-    assert any(
-        "no included RDMA NIC ports" in issue for issue in out["issues"]
-    ), out["issues"]
+    assert any("no included RDMA NIC ports" in issue for issue in out["issues"]), out["issues"]
 
 
-def test_collect_nic_status_expected_count_compares_included(
-    tmp_path, monkeypatch
-):
+def test_collect_nic_status_expected_count_compares_included(tmp_path, monkeypatch):
     """F.17 -- the behavior change for --expected-rdma-nics: it must
     compare against the *included* count, not the total /sys/class/
     infiniband count. Otherwise `--expected-rdma-nics 8` would fail on
@@ -943,9 +926,7 @@ def test_primus_cli_node_smoke_rejects_abbreviated_tier2():
     # matching.
     ns, unknown = parser.parse_known_args(["node_smoke", "--tier2"])
     assert "--tier2" in unknown
-    assert ns.tier2_perf is False, (
-        "--tier2 must NOT silently match --tier2-perf via prefix abbreviation"
-    )
+    assert ns.tier2_perf is False, "--tier2 must NOT silently match --tier2-perf via prefix abbreviation"
 
     # Defense-in-depth: parse_args (strict mode) raises SystemExit.
     with pytest.raises(SystemExit):
@@ -1028,12 +1009,8 @@ def test_primus_cli_node_smoke_two_phase_dispatch_rank0(monkeypatch):
         calls.append(("aggregate", ns))
         return 1  # simulate one MISSING node
 
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True
-    )
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True
-    )
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True)
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True)
 
     args = _argparse.Namespace(
         dump_path="/tmp/test-smoke",
@@ -1080,12 +1057,8 @@ def test_primus_cli_node_smoke_two_phase_dispatch_non_rank0(monkeypatch):
         calls.append("aggregate")
         raise AssertionError("aggregator must not run on non-rank-0")
 
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True
-    )
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True
-    )
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True)
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True)
 
     args = _argparse.Namespace(
         dump_path="/tmp/test-smoke",
@@ -1118,12 +1091,8 @@ def test_primus_cli_node_smoke_rank0_run_failure_surfaces(monkeypatch):
     monkeypatch.delenv("NNODES", raising=False)
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
 
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_run", lambda _ns: 1, raising=True
-    )
-    monkeypatch.setattr(
-        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", lambda _ns: 0, raising=True
-    )
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_run", lambda _ns: 1, raising=True)
+    monkeypatch.setattr("primus.tools.preflight.node_smoke.cli._cmd_aggregate", lambda _ns: 0, raising=True)
 
     args = _argparse.Namespace(
         dump_path="/tmp/test-smoke",
@@ -1137,6 +1106,4 @@ def test_primus_cli_node_smoke_rank0_run_failure_surfaces(monkeypatch):
     )
     with pytest.raises(SystemExit) as exc:
         smoke_cmd.run(args, extra_args=[])
-    assert exc.value.code == 1, (
-        "rank-0 _cmd_run=1 must not be masked by _cmd_aggregate=0"
-    )
+    assert exc.value.code == 1, "rank-0 _cmd_run=1 must not be masked by _cmd_aggregate=0"

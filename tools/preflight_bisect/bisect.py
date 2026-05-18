@@ -281,7 +281,12 @@ Caveats:
         help="Maximum concurrent subset trials (default: 2). Set to 1 to force sequential execution.",
     )
     p.add_argument("--cpus-per-task", type=int, default=128, help="srun -c (default: 128)")
-    p.add_argument("--gpus-per-node", type=int, default=8, help="GPUs per node; emitted as srun --gres=gpu:N (default: 8)")
+    p.add_argument(
+        "--gpus-per-node",
+        type=int,
+        default=8,
+        help="GPUs per node; emitted as srun --gres=gpu:N (default: 8)",
+    )
     p.add_argument(
         "--preflight-env",
         action="append",

@@ -98,7 +98,10 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
     ``node_smoke`` parser (no inner ``run`` keyword) plus the aggregator
     tuning knobs the rank-0 aggregate step needs.
     """
-    from primus.tools.preflight.node_smoke.cli import _add_aggregate_flags, _add_run_flags
+    from primus.tools.preflight.node_smoke.cli import (
+        _add_aggregate_flags,
+        _add_run_flags,
+    )
 
     parser = subparsers.add_parser(
         "node_smoke",

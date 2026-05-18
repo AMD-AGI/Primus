@@ -219,8 +219,7 @@ def _write_nic_excluded(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 }.get(src, src)
                 src_bits.append(f"{c} via `{pretty}`")
             f.write(
-                "Ports excluded from the training-NIC set "
-                + "(" + ", ".join(src_bits) + "). "
+                "Ports excluded from the training-NIC set " + "(" + ", ".join(src_bits) + "). "
                 "Hard-fail rules (state ACTIVE, phys_state LinkUp, "
                 "RoCE v2 GIDs) did NOT run on these ports.\n\n"
             )
@@ -230,10 +229,7 @@ def _write_nic_excluded(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 msg = str(row["issue"]).replace("|", "/")
                 if len(msg) > 160:
                     msg = msg[:157] + "..."
-                f.write(
-                    f"| {row['node_rank']} | {row['host']} | "
-                    f"`{row['source']}` | {msg} |\n"
-                )
+                f.write(f"| {row['node_rank']} | {row['host']} | " f"`{row['source']}` | {msg} |\n")
     except Exception as e:
         f.write(f"*NIC excluded-ports section failed to render: {e}*\n")
         _warn(f"nic-excluded render failed: {e}")

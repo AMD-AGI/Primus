@@ -376,9 +376,7 @@ def _collect_nic_status(
                 # else and let the strict per-port rules run.
                 if (phys or "").lower() in _ADMIN_DOWN_PHYS_STATES:
                     include = False
-                    exclude_reason = (
-                        f"phys_state={phys} (admin-disabled, not used for training)"
-                    )
+                    exclude_reason = f"phys_state={phys} (admin-disabled, not used for training)"
             else:
                 # Explicit allow/denylist (CLI or env).
                 if not _selector_matches(selector, dev, port):
@@ -438,9 +436,7 @@ def _collect_nic_status(
     # /sys/class/infiniband/" -- which on multi-role nodes includes
     # frontend / management / storage RoCE NICs.
     if expected_count is not None and len(out["included_ports"]) != expected_count:
-        out["issues"].append(
-            f"RDMA NIC port count {len(out['included_ports'])} != expected {expected_count}"
-        )
+        out["issues"].append(f"RDMA NIC port count {len(out['included_ports'])} != expected {expected_count}")
 
     # Empty-set guard: if we saw IB ports on this host but every single
     # one got excluded, the node cannot participate in inter-node

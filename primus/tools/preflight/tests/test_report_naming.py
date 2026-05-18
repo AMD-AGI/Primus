@@ -28,8 +28,6 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 
-import pytest
-
 from primus.tools.preflight.preflight_args import add_preflight_parser
 from primus.tools.preflight.preflight_perf_test import (
     _announce_report_paths,
@@ -125,8 +123,7 @@ class _ExplodingDatetime:
     @classmethod
     def now(cls, *_a, **_kw):
         raise AssertionError(
-            "_ensure_report_file_name regenerated the timestamp on "
-            "the second call (it must be idempotent)"
+            "_ensure_report_file_name regenerated the timestamp on " "the second call (it must be idempotent)"
         )
 
 
@@ -144,9 +141,7 @@ def test_ensure_report_file_name_unique_per_run(monkeypatch):
         def now(cls, *_a, **_kw):
             return cls._now
 
-    monkeypatch.setattr(
-        "primus.tools.preflight.preflight_perf_test.datetime", _FrozenDatetime
-    )
+    monkeypatch.setattr("primus.tools.preflight.preflight_perf_test.datetime", _FrozenDatetime)
     ns_a = argparse.Namespace(report_file_name=None)
     name_a = _ensure_report_file_name(ns_a)
     # Bump the clock by one second to simulate the next run.
