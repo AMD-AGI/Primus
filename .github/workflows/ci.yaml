@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
-  PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986
+  PRIMUS_TURBO_COMMIT: 06b8d3fefd91be26d6adfb5cd43c7524ef87b825 # Add HYBRID FP8 format support for Triton backend in gemm and grouped_gemm (#278)
+  PRIMUS_TURBO_AITER_COMMIT: b5e03ed191fca11ee423226537ef8d9435e432a6 # Fix dsink bf16 noise in Triton MHA one-kernel backward (#3070)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
@@ -105,25 +105,25 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # # Primus v26.2 already includes AINIC under /workspace. Re-enable this
-          # # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
-          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
-          # start_time=$(date +%s)
-          # mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
-          #      --network=host \
-          #      -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
-          #      --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
-          #      --build-arg AINIC_BUNDLE_PATH=ainic \
-          #      $GITHUB_WORKSPACE/.github/workflows/docker
-          # end_time=$(date +%s)
-          # elapsed=$((end_time - start_time))
-          # echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+          # Primus v26.2 already includes AINIC under /workspace. Re-enable this
+          # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
+          start_time=$(date +%s)
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
+               --network=host \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
 
-          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          # docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.09-ainic"
@@ -308,6 +308,7 @@ jobs:
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          GPU_ARCHS=gfx942 \
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
       - name: Run Primus Model Tests -- TorchTitan
         env:

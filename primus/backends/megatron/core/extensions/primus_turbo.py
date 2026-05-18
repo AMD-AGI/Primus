@@ -588,8 +588,6 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
-        SUPPORTED_QKV_FORMATS = "sbhd"
-
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -597,11 +595,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         )
 
         qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
-        assert (
-            qkv_format in SUPPORTED_QKV_FORMATS
-        ), f"qkv_format only support {SUPPORTED_QKV_FORMATS}, but got {qkv_format}"
-        # NOTE(ruibin): The layout of q, k and v is (S, B, H, D). But attn accept the shape of qkv is (B, S, H, D).
-        query, key, value = [x.permute(1, 0, 2, 3) for x in (query, key, value)]
+
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -635,10 +629,20 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                         window_size = (self.sink_sliding_window, 0)
                 else:
                     window_size = (self.sink_sliding_window, 0)
+
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
+
+        if qkv_format == "sbhd":
+            query = query.permute(1, 0, 2, 3)
+            key = key.permute(1, 0, 2, 3)
+            value = value.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            query = query.permute(0, 2, 1, 3)
+            key = key.permute(0, 2, 1, 3)
+            value = value.permute(0, 2, 1, 3)
 
         o = self.attn(
             query,
@@ -657,8 +661,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             **self.attn_kwargs,
         )
 
-        # NOTE(ruibin): The output of attn is BSHD. Use permute to convert the layout to SBHD.
-        o = o.permute(1, 0, 2, 3).contiguous()
+        if qkv_format == "sbhd":
+            o = o.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            o = o.permute(0, 2, 1, 3)
+
         o = o.view(o.shape[0], o.shape[1], -1)
 
         return o
