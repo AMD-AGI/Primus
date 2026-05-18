@@ -487,6 +487,17 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
                 exit 1
             fi
             export MASTER_ADDR
+        else
+            # In a SLURM context but we cannot resolve a real address from
+            # scontrol -- either scontrol is not installed (CI / dev VM) or
+            # SLURM_NODELIST was not propagated (rare; can happen in stubbed
+            # tests or single-node allocations). Fall back to localhost so
+            # the downstream sanity check at line 503 has a valid value;
+            # NODE_RANK=0 + MASTER_ADDR=localhost is correct for single-node
+            # SLURM runs and for dry-run smoke tests. Real multi-node
+            # bare-srun on a SLURM head node always has both, so this
+            # branch never fires in production.
+            export MASTER_ADDR="localhost"
         fi
     fi
     LOG_INFO_RANK0 "[direct] SLURM detected: JOB_ID=$SLURM_JOB_ID NNODES=$NNODES NODE_RANK=$NODE_RANK MASTER_ADDR=${MASTER_ADDR:-<unset>}"

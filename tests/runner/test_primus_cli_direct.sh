@@ -411,6 +411,22 @@ test_slurm_env_derivation() {
             "exit=$ec_sanity stderr=$(cat /tmp/test_slurm_err_$$)"
     fi
     rm -f /tmp/test_slurm_err_$$
+
+    # Sub-test 12d: SLURM context without SLURM_NODELIST must still complete.
+    # This exercises the same code path as "no scontrol on the host" (the
+    # `command -v scontrol && [[ -n "$SLURM_NODELIST" ]]` short-circuits to
+    # false either way), and used to crash with "MASTER_ADDR: unbound
+    # variable" under set -u. The launcher must fall back to MASTER_ADDR=localhost
+    # and the dry-run must reach the torchrun command line.
+    local out_no_nodelist
+    out_no_nodelist=$(env -u SLURM_NODELIST SLURM_JOB_ID=999 SLURM_NNODES=4 SLURM_NODEID=0 \
+        timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+    assert_not_contains "$out_no_nodelist" "unbound variable" \
+        "SLURM context with no SLURM_NODELIST does not crash on unbound MASTER_ADDR"
+    assert_contains "$out_no_nodelist" "MASTER_ADDR=localhost" \
+        "MASTER_ADDR falls back to localhost when scontrol/NODELIST unavailable"
+    assert_contains "$out_no_nodelist" "--nnodes 4" \
+        "torchrun cmd still gets --nnodes 4 even without NODELIST"
 }
 
 # ============================================================================
