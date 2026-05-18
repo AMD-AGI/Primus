@@ -871,3 +871,272 @@ def test_collect_nic_status_expected_count_compares_included(
     # the comparison happens against the included set.
     out = _collect_nic_status(expected_count=10)
     assert any("!= expected 10" in i for i in out["issues"])
+
+
+# ---------------------------------------------------------------------------
+# Primus-cli subcommand wrapper (consolidate-preflight-direct-wrappers).
+# These tests pin the contract for the new `primus-cli node_smoke`
+# subcommand layer: hoisted flags, abbreviation rejection, no Python-side
+# --silent, two-phase dispatch (run on all ranks, aggregate on rank 0),
+# and SLURM-aware aggregator-arg resolution.
+# ---------------------------------------------------------------------------
+
+
+def _build_primus_cli_node_smoke_parser():
+    """Helper: build a parser that mirrors how primus.cli.main wires the
+    `node_smoke` subcommand, without going through the full main()
+    dispatch. Centralized here so individual tests don't redo the wiring.
+    """
+    import argparse as _argparse
+
+    from primus.cli.subcommands.node_smoke import register_subcommand
+
+    top = _argparse.ArgumentParser(prog="primus")
+    sub = top.add_subparsers(dest="command", required=True)
+    register_subcommand(sub)
+    return top
+
+
+def test_primus_cli_node_smoke_known_flags_parse_cleanly():
+    """`primus-cli node_smoke --tier2-perf --hbm-busy-threshold-gib 3.5 ...`
+    must parse without unknown-args; the namespace must merge the run
+    surface with the aggregator surface in a single object."""
+    parser = _build_primus_cli_node_smoke_parser()
+    ns, unknown = parser.parse_known_args(
+        ["node_smoke", "--tier2-perf", "--hbm-busy-threshold-gib", "3.5", "--expected-nodes", "4"]
+    )
+    assert unknown == []
+    assert ns.command == "node_smoke"
+    # Run-side knob
+    assert ns.tier2_perf is True
+    assert ns.hbm_busy_threshold_gib == 3.5
+    # Aggregator-side knob hoisted to the same namespace
+    assert ns.expected_nodes == 4
+    # Run-side default preserved (we only attach --dump-path once via _add_run_flags)
+    assert ns.dump_path == "output/preflight"
+
+
+def test_primus_cli_node_smoke_rejects_silent():
+    """`--silent` is a bash-launcher knob only; the python subcommand
+    must surface it as an unknown argument so a misplaced --silent never
+    silently disappears into argparse."""
+    parser = _build_primus_cli_node_smoke_parser()
+    _ns, unknown = parser.parse_known_args(["node_smoke", "--silent"])
+    assert "--silent" in unknown, (
+        "primus-cli node_smoke must NOT accept --silent (silencing lives "
+        "exclusively in primus-cli-direct.sh's bash layer; this test "
+        "guards against dual handling regressing)"
+    )
+
+
+def test_primus_cli_node_smoke_rejects_abbreviated_tier2():
+    """`--tier2` is an abbreviation of `--tier2-perf` -- argparse's
+    `allow_abbrev=False` must make this a hard error so a stale script
+    using the old flag name doesn't silently match the new one."""
+    import argparse as _argparse
+
+    parser = _build_primus_cli_node_smoke_parser()
+    # parse_known_args with `allow_abbrev=False` returns --tier2 in
+    # `unknown`; the main() dispatcher then rejects unknown args with
+    # SystemExit(2). The subparser-level guarantee we care about here is
+    # that --tier2 NEVER ends up bound to tier2_perf=True via prefix
+    # matching.
+    ns, unknown = parser.parse_known_args(["node_smoke", "--tier2"])
+    assert "--tier2" in unknown
+    assert ns.tier2_perf is False, (
+        "--tier2 must NOT silently match --tier2-perf via prefix abbreviation"
+    )
+
+    # Defense-in-depth: parse_args (strict mode) raises SystemExit.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["node_smoke", "--tier2"])
+    _ = _argparse  # silence unused
+
+
+def test_resolve_aggregate_args_from_slurm_uses_slurm_nnodes(monkeypatch):
+    """When `--expected-nodes` is not supplied, the helper must fall back
+    to `SLURM_NNODES` (then `SLURM_JOB_NUM_NODES`, then `NNODES`) so the
+    aggregator correctly identifies missing nodes."""
+    import argparse as _argparse
+
+    from primus.tools.preflight.node_smoke.cli import _resolve_aggregate_args_from_slurm
+
+    monkeypatch.setenv("SLURM_NNODES", "6")
+    monkeypatch.delenv("SLURM_JOB_NUM_NODES", raising=False)
+    monkeypatch.delenv("NNODES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
+
+    args = _argparse.Namespace(
+        dump_path="output/preflight",
+        expected_nodes=None,
+        wait_timeout_sec=60,
+        rocm_smi_warn_sec=1.0,
+        clock_skew_warn_sec=30.0,
+        hbm_busy_threshold_gib=2.0,
+        gpu_activity_warn_pct=20.0,
+        expected_nodelist_file=None,
+    )
+    agg = _resolve_aggregate_args_from_slurm(args)
+    assert agg.expected_nodes == 6
+    assert agg.dump_path == "output/preflight"
+    # No SLURM_JOB_NODELIST + no pre-supplied file -> stays None (the
+    # aggregator falls back to `<missing-N>` placeholders, by design).
+    assert agg.expected_nodelist_file is None
+
+
+def test_resolve_aggregate_args_from_slurm_cli_wins(monkeypatch):
+    """User-supplied `--expected-nodes` takes precedence over SLURM_*."""
+    import argparse as _argparse
+
+    from primus.tools.preflight.node_smoke.cli import _resolve_aggregate_args_from_slurm
+
+    monkeypatch.setenv("SLURM_NNODES", "6")
+    args = _argparse.Namespace(
+        dump_path="output/preflight",
+        expected_nodes=4,  # user-set wins
+        wait_timeout_sec=60,
+        rocm_smi_warn_sec=1.0,
+        clock_skew_warn_sec=30.0,
+        hbm_busy_threshold_gib=2.0,
+        gpu_activity_warn_pct=20.0,
+        expected_nodelist_file=None,
+    )
+    agg = _resolve_aggregate_args_from_slurm(args)
+    assert agg.expected_nodes == 4
+
+
+def test_primus_cli_node_smoke_two_phase_dispatch_rank0(monkeypatch):
+    """On rank 0 the subcommand must call `_cmd_run` AND `_cmd_aggregate`,
+    propagate the max(rc_run, rc_agg) exit code, and pass the SLURM-
+    resolved aggregator args (not the raw `args`) to the aggregator."""
+    import argparse as _argparse
+
+    from primus.cli.subcommands import node_smoke as smoke_cmd
+
+    monkeypatch.setenv("NODE_RANK", "0")
+    monkeypatch.delenv("SLURM_NODEID", raising=False)
+    monkeypatch.setenv("SLURM_NNODES", "5")
+    monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
+
+    calls = []
+
+    def fake_run(ns):
+        calls.append(("run", ns))
+        return 0
+
+    def fake_agg(ns):
+        calls.append(("aggregate", ns))
+        return 1  # simulate one MISSING node
+
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True
+    )
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True
+    )
+
+    args = _argparse.Namespace(
+        dump_path="/tmp/test-smoke",
+        expected_nodes=None,
+        wait_timeout_sec=60,
+        rocm_smi_warn_sec=1.0,
+        clock_skew_warn_sec=30.0,
+        hbm_busy_threshold_gib=2.0,
+        gpu_activity_warn_pct=20.0,
+        expected_nodelist_file=None,
+    )
+    with pytest.raises(SystemExit) as exc:
+        smoke_cmd.run(args, extra_args=[])
+    assert exc.value.code == 1, "aggregator's FAIL must surface as the exit code"
+
+    # Run AND aggregate both fired, in that order.
+    assert [c[0] for c in calls] == ["run", "aggregate"]
+    # Aggregate received the SLURM-resolved namespace (expected_nodes
+    # auto-filled from SLURM_NNODES=5), not the user-supplied args.
+    agg_ns = calls[1][1]
+    assert agg_ns.expected_nodes == 5
+    # And the aggregator namespace is a *different* object from `args`.
+    assert agg_ns is not args
+
+
+def test_primus_cli_node_smoke_two_phase_dispatch_non_rank0(monkeypatch):
+    """Non-rank-0 ranks must run `_cmd_run` only and propagate its exit
+    code; calling `_cmd_aggregate` on every rank would race on the
+    shared output directory."""
+    import argparse as _argparse
+
+    from primus.cli.subcommands import node_smoke as smoke_cmd
+
+    monkeypatch.setenv("NODE_RANK", "3")
+    monkeypatch.delenv("SLURM_NODEID", raising=False)
+
+    calls = []
+
+    def fake_run(ns):
+        calls.append("run")
+        return 0
+
+    def fake_agg(ns):  # MUST NOT be called on a non-rank-0 rank.
+        calls.append("aggregate")
+        raise AssertionError("aggregator must not run on non-rank-0")
+
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_run", fake_run, raising=True
+    )
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", fake_agg, raising=True
+    )
+
+    args = _argparse.Namespace(
+        dump_path="/tmp/test-smoke",
+        expected_nodes=None,
+        wait_timeout_sec=60,
+        rocm_smi_warn_sec=1.0,
+        clock_skew_warn_sec=30.0,
+        hbm_busy_threshold_gib=2.0,
+        gpu_activity_warn_pct=20.0,
+        expected_nodelist_file=None,
+    )
+    with pytest.raises(SystemExit) as exc:
+        smoke_cmd.run(args, extra_args=[])
+    assert exc.value.code == 0
+    assert calls == ["run"]
+
+
+def test_primus_cli_node_smoke_rank0_run_failure_surfaces(monkeypatch):
+    """If `_cmd_run` fails on rank 0 but the aggregator (which only knows
+    about missing-from-`<dump>/smoke/*.json`) reports success, the
+    subcommand must still surface the rank-0 run failure -- otherwise a
+    sick rank-0 node could paint itself green via a successful aggregate."""
+    import argparse as _argparse
+
+    from primus.cli.subcommands import node_smoke as smoke_cmd
+
+    monkeypatch.setenv("NODE_RANK", "0")
+    monkeypatch.delenv("SLURM_NODEID", raising=False)
+    monkeypatch.delenv("SLURM_NNODES", raising=False)
+    monkeypatch.delenv("NNODES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
+
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_run", lambda _ns: 1, raising=True
+    )
+    monkeypatch.setattr(
+        "primus.tools.preflight.node_smoke.cli._cmd_aggregate", lambda _ns: 0, raising=True
+    )
+
+    args = _argparse.Namespace(
+        dump_path="/tmp/test-smoke",
+        expected_nodes=None,
+        wait_timeout_sec=60,
+        rocm_smi_warn_sec=1.0,
+        clock_skew_warn_sec=30.0,
+        hbm_busy_threshold_gib=2.0,
+        gpu_activity_warn_pct=20.0,
+        expected_nodelist_file=None,
+    )
+    with pytest.raises(SystemExit) as exc:
+        smoke_cmd.run(args, extra_args=[])
+    assert exc.value.code == 1, (
+        "rank-0 _cmd_run=1 must not be masked by _cmd_aggregate=0"
+    )

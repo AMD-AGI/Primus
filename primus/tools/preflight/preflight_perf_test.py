@@ -168,6 +168,95 @@ def _status_from_counts(fail_count: int, warn_count: int) -> str:
     return "OK"
 
 
+def _ensure_report_file_name(args: Any) -> str:
+    """Ensure ``args.report_file_name`` is set; auto-generate a timestamped
+    default when the user did not pass ``--report-file-name``.
+
+    The auto-generated form is ``preflight-{NNODES}N-{YYYYMMDD-HHMMSS}``. This
+    guarantees each run writes to a fresh, never-before-used path so the
+    report-path announcement (R5) cannot point at a stale leftover from a
+    previous run.
+
+    Returns the resolved name. Safe to call multiple times: subsequent calls
+    are a no-op once ``args.report_file_name`` is populated.
+    """
+    name = getattr(args, "report_file_name", None)
+    if name:
+        return name
+
+    # Prefer NNODES from the env (set by the runner wrapper before exec) over
+    # deriving from torch's world size, because in info-only mode the
+    # distributed process group is not initialized and world reports 1.
+    nnodes_env = os.environ.get("NNODES")
+    if nnodes_env and nnodes_env.isdigit() and int(nnodes_env) > 0:
+        nnodes = int(nnodes_env)
+    else:
+        try:
+            _rank, world = get_rank_world()
+        except Exception:
+            world = 1
+        try:
+            local_world = int(
+                os.environ.get("LOCAL_WORLD_SIZE")
+                or os.environ.get("GPUS_PER_NODE")
+                or 8
+            )
+        except (TypeError, ValueError):
+            local_world = 8
+        nnodes = max(1, (world or 1) // max(1, local_world))
+
+    name = f"preflight-{nnodes}N-{datetime.now():%Y%m%d-%H%M%S}"
+    try:
+        args.report_file_name = name
+    except (AttributeError, TypeError):
+        # If args is a frozen / read-only container, the caller will see the
+        # returned name; downstream code in this module always uses the
+        # attribute, so the only impact is that the auto-name regenerates on
+        # the next call. Acceptable for the edge case.
+        pass
+    return name
+
+
+def _announce_report_paths(args: Any) -> None:
+    """Print absolute paths of report files on rank 0 (R5).
+
+    Scans ``args.dump_path`` for files matching
+    ``<report_file_name>{,_perf}.{md,pdf}`` and prints absolute paths to
+    stdout. Under bash-side ``--silent`` (primus-cli-direct.sh), fd 1 is
+    ``/dev/null`` by inheritance, so these prints are silenced along with
+    every other stdout write -- acceptable per plan.
+
+    Always rank-0 only. Best-effort: failures here must never mask the
+    preflight exit code.
+    """
+    try:
+        rank, _world = get_rank_world()
+    except Exception:
+        rank = 0
+    if rank != 0:
+        return
+    dump_path = getattr(args, "dump_path", "output/preflight") or "output/preflight"
+    name = getattr(args, "report_file_name", None)
+    if not name:
+        return
+    found_any = False
+    for suffix in ("", "_perf"):
+        for ext in ("md", "pdf"):
+            p = os.path.join(dump_path, f"{name}{suffix}.{ext}")
+            try:
+                if os.path.isfile(p):
+                    print(f"[Primus:Preflight] Report: {os.path.abspath(p)}", flush=True)
+                    found_any = True
+            except OSError:
+                continue
+    if not found_any:
+        print(
+            f"[Primus:Preflight] WARN: no report files found at "
+            f"{dump_path}/{name}{{,_perf}}.{{md,pdf}}",
+            flush=True,
+        )
+
+
 def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
     """
     Run lightweight preflight info collection (host/gpu/network), aggregate across ranks,
@@ -204,7 +293,10 @@ def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
         check_host = check_gpu = check_network = True
 
     dump_path = getattr(args, "dump_path", "output/preflight")
-    report_file_name = getattr(args, "report_file_name", "preflight_report")
+    # Defensive: if a caller reached this helper without going through
+    # run_preflight() (e.g. a test fixture), normalize the report name here so
+    # we never write a file literally called "None.md".
+    report_file_name = _ensure_report_file_name(args)
     save_pdf = bool(getattr(args, "save_pdf", True))
 
     findings: List[Finding] = []
@@ -336,6 +428,13 @@ def run_preflight(args):
          WARN is emitted.
       3. Otherwise (no flags) -> default: info AND all perf tests.
     """
+    # R4: canonical normalization point for the report file name. Done here
+    # before any downstream code reads args.report_file_name, so every code
+    # path (info-only, perf-only, info+perf, dist-init failure) sees the same
+    # value -- and so the dist-init failure paths below can interpolate it
+    # safely without a None-guard.
+    _ensure_report_file_name(args)
+
     perf_test = bool(getattr(args, "perf_test", False))
     tests_set = getattr(args, "tests", None) is not None
     quick_set = bool(getattr(args, "quick", False))
@@ -425,20 +524,23 @@ def run_preflight(args):
             if world > 1:
                 init_distributed(timeout=timedelta(seconds=dist_timeout_sec))
                 try:
-                    return run_preflight_info(args)
+                    rc = run_preflight_info(args)
+                    _announce_report_paths(args)
+                    return rc
                 finally:
                     finalize_distributed()
         except Exception as e:
             if rank == 0:
                 dump_path = getattr(args, "dump_path", "output/preflight")
-                report_file_name = getattr(args, "report_file_name", "preflight_report")
                 os.makedirs(dump_path, exist_ok=True)
-                markdown_file = f"{dump_path}/{report_file_name}.md"
+                markdown_file = f"{dump_path}/{args.report_file_name}.md"
                 _append_dist_init_failure(markdown_file, dist_timeout_sec, e)
             print(f"[Primus:Preflight] ERROR: distributed init failed: {e}", file=sys.stderr)
+            _announce_report_paths(args)
             return 2
 
         # world==1 fallback
+        _announce_report_paths(args)
         return local_rc
 
     # 2) Plain `preflight` (no flags): run info FIRST (no dist init) so we always get a report.
@@ -473,16 +575,16 @@ def run_preflight(args):
         # We already wrote the info report in plain preflight mode; append a clear failure note.
         rank, _world = get_rank_world()
         dump_path = getattr(args, "dump_path", "output/preflight")
-        report_file_name = getattr(args, "report_file_name", "preflight_report")
         if rank == 0:
             try:
                 os.makedirs(dump_path, exist_ok=True)
-                markdown_file = f"{dump_path}/{report_file_name}.md"
+                markdown_file = f"{dump_path}/{args.report_file_name}.md"
                 _append_dist_init_failure(markdown_file, dist_timeout_sec, e)
             except Exception as ee:
                 print(f"[Primus:Preflight] [rank0] WARN: failed to write report: {ee}", file=sys.stderr)
 
         print(f"[Primus:Preflight] ERROR: distributed init failed: {e}", file=sys.stderr)
+        _announce_report_paths(args)
         return 2
 
     try:
@@ -593,6 +695,7 @@ def run_preflight(args):
             return info_rc
         return 0
     finally:
+        _announce_report_paths(args)
         finalize_distributed()
 
 

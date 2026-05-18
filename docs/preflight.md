@@ -8,7 +8,7 @@
 Use it to spot misconfiguration, hardware degradation, or perf outliers **before** committing a large distributed training run to a global rendezvous.
 
 - **User-facing entry**: `primus-cli ... -- preflight [args]`
-- **Wrapper script (no container)**: [`runner/run_preflight_direct.sh`](../runner/run_preflight_direct.sh) — see [`preflight-direct.md`](./preflight-direct.md).
+- **No-container launcher**: `runner/primus-cli direct -- preflight ...` — see [`preflight-direct.md`](./preflight-direct.md).
 - **Implementation entrypoint**: `primus/cli/subcommands/preflight.py` → `primus/tools/preflight/preflight_perf_test.py`.
 
 > Looking for a faster, distributed-rendezvous-free per-node screen? See [`node-smoke.md`](./node-smoke.md) (and the [quick-start guide](./node-smoke-test-instruction.md)). The recommended workflow is **smoke first, preflight second** — see [§10 Comparison with node-smoke](#10-comparison-with-node-smoke).
@@ -69,7 +69,7 @@ Equivalent on SLURM via `primus-cli slurm`:
 primus-cli slurm srun -N 4 -- preflight --quick
 ```
 
-Without a container, see [`preflight-direct.md`](./preflight-direct.md) for the equivalent `runner/run_preflight_direct.sh` invocations.
+Without a container, see [`preflight-direct.md`](./preflight-direct.md) for the equivalent `runner/primus-cli direct -- preflight ...` invocations.
 
 ---
 
@@ -416,7 +416,7 @@ Each invocation:
 | Flag | Default | Effect |
 |---|---|---|
 | `--dump-path DIR` | `output/preflight` | Output directory for reports + plots. |
-| `--report-file-name NAME` | `preflight_report` | Base name for report files. The wrapper `run_preflight_direct.sh` auto-generates a unique `preflight-${NNODES}N-YYYYMMDD-HHMMSS` when this is omitted. |
+| `--report-file-name NAME` | auto-generated `preflight-${NNODES}N-YYYYMMDD-HHMMSS` | Base name for report files. Omit to let preflight auto-generate a unique timestamped name (prevents stale leftovers from prior runs being mistaken for fresh output). Pass an explicit value when you want a stable / well-known filename. |
 | `--disable-pdf` | enabled | Skip PDF generation (Markdown only). Useful when `weasyprint`/`markdown2` aren't installed. |
 
 Output files:
@@ -495,7 +495,7 @@ In default mode where info selectors are dropped because perf intent was set, th
 
 ## 12. Operational tips
 
-- **For multi-node runs, always use `primus-cli slurm`** (or `runner/run_preflight_direct.sh`) so distributed environment variables are set correctly.
+- **For multi-node runs, always use `primus-cli slurm` or `primus-cli direct` under `srun`** so distributed environment variables (`NNODES` / `NODE_RANK` / `MASTER_ADDR`) are set correctly.
 - **Insufficient CPU cores cause >30x perf slowdowns** — pass `srun -c <cores-per-node>` so RCCL's network proxy threads have CPU to spawn on. Verify with `srun -N 1 --gpus-per-node=8 bash -c 'nproc'`.
 - **For a quick environment snapshot**, prefer `--host --gpu --network` (no rendezvous, finishes in seconds even on broken networks).
 - **Between each communication test phase**, preflight performs a global barrier + `--comm-cleanup-delay-sec` sleep (default 2 s) for cross-rank sync across the destroy → setup transition. The default works at every cluster size we test up to 1024 nodes because the inter-node alltoall sub-group is internally capped at 16 (see §5.2), which holds peak simultaneous ESTAB sockets per node well under the kernel's ephemeral-port pool — the only constraint that actually produces `Address already in use` under NCCL's connection pattern (see §7.1). Widening `ip_local_port_range` (§7.2) is best-practice for any RDMA workload.
@@ -508,15 +508,15 @@ In default mode where info selectors are dropped because perf intent was set, th
 
 ## 13. Running preflight without a container
 
-If you cannot (or prefer not to) use a container, see [`preflight-direct.md`](./preflight-direct.md) for the step-by-step `runner/run_preflight_direct.sh` walkthrough — Python virtual-environment setup, SLURM invocation patterns, NCCL configuration for Broadcom and Pensando (AINIC) clusters, and many configurable-knob examples.
+If you cannot (or prefer not to) use a container, see [`preflight-direct.md`](./preflight-direct.md) for the step-by-step `runner/primus-cli direct -- preflight ...` walkthrough — Python virtual-environment setup, SLURM invocation patterns, NCCL configuration for Broadcom and Pensando (AINIC) clusters, and many configurable-knob examples.
 
 ---
 
 ## 14. See also
 
-- [`preflight-direct.md`](./preflight-direct.md) — quick-start guide for `runner/run_preflight_direct.sh` (no container).
+- [`preflight-direct.md`](./preflight-direct.md) — quick-start guide for `primus-cli direct -- preflight` (no container).
 - [`node-smoke.md`](./node-smoke.md) — full reference for the per-node smoke test.
 - [`node-smoke-test-instruction.md`](./node-smoke-test-instruction.md) — short quick-start for the smoke test.
-- [`runner/run_preflight_direct.sh`](../runner/run_preflight_direct.sh) — non-container wrapper.
+- [`runner/primus-cli-direct.sh`](../runner/primus-cli-direct.sh) — non-container launcher (`primus-cli direct` dispatches here).
 - [`primus/tools/preflight/`](../primus/tools/preflight/) — implementation.
 - [`primus/tools/preflight/preflight_args.py`](../primus/tools/preflight/preflight_args.py) — canonical CLI definition (single source of truth for flags + defaults).

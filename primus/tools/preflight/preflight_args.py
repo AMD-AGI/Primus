@@ -215,8 +215,13 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     parser.add_argument(
         "--report-file-name",
         type=str,
-        default="preflight_report",
-        help="Base name for report files (default: preflight_report).",
+        default=None,
+        help=(
+            "Base name for report files. When omitted, an auto-generated "
+            "timestamped name of the form 'preflight-{NNODES}N-{YYYYMMDD-HHMMSS}' "
+            "is used so each run writes to a fresh path and never overwrites "
+            "or collides with stale leftovers."
+        ),
     )
     parser.add_argument(
         "--disable-pdf",

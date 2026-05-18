@@ -5,36 +5,54 @@
 A lightweight, distributed-rendezvous-free preflight check that runs on every node in parallel under SLURM. Designed to **quickly identify broken nodes before a large training job commits to a global rendezvous**. Because training jobs allocate whole nodes, a under-performing GPU (or NIC, or wedged driver) takes the entire node out of rotation -- so the smoke test produces a single PASS/FAIL verdict per node and SLURM-ready `passing_nodes.txt` / `failing_nodes.txt` you can pipe straight into `srun --nodelist=` / `--exclude=`.
 
 - **Implementation**: `primus/tools/preflight/node_smoke/` (Python sub-package; entry point `python -m primus.tools.preflight.node_smoke`).
-- **Wrapper**: `runner/run_node_smoke_direct.sh`
+- **Recommended launcher**: `runner/primus-cli slurm srun -- direct -- node_smoke ...` (auto-resolves `MASTER_ADDR`/`NNODES`/`NODE_RANK` via `--env`, applies `slurm.*` config defaults, same pattern as `train` / `benchmark`). The shorter `runner/primus-cli direct -- node_smoke ...` form (bare `srun` + direct) is equivalent and useful for ad-hoc runs.
 - **Companion**: see `docs/preflight.md` for the full preflight tool (with global rendezvous and richer perf tests).
 
 ## Quick start
 
+Recommended — through the `primus-cli slurm srun` wrapper:
+
 ```bash
 # Inside an existing SLURM allocation (the normal case):
-srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
-     bash runner/run_node_smoke_direct.sh
+runner/primus-cli slurm srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    -- direct -- node_smoke
 
 # With perf sanity (GEMM TFLOPS, HBM GB/s, local 8-GPU RCCL all-reduce):
-srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
-     bash runner/run_node_smoke_direct.sh --tier2-perf
+runner/primus-cli slurm srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    -- direct -- node_smoke --tier2-perf
 
 # Hard-fail on partial NIC enumeration (e.g. 7 of 8 RDMA NICs).
 # The count is compared against the *training-NIC* set after the
 # selector chain runs, so frontend / storage RoCE NICs do not count.
-srun ... bash runner/run_node_smoke_direct.sh --tier2-perf \
-     --expected-rdma-nics 8
+runner/primus-cli slurm srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    -- direct -- node_smoke --tier2-perf --expected-rdma-nics 8
 
 # Explicitly pin the training-NIC selector (otherwise NCCL_IB_HCA env
 # is used; otherwise admin-disabled phys_state ports are auto-excluded):
-srun ... bash runner/run_node_smoke_direct.sh --tier2-perf \
-     --rdma-nic-allowlist 'rocep158s0:1,rocep190s0:1,rocep206s0:1,rocep222s0:1,rocep28s0:1,rocep62s0:1,rocep79s0:1,rocep96s0:1'
-
-# Single-node local check (no SLURM):
-bash runner/run_node_smoke_direct.sh
+runner/primus-cli slurm srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    -- direct -- node_smoke --tier2-perf \
+    --rdma-nic-allowlist 'rocep158s0:1,rocep190s0:1,rocep206s0:1,rocep222s0:1,rocep28s0:1,rocep62s0:1,rocep79s0:1,rocep96s0:1'
 ```
 
-`VENV_ACTIVATE` must point at the Python virtualenv activation script (same convention as `run_preflight_direct.sh`).
+Equivalent with bare `srun` (works the same; useful when composing with custom `srun` flags):
+
+```bash
+srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    runner/primus-cli direct -- node_smoke
+
+srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
+    runner/primus-cli direct -- node_smoke --tier2-perf
+```
+
+Single-node local check (no SLURM, both forms collapse to the same call):
+
+```bash
+runner/primus-cli direct -- node_smoke
+```
+
+> **Note on the `direct` keyword**: with the `primus-cli slurm srun` wrapper, the entry-mode keyword `direct` between the two `--`s is mandatory to take the direct (no-container) path. Without it the wrapper routes through the **container** path. See [`preflight-direct.md` § Wrapper vs. bare-srun](./preflight-direct.md#wrapper-vs-bare-srun) for the full precedence and caveats.
+
+When `VENV_ACTIVATE` is set, `primus-cli direct` sources it before launching `node_smoke` (same convention as `primus-cli direct -- preflight`). When unset (e.g. inside the container path), it is a no-op.
 
 ## Outputs
 
@@ -248,18 +266,31 @@ The authoritative source of flags + defaults is `python -m primus.tools.prefligh
 | `--clock-skew-warn-sec SEC` | 30.0 | Warn when wall-clock spread across nodes exceeds this many seconds. Includes srun launch jitter so the default is loose. |
 | `--hbm-busy-threshold-gib GiB` | 2.0 | Mirrors the `run`-side default; used to label the **GPU pre-touch HBM usage outliers** section. |
 | `--gpu-activity-warn-pct PCT` | 20.0 | Mirrors the `run`-side default; used to label the **GPU compute-activity outliers** section. |
-| `--expected-nodelist-file FILE` | none | One short hostname per line. Missing nodes get their **real short hostname** in the report and `failing_nodes.txt` (instead of `<missing-N>` placeholders). The wrapper auto-populates this from `scontrol show hostnames "$SLURM_JOB_NODELIST"`. |
+| `--expected-nodelist-file FILE` | none | One short hostname per line. Missing nodes get their **real short hostname** in the report and `failing_nodes.txt` (instead of `<missing-N>` placeholders). The primus-cli wrapper auto-populates this from `scontrol show hostnames "$SLURM_JOB_NODELIST"` under SLURM. |
 
-Wrapper-only flags (consumed by `run_node_smoke_direct.sh`, not forwarded):
+### Launcher-level knobs (`primus-cli direct`)
 
-| Flag | Purpose |
+These are consumed by `primus-cli-direct.sh` **before** the `--` separator (not forwarded to the `node_smoke` Python tool):
+
+| Flag       | Purpose |
 |---|---|
-| `--silent` | Suppress wrapper stdout (final report path still printed) |
-| `--aggregate-only` | Skip per-node run, only aggregate |
-| `--no-aggregate` | Skip the rank-0 aggregator step |
-| `--wait-timeout-sec SEC` | Override aggregator timeout |
+| `--silent` | Back-pocket knob: redirect launcher + tool stdout to `/dev/null`. Launcher errors (`LOG_ERROR` / `LOG_WARN` on stderr) and the log file are preserved. Exit code propagated. |
+| `--debug`  | Verbose launcher logging. |
+| `--dry-run`| Show the resolved command without executing. |
+| `--env KEY=VALUE` | Inject an env var into the Python process. |
 
-Anything else is forwarded verbatim to `node_smoke run`.
+### Rare advanced control (run-only / aggregate-only / no-aggregate)
+
+The primus-cli `node_smoke` subcommand always runs `_cmd_run` on every rank followed by rank-0 `_cmd_aggregate`. That is what users want ~100% of the time. For the rare cases where you need just one phase (e.g. re-aggregate yesterday's JSONs without re-running per-node, or smoke a single node without producing a cluster report), reach for the standalone CLI directly:
+
+```bash
+# Per-node only, no aggregator (useful when scheduling phases separately):
+python -m primus.tools.preflight.node_smoke run --tier2-perf
+
+# Aggregate only (read existing <dump>/smoke/*.json, produce cluster report):
+python -m primus.tools.preflight.node_smoke aggregate \
+    --dump-path output/preflight --expected-nodes 6 --wait-timeout-sec 5
+```
 
 ## Comparison with the full `preflight`
 
@@ -344,7 +375,7 @@ An 18-node run on a different cluster crashed the aggregator with `TypeError: un
 
 ### 7. Package split (refactor of the 4.5k-line monolith)
 
-`node_smoke.py` had grown to ~4500 lines with all collectors, the orchestrator, the per-GPU subprocess body, and the ~700-line aggregator markdown writer in a single file. The refactor turned it into a Python sub-package (`primus/tools/preflight/node_smoke/`) with one module per Tier 1 sub-section (`collectors/`), the per-GPU subprocess body, the orchestrator, and the aggregator's data shapers (`aggregator/summarizers.py`) and Markdown writer (`aggregator/report.py`, with one `_write_<section>` helper per `##` heading). The single public entry point — `main` — is re-exported from `__init__.py`, so the existing `python -m primus.tools.preflight.node_smoke ...` invocation (used by `runner/run_node_smoke_direct.sh` and by `_spawn_per_gpu` for per-GPU subprocesses) keeps working unchanged. Behavior parity was checked by diffing the per-node JSON and `smoke_report.md` against a baseline (with a small allowlist for run-variant fields like PIDs, hardware cycle counters, and `available_gb`/`free_gb`/`cached_gb`); CLI help text, JSON schema, report section order, and exit-code semantics for `run` / `_per_gpu` / `aggregate` are byte-identical to pre-refactor.
+`node_smoke.py` had grown to ~4500 lines with all collectors, the orchestrator, the per-GPU subprocess body, and the ~700-line aggregator markdown writer in a single file. The refactor turned it into a Python sub-package (`primus/tools/preflight/node_smoke/`) with one module per Tier 1 sub-section (`collectors/`), the per-GPU subprocess body, the orchestrator, and the aggregator's data shapers (`aggregator/summarizers.py`) and Markdown writer (`aggregator/report.py`, with one `_write_<section>` helper per `##` heading). The single public entry point — `main` — is re-exported from `__init__.py`, so the existing `python -m primus.tools.preflight.node_smoke ...` invocation (used by the primus-cli wrapper and by `_spawn_per_gpu` for per-GPU subprocesses) keeps working unchanged. Behavior parity was checked by diffing the per-node JSON and `smoke_report.md` against a baseline (with a small allowlist for run-variant fields like PIDs, hardware cycle counters, and `available_gb`/`free_gb`/`cached_gb`); CLI help text, JSON schema, report section order, and exit-code semantics for `run` / `_per_gpu` / `aggregate` are byte-identical to pre-refactor.
 
 ### 8. Short hostnames + naming nodes that never reported
 

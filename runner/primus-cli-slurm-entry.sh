@@ -148,8 +148,20 @@ validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distri
 
 # ------------- Dispatch based on mode ---------------
 
-# Parse mode (default: container)
+# Strip the entry-mode separator if present.
 [[ "${1:-}" == "--" ]] && shift
+
+# Parse entry mode (default: container). Supported keywords are the ones
+# advertised by primus-cli-slurm.sh: container | direct. Anything else is
+# treated as a primus subcommand and routed through the default container
+# chain (preserves the documented terse forms like `-- preflight`).
+ENTRY_MODE="container"
+if [[ "${1:-}" == "container" || "${1:-}" == "direct" ]]; then
+    ENTRY_MODE="$1"
+    shift
+fi
+[[ "${1:-}" == "--" ]] && shift
+LOG_INFO_RANK0 "[slurm-entry] Entry mode: $ENTRY_MODE"
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
@@ -167,8 +179,10 @@ SCRIPT_ARGS+=(
     --env "GPUS_PER_NODE=$GPUS_PER_NODE"
 )
 
-# Build script path (container mode only)
-script_path="$RUNNER_DIR/primus-cli-container.sh"
+# Dispatch to the chosen entry script. Both primus-cli-container.sh and
+# primus-cli-direct.sh already accept --env / --config / --debug, so no
+# downstream changes are needed.
+script_path="$RUNNER_DIR/primus-cli-${ENTRY_MODE}.sh"
 require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
 # Build full command
