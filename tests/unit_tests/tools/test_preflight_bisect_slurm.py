@@ -59,7 +59,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BISECT_PY = REPO_ROOT / "tools" / "preflight_bisect" / "bisect.py"
 FAKE_RUNNER = REPO_ROOT / "tools" / "preflight_bisect" / "fake_runner.sh"
-REAL_RUNNER = REPO_ROOT / "runner" / "run_preflight_direct.sh"
+REAL_RUNNER = REPO_ROOT / "runner" / "primus-cli"
 
 
 def _require_env(*names: str) -> dict[str, str]:

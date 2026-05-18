@@ -123,11 +123,13 @@ def run_trial(
     ]
     if args.partition:
         cmd.extend(["-p", args.partition])
-    # The new wrapper run_preflight_direct.sh does NOT accept "--env KEY=VALUE".
-    # Per-trial env overrides are propagated via srun --export. ALL keeps the
-    # caller's environment (notably VENV_ACTIVATE) intact; the trailing K=V
-    # pairs override / add on top. SLURM tokenizes --export on commas, so
-    # values must not contain ',' or whitespace (NCCL flags never do).
+    # Per-trial env overrides are propagated via srun --export so every rank on
+    # every node sees them (the consolidated primus-cli launcher does accept
+    # --env KEY=VALUE, but only rank 0 would see those; --export covers all
+    # ranks). ALL keeps the caller's environment (notably VENV_ACTIVATE)
+    # intact; the trailing K=V pairs override / add on top. SLURM tokenizes
+    # --export on commas, so values must not contain ',' or whitespace
+    # (NCCL flags never do).
     export_val = "ALL"
     if args.preflight_env:
         export_val += "," + ",".join(args.preflight_env)
@@ -135,6 +137,9 @@ def run_trial(
     cmd.append(str(runner))
     cmd.extend(
         [
+            "direct",
+            "--",
+            "preflight",
             "--perf-test",
             "--report-file-name",
             f"trial-{trial_idx:03d}",
@@ -240,7 +245,7 @@ def main() -> int:
         epilog="""
 Environment:
   Export VENV_ACTIVATE to your venv activate script before running (required by
-  runner/run_preflight_direct.sh). See docs/preflight-direct.md.
+  runner/primus-cli direct -> primus-cli-direct.sh). See docs/preflight-direct.md.
 
 Caveats:
   - If the hang only reproduces at full scale, all subsets may PASS -> SUSPECT_NODES empty.
@@ -291,7 +296,13 @@ Caveats:
         "--runner",
         type=Path,
         default=None,
-        help="Override path to run_preflight_direct.sh (default: repo runner/)",
+        help=(
+            "Override path to the launcher invoked per trial "
+            "(default: repo runner/primus-cli). The bisector always appends "
+            "'direct -- preflight --perf-test --report-file-name ...' after "
+            "the runner path; custom runners that ignore positional args "
+            "(e.g. fake_runner.sh) work transparently."
+        ),
     )
     p.add_argument(
         "--scancel-user-on-hang",
@@ -311,7 +322,7 @@ Caveats:
         )
         return 2
 
-    runner = args.runner or (_repo_root() / "runner" / "run_preflight_direct.sh")
+    runner = args.runner or (_repo_root() / "runner" / "primus-cli")
     if not runner.is_file():
         print(f"ERROR: runner not found: {runner}", file=sys.stderr)
         return 2
