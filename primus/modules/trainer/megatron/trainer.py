@@ -687,6 +687,27 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         """
         args = get_args()
 
+        fla_data_flag = os.environ.get("PRIMUS_FLA_DATA", "0")
+        fla_cache = os.environ.get("PRIMUS_FLA_CACHE_DIR", "")
+        if fla_data_flag == "1" and fla_cache:
+            from tools.fla_order_dataset import FLAOrderGPTDataset
+
+            dp_size = parallel_state.get_data_parallel_world_size()
+            tokenizer = get_tokenizer()
+            log_rank_0(f"> building FLA-order dataset from {fla_cache} ...")
+            train_ds = FLAOrderGPTDataset(
+                cache_dir=fla_cache,
+                seq_length=args.seq_length,
+                micro_batch_size=args.micro_batch_size,
+                data_parallel_size=dp_size,
+                seed=args.seed,
+                pad_token_id=0,
+                eod_token=tokenizer.eod,
+                eod_mask_loss=args.eod_mask_loss,
+            )
+            log_rank_0(f"> FLA-order dataset: {len(train_ds)} samples")
+            return train_ds, None, None
+
         config = self.core_gpt_dataset_config_from_args(args)
 
         if args.mock_data:

@@ -43,9 +43,11 @@ except ImportError:
     InferenceRowParallelLinear = TERowParallelLinear
     HAS_INFERENCE_LAYERS = False
 
+from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.torch_norm import WrappedTorchNorm
 from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSubmodules,
@@ -165,6 +167,64 @@ gdn_hybrid_stack_spec = ModuleSpec(
                     module=MLP,
                     submodules=MLPSubmodules(
                         linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear
+                    ),
+                ),
+                mlp_bda=get_bias_dropout_add,
+            ),
+        ),
+        moe_layer=moe,
+    ),
+)
+
+
+gdn_hybrid_stack_spec_no_te = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=ModuleSpec(
+            module=GatedDeltaNetLayer,
+            submodules=GatedDeltaNetLayerSubmodules(
+                norm=WrappedTorchNorm,
+                mixer=ModuleSpec(
+                    module=GatedDeltaNet,
+                    submodules=GatedDeltaNetSubmodules(
+                        in_proj=ColumnParallelLinear,
+                        out_norm=WrappedTorchNorm,
+                        out_proj=RowParallelLinear,
+                    ),
+                ),
+                gdn_bda=get_bias_dropout_add,
+            ),
+        ),
+        attention_layer=ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=WrappedTorchNorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=ColumnParallelLinear,
+                        linear_q_down_proj=ColumnParallelLinear,
+                        linear_q_up_proj=ColumnParallelLinear,
+                        linear_kv_down_proj=ColumnParallelLinear,
+                        linear_kv_up_proj=ColumnParallelLinear,
+                        core_attention=TEDotProductAttention,
+                        linear_proj=RowParallelLinear,
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=ModuleSpec(
+            module=MLPLayer,
+            submodules=TransformerLayerSubmodules(
+                pre_mlp_layernorm=WrappedTorchNorm,
+                mlp=ModuleSpec(
+                    module=MLP,
+                    submodules=MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
                     ),
                 ),
                 mlp_bda=get_bias_dropout_add,

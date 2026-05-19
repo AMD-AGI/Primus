@@ -5,9 +5,12 @@
 ###############################################################################
 
 import collections
+import os
+import time
 from functools import partial
 
 import torch
+import torch.distributed as _dist
 from megatron.core import mpu
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
@@ -22,6 +25,26 @@ from megatron.training.utils import (
 stimer = StragglerDetector()
 
 from .trainer import MegatronTrainer
+
+_DIAG_ENABLED = int(os.environ.get('PRIMUS_DIAG', '0'))
+_DIAG_INTERVAL = int(os.environ.get('PRIMUS_DIAG_INTERVAL', '50'))
+_DIAG_BATCH = int(os.environ.get('PRIMUS_DIAG_BATCH', '0'))
+_DIAG_STEP = 0
+_DIAG_TIMINGS: dict = {}
+
+_DUMP_ITER1_BATCH_PATH = os.environ.get('PRIMUS_DUMP_ITER1_BATCH', '')
+_BATCH_DUMPED = False
+# Note: PRIMUS_DUMP_ITER1_ACTS is handled in third_party/Megatron-LM/pretrain_mamba.py
+# which already has working hooks for the Mamba/GDN model architecture.
+
+
+def _diag_rank0():
+    return (not _dist.is_initialized()) or _dist.get_rank() == 0
+
+
+def _diag_log(msg):
+    if _diag_rank0():
+        print(f"[DIAG] {msg}", flush=True)
 
 mb_batch = None
 
@@ -215,7 +238,15 @@ class MegatronPretrainTrainer(MegatronTrainer):
         args = get_args()
         timers = get_timers()
 
+        global _DIAG_STEP
+        _DIAG_STEP += 1
+        _do_diag = _DIAG_ENABLED and (_DIAG_STEP % _DIAG_INTERVAL == 0) and _diag_rank0()
+
         # Get the batch.
+        if _do_diag:
+            torch.cuda.synchronize()
+            _t0 = time.perf_counter()
+
         if not args.patch_zero_bubble:
             timers("batch-generator", log_level=2).start()
             global stimer
@@ -236,6 +267,41 @@ class MegatronPretrainTrainer(MegatronTrainer):
             else:
                 DataLoaderStore.push(data_iterator, h2d_stream=False, vp_stage=vp_stage)
                 tokens, labels, loss_mask, attention_mask, position_ids = DataLoaderStore.pop()
+
+        if _do_diag:
+            torch.cuda.synchronize()
+            _t_batch = (time.perf_counter() - _t0) * 1000
+            _diag_log(f"step={_DIAG_STEP}  batch_gen={_t_batch:.1f}ms  "
+                       f"tokens={list(tokens.shape)}  labels={list(labels.shape)}  "
+                       f"loss_mask_sum={loss_mask.sum().item():.0f}/{loss_mask.numel()}")
+
+        global _BATCH_DUMPED
+        if _DUMP_ITER1_BATCH_PATH and not _BATCH_DUMPED and _diag_rank0():
+            _payload = {
+                "tokens": tokens.detach().cpu(),
+                "labels": labels.detach().cpu(),
+                "loss_mask": loss_mask.detach().cpu(),
+                "position_ids": position_ids.detach().cpu(),
+            }
+            os.makedirs(os.path.dirname(os.path.abspath(_DUMP_ITER1_BATCH_PATH)), exist_ok=True)
+            torch.save(_payload, _DUMP_ITER1_BATCH_PATH)
+            _BATCH_DUMPED = True
+            print(f"[ITER1-DUMP] saved iter-1 batch to {_DUMP_ITER1_BATCH_PATH} "
+                  f"(tokens.shape={list(tokens.shape)})", flush=True)
+
+        if _do_diag and _DIAG_BATCH and _DIAG_STEP <= _DIAG_INTERVAL:
+            _diag_log(f"  tokens[0,:20]={tokens[0,:20].tolist()}")
+            _diag_log(f"  labels[0,:20]={labels[0,:20].tolist()}")
+            _diag_log(f"  tokens[0,-5:]={tokens[0,-5:].tolist()}")
+            _diag_log(f"  labels[0,-5:]={labels[0,-5:].tolist()}")
+            _diag_log(f"  loss_mask[0,:20]={loss_mask[0,:20].tolist()}")
+            shifted_match = (tokens[0, 1:] == labels[0, :-1]).sum().item()
+            _diag_log(f"  shifted_align: tokens[0,1:]==labels[0,:-1] -> "
+                       f"{shifted_match}/{tokens.shape[1]-1}")
+
+        if _do_diag:
+            torch.cuda.synchronize()
+            _t0_fwd = time.perf_counter()
 
         with stimer:
             if return_schedule_plan:
@@ -284,5 +350,13 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 output_tensor = model(
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
                 )
+
+        if _do_diag:
+            torch.cuda.synchronize()
+            _t_fwd = (time.perf_counter() - _t0_fwd) * 1000
+            _loss_val = output_tensor.float().mean().item()
+            _mem_gb = torch.cuda.max_memory_allocated() / 1e9
+            _diag_log(f"step={_DIAG_STEP}  fwd={_t_fwd:.1f}ms  "
+                       f"loss_mean={_loss_val:.6f}  peak_mem={_mem_gb:.2f}GB")
 
         return output_tensor, partial(self.loss_func, loss_mask)

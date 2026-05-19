@@ -1,4 +1,4 @@
-bases:
+extends:
   - mamba_base.yaml
 
 # Zebra Llama 1B Pure GDN configuration

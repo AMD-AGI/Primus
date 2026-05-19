@@ -47,11 +47,25 @@ except ImportError:
 
     HAVE_FLA = False
 
+import os
+_USE_FLA_FUSED_GATED_NORM = os.environ.get('PRIMUS_FLA_NORM', '0') == '1'
+# When PRIMUS_FLA_CONV=1, route the depthwise short conv1d through FLA's
+# Triton implementation (fla.modules.conv.causal_conv1d) instead of Tri Dao's
+# causal_conv1d CUDA package. The FLA reference run uses the Triton backend
+# by default; matching it here makes Primus's GDN forward+backward
+# bit-identical to FLA's.
+_USE_FLA_CONV = os.environ.get('PRIMUS_FLA_CONV', '0') == '1'
+
 try:
     from causal_conv1d import causal_conv1d_fn
 except ImportError:
     causal_conv1d_fn = None
     causal_conv1d_update = None
+
+try:
+    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
+except ImportError:
+    _fla_causal_conv1d = None
 
 
 logger = logging.getLogger(__name__)
@@ -200,12 +214,24 @@ class GatedDeltaNet(MegatronModule):
         setattr(self.A_log, "tensor_model_parallel", True)
 
         # Output layernorm before projection
-        self.out_norm = build_module(
-            submodules.out_norm,
-            config=self.config,
-            hidden_size=self.value_head_dim,
-            eps=self.config.layernorm_epsilon,
-        )
+        self._use_fla_fused_gated_norm = False
+        if _USE_FLA_FUSED_GATED_NORM and config.normalization == "RMSNorm":
+            try:
+                from fla.modules.fused_norm_gate import FusedRMSNormGated
+                self.out_norm = FusedRMSNormGated(
+                    self.value_head_dim,
+                    eps=self.config.layernorm_epsilon,
+                )
+                self._use_fla_fused_gated_norm = True
+            except ImportError:
+                pass
+        if not self._use_fla_fused_gated_norm:
+            self.out_norm = build_module(
+                submodules.out_norm,
+                config=self.config,
+                hidden_size=self.value_head_dim,
+                eps=self.config.layernorm_epsilon,
+            )
 
         self.out_proj = build_module(
             submodules.out_proj,
@@ -333,18 +359,30 @@ class GatedDeltaNet(MegatronModule):
         # Convolution on qkv (or SiLU-only when use_short_conv=False)
         nvtx_range_push(suffix="conv1d")
         if self.use_short_conv:
-            qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
-            if (causal_conv1d_fn is None) or self.config.deterministic_mode:
-                qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
-            else:
+            if _USE_FLA_CONV and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
+                # FLA's Triton causal_conv1d expects [B, T, D] (no transpose needed)
+                # and matches FLA reference run bit-for-bit.
                 assert self.activation in ["silu", "swish"]
-                qkv = causal_conv1d_fn(
+                qkv, _ = _fla_causal_conv1d(
                     x=qkv,
                     weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
                     bias=self.conv1d.bias,
                     activation=self.activation,
+                    backend='triton',
                 )
-            qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
+            else:
+                qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
+                if (causal_conv1d_fn is None) or self.config.deterministic_mode:
+                    qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+                else:
+                    assert self.activation in ["silu", "swish"]
+                    qkv = causal_conv1d_fn(
+                        x=qkv,
+                        weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
+                        bias=self.conv1d.bias,
+                        activation=self.activation,
+                    )
+                qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
         else:
             qkv = self.act_fn(qkv)
         nvtx_range_pop(suffix="conv1d")
@@ -357,10 +395,16 @@ class GatedDeltaNet(MegatronModule):
         query = query.reshape(batch, seq_len, -1, self.key_head_dim)
         key = key.reshape(batch, seq_len, -1, self.key_head_dim)
         value = value.reshape(batch, seq_len, -1, self.value_head_dim)
-        # GVA head expansion (must happen before kernel call in both paths)
+        # GVA head expansion. FLA's chunk_gated_delta_rule kernel handles GVA
+        # internally (accepts q/k with H<HV, replicating inside the kernel),
+        # which gives a different bf16 backward than user-side repeat_interleave
+        # because PyTorch's repeat_interleave backward sums repeats post-hoc in
+        # the autograd graph. Set PRIMUS_NATIVE_GVA=1 to skip pre-expansion and
+        # let the kernel handle GVA itself — matches FLA's gradient layout.
         if self.num_value_heads // self.num_key_heads > 1:
-            query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
-            key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+            if os.environ.get('PRIMUS_NATIVE_GVA', '0') != '1':
+                query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+                key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
 
         # Make contiguous
         query = query.contiguous()
@@ -371,7 +415,6 @@ class GatedDeltaNet(MegatronModule):
         alpha = alpha.contiguous()
 
         nvtx_range_push(suffix="g_and_beta")
-        g = -self.A_log.float().exp() * F.softplus(alpha.float() + self.dt_bias)
         beta = beta.sigmoid()
         nvtx_range_pop(suffix="g_and_beta")
 
@@ -380,7 +423,7 @@ class GatedDeltaNet(MegatronModule):
             mode = (
                 "Pure PyTorch fallback (deterministic)"
                 if self.config.deterministic_mode
-                else "FLA Triton (fwd+bwd, use_qk_l2norm_in_kernel=True)"
+                else "FLA Triton (fwd+bwd, use_gate_in_kernel=True, use_qk_l2norm_in_kernel=True)"
             )
             logger.warning(
                 f"[GDN layer {self.layer_number}] kernel={mode} | "
@@ -389,6 +432,7 @@ class GatedDeltaNet(MegatronModule):
 
         nvtx_range_push(suffix="gated_delta_rule")
         if self.config.deterministic_mode:
+            g = -self.A_log.float().exp() * F.softplus(alpha.float() + self.dt_bias)
             if self.use_qk_l2norm:
                 query = l2norm(query)
                 key = l2norm(key)
@@ -407,11 +451,14 @@ class GatedDeltaNet(MegatronModule):
                 query,
                 key,
                 value,
-                g=g,
+                g=alpha,
                 beta=beta,
                 initial_state=None,
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=self.use_qk_l2norm,
+                use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
             )
         nvtx_range_pop(suffix="gated_delta_rule")
 
@@ -432,16 +479,16 @@ class GatedDeltaNet(MegatronModule):
 
         return out, out_bias
 
-    @jit_fuser
     def _apply_gated_norm(self, x, gate):
-        # Output Norm
         x_dtype = x.dtype
         x = x.reshape(-1, x.shape[-1])
-        y = self.out_norm(x)
-        # Output gate
         gate = gate.reshape(-1, gate.shape[-1])
-        y = y * self.act_fn(gate.float())
-        y = y.to(x_dtype)
+        if self._use_fla_fused_gated_norm:
+            y = self.out_norm(x, gate)
+        else:
+            y = self.out_norm(x)
+            y = y * self.act_fn(gate.float())
+            y = y.to(x_dtype)
         return y
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None, tp_group=None):

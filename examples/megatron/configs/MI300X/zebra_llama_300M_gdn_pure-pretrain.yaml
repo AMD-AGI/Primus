@@ -15,13 +15,39 @@ modules:
 
       eval_iters: 0
 
-      num_workers: 2
+      num_workers: 8
       create_attention_mask_in_dataloader: false
 
       profile: false
       use_pytorch_profiler: false
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
+      log_interval: 100
+      check_for_nan_in_loss_and_grad: false
+
+      # Perf: Megatron defaults to inserting dist.barrier() before every L1
+      # timer measurement (~5-10/iter) to make per-stage timings comparable.
+      # This serializes ranks. Disable for production training.
+      barrier_with_L1_time: false
+
+      # Match FLA seed for reproducibility comparison
+      seed: 42
+
+      # Fix: norm_epsilon in model YAML maps to args.norm_epsilon, but
+      # TransformerConfig uses layernorm_epsilon (default 1e-5).
+      # Must explicitly set layernorm_epsilon to match FLA's 1e-6.
+      layernorm_epsilon: 1.0e-6
+
+      # CRITICAL: Megatron's TransformerConfig defaults hidden_dropout=0.1 and
+      # attention_dropout=0.1 (transformer_config.py L152). Even though
+      # mamba_base.yaml sets these to 0.0, the YAML inheritance is being
+      # overridden by language_model.yaml (which sets 0.1) and the override is
+      # not propagating to args. This caused embeddings to be dropout-perturbed
+      # at every iteration in prior runs (verified empirically: same token
+      # produced DIFFERENT embedding vectors with 1/(1-0.1)=1.111 scaling).
+      # FLA does NOT apply any dropout. Force these to 0 here to match.
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
 
       # Training schedule — matched to FLA (8 GPUs):
       #   FLA: per_device_train_batch_size=128, 8 GPUs → global=1024
@@ -51,7 +77,9 @@ modules:
       eod_mask_loss: false
 
       # Pure GDN hybrid spec (hybrid_attention_ratio=0.0 → all GDN, no MLA)
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec']
+      # Use no-TE spec to match FLA's native PyTorch layers for loss curve alignment
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec_no_te']
+      no_persist_layer_norm: true
 
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
@@ -61,11 +89,17 @@ modules:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
+      # Perf: For a small 300M model, distributed optimizer (ZeRO-1) adds
+      # REDUCE-SCATTER + ALL-GATHER overhead with no memory savings (full
+      # optimizer state ~3.6GB easily fits per-rank). Switch to plain DDP
+      # ALL-REDUCE to match FLA. Memory cost: +3GB/rank, expected: ~10-15% faster.
+      # NOTE: overlap_param_gather requires distributed optimizer, so disable it.
       overlap_grad_reduce: true
-      overlap_param_gather: true
-      gradient_accumulation_fusion: true
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
       use_torch_fsdp2: false
-      use_distributed_optimizer: true
+      use_distributed_optimizer: false
+      ddp_average_in_collective: true
 
       # Data — FLA-aligned FineWeb-Edu sample-10BT
       mock_data: false
@@ -74,11 +108,13 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      # Checkpoints
-      finetune: false
-      auto_continue_train: true
-      load: null
-      save: ./output/zebra_llama_300M_gdn_pure-pretrain
+      # Checkpoints — load FLA-initialized weights for exact comparison
+      finetune: true
+      auto_continue_train: false
+      no_load_optim: true
+      no_load_rng: true
+      load: /home/vanbhati@amd.com/Primus/output/fla_init_ckpt_300M
+      save: ./output/zebra_llama_300M_gdn_pure-pretrain-fla-init-v2
       save_interval: 1024
       disable_last_saving: false
       ckpt_format: torch
