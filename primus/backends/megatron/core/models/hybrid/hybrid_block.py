@@ -5,6 +5,7 @@
 # This source code is licensed under the Apache license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -98,6 +99,8 @@ class HybridStack(MegatronModule):
         **kwargs,
     ) -> None:
         super().__init__(config=config)
+        if residual_in_fp32 is False and config.fp32_residual_connection:
+            residual_in_fp32 = True
         self.residual_in_fp32 = residual_in_fp32
         self.pre_process = pre_process
         self.post_layer_norm = post_layer_norm
@@ -180,12 +183,23 @@ class HybridStack(MegatronModule):
                     assert False, "unexpected layer_type"
             self.layers.append(layer)
 
+        self._fuse_prenorm = int(os.environ.get('PRIMUS_FLA_NORM', '0')) == 1
+        if self._fuse_prenorm:
+            from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer
+            for i, (lt, layer) in enumerate(zip(self.layer_type_list, self.layers)):
+                if lt == LayerSymbols.MAMBA and isinstance(layer, GatedDeltaNetLayer):
+                    layer._fuse_prenorm_with_next = True
+
         # Required for activation recomputation
         self.num_layers_per_pipeline_rank = len(self.layers)
 
         if self.post_process and self.post_layer_norm:
-            # Final layer norm before output.
-            self.final_norm = TENorm(
+            if int(os.environ.get('PRIMUS_NO_TE', '0')):
+                from megatron.core.transformer.torch_norm import WrappedTorchNorm
+                norm_cls = WrappedTorchNorm
+            else:
+                norm_cls = TENorm
+            self.final_norm = norm_cls(
                 config=self.config,
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,
@@ -322,15 +336,31 @@ class HybridStack(MegatronModule):
         use_inner_fp8_context = self.config.fp8 and self.config.fp8_recipe != Fp8Recipe.delayed
         outer_fp8_context = get_fp8_context(self.config) if use_outer_fp8_context else nullcontext()
 
+        _pending_fuse = None
+
         with outer_fp8_context:
-            for layer in self.layers:
+            for i_layer, layer in enumerate(self.layers):
                 inner_fp8_context = (
                     get_fp8_context(self.config, layer.layer_number - 1)
                     if use_inner_fp8_context
                     else nullcontext()
                 )
                 with inner_fp8_context:
-                    if isinstance(layer, TransformerLayer):
+                    if isinstance(layer, TransformerLayer) and _pending_fuse is not None:
+                        mixer_out, block_residual = _pending_fuse
+                        _pending_fuse = None
+                        normed, new_residual = layer.pre_mlp_layernorm(
+                            mixer_out, block_residual, True
+                        )
+                        mlp_output_with_bias = layer.mlp(normed)
+                        bda_fn = layer.mlp_bda(
+                            training=self.training,
+                            fused=self.config.bias_dropout_fusion,
+                        )
+                        hidden_states = bda_fn(
+                            mlp_output_with_bias, new_residual, layer.hidden_dropout
+                        )
+                    elif isinstance(layer, TransformerLayer):
                         hidden_states, _ = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
@@ -338,12 +368,16 @@ class HybridStack(MegatronModule):
                             rotary_pos_emb=rotary_pos_emb,
                             sequence_len_offset=sequence_len_offset,
                         )
-                    else:  # MambaLayer
-                        hidden_states = layer(
+                    else:  # MambaLayer / GatedDeltaNetLayer
+                        result = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
                             inference_context=inference_context,
                         )
+                        if isinstance(result, tuple):
+                            _pending_fuse = result
+                        else:
+                            hidden_states = result
 
                 # The attention layer (currently a simplified transformer layer)
                 # outputs a tuple of (hidden_states, context). Context is intended

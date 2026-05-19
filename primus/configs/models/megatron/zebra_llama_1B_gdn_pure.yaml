@@ -1,4 +1,4 @@
-bases:
+extends:
   - mamba_base.yaml
 
 # Pure Gated DeltaNet 1B — matches FLA gated_deltanet_1B_pure.json exactly

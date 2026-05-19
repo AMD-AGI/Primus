@@ -65,9 +65,19 @@ class GatedDeltaNetLayer(MegatronModule):
             layer_number=layer_number,
             pg_collection=pg_collection,
         )
-        self.norm = build_module(submodules.norm, self.config, self.config.hidden_size)
+        # Pass eps from config.layernorm_epsilon. WrappedTorchNorm defaults
+        # eps to 1e-5 if not provided; FLA's GatedDeltaNet uses 1e-6, so we
+        # must forward the YAML value explicitly or the pre-norm silently
+        # diverges from FLA by ~1.1% per layer.
+        self.norm = build_module(
+            submodules.norm,
+            self.config,
+            self.config.hidden_size,
+            eps=self.config.layernorm_epsilon,
+        )
         self.gdn_bda = build_module(submodules.gdn_bda)
         self.bias_dropout_add_exec_handler = torch.enable_grad
+        self._fuse_prenorm_with_next = False
 
     def forward(
         self,
@@ -93,8 +103,6 @@ class GatedDeltaNetLayer(MegatronModule):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         residual = hidden_states
-        if self.residual_in_fp32:
-            residual = residual.to(torch.float32)
 
         hidden_states = hidden_states.to(dtype=self.config.params_dtype)
         hidden_states = self.norm(hidden_states)
@@ -103,10 +111,20 @@ class GatedDeltaNetLayer(MegatronModule):
             hidden_states, attention_mask, inference_context=inference_context
         )
 
+        if self._fuse_prenorm_with_next:
+            mixer_out = mixer_out_with_bias[0] if isinstance(mixer_out_with_bias, tuple) else mixer_out_with_bias
+            return mixer_out, residual
+
+        if self.residual_in_fp32:
+            residual = residual.to(torch.float32)
+
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.gdn_bda(
                 training=self.training, fused=self.config.bias_dropout_fusion
             )(mixer_out_with_bias, residual, self.hidden_dropout)
+
+        if self.residual_in_fp32:
+            hidden_states = hidden_states.to(self.config.params_dtype)
 
         return hidden_states
 

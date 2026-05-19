@@ -1,4 +1,4 @@
-bases:
+extends:
   - language_model.yaml
 
 # Mamba-specific configuration

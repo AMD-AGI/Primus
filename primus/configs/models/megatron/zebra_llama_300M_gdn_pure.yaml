@@ -1,4 +1,4 @@
-bases:
+extends:
   - mamba_base.yaml
 
 # Pure Gated DeltaNet 300M — matches FLA gated_deltanet_300M_pure.json exactly
@@ -57,3 +57,5 @@ position_embedding_type: none
 add_position_embedding: true
 use_rotary_position_embeddings: false
 max_position_embeddings: 131072
+
+
