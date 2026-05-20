@@ -513,6 +513,9 @@ fi
 [[ "$MASTER_PORT" =~ ^[0-9]+$       ]] || { LOG_ERROR "[direct] MASTER_PORT must be a non-negative integer (got '$MASTER_PORT')"; exit 1; }
 [[ -n "$MASTER_ADDR" ]]                || { LOG_ERROR "[direct] MASTER_ADDR is empty"; exit 1; }
 (( NODE_RANK < NNODES ))               || { LOG_ERROR "[direct] NODE_RANK ($NODE_RANK) must be < NNODES ($NNODES)"; exit 1; }
+if [[ "$MASTER_ADDR" == "localhost" && "${NNODES:-1}" -gt 1 ]]; then
+  LOG_WARN "[direct] MASTER_ADDR=localhost with NNODES=$NNODES — multi-node will likely fail"
+fi
 
 ###############################################################################
 # STEP 5: Source GPU environment and helper modules
