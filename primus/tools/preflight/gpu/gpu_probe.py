@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
+from .sysfs_probe import sysfs_probe
 from .utils import ProbeResult, run_cmd, which
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_gfx_arch(raw: str) -> str:
@@ -120,27 +124,16 @@ def _probe_with_torch() -> Dict[str, Any]:
 
 
 def _probe_amd_smi() -> Optional[Dict[str, Any]]:
+    """Best-effort amd-smi JSON probe for process occupancy detection only."""
     if which("amd-smi") is None:
         return None
-
-    # Prefer JSON if available (newer amd-smi); fall back to `list` output.
-    rc, out, err = run_cmd(["amd-smi", "list", "--json"], timeout_s=10)
-    if rc == 0 and out:
-        try:
+    try:
+        rc, out, err = run_cmd(["amd-smi", "list", "--json"], timeout_s=10)
+        if rc == 0 and out:
             return {"rc": rc, "json": json.loads(out), "err": err}
-        except Exception:
-            # Fall through to non-json.
-            pass
-
-    rc, out, err = run_cmd(["amd-smi", "list"], timeout_s=10)
-    return {"rc": rc, "out": out, "err": err}
-
-
-def _probe_rocm_smi() -> Optional[Dict[str, Any]]:
-    if which("rocm-smi") is None:
-        return None
-    rc, out, err = run_cmd(["rocm-smi", "-a"], timeout_s=10)
-    return {"rc": rc, "out": out, "err": err}
+    except Exception as e:
+        logger.debug("amd-smi probe failed: %s", e)
+    return None
 
 
 _PROBE_CACHE: Optional[ProbeResult] = None
@@ -157,9 +150,10 @@ def probe_gpus() -> ProbeResult:
     (from gpu_basic, gpu_topology, and gpu_perf) and the output is static
     during a single preflight run.
 
-    amd-smi and rocm-smi are only invoked on LOCAL_RANK == 0 to avoid
-    /dev/shm mutex contention (rocm_smi_lib#88) and shared-FS subprocess
-    overhead at scale. Their output is node-level (identical across ranks).
+    Primary GPU enumeration uses sysfs (KFD topology), which is safe to call
+    from any rank (no subprocesses, no /dev/shm mutex).  amd-smi is kept as
+    an optional probe on LOCAL_RANK == 0 for process-occupancy data only;
+    its failure never crashes the run.
     """
     global _PROBE_CACHE
     if _PROBE_CACHE is not None:
@@ -170,13 +164,31 @@ def probe_gpus() -> ProbeResult:
     torch_info = _probe_with_torch()
     tooling: Dict[str, Any] = {"torch": torch_info}
 
+    # sysfs probe: safe from every rank, no subprocess calls.
+    sysfs_result = sysfs_probe()
+    if sysfs_result.ok:
+        tooling["sysfs"] = {
+            "gpu_count": sysfs_result.gpu_count,
+            "gpus": [
+                {
+                    "index": i,
+                    "pci_bdf": g.pci_bdf_str,
+                    "unique_id": hex(g.unique_id) if g.unique_id else None,
+                    "numa_node": g.numa_node,
+                }
+                for i, g in enumerate(sysfs_result.gpus)
+            ],
+            "link_count": len(sysfs_result.links),
+        }
+    else:
+        logger.debug("sysfs probe unavailable: %s", sysfs_result.error)
+
+    # amd-smi JSON: subprocess-based, LOCAL_RANK 0 only, best-effort.
+    # Used solely for process-occupancy detection in gpu_basic.py.
     if LOCAL_RANK == 0:
         amd = _probe_amd_smi()
         if amd is not None:
             tooling["amd-smi"] = amd
-        rocmsmi = _probe_rocm_smi()
-        if rocmsmi is not None:
-            tooling["rocm-smi"] = rocmsmi
 
     backend = torch_info.get("backend") if torch_info.get("ok") else "unknown"
     devices = torch_info.get("devices", []) if torch_info.get("ok") else []

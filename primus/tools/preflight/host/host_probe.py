@@ -488,8 +488,21 @@ def _get_pcie_link_info_sysfs() -> Dict[str, Any]:
     return info
 
 
+def get_gpu_count_sysfs() -> int:
+    """GPU count via KFD sysfs — no subprocesses, no /dev/shm mutex."""
+    try:
+        from primus.tools.preflight.gpu.sysfs_probe import sysfs_gpu_count
+
+        count = sysfs_gpu_count()
+        if count > 0:
+            return count
+    except Exception:
+        pass
+    return 0
+
+
 def get_gpu_count_rocm_fallback() -> int:
-    """GPU count without invoking rocm-smi (HIP_VISIBLE_DEVICES / sysfs)."""
+    """GPU count without invoking rocm-smi (HIP_VISIBLE_DEVICES / /dev/dri)."""
     hip_devices = os.environ.get("HIP_VISIBLE_DEVICES", "")
     if hip_devices:
         return len([x for x in hip_devices.split(",") if x.strip()])
