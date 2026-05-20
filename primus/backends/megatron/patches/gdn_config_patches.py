@@ -24,6 +24,17 @@ _GDN_CONFIG_FIELDS = {
     "linear_num_value_heads": None,
     "use_fla_triton_kda": False,
     "use_fla_triton_kda_hybrid": False,
+    # When True (default) and use_fla_triton_kda is also True, chunk_kda is
+    # called with use_gate_in_kernel=True (gate fused inside the Triton
+    # kernel). Set to False to materialize the gate up-front via
+    # fused_kda_gate() — bit-identical to FLA's pre-fusion path and to the
+    # tw006-validated numerics (loss=4.7281 @ iter 500 vs FLA/8=4.7350).
+    "use_fla_kda_in_kernel_gate": True,
+    # When True (default when use_fla_triton_kda=True), the output norm is
+    # replaced by fla.modules.FusedRMSNormGated (RMSNorm + sigmoid-gate +
+    # multiply in one Triton kernel). Set to False to use the unfused
+    # _apply_gated_norm path with explicit fp32 sigmoid (tw006 numerics).
+    "use_fla_fused_norm_gated": None,
 }
 
 
