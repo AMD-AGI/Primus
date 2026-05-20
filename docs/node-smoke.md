@@ -240,7 +240,7 @@ The authoritative source of flags + defaults is `python -m primus.tools.prefligh
 | `--hbm-gbs-min` | 2000 | Tier 2 HBM threshold. |
 | `--rccl-size-mb` | 64 | Local RCCL message size. |
 | `--rccl-gbs-min` | 100 | Local RCCL bandwidth threshold. |
-| `--rccl-timeout-sec` | 30 | Hard timeout for the RCCL phase. |
+| `--rccl-timeout-sec` | 120 | Hard timeout for the RCCL phase. |
 | `--skip-dmesg` | off | Skip dmesg scan (e.g. inside containers). |
 | `--dmesg-minutes` | 15 | dmesg `--since` window. |
 | `--expected-rdma-nics N` | auto-report-only | When set, a mismatch between the **included (training-NIC) count** and N becomes a node FAIL. Compares against the post-selector count, not the raw number of devices under `/sys/class/infiniband`. |

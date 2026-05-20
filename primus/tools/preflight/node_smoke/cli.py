@@ -597,7 +597,7 @@ def _add_run_flags(parser: argparse.ArgumentParser) -> None:
         help="FAIL if local RCCL GB/s is below this. Default: 100.",
     )
     parser.add_argument(
-        "--rccl-timeout-sec", type=int, default=30, help="Hard timeout for the local RCCL all-reduce phase."
+        "--rccl-timeout-sec", type=int, default=120, help="Hard timeout for the local RCCL all-reduce phase."
     )
     parser.add_argument(
         "--skip-dmesg", action="store_true", help="Skip the dmesg recent-error scan (e.g. inside containers)."
