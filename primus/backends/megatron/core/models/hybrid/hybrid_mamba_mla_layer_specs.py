@@ -229,3 +229,74 @@ kda_hybrid_stack_spec = ModuleSpec(
         moe_layer=moe,
     ),
 )
+
+
+# No-TE KDA spec — mirrors gdn_hybrid_stack_spec_no_te. Replaces every TE
+# wrapper with plain WrappedTorchNorm / ColumnParallelLinear / RowParallelLinear.
+# On ROCm this removes TE's per-call dispatch indirection + dtype recasts that
+# account for the bulk of Megatron's per-iter overhead vs FLA's HF-Trainer loop.
+#
+# Architectural match to fla/models/kda/modeling_kda.py KDABlock:
+#   - Single pre-norm at the layer (KimiDeltaAttentionLayer.norm = WrappedTorchNorm)
+#   - Mixer in_proj is plain ColumnParallelLinear (no fused norm-and-project)
+#   - Mixer gate_norm = IdentityOp (FLA has no re-norm for the gate path; the
+#     pre-norm-once-and-reuse pattern saves 1 norm launch per layer)
+#   - Mixer out_norm stays as WrappedTorchNorm (becomes FusedRMSNormGated when
+#     PRIMUS_FLA_NORM=1 + use_fla_triton_kda=true, see KimiDeltaAttention.__init__)
+kda_hybrid_stack_spec_no_te = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=ModuleSpec(
+            module=KimiDeltaAttentionLayer,
+            submodules=KimiDeltaAttentionLayerSubmodules(
+                norm=WrappedTorchNorm,
+                mixer=ModuleSpec(
+                    module=KimiDeltaAttention,
+                    submodules=KimiDeltaAttentionSubmodules(
+                        in_proj=ColumnParallelLinear,
+                        gate_norm=IdentityOp,
+                        out_norm=WrappedTorchNorm,
+                        out_proj=RowParallelLinear,
+                    ),
+                ),
+                kda_bda=get_bias_dropout_add,
+            ),
+        ),
+        attention_layer=ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=WrappedTorchNorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=ColumnParallelLinear,
+                        linear_q_down_proj=ColumnParallelLinear,
+                        linear_q_up_proj=ColumnParallelLinear,
+                        linear_kv_down_proj=ColumnParallelLinear,
+                        linear_kv_up_proj=ColumnParallelLinear,
+                        core_attention=TEDotProductAttention,
+                        linear_proj=RowParallelLinear,
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=ModuleSpec(
+            module=MLPLayer,
+            submodules=TransformerLayerSubmodules(
+                pre_mlp_layernorm=WrappedTorchNorm,
+                mlp=ModuleSpec(
+                    module=MLP,
+                    submodules=MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
+                    ),
+                ),
+                mlp_bda=get_bias_dropout_add,
+            ),
+        ),
+        moe_layer=moe,
+    ),
+)

@@ -3,8 +3,18 @@
 # megatron_patch.sh — Apply Primus modifications to vendored Megatron-LM
 #
 # This script applies all Megatron-LM submodule changes that Primus needs
-# for GDN training to match the FLA reference implementation on both loss
-# trajectory and step throughput.
+# for FLA-parity training of the hybrid linear-attention recipes:
+#
+#   * Gated DeltaNet (GDN)        — docs/zebra_llama/README_GDN.md
+#   * Kimi Delta Attention (KDA)  — docs/zebra_llama/README_KDA.md
+#
+# Both architectures consume the same six patches below. All KDA-specific
+# code lives in primus/ (kimi_delta_attention.py,
+# kimi_delta_attention_layer.py, hybrid_mamba_mla_layer_specs.py
+# ::kda_hybrid_stack_spec_no_te, and the use_fla_triton_kda /
+# use_fla_kda_in_kernel_gate / use_fla_fused_norm_gated fields registered
+# in patches/gdn_config_patches.py) — no additional
+# megatron_patches/*.patch is required for KDA.
 #
 # Patch sources live in ./megatron_patches/ and are applied with `git apply`
 # inside the third_party/Megatron-LM submodule.

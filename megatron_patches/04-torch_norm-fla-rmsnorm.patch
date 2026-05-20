@@ -1,0 +1,21 @@
+diff --git a/megatron/core/transformer/torch_norm.py b/megatron/core/transformer/torch_norm.py
+index 5948ae600..f6eaee053 100644
+--- a/megatron/core/transformer/torch_norm.py
++++ b/megatron/core/transformer/torch_norm.py
+@@ -1,4 +1,5 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
++import os
+ from typing import Protocol
+ 
+ import torch
+@@ -56,6 +57,10 @@ class WrappedTorchNorm:
+         if config.normalization == "LayerNorm":
+             norm_cls = torch.nn.LayerNorm
+         elif config.normalization == "RMSNorm":
++            if os.environ.get('PRIMUS_FLA_NORM', '0') == '1':
++                from fla.modules import RMSNorm as FLARMSNorm
++                return FLARMSNorm(hidden_size=hidden_size, eps=eps)
++
+             assert is_torch_min_version(
+                 "2.4.0a0"
+             ), 'Torch RMSNorm requires PyTorch version >= 2.4.0'

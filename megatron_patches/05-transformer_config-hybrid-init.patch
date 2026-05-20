@@ -1,0 +1,30 @@
+diff --git a/megatron/core/transformer/transformer_config.py b/megatron/core/transformer/transformer_config.py
+index 642af8415..9dc35223e 100644
+--- a/megatron/core/transformer/transformer_config.py
++++ b/megatron/core/transformer/transformer_config.py
+@@ -1746,19 +1746,22 @@ class TransformerConfig(ModelParallelConfig):
+                 self.init_method = init_method_normal(self.init_method_std)
+ 
+         if self.output_layer_init_method is None:
+-            if self.use_mup:
++            if self.is_hybrid_model:
++                # Hybrid models (GDN, etc.): use uniform std matching FLA's initializer_range
++                self.output_layer_init_method = init_method_normal(self.init_method_std)
++            elif self.use_mup:
+                 # MuP: depth and width scaling for output layers.
+                 self.output_layer_init_method = mup_scaled_init_method_normal(
+                     self.init_method_std,
+                     self.num_layers,
+                     self.mup_width_mult,
+-                    multiplier=2.0 if not self.is_hybrid_model else 1.0,
++                    multiplier=2.0,
+                 )
+             else:
+                 self.output_layer_init_method = scaled_init_method_normal(
+                     self.init_method_std,
+                     self.num_layers,
+-                    multiplier=2.0 if not self.is_hybrid_model else 1.0,
++                    multiplier=2.0,
+                 )
+ 
+         if self.num_moe_experts is not None and self.add_bias_linear:

@@ -21,11 +21,16 @@ from megatron.core.utils import deprecate_inference_params
 class KimiDeltaAttentionLayerSubmodules:
     """Configuration class for specifying the submodules of a KDA layer.
 
-    No separate norm is needed here because the LayerNorm is fused into the
-    mixer's in_proj (TELayerNormColumnParallelLinear), matching the GDN
-    layer pattern.
+    Two layouts are supported:
+    1. TE-fused (default): norm=IdentityOp; the mixer's in_proj is
+       TELayerNormColumnParallelLinear and absorbs the pre-norm.
+    2. No-TE / FLA-style: norm=WrappedTorchNorm; the mixer's in_proj is plain
+       ColumnParallelLinear and gate_norm=IdentityOp (single pre-norm matches
+       fla/models/kda/modeling_kda.py KDABlock pattern — saves one redundant
+       gate_norm launch per layer).
     """
 
+    norm: Union[ModuleSpec, type] = IdentityOp
     mixer: Union[ModuleSpec, type] = IdentityOp
     kda_bda: Union[ModuleSpec, type] = IdentityOp
 
@@ -66,6 +71,18 @@ class KimiDeltaAttentionLayer(MegatronModule):
             layer_number=layer_number,
             pg_collection=pg_collection,
         )
+        # Optional pre-norm. With TE-fused in_proj this is IdentityOp (norm
+        # is absorbed into TELayerNormColumnParallelLinear). With plain
+        # ColumnParallelLinear in_proj this is WrappedTorchNorm and matches
+        # fla/models/kda/modeling_kda.py:113 `hidden_states = self.attn_norm(...)`.
+        # eps forwarded explicitly because WrappedTorchNorm defaults to 1e-5
+        # while KDA configs (and FLA) use 1e-6.
+        self.norm = build_module(
+            submodules.norm,
+            self.config,
+            self.config.hidden_size,
+            eps=self.config.layernorm_epsilon,
+        )
         self.kda_bda = build_module(submodules.kda_bda)
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
@@ -96,6 +113,7 @@ class KimiDeltaAttentionLayer(MegatronModule):
             residual = residual.to(torch.float32)
 
         hidden_states = hidden_states.to(dtype=self.config.params_dtype)
+        hidden_states = self.norm(hidden_states)
 
         mixer_out_with_bias = self.mixer(
             hidden_states, attention_mask, inference_context=inference_context

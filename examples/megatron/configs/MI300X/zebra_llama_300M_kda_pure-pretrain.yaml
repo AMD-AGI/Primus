@@ -1,0 +1,178 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_300M_kda_pure-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: zebra_llama_300M_kda_pure.yaml
+    overrides:
+      wandb_project: "Primus_Zebra_Llama_300M_KDA_Pure_Pretrain"
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      num_workers: 8
+      create_attention_mask_in_dataloader: false
+
+      profile: false
+      use_pytorch_profiler: false
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: 100
+      check_for_nan_in_loss_and_grad: false
+
+      # Perf: Megatron defaults to inserting dist.barrier() before every L1
+      # timer measurement (~5-10/iter) to make per-stage timings comparable.
+      # This serializes ranks. Disable for production training.
+      barrier_with_L1_time: false
+
+      # Match FLA seed for reproducibility comparison
+      seed: 42
+
+      # Fix: norm_epsilon in model YAML maps to args.norm_epsilon, but
+      # TransformerConfig uses layernorm_epsilon (default 1e-5).
+      # Must explicitly set layernorm_epsilon to match FLA's 1e-6.
+      layernorm_epsilon: 1.0e-6
+
+      # CRITICAL: Megatron's TransformerConfig defaults hidden_dropout=0.1 and
+      # attention_dropout=0.1. Even though mamba_base.yaml sets these to 0.0,
+      # the YAML inheritance is being overridden by language_model.yaml (which
+      # sets 0.1) and the override is not propagating to args. FLA does NOT
+      # apply any dropout. Force these to 0 here to match.
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
+
+      # Training schedule — matched to FLA (8 GPUs):
+      #   FLA: per_device_train_batch_size=128, 8 GPUs → global=1024
+      #   tokens/step = 1024 * 2048 = 2,097,152
+      #   total tokens ~= 4768 * 2,097,152 ≈ 10B
+      train_iters: 4768
+      micro_batch_size: 128
+      global_batch_size: 1024
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+      original_max_position_embeddings: 2048
+
+      # Optimizer — matched to FLA:
+      #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
+      #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
+      #   max_grad_norm=1.0, warmup_steps=200
+      clip_grad: 1.0
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 4768
+      lr_decay_style: cosine
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # Pure KDA hybrid spec — no-TE variant matches FLA's KDABlock layout
+      # exactly (fla/models/kda/modeling_kda.py):
+      #   - Pre-norm computed ONCE per layer in the wrapper
+      #     (KimiDeltaAttentionLayer.norm = WrappedTorchNorm).
+      #   - Mixer in_proj is plain ColumnParallelLinear (no fused norm).
+      #   - Mixer gate_norm = IdentityOp (side projections reuse the
+      #     wrapper-normed tensor — no second norm pass).
+      # The TE variant (kda_hybrid_stack_spec) re-normalizes hidden_states
+      # inside the mixer via gate_norm, costing ~12-15 GiB activation memory
+      # per layer × 12 = ~40 GiB peak, plus ~50 ms/iter for the extra norm
+      # launches. The no-TE variant saves both, mirroring how GDN matched
+      # FLA in GDN_FLA_PARITY.md.
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec_no_te']
+      use_fla_triton_kda: true
+
+      # Full FLA-exact kernel fusion (matches fla/layers/kda.py exactly):
+      #   use_fla_kda_in_kernel_gate=True  → chunk_kda(use_gate_in_kernel=True,
+      #     use_qk_l2norm_in_kernel=True); gate `-exp(A_log)*softplus(g+dt_bias)
+      #     +cumsum` fused inside the Triton kernel and recomputed in backward,
+      #     so the [B,T,H,K] fp32 activated-gate tensor is never materialized.
+      #   use_fla_fused_norm_gated=True   → out_norm = FusedRMSNormGated
+      #     (RMSNorm + sigmoid-gate + multiply in one Triton kernel); avoids
+      #     the post-norm fp32 tensor and the fp32-upcast gate save-for-backward.
+      # Speed: ~+15 % vs the unfused path (matches FLA's ~1480 ms/iter).
+      # Memory: ~-20 GiB peak (FusedRMSNormGated drops ~10 GiB activation +
+      #   in-kernel gate drops ~3 GiB + fewer DDP buckets ≈ ~20 GiB total).
+      # Loss-curve note: on ROCm the in-kernel `-exp(A_log)*softplus` and the
+      # fused norm+sigmoid+multiply accumulators run in bf16; ±1 ulp drift
+      # compounds across 12 layers and gives ~+0.2-0.4 lm-loss above FLA
+      # *unless* we also load FLA's init checkpoint (the drift cancels when
+      # both runs start from identical weights — proven on GDN). Without the
+      # init ckpt expect loss curve to track FLA shape but offset; with it,
+      # expect bit-perfect parity (GDN-style).
+      use_fla_kda_in_kernel_gate: true
+      use_fla_fused_norm_gated: true
+
+      no_persist_layer_norm: true
+
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.2-1B
+
+      # Parallelism
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      # Plain DDP (no distributed optimizer) — required for FLA loss-curve
+      # parity per GDN_FLA_PARITY.md line 143-149. Megatron's
+      # DistributedOptimizer (ZeRO-1) applies the optimizer update per-shard
+      # then all-gathers, which is mathematically equivalent in fp64 but
+      # NOT bit-identical to plain AdamW in bf16 → those ±1 ulp ordering
+      # differences compound into a measurable loss drift over ~100 iters
+      # even when iter-1 forward and gradient match FLA exactly.
+      #
+      # Memory cost: ~3.6 GiB / rank extra (un-sharded optim state). With
+      # FLA-init checkpoint + both fusions on + expandable_segments we have
+      # ~12 GiB free headroom at iter 200, so this fits.
+      overlap_grad_reduce: true
+      overlap_param_gather: false       # requires distributed optimizer
+      gradient_accumulation_fusion: false
+      use_torch_fsdp2: false
+      use_distributed_optimizer: false
+      ddp_average_in_collective: true   # divide gradients in NCCL collective
+
+      # Data — FLA-aligned FineWeb-Edu sample-10BT
+      # Converted from FLA's preprocessed Arrow dataset so both
+      # frameworks see the exact same tokens in the same order.
+      mock_data: false
+      train_data_path: >
+        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      valid_data_path: null
+      test_data_path: null
+
+      # Checkpoints — load FLA-equivalent init weights so the iter-1 forward
+      # pass is bit-identical to FLA's (proven for GDN in GDN_FLA_PARITY.md).
+      # Without this Megatron's parameter-init traversal order differs from
+      # HF's, so even with the same `seed=42` and same `nn.init.normal_(std=0.02)`
+      # recipe the per-layer A_log/dt_bias/g_proj/etc. starting points diverge
+      # — producing the +0.7 lm-loss warmup gap we kept observing.
+      #
+      # Generate with:
+      #   python3 tools/convert_fla_kda_init_to_megatron.py
+      #     # (inside the rocm/primus container so FLA's Triton kernels are importable)
+      #
+      # `finetune: true` + `no_load_optim`/`no_load_rng: true` makes Megatron
+      # ingest only the `model` field of the pickle and start a fresh
+      # optimizer/RNG (FLA also starts with a fresh AdamW each run).
+      finetune: true
+      auto_continue_train: false
+      no_load_optim: true
+      no_load_rng: true
+      load: /home/vanbhati@amd.com/Primus/output/fla_init_kda_300M
+      save: ./output/zebra_llama_300M_kda_pure-pretrain
+      save_interval: 1024
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      # Context parallel
+      context_parallel_size: 1
