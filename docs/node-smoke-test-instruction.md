@@ -1,6 +1,6 @@
 # Node-Smoke Test — Quick-Start Instructions
 
-A short get-started guide for the per-node preflight smoke test. For the full design / aggregator section reference / implementation history, see `[node-smoke.md](./node-smoke.md)`.
+A short get-started guide for the per-node preflight smoke test. For the full design / aggregator section reference / implementation history, see [node-smoke.md](./node-smoke.md).
 
 ---
 
