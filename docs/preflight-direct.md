@@ -205,6 +205,46 @@ runner/primus-cli direct -- preflight --perf-test
 
 When SLURM is not detected the script defaults to `NNODES=1`, `NODE_RANK=0`, `MASTER_ADDR=localhost`. Any of those can be overridden by exporting them before calling the script.
 
+### Multi-node without SLURM (parallel SSH)
+
+When no scheduler is available (bare-metal, cloud VMs, lab nodes), launch
+`primus-cli direct` on each node yourself via SSH. The script works
+identically — you just pre-export the distributed variables that SLURM
+would normally provide.
+
+#### Requirements
+
+- All nodes share the same filesystem (or at least the same Primus checkout + venv path).
+- Nodes can reach each other on a **data-plane** network interface (not the management NIC).
+- SSH key-based access to each node from the launching host.
+
+#### Required environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `NNODES` | Total number of nodes |
+| `NODE_RANK` | This node's rank (`0` through `NNODES-1`) |
+| `MASTER_ADDR` | IP of rank-0 node **on the data-plane interface** |
+| `MASTER_PORT` | Rendezvous port (default `1234`; increment between concurrent runs) |
+| `GPUS_PER_NODE` | GPUs per node (default `8`) |
+| `NCCL_SOCKET_IFNAME` | Data-plane NIC name (e.g. `enp159s0np0`) — **critical for multi-node** |
+| `GLOO_SOCKET_IFNAME` | Same as `NCCL_SOCKET_IFNAME` |
+| `VENV_ACTIVATE` | Path to virtualenv `activate` script |
+
+> **Warning**: `NCCL_SOCKET_IFNAME` auto-detection often picks a management interface
+> (e.g. `enp28s0np0`, `eno8303`) instead of the high-bandwidth data NIC. For multi-node
+> runs this causes `init_process_group` to hang or NCCL to fail silently. Always set it
+> explicitly.
+
+#### Identifying the correct data-plane interface
+
+```bash
+# On any node, find the interface whose IP matches the MASTER_ADDR subnet:
+ip -4 addr show | grep "10.245.134"
+# → enp159s0np0  inet 10.245.134.129/24
+
+# Or check which interface routes to the master:
+ip route get 10.245.134.129 | awk '{print $5; exit}'
 ### Multi-node via SLURM
 
 `primus-cli direct` auto-detects a SLURM allocation (via `SLURM_JOB_ID`) and derives all distributed variables from `SLURM_*` automatically. **Pre-exported values always win**, so the same launcher script also works inside the `primus-cli slurm srun ... -- direct -- ...` chain (where `slurm-entry` has already set these via `--env`):
