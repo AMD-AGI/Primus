@@ -28,6 +28,16 @@ No `MASTER_ADDR`, no `MASTER_PORT`, no global rendezvous required.
 
 ## 3. Quick start
 
+**Git clone the Primus repository to a shared filesystem that all nodes can read.**
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+cd Primus
+git checkout dev/preflight-direct-test
+```
+
+**Note: remember to setup the Python virtual environment and NCCL / fabric environment variables as described in [§2 Prerequisites](#2-prerequisites).**
+
 > ⚠ **Set the NCCL / RCCL environment first** if you plan to run with `--tier2-perf` (the local 8-GPU RCCL all-reduce). Even though the smoke test never opens a cross-node rendezvous, the Tier 2 RCCL step calls `dist.init_process_group(backend="nccl", ...)`, and RCCL **enumerates every transport at init** (XGMI / PCIe P2P + IB + sockets). A misconfigured `NCCL_IB_HCA` / `NCCL_SOCKET_IFNAME` / `NCCL_IB_GID_INDEX` can stall init or make the all-reduce silently fall back to a slow path. The launcher's `base_env.sh` auto-detects these via `get_nccl_ib_hca.sh` + `get_ip_interface.sh`, **but auto-detect sometimes picks the wrong values inside a container** (devices masked by the network namespace, frontend NICs picked up instead of fabric NICs, etc.) so you usually want to check these settings and set them explicitly if auto-detection is wrong.
 >
 > Minimum-viable checklist before running with `--tier2-perf`:
@@ -301,3 +311,4 @@ For the full flag list and the aggregator subcommand, see `python -m primus.tool
 - `[preflight-direct.md](./preflight-direct.md)` — the heavier `preflight` tool with global rendezvous and inter-node bandwidth tests.
 - `[primus/cli/subcommands/node_smoke.py](../primus/cli/subcommands/node_smoke.py)` — the primus-cli subcommand wiring (two-phase dispatch: rank-N run + rank-0 aggregate).
 - `[primus/tools/preflight/node_smoke/cli.py](../primus/tools/preflight/node_smoke/cli.py)` — canonical flag definitions and per-node / aggregate phase bodies.
+

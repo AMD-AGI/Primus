@@ -2,7 +2,15 @@
 
 > ⚠ **Run the [node-smoke test](./node-smoke-test-instruction.md) first.** `preflight` opens a global `torch.distributed` rendezvous, so a single sick node (wedged driver, leaked rank holding HBM, partial NIC enumeration, time-sync drift, etc.) can stall the whole job for up to `--dist-timeout-sec` seconds — long before any cross-node bandwidth number is produced. The node-smoke test catches those exact failure modes *without* a rendezvous in ~30–60 s and emits a SLURM-ready `failing_nodes.txt` you can pipe straight into `srun --exclude=`. Treat node-smoke as a hard prerequisite; only run `preflight` on the nodes node-smoke marked PASS. See [§0 "Which test should I run?"](#0-which-test-should-i-run) for the side-by-side comparison and the recommended 3-step workflow.
 
-This guide explains how to run Primus's [`preflight`](./preflight.md) cluster-diagnostic tool **directly on the host** (no Docker / Podman), via the standard Primus launcher.
+This guide explains how to run Primus's `[preflight](./preflight.md)` cluster-diagnostic tool **directly on the host** (no Docker / Podman), via the standard Primus launcher.
+
+**Git clone the Primus repository to a shared filesystem that all nodes can read.**
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+cd Primus
+git checkout dev/preflight-direct-test
+```
 
 **Recommended (through the primus-cli SLURM wrapper):**
 
@@ -16,7 +24,7 @@ runner/primus-cli slurm srun -N <NNODES> --ntasks-per-node=1 -- direct -- prefli
 srun -N <NNODES> --ntasks-per-node=1 runner/primus-cli direct -- preflight [PREFLIGHT_ARGS...]
 ```
 
-Both forms produce the **same workload** on the same ranks. The wrapper form is recommended because it auto-resolves `MASTER_ADDR` / `MASTER_PORT` / `NNODES` / `NODE_RANK` / `GPUS_PER_NODE` once on the launching node and passes them to every rank via `--env`, applies any `slurm.*` config defaults (partition / time / etc.) from your YAML, and is the same pattern used for `train` / `benchmark` / `node_smoke`. See [§ Wrapper vs. bare-srun](#wrapper-vs-bare-srun) below for the exact precedence / caveats.
+Both forms produce the **same workload** on the same ranks. The wrapper form is recommended because it auto-resolves `MASTER_ADDR` / `MASTER_PORT` / `NNODES` / `NODE_RANK` / `GPUS_PER_NODE` once on the launching node and passes them to every rank via `--env`, applies any `slurm.`* config defaults (partition / time / etc.) from your YAML, and is the same pattern used for `train` / `benchmark` / `node_smoke`. See [§ Wrapper vs. bare-srun](#wrapper-vs-bare-srun) below for the exact precedence / caveats.
 
 `primus-cli direct` activates an optional Python virtualenv (`VENV_ACTIVATE`), auto-derives the distributed environment variables (`NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, `GPUS_PER_NODE`) from `SLURM_*` when running inside a SLURM allocation, and then launches the `preflight` Python subcommand via `torchrun` (one worker per GPU). It is the recommended entry point when:
 
@@ -30,20 +38,23 @@ Both forms produce the **same workload** on the same ranks. The wrapper form is 
 
 Primus ships **two** complementary cluster screens. Pick the right one — and ideally run them in this order.
 
-| Aspect | `node-smoke` (start here) | `preflight` (this doc) |
-|---|---|---|
-| Purpose | "Which nodes are healthy enough to run anything?" | "What is the actual cross-node performance on the surviving nodes?" |
-| Rendezvous | None — every node independent | Global `torch.distributed` rendezvous |
-| Wall clock | ~30–60 s for 6 nodes (Tier 1+2) | A few minutes; scales with N for inter-node tests |
-| Granularity | Per-node PASS/FAIL | Per-rank perf measurements |
-| Safety | A stuck node cannot wedge its peers | A single hung NIC can stall the whole rendezvous |
-| Output | Per-node JSON + cluster md + SLURM-ready `passing_nodes.txt` / `failing_nodes.txt` | Markdown + PDF perf report |
-| Entry point | `primus-cli direct -- node_smoke` | `primus-cli direct -- preflight` (this doc) |
-| Quick-start guide | [`node-smoke-test-instruction.md`](./node-smoke-test-instruction.md) | This doc, §3+ |
+
+| Aspect            | `node-smoke` (start here)                                                          | `preflight` (this doc)                                              |
+| ----------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Purpose           | "Which nodes are healthy enough to run anything?"                                  | "What is the actual cross-node performance on the surviving nodes?" |
+| Rendezvous        | None — every node independent                                                      | Global `torch.distributed` rendezvous                               |
+| Wall clock        | ~30–60 s for 6 nodes (Tier 1+2)                                                    | A few minutes; scales with N for inter-node tests                   |
+| Granularity       | Per-node PASS/FAIL                                                                 | Per-rank perf measurements                                          |
+| Safety            | A stuck node cannot wedge its peers                                                | A single hung NIC can stall the whole rendezvous                    |
+| Output            | Per-node JSON + cluster md + SLURM-ready `passing_nodes.txt` / `failing_nodes.txt` | Markdown + PDF perf report                                          |
+| Entry point       | `primus-cli direct -- node_smoke`                                                  | `primus-cli direct -- preflight` (this doc)                         |
+| Quick-start guide | `[node-smoke-test-instruction.md](./node-smoke-test-instruction.md)`               | This doc, §3+                                                       |
+
 
 ### Recommended workflow
 
 > **Before running any of the commands below, complete the one-time setup:**
+>
 > 1. **Python virtualenv** on a shared filesystem — see [§2 Set up the Python virtual environment](#2-set-up-the-python-virtual-environment), then point the launcher at it via `export VENV_ACTIVATE=...` (details in [§2 → Tell the launcher where the venv is](#tell-the-launcher-where-the-venv-is)).
 > 2. **NCCL / fabric environment variables** — usually the defaults in `base_env.sh` are fine, but multi-NIC nodes may need `NCCL_IB_HCA` / `NCCL_IB_GID_INDEX` / `NCCL_SOCKET_IFNAME` overrides. See [§4 Cluster-specific NCCL configuration](#4-cluster-specific-nccl-configuration) for known-good values per fabric (Broadcom, Pensando Pollara/AINIC).
 
@@ -111,12 +122,14 @@ You can use any tool you like; `uv` is the fastest. Either of the following work
 
 The `preflight` and `node-smoke` tools deliberately use **only a small subset** of Primus's full dependency tree. You do **not** need to install the entire `requirements.txt` — that pulls in trainer / dataset / experiment-tracking packages that neither tool ever imports.
 
-| Package | Required for | Skip when |
-|---|---|---|
-| `torch` (ROCm build) | Both tools — perf measurements (`torch.matmul`, `torch.distributed`, `torch.cuda.*`). | Never (mandatory). |
-| `markdown2` | `preflight` PDF report only (Markdown → HTML). | You always pass `--disable-pdf`, or you only run `node-smoke` (which never produces PDFs). |
-| `weasyprint` | `preflight` PDF report only (HTML → PDF). | Same as above. |
-| `matplotlib` | `preflight --plot` only (per-test bandwidth bar charts). | You don't pass `--plot`. |
+
+| Package              | Required for                                                                          | Skip when                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `torch` (ROCm build) | Both tools — perf measurements (`torch.matmul`, `torch.distributed`, `torch.cuda.`*). | Never (mandatory).                                                                         |
+| `markdown2`          | `preflight` PDF report only (Markdown → HTML).                                        | You always pass `--disable-pdf`, or you only run `node-smoke` (which never produces PDFs). |
+| `weasyprint`         | `preflight` PDF report only (HTML → PDF).                                             | Same as above.                                                                             |
+| `matplotlib`         | `preflight --plot` only (per-test bandwidth bar charts).                              | You don't pass `--plot`.                                                                   |
+
 
 Everything else in the preflight / node-smoke code path is Python stdlib (`os`, `subprocess`, `socket`, `argparse`, `dataclasses`, `json`, `time`, ...) — no extra installs needed.
 
@@ -130,7 +143,7 @@ uv venv --python 3.12
 source .venv/bin/activate
 
 # 1) ROCm-built PyTorch (pin to your ROCm version; rocm7.1 shown here)
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1 --no-cache-dir
 
 # 2) Optional: only if you want preflight PDF reports (omit to use --disable-pdf)
 uv pip install markdown2 weasyprint
@@ -146,7 +159,7 @@ mkdir -p ~/envs/preflight
 python3.12 -m venv ~/envs/preflight/.venv
 source ~/envs/preflight/.venv/bin/activate
 
-pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1 --no-cache-dir
 pip install markdown2 weasyprint   # optional, for preflight PDFs
 pip install matplotlib             # optional, for preflight --plot
 ```
@@ -164,19 +177,20 @@ This installs every Primus runtime dependency (trainer, dataset loaders, experim
 
 If you want the absolute smallest footprint, install only what your intended invocations need:
 
-| Invocation | `torch` | `markdown2` | `weasyprint` | `matplotlib` |
-|---|---|---|---|---|
-| `node-smoke` (any flags) | required | — | — | — |
-| `preflight --host --gpu --network --disable-pdf` | required | — | — | — |
-| `preflight --host --gpu --network` (with PDF) | required | required | required | — |
-| `preflight --quick --disable-pdf` | required | — | — | — |
-| `preflight --quick` (with PDF) | required | required | required | — |
-| `preflight ... --plot` | required | required (unless `--disable-pdf`) | required (unless `--disable-pdf`) | required |
+
+| Invocation                                       | `torch`  | `markdown2`                       | `weasyprint`                      | `matplotlib` |
+| ------------------------------------------------ | -------- | --------------------------------- | --------------------------------- | ------------ |
+| `node-smoke` (any flags)                         | required | —                                 | —                                 | —            |
+| `preflight --host --gpu --network --disable-pdf` | required | —                                 | —                                 | —            |
+| `preflight --host --gpu --network` (with PDF)    | required | required                          | required                          | —            |
+| `preflight --quick --disable-pdf`                | required | —                                 | —                                 | —            |
+| `preflight --quick` (with PDF)                   | required | required                          | required                          | —            |
+| `preflight ... --plot`                           | required | required (unless `--disable-pdf`) | required (unless `--disable-pdf`) | required     |
 
 
 ### Tell the launcher where the venv is
 
-`primus-cli direct` reads the **`VENV_ACTIVATE`** environment variable. When set, it sources the path before launching the Python process; when unset, it is a no-op (the container path, which uses the container's bundled Python, leaves this unset):
+`primus-cli direct` reads the `**VENV_ACTIVATE**` environment variable. When set, it sources the path before launching the Python process; when unset, it is a no-op (the container path, which uses the container's bundled Python, leaves this unset):
 
 ```bash
 export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
@@ -220,16 +234,18 @@ would normally provide.
 
 #### Required environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `NNODES` | Total number of nodes |
-| `NODE_RANK` | This node's rank (`0` through `NNODES-1`) |
-| `MASTER_ADDR` | IP of rank-0 node **on the data-plane interface** |
-| `MASTER_PORT` | Rendezvous port (default `1234`; increment between concurrent runs) |
-| `GPUS_PER_NODE` | GPUs per node (default `8`) |
+
+| Variable             | Description                                                            |
+| -------------------- | ---------------------------------------------------------------------- |
+| `NNODES`             | Total number of nodes                                                  |
+| `NODE_RANK`          | This node's rank (`0` through `NNODES-1`)                              |
+| `MASTER_ADDR`        | IP of rank-0 node **on the data-plane interface**                      |
+| `MASTER_PORT`        | Rendezvous port (default `1234`; increment between concurrent runs)    |
+| `GPUS_PER_NODE`      | GPUs per node (default `8`)                                            |
 | `NCCL_SOCKET_IFNAME` | Data-plane NIC name (e.g. `enp159s0np0`) — **critical for multi-node** |
-| `GLOO_SOCKET_IFNAME` | Same as `NCCL_SOCKET_IFNAME` |
-| `VENV_ACTIVATE` | Path to virtualenv `activate` script |
+| `GLOO_SOCKET_IFNAME` | Same as `NCCL_SOCKET_IFNAME`                                           |
+| `VENV_ACTIVATE`      | Path to virtualenv `activate` script                                   |
+
 
 > **Warning**: `NCCL_SOCKET_IFNAME` auto-detection often picks a management interface
 > (e.g. `enp28s0np0`, `eno8303`) instead of the high-bandwidth data NIC. For multi-node
@@ -259,7 +275,7 @@ ip route get 10.245.134.129 | awk '{print $5; exit}'
 
 Run it as a single task per node (the script invokes `torchrun` internally, which spawns one worker per GPU):
 
-> **Verify NCCL / network env first.** The script sets sensible `NCCL_*` defaults via `base_env.sh`, but auto-detection can pick the wrong device on multi-NIC nodes. Always confirm `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME` (set to the same value as `NCCL_SOCKET_IFNAME`) are correct for your fabric, and `export` overrides before running. See [§4](#4-cluster-specific-nccl-configuration) for cluster-specific values.
+> **Verify NCCL / network env first.** The script sets sensible `NCCL_`* defaults via `base_env.sh`, but auto-detection can pick the wrong device on multi-NIC nodes. Always confirm `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME` (set to the same value as `NCCL_SOCKET_IFNAME`) are correct for your fabric, and `export` overrides before running. See [§4](#4-cluster-specific-nccl-configuration) for cluster-specific values.
 
 ```bash
 export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
@@ -280,32 +296,36 @@ srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
     runner/primus-cli direct -- preflight --perf-test
 ```
 
-<a id="wrapper-vs-bare-srun"></a>
+
 
 #### Wrapper vs. bare-srun
 
 Both forms target the **same** `primus-cli-direct.sh` launcher and produce identical workloads. The difference is only in how the SLURM context is constructed:
 
-| Aspect | `primus-cli slurm srun -- direct --` (recommended) | Bare `srun ... primus-cli direct --` |
-|---|---|---|
-| `MASTER_ADDR` resolution | Resolved **once** on the launching node via `scontrol show hostnames "$SLURM_NODELIST" \| head -n1`, then propagated to every rank via `--env MASTER_ADDR=...`. | Each rank re-derives it inside `primus-cli-direct.sh` STEP 4.7 from `SLURM_*` (same result, more `scontrol` calls). |
-| `NNODES` / `NODE_RANK` / `GPUS_PER_NODE` | Set explicitly by `slurm-entry.sh` via `--env`. | Derived from `SLURM_NNODES` / `SLURM_NODEID` / `SLURM_PROCID` inside `direct.sh`. |
-| `slurm.*` config defaults | Honored (partition, time, ntasks-per-node, etc. from the active YAML). | Not consulted — you pass every flag explicitly to `srun`. |
-| Default wall-time | `-t 4:00:00` is auto-added if you don't pass `--time`. | None — `srun` uses the cluster default (may reject the job). |
-| `direct` keyword | **Required**: `primus-cli slurm srun ... -- direct -- <cmd>`. Without `direct`, the wrapper routes through the **container** path. | N/A — there's only one path. |
-| `--ntasks-per-node=1` | **Not auto-added**. Pass it on the CLI (before the first `--`) or set it in the `slurm.*` config. | **Not auto-added**. Pass it as an `srun` flag. |
-| Best for | Production / repeatable runs. Same pattern as `train` / `benchmark` / `node_smoke`. | Ad-hoc runs where you want to compose with arbitrary `srun` flags (`--nodelist=$(...)`, `--exclude=...` from a runtime file, etc.). |
+
+| Aspect                                   | `primus-cli slurm srun -- direct --` (recommended)                                                                                                             | Bare `srun ... primus-cli direct --`                                                                                                |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `MASTER_ADDR` resolution                 | Resolved **once** on the launching node via `scontrol show hostnames "$SLURM_NODELIST" | head -n1`, then propagated to every rank via `--env MASTER_ADDR=...`. | Each rank re-derives it inside `primus-cli-direct.sh` STEP 4.7 from `SLURM_`* (same result, more `scontrol` calls).                 |
+| `NNODES` / `NODE_RANK` / `GPUS_PER_NODE` | Set explicitly by `slurm-entry.sh` via `--env`.                                                                                                                | Derived from `SLURM_NNODES` / `SLURM_NODEID` / `SLURM_PROCID` inside `direct.sh`.                                                   |
+| `slurm.*` config defaults                | Honored (partition, time, ntasks-per-node, etc. from the active YAML).                                                                                         | Not consulted — you pass every flag explicitly to `srun`.                                                                           |
+| Default wall-time                        | `-t 4:00:00` is auto-added if you don't pass `--time`.                                                                                                         | None — `srun` uses the cluster default (may reject the job).                                                                        |
+| `direct` keyword                         | **Required**: `primus-cli slurm srun ... -- direct -- <cmd>`. Without `direct`, the wrapper routes through the **container** path.                             | N/A — there's only one path.                                                                                                        |
+| `--ntasks-per-node=1`                    | **Not auto-added**. Pass it on the CLI (before the first `--`) or set it in the `slurm.`* config.                                                              | **Not auto-added**. Pass it as an `srun` flag.                                                                                      |
+| Best for                                 | Production / repeatable runs. Same pattern as `train` / `benchmark` / `node_smoke`.                                                                            | Ad-hoc runs where you want to compose with arbitrary `srun` flags (`--nodelist=$(...)`, `--exclude=...` from a runtime file, etc.). |
+
 
 For the rest of this doc the examples use bare `srun` for brevity, but every example also works with the wrapper form by substituting `srun <flags> runner/primus-cli direct --` → `runner/primus-cli slurm srun <flags> -- direct --`.
 
 ### Key `srun` flags
 
-| Flag                   | Why it's necessary                                                                                                              |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `-c 128`               | Allocate all CPU cores per task. Without this, SLURM may default to 1 core, which starves the RCCL network proxy threads and can cause >30× slowdown on perf tests. Set this to your node's core count. |
-| `--gpus-per-node=8`    | Grants GPU device access (`/dev/kfd`, `/dev/dri`). Required for non-container execution.                                         |
-| `--ntasks-per-node=1`  | One launcher invocation per node; `primus-cli direct` then spawns 8 workers per node via `torchrun`.                            |
-| `-t 00:45:00`          | Wall-clock limit. Full perf tests on 8N usually finish well under 10 min.                                                       |
+
+| Flag                  | Why it's necessary                                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-c 128`              | Allocate all CPU cores per task. Without this, SLURM may default to 1 core, which starves the RCCL network proxy threads and can cause >30× slowdown on perf tests. Set this to your node's core count. |
+| `--gpus-per-node=8`   | Grants GPU device access (`/dev/kfd`, `/dev/dri`). Required for non-container execution.                                                                                                                |
+| `--ntasks-per-node=1` | One launcher invocation per node; `primus-cli direct` then spawns 8 workers per node via `torchrun`.                                                                                                    |
+| `-t 00:45:00`         | Wall-clock limit. Full perf tests on 8N usually finish well under 10 min.                                                                                                                               |
+
 
 > Tip — check core count: `srun -N 1 --gpus-per-node=8 bash -c 'nproc'`
 
@@ -313,7 +333,7 @@ For the rest of this doc the examples use bare `srun` for brevity, but every exa
 
 ## 4. Cluster-specific NCCL configuration
 
-`primus-cli direct` sources `runner/helpers/envs/base_env.sh`, which sets sensible defaults for `NCCL_*` and auto-detects `NCCL_IB_HCA` / `NCCL_SOCKET_IFNAME`. Pre-exported values from your shell take precedence, so the standard pattern is:
+`primus-cli direct` sources `runner/helpers/envs/base_env.sh`, which sets sensible defaults for `NCCL_`* and auto-detects `NCCL_IB_HCA` / `NCCL_SOCKET_IFNAME`. Pre-exported values from your shell take precedence, so the standard pattern is:
 
 ```bash
 export VAR=value
@@ -355,14 +375,16 @@ Anything you place **after** the `--` separator is forwarded verbatim to the `pr
 
 ### Launcher-only flags (before `--`)
 
-| Flag       | Effect                                                                                                                                                          |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--silent` | Back-pocket knob: redirect the launcher's and the Python tool's `stdout` to `/dev/null`. Launcher errors (`LOG_ERROR` / `LOG_WARN`, written to `stderr`) are preserved so real failures still surface; the log file under `logs/` captures everything. Exit code is propagated unchanged. **Not recommended** for normal use — you lose live progress; prefer the log file. |
-| `--debug`  | Verbose launcher logging (`PRIMUS_LOG_LEVEL=DEBUG`). Forwarded to the Python tool as `--debug` too.                                                              |
-| `--dry-run`| Print the resolved configuration and final `torchrun` / `python3` command without executing.                                                                    |
-| `--single` | Force `python3` instead of `torchrun`. `node_smoke` auto-selects this; for `preflight` you usually want the default (`torchrun`).                                |
-| `--env KEY=VALUE` | Inject an env var into the Python process (in addition to anything `export`-ed in the shell).                                                            |
-| `--log_file PATH` | Redirect the captured tee log to a specific path (default: `logs/log_<timestamp>.txt`).                                                                  |
+
+| Flag              | Effect                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--silent`        | Back-pocket knob: redirect the launcher's and the Python tool's `stdout` to `/dev/null`. Launcher errors (`LOG_ERROR` / `LOG_WARN`, written to `stderr`) are preserved so real failures still surface; the log file under `logs/` captures everything. Exit code is propagated unchanged. **Not recommended** for normal use — you lose live progress; prefer the log file. |
+| `--debug`         | Verbose launcher logging (`PRIMUS_LOG_LEVEL=DEBUG`). Forwarded to the Python tool as `--debug` too.                                                                                                                                                                                                                                                                         |
+| `--dry-run`       | Print the resolved configuration and final `torchrun` / `python3` command without executing.                                                                                                                                                                                                                                                                                |
+| `--single`        | Force `python3` instead of `torchrun`. `node_smoke` auto-selects this; for `preflight` you usually want the default (`torchrun`).                                                                                                                                                                                                                                           |
+| `--env KEY=VALUE` | Inject an env var into the Python process (in addition to anything `export`-ed in the shell).                                                                                                                                                                                                                                                                               |
+| `--log_file PATH` | Redirect the captured tee log to a specific path (default: `logs/log_<timestamp>.txt`).                                                                                                                                                                                                                                                                                     |
+
 
 See `runner/primus-cli direct --help` for the full set.
 
@@ -475,7 +497,7 @@ $SRUN runner/primus-cli direct -- preflight \
     --inter-group-sizes 2,all
 ```
 
-> Note: for `inter-alltoall` only, every requested per-group node count is internally clamped to **16** (real-world MoE training rarely dispatches across more nodes; see [`preflight.md` §5.2](./preflight.md#52-group-sizes) for the rationale). The other inter-node tests use the requested sizes unchanged. So on a 128-node cluster, `--tests inter-alltoall --inter-group-sizes all` actually runs at 16-node sub-groups, while `--tests inter-allreduce --inter-group-sizes all` runs at 128 nodes as written.
+> Note: for `inter-alltoall` only, every requested per-group node count is internally clamped to **16** (real-world MoE training rarely dispatches across more nodes; see `[preflight.md` §5.2](./preflight.md#52-group-sizes) for the rationale). The other inter-node tests use the requested sizes unchanged. So on a 128-node cluster, `--tests inter-alltoall --inter-group-sizes all` actually runs at 16-node sub-groups, while `--tests inter-allreduce --inter-group-sizes all` runs at 128 nodes as written.
 
 #### E. Ring P2P sizes
 
@@ -506,7 +528,7 @@ $SRUN runner/primus-cli direct -- preflight --quick --comm-cleanup-delay-sec 5
 $SRUN runner/primus-cli direct -- preflight --perf-test --dist-timeout-sec 30
 ```
 
-> Operating clusters at ≥ 128 nodes? See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the recommended OS-level tunings (`tcp_tw_reuse`, wider `ip_local_port_range`) and per-test invocation patterns. With the §5.2 inter-alltoall cap in place, a default invocation is safe at every cluster size; the §7.2 sysctls remain best-practice for any RDMA workload.
+> Operating clusters at ≥ 128 nodes? See `[preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the recommended OS-level tunings (`tcp_tw_reuse`, wider `ip_local_port_range`) and per-test invocation patterns. With the §5.2 inter-alltoall cap in place, a default invocation is safe at every cluster size; the §7.2 sysctls remain best-practice for any RDMA workload.
 
 #### H. Reporting & output layout
 
@@ -559,12 +581,14 @@ srun -N <good-nnodes> -c 128 --gpus-per-node=8 --ntasks-per-node=1 \
 
 Reports are written to `--dump-path` (default: `output/preflight/`), with the basename from `--report-file-name` and a `_perf` suffix for performance reports:
 
-| File                                | Produced by                | Notes                          |
-| ----------------------------------- | -------------------------- | ------------------------------ |
-| `<name>.md`                         | `--host --gpu --network` (or default selection) | Info report                    |
-| `<name>.pdf`                        | same, unless `--disable-pdf` | Info report PDF                |
-| `<name>_perf.md`                    | `--perf-test`              | Perf report (GEMM + comm)      |
-| `<name>_perf.pdf`                   | same, unless `--disable-pdf` | Perf report PDF                |
+
+| File              | Produced by                                     | Notes                     |
+| ----------------- | ----------------------------------------------- | ------------------------- |
+| `<name>.md`       | `--host --gpu --network` (or default selection) | Info report               |
+| `<name>.pdf`      | same, unless `--disable-pdf`                    | Info report PDF           |
+| `<name>_perf.md`  | `--perf-test`                                   | Perf report (GEMM + comm) |
+| `<name>_perf.pdf` | same, unless `--disable-pdf`                    | Perf report PDF           |
+
 
 Only **rank 0** writes the report. After preflight completes, the Python tool prints the absolute path of every report file it produced to stdout. Under `--silent` these prints go to `/dev/null` along with everything else (one of the trade-offs of using `--silent`); without `--silent` the announcement is visible live. Sample output:
 
@@ -579,26 +603,30 @@ Only **rank 0** writes the report. After preflight completes, the Python tool pr
 
 Variables read by `primus-cli direct` itself:
 
-| Variable          | Required | Default                  | Purpose                                         |
-| ----------------- | -------- | ------------------------ | ----------------------------------------------- |
-| `VENV_ACTIVATE`   | no       | —                        | Path to the venv `bin/activate` script. Unset = no-op (use system / container Python). Set + missing file = fail-fast. |
-| `NNODES`          | no       | `1` (or auto-derived from `SLURM_NNODES` / `SLURM_JOB_NUM_NODES`) | Number of nodes. Pre-exported always wins. |
-| `NODE_RANK`       | no       | `0` (or auto-derived from `SLURM_NODEID` / `SLURM_PROCID`) | This node's rank. Pre-exported always wins. |
-| `GPUS_PER_NODE`   | no       | `8`                      | GPUs per node                                   |
-| `MASTER_ADDR`     | no       | `localhost` (or first host from `scontrol show hostnames "$SLURM_NODELIST"`) | Rendezvous host. Pre-exported always wins. |
-| `MASTER_PORT`     | no       | `1234`                   | Rendezvous port                                 |
+
+| Variable        | Required | Default                                                                      | Purpose                                                                                                                |
+| --------------- | -------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `VENV_ACTIVATE` | no       | —                                                                            | Path to the venv `bin/activate` script. Unset = no-op (use system / container Python). Set + missing file = fail-fast. |
+| `NNODES`        | no       | `1` (or auto-derived from `SLURM_NNODES` / `SLURM_JOB_NUM_NODES`)            | Number of nodes. Pre-exported always wins.                                                                             |
+| `NODE_RANK`     | no       | `0` (or auto-derived from `SLURM_NODEID` / `SLURM_PROCID`)                   | This node's rank. Pre-exported always wins.                                                                            |
+| `GPUS_PER_NODE` | no       | `8`                                                                          | GPUs per node                                                                                                          |
+| `MASTER_ADDR`   | no       | `localhost` (or first host from `scontrol show hostnames "$SLURM_NODELIST"`) | Rendezvous host. Pre-exported always wins.                                                                             |
+| `MASTER_PORT`   | no       | `1234`                                                                       | Rendezvous port                                                                                                        |
+
 
 Variables consumed downstream by `primus-cli direct` / `base_env.sh` (set them via `export`):
 
-| Variable               | Default in `base_env.sh` | When to override                                  |
-| ---------------------- | ------------------------ | ------------------------------------------------- |
-| `NCCL_SOCKET_IFNAME`   | auto-detected            | Force a specific Ethernet interface for bootstrap |
-| `NCCL_IB_HCA`          | auto-detected            | Force specific RDMA HCAs                          |
-| `NCCL_IB_GID_INDEX`    | `3`                      | `1` on AINIC clusters                             |
-| `NCCL_CROSS_NIC`       | `0`                      | `1` for multi-rail IB fabrics                     |
-| `NCCL_PXN_DISABLE`     | `1`                      | `0` to enable PXN multi-hop NIC sharing           |
-| `USING_AINIC`          | unset                    | `1` on Pensando Pollara clusters                  |
-| `NCCL_DEBUG`           | unset                    | `INFO` for verbose NCCL logging                   |
+
+| Variable             | Default in `base_env.sh` | When to override                                  |
+| -------------------- | ------------------------ | ------------------------------------------------- |
+| `NCCL_SOCKET_IFNAME` | auto-detected            | Force a specific Ethernet interface for bootstrap |
+| `NCCL_IB_HCA`        | auto-detected            | Force specific RDMA HCAs                          |
+| `NCCL_IB_GID_INDEX`  | `3`                      | `1` on AINIC clusters                             |
+| `NCCL_CROSS_NIC`     | `0`                      | `1` for multi-rail IB fabrics                     |
+| `NCCL_PXN_DISABLE`   | `1`                      | `0` to enable PXN multi-hop NIC sharing           |
+| `USING_AINIC`        | unset                    | `1` on Pensando Pollara clusters                  |
+| `NCCL_DEBUG`         | unset                    | `INFO` for verbose NCCL logging                   |
+
 
 ---
 
@@ -655,24 +683,19 @@ Almost always a symptom of insufficient CPU cores. Pass `-c <cores-per-node>` to
 
 1. Create a venv inside the conda env and point `VENV_ACTIVATE` at that venv's activate script.
 2. Write a small shim activate script (e.g. `~/envs/conda-shim.sh`) that activates conda and the desired env, then point `VENV_ACTIVATE` at it:
-
-   ```bash
+  ```bash
    # ~/envs/conda-shim.sh
    source "$HOME/miniconda3/etc/profile.d/conda.sh"
    conda activate <env_name>
-   ```
-
-   ```bash
-   export VENV_ACTIVATE=~/envs/conda-shim.sh
-   ```
+  ```
 
 ### "Address already in use" during perf tests
 
-This error occurs when peak simultaneous ESTAB sockets per node during an `ncclCommInit` exhausts the kernel ephemeral-port pool, so the next outgoing `bind()` walks the entire range without finding an allocatable port. (Despite the name and the `TIME_WAIT` framing in the kernel docs, accumulated `TIME_WAIT` count does *not* gate this for NCCL inter-node OOB — see [`preflight.md` §7.1](./preflight.md#71-why-address-already-in-use-used-to-surface-at-scale) for the mechanism and the empirical evidence.)
+This error occurs when peak simultaneous ESTAB sockets per node during an `ncclCommInit` exhausts the kernel ephemeral-port pool, so the next outgoing `bind()` walks the entire range without finding an allocatable port. (Despite the name and the `TIME_WAIT` framing in the kernel docs, accumulated `TIME_WAIT` count does *not* gate this for NCCL inter-node OOB — see `[preflight.md` §7.1](./preflight.md#71-why-address-already-in-use-used-to-surface-at-scale) for the mechanism and the empirical evidence.)
 
 Preflight has two complementary defenses:
 
-1. The **inter-node alltoall sub-group is internally capped at 16 nodes** (see [`preflight.md` §5.2](./preflight.md#52-group-sizes)) — the only test that, at large scale, can push peak ESTAB anywhere near the per-node ephemeral pool. The cap eliminates this failure mode by construction.
+1. The **inter-node alltoall sub-group is internally capped at 16 nodes** (see `[preflight.md` §5.2](./preflight.md#52-group-sizes)) — the only test that, at large scale, can push peak ESTAB anywhere near the per-node ephemeral pool. The cap eliminates this failure mode by construction.
 2. A **global barrier + `--comm-cleanup-delay-sec` sleep** (default 2 s) is inserted after every comm destroy, primarily for cross-rank synchronization across the destroy → setup transition.
 
 If you still see `Address already in use` (e.g. on a network with an unusually narrow ephemeral-port range), the directly relevant **OS-level tuning** is widening that range — best-practice for any RDMA host:
@@ -696,7 +719,7 @@ As a fallback, raise the per-phase delay:
 runner/primus-cli direct -- preflight --comm-cleanup-delay-sec 5
 ```
 
-See [`preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the full explanation, persistence, and recommended large-cluster invocation patterns (split tests into separate runs, etc.).
+See `[preflight.md` §7](./preflight.md#7-running-on-very-large-clusters--64-nodes) for the full explanation, persistence, and recommended large-cluster invocation patterns (split tests into separate runs, etc.).
 
 If the error occurs at `init_process_group` (before tests even start), it typically means a previous job left port 29500 in `TIME_WAIT`. Either wait ~60 s or use a different port:
 
@@ -718,16 +741,16 @@ srun ... runner/primus-cli direct -- preflight --perf-test \
 ## 9. Automated node bisection (finding the bad node in an NCCL hang)
 
 When a cluster-wide preflight run hangs or fails, use
-[`tools/preflight_bisect/bisect.py`](../tools/preflight_bisect/bisect.py) to
+`[tools/preflight_bisect/bisect.py](../tools/preflight_bisect/bisect.py)` to
 run `preflight --perf-test` on smaller Slurm node subsets until suspect nodes
 are isolated.
 
 ### Prerequisites
 
 1. Working non-container preflight setup from the sections above, with
-   `VENV_ACTIVATE` exported from a shared filesystem path.
+  `VENV_ACTIVATE` exported from a shared filesystem path.
 2. Run from the SLURM login/head node, where both `scontrol` and `srun` are
-   available.
+  available.
 3. Run from inside a Slurm allocation, or provide a Slurm nodelist explicitly.
 
 ### Example from inside an allocation
@@ -766,6 +789,7 @@ final `summary.txt` are written under `--output-dir`.
 
 - [Preflight](./preflight.md) — full reference for the `preflight` subcommand and its flags
 - [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md) — container-based and `primus-cli slurm` workflows
-- [`runner/primus-cli-direct.sh`](../runner/primus-cli-direct.sh) — the direct launcher itself (`primus-cli direct` dispatches here)
-- [`primus/tools/preflight/`](../primus/tools/preflight/) — preflight implementation
-- [`tools/preflight_bisect/bisect.py`](../tools/preflight_bisect/bisect.py) — bisect wrapper for narrowing down failing nodes in multi-node preflight runs
+- `[runner/primus-cli-direct.sh](../runner/primus-cli-direct.sh)` — the direct launcher itself (`primus-cli direct` dispatches here)
+- `[primus/tools/preflight/](../primus/tools/preflight/)` — preflight implementation
+- `[tools/preflight_bisect/bisect.py](../tools/preflight_bisect/bisect.py)` — bisect wrapper for narrowing down failing nodes in multi-node preflight runs
+
