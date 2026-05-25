@@ -75,7 +75,17 @@ class SFTSample:
 
     @classmethod
     def from_mapping(cls, sample: Mapping[str, Any]) -> "SFTSample":
-        """Normalize a raw record from JSON/HF dataset into SFT semantics."""
+        """Normalize a raw record from JSON/HF dataset into SFT semantics.
+
+        Supports the following dataset schemas:
+          * Alpaca (tatsu-lab/alpaca): instruction / input / output
+          * OpenAI messages: messages = [{role, content}, ...]
+          * SQuAD (rajpurkar/squad): question / context / answers={text:[...]}
+              question -> instruction
+              context  -> input_text
+              answers.text[0] -> response
+          * Generic: prompt/response, question/answer
+        """
         raw_messages = sample.get("messages")
         if isinstance(raw_messages, Sequence) and not isinstance(raw_messages, (str, bytes)):
             messages = tuple(
@@ -95,12 +105,28 @@ class SFTSample:
         if response is None:
             response = sample.get("output")
         if response is None:
-            response = sample.get("answer", "")
+            response = sample.get("answer")
+        if response is None:
+            # SQuAD-style answers field: {"text": [...], "answer_start": [...]}
+            answers = sample.get("answers")
+            if isinstance(answers, Mapping):
+                answer_texts = answers.get("text")
+                if isinstance(answer_texts, Sequence) and not isinstance(answer_texts, (str, bytes)):
+                    response = answer_texts[0] if len(answer_texts) > 0 else ""
+            elif isinstance(answers, Sequence) and not isinstance(answers, (str, bytes)):
+                response = answers[0] if len(answers) > 0 else ""
+
+        # SQuAD has `context` instead of `input`; fall back to it when `input`
+        # is absent so the alpaca formatter renders context as the ``### Input``
+        # block.
+        input_text = sample.get("input")
+        if input_text is None:
+            input_text = sample.get("context")
 
         return cls(
             instruction=_coerce_text(instruction),
             response=_coerce_text(response),
-            input_text=_coerce_optional_text(sample.get("input")),
+            input_text=_coerce_optional_text(input_text),
             system_prompt=_coerce_optional_text(sample.get("system")),
         )
 

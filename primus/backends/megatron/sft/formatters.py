@@ -60,6 +60,54 @@ class ConversationFormatter:
         return {}
 
 
+class SquadFormatter(ConversationFormatter):
+    """SQuAD-style single-line prompt/response format.
+
+    This formatter is byte-identical to what Megatron-Bridge's
+    ``process_squad_example`` (combined with the default
+    ``prompt_template="{input} {output}"`` of ``GPTSFTDataset``) emits, so
+    Native SFT can be A/B-benchmarked against Bridge under the *same*
+    training text on the SQuAD dataset.
+
+    Bridge-side reference:
+      * ``megatron/bridge/data/hf_processors/squad.py``::
+            _input  = f"Context: {context} Question: {question} Answer:"
+            _output = answers["text"][0]
+      * ``megatron/bridge/data/datasets/sft.py``::
+            prompt_template = "{input} {output}"
+
+    Final text (with all three fields ``.strip(" ")``-ed, matching Bridge):
+        ``Context: <ctx> Question: <q> Answer: <ans>``
+
+    Notes:
+      * The single space between ``Answer:`` and the answer is held at the
+        START of the supervised segment, not at the END of the prompt
+        segment. This mirrors Bridge's
+        ``prompt_template = "{input} {output}"`` where ``_input`` ends with
+        ``Answer:`` (no trailing space) and the space is part of the join
+        between input and output. With this layout, after per-segment
+        tokenize the leading space token of the answer becomes the first
+        token of segment 1 (rather than the last token of segment 0), which
+        is what makes Native's supervised range start exactly at the same
+        token Bridge supervises (the colon-prefixed answer span).
+      * ``system_prompt`` and the ``messages`` multi-turn channel are not
+        supported -- SQuAD is single-turn QA. If a sample carries either,
+        we fall back to using the collapsed instruction/response pair.
+    """
+
+    def format_sample(self, sample: SFTSample) -> FormattedSFTSample:
+        sample = collapse_messages_to_single_turn(sample)
+        ctx = (sample.input_text or "").strip(" ")
+        q = (sample.instruction or "").strip(" ")
+        ans = (sample.response or "").strip(" ")
+        return FormattedSFTSample(
+            segments=(
+                TextSegment(text=f"Context: {ctx} Question: {q} Answer:"),
+                TextSegment(text=f" {ans}", supervise=True),
+            )
+        )
+
+
 class AlpacaFormatter(ConversationFormatter):
     """Alpaca-style prompt/response format."""
 
@@ -192,8 +240,10 @@ def create_formatter(name: str) -> ConversationFormatter:
         return ChatMLFormatter()
     if name in {"openai", "messages"}:
         return OpenAIMessagesFormatter()
+    if name in {"squad", "bridge_squad"}:
+        return SquadFormatter()
     raise ValueError(
-        f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages"
+        f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages, squad"
     )
 
 
@@ -202,5 +252,6 @@ __all__ = [
     "ChatMLFormatter",
     "ConversationFormatter",
     "OpenAIMessagesFormatter",
+    "SquadFormatter",
     "create_formatter",
 ]

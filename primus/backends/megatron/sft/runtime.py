@@ -50,9 +50,34 @@ def create_sft_datasets_provider() -> Callable:
 
         dataset_name = getattr(args, "sft_dataset_name", "tatsu-lab/alpaca")
         conversation_format = getattr(args, "sft_conversation_format", "alpaca")
+        enable_packed_sequences = bool(getattr(args, "enable_packed_sequences", False))
+        use_packed_attention = bool(getattr(args, "use_packed_attention", False))
+        # Opt-in: reproduce NeMo Megatron-Bridge's packed-parquet token layout
+        # (per-segment tokenize -> inline BOS in front of each supervised
+        # segment -> trailing EOS). Used only for numerical A/B against Bridge.
+        bridge_compat_inline_bos = bool(
+            getattr(args, "sft_bridge_compat_inline_bos", False)
+        )
 
         log_rank_0(f"Building SFT datasets from: {dataset_name}")
         log_rank_0(f"Using conversation format: {conversation_format}")
+        if enable_packed_sequences:
+            iso_mode = (
+                "STRICT (cu_seqlens-based, qkv_format='thd')"
+                if use_packed_attention
+                else "implicit-multi-turn (causal across whole pack, loss_mask only on responses)"
+            )
+            log_rank_0(
+                "Sequence packing ENABLED -- multiple samples concatenated into "
+                f"max_seq_length sequences. Attention isolation: {iso_mode}."
+            )
+        if bridge_compat_inline_bos:
+            log_rank_0(
+                "Bridge-parity tokenize ENABLED via sft_bridge_compat_inline_bos=True: "
+                "each supervised segment will be wrapped with an inline BOS + trailing "
+                "EOS to mirror NeMo Megatron-Bridge's packed parquet. Iter-1 loss will "
+                "rise from ~0.15 to ~4.3 because the inline BOS is OOD for Llama-2."
+            )
 
         return build_train_valid_test_datasets(
             dataset_name=dataset_name,
@@ -61,6 +86,8 @@ def create_sft_datasets_provider() -> Callable:
             train_val_test_num_samples=train_val_test_num_samples,
             formatter=conversation_format,
             seed=args.seed,
+            enable_packed_sequences=enable_packed_sequences,
+            bridge_compat_inline_bos=bridge_compat_inline_bos,
         )
 
     # Required by Megatron pretrain dataset setup path.

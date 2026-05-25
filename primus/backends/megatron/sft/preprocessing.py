@@ -8,7 +8,7 @@
 
 import json
 import os
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -118,10 +118,33 @@ def _resolve_pad_token_id(tokenizer) -> int:
     return 0
 
 
+def _resolve_bos_token_id(tokenizer) -> Optional[int]:
+    """Best-effort lookup of a BOS token id across Megatron/HF tokenizer variants.
+
+    Returns ``None`` if the tokenizer has no BOS concept (e.g. GPT-2 style); the
+    caller is expected to treat that as "do not insert any inline BOS".
+    """
+    for attr in ("bos", "bos_token_id", "bos_id"):
+        value = getattr(tokenizer, attr, None)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
+def _resolve_eos_token_id(tokenizer) -> Optional[int]:
+    """Best-effort lookup of an EOS token id across Megatron/HF tokenizer variants."""
+    for attr in ("eos", "eos_token_id", "eos_id", "eod"):
+        value = getattr(tokenizer, attr, None)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
 def tokenize_formatted_sft_sample(
     formatted_sample: FormattedSFTSample,
     tokenizer,
     max_seq_length: int,
+    bridge_compat_inline_bos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Tokenize a formatted sample and build its SFT loss mask.
 
@@ -130,25 +153,56 @@ def tokenize_formatted_sft_sample(
     samples whose original token lengths differ across a micro-batch.
     Padding tokens are masked out via ``loss_mask=0`` so they do not contribute
     to the SFT loss.
+
+    See ``packing._tokenize_no_pad`` for the meaning of
+    ``bridge_compat_inline_bos``; this function honours the same flag so the
+    non-packed code path stays consistent with the packed path.
     """
-    text = formatted_sample.text
-    token_ids = tokenize_text(tokenizer, text)
-    if len(token_ids) > max_seq_length:
-        token_ids = token_ids[:max_seq_length]
+    if not bridge_compat_inline_bos:
+        text = formatted_sample.text
+        token_ids = tokenize_text(tokenizer, text)
+        if len(token_ids) > max_seq_length:
+            token_ids = token_ids[:max_seq_length]
 
-    loss_mask = np.zeros(len(token_ids), dtype=np.int64)
-    prefix_text = ""
-    prefix_token_count = 0
-    for segment in formatted_sample.segments:
-        start = prefix_token_count
-        prefix_text += segment.text
-        prefix_token_count = len(tokenize_text(tokenizer, prefix_text))
-        end = prefix_token_count
+        loss_mask = np.zeros(len(token_ids), dtype=np.int64)
+        prefix_text = ""
+        prefix_token_count = 0
+        for segment in formatted_sample.segments:
+            start = prefix_token_count
+            prefix_text += segment.text
+            prefix_token_count = len(tokenize_text(tokenizer, prefix_text))
+            end = prefix_token_count
 
-        if segment.supervise and start < len(token_ids):
-            loss_mask[start:min(end, len(token_ids))] = 1
-        if start >= len(token_ids):
-            break
+            if segment.supervise and start < len(token_ids):
+                loss_mask[start:min(end, len(token_ids))] = 1
+            if start >= len(token_ids):
+                break
+    else:
+        eos_id = _resolve_eos_token_id(tokenizer)
+
+        ids_list: List[int] = []
+        mask_list: List[int] = []
+        # Per-segment tokenize. Megatron's ``TextTokenizer.tokenize`` calls
+        # ``HuggingFaceTokenizer.text_to_ids`` which already adds a BOS at the
+        # start of each standalone segment (``include_special_tokens=True``
+        # default). Do NOT manually prepend ``bos_id`` here -- doubling up
+        # would emit ``<s><s>`` and inflate iter-1 loss ~2 nats above Bridge.
+        for segment in formatted_sample.segments:
+            seg_ids = list(tokenize_text(tokenizer, segment.text))
+            mask_val = 1 if segment.supervise else 0
+            ids_list.extend(seg_ids)
+            mask_list.extend([mask_val] * len(seg_ids))
+
+        if eos_id is not None and formatted_sample.segments:
+            tail_supervised = bool(formatted_sample.segments[-1].supervise)
+            ids_list.append(eos_id)
+            mask_list.append(1 if tail_supervised else 0)
+
+        if len(ids_list) > max_seq_length:
+            ids_list = ids_list[:max_seq_length]
+            mask_list = mask_list[:max_seq_length]
+        token_ids = ids_list
+        loss_mask = np.asarray(mask_list, dtype=np.int64)
 
     seq_len = len(token_ids)
     if seq_len < max_seq_length:
@@ -158,8 +212,23 @@ def tokenize_formatted_sft_sample(
         loss_mask = np.concatenate([loss_mask, np.zeros(pad_len, dtype=np.int64)])
 
     input_ids = torch.tensor(token_ids, dtype=torch.int64)
+    # Next-token prediction: ``labels[i] = input_ids[i+1]``. Megatron's
+    # ``compute_language_model_loss(labels, logits)`` does NOT shift labels
+    # internally, so the dataset MUST emit shifted labels. The last position
+    # has no in-sequence next-token target and is masked out below.
+    # Bridge does the equivalent shift in its collate_fn
+    # (see ``megatron/bridge/data/datasets/sft.py:1206``).
     labels = input_ids.clone()
+    if labels.numel() >= 2:
+        labels[:-1] = input_ids[1:]
     loss_mask_tensor = torch.tensor(loss_mask, dtype=torch.int64)
+    # The very last position has no next-token target; mask it out so the
+    # bogus ``labels[-1]`` slot never contributes to the loss. This is
+    # belt-and-suspenders -- under the typical SFT prompt template the last
+    # token is already eos/pad with loss_mask=0, but enforcing it here makes
+    # the contract explicit.
+    if loss_mask_tensor.numel() >= 1:
+        loss_mask_tensor[-1] = 0
     return input_ids, labels, loss_mask_tensor
 
 

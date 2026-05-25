@@ -64,6 +64,69 @@ use_distributed_optimizer: true
 sft_dataset_name: "tatsu-lab/alpaca"
 sft_conversation_format: "alpaca"
 
+# Sequence packing: concatenate multiple short samples into a single
+# max_seq_length sequence. Big throughput win on short-sample datasets such
+# as Alpaca (~80 tokens per sample at seq_length=2048).
+enable_packed_sequences: false
+
+# When packing is enabled, this flag controls whether the model is forwarded
+# with PackedSeqParams(qkv_format='thd', cu_seqlens=...) so that attention is
+# strictly isolated across packed sub-samples.
+#   true  -> "correct" varlen attention via TE / FlashAttention thd kernel.
+#            Requires a backend that supports thd; ROCm + aiter currently
+#            hangs / SIGABRTs in the first forward, so DO NOT enable on AMD
+#            until that backend is fixed.
+#   false -> implicit multi-turn regime: attention is plain causal across the
+#            whole packed sequence (sub-samples can see each other), but the
+#            loss_mask still restricts the loss to response tokens. This is
+#            what LLaMA-Factory / TRL ship as their default packing path; the
+#            accuracy hit is small and throughput goes up roughly 20x on
+#            short-sample datasets.
+use_packed_attention: false
+
+# Opt-in: reproduce NeMo Megatron-Bridge's packed dataset byte-for-byte.
+#
+# When False (default) Native does a clean single-shot tokenize of the full
+# prompt+answer string (one BOS at sequence start) and applies
+# first_fit_decreasing packing (long samples cluster into the first packs).
+# On Llama-2 70B + SQuAD this yields iter-1 lm-loss ~0.15.
+#
+# When True we flip Native into Bridge-parity mode along both dimensions:
+#   1. Per-segment tokenize -> inline BOS in front of every supervised
+#      answer span + trailing EOS. Mirrors NeMo Megatron-Bridge's
+#      ``fill_packing_strategy`` + ``_separate_template`` loop, where each
+#      independent ``text_to_ids`` call auto-prepends a BOS. The inline BOS
+#      is OOD for Llama-2 and pushes iter-1 lm-loss into the ~4.x band.
+#   2. first_fit_shuffle packing (seed = ``seed`` of the SFT dataset). Bridge
+#      defaults to this in
+#      ``megatron/bridge/data/datasets/packed_sequence.py`` L88. Random
+#      traversal yields length-mixed packs (~20 short samples per pack)
+#      instead of FFD's "all longest samples in pack 0", which is what made
+#      iter-1 Native vs Bridge differ even after the BOS fix.
+#
+# Use this flag ONLY for numerical A/B benchmarking against Bridge runs.
+sft_bridge_compat_inline_bos: false
+
+# -----------------------------------------------------------------------------
+# Benchmark robustness: NaN/Inf grad sanitizer
+# -----------------------------------------------------------------------------
+# When set to true, Primus monkey-patches Megatron's DDP
+# ``ParamAndGradBucketGroup.check_grads`` so that any NaN/Inf entries in a
+# grad bucket are replaced with 0 *before* the official NaN check. A NaN
+# iteration then becomes a no-op step (Adam sees an all-zero grad slice for
+# the affected bucket and skips that update) instead of raising a fatal
+# RuntimeError that kills the run.
+#
+# Intended use case: benchmark configurations that intentionally use random
+# routing via ``moe_router_force_load_balancing=true``. The combination of
+# bf16 + grouped_gemm + LoRA + random routing can occasionally produce NaN
+# grads, which kills long benchmark runs. With this flag on, the run keeps
+# making progress and you still get end-to-end wall-clock / TFLOPS numbers.
+#
+# DO NOT enable this for standard pretrain / SFT recipes -- it silently
+# hides numerical bugs you would otherwise want to know about.
+sft_sanitize_nan_grads: false
+
 # LoRA (Low-Rank Adaptation) settings
 lora:
   enabled: false                   # Set true for parameter-efficient fine-tuning

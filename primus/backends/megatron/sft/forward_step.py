@@ -13,9 +13,158 @@ compatible with newer Megatron-LM forward-step entrypoints.
 """
 
 from functools import partial
-from typing import Callable, Iterator, Tuple
+from typing import Any, Callable, Iterator, Tuple
 
 import torch
+
+
+_PRE_FORWARD_CANARY_DONE = False
+
+
+def _unwrap_to_base(m: Any) -> Any:
+    """Strip DDP / Float16Module / ``.module`` wrappers down to the unwrapped
+    GPT/Megatron model object so we can introspect ``decoder.layers[0]``.
+
+    Stops as soon as no ``module`` attribute is exposed. This mirrors
+    Megatron's ``unwrap_model`` semantics but avoids importing it here so
+    forward_step has no extra dependency."""
+    seen = set()
+    cur = m
+    while True:
+        # Avoid infinite loops if some module proxies its own attribute.
+        if id(cur) in seen:
+            break
+        seen.add(id(cur))
+        nxt = getattr(cur, "module", None)
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return cur
+
+
+def _pre_forward_canary(model: Any) -> None:
+    """One-shot dump (rank-0 only) of base-model weight stats RIGHT BEFORE
+    the very first ``model(...)`` call hits the GPU forward graph.
+
+    The pre-wrap canary in ``megatron_sft_trainer._create_model_provider_with_lora``
+    already proved (a) ``dist_checkpointing.load`` mutates the base params
+    in place to real Llama-2 values and (b) LoRA wrap preserves both
+    ``sum`` and ``data_ptr`` of every base param. Despite that, iter-1 LM
+    loss is still 13.65 == random-init forward. The only remaining
+    explanation is that something **after** the pre-wrap hook (``model.cuda()``
+    / ``Float16Module`` wrap / DDP wrap / ``model.train()``) silently swaps
+    the underlying tensor storage of the base params. This probe lets us
+    see what the forward graph actually executes against."""
+    global _PRE_FORWARD_CANARY_DONE
+    if _PRE_FORWARD_CANARY_DONE:
+        return
+    _PRE_FORWARD_CANARY_DONE = True
+
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except Exception:
+        pass
+
+    try:
+        base = _unwrap_to_base(model)
+        layer0 = base.decoder.layers[0]
+
+        def _stat(name: str, getter):
+            try:
+                t = getter()
+                if t is None:
+                    print(f"[PRE-FORWARD canary] {name}: None", flush=True)
+                    return
+                tf = t.detach().float()
+                print(
+                    f"[PRE-FORWARD canary] {name}: "
+                    f"sum={tf.sum().item():.6f} "
+                    f"abs_max={tf.abs().max().item():.6f} "
+                    f"shape={tuple(t.shape)} dtype={t.dtype} "
+                    f"device={t.device} ptr={t.data_ptr()}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[PRE-FORWARD canary] {name}: ERR {type(e).__name__}: {e}",
+                      flush=True)
+
+        # The pre-wrap canary stored these references on the unwrapped GPT
+        # model. After LoRA wrap, the original linears live inside
+        # ``LoRALinear.to_wrap``. Try the wrapped path first, then fall
+        # back to the unwrapped path (covers the no-LoRA case too).
+        def _qkv_w():
+            attn = layer0.self_attention.linear_qkv
+            return getattr(attn, "to_wrap", attn).weight
+
+        def _qkv_lnw():
+            attn = layer0.self_attention.linear_qkv
+            tgt = getattr(attn, "to_wrap", attn)
+            return getattr(tgt, "layer_norm_weight", None)
+
+        def _proj_w():
+            proj = layer0.self_attention.linear_proj
+            return getattr(proj, "to_wrap", proj).weight
+
+        def _fc1_w():
+            fc1 = layer0.mlp.linear_fc1
+            return getattr(fc1, "to_wrap", fc1).weight
+
+        def _fc1_lnw():
+            fc1 = layer0.mlp.linear_fc1
+            tgt = getattr(fc1, "to_wrap", fc1)
+            return getattr(tgt, "layer_norm_weight", None)
+
+        def _fc2_w():
+            fc2 = layer0.mlp.linear_fc2
+            return getattr(fc2, "to_wrap", fc2).weight
+
+        _stat("L0.attn.linear_qkv.weight", _qkv_w)
+        _stat("L0.attn.linear_qkv.layer_norm_weight", _qkv_lnw)
+        _stat("L0.attn.linear_proj.weight", _proj_w)
+        _stat("L0.mlp.linear_fc1.weight", _fc1_w)
+        _stat("L0.mlp.linear_fc1.layer_norm_weight", _fc1_lnw)
+        _stat("L0.mlp.linear_fc2.weight", _fc2_w)
+        _stat("final_layernorm.weight", lambda: base.decoder.final_layernorm.weight)
+        _stat("embedding.word_embeddings.weight",
+              lambda: base.embedding.word_embeddings.weight)
+        _stat("output_layer.weight", lambda: base.output_layer.weight)
+
+        # Also probe whether the same Parameter object is reachable via
+        # DDP-wrapped path ``model.module....`` (which is what autograd
+        # actually backprops through). If the canary above and this one
+        # disagree on data_ptr / abs_max, that's the smoking gun: the
+        # outer wrapper is forwarding through a *different* tensor.
+        try:
+            cur = model
+            depth = 0
+            chain = [f"{type(cur).__name__}"]
+            while hasattr(cur, "module") and depth < 6:
+                cur = cur.module
+                depth += 1
+                chain.append(f".module={type(cur).__name__}")
+            print(f"[PRE-FORWARD canary] wrap-chain (depth={depth}): "
+                  f"{''.join(chain)}", flush=True)
+            wrapped_layer0 = cur.decoder.layers[0]
+            wqkv = wrapped_layer0.self_attention.linear_qkv
+            wt = getattr(wqkv, "to_wrap", wqkv).weight
+            wtf = wt.detach().float()
+            print(
+                f"[PRE-FORWARD canary] (via outer wrapper) "
+                f"L0.attn.linear_qkv.weight: "
+                f"sum={wtf.sum().item():.6f} "
+                f"abs_max={wtf.abs().max().item():.6f} "
+                f"ptr={wt.data_ptr()}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[PRE-FORWARD canary] outer-wrapper probe ERR "
+                  f"{type(e).__name__}: {e}", flush=True)
+
+    except Exception as e:
+        print(f"[PRE-FORWARD canary] OUTER ERR {type(e).__name__}: {e}",
+              flush=True)
 
 
 def _move_to_runtime_device(tensor: torch.Tensor) -> torch.Tensor:
@@ -34,6 +183,54 @@ def _empty_loss_result(device: torch.device | None = None) -> Tuple[torch.Tensor
         torch.tensor(0.0, device=device),
         torch.tensor(0, device=device, dtype=torch.int),
         {},
+    )
+
+
+def _build_packed_seq_params(
+    cu_seqlens: torch.Tensor,
+    num_segments: torch.Tensor,
+    max_sub_seqlen: torch.Tensor | None,
+    seq_len: int,
+    device: torch.device,
+):
+    """Stitch per-sample cu_seqlens into a batch-global PackedSeqParams.
+
+    ``cu_seqlens`` is shaped ``[batch, MAX_SEGMENTS+1]`` where each row encodes
+    sub-sequence boundaries inside one packed sample (padded to a fixed length).
+    Megatron's attention path expects a single 1-D ``cu_seqlens_q`` covering
+    the whole batch, so we shift each sample's offsets by ``b * seq_len`` and
+    concatenate the valid prefixes.
+    """
+    from megatron.core.packed_seq_params import PackedSeqParams
+
+    cu_seqlens_cpu = cu_seqlens.detach().cpu()
+    num_segments_cpu = num_segments.detach().cpu()
+    batch_size = cu_seqlens_cpu.size(0)
+
+    pieces = []
+    pieces.append(torch.tensor([0], dtype=torch.int32))
+    for b in range(batch_size):
+        n = int(num_segments_cpu[b].item())
+        if n <= 0:
+            continue
+        # Take cu_seqlens[1..n] (excluding leading 0) and shift by b*seq_len.
+        valid = cu_seqlens_cpu[b, 1 : n + 1].to(torch.int32) + b * seq_len
+        pieces.append(valid)
+
+    global_cu = torch.cat(pieces).to(device=device, dtype=torch.int32)
+
+    if max_sub_seqlen is not None:
+        max_seqlen_q = int(max_sub_seqlen.detach().cpu().max().item())
+    else:
+        diffs = global_cu[1:] - global_cu[:-1]
+        max_seqlen_q = int(diffs.max().item()) if diffs.numel() > 0 else seq_len
+
+    return PackedSeqParams(
+        qkv_format="thd",
+        cu_seqlens_q=global_cu,
+        cu_seqlens_kv=global_cu,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=max_seqlen_q,
     )
 
 
@@ -85,7 +282,7 @@ def create_sft_forward_step() -> Callable:
         labels = _move_to_runtime_device(batch["labels"]).long()
         loss_mask = _move_to_runtime_device(batch["loss_mask"]).float()
         packed_seq_params = batch.get("packed_seq_params")
-        
+
         # Ensure proper shapes [batch, seq]
         if tokens.dim() == 1:
             tokens = tokens.unsqueeze(0)
@@ -93,13 +290,61 @@ def create_sft_forward_step() -> Callable:
             labels = labels.unsqueeze(0)
         if loss_mask.dim() == 1:
             loss_mask = loss_mask.unsqueeze(0)
-        
-        # Generate position_ids: [batch, seq]
-        # Position IDs are sequential: [0, 1, 2, ..., seq_length-1]
+
         batch_size, seq_len = tokens.size()
-        position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
-        
+
+        # Sequence-packing attention isolation:
+        #   The "correct" way to keep attention from leaking across packed
+        #   sub-samples is to forward `PackedSeqParams(qkv_format='thd', cu_seqlens=...)`
+        #   to the model. TE then dispatches to its varlen / flash-attention thd
+        #   kernel.
+        #
+        #   However on the current ROCm + aiter image this thd kernel hangs /
+        #   SIGABRTs (rank-7 abort during the very first forward).
+        #
+        #   Default behaviour: DISABLE the thd path. Datasets still emit
+        #   ``cu_seqlens`` (we just ignore them here) so the loss / metrics
+        #   plumbing keeps working. Attention falls back to plain causal across
+        #   the whole packed sequence -- this means a sub-sample CAN attend to
+        #   tokens of an earlier sub-sample. ``loss_mask`` already restricts the
+        #   loss to response tokens, so this is the same "implicit multi-turn"
+        #   regime used by LLaMA-Factory / TRL packing: throughput +20x with a
+        #   small accuracy hit.
+        #
+        #   Set ``use_packed_attention: true`` in the YAML to re-enable the thd
+        #   path once the backend supports it.
+        use_packed_attention = bool(getattr(args, "use_packed_attention", False))
+        if (
+            use_packed_attention
+            and packed_seq_params is None
+            and "cu_seqlens" in batch
+        ):
+            packed_seq_params = _build_packed_seq_params(
+                batch["cu_seqlens"],
+                batch["num_segments"],
+                batch.get("max_sub_seqlen"),
+                seq_len,
+                tokens.device,
+            )
+
+        # position_ids selection:
+        #   * use_packed_attention=True: dataset-provided per-segment position
+        #     ids (each sub-segment restarts at 0) match the strict-isolation
+        #     thd attention path -- RoPE computes relative distance inside each
+        #     segment independently.
+        #   * use_packed_attention=False: attention runs causal across the
+        #     whole packed sequence, so we want a SINGLE continuous position
+        #     stream (0..seq_length-1). Per-segment ids would confuse RoPE
+        #     because tokens in different sub-samples could share the same
+        #     position id, making relative-distance computation meaningless.
+        if use_packed_attention and "position_ids" in batch:
+            position_ids = _move_to_runtime_device(batch["position_ids"]).long()
+            if position_ids.dim() == 1:
+                position_ids = position_ids.unsqueeze(0)
+        else:
+            position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+
         # attention_mask: None for causal mask (standard GPT autoregressive)
         attention_mask = None
         
@@ -149,6 +394,8 @@ def create_sft_forward_step() -> Callable:
             # Return standard Megatron loss function signature
             # (loss, num_tokens, metrics_dict)
             return (loss, num_tokens, {"lm loss": reporting_loss})
+
+        _pre_forward_canary(model)
 
         if getattr(args, "use_legacy_models", False):
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
