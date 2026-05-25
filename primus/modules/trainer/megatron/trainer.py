@@ -1689,7 +1689,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
                     tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
                     tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
-                    tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+                    tracelens_cleanup_after_upload=getattr(
+                        args, "mlflow_tracelens_cleanup_after_upload", False
+                    ),
                     tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
                 )
             except Exception as e:
