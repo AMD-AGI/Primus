@@ -13,6 +13,7 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
+from primus.backends.megatron.core.models.hybrid.mamba_layer_adapter import Mamba2HybridLayer
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
 from primus.backends.megatron.core.models.hybrid.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
 from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer, GatedDeltaNetLayerSubmodules
@@ -52,6 +53,47 @@ from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSubmodules,
 )
+from primus.backends.megatron.core.transformer.fla_flash_attention import (
+    FLAFlashAttention,
+    is_enabled as _fla_mla_attn_enabled,
+)
+
+
+# Route MLA's `core_attention` through a direct `flash_attn_func` call
+# instead of TransformerEngine's `TEDotProductAttention` whenever the
+# installed flash-attn version is newer than TE supports (>2.8.1) — that's
+# the case where TE silently drops to its Composable-Kernel backend and
+# loses ~30 ms/MLA-block on MI300X.  Auto-enabled by default; override
+# with `PRIMUS_FLA_MLA_ATTN=0` to force the TE path.
+_MLA_CORE_ATTENTION = FLAFlashAttention if _fla_mla_attn_enabled() else TEDotProductAttention
+
+
+# Module-load diagnostic: drop a per-rank marker file so we can verify
+# unambiguously which copy of this spec was actually imported by training.
+# This sidesteps Megatron's stdout filtering and any later monkey-patching.
+def _record_spec_import_marker() -> None:
+    import os
+    import sys
+    import time
+
+    try:
+        rank = int(os.environ.get("RANK", "-1"))
+        marker = f"/tmp/primus_hybrid_spec_imported.rank{rank}.txt"
+        with open(marker, "w") as fh:
+            fh.write(f"file        = {__file__}\n")
+            fh.write(f"_MLA_CORE_ATTENTION = {_MLA_CORE_ATTENTION!r}\n")
+            fh.write(f"PRIMUS_FLA_MLA_ATTN = {os.environ.get('PRIMUS_FLA_MLA_ATTN')!r}\n")
+            fh.write(f"is_enabled()        = {_fla_mla_attn_enabled()}\n")
+            fh.write(f"pid                 = {os.getpid()}\n")
+            fh.write(f"ts                  = {time.time()}\n")
+            fh.write("sys.path[:6]:\n")
+            for p in sys.path[:6]:
+                fh.write(f"  {p}\n")
+    except Exception:
+        pass
+
+
+_record_spec_import_marker()
 
 moe = get_moe_module_spec(
     use_te=True,
@@ -91,10 +133,16 @@ hybrid_stack_spec = ModuleSpec(
                         linear_q_up_proj=TELayerNormColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
                         linear_kv_up_proj=TELayerNormColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
-                        q_layernorm=IdentityOp,
-                        kv_layernorm=IdentityOp,
+                        # FLA's MLA wraps every LoRA projection in
+                        # `nn.Sequential(Linear → RMSNorm(fp32) → Linear)`; with
+                        # IdentityOp we skip the intermediate norm and the model
+                        # plateaus ~0.12 above FLA's loss curve from iter 100
+                        # onwards (iter-1 still matches bit-perfect).  TENorm
+                        # matches FLA's `RMSNorm(dtype=fp32)` exactly.
+                        q_layernorm=TENorm,
+                        kv_layernorm=TENorm,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
@@ -151,10 +199,14 @@ gdn_hybrid_stack_spec = ModuleSpec(
                         linear_q_up_proj=TELayerNormColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
                         linear_kv_up_proj=TELayerNormColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
-                        q_layernorm=IdentityOp,
-                        kv_layernorm=IdentityOp,
+                        # FLA's MLA applies `RMSNorm(dtype=fp32)` between every
+                        # LoRA down/up projection (see fla/layers/mla.py).
+                        # IdentityOp skips it and the loss plateaus ~0.12 above
+                        # FLA from iter 100 onwards.  TENorm = fp32 RMSNorm.
+                        q_layernorm=TENorm,
+                        kv_layernorm=TENorm,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
@@ -208,10 +260,90 @@ gdn_hybrid_stack_spec_no_te = ModuleSpec(
                         linear_q_up_proj=ColumnParallelLinear,
                         linear_kv_down_proj=ColumnParallelLinear,
                         linear_kv_up_proj=ColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=RowParallelLinear,
-                        q_layernorm=IdentityOp,
-                        kv_layernorm=IdentityOp,
+                        # FLA's MLA wraps every LoRA projection in
+                        # `nn.Sequential(Linear → RMSNorm(fp32) → Linear)`
+                        # (fla/layers/mla.py lines 99-112).  Skipping this norm
+                        # (IdentityOp) leaves the loss curve plateaued ~0.12
+                        # above FLA from iter 100 onward; iter-1 still matches
+                        # bit-perfect because both models start from identical
+                        # init and the missing norm only kicks in after the
+                        # LoRA weights diverge from their init.  Using
+                        # WrappedTorchNorm here makes the per-LoRA norm pick up
+                        # FLA's Triton RMSNorm when `PRIMUS_FLA_NORM=1`.
+                        q_layernorm=WrappedTorchNorm,
+                        kv_layernorm=WrappedTorchNorm,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=ModuleSpec(
+            module=MLPLayer,
+            submodules=TransformerLayerSubmodules(
+                pre_mlp_layernorm=WrappedTorchNorm,
+                mlp=ModuleSpec(
+                    module=MLP,
+                    submodules=MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
+                    ),
+                ),
+                mlp_bda=get_bias_dropout_add,
+            ),
+        ),
+        moe_layer=moe,
+    ),
+)
+
+
+mamba_hybrid_stack_spec_no_te = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        # Mamba2 mixer wrapped in our `Mamba2HybridLayer` adapter (subclass of
+        # upstream MambaLayer that accepts `residual_in_fp32` so it slots into
+        # Primus's `HybridStack` builder — see mamba_layer_adapter.py).
+        # No TE column-parallel-LayerNorm fusion here — matches the no-TE GDN
+        # variant so the same `_MLA_CORE_ATTENTION` (FLA flash-attn or TE) path
+        # is used end-to-end without TE-norm folding.
+        mamba_layer=ModuleSpec(
+            module=Mamba2HybridLayer,
+            submodules=MambaLayerSubmodules(
+                mixer=ModuleSpec(
+                    module=MambaMixer,
+                    params={
+                        "expand": 2,
+                        "d_conv": 4,
+                    },
+                    submodules=MambaMixerSubmodules(
+                        in_proj=ColumnParallelLinear,
+                        out_proj=RowParallelLinear,
+                    ),
+                ),
+                mamba_bda=get_bias_dropout_add,
+            ),
+        ),
+        attention_layer=ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=WrappedTorchNorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=ColumnParallelLinear,
+                        linear_q_down_proj=ColumnParallelLinear,
+                        linear_q_up_proj=ColumnParallelLinear,
+                        linear_kv_down_proj=ColumnParallelLinear,
+                        linear_kv_up_proj=ColumnParallelLinear,
+                        core_attention=_MLA_CORE_ATTENTION,
+                        linear_proj=RowParallelLinear,
+                        # Same MLA LoRA-norm fix as gdn_hybrid_stack_spec_no_te:
+                        # WrappedTorchNorm = RMSNorm(fp32) between every LoRA
+                        # down/up projection (matches FLA's
+                        # `nn.Sequential(Linear → RMSNorm(fp32) → Linear)`).
+                        q_layernorm=WrappedTorchNorm,
+                        kv_layernorm=WrappedTorchNorm,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
@@ -266,10 +398,14 @@ kda_hybrid_stack_spec = ModuleSpec(
                         linear_q_up_proj=TELayerNormColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
                         linear_kv_up_proj=TELayerNormColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
-                        q_layernorm=IdentityOp,
-                        kv_layernorm=IdentityOp,
+                        # FLA's MLA applies `RMSNorm(dtype=fp32)` between LoRA
+                        # down/up projections (fla/layers/mla.py).  IdentityOp
+                        # here breaks training-dynamics parity even when the
+                        # init checkpoint matches bit-perfect at iter 1.
+                        q_layernorm=TENorm,
+                        kv_layernorm=TENorm,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
@@ -336,10 +472,15 @@ kda_hybrid_stack_spec_no_te = ModuleSpec(
                         linear_q_up_proj=ColumnParallelLinear,
                         linear_kv_down_proj=ColumnParallelLinear,
                         linear_kv_up_proj=ColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
+                        core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=RowParallelLinear,
-                        q_layernorm=IdentityOp,
-                        kv_layernorm=IdentityOp,
+                        # FLA wraps every LoRA proj in
+                        # `nn.Sequential(Linear → RMSNorm(fp32) → Linear)`
+                        # (fla/layers/mla.py).  WrappedTorchNorm gives us the
+                        # equivalent and, under PRIMUS_FLA_NORM=1, swaps to
+                        # FLA's Triton `RMSNorm` for bit-exact parity.
+                        q_layernorm=WrappedTorchNorm,
+                        kv_layernorm=WrappedTorchNorm,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,

@@ -10,7 +10,7 @@ index ae309e418..b093c319a 100644
  from typing import Literal, Optional
  
  from torch import Tensor
-@@ -275,11 +276,56 @@ class MambaModel(LanguageModule):
+@@ -275,11 +276,62 @@ class MambaModel(LanguageModule):
          if self.pre_process or self.post_process or self.mtp_process:
              self.setup_embeddings_and_output_layer()
  
@@ -26,7 +26,13 @@ index ae309e418..b093c319a 100644
 +        elif _ce_mode == 1:
 +            try:
 +                from fla.modules import FusedLinearCrossEntropyLoss
-+                self._fused_lce = FusedLinearCrossEntropyLoss(reduction='mean')
++                # num_chunks controls peak per-chunk memory: each chunk materializes
++                # a [N/num_chunks, vocab] bf16 logits tensor. Default 8 → 4.2 GB at
++                # batch=64, seq=2048, vocab=128k — OOMs on 1B/MI300X. 32 → ~1 GB,
++                # plenty of headroom. Numerics unchanged (same math, more chunks).
++                # Override with PRIMUS_FUSED_CE_CHUNKS (must be a power of 2).
++                _nc = int(os.environ.get('PRIMUS_FUSED_CE_CHUNKS', '32'))
++                self._fused_lce = FusedLinearCrossEntropyLoss(reduction='mean', num_chunks=_nc)
 +                self._fused_ce_mode = 1
 +            except ImportError:
 +                pass
@@ -67,7 +73,7 @@ index ae309e418..b093c319a 100644
      def set_input_tensor(self, input_tensor: Tensor) -> None:
          """Sets input tensor to the model.
  
-@@ -439,6 +485,9 @@ class MambaModel(LanguageModule):
+@@ -439,6 +491,9 @@ class MambaModel(LanguageModule):
                      hidden_states.squeeze(1).unsqueeze(0)
                  ).unsqueeze(1)
  
