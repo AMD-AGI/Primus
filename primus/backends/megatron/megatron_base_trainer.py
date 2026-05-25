@@ -6,6 +6,8 @@
 
 import os
 
+import torch.distributed as dist
+
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     set_primus_global_variables,
@@ -76,6 +78,18 @@ class MegatronBaseTrainer(BaseTrainer):
                 exp_root_path = os.path.dirname(tensorboard_dir_abs)
                 log_rank_0(f"[MLflow] Fallback exp_root_path from tensorboard_dir: {exp_root_path}")
 
+        # Bookend rank-0 console so the finalization window is visible
+        # (the actual work runs on the writer/last rank).
+        will_finalize = (not getattr(args, "disable_mlflow", True)) or getattr(
+            args, "generate_tracelens_report", False
+        )
+        if will_finalize:
+            log_rank_0("[MLflow] Finalizing artifacts...")
+
+        # Barrier so all ranks flush trace/log files before the writer rank uploads.
+        if dist.is_initialized():
+            dist.barrier()
+
         try:
             upload_mlflow_artifacts(
                 tensorboard_dir=tensorboard_dir,
@@ -93,6 +107,11 @@ class MegatronBaseTrainer(BaseTrainer):
             warning_rank_0(f"[MLflow] Artifact finalization failed: {e}")
         finally:
             self._end_mlflow_run()
+            if dist.is_initialized():
+                dist.barrier()
+
+        if will_finalize:
+            log_rank_0("[MLflow] Artifact finalization done.")
 
     def _end_mlflow_run(self):
         mlflow_writer = get_mlflow_writer()
