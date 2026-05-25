@@ -1,0 +1,184 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# =============================================================================
+# Llama-2 70B LoRA SFT — Native FP8 performance variant
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Apples-to-apples wall-clock comparison against the mlperf branch
+#   (mlperf_llama2_70b_sft/Primus, examples/megatron_bridge/configs/MI355X/
+#   llama2_70b_lora_posttrain.yaml). Both configs run llama2-70b + LoRA on
+#   8 x MI355X with the FP8 hybrid TE recipe.
+#
+# Diff vs llama2_70B-BF16-sft-packed-bridge_aligned.yaml:
+#   1. FP8 turned on (``fp8: hybrid`` + TE weight-transpose-cache disabled).
+#   2. Primus-Turbo ON (the mlperf yaml has it on too: enable_primus_turbo=true).
+#   3. sft_bridge_compat_inline_bos: false (perf run, no compat noise).
+#   4. profile: false (TFLOPS measurement, no nsys/pytorch profiler).
+#   5. seq_length / GBS / MBS / LR exposed through env vars so the same
+#      yaml can be driven into either ``squad seq=4096 GBS=16`` (default,
+#      same shape as the existing native BF16 baseline) or
+#      ``squad seq=8192 GBS=8`` (matches mlperf shape) without editing.
+#
+# Recommended invocations:
+#
+#   # (a) Native-shape FP8 perf run (seq=4096 GBS=16 squad)
+#   export PRIMUS_EXP_NAME=native_llama2_70b_fp8_perf_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/llama2_70B-FP8-sft-packed-perf.yaml \
+#       bash examples/run_pretrain.sh
+#
+#   # (b) mlperf-shape FP8 perf run (seq=8192 GBS=8) -- for like-for-like compare
+#   export PRIMUS_SEQ_LENGTH=8192
+#   export PRIMUS_MAX_POSITION_EMBEDDINGS=8192
+#   export PRIMUS_GBS=8
+#   export PRIMUS_MBS=1
+#   export PRIMUS_LR=4.0e-4
+#   export PRIMUS_TRAIN_ITERS=200
+#   export PRIMUS_EXP_NAME=native_llama2_70b_fp8_perf_mlperfshape_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/llama2_70B-FP8-sft-packed-perf.yaml \
+#       bash examples/run_pretrain.sh
+#
+# IMPORTANT: also export the FP8 NVTE_* env vars before run_pretrain.sh so
+# the TE FP8 kernels light up. See the README block at the bottom of this
+# file or the launch wrapper described in the SOP.
+# =============================================================================
+
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-FP8-sft-packed-perf}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: llama2_70B.yaml
+
+    overrides:
+      data_path: null
+      sft_dataset_name: rajpurkar/squad
+      sft_dataset_formatter: squad
+
+      # Perf run -- do NOT enable Bridge-compat tokenization layout
+      sft_bridge_compat_inline_bos: false
+
+      num_workers: 1
+      dataloader_type: cyclic
+
+      wandb_project: null
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---------- Training schedule (driven by env vars for A/B sweeps) ----
+      train_iters: ${PRIMUS_TRAIN_ITERS:200}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:16}
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      lr: ${PRIMUS_LR:1.0e-4}
+      min_lr: 0.0
+      lr_warmup_iters: 10
+      lr_decay_iters: 200
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1.0e-8
+
+      seed: 5678
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- Parallelism (8x MI355X default) ----
+      tensor_model_parallel_size: ${PRIMUS_TP:2}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ---------- DDP / optimizer (ZeRO-1 + overlap) ----
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+      use_precision_aware_optimizer: false
+      apply_rope_fusion: true
+      masked_softmax_fusion: true
+      attention_softmax_in_fp32: false
+      align_param_gather: false
+
+      # ---------- Activation recompute (required at TP=2 for 70B) ----
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 8
+
+      # ---------- Checkpoint ----
+      pretrained_checkpoint: /workspace/megatron_checkpoints/Llama-2-70b-hf
+      finetune: true
+      load: null
+      save: null
+      save_interval: 1000000
+      eval_interval: 1000000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: log_all
+
+      # =====================================================================
+      # FP8: ENABLED (the whole point of this yaml)
+      # ---------------------------------------------------------------------
+      # In Megatron-LM, ``fp8: hybrid`` activates TE's FP8 hybrid recipe
+      # (E4M3 forward, E5M2 backward) on linear / fc1 / fc2 / attn-qkv layers
+      # via the TransformerEngine ``Float8Tensor`` plumbing. bf16 is kept
+      # for the master / LoRA-adapter weights -- this is the same effective
+      # recipe the mlperf yaml selects through ``precision_config:
+      # bf16_with_fp8_hybrid``.
+      # =====================================================================
+      bf16: true
+      fp8: hybrid
+      # Don't keep a parallel cached FP8 weight-transpose buffer (saves ~70 GB
+      # of HBM at 70B and matches the mlperf yaml's
+      # ``no_fp8_weight_transpose_cache: true``).
+      no_fp8_weight_transpose_cache: true
+
+      # =====================================================================
+      # PRIMUS-TURBO + FUSED-KERNEL FAMILY: enabled (match mlperf yaml)
+      # =====================================================================
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+
+      # ---------- Cross-entropy fusion ----
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # ---------- Manual GC (match mlperf cadence) ----
+      manual_gc: true
+      manual_gc_interval: 100
+
+      # ---------- Profiling: OFF for performance measurement ----
+      profile: false
+      use_pytorch_profiler: false
+      use_nsys_profiler: false
+      record_shapes: false
+      record_memory_history: false
+      nvtx_ranges: false
+
+      eval_iters: 0
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

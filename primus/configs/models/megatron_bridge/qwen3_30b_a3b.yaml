@@ -1,0 +1,11 @@
+recipe: qwen.qwen3_moe
+flavor: qwen3_30b_a3b_finetune_config
+hf_path: Qwen/Qwen3-30B-A3B
+
+# This block is informational only -- the recipe doesn't read nested ``dataset``
+# fields. Actual dataset selection is driven by the ``dataset_name`` value
+# passed via the launcher yaml's ``overrides``, which is forwarded into
+# ``_qwen3_moe_finetune_common`` and routed by ``get_default_dataset_config``.
+dataset:
+    dataset_name: "rajpurkar/squad"
+

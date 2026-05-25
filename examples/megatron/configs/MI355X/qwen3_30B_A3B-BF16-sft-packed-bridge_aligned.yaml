@@ -1,0 +1,357 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# Recommended invocation (each run gets its own output directory):
+#
+#   export PRIMUS_EXP_NAME=qwen3_30B_A3B_native_bridge_aligned_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-sft-packed-bridge_aligned.yaml \
+#       bash examples/run_pretrain.sh
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-sft-packed-bridge_aligned}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen3-30B-A3B SFT — NATIVE-PATH apples-to-apples baseline for the
+# Bridge-vs-Native A/B benchmark (THIS YAML LIVES IN THE 0507 NATIVE PROJECT)
+# =============================================================================
+# Companion config (the Bridge side, lives in the 0509 project):
+#   /home/botahu_qle/Primus_0509/Primus/examples/megatron_bridge/configs/MI355X/
+#       qwen3_30b_a3b_lora_posttrain_packed.yaml
+#
+# Container mapping (don't mix these up!):
+#   * 0509 + Bridge          -> container ``primus_050``
+#                               (image 5582e5d7699c)
+#   * 0507 + Native (this)   -> container ``sft_primus_0509``
+#                               (image ac68ece9ed7d)
+#
+# Why this yaml exists
+# --------------------
+# To produce a single Native run whose ``num_floating_point_operations``
+# input is bit-identical to the Bridge run, AND whose kernel set has none
+# of the Native-only fast paths Bridge cannot use. Without this the
+# comparison degenerates into "Native + every AMD optimisation we have"
+# vs "Bridge + nothing", which only tells us the optimisation ladder is
+# real, not whether the framework wrap is itself heavy.
+#
+# What this yaml differs from the production native packed-ab.yaml in
+# ----------------------------------------------------------------------
+# 1. Shape: (mbs, gbs, seq) flipped from (8, 512, 4096) to (1, 64, 32768)
+#    -- IDENTICAL to Bridge. Per-step token count stays at 2 097 152
+#    (= 1 * 64 * 32768 = 8 * 512 * 4096), but ``batch * seq²`` (which is
+#    the dominant input to the attention quadratic FLOPS term) is now
+#    also identical, so ``throughput per GPU (TFLOP/s/GPU)`` finally
+#    becomes a fair head-to-head number between the two sides.
+# 2. Dataset: tatsu-lab/alpaca -> rajpurkar/squad. Bridge's
+#    ``_peft_common`` hard-codes squad via ``default_squad_config`` and
+#    does not provide a launcher-yaml hook to switch it. Mirror here so
+#    the data path drives the SAME tokenizer + collation kernel set on
+#    both sides.
+# 3. LoRA target_modules cut from [qkv, proj, fc1, fc2] to [qkv, proj].
+#    The Bridge ``qwen3_30b_a3b_peft_config`` defaults to the smaller
+#    target. Same number of trainable parameters on both sides keeps
+#    the optimiser-step / grad-reduce work identical.
+# 4. Primus Turbo + ROCm-only fused-kernel family ALL forced OFF -- see
+#    the dedicated block near the end of this file. Bridge has no
+#    counterpart for any of these on its qwen3 PEFT path, so disabling
+#    them on Native makes the kernel set the same on both sides.
+#
+# What this yaml deliberately matches Bridge on (NOT changed vs ab.yaml)
+# ----------------------------------------------------------------------
+# * Model = Qwen3-30B-A3B
+# * Parallelism: TP=1, PP=1, EP=8, CP=1, SP=false
+# * BF16, distributed optimiser, grad/param overlap
+# * train_iters=20, force_load_balancing=true
+# * eval skipped (final-eval would dominate wall-clock)
+#
+# IMPORTANT: this yaml is NOT meant for production SFT. It deliberately
+# disables Primus Turbo, fused permute, fused router with aux score,
+# legacy grouped GEMM, and recompute. The wall-clock will be slower
+# than the production packed-ab.yaml -- by design. Only use it for the
+# apples-to-apples Bridge comparison.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:qwen3_30B_A3B}.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: Qwen/Qwen3-30B-A3B
+      tokenizer_model: Qwen/Qwen3-30B-A3B
+
+      # Bridge ``_peft_common`` hard-codes the SQuAD dataset AND its NV
+      # ``process_squad_example`` processor which emits the single line
+      #     "Context: <ctx> Question: <q> Answer: <ans>"
+      # (all three fields ``.strip(" ")``-ed; GPTSFTDataset default
+      # ``prompt_template="{input} {output}"`` joins input/output with one
+      # space). Switch the Native conversation format from ``alpaca`` to
+      # the new ``squad`` formatter (defined in
+      # primus/backends/megatron/sft/formatters.py ``SquadFormatter``) so
+      # the training-text bytes — and hence loss-mask boundaries and
+      # per-token LM loss — are byte-identical to Bridge.
+      sft_dataset_name: "rajpurkar/squad"
+      sft_conversation_format: "squad"
+
+      # Sequence packing matches Bridge: implicit-multi-turn packing
+      # (full-pack causal attn, loss_mask gating). Bridge's default
+      # ``packed_sequence_specs`` mode is the same regime.
+      ## 新增参数和bridge对齐
+      enable_packed_sequences: true
+      use_packed_attention: true ###false和brideg=true对齐
+      ddp_average_in_collective: true  ##新增和brideg=true对齐
+      attention_softmax_in_fp32: false  ##新增和brideg=false对齐
+      masked_softmax_fusion: true  ##新增和brideg=true对齐
+
+
+      # MATCH BRIDGE dataset config (insofar as Native Megatron supports it):
+      #   * num_workers: Bridge=1 → Native=1 (Native trainer_base default is 8).
+      #   * dataloader_type: Bridge="batch" is Bridge's own variable-length
+      #     finetuning sampler; Native Megatron only accepts
+      #     {single, cyclic, external}. Set to "cyclic" — the closest
+      #     equivalent in semantics (random sampling, full epoch). Both
+      #     emit one GBS per iteration; both pad inside the packed sequence
+      #     constructor, so the dataloader cadence the trainer sees is
+      #     identical. Wall-clock impact at train_iters=20 is < 0.1 %.
+      num_workers: 1
+      dataloader_type: cyclic
+
+      wandb_project: "Primus_Qwen3_30B_A3B_SFT_Packed_Bridge_Aligned"
+      stderr_sink_level: DEBUG
+
+      # Primus's print_rank_last patch uses these to drive the running
+      # average renderer. Keep them on (Native side only); Bridge has
+      # its own running-window averaging via log_throughput_to_tensorboard.
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---------- Training schedule (FLIPPED to align with Bridge) ----------
+      # Native packed-ab.yaml runs (mbs=8, gbs=512, seq=4096) → 2 097 152
+      # tokens per step. Bridge ``runtime_config_update`` enforces mbs=1
+      # whenever packed_sequence_specs is set; Native does not enforce
+      # this constraint, but for an apples-to-apples comparison we
+      # voluntarily honour it. The mathematically equivalent reformulation
+      # is one packed micro-batch of 8*4096=32768 tokens with gbs scaled
+      # down by the same factor (512/8=64), giving 1*64*32768=2 097 152
+      # tokens per step -- identical to the original AND identical to
+      # Bridge.
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 32  ##64
+      moe_router_force_load_balancing: true
+
+      # Sequence length must also be raised to the packed sample size on
+      # Native -- otherwise the dataloader emits seq=4096 samples while
+      # the model forward expects 32768.
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}  ##32768
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096} ##32768
+
+      # ---------- LR / SFT discipline (FULLY ALIGNED to Bridge qwen3_moe peft) ----------
+      # Bridge's qwen3_30b_a3b_peft_config -- after the _peft_common base
+      # template -- explicitly overrides:
+      #     cfg.scheduler.lr_warmup_iters = 10
+      #     cfg.scheduler.lr_decay_iters  = 100      # NOT train_iters
+      #     cfg.optimizer.adam_beta2      = 0.95
+      # (qwen3_moe.py:585-588). Mirror those exactly here so:
+      #   * iter-by-iter LR is bit-identical between sides (cosine schedule
+      #     parameterised by the same warmup, max_lr, min_lr, decay_iters).
+      #   * the optimiser internal state (adam beta1/beta2 + eps + wd)
+      #     evolves under the same dynamics.
+      #
+      # Why this changed vs the original packed-ab.yaml's (lr=1e-5,
+      # warmup=50, decay=950):
+      #   * lr 1e-5 vs Bridge's 1e-4 -- a 10x mismatch on max LR, which is
+      #     why the Native side's 20-step LM-loss curve barely moves
+      #     (11.99 -> 11.65) while Bridge's drops 8.74 -> 3.95: the
+      #     parameters literally take 10x larger steps on Bridge.
+      #   * warmup=50 vs Bridge's 10 -- with train_iters=20 this means the
+      #     Native side never even leaves warmup; iter-20 LR sits at
+      #     20/50 * 1e-5 = 4e-6, while Bridge has already finished warmup
+      #     at iter 10 and is at ~9.7e-5 by iter 20.
+      #   * decay=950 vs Bridge's 100 -- effectively dead code at
+      #     train_iters=20 on either side, but kept aligned for the
+      #     eventual long run case.
+      lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 10
+      lr_decay_iters: 100
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+
+      # Match Bridge ``_peft_common``'s RNGConfig(seed=5678). Default Native
+      # uses 1234 (primus/configs/modules/megatron/trainer_base.yaml:32);
+      # different seeds drive different LoRA Xavier initialisation, router
+      # noise samples (force_lb=true uses RandomSTE), tokeniser RNG state
+      # advancement, and dataset-shuffle order, all of which contribute to
+      # the LM-loss-start divergence.
+      seed: 5678
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- Parallelism (already aligned w/ packed-ab + Bridge) ----------
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ---------- Optimizer / DDP basics ----------
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      # ---------- DELIBERATELY MATCH BRIDGE DEFAULTS (was true on ab.yaml) ----------
+      # Bridge's qwen3_30b_a3b_peft_config has
+      # ``use_precision_aware_optimizer=False`` + main grads in fp32.
+      # Match here so the optimiser memory + per-step work on the
+      # optimiser path is identical on both sides.
+      use_precision_aware_optimizer: false
+
+      apply_rope_fusion: true
+      enable_experimental: true
+
+      # ---------- Checkpoint ----------
+      finetune: true
+      load: null
+      # ====================================================================
+      # FAST-START MODE: pretrained_checkpoint COMMENTED OUT (2026-05-13)
+      # --------------------------------------------------------------------
+      # WHY DISABLED
+      # ------------
+      # Loading the converted 30B-A3B distributed checkpoint takes ~5-8 min
+      # on the 300-series box every single run because /workspace is overlay
+      # and we keep relaunching. To make startup iteration fast (test JIT
+      # cache, env variables, parallelism, etc.) we mirror the *mi355*
+      # reference yaml ``qwen3_30B_A3B-BF16-sft-packed-bridge_aligned_355.yaml``
+      # which has no pretrained_checkpoint line at all — base weights are
+      # then random-initialised via ``init_method_std=0.008`` and LoRA
+      # adapters via xavier_init/zero_init. The mi355 log
+      # ``native_qwen3_squad_fmt_v2_20260511_030153_newtest_0511`` confirms
+      # this mode: NO "successfully loaded checkpoint" line ever appears
+      # and the entire setup finishes in 74 s.
+      #
+      # WHAT THIS BREAKS
+      # ----------------
+      # The LM-loss curve is meaningless. With random base weights the
+      # 30B-A3B starts at ~11.x and barely moves over 20 LoRA steps; you
+      # CANNOT use this loss to compare Bridge vs Native. Use this yaml
+      # ONLY for:
+      #   - verifying JIT/Triton/MIOpen cache persistence
+      #   - measuring step-time / TFLOPS / kernel set
+      #   - capturing pytorch-profiler traces for one iteration
+      # For real Bridge-vs-Native loss-curve comparison, uncomment the line
+      # below to restore the real base weights.s
+      pretrained_checkpoint: /workspace/megatron_checkpoints/Qwen3-30B-A3B
+      # ====================================================================
+      save: null
+      save_interval: 100
+      eval_interval: 100
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: log_all
+
+      bf16: true
+
+      # =====================================================================
+      # PRIMUS-TURBO + FUSED-KERNEL FAMILY: ALL FORCED OFF
+      # =====================================================================
+      # The Bridge side has no Primus Turbo integration on the qwen3 PEFT
+      # path, so disabling all of these on the Native side keeps the
+      # kernel set identical on both sides. Each flag below is the
+      # inverse of what packed-ab.yaml ships -- see the packed-ab.yaml
+      # comment block to understand what workload changes when each
+      # flag flips.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+      # CRITICAL: disable ROCm-DeepEP fast path. This is the dominant
+      # source of the Bridge-vs-Native gap on the production yaml --
+      # turning it off here pushes the Native side onto Megatron's
+      # standard alltoall, which is what Bridge runs through
+      # ``moe_token_dispatcher_type="alltoall"``.
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      # The turbo_deepep_* knobs are ignored when use_turbo_deepep=false,
+      # but listing them here for self-documentation:
+      # turbo_deepep_num_cu, turbo_deepep_use_comm_stream, turbo_sync_free_moe_stage
+
+      # The Bridge yaml has ``moe_permute_fusion: false`` because the
+      # ROCm Triton port can't JIT TE's fused permute kernel
+      # (get_int_dtype unsupported). Match the same off here.
+      moe_use_fused_router_with_aux_score: false
+      moe_permute_fusion: false
+
+      # legacy_grouped_gemm goes through aiter on AMD (an AMD fast path);
+      # Bridge's ``moe_grouped_gemm=true`` path uses Megatron's standard
+      # kernel. Disable legacy here so we run Megatron's standard
+      # grouped GEMM (the same kernel Bridge runs).
+      moe_use_legacy_grouped_gemm: false
+
+      # Bridge runs ``cross_entropy_loss_fusion=True`` +
+      # ``cross_entropy_fusion_impl="te"``. Keep these aligned -- both
+      # are ON on both sides.
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # NOTE on MI300X (192GB HBM3 vs MI355X 288GB HBM3e): without recompute
+      # the model OOMs at ~167 GiB allocated. Enable activation recompute to
+      # fit. We document this divergence; on MI355X this block was OFF for
+      # parity with Bridge.
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 8
+
+      # MATCH BRIDGE recipe: manual_gc enabled with interval=100
+      # (Bridge sets manual_gc_interval=100; Native default was 1 which
+      # would trigger Python GC every step, adding ~10-30 ms/step at the
+      # 25 s steady-state — noise-level on a 20-step benchmark but
+      # philosophically not aligned. Use 100 to match Bridge exactly.)
+      manual_gc: true
+      manual_gc_interval: 100
+      mtp_num_layers: 0
+
+      # MATCH BRIDGE: pytorch profiler captures iter 11 only (start=10
+      # warmup, end=11 active), same schedule as the deepseek-aligned yaml.
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+
+      # MATCH BRIDGE: Bridge yaml explicitly nulls out moe_flex_dispatcher_backend
+      # to skip the NVIDIA-only deepep import path on ROCm. Native default is
+      # "deepep" string (lazy attribute, never invoked because use_turbo_deepep
+      # is false) but the dump diverges between sides. Pin to null for parity.
+      moe_flex_dispatcher_backend: null
+
+      # 20-iter benchmark: never trigger validation. Same constraint as
+      # the Bridge yaml -- final-eval would dominate wall-clock.
+      eval_iters: 0
+
+      # ---------- LoRA ----------
+      # Cut to [linear_qkv, linear_proj] to match Bridge default. Same
+      # trainable-parameter count on both sides keeps the optimiser-step
+      # / grad-reduce work identical.
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
