@@ -495,6 +495,9 @@ def validate_args_on_rocm(args):
                 os.environ.get(env, None) == value
             ), f"{env} must be set to {value} in deterministic mode but got {os.environ.get(env, None)} instead."
 
+        # Set fill_uninitialized_memory to False to avoid calling extra fill kernel in deterministic mode.
+        torch.utils.deterministic.fill_uninitialized_memory = False
+
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
         support_fp8_recipe = ["tensorwise", "blockwise", "mxfp8"]
