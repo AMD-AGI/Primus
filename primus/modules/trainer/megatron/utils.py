@@ -482,13 +482,18 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
+        # NOTE: Some environment variables affect deterministic mode on ROCm. Need to do extra check.
+        NON_DETERMINISTIC_ENVS = {
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "PRIMUS_TURBO_AUTO_TUNE": "0",
+            "PRIMUS_DETERMINISTIC": "1",
+        }
         # NOTE: Some version triton compile exist potential racing condition issue.
-        assert (
-            os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
-        ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."
-        assert (
-            os.environ.get("ROCBLAS_DEFAULT_ATOMICS_MODE", "1") == "0"
-        ), "ROCBLAS_DEFAULT_ATOMICS_MODE must be set to 0 in deterministic mode."
+        for env, value in NON_DETERMINISTIC_ENVS.items():
+            assert (
+                os.environ.get(env, None) == value
+            ), f"{env} must be set to {value} in deterministic mode but got {os.environ.get(env, None)} instead."
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
