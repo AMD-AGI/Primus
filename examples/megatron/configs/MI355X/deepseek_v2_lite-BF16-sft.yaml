@@ -30,7 +30,12 @@ modules:
       
       # Training configuration
       train_iters: 20
-      micro_batch_size: 2
+      # NOTE: mbs=8 triggers a Triton kernel launch error in primus_turbo's
+      # MoE token-permute path on rank with imbalanced expert load
+      # ("SystemError: __reversed__ returned a result with an exception set").
+      # If mbs=4 also crashes, set use_turbo_deepep=false + moe_permute_fusion=false
+      # below to fall back to Megatron's default alltoall dispatcher.
+      micro_batch_size: 4
       global_batch_size: 128
       
       # Sequence length
