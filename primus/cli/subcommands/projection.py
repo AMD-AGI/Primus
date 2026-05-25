@@ -38,17 +38,17 @@ def register_subcommand(subparsers):
     Example:
         # Memory projection
         primus projection memory --config exp.yaml
-        
+
         # Performance projection (single-node benchmarking only)
         primus projection performance --config exp.yaml
-        
+
         # Performance projection with multinode scaling to 4 nodes
         primus projection performance --config exp.yaml --target-nodes 4
-        
+
         # Performance projection with custom hardware config
         primus projection performance --config exp.yaml --target-nodes 8 \\
             --hardware-config hardware_mi300x.yaml
-        
+
     Args:
         subparsers: argparse subparsers object from main.py
 
@@ -156,6 +156,113 @@ def register_subcommand(subparsers):
             "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
             "Example: --gpu-clock-mhz 1500\n"
         ),
+    )
+    performance.add_argument(
+        "--pipeline-schedule-algorithm",
+        type=str,
+        required=False,
+        default="auto",
+        choices=[
+            "auto",
+            "zerobubble",
+            "zerobubble-heuristic",
+            "zbv-formatted",
+            "zbv-greedy-half",
+            "zbv-greedy-min",
+            "seaailab-ilp",
+            "all",
+        ],
+        help=(
+            "Pipeline schedule algorithm for simulation.\n"
+            "  auto                 - Default: zerobubble when enabled, else 1f1b\n"
+            "  zerobubble           - Primus basic zero-bubble (fixed F-B-W pattern)\n"
+            "  zerobubble-heuristic - Primus heuristic (tries 8 combos, picks best)\n"
+            "  zbv-formatted        - Zero-Bubble V-shape with structured phases (VPP=2)\n"
+            "  zbv-greedy-half      - Zero-Bubble V-shape greedy, half memory (VPP=2)\n"
+            "  zbv-greedy-min       - Zero-Bubble V-shape greedy, min memory (VPP=2)\n"
+            "  seaailab-ilp         - SeaAILab ILP-based zero-bubble scheduler\n"
+            "  all                  - Run ALL schedulers and compare results\n"
+        ),
+    )
+
+    # ── Projection-specific overrides ──
+    # These args override the YAML config for projection runs so that the
+    # user does not have to edit the YAML file for different projection scenarios.
+    performance.add_argument(
+        "--target-num-nodes",
+        type=int,
+        required=False,
+        default=None,
+        help="Target number of nodes for multinode projection (alias for --target-nodes).",
+    )
+    performance.add_argument(
+        "--target-ep-size",
+        type=int,
+        required=False,
+        default=None,
+        help="Override expert_model_parallel_size for projection target.",
+    )
+    performance.add_argument(
+        "--enable-zero-bubble",
+        action="store_true",
+        default=False,
+        help="Enable zero-bubble pipeline scheduling.",
+    )
+    performance.add_argument(
+        "--enable-deepep",
+        action="store_true",
+        default=False,
+        help="Enable DeepEP (async All-to-All overlap with compute).",
+    )
+    performance.add_argument(
+        "--sync-free-stage",
+        type=int,
+        required=False,
+        default=0,
+        help="SyncFree MoE stage (0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act). Auto-enables DeepEP.",
+    )
+    performance.add_argument(
+        "--num-virtual-stages-per-pipeline-rank",
+        type=int,
+        required=False,
+        default=None,
+        help="Override virtual_pipeline_model_parallel_size (VPP) for projection.",
+    )
+    performance.add_argument(
+        "--micro-batch-size",
+        type=int,
+        required=False,
+        default=None,
+        help="Override micro_batch_size for projection.",
+    )
+    performance.add_argument(
+        "--global-batch-size",
+        type=int,
+        required=False,
+        default=None,
+        help="Override global_batch_size for projection.",
+    )
+    import argparse as _argparse
+
+    performance.add_argument(
+        "--save-profiling",
+        type=str,
+        required=False,
+        default=None,
+        help=_argparse.SUPPRESS,
+    )
+    performance.add_argument(
+        "--compute-baseline",
+        type=str,
+        required=False,
+        default=None,
+        help=_argparse.SUPPRESS,
+    )
+    performance.add_argument(
+        "--profile-only",
+        action="store_true",
+        default=False,
+        help=_argparse.SUPPRESS,
     )
     parser.set_defaults(func=run)
 

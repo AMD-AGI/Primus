@@ -44,3 +44,25 @@ schedulers:
     vpp_size: 2
     micro_batches: 32
     memory_config: min
+
+  - name: zb-heuristic-mem8
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zerobubble_heuristic.ScheduleZeroBubbleHeuristic
+    pp_size: 8
+    vpp_size: 1
+    micro_batches: 32
+    cost_f: 1000
+    cost_b: 1000
+    cost_w: 1000
+    cost_comm: 10
+    max_mem: 8
+
+  - name: zb-heuristic-mem10
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zerobubble_heuristic.ScheduleZeroBubbleHeuristic
+    pp_size: 8
+    vpp_size: 1
+    micro_batches: 32
+    cost_f: 1000
+    cost_b: 1000
+    cost_w: 1000
+    cost_comm: 10
+    max_mem: 10

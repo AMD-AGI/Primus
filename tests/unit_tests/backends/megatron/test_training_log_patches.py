@@ -134,12 +134,48 @@ def test_patch_training_log_wraps_and_stacks_extensions(monkeypatch: pytest.Monk
 
 
 def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.MonkeyPatch):
-    # Prepare fake torch and ROCm SMI helpers.
+    # Prepare fake torch and ROCm SMI helpers. MemoryStatsExtension also calls
+    # torch.tensor / torch.distributed.all_gather for cross-rank max ROCm mem;
+    # stub those so inject() does not fall into the exception path in unit tests.
+    class _FakeTensor:
+        __slots__ = ("_value",)
+
+        def __init__(self, value: int):
+            self._value = int(value)
+
+        def item(self) -> int:
+            return self._value
+
+    def _tensor(data, device=None, dtype=None):
+        if isinstance(data, (list, tuple)):
+            return _FakeTensor(data[0])
+        return _FakeTensor(data)
+
+    def _zeros_like(_t):
+        return _FakeTensor(0)
+
+    def _get_world_size():
+        return 8
+
+    def _all_gather(gathered_list, tensor):
+        v = tensor.item()
+        for i in range(len(gathered_list)):
+            gathered_list[i] = _FakeTensor(v)
+
+    # `inject` passes `dtype=torch.int64`; SimpleNamespace must expose `int64`
+    # or attribute lookup fails before our fake `tensor()` runs.
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(
             mem_get_info=lambda: (2 * 1024**3, 4 * 1024**3),
             current_device=lambda: 0,
-        )
+        ),
+        tensor=_tensor,
+        zeros_like=_zeros_like,
+        int64=int,
+        distributed=SimpleNamespace(
+            get_world_size=_get_world_size,
+            all_gather=_all_gather,
+        ),
     )
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.torch",
@@ -187,6 +223,7 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
     # Basic sanity checks that memory substrings are present.
     assert "hip mem usage/free/total/usage_ratio" in out
     assert "rocm mem usage/free/total/usage_ratio" in out
+    assert "rocm max mem usage/usage_ratio" in out
 
 
 def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest.MonkeyPatch):

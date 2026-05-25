@@ -9,7 +9,10 @@ import importlib
 import json
 import os
 
-import plotext as plt
+try:
+    import plotext as plt
+except ImportError:
+    plt = None  # plotext is optional, not currently used
 import yaml
 
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (

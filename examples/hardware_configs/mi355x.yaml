@@ -1,0 +1,26 @@
+# Custom Hardware Configuration for MI355X Performance Projection
+# This file defines hardware parameters used for communication modeling
+# when projecting performance to multi-node configurations.
+
+hardware_config:
+  # Intra-node Communication (Infinity Fabric/xGMI)
+  node_bw: 537.6  # Per-GPU egress bandwidth (GB/s) — XGMI mesh
+  node_lat: 0.45  # Intra-node latency (us)
+
+  # Inter-node Communication (InfiniBand/RoCE)
+  pod_bw: 50.0  # Inter-node bandwidth per NIC (GB/s)
+  pod_lat: 2.0  # Inter-node latency (us)
+
+  # Cluster-level Communication
+  cluster_bw: 25.0  # Cluster-level bandwidth (GB/s)
+  cluster_lat: 10.0  # Cluster-level latency (us)
+
+  # Network Topology
+  node_size: 8  # GPUs per node
+  pod_size: 64  # GPUs per pod
+  nics_per_node: 8  # NICs per node
+  switch_topology: false  # Switch-based inter-node topology
+  node_topology: "mesh"  # MI355X uses mesh topology
+
+  # Compute
+  vector_flops: 157.0e12  # Vector FLOPS for reduction compute

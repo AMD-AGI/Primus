@@ -87,15 +87,23 @@ execute_hooks() {
             local exit_code
 
             if [[ "$hook_file" == *.sh ]]; then
-                # Capture output and display in real-time
+                # Only main node prints hook raw output in real-time.
                 # Use set -o pipefail to propagate exit code through pipe
-                hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
-                exit_code=$?
+                if [[ "${NODE_RANK:-0}" -eq 0 ]]; then
+                    hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    exit_code=$?
+                else
+                    hook_output="$(bash "$hook_file" "${args[@]}" 2>&1)"
+                    exit_code=$?
+                fi
             elif [[ "$hook_file" == *.py ]]; then
-                # Capture output and display in real-time
-                # Use set -o pipefail to propagate exit code through pipe
-                hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
-                exit_code=$?
+                if [[ "${NODE_RANK:-0}" -eq 0 ]]; then
+                    hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    exit_code=$?
+                else
+                    hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1)"
+                    exit_code=$?
+                fi
             else
                 LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
                 continue

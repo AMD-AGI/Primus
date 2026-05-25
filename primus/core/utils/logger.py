@@ -125,7 +125,9 @@ def add_file_sink(
             retention=retention,
             encoding=encoding,
             filter=lambda record: (
-                format_level_with_padding(record) and record["level"].no >= logger.level(level.upper()).no
+                format_level_with_padding(record)
+                and not record["extra"].get("console_only", False)
+                and record["level"].no >= logger.level(level.upper()).no
             ),
         )
         return handler_id

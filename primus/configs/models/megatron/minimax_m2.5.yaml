@@ -1,0 +1,68 @@
+bases:
+  - language_model.yaml
+
+# MiniMax-M2.5 Model (GQA + MoE)
+# 229B total params, ~10B active params
+# https://huggingface.co/MiniMaxAI/MiniMax-M2.5
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: MiniMaxAI/MiniMax-M2.5
+
+# model architecture
+num_layers: 62
+hidden_size: 3072
+ffn_hidden_size: 1536
+num_attention_heads: 48
+
+# GQA (48 Q heads, 8 KV heads)
+group_query_attention: true
+num_query_groups: 8
+qk_layernorm: true
+kv_channels: 128
+
+# MoE - all layers are MoE, no shared experts
+moe_layer_freq: "1"
+num_experts: 256
+moe_router_topk: 8
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: true
+moe_router_bias_update_rate: 1.0e-3
+moe_router_load_balancing_type: seq_aux_loss
+moe_aux_loss_coeff: 0.001
+moe_token_dispatcher_type: alltoall
+
+# MoE optimization
+expert_model_parallel_size: 8
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+
+# partial rotary embedding (rotary_dim=64, head_dim=128 → 50%)
+rotary_base: 5000000
+rotary_percent: 0.5
+
+# other settings
+swiglu: true
+bias_swiglu_fusion: false
+add_bias_linear: false
+attention_softmax_in_fp32: true
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+position_embedding_type: rope
+normalization: RMSNorm
+norm_epsilon: 1.0e-6
+init_method_std: 0.02
+
+apply_rope_fusion: false
+masked_softmax_fusion: false
+
+# primus specific
+disable_primus_topk_router: false
+moe_router_force_load_balancing: false
+use_deprecated_20241209_moe_layer: false
+final_logit_softcapping: null
+attn_logit_softcapping: null
+router_logit_softcapping: null

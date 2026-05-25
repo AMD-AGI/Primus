@@ -4,9 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.backends.megatron.training.global_vars import set_primus_global_variables
+import os
+
+from primus.backends.megatron.training.global_vars import (
+    get_mlflow_writer,
+    set_primus_global_variables,
+)
+from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -22,18 +28,81 @@ class MegatronBaseTrainer(BaseTrainer):
         log_rank_0("Initializing Megatron training...")
         # log_dict_aligned("Backend arguments", self.backend_args)
 
+    def cleanup(self, on_error: bool = False):
+        """Megatron cleanup: optional fast exit.
+
+        * ``PRIMUS_EXIT_FAST=1`` — after ``super().cleanup()``, skip Python
+          shutdown and call ``os._exit(0)`` directly. Saves ~20 s of Python
+          interpreter shutdown / torchrun reaper lag at the cost of any
+          ``atexit`` handlers below us. OFF by default.
+
+        When both are off this method just delegates to ``super().cleanup()``,
+        identical to the previous behavior.
+        """
+        super().cleanup(on_error=on_error)
+
+        if not on_error:
+            self._finalize_mlflow_artifacts()
+        else:
+            self._end_mlflow_run()
+
+        exit_fast = os.environ.get("PRIMUS_EXIT_FAST", "0") == "1"
+
+        if exit_fast and not on_error:
+            log_rank_0("[MegatronBaseTrainer] PRIMUS_EXIT_FAST=1 -> os._exit(0)")
+            # Flush stdout/stderr so the final log lines are not lost.
+            try:
+                import sys
+
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:  # pragma: no cover
+                pass
+            os._exit(0)
+
+    def _finalize_mlflow_artifacts(self):
+        """Generate/upload Megatron training artifacts after the core runtime finishes."""
+        args = self.backend_args
+        tensorboard_dir = getattr(args, "tensorboard_dir", None)
+        save_dir = getattr(args, "save", None)
+        exp_root_path = None
+        if save_dir:
+            save_dir_abs = os.path.abspath(save_dir)
+            if os.path.basename(save_dir_abs) == "checkpoints":
+                exp_root_path = os.path.dirname(save_dir_abs)
+        if exp_root_path is None and tensorboard_dir:
+            tensorboard_dir_abs = os.path.abspath(tensorboard_dir)
+            if os.path.basename(tensorboard_dir_abs) == "tensorboard":
+                exp_root_path = os.path.dirname(tensorboard_dir_abs)
+                log_rank_0(f"[MLflow] Fallback exp_root_path from tensorboard_dir: {exp_root_path}")
+
+        try:
+            upload_mlflow_artifacts(
+                tensorboard_dir=tensorboard_dir,
+                exp_root_path=exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", False),
+                upload_logs=getattr(args, "mlflow_upload_logs", False),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+                tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
+            )
+        except Exception as e:
+            warning_rank_0(f"[MLflow] Artifact finalization failed: {e}")
+        finally:
+            self._end_mlflow_run()
+
+    def _end_mlflow_run(self):
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            mlflow_writer.end_run()
+
     def _patch_parse_args(self):
-        """
-        This function patches Megatron's parse_args to return pre-configured Primus arguments.
-        It also validates the arguments on ROCM.
-        """
+        """Patch Megatron's parse_args to return pre-configured Primus arguments."""
         import megatron.training.arguments as megatron_args  # type: ignore
         import megatron.training.initialize as megatron_init  # type: ignore
-
-        from primus.modules.trainer.megatron.utils import (
-            validate_args_modified,
-            validate_args_on_rocm,
-        )
 
         log_rank_0("Patching Megatron-LM parse_args()")
 
@@ -41,51 +110,7 @@ class MegatronBaseTrainer(BaseTrainer):
             log_rank_0("parse_args() called; returning Primus arguments") or self.backend_args
         )
 
-        original_validate_args = megatron_args.validate_args
-
-        def _run_modified_validate(ori_code, new_code, *args, **kwargs):
-            before_patch_validate = megatron_args.validate_args
-            before_init_validate = megatron_init.validate_args
-            try:
-                megatron_args.validate_args = original_validate_args
-                megatron_init.validate_args = original_validate_args
-                validated_args = validate_args_modified(*args, **kwargs, ori_code=ori_code, new_code=new_code)
-                if validated_args is None:
-                    validated_args = args[0] if args else kwargs.get("args", None)
-                return validated_args
-            finally:
-                # Always restore wrapper references to avoid leaking global monkey patches.
-                megatron_args.validate_args = before_patch_validate
-                megatron_init.validate_args = before_init_validate
-
-        def patched_validate_args(*args, **kwargs):
-            parsed_args = args[0] if args else kwargs.get("args", None)
-            if parsed_args is None:
-                return original_validate_args(*args, **kwargs)
-
-            if getattr(parsed_args, "decoder_pipeline_manual_split_list", None) is not None:
-                ori_code = "if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:"
-                new_code = (
-                    "if args.decoder_pipeline_manual_split_list is None and " + ori_code.split("if ")[-1]
-                )
-                validated_args = _run_modified_validate(ori_code, new_code, *args, **kwargs)
-            elif getattr(parsed_args, "fp4", None) is not None:
-                ori_code = """raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")"""
-                new_code = """pass"""
-                validated_args = _run_modified_validate(ori_code, new_code, *args, **kwargs)
-            else:
-                validated_args = original_validate_args(*args, **kwargs)
-
-            log_rank_0("validate_args() called; validating on ROCM")
-            validate_args_on_rocm(validated_args)
-            return validated_args
-
         megatron_args.parse_args = patched_parse_args
         megatron_init.parse_args = patched_parse_args
 
-        megatron_args.validate_args = patched_validate_args
-        megatron_init.validate_args = patched_validate_args
-
-        log_rank_0(
-            f"Patched parse_args()/validate_args(); Primus provided {len(vars(self.backend_args))} arguments"
-        )
+        log_rank_0(f"Patched parse_args(); Primus provided {len(vars(self.backend_args))} arguments")

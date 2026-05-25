@@ -95,14 +95,20 @@ def get_color_dict(vp_size):
     return color_dict
 
 
-def get_bubble_ratio(data, iter_time, vp_size, num_mbs):
-    non_bubble_time = 0
+def get_fbw_times(data, vp_size, num_mbs):
+    """Return total F, B, W time for a single rank in one iteration."""
+    f_time, b_time, w_time = 0.0, 0.0, 0.0
     for i in range(vp_size * num_mbs):
-        non_bubble_time += data["fwd_end"][i] - data["fwd_start"][i]
-        non_bubble_time += data["bwd_end"][i] - data["bwd_start"][i]
+        f_time += data["fwd_end"][i] - data["fwd_start"][i]
+        b_time += data["bwd_end"][i] - data["bwd_start"][i]
         if "wgrad_start" in data and len(data["wgrad_start"]) > 0:
-            non_bubble_time += data["wgrad_end"][i] - data["wgrad_start"][i]
+            w_time += data["wgrad_end"][i] - data["wgrad_start"][i]
+    return f_time, b_time, w_time
 
+
+def get_bubble_ratio(data, iter_time, vp_size, num_mbs):
+    f_time, b_time, w_time = get_fbw_times(data, vp_size, num_mbs)
+    non_bubble_time = f_time + b_time + w_time
     bubble_ratio = (iter_time - non_bubble_time) / iter_time * 100
     return bubble_ratio
 
@@ -141,13 +147,34 @@ def get_task_data(task_list):
         iter_time_max = 0
         for iter_idx in task_data["iter_to_vis"]:
             iter_dict[iter_idx] = {}
-            iter_time = pp_rank_dict[0][str(iter_idx)]["total"]
+            iter_time = max(pp_rank_dict[pp_rank][str(iter_idx)]["total"] for pp_rank in range(pp_size))
             iter_dict[iter_idx]["iter_time"] = iter_time
             iter_time_max = max(iter_time, iter_time_max)
+
+            print(f"\n{'='*90}")
+            print(f"  Task: {task_data['title']}  |  Iter: {iter_idx}  |  iter_time: {iter_time:.2f}ms")
+            print(f"{'='*90}")
+            print(
+                f"  {'Rank':<6} {'F(ms)':>10} {'B(ms)':>10} {'W(ms)':>10} {'F+B+W':>10} {'F%':>7} {'B%':>7} {'W%':>7} {'Bbl%':>7}"
+            )
+            print(f"  {'-'*6} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
+
             for pp_rank in range(pp_size):
                 iter_dict[iter_idx][pp_rank] = pp_rank_dict[pp_rank][str(iter_idx)]
                 bubble_ratio = get_bubble_ratio(iter_dict[iter_idx][pp_rank], iter_time, vp_size, num_mbs)
                 iter_dict[iter_idx][pp_rank]["bubble"] = bubble_ratio
+
+                f_time, b_time, w_time = get_fbw_times(iter_dict[iter_idx][pp_rank], vp_size, num_mbs)
+                total_fbw = f_time + b_time + w_time
+                f_pct = f_time / iter_time * 100 if iter_time > 0 else 0
+                b_pct = b_time / iter_time * 100 if iter_time > 0 else 0
+                w_pct = w_time / iter_time * 100 if iter_time > 0 else 0
+                print(
+                    f"  PP-{pp_rank:<3} {f_time:>10.2f} {b_time:>10.2f} {w_time:>10.2f} {total_fbw:>10.2f}"
+                    f" {f_pct:>6.1f}% {b_pct:>6.1f}% {w_pct:>6.1f}% {bubble_ratio:>6.1f}%"
+                )
+
+            print()
 
         task_data["iters_dict"] = iter_dict
         task_data["iter_time_max"] = iter_time_max

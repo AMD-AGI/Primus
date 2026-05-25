@@ -14,8 +14,17 @@ from megatron.core.optimizer.optimizer import (
     FP32Optimizer,
     MegatronOptimizer,
 )
-from megatron.core.optimizer.optimizer_config import OptimizerConfig, ParamKey
-from megatron.core.optimizer_param_scheduler import ParamGroupOverride
+from megatron.core.optimizer.optimizer_config import OptimizerConfig
+
+try:
+    from megatron.core.optimizer.optimizer_config import ParamKey
+except ImportError:
+    ParamKey = Any
+
+try:
+    from megatron.core.optimizer_param_scheduler import ParamGroupOverride
+except ImportError:
+    ParamGroupOverride = Any
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import get_pg_size, log_single_rank

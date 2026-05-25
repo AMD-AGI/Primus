@@ -77,10 +77,8 @@ def main():
     # Get framework name from pre_trainer module
     framework = config.get_module_config("pre_trainer").framework
 
-    # Normalize alias: map "light-megatron" to actual folder name
     framework_map = {
         "megatron": "megatron",
-        "light-megatron": "megatron",
         "torchtitan": "torchtitan",
         # Add more aliases here if needed
     }
