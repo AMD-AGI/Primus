@@ -132,20 +132,30 @@ class HybridStack(MegatronModule):
         self.hybrid_mlp_ratio = hybrid_mlp_ratio
         self.hybrid_override_pattern = hybrid_override_pattern
 
-        # Customized layer allocation
-        # hybrid_mlp_ratio is not used in this hybrid stack.
-        # It is by default to be always followed by mamba or mla (i.e., mamba + MLP or MLA + MLP)
-        # By setting hybrid_attention_ratio, attention layers are by default to be distributed uniformly.
-        self.layer_type_list = self.allocate_layers(
-            self.config.num_layers,
-            self.hybrid_attention_ratio,
-        )
-
-        pp_layer_offset = 0
-        if self.pp_group.size() > 1:
-            pp_layer_offset, self.layer_type_list = self._select_layers_for_pipeline_parallel(
-                self.layer_type_list
+        # Modern Megatron `MambaModel` parses `hybrid_layer_pattern` into a
+        # concrete `layer_type_list` (list of `Symbols` like 'M', '*', '-',
+        # 'E') and a `pp_layer_offset`, then passes them to
+        # `build_module(mamba_stack_spec, ..., layer_type_list=..., pp_layer_offset=...)`.
+        # If we received a non-empty pre-computed list, USE IT.  An *empty*
+        # list (or None) means the caller didn't specify a pattern (e.g. pure
+        # GDN configs, or hybrid configs whose YAML uses `hybrid_attention_ratio`
+        # which upstream silently dropped as an arg); in that case fall back
+        # to the legacy ratio-based allocation so the old behaviour is preserved.
+        if layer_type_list:
+            self.layer_type_list = list(layer_type_list)
+        else:
+            # Legacy path: caller didn't pre-compute the list, allocate from
+            # the ratio.  hybrid_mlp_ratio is intentionally ignored here --
+            # this hybrid stack always follows attention/mamba with an MLP.
+            self.layer_type_list = self.allocate_layers(
+                self.config.num_layers,
+                self.hybrid_attention_ratio,
             )
+            pp_layer_offset = 0
+            if self.pp_group.size() > 1:
+                pp_layer_offset, self.layer_type_list = self._select_layers_for_pipeline_parallel(
+                    self.layer_type_list
+                )
 
         print(f"layer_type_list: {self.layer_type_list}")
 

@@ -216,3 +216,68 @@ The `tools/compare_*.py`, `tools/diff_*.py`, `tools/dump_*.py`,
 were used as one-off forensics during the parity hunt and are kept
 untracked under `tools/`. They reference the env-var-gated dump paths
 documented above.
+
+---
+
+## Hybrid (3 MLA + 9 GDN) parity delta
+
+Everything above applies as-is to the 75% Hybrid GDN+MLA configuration.
+On top of the pure-GDN parity stack, the hybrid run needs two more pieces
+to match FLA's `gated_deltanet_300M_hybrid.json` reference:
+
+### Spec-level fix — LoRA RMSNorm in MLA
+
+FLA's MLA wraps every LoRA projection in a `nn.Sequential` chain:
+
+```python
+self.q_proj = nn.Sequential(
+    nn.Linear(hidden_size, q_lora_rank, bias=False),
+    RMSNorm(q_lora_rank, dtype=torch.float32),
+    nn.Linear(q_lora_rank, num_heads * qk_head_dim, bias=False),
+)
+self.kv_proj = nn.Sequential(
+    nn.Linear(hidden_size, kv_lora_rank, bias=False),
+    RMSNorm(kv_lora_rank, dtype=torch.float32),
+    nn.Linear(kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False),
+)
+```
+
+Megatron's `MLASelfAttention` constructs the equivalent intermediate
+norm from its `q_layernorm` / `kv_layernorm` submodules:
+
+```python
+self.q_layernorm  = submodules.q_layernorm( hidden_size=config.q_lora_rank,  config=config, eps=config.layernorm_epsilon)
+self.kv_layernorm = submodules.kv_layernorm(hidden_size=config.kv_lora_rank, config=config, eps=config.layernorm_epsilon)
+# ... and applied between linear_*_down_proj and linear_*_up_proj.
+```
+
+Earlier hybrid specs declared both as `IdentityOp`, which silently
+skipped FLA's per-LoRA RMSNorm. Iter-1 still matched bit-perfect
+(both models start from the same init and the missing norm only kicks
+in once the LoRA weights drift from their init), but from iter 100
+onward Primus plateaued ~0.12 above FLA's loss curve.
+
+Fix in `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py`:
+flip `q_layernorm` / `kv_layernorm` to `TENorm` (TE specs) or
+`WrappedTorchNorm` (no-TE specs) in all four MLA-bearing specs.
+Under `PRIMUS_FLA_NORM=1`, `WrappedTorchNorm` resolves to FLA's
+Triton `RMSNorm`, giving bit-exact FLA semantics.
+
+### Launcher-level fix — full FLA fusion stack
+
+The hybrid launcher (`launch_hybrid_faflag.sh`) now exports every
+FLA-parity flag that the pure-GDN/KDA launchers already used:
+
+```bash
+export PRIMUS_FLA_MLA_ATTN=1   # MLA → flash_attn_func directly (TE 2.8.1 cap)
+export PRIMUS_FUSED_CE=1       # FLA chunked fused-LCE (mem + speed)
+export PRIMUS_FLA_SWIGLU=1     # Triton SwiGLU (~20 ms/iter)
+export PRIMUS_FLA_NORM=1       # FLA RMSNorm + FusedRMSNormGated + prenorm/MLP fusion
+export PRIMUS_FLA_CONV=1       # FLA Triton causal_conv1d
+export PRIMUS_FLA_DATA=1       # same token order as FLA's DistributedSampler
+```
+
+With these flags on, the same Megatron stack that ran pure-KDA at
+1.46 s/iter runs the hybrid at FLA-parity speed (∼1.47 s/iter) and
+loss curve (Δ ≤ 0.5% from iter 100 onward), no other changes
+required.
