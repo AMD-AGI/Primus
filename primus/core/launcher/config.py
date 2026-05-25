@@ -59,7 +59,19 @@ class PrimusConfig(object):
 
     def get_module_config(self, module_name: str) -> SimpleNamespace:
         if not yaml_utils.has_key_in_namespace(self._exp.modules, module_name):
-            raise ValueError(f"Primus config ({self._exp.config_file}) has no module named {module_name}")
+            # SFT yamls only declare ``post_trainer``; let pretrain-flavoured
+            # entry points still find their config by aliasing pre_trainer
+            # to post_trainer (and vice-versa) when only one of the two is
+            # present. The two carry the same field set (both expand from
+            # sft_trainer.yaml + overrides), so the alias is safe.
+            alias_map = {"pre_trainer": "post_trainer", "post_trainer": "pre_trainer"}
+            alias = alias_map.get(module_name)
+            if alias is not None and yaml_utils.has_key_in_namespace(self._exp.modules, alias):
+                module_name = alias
+            else:
+                raise ValueError(
+                    f"Primus config ({self._exp.config_file}) has no module named {module_name}"
+                )
         module_config = yaml_utils.get_value_by_key(self._exp.modules, module_name)
         return module_config
 
