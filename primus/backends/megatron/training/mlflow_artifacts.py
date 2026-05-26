@@ -40,7 +40,7 @@ import subprocess
 import sys
 from typing import List, Optional
 
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import log_rank_0, log_rank_last, warning_rank_0
 
 # Pinned to immutable commit SHA for supply-chain safety (tags can be moved).
 # This corresponds to tag v0.4.0 in AMD-AGI/TraceLens.
@@ -135,15 +135,15 @@ def upload_trace_files_to_mlflow(
     if mlflow_writer is None:
         return 0
 
-    log_rank_0(f"[MLflow] Searching for trace files in: {tensorboard_dir}")
+    log_rank_last(f"[MLflow] Searching for trace files in: {tensorboard_dir}")
     trace_files = _get_all_trace_files(tensorboard_dir)
     if len(trace_files) > 5:
-        log_rank_0(f"[MLflow] Found {len(trace_files)} trace files: {trace_files[:5]}...")
+        log_rank_last(f"[MLflow] Found {len(trace_files)} trace files: {trace_files[:5]}...")
     else:
-        log_rank_0(f"[MLflow] Found {len(trace_files)} trace files: {trace_files}")
+        log_rank_last(f"[MLflow] Found {len(trace_files)} trace files: {trace_files}")
 
     if not trace_files:
-        log_rank_0("[MLflow] No trace files found to upload")
+        log_rank_last("[MLflow] No trace files found to upload")
         return 0
 
     uploaded_count = 0
@@ -160,11 +160,11 @@ def upload_trace_files_to_mlflow(
 
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
-            log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+            log_rank_last(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
+            log_rank_last(f"[WARNING] [MLflow] Failed to upload trace file {trace_file}: {e}")
 
-    log_rank_0(f"[MLflow] Uploaded {uploaded_count} trace files to '{artifact_path}'")
+    log_rank_last(f"[MLflow] Uploaded {uploaded_count} trace files to '{artifact_path}'")
     return uploaded_count
 
 
@@ -194,7 +194,7 @@ def upload_log_files_to_mlflow(
     log_files = _get_all_log_files(exp_root_path)
 
     if not log_files:
-        log_rank_0("[MLflow] No log files found to upload")
+        log_rank_last("[MLflow] No log files found to upload")
         return 0
 
     logs_base_dir = os.path.join(exp_root_path, "logs")
@@ -213,9 +213,9 @@ def upload_log_files_to_mlflow(
             mlflow_writer.log_artifact(log_file, artifact_path=artifact_subpath)
             uploaded_count += 1
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload log file {log_file}: {e}")
+            log_rank_last(f"[WARNING] [MLflow] Failed to upload log file {log_file}: {e}")
 
-    log_rank_0(f"[MLflow] Uploaded {uploaded_count} log files to '{artifact_path}'")
+    log_rank_last(f"[MLflow] Uploaded {uploaded_count} log files to '{artifact_path}'")
     return uploaded_count
 
 
@@ -941,13 +941,13 @@ def upload_tracelens_reports_to_mlflow(
         Set cleanup_after_upload=True to remove them after upload and save disk space.
     """
     if mlflow_writer is None:
-        log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
+        log_rank_last("[TraceLens] MLflow writer not available, skipping report upload")
         return 0
 
     # Normalize and validate ranks (config/CLI can pass as a string)
     ranks = _normalize_tracelens_ranks(ranks)
     if ranks == []:
-        warning_rank_0("[TraceLens] No valid ranks after validation; skipping report upload.")
+        log_rank_last("[WARNING] [TraceLens] No valid ranks after validation; skipping report upload.")
         return 0
 
     output_format = _normalize_tracelens_output_format(output_format)
@@ -956,10 +956,10 @@ def upload_tracelens_reports_to_mlflow(
     reports_dir = os.path.join(exp_root_path, "tracelens_reports")
     os.makedirs(reports_dir, exist_ok=True)
 
-    log_rank_0(f"[TraceLens] Generating reports from traces in: {tensorboard_dir}")
-    log_rank_0(f"[TraceLens] Reports will be saved to: {reports_dir}")
+    log_rank_last(f"[TraceLens] Generating reports from traces in: {tensorboard_dir}")
+    log_rank_last(f"[TraceLens] Reports will be saved to: {reports_dir}")
     if ranks:
-        log_rank_0(f"[TraceLens] Analyzing ranks: {ranks}")
+        log_rank_last(f"[TraceLens] Analyzing ranks: {ranks}")
 
     # Generate reports
     reports = generate_tracelens_reports(
@@ -971,7 +971,7 @@ def upload_tracelens_reports_to_mlflow(
     )
 
     if not reports:
-        log_rank_0("[TraceLens] No reports generated, nothing to upload")
+        log_rank_last("[TraceLens] No reports generated, nothing to upload")
         return 0
 
     # Upload reports to MLflow (files via log_artifact, dirs via log_artifacts for correct behavior)
@@ -985,37 +985,37 @@ def upload_tracelens_reports_to_mlflow(
                     else os.path.basename(report_path)
                 )
                 mlflow_writer.log_artifacts(report_path, artifact_path=subpath)
-                log_rank_0(f"[MLflow] Uploaded TraceLens report dir: {os.path.basename(report_path)}")
+                log_rank_last(f"[MLflow] Uploaded TraceLens report dir: {os.path.basename(report_path)}")
             else:
                 mlflow_writer.log_artifact(report_path, artifact_path=artifact_path)
-                log_rank_0(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
+                log_rank_last(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
             uploaded_count += 1
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload report {report_path}: {e}")
+            log_rank_last(f"[WARNING] [MLflow] Failed to upload report {report_path}: {e}")
 
-    log_rank_0(
+    log_rank_last(
         f"[TraceLens] Uploaded {uploaded_count} report item(s) to '{artifact_path}' "
         "(each item may be a file or a directory of CSV files)"
     )
 
     # Optionally clean up local reports only when all uploads succeeded, to avoid losing data
-    # when some uploads failed (reported via warning_rank_0 above).
+    # when some uploads failed (reported via the [WARNING] log_rank_last above).
     if cleanup_after_upload:
         if uploaded_count == len(reports):
             try:
                 import shutil
 
                 shutil.rmtree(reports_dir)
-                log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
+                log_rank_last(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
             except Exception as e:
-                warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+                log_rank_last(f"[WARNING] [TraceLens] Failed to cleanup reports directory: {e}")
         else:
-            log_rank_0(
+            log_rank_last(
                 f"[TraceLens] Skipping cleanup (only {uploaded_count}/{len(reports)} uploads succeeded); "
                 f"keeping local reports at: {reports_dir}"
             )
     else:
-        log_rank_0(f"[TraceLens] Keeping local reports at: {reports_dir}")
+        log_rank_last(f"[TraceLens] Keeping local reports at: {reports_dir}")
 
     return uploaded_count
 
@@ -1091,14 +1091,14 @@ def upload_artifacts_to_mlflow(
         }
     """
     if mlflow_writer is None:
-        log_rank_0("[MLflow] MLflow writer not available, skipping artifact upload")
+        log_rank_last("[MLflow] MLflow writer not available, skipping artifact upload")
         return {"traces": 0, "logs": 0, "tracelens_reports": 0}
 
-    log_rank_0("[MLflow] Starting artifact upload to MLflow...")
-    log_rank_0(f"[MLflow] tensorboard_dir: {tensorboard_dir}")
-    log_rank_0(f"[MLflow] exp_root_path: {exp_root_path}")
-    log_rank_0(f"[MLflow] upload_traces: {upload_traces}, upload_logs: {upload_logs}")
-    log_rank_0(
+    log_rank_last("[MLflow] Starting artifact upload to MLflow...")
+    log_rank_last(f"[MLflow] tensorboard_dir: {tensorboard_dir}")
+    log_rank_last(f"[MLflow] exp_root_path: {exp_root_path}")
+    log_rank_last(f"[MLflow] upload_traces: {upload_traces}, upload_logs: {upload_logs}")
+    log_rank_last(
         f"[MLflow] generate_tracelens_report: {generate_tracelens_report}, "
         f"upload_tracelens_report: {upload_tracelens_report}"
     )
@@ -1122,7 +1122,7 @@ def upload_artifacts_to_mlflow(
     if should_generate and tensorboard_dir and exp_root_path:
         if upload_tracelens_report:
             # Generate AND upload to MLflow
-            log_rank_0("[TraceLens] Mode: Generate and upload to MLflow")
+            log_rank_last("[TraceLens] Mode: Generate and upload to MLflow")
             result["tracelens_reports"] = upload_tracelens_reports_to_mlflow(
                 mlflow_writer=mlflow_writer,
                 tensorboard_dir=tensorboard_dir,
@@ -1135,7 +1135,7 @@ def upload_artifacts_to_mlflow(
             )
         else:
             # Generate locally only (no MLflow upload)
-            log_rank_0("[TraceLens] Mode: Generate locally only (no MLflow upload)")
+            log_rank_last("[TraceLens] Mode: Generate locally only (no MLflow upload)")
             num_generated = generate_tracelens_reports_locally(
                 tensorboard_dir=tensorboard_dir,
                 exp_root_path=exp_root_path,
@@ -1144,9 +1144,9 @@ def upload_artifacts_to_mlflow(
                 auto_install=tracelens_auto_install,
             )
             # Don't count as "uploaded" since they're local-only
-            log_rank_0(f"[TraceLens] Generated {num_generated} report files (not uploaded to MLflow)")
+            log_rank_last(f"[TraceLens] Generated {num_generated} report files (not uploaded to MLflow)")
 
-    log_rank_0(
+    log_rank_last(
         f"[MLflow] Artifact upload complete: "
         f"{result['traces']} traces, {result['logs']} logs, "
         f"{result['tracelens_reports']} TraceLens reports"
