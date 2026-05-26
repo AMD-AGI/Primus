@@ -1,0 +1,114 @@
+# CONTEXT {'gpu_vendor': 'AMD', 'guest_os': 'UBUNTU'}
+###############################################################################
+#
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+###############################################################################
+#
+# Slim image for the Primus MoRI EP microbenchmarks.
+#
+# Based on the upstream vLLM ROCm image (which already provides ROCm, PyTorch,
+# and vLLM) and inspired by ROCm/MAD's docker/large_ep_benchmark.ubuntu.amd.Dockerfile,
+# but reduced to ONLY install MoRI (no rocSHMEM build, no DeepEP, no PerfTests).
+#
+# Build (from this directory):
+#   docker build \
+#       -f Dockerfile.mori \
+#       --build-arg GPU_ARCH=gfx942 \
+#       -t primus-mori-ep:latest .
+#
+# Use with the Slurm launcher:
+#   DOCKER_IMAGE=primus-mori-ep:latest sbatch -N 1 -p <partition> \
+#       ../run_slurm.sh
+#
+###############################################################################
+
+# Latest stable upstream vLLM ROCm image. AMD's rocm/vllm and rocm/vllm-dev
+# images are deprecated in favor of vllm/vllm-openai-rocm:
+# https://docs.vllm.ai/en/stable/deployment/docker/
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.21.0
+FROM ${BASE_IMAGE}
+
+RUN sed -i 's/http/https/g' /etc/apt/sources.list
+
+# Tuning knobs (override with --build-arg)
+ARG GPU_ARCH=gfx942
+ARG MORI_REPO=https://github.com/ROCm/mori.git
+ARG MORI_REF=main
+# Set MORI_PRECOMPILE=1 to JIT-compile MoRI kernels at image build time. This
+# requires the build host to expose an AMD GPU; otherwise we skip and fall back
+# to first-use JIT (cached under ~/.mori/jit).
+ARG MORI_PRECOMPILE=0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The upstream vllm-openai-rocm image sets ENTRYPOINT to launch the vLLM API
+# server; clear it so the container can be driven by our bench scripts.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+
+WORKDIR /app
+
+# Minimal system packages: MoRI host code only needs libpci-dev + standard
+# RDMA userspace headers (matches mori/docker/Dockerfile.dev).
+RUN apt update && \
+    apt install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        ibverbs-utils \
+        libibverbs-dev \
+        libpci-dev \
+        libdw1 \
+        rdma-core \
+        infiniband-diags \
+        iproute2 \
+        iputils-ping \
+        pciutils \
+        vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python build / runtime deps (subset of mori/requirements-build.txt + the
+# bench-script helpers MAD pulls in).
+RUN pip3 install --no-cache-dir \
+        "cmake>=3.19" \
+        "setuptools>=65" \
+        "setuptools-scm>=8" \
+        pybind11 \
+        ninja \
+        prettytable \
+        tqdm \
+        matplotlib
+
+# Clone MoRI source. The tree is kept at /app/mori so run_mori_bench.sh can
+# invoke tests/python/ops/bench_dispatch_combine.py and
+# examples/ops/dispatch_combine/test_dispatch_combine_internode.py directly.
+RUN git clone --recursive "${MORI_REPO}" /app/mori && \
+    cd /app/mori && \
+    git checkout "${MORI_REF}" && \
+    git submodule update --init --recursive && \
+    git log -1 --oneline
+
+# Install MoRI. hipcc is not required at install time (host code compiles with
+# the standard C++ compiler); GPU kernels are JIT-compiled on first use.
+# --no-build-isolation lets pip pick up the build deps installed above.
+WORKDIR /app/mori
+RUN PYTORCH_ROCM_ARCH="${GPU_ARCH}" \
+    pip3 install --no-cache-dir --no-build-isolation .
+
+# Optional: precompile MoRI JIT kernels into the image. Only runs when a GPU
+# is visible at build time; otherwise we leave JIT to happen at first import.
+RUN if [ "${MORI_PRECOMPILE}" = "1" ]; then \
+        MORI_PRECOMPILE=1 python3 -c "import mori; print('mori precompile OK')" \
+        || echo "WARNING: MORI precompile skipped (likely no GPU at build time)"; \
+    fi
+
+# Smoke-test the python import (works without a GPU because kernels are JIT).
+RUN python3 -c "import mori; print('mori import OK ->', mori.__file__)"
+
+# Reasonable defaults consumed by run_mori_bench.sh / MoRI tests; can be
+# overridden via -e on docker run.
+ENV MORI_PATH=/app/mori
+
+WORKDIR /app/mori
