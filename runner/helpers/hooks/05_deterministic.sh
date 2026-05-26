@@ -24,3 +24,4 @@ echo "env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=0"
 echo "env.ROCBLAS_DEFAULT_ATOMICS_MODE=0"
 # Disable torch compile to avoid race condition issue in some triton versions.
 echo "env.TORCH_COMPILE_DISABLE=1"
+echo "env.PRIMUS_TURBO_AUTO_TUNE=0"

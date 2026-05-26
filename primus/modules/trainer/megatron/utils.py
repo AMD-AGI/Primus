@@ -343,6 +343,39 @@ def fwd_bwd_wrapper(func, mode, minibatch=None, chunk=None):
     return wrapper
 
 
+def combined_fwd_bwd_wrapper(func, fwd_minibatch, fwd_chunk, bwd_minibatch, bwd_chunk):
+    """Record a single combined forward+backward call as both an ``fwd`` event
+    and a ``bwd`` event sharing the same ``[start, end]`` interval.
+
+    Used by ``megatron_combined_fwd_bkwd_handler`` so that nodes collapsed into
+    a combined FB group still appear in the dump_pp_data output. Without this
+    the visualizer's per-rank F/B/W totals are heavily under-counted on ranks
+    that hit the steady state (the F and B halves are interleaved inside
+    ``combined_forward_backward_step`` and cannot be timed separately).
+    """
+
+    def wrapper(*args, **kwargs):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        start.record()
+        res = func(*args, **kwargs)
+        end.record()
+
+        global _GLOBAL_PP_VIS_EVENTS_PER_ITER
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_start"].append(start)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_end"].append(end)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_minibatch"].append(fwd_minibatch)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["fwd_chunk"].append(fwd_chunk)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_start"].append(start)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_end"].append(end)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_minibatch"].append(bwd_minibatch)
+        _GLOBAL_PP_VIS_EVENTS_PER_ITER["bwd_chunk"].append(bwd_chunk)
+        return res
+
+    return wrapper
+
+
 def set_dump_pp_data_patch():
     from megatron.core.pipeline_parallel import schedules
 
@@ -432,13 +465,13 @@ def _get_sync_free_moe_options(stage: int) -> dict:
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
+            "use_turbo_grouped_gemm": True,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
+            "use_turbo_grouped_gemm": True,
             "use_turbo_fused_act_with_probs": True,
         },
     }
@@ -449,13 +482,21 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
+        # NOTE: Some environment variables affect deterministic mode on ROCm. Need to do extra check.
+        NON_DETERMINISTIC_ENVS = {
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "PRIMUS_TURBO_AUTO_TUNE": "0",
+            "PRIMUS_DETERMINISTIC": "1",
+        }
         # NOTE: Some version triton compile exist potential racing condition issue.
-        assert (
-            os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
-        ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."
-        assert (
-            os.environ.get("ROCBLAS_DEFAULT_ATOMICS_MODE", "1") == "0"
-        ), "ROCBLAS_DEFAULT_ATOMICS_MODE must be set to 0 in deterministic mode."
+        for env, value in NON_DETERMINISTIC_ENVS.items():
+            assert (
+                os.environ.get(env, None) == value
+            ), f"{env} must be set to {value} in deterministic mode but got {os.environ.get(env, None)} instead."
+
+        # Set fill_uninitialized_memory to False to avoid calling extra fill kernel in deterministic mode.
+        torch.utils.deterministic.fill_uninitialized_memory = False
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
@@ -484,10 +525,14 @@ def validate_args_on_rocm(args):
 
     # PrimusTurboGroupedMLP no longer depends on legacy GroupedMLP; the two
     # flags are mutually exclusive when turbo is enabled.
-    if getattr(args, "use_turbo_grouped_mlp", False) and getattr(args, "moe_use_legacy_grouped_gemm", False):
+    if getattr(args, "use_turbo_grouped_mlp", False):
+        print_rank_last("use_turbo_grouped_mlp is deprecated, please use use_turbo_grouped_gemm instead.")
+    use_turbo_grouped_gemm = getattr(args, "use_turbo_grouped_gemm", False) or getattr(
+        args, "use_turbo_grouped_mlp", False
+    )
+    if use_turbo_grouped_gemm and getattr(args, "moe_use_legacy_grouped_gemm", False):
         raise ValueError(
-            "use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
-            "PrimusTurboGroupedMLP now uses the TEGroupedMLP path; "
+            "use_turbo_grouped_gemm=True or use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
             "please set moe_use_legacy_grouped_gemm=False."
         )
 
@@ -495,9 +540,9 @@ def validate_args_on_rocm(args):
     if args.turbo_sync_free_moe_stage > 0:
         assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
 
-        if args.turbo_sync_free_moe_stage > 1 and not args.use_turbo_grouped_mlp:
+        if args.turbo_sync_free_moe_stage > 1 and not use_turbo_grouped_gemm:
             raise ValueError(
-                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `use_turbo_grouped_mlp=True`"
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedLinear, please set `use_turbo_grouped_gemm=True`"
             )
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(

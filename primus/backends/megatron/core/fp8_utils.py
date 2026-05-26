@@ -24,19 +24,28 @@ except (ImportError, ModuleNotFoundError):
     # Transformer Engine not found
     pass
 
-# Check if Primus-Turbo is installed
+# Check if Primus-Turbo is installed.
+#
+# Probe the *deep* import path that the HAVE_TURBO branch below actually uses.
+# A shallow ``import primus_turbo`` succeeds even when ``primus_turbo.pytorch``
+# fails to initialize (e.g. when its transitive ``aiter`` import is broken in
+# the runtime environment), which would otherwise let us enter the HAVE_TURBO
+# branch and crash at module-load time when the deep import is performed.
 HAVE_TURBO = False
 try:
-    import primus_turbo  # pylint: disable=W0611
+    from primus_turbo.pytorch.core.low_precision import (  # noqa: F401  pylint: disable=W0611
+        ScaleDtype,
+        ScalingGranularity,
+    )
 
     HAVE_TURBO = True
 except (ImportError, ModuleNotFoundError):
-    # Primus-Turbo not found
+    # Primus-Turbo not importable (not installed, or a transitive dep is broken).
     pass
 
 
 SCALING_BLOCK_SIZE = 128
-MX_SCALING_BLOCK_SIZE = 32
+MXFP8_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -149,7 +158,7 @@ if HAVE_TE and HAVE_TURBO:
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.MX_BLOCKWISE,
                 format=te_fp8_format_mapping(fp8_format),
-                block_size=MX_SCALING_BLOCK_SIZE,
+                block_size=MXFP8_SCALING_BLOCK_SIZE,
                 scale_dtype=ScaleDtype.E8M0,
             )
 

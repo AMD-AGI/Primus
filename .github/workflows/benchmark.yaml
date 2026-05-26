@@ -6,7 +6,7 @@ on:
     - cron: '0 16 * * *'
 
 env:
-  PRIMUS_TURBO_COMMIT: a4488f6cdb15cfff4383c61af7922bb50803f0ea # feat: update triton impl for mi300 & mi355 (#252)
+  PRIMUS_TURBO_COMMIT: 06b8d3fefd91be26d6adfb5cd43c7524ef87b825 # Add HYBRID FP8 format support for Triton backend in gemm and grouped_gemm (#278)
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:

@@ -7,7 +7,7 @@
 import os
 from pathlib import Path
 
-from primus.core.launcher.parser import PrimusParser
+from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.module_profilers.language_model import (
     build_profiler,
     get_language_model_profiler_spec,
@@ -81,10 +81,8 @@ def launch_projection_from_cli(args, overrides):
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Projection] Config file '{cfg_path}' not found.")
 
-    config_parser = PrimusParser()
-    primus_config = config_parser.parse(args)
+    primus_config, _unknown_overrides = load_primus_config(args, overrides or [])
     training_config = convert_primus_config_to_projection_config(primus_config)
-    print(training_config)
 
     model_profiler_spec = get_language_model_profiler_spec(training_config)
     model_profiler = build_profiler(model_profiler_spec)
