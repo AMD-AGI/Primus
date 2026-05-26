@@ -8,13 +8,21 @@
 Argument parsing utilities for Primus CLI.
 """
 
+import ast
+
 
 def _coerce_cli_value_modern(raw_value):
-    """Convert common CLI literals to bool/int/float/string."""
+    """Convert common CLI literals to bool/int/float/list/dict/None/string."""
     value = raw_value
     try:
         if value.lower() in ("true", "false"):
             return value.lower() == "true"
+        # Container / None literals via ast.literal_eval (safe, no arbitrary code).
+        if value == "None" or value[:1] in "[({":
+            try:
+                return ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                pass
         if "." in value:
             try:
                 return float(value)
@@ -80,7 +88,7 @@ def parse_cli_overrides(overrides: list, type_mode: str = "modern") -> dict:
         {"use_cache": True, "verbose": False}
 
     Type Inference Rules:
-        - modern: bool/int/float/string
+        - modern: bool/int/float/list/tuple/dict/set/None/string
         - legacy: bool + eval fallback
 
     Nested Keys:
