@@ -8,6 +8,7 @@ import os
 import socket
 import time
 from pathlib import Path
+from typing import Iterable, List
 
 import torch
 import torch.distributed as dist
@@ -72,6 +73,32 @@ def remove_file(file_path):
             os.remove(file_path)
             print(f"{file_path} deleted.", flush=True)
     dist.barrier(device_ids=[torch.cuda.current_device()])
+
+
+def format_int_range(values: Iterable[int]) -> str:
+    """Compactly format a list of ints as a comma-separated set of contiguous ranges.
+
+    Examples:
+        [0,1,2,3]         -> "0-3"
+        [0,1,2,3,8,9]     -> "0-3,8-9"
+        [0,2,4,6]         -> "0,2,4,6"
+        [5]               -> "5"
+        []                -> ""
+    """
+    vs = sorted(set(int(v) for v in values))
+    if not vs:
+        return ""
+
+    parts: List[str] = []
+    start = prev = vs[0]
+    for v in vs[1:]:
+        if v == prev + 1:
+            prev = v
+            continue
+        parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+        start = prev = v
+    parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+    return ",".join(parts)
 
 
 def extract_first_middle_last(lst):

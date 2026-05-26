@@ -17,8 +17,11 @@ Usage:
 Description:
     Launch distributed Primus jobs via Slurm.
     - Everything before the first '--' is passed to Slurm (srun/sbatch and flags).
-    - <entry> specifies Primus execution mode: container | direct | preflight (see below).
+    - <entry> specifies Primus execution mode: container | direct  (default: container).
     - The second '--' (if any) separates Primus entry args from Primus CLI arguments.
+    - If <entry> is anything other than 'container' or 'direct' (e.g. a primus
+      subcommand like 'preflight'), it is routed through the default container
+      chain unchanged.
 
 Options:
     --config FILE    Load configuration from specified file
@@ -32,8 +35,14 @@ Examples:
     # Launch with sbatch, log to file, run benchmark
     primus-cli slurm sbatch --output=run.log -N 2 -- container -- benchmark gemm -M 4096 -N 4096 -K 4096
 
-    # Run preflight environment check across 4 nodes
-    primus-cli slurm srun -N 4 -- preflight
+    # Run preflight environment check across 4 nodes (terse form: defaults to container entry)
+    primus-cli slurm srun -N 4 -- preflight --quick
+
+    # Run preflight via the direct entry (no container; uses host python or VENV_ACTIVATE)
+    primus-cli slurm srun -N 4 -- direct -- preflight --quick
+
+    # Run node smoke test via direct entry (auto-selects single mode for node_smoke)
+    primus-cli slurm srun -N 4 -- direct -- node_smoke --tier2-perf
 
     # Dry-run to see what would be executed
     primus-cli slurm --dry-run srun -N 4 -- container -- train

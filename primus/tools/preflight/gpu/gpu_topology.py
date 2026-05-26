@@ -96,7 +96,7 @@ def _xgmi_presence_best_effort() -> Optional[Dict[str, Any]]:
 
     if which("amd-smi") is None:
         return None
-    rc, out, err = run_cmd(["amd-smi", "topo"], timeout_s=10)
+    rc, out, err = run_cmd(["amd-smi", "topology"], timeout_s=10)
     if rc != 0:
         return {"rc": rc, "err": err}
     return {"rc": rc, "out": out}

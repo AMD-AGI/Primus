@@ -1,19 +1,20 @@
+from typing import Optional, Sequence
+
 import torch
 import torch.distributed as dist
 from torch.profiler import ProfilerActivity
 
 from primus.tools.preflight.global_vars import (
-    ITERATION,
     LOCAL_WORLD_SIZE,
     RANK,
-    WARMUP,
     WORLD_SIZE,
+    get_iteration,
+    get_warmup,
 )
 from primus.tools.preflight.utility import barrier_after_comm_destroy, log
 
 # profile parameters
 _ENABLE_PROFILE = False
-_PROFILE_STEPS = min(ITERATION, 10)
 
 _NODE_RANK = RANK // LOCAL_WORLD_SIZE
 _GLOBAL_PIPELINE_GROUP = None
@@ -76,10 +77,14 @@ def run_ring_p2p(num_bytes: int):
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    for it in range(WARMUP):
+    warmup = get_warmup()
+    iteration = get_iteration()
+    profile_steps = min(iteration, 10)
+
+    for it in range(warmup):
         reqs = send_recv_once(x, y)
 
-    if WARMUP > 0:
+    if warmup > 0:
         # TODO(limou)
         # check, does this create a cuda event
         # making default stream waiting for NCCL stream ?
@@ -87,20 +92,20 @@ def run_ring_p2p(num_bytes: int):
             req.wait()
 
     if _ENABLE_PROFILE and RANK == 0:
-        assert ITERATION >= _PROFILE_STEPS
+        assert iteration >= profile_steps
         prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
             schedule=torch.profiler.schedule(
-                wait=ITERATION - _PROFILE_STEPS,
+                wait=iteration - profile_steps,
                 warmup=0,
-                active=_PROFILE_STEPS,
+                active=profile_steps,
             ),
         )
         prof.start()
 
     start_event.record()
-    for it in range(ITERATION):
+    for it in range(iteration):
         reqs = send_recv_once(x, y)
         if _ENABLE_PROFILE and RANK == 0:
             prof.step()
@@ -110,7 +115,7 @@ def run_ring_p2p(num_bytes: int):
 
     end_event.record()
     end_event.synchronize()
-    avg_time_elapsed = start_event.elapsed_time(end_event) / ITERATION
+    avg_time_elapsed = start_event.elapsed_time(end_event) / iteration
     if _ENABLE_PROFILE and RANK == 0:
         prof.stop()
         prof.export_chrome_trace(f"inter-node_ring_p2p_trace_{num_bytes}.json")
@@ -177,7 +182,7 @@ Every GPU sends data to the next GPU in the ring
 """
 
 
-def run_inter_node_ring_p2p(args):
+def run_inter_node_ring_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
     assert WORLD_SIZE % LOCAL_WORLD_SIZE == 0
     num_nodes = WORLD_SIZE // LOCAL_WORLD_SIZE
 
@@ -190,16 +195,18 @@ def run_inter_node_ring_p2p(args):
         log("Skip inter node ring p2p benchmark")
         return
 
-    SIZES_IN_MB_TO_BENCH = [10, 20, 40, 80, 160]
+    if sizes_mb is None or len(sizes_mb) == 0:
+        sizes_mb = [10, 20, 40, 80, 160]
+    sizes_in_mb_to_bench = [int(mb) for mb in sizes_mb]
     time_statistics = []
-    for size_in_mb in SIZES_IN_MB_TO_BENCH:
+    for size_in_mb in sizes_in_mb_to_bench:
         avg_time_elapsed = run_ring_p2p(size_in_mb * (2**20))
 
         all_latency_results = [-1.0 for _ in range(WORLD_SIZE)]
         dist.gather_object(avg_time_elapsed, all_latency_results if RANK == 0 else None, dst=0)
         time_statistics.append(all_latency_results[:LOCAL_WORLD_SIZE])
 
-    write_markdown(args, SIZES_IN_MB_TO_BENCH, time_statistics)
+    write_markdown(args, sizes_in_mb_to_bench, time_statistics)
 
     if _GLOBAL_PIPELINE_GROUP is not None:
         dist.destroy_process_group(_GLOBAL_PIPELINE_GROUP)
