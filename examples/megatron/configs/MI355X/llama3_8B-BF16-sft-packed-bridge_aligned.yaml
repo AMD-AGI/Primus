@@ -126,7 +126,7 @@ modules:
 
       apply_rope_fusion: true
 
-      ### 对齐bridge
+      # Bridge-parity flags.
       attention_softmax_in_fp32: false
       masked_softmax_fusion: true
 

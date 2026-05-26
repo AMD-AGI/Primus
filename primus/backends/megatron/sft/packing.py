@@ -193,7 +193,6 @@ def _tokenize_no_pad(
     }
 
 
-## 把多个真样本压进一条序列。把多个真样本物理拼接，cu_seqlens 记录每段边界，只有最末尾装不下时才用 pad_id 填满到 seq_length
 def _first_fit_pack(
     samples: List[Dict[str, np.ndarray]],
     max_seq_length: int,

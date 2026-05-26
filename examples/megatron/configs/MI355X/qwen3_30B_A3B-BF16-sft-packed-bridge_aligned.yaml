@@ -97,12 +97,12 @@ modules:
       # Sequence packing matches Bridge: implicit-multi-turn packing
       # (full-pack causal attn, loss_mask gating). Bridge's default
       # ``packed_sequence_specs`` mode is the same regime.
-      ## 新增参数和bridge对齐
+      # Bridge-parity: enable sequence packing + bridge-aligned flags.
       enable_packed_sequences: true
-      use_packed_attention: true ###false和brideg=true对齐
-      ddp_average_in_collective: true  ##新增和brideg=true对齐
-      attention_softmax_in_fp32: false  ##新增和brideg=false对齐
-      masked_softmax_fusion: true  ##新增和brideg=true对齐
+      use_packed_attention: true
+      ddp_average_in_collective: true
+      attention_softmax_in_fp32: false
+      masked_softmax_fusion: true
 
 
       # MATCH BRIDGE dataset config (insofar as Native Megatron supports it):

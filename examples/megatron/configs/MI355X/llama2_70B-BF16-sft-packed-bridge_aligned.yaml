@@ -81,8 +81,8 @@ modules:
 
       # KEY: enable sequence packing
       enable_packed_sequences: true
-      use_packed_attention: true ###false  和brideg=true对齐
-      ddp_average_in_collective: true ##新增和brideg=true对齐
+      use_packed_attention: true
+      ddp_average_in_collective: true
 
       # Opt-in Bridge-parity mode. When True Native switches BOTH:
       #   1. Tokenize layout: per-segment tokenize + inline BOS + trailing
@@ -166,9 +166,9 @@ modules:
       use_precision_aware_optimizer: false
       apply_rope_fusion: true
 
-       # === 对齐 Bridge =
-      masked_softmax_fusion: true      # +5~7%
-      attention_softmax_in_fp32: false   # +3~4%（BF16 训练无需 FP32 softmax）
+      # Bridge-parity: matching softmax fusion & dtype settings.
+      masked_softmax_fusion: true        # +5~7%
+      attention_softmax_in_fp32: false   # +3~4% (BF16 training does not need FP32 softmax)
       align_param_gather: false          # +1~2%
 
       # ---------- Activation recompute (REQUIRED at TP=1) -----------------

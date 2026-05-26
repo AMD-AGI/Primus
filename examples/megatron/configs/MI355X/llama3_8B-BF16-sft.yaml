@@ -16,10 +16,9 @@ modules:
       stage: sft
 
 
-      # 绕开 meta-llama gated repo（HF 申请被拒）：
-      # 改用社区 mirror NousResearch/Meta-Llama-3-8B（权重一致，无 gating）。
-      # hf_path 给 01_convert_checkpoints.py 用（HF→Megatron 转换源）；
-      # tokenizer_model 给训练阶段 HuggingFaceTokenizer 用。两个都覆盖最稳。
+      # Use the community mirror (weights identical, no HF gating).
+      # hf_path: source for 01_convert_checkpoints.py (HF -> Megatron).
+      # tokenizer_model: used by HuggingFaceTokenizer at training time.
       hf_path: NousResearch/Meta-Llama-3-8B
       tokenizer_model: NousResearch/Meta-Llama-3-8B
 

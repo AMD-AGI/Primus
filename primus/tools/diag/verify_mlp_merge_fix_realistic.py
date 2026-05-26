@@ -1,7 +1,9 @@
-"""Realistic-scale sanity check: 模拟真实 70B 加载场景下的 mlp.py 修复效果.
+"""Realistic-scale sanity check for the mlp.py fix under a true 70B load.
 
-跟 verify_mlp_merge_fix.py 的差别：预先分配 ~80 GB "context"（模拟 attention/embed/optimizer），
-再走 160 次 sh_ten_merge_fn，观察 peak / fragmentation 是否会逼近 GPU 上限。
+Differs from verify_mlp_merge_fix.py: this version preallocates ~80 GB of
+"context" tensors (proxy for attention / embed / optimizer state) and only
+then runs the 160 sh_ten_merge_fn calls, so we can see whether the peak and
+fragmentation actually push against the GPU limit.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ CONTEXT_TENSOR_COUNT = 800  # ~75 GB total
 
 
 def merge_old(sub_state_dict):
-    """原始 mlp.py:430-442 行为：cat 后不释放 sub_state_dict 引用。"""
+    """Original mlp.py:430-442 behavior: cat then keep sub_state_dict refs alive."""
     with torch.no_grad():
         try:
             return torch.cat(sub_state_dict)
@@ -33,7 +35,7 @@ def merge_old(sub_state_dict):
 
 
 def merge_new(sub_state_dict):
-    """修复后行为：cat 成功立即 del list 元素。"""
+    """Post-fix behavior: del sub_state_dict elements once cat succeeds."""
     with torch.no_grad():
         try:
             merged = torch.cat(sub_state_dict)

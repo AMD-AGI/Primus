@@ -216,7 +216,7 @@ modules:
       # ============================================================
       # Activation recompute (kept ON for MI300X 192 GB headroom).
       # ============================================================
-      ## 对齐mlperf，不使用recompute
+      # Match mlperf: no activation recompute.
       # recompute_granularity: full
       # recompute_method: block
       # recompute_num_layers: 8

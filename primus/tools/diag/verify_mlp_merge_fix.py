@@ -1,19 +1,18 @@
 """Sanity check for mlp.py:sh_ten_merge_fn fragmentation fix.
 
-模拟 Llama2-70B 80 层 × (fc1+fc2) = 160 次 sharded MLP weight cat-merge，
-对比修复前/后 HIP allocator 的峰值显存与碎片占用。
+Simulates Llama2-70B's 80 layers x (fc1 + fc2) = 160 sharded MLP weight
+cat-merges and compares the HIP allocator's peak / fragmentation footprint
+before vs after the fix.
 
-跑法（单卡足够，因为只验证单 rank 的 allocator 行为）：
+Usage (single GPU is sufficient -- only single-rank allocator behavior is
+validated)::
 
-    docker exec -it sft_primus_0512 bash -lc \
-        'cd /home/botahu/sft_primus_0507/Primus && \
-         export PYTORCH_ALLOC_CONF=expandable_segments:True && \
-         python examples/megatron/configs/MI355X/verify_mlp_merge_fix.py'
+    python -m primus.tools.diag.verify_mlp_merge_fix
 
-判定：
-    * "after-fix peak allocated"  显著低于 "before-fix peak allocated"
-    * "after-fix max reserved"    显著低于 "before-fix max reserved"
-    * 没有 ``RuntimeError``      （修复前在 80~120 次 cat 时常 OOM）
+Pass criteria:
+    * "after-fix peak allocated"  noticeably lower than "before-fix peak allocated"
+    * "after-fix max reserved"    noticeably lower than "before-fix max reserved"
+    * No ``RuntimeError`` (the pre-fix path frequently OOMs around merge 80-120)
 """
 
 from __future__ import annotations
@@ -24,8 +23,9 @@ import time
 
 import torch
 
-# 70B Llama2 SwiGLU MLP shape: fc1 weight = (28672, 8192) bf16 ≈ 470 MB
-# 加载时通常拆成 8 个 chunks，每个 ~58 MB；fc2 weight = (8192, 28672) 同量级
+# 70B Llama2 SwiGLU MLP shape: fc1 weight = (28672, 8192) bf16 ~ 470 MB.
+# At load time it is normally split into 8 shards of ~58 MB each;
+# fc2 weight = (8192, 28672) is comparable in size.
 NUM_LAYERS = 80
 SHARDS_PER_MERGE = 8
 PER_SHARD_SHAPE = (28672 // SHARDS_PER_MERGE, 8192)  # (3584, 8192) bf16 ≈ 58.7 MB
@@ -34,12 +34,12 @@ DEVICE = "cuda"
 
 
 def _build_shards() -> list[torch.Tensor]:
-    """模拟一次 dist_ckpt 加载得到的 sub_state_dict (list[Tensor on GPU])."""
+    """Simulate one dist_ckpt sub_state_dict load (list[Tensor] on GPU)."""
     return [torch.empty(PER_SHARD_SHAPE, dtype=DTYPE, device=DEVICE) for _ in range(SHARDS_PER_MERGE)]
 
 
 def merge_old(sub_state_dict: list[torch.Tensor]) -> torch.Tensor:
-    """原始 mlp.py:430-442 行为：cat 后不释放 sub_state_dict 引用。"""
+    """Original mlp.py:430-442 behavior: cat then keep sub_state_dict refs alive."""
     with torch.no_grad():
         try:
             return torch.cat(sub_state_dict)
@@ -51,7 +51,8 @@ def merge_old(sub_state_dict: list[torch.Tensor]) -> torch.Tensor:
 
 
 def merge_new(sub_state_dict: list[torch.Tensor]) -> torch.Tensor:
-    """修复后行为：cat 成功立即 del list 元素，失败路径也 del + empty_cache。"""
+    """Post-fix behavior: del sub_state_dict on success; on OOM fallback also
+    del + empty_cache before retrying on CPU."""
     with torch.no_grad():
         force_cpu = os.environ.get("MEGATRON_CKPT_CPU_MERGE", "0").lower() in (
             "1",
@@ -138,7 +139,7 @@ def fmt(r: dict) -> str:
 
 
 def main():
-    assert torch.cuda.is_available(), "需要 GPU"
+    assert torch.cuda.is_available(), "GPU required"
     print(
         f"Simulating {NUM_LAYERS} layers × 2 MLPs × {SHARDS_PER_MERGE} shards"
         f" = {NUM_LAYERS * 2 * SHARDS_PER_MERGE} bf16 tensors"
