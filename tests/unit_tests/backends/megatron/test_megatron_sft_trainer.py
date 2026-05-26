@@ -136,6 +136,8 @@ def test_create_sft_datasets_provider_uses_runtime_args(monkeypatch: pytest.Monk
             "train_val_test_num_samples": [100, 20, 10],
             "formatter": "chatml",
             "seed": 123,
+            "enable_packed_sequences": False,
+            "bridge_compat_inline_bos": False,
         }
     ]
 
