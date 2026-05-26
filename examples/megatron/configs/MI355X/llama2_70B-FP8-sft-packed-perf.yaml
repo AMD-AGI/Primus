@@ -54,7 +54,7 @@ modules:
     overrides:
       data_path: null
       sft_dataset_name: rajpurkar/squad
-      sft_dataset_formatter: squad
+      sft_conversation_format: squad
 
       # Perf run -- do NOT enable Bridge-compat tokenization layout
       sft_bridge_compat_inline_bos: false
