@@ -245,6 +245,7 @@ if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
     export ROCBLAS_DEFAULT_ATOMICS_MODE=0
     # Disable torch compile to avoid race issues in some triton versions.
     export TORCH_COMPILE_DISABLE=1
+    export PRIMUS_TURBO_AUTO_TUNE=0
 fi
 # turbo deepep timeout
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=${PRIMUS_TURBO_DEEPEP_TIMEOUT:-600}

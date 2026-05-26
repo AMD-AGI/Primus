@@ -496,6 +496,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             )
             _use_sink_attention = False
 
+        # set deterministic flag
+        self.deterministic_mode = args.deterministic_mode
+
         # Store for later use after super().__init__()
         self._init_sink_attention = _use_sink_attention
         self._num_heads_for_sinks = self.config.num_attention_heads
@@ -654,7 +657,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             window_size=window_size,
             bias=None,
             alibi_slopes=None,
-            deterministic=False,
+            deterministic=self.deterministic_mode,
             return_lse=False,
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
