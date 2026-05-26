@@ -6,6 +6,7 @@
 
 import os
 from dataclasses import dataclass, fields
+from typing import List, Optional
 
 
 @dataclass
@@ -34,6 +35,8 @@ class ModelParallelConfig:
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0
+    # Megatron selective block recompute: global transformer layer indices (0..num_layers-1)
+    recompute_layer_ids: Optional[List[int]] = None
 
 
 @dataclass
