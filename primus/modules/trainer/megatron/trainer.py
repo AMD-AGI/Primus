@@ -65,7 +65,7 @@ from megatron.core.num_microbatches_calculator import (
     get_num_microbatches,
     update_num_microbatches,
 )
-from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+from megatron.core.optimizer import get_megatron_optimizer, get_mup_config_overrides
 from megatron.core.rerun_state_machine import (
     RerunDiagnostic,
     RerunErrorInjector,
@@ -120,6 +120,7 @@ from megatron.training.training import (
     dummy_train_step,
     enable_forward_pre_hook,
     evaluate_and_print_results,
+    get_megatron_optimizer_config,
     get_model,
     get_optimizer_param_scheduler,
     num_floating_point_operations,
@@ -149,9 +150,10 @@ from primus.backends.megatron.training.global_vars import (
     set_primus_global_variables,
     set_train_start_time,
 )
+from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
-from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
@@ -194,6 +196,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         self.app_metrics = {}
 
+        # Cache for GPU utilization sampling to avoid rocm-smi overhead on every rank
+        # See: https://github.com/AMD-AGI/Primus/pull/439 (Copilot review)
+        self._last_rocm_gpu_util = None
+        self._last_rocm_gpu_util_time = 0.0
+        self._rocm_gpu_util_sample_interval = 5.0  # seconds
+
         # disable all logging handlers
         import logging
 
@@ -210,6 +218,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             "ignore_unknown_args",
             "allow_no_cuda",
             "skip_mpu_initialization",
+            "skip_setup",
         }
 
         invalid_keys = set(kwargs.keys()) - allowed_keys
@@ -341,7 +350,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             self.checkpointing_context = {}
 
-        self.setup()
+        if not kwargs.get("skip_setup", False):
+            self.setup()
 
     def update_primus_config(
         self,
@@ -406,6 +416,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     warning_rank_0(f"-set args.use_checkpoint_args=True [auto_continue_train]")
             else:
                 log_rank_0(f"-{latest_file} does not exist, skip auto_continue_train.")
+
+        # Auto-enable profiling and tensorboard when traces are needed: for MLflow upload
+        # (only if MLflow is enabled) or for local TraceLens report generation.
+        # Without this, generate_tracelens_report=True with profile=False would produce no traces.
+        needs_profiling = (
+            (
+                getattr(args, "mlflow_upload_traces", False)
+                or getattr(args, "mlflow_upload_tracelens_report", False)
+            )
+            and not args.disable_mlflow
+        ) or getattr(args, "generate_tracelens_report", False)
+        if needs_profiling:
+            if not getattr(args, "profile", False):
+                args.profile = True
+                debug_rank_0("Auto-enabled profile=True for trace/tracelens (upload or local generation)")
+            if not getattr(args, "use_pytorch_profiler", False):
+                args.use_pytorch_profiler = True
+                debug_rank_0(
+                    "Auto-enabled use_pytorch_profiler=True for trace/tracelens (upload or local generation)"
+                )
+            if getattr(args, "disable_tensorboard", True):
+                args.disable_tensorboard = False
+                debug_rank_0("Auto-enabled tensorboard (disable_tensorboard=False) for profiler trace output")
 
         # tensorboard
         if not args.disable_tensorboard:
@@ -936,24 +969,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         unwrapped_model = unwrap_model(model)
 
-        kwargs = {}
+        config, config_overrides = get_megatron_optimizer_config(args)
+        config.timers = timers
+        if getattr(args, "use_mup", False):
+            model_config_source = unwrapped_model[0] if isinstance(unwrapped_model, list) else unwrapped_model
+            model_config = get_model_config(model_config_source)
+            mup_overrides = get_mup_config_overrides(
+                config=config,
+                mup_width_mult=model_config.mup_width_mult,
+                optimizer_type=config.optimizer,
+            )
+            if mup_overrides:
+                config_overrides = {**(config_overrides or {}), **mup_overrides}
 
         if "muon" not in args.optimizer:
-            for f in dataclasses.fields(OptimizerConfig):
-                if hasattr(args, f.name):
-                    kwargs[f.name] = getattr(args, f.name)
-            config = OptimizerConfig(**kwargs)
-            config.timers = timers
-
             optimizer = get_megatron_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
+                config_overrides=config_overrides,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
+                dump_param_to_param_group_map=getattr(args, "dump_param_to_param_group_map", None),
             )
         else:
+            kwargs = {}
             for f in dataclasses.fields(MounOptimizerConfig):
                 if hasattr(args, f.name):
                     kwargs[f.name] = getattr(args, f.name)
@@ -963,11 +1001,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer = get_megatron_muon_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
+                config_overrides=config_overrides,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
                 layer_wise_distributed_optimizer="dist" in config.optimizer,
+                dump_param_to_param_group_map=getattr(args, "dump_param_to_param_group_map", None),
             )
 
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
@@ -1167,8 +1204,28 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
         mlflow_writer = get_mlflow_writer()
-        if mlflow_writer:
-            mlflow_writer.end_run()
+        # Always call: uploads to MLflow when enabled; when MLflow disabled, still runs
+        # local-only TraceLens report generation if generate_tracelens_report=True.
+        try:
+            upload_mlflow_artifacts(
+                tensorboard_dir=args.tensorboard_dir,
+                exp_root_path=self.exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", False),
+                upload_logs=getattr(args, "mlflow_upload_logs", False),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+                tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
+            )
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).warning("[MLflow] Artifact upload failed: %s", e)
+        finally:
+            if mlflow_writer:
+                mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -2008,13 +2065,38 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if iteration % args.log_interval == 0:
             # Note(wenx): If we want to collect rocm-smi memory information for the first two iterations,
             # place the collection before the timer to minimize its impact on latency measurements for iterations ≥ 3.
-            if args.log_throughput:
+            rocm_gpu_util = None
+            # Enable throughput calculations if log_throughput or mlflow_upload_performance_metrics is set
+            enable_perf_metrics = args.log_throughput or getattr(
+                args, "mlflow_upload_performance_metrics", False
+            )
+            if enable_perf_metrics:
                 if args.use_rocm_mem_info or (
                     args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
                 ):
                     rocm_total_mem, rocm_used_mem, rocm_free_mem = get_rocm_smi_mem_info(
                         self.module_local_rank
                     )
+                # Collect GPU utilization for performance metrics
+                # Every rank samples its own GPU util (rate-limited to avoid rocm-smi
+                # subprocess overhead) so the all_gather below gets real per-rank values.
+                if getattr(args, "mlflow_upload_performance_metrics", False):
+                    import time
+
+                    now = time.time()
+                    should_sample = (
+                        self._last_rocm_gpu_util is None
+                        or (now - self._last_rocm_gpu_util_time) >= self._rocm_gpu_util_sample_interval
+                    )
+                    if should_sample:
+                        try:
+                            self._last_rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                            self._last_rocm_gpu_util_time = now
+                        except Exception:
+                            pass  # Keep previous cached value if any
+                    rocm_gpu_util = self._last_rocm_gpu_util
+                else:
+                    rocm_gpu_util = None
 
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
@@ -2051,7 +2133,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 elapsed_time_per_iteration * 1000.0,
                 statistics.mean(self.recent_iteration_times),
             )
-            if args.log_throughput:
+            if enable_perf_metrics:
                 if (
                     iteration == self.log_avg_skip_iterations + 1
                     or len(self.recent_tflop_throughputs) >= self.log_avg_reset_interval
@@ -2193,6 +2275,77 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         mlflow_writer.log_metric(
                             f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
                         )
+
+                # Upload performance metrics to MLflow
+                # Groups: Performance (throughput, TPS, iteration time), Memory (peak, usage %), System (GPU util)
+                # NOTE: mlflow_writer only exists on last rank, but all_gather requires all ranks to participate
+                if getattr(args, "mlflow_upload_performance_metrics", False):
+                    # Ensure memory metrics are available when log_timers_to_tensorboard is False
+                    # (mem_collector, used_mem, mem_usage are otherwise only set inside log_timers_to_tensorboard)
+                    if not args.log_timers_to_tensorboard:
+                        hip_free_mem, hip_total_mem = torch.cuda.mem_get_info()
+                        used_mem = hip_total_mem - hip_free_mem
+                        mem_usage = used_mem / hip_total_mem
+                        mem_collector = "hip"
+                        if args.use_rocm_mem_info or (
+                            args.use_rocm_mem_info_iters is not None
+                            and iteration in args.use_rocm_mem_info_iters
+                        ):
+                            mem_collector = "rocm"
+                            used_mem = rocm_used_mem
+                            mem_usage = rocm_mem_usage
+                    # System metrics - GPU utilization per rank
+                    # ALL ranks must participate in all_gather, even if they don't have mlflow_writer
+                    # Use -1 as sentinel for unavailable GPU util
+                    util_value = rocm_gpu_util if rocm_gpu_util is not None else -1.0
+                    util_tensor = torch.tensor([util_value], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_utils, util_tensor)
+
+                    # Only the last rank (which has mlflow_writer) logs the metrics
+                    if mlflow_writer:
+                        # Performance metrics
+                        mlflow_writer.log_metric("perf/throughput_tflops_per_gpu", throughput, iteration)
+                        mlflow_writer.log_metric(
+                            "perf/tps_tokens_per_sec_per_gpu", token_throughput, iteration
+                        )
+                        mlflow_writer.log_metric(
+                            "perf/iteration_time_ms",
+                            elapsed_time_per_iteration * 1000.0,
+                            iteration,
+                        )
+                        # Memory metrics
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_current_mem_gb",
+                            used_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_mem_utilization_pct",
+                            mem_usage * 100.0,
+                            iteration,
+                        )
+                        # Log GPU utilization from gathered values
+                        valid_utils = []
+                        for rank, util_val in enumerate(gathered_utils):
+                            util = util_val.item()
+                            if util >= 0:  # Filter out sentinel values (-1)
+                                mlflow_writer.log_metric(
+                                    f"perf/gpu_utilization_pct_rank{rank}",
+                                    util,
+                                    iteration,
+                                )
+                                valid_utils.append(util)
+                        # Also log average GPU utilization (only from valid values)
+                        if valid_utils:
+                            avg_util = sum(valid_utils) / len(valid_utils)
+                            mlflow_writer.log_metric(
+                                "perf/gpu_utilization_pct_avg",
+                                avg_util,
+                                iteration,
+                            )
+
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)

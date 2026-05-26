@@ -10,41 +10,29 @@
     <header class="hero">
       <div class="hero__inner">
         <div class="hero__content">
-          <p class="eyebrow">Primus Engineering Dashboard</p>
-          <h1>Backend gap reports and weekly engineering updates, in one place.</h1>
+          <p class="eyebrow">Primus Engineering</p>
+          <h1>Primus Dashboard</h1>
           <p class="hero__summary">
-            A single, verified source for the Primus main branch: track backend-to-upstream
-            drift, read every weekly engineering report, and follow key recommendations
-            across Megatron-LM, torchtitan, and Primus-Turbo.
+            Weekly engineering updates, backend drift, and key recommendations for the
+            Primus main branch.
           </p>
           <div class="hero__chips" id="hero-chips"></div>
         </div>
-        <nav class="section-tabs" role="tablist" aria-label="Primus dashboard sections">
-          <button
-            class="section-tab is-active"
-            role="tab"
-            data-section="weekly"
-            aria-selected="true"
-          >
-            <span class="section-tab__label">Weekly Reports</span>
-            <span class="section-tab__sub" id="tab-weekly-sub">-</span>
-          </button>
-          <button
-            class="section-tab"
-            role="tab"
-            data-section="backend-gap"
-            aria-selected="false"
-          >
-            <span class="section-tab__label">Backend Gap</span>
-            <span class="section-tab__sub" id="tab-gap-sub">-</span>
-          </button>
-        </nav>
       </div>
     </header>
 
     <main class="layout">
       <!-- ========== WEEKLY REPORTS SECTION ========== -->
-      <section class="section" data-section-panel="weekly" aria-label="Weekly Reports">
+      <section class="section section--lead" aria-label="Latest weekly update">
+        <div class="section-heading">
+          <p class="section-heading__eyebrow">Weekly update</p>
+          <h2>Latest engineering snapshot</h2>
+          <p>
+            Start here for the current status of main: merged work, drift posture,
+            and recommendations that need attention.
+          </p>
+        </div>
+
         <div class="stat-row" id="weekly-stat-row"></div>
 
         <article class="featured-panel" id="weekly-featured" hidden>
@@ -54,18 +42,14 @@
               <h2 id="weekly-featured-title">-</h2>
               <p class="featured-panel__window" id="weekly-featured-window">-</p>
             </div>
-            <div class="featured-panel__actions">
-              <a
-                id="weekly-featured-link"
-                class="button button--primary"
-                target="_blank"
-                rel="noopener noreferrer"
-                href="#"
-              >Open Markdown report</a>
-            </div>
           </header>
 
           <div class="featured-panel__grid">
+            <section class="featured-panel__card featured-panel__card--wide">
+              <h3>Key findings</h3>
+              <ul class="findings-list" id="weekly-featured-findings"></ul>
+            </section>
+
             <section class="featured-panel__card">
               <h3>Merged PRs</h3>
               <p class="featured-panel__kpi" id="weekly-featured-prs">-</p>
@@ -77,22 +61,71 @@
               <ul class="recommendation-list" id="weekly-featured-recommendations"></ul>
             </section>
 
-            <section class="featured-panel__card featured-panel__card--wide">
-              <h3>Key findings</h3>
-              <ul class="findings-list" id="weekly-featured-findings"></ul>
-            </section>
           </div>
         </article>
+      </section>
 
-        <section class="panel" aria-label="Weekly report history">
+      <!-- ========== BACKEND DEEP DIVES SECTION ========== -->
+      <section class="section" aria-label="Backend deep dives">
+        <div class="section-heading section-heading--split">
+          <div>
+            <p class="section-heading__eyebrow">Backend deep dives</p>
+            <h2>Detailed backend drift reviews</h2>
+            <p>
+              Backend-specific PDF reports generated from structured comparisons.
+              New backends appear here automatically when their metadata is added.
+            </p>
+          </div>
+          <div class="section-heading__meta" id="gap-result-count">0 reports</div>
+        </div>
+
+        <div class="stat-row" id="gap-stat-row"></div>
+
+        <div class="filter-row filter-row--compact" id="gap-filter-row">
+          <label class="field">
+            <span>Backend</span>
+            <select id="backend-filter">
+              <option value="all">All backends</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Status</span>
+            <select id="status-filter">
+              <option value="all">All statuses</option>
+              <option value="verified">Verified</option>
+              <option value="draft">Draft</option>
+              <option value="superseded">Superseded</option>
+            </select>
+          </label>
+
+          <label class="field field--search">
+            <span>Search</span>
+            <input
+              id="search-filter"
+              type="search"
+              placeholder="Search backend, target, risk, dependency..."
+            />
+          </label>
+        </div>
+
+        <div id="loading-state" class="state">Loading backend deep dives...</div>
+        <div id="error-state" class="state state--error" hidden></div>
+        <div id="empty-state" class="state" hidden>No backend reports match.</div>
+        <div id="report-list" class="backend-deep-dive-grid" hidden></div>
+      </section>
+
+      <!-- ========== WEEKLY ARCHIVE SECTION ========== -->
+      <section class="section" aria-label="Weekly report archive">
+        <section class="panel panel--quiet">
           <div class="panel__header">
-            <h2>Weekly report history</h2>
+            <h2>Weekly report archive</h2>
             <p class="panel__subtitle">
-              Newest first. Each entry links to the GitHub-rendered Markdown report.
+              Available weekly Markdown reports. Newest first.
             </p>
           </div>
 
-          <div class="filter-row filter-row--compact">
+          <div class="filter-row filter-row--compact" id="weekly-filter-row">
             <label class="field">
               <span>Status</span>
               <select id="weekly-recommendation-filter">
@@ -119,52 +152,6 @@
           <div id="weekly-error-state" class="state state--error" hidden></div>
           <div id="weekly-empty-state" class="state" hidden>No weekly reports match.</div>
           <div id="weekly-list" class="card-list" hidden></div>
-        </section>
-      </section>
-
-      <!-- ========== BACKEND GAP SECTION ========== -->
-      <section class="section" data-section-panel="backend-gap" aria-label="Backend Gap" hidden>
-        <div class="stat-row" id="gap-stat-row"></div>
-
-        <section class="panel" aria-label="Backend gap filters">
-          <div class="filter-row">
-            <label class="field">
-              <span>Backend</span>
-              <select id="backend-filter">
-                <option value="all">All backends</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>Status</span>
-              <select id="status-filter">
-                <option value="all">All statuses</option>
-                <option value="verified">Verified</option>
-                <option value="draft">Draft</option>
-                <option value="superseded">Superseded</option>
-              </select>
-            </label>
-
-            <label class="field field--search">
-              <span>Search</span>
-              <input
-                id="search-filter"
-                type="search"
-                placeholder="Search backend, title, scope, highlight..."
-              />
-            </label>
-          </div>
-
-          <div class="filter-summary">
-            <span id="result-count">0 reports</span>
-          </div>
-        </section>
-
-        <section class="panel" id="reports-panel">
-          <div id="loading-state" class="state">Loading backend gap reports...</div>
-          <div id="error-state" class="state state--error" hidden></div>
-          <div id="empty-state" class="state" hidden>No reports match the current filters.</div>
-          <div id="report-list" class="report-list" hidden></div>
         </section>
       </section>
     </main>

@@ -39,7 +39,7 @@ class SafeWrapper:
 
         self.PRIMUS_REPO = "https://github.com/AMD-AGI/Primus.git"
         self.PRIMUS_TURBO_REPO = "https://github.com/AMD-AGI/Primus-Turbo.git"
-        self.PRIMUS_TURBO_COMMIT = "a4488f6cdb15cfff4383c61af7922bb50803f0ea"
+        self.PRIMUS_TURBO_COMMIT = "06b8d3fefd91be26d6adfb5cd43c7524ef87b825"  # Add HYBRID FP8 format support for Triton backend in gemm and grouped_gemm (#278)
         self.PRIMUS_WORKDIR = os.getenv("PRIMUS_WORKDIR", "")
         self.BENCHMARK_LOG_DIR = os.getenv("BENCHMARK_LOG_DIR", "")
 
