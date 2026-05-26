@@ -147,14 +147,15 @@ modules:
       context_parallel_size: 1
       sequence_parallel: false
 
-      # FORCE-LB EXPERIMENT VARIANT: this yaml is a copy of
-      # deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml with the
-      # single change of force_lb=false -> true (Bridge-side companion
-      # has the same change). Used to isolate whether the 13%
-      # Bridge-vs-Native wall-clock gap on DeepSeek is dominated by the
-      # alltoall straggler (force_lb=true eliminates it) or by framework
-      # overhead (force_lb=true leaves it untouched). Router does NOT
-      # learn under this flag; loss curve is benchmark-only.
+      # FORCE-LB BENCHMARK VARIANT: force_lb=true forces the MoE router to
+      # output uniform random logits in the forward pass (matches Bridge's
+      # apply_random_logits / our PrimusTopKRouter / RandomSTE). This
+      # eliminates the alltoall straggler and yields a stable benchmark
+      # baseline -- so we can isolate whether the ~13% Bridge-vs-Native
+      # wall-clock gap on DeepSeek is dominated by the straggler
+      # (force_lb=true would close it) or by framework overhead (it would
+      # not). Router does NOT learn under this flag; loss curve is
+      # benchmark-only and should not be used for production SFT.
       moe_router_force_load_balancing: true
 
       # =====================================================================

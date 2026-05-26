@@ -39,7 +39,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   * Dataset: SQuAD with `squad` formatter (byte-identical prompt template)
 #   * train_iters=20, eval skipped
 #
-# DDP / CE alignment with deepseek_v2_lite-BF16-sft-packed-bridge_aligned-force_lb.yaml:
+# DDP / CE alignment with deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml:
 #   * use_distributed_optimizer: true
 #   * overlap_grad_reduce: true
 #   * overlap_param_gather: true
