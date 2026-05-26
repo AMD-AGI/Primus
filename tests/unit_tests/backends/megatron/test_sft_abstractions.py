@@ -77,7 +77,16 @@ def test_tokenize_formatted_sft_sample_marks_only_supervised_segments():
         max_seq_length=512,
     )
 
-    assert torch.equal(input_ids, labels)
+    # Megatron's compute_language_model_loss does NOT shift labels internally,
+    # so tokenize_formatted_sft_sample MUST emit next-token-shifted labels:
+    #     labels[i] == input_ids[i + 1]   for i in [0, L-2]
+    # Verify the shift contract on the non-padding prefix.
+    assert input_ids.shape == labels.shape
+    if input_ids.numel() >= 2:
+        assert torch.equal(labels[:-1], input_ids[1:])
+
+    # Test name's invariant: loss_mask flags only the supervised (response)
+    # segment, so it must be partially set (not all-0, not all-1).
     assert loss_mask.sum().item() > 0
     assert loss_mask.sum().item() < len(loss_mask)
 
