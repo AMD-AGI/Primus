@@ -1204,6 +1204,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
         mlflow_writer = get_mlflow_writer()
+        # Barrier to ensure all ranks have finished writing files before upload.
+        # Must run on ALL ranks to avoid deadlock (only last rank has mlflow_writer).
+        if dist.is_initialized():
+            dist.barrier()
+
         # Always call: uploads to MLflow when enabled; when MLflow disabled, still runs
         # local-only TraceLens report generation if generate_tracelens_report=True.
         try:
@@ -1226,6 +1231,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         finally:
             if mlflow_writer:
                 mlflow_writer.end_run()
+            if dist.is_initialized():
+                dist.barrier()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -1668,8 +1675,34 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if wandb_writer:
                 wandb_writer.finish()
             mlflow_writer = get_mlflow_writer()
-            if mlflow_writer:
-                mlflow_writer.end_run()
+            # Barrier to ensure all ranks have finished writing files before upload.
+            # Must run on ALL ranks to avoid deadlock (only last rank has mlflow_writer).
+            if dist.is_initialized():
+                dist.barrier()
+            try:
+                upload_mlflow_artifacts(
+                    tensorboard_dir=args.tensorboard_dir,
+                    exp_root_path=self.exp_root_path,
+                    upload_traces=getattr(args, "mlflow_upload_traces", False),
+                    upload_logs=getattr(args, "mlflow_upload_logs", False),
+                    generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                    upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                    tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                    tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+                    tracelens_cleanup_after_upload=getattr(
+                        args, "mlflow_tracelens_cleanup_after_upload", False
+                    ),
+                    tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
+                )
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning("[MLflow] Artifact upload failed: %s", e)
+            finally:
+                if mlflow_writer:
+                    mlflow_writer.end_run()
+                if dist.is_initialized():
+                    dist.barrier()
             ft_integration.shutdown()
             sys.exit(exit_code)
 
