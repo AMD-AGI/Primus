@@ -24,7 +24,6 @@ import time
 
 import torch
 
-
 # 70B Llama2 SwiGLU MLP shape: fc1 weight = (28672, 8192) bf16 ≈ 470 MB
 # 加载时通常拆成 8 个 chunks，每个 ~58 MB；fc2 weight = (8192, 28672) 同量级
 NUM_LAYERS = 80
@@ -36,10 +35,7 @@ DEVICE = "cuda"
 
 def _build_shards() -> list[torch.Tensor]:
     """模拟一次 dist_ckpt 加载得到的 sub_state_dict (list[Tensor on GPU])."""
-    return [
-        torch.empty(PER_SHARD_SHAPE, dtype=DTYPE, device=DEVICE)
-        for _ in range(SHARDS_PER_MERGE)
-    ]
+    return [torch.empty(PER_SHARD_SHAPE, dtype=DTYPE, device=DEVICE) for _ in range(SHARDS_PER_MERGE)]
 
 
 def merge_old(sub_state_dict: list[torch.Tensor]) -> torch.Tensor:
@@ -172,10 +168,14 @@ def main():
     saved_alloc = old_r["peak_alloc_gb"] - new_r["peak_alloc_gb"]
     saved_frag = old_r["fragmentation_gb"] - new_r["fragmentation_gb"]
     print("===== SUMMARY =====")
-    print(f"  peak alloc reduced by  : {saved_alloc:+.2f} GB"
-          f"  ({saved_alloc / max(old_r['peak_alloc_gb'], 1e-9) * 100:+.1f} %)")
-    print(f"  fragmentation reduced  : {saved_frag:+.2f} GB"
-          f"  ({saved_frag / max(old_r['fragmentation_gb'], 1e-9) * 100:+.1f} %)")
+    print(
+        f"  peak alloc reduced by  : {saved_alloc:+.2f} GB"
+        f"  ({saved_alloc / max(old_r['peak_alloc_gb'], 1e-9) * 100:+.1f} %)"
+    )
+    print(
+        f"  fragmentation reduced  : {saved_frag:+.2f} GB"
+        f"  ({saved_frag / max(old_r['fragmentation_gb'], 1e-9) * 100:+.1f} %)"
+    )
     print(f"  old OOM                : {old_r['oom']}")
     print(f"  new OOM                : {new_r['oom']}")
     print(f"  force-cpu OOM          : {cpu_r['oom']}")

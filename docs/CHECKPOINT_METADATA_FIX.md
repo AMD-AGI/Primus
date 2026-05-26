@@ -19,7 +19,7 @@ Megatron-LM's checkpoint system has strict conventions:
 
 1. **Metadata file** (`latest_checkpointed_iteration.txt`):
    - Must contain `iteration > 0` OR the string `"release"`
-   
+
 2. **Directory structure**:
    - If iteration N: checkpoint must be in `iter_{N:07d}/` (e.g., `iter_0000100/`)
    - If release: checkpoint must be in `release/` directory
@@ -58,12 +58,12 @@ release_dir = megatron_path / "release"
 if metadata_file.exists() and iter_dir.exists():
     with open(metadata_file, 'r') as f:
         content = f.read().strip()
-    
+
     if content == "0":
         # Step 1: Update metadata
         with open(metadata_file, 'w') as f:
             f.write("release")
-        
+
         # Step 2: Rename directory
         if not release_dir.exists():
             iter_dir.rename(release_dir)

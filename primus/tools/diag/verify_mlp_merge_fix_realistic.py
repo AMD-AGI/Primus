@@ -7,11 +7,9 @@
 from __future__ import annotations
 
 import gc
-import os
 import time
 
 import torch
-
 
 NUM_LAYERS = 80
 SHARDS_PER_MERGE = 8
@@ -69,8 +67,7 @@ def run(merge_fn, label, context_tensors):
         for layer in range(NUM_LAYERS):
             for which in ("fc1", "fc2"):
                 shards = [
-                    torch.empty(PER_SHARD_SHAPE, dtype=DTYPE, device=DEVICE)
-                    for _ in range(SHARDS_PER_MERGE)
+                    torch.empty(PER_SHARD_SHAPE, dtype=DTYPE, device=DEVICE) for _ in range(SHARDS_PER_MERGE)
                 ]
                 merged_keep.append(merge_fn(shards))
                 if (layer + 1) % 20 == 0 and which == "fc2":
@@ -117,8 +114,7 @@ def main():
     for label, fn in [("OLD (no del)", merge_old), ("NEW (del sub_state_dict)", merge_new)]:
         print(f"===== {label} =====")
         context = [
-            torch.empty(CONTEXT_TENSOR_SHAPE, dtype=DTYPE, device=DEVICE)
-            for _ in range(CONTEXT_TENSOR_COUNT)
+            torch.empty(CONTEXT_TENSOR_SHAPE, dtype=DTYPE, device=DEVICE) for _ in range(CONTEXT_TENSOR_COUNT)
         ]
         r = run(fn, label, context)
         del context

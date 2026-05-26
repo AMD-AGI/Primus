@@ -69,7 +69,7 @@ modules:
     framework: megatron
     config: sft_trainer.yaml
     model: llama3_8B.yaml
-    
+
     overrides:
       stage: sft  # ← This selects the SFT trainer
       sft_dataset_name: "tatsu-lab/alpaca"

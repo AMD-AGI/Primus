@@ -15,7 +15,7 @@ from primus.modules.module_utils import log_rank_0
 class MegatronSFTTrainer(MegatronBaseTrainer):
     """
     Trainer class for Megatron-LM based supervised fine-tuning.
-    
+
     This trainer handles:
         - SFT workflows with HuggingFace datasets
         - Instruction tuning with proper loss masking
@@ -23,7 +23,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         - Direct Megatron-LM integration
         - Support for various model architectures (Llama, GPT, etc.)
         - LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning
-    
+
     Inherits from MegatronBaseTrainer which provides:
         - Argument injection into Megatron runtime
         - ROCm compatibility patches
@@ -45,7 +45,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
 
         self.model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"Initialized MegatronSFTTrainer for model_type: {self.model_type}")
-    
+
     def _init_lora(self):
         """Initialize LoRA (Low-Rank Adaptation) if enabled in config."""
         lora_config = getattr(self.backend_args, "lora", None)
@@ -162,9 +162,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         def _count_params(m):
             if isinstance(m, list):
                 total = sum(p.numel() for chunk in m for p in chunk.parameters())
-                trainable = sum(
-                    p.numel() for chunk in m for p in chunk.parameters() if p.requires_grad
-                )
+                trainable = sum(p.numel() for chunk in m for p in chunk.parameters() if p.requires_grad)
             else:
                 total = sum(p.numel() for p in m.parameters())
                 trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -186,9 +184,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
 
             if do_pre_wrap_load:
                 log_rank_0("=" * 60)
-                log_rank_0(
-                    f"[PEFT pre-wrap] Loading base model weights from: {pretrained_path}"
-                )
+                log_rank_0(f"[PEFT pre-wrap] Loading base model weights from: {pretrained_path}")
 
                 # ----------------------------------------------------------
                 # Why we bypass megatron.training.checkpointing.load_checkpoint
@@ -257,7 +253,16 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                                     t.data_ptr(),
                                 )
                         except Exception as e:
-                            out[name] = (f"ERR:{type(e).__name__}:{e}", None, None, None, None, None, None, None)
+                            out[name] = (
+                                f"ERR:{type(e).__name__}:{e}",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
 
                     try:
                         layer0 = model.decoder.layers[0]
@@ -265,24 +270,21 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                         log_rank_0(f"[PEFT pre-wrap] {stage}: cannot access decoder.layers[0]: {e}")
                         return out
 
-                    _try("L0.attn.linear_qkv.weight",
-                         lambda: layer0.self_attention.linear_qkv.weight)
-                    _try("L0.attn.linear_qkv.layer_norm_weight",
-                         lambda: getattr(layer0.self_attention.linear_qkv, "layer_norm_weight", None))
-                    _try("L0.attn.linear_proj.weight",
-                         lambda: layer0.self_attention.linear_proj.weight)
-                    _try("L0.mlp.linear_fc1.weight",
-                         lambda: layer0.mlp.linear_fc1.weight)
-                    _try("L0.mlp.linear_fc1.layer_norm_weight",
-                         lambda: getattr(layer0.mlp.linear_fc1, "layer_norm_weight", None))
-                    _try("L0.mlp.linear_fc2.weight",
-                         lambda: layer0.mlp.linear_fc2.weight)
-                    _try("final_layernorm.weight",
-                         lambda: model.decoder.final_layernorm.weight)
-                    _try("embedding.word_embeddings.weight",
-                         lambda: model.embedding.word_embeddings.weight)
-                    _try("output_layer.weight",
-                         lambda: model.output_layer.weight)
+                    _try("L0.attn.linear_qkv.weight", lambda: layer0.self_attention.linear_qkv.weight)
+                    _try(
+                        "L0.attn.linear_qkv.layer_norm_weight",
+                        lambda: getattr(layer0.self_attention.linear_qkv, "layer_norm_weight", None),
+                    )
+                    _try("L0.attn.linear_proj.weight", lambda: layer0.self_attention.linear_proj.weight)
+                    _try("L0.mlp.linear_fc1.weight", lambda: layer0.mlp.linear_fc1.weight)
+                    _try(
+                        "L0.mlp.linear_fc1.layer_norm_weight",
+                        lambda: getattr(layer0.mlp.linear_fc1, "layer_norm_weight", None),
+                    )
+                    _try("L0.mlp.linear_fc2.weight", lambda: layer0.mlp.linear_fc2.weight)
+                    _try("final_layernorm.weight", lambda: model.decoder.final_layernorm.weight)
+                    _try("embedding.word_embeddings.weight", lambda: model.embedding.word_embeddings.weight)
+                    _try("output_layer.weight", lambda: model.output_layer.weight)
 
                     for k, v in out.items():
                         if isinstance(v[0], float):
@@ -302,9 +304,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 # Build sharded_state_dict from the unwrapped base model.
                 # ----------------------------------------------------------
                 try:
-                    dp_cp_group = core_mpu.get_data_parallel_group(
-                        with_context_parallel=True
-                    )
+                    dp_cp_group = core_mpu.get_data_parallel_group(with_context_parallel=True)
                 except Exception:
                     dp_cp_group = None
 
@@ -313,9 +313,9 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 # sharded_state_dict we build matches the on-disk layout.
                 try:
                     common_sd = dist_checkpointing.load_common_state_dict(ckpt_dir)
-                    sharded_sd_metadata = dist_checkpointing.load_content_metadata(
-                        preloaded_state_dict=common_sd
-                    ) or {}
+                    sharded_sd_metadata = (
+                        dist_checkpointing.load_content_metadata(preloaded_state_dict=common_sd) or {}
+                    )
                 except Exception as e:
                     log_rank_0(
                         f"[PEFT pre-wrap] load_content_metadata failed "
@@ -329,17 +329,13 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                     f"{ {k: v for k, v in sharded_sd_metadata.items() if k != 'dp_cp_group'} }"
                 )
 
-                sharded_state_dict = {
-                    "model": model.sharded_state_dict(metadata=sharded_sd_metadata)
-                }
+                sharded_state_dict = {"model": model.sharded_state_dict(metadata=sharded_sd_metadata)}
 
                 # ----------------------------------------------------------
                 # Load directly via dist_checkpointing.load (Bridge fast path).
                 # strict="log_all" matches what the rest of the project uses.
                 # ----------------------------------------------------------
-                loaded = dist_checkpointing.load(
-                    sharded_state_dict, ckpt_dir, strict="log_all"
-                )
+                loaded = dist_checkpointing.load(sharded_state_dict, ckpt_dir, strict="log_all")
 
                 # ----------------------------------------------------------
                 # Apply to model. Use strict=False so adapter/extra keys
@@ -347,9 +343,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 # log IncompatibleKeys so we DON'T silently skip everything
                 # like Megatron-LM's helper did.
                 # ----------------------------------------------------------
-                missing, unexpected = model.load_state_dict(
-                    loaded["model"], strict=False
-                )
+                missing, unexpected = model.load_state_dict(loaded["model"], strict=False)
                 n_missing = len(missing) if missing is not None else 0
                 n_unexpected = len(unexpected) if unexpected is not None else 0
                 log_rank_0(
@@ -357,20 +351,17 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                     f"missing={n_missing}, unexpected={n_unexpected}"
                 )
                 if n_missing:
-                    log_rank_0(
-                        f"[PEFT pre-wrap] first 5 missing keys: {list(missing)[:5]}"
-                    )
+                    log_rank_0(f"[PEFT pre-wrap] first 5 missing keys: {list(missing)[:5]}")
                 if n_unexpected:
-                    log_rank_0(
-                        f"[PEFT pre-wrap] first 5 unexpected keys: {list(unexpected)[:5]}"
-                    )
+                    log_rank_0(f"[PEFT pre-wrap] first 5 unexpected keys: {list(unexpected)[:5]}")
 
                 after_canaries = _collect_canaries("AFTER  load")
                 log_rank_0("[PEFT pre-wrap] === canary deltas (BEFORE -> AFTER load) ===")
                 for k, before_v in before_canaries.items():
                     after_v = after_canaries.get(k)
                     if (
-                        before_v is None or after_v is None
+                        before_v is None
+                        or after_v is None
                         or not isinstance(before_v[0], float)
                         or not isinstance(after_v[0], float)
                     ):
@@ -447,30 +438,35 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                         except Exception:
                             return None
                         path_map = {
-                            "L0.attn.linear_qkv.weight":
-                                ["self_attention.linear_qkv.to_wrap.weight",
-                                 "self_attention.linear_qkv.weight"],
-                            "L0.attn.linear_qkv.layer_norm_weight":
-                                ["self_attention.linear_qkv.to_wrap.layer_norm_weight",
-                                 "self_attention.linear_qkv.layer_norm_weight"],
-                            "L0.attn.linear_proj.weight":
-                                ["self_attention.linear_proj.to_wrap.weight",
-                                 "self_attention.linear_proj.weight"],
-                            "L0.mlp.linear_fc1.weight":
-                                ["mlp.linear_fc1.to_wrap.weight",
-                                 "mlp.linear_fc1.weight"],
-                            "L0.mlp.linear_fc1.layer_norm_weight":
-                                ["mlp.linear_fc1.to_wrap.layer_norm_weight",
-                                 "mlp.linear_fc1.layer_norm_weight"],
-                            "L0.mlp.linear_fc2.weight":
-                                ["mlp.linear_fc2.to_wrap.weight",
-                                 "mlp.linear_fc2.weight"],
-                            "final_layernorm.weight":
-                                ["decoder_final_layernorm_dummy"],  # accessed via model.decoder below
-                            "embedding.word_embeddings.weight":
-                                ["embedding_dummy"],
-                            "output_layer.weight":
-                                ["output_layer_dummy"],
+                            "L0.attn.linear_qkv.weight": [
+                                "self_attention.linear_qkv.to_wrap.weight",
+                                "self_attention.linear_qkv.weight",
+                            ],
+                            "L0.attn.linear_qkv.layer_norm_weight": [
+                                "self_attention.linear_qkv.to_wrap.layer_norm_weight",
+                                "self_attention.linear_qkv.layer_norm_weight",
+                            ],
+                            "L0.attn.linear_proj.weight": [
+                                "self_attention.linear_proj.to_wrap.weight",
+                                "self_attention.linear_proj.weight",
+                            ],
+                            "L0.mlp.linear_fc1.weight": [
+                                "mlp.linear_fc1.to_wrap.weight",
+                                "mlp.linear_fc1.weight",
+                            ],
+                            "L0.mlp.linear_fc1.layer_norm_weight": [
+                                "mlp.linear_fc1.to_wrap.layer_norm_weight",
+                                "mlp.linear_fc1.layer_norm_weight",
+                            ],
+                            "L0.mlp.linear_fc2.weight": [
+                                "mlp.linear_fc2.to_wrap.weight",
+                                "mlp.linear_fc2.weight",
+                            ],
+                            "final_layernorm.weight": [
+                                "decoder_final_layernorm_dummy"
+                            ],  # accessed via model.decoder below
+                            "embedding.word_embeddings.weight": ["embedding_dummy"],
+                            "output_layer.weight": ["output_layer_dummy"],
                         }
                         if name == "final_layernorm.weight":
                             try:

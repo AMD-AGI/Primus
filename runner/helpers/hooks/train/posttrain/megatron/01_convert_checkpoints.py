@@ -12,10 +12,10 @@ It calls ``AutoBridge.import_ckpt()`` directly and then normalizes the produced
 checkpoint layout so native Megatron-LM finetune loading can consume it.
 """
 
+import argparse
 import os
 import sys
 import time
-import argparse
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -23,7 +23,7 @@ from pathlib import Path
 PRIMUS_ROOT = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(PRIMUS_ROOT))
 
-from primus.core.config.primus_config import load_primus_config, get_module_config
+from primus.core.config.primus_config import get_module_config, load_primus_config
 
 
 def _is_rank_0() -> bool:
@@ -168,25 +168,26 @@ def wait_for_conversion(done_file: Path, lock_file: Path, timeout: int = 600):
 def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
     """
     Fix common.pt to include 'args' for Megatron-LM compatibility.
-    
+
     Megatron-LM expects 'args' in common.pt's state_dict for loading torch_dist
     checkpoints. HuggingFace converted checkpoints are always TP=1, PP=1.
     """
-    import torch
     from types import SimpleNamespace
-    
+
+    import torch
+
     common_pt = checkpoint_dir / "common.pt"
-    
+
     log_info(f"  3. Adding 'args' to common.pt for Megatron-LM compatibility")
-    
+
     # Load existing common.pt
-    state_dict = torch.load(common_pt, map_location='cpu')
-    
+    state_dict = torch.load(common_pt, map_location="cpu")
+
     # Check if args already exists
-    if 'args' in state_dict:
+    if "args" in state_dict:
         log_info("     'args' already exists in common.pt, skipping")
         return
-    
+
     # Create args namespace with default values for HuggingFace converted checkpoints
     # HF models are single-device, so TP=1, PP=1
     args = SimpleNamespace(
@@ -198,9 +199,9 @@ def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
         no_save_optim=True,
         ckpt_fully_parallel_save=False,
     )
-    
+
     # Add args to state_dict and save
-    state_dict['args'] = args
+    state_dict["args"] = args
     torch.save(state_dict, common_pt)
     log_success("     Successfully added 'args' to common.pt")
 
@@ -259,40 +260,40 @@ def main():
 
         try:
             convert_checkpoint(hf_path, str(megatron_path))
-            
+
             # Fix metadata and directory structure for converted checkpoints
             # Megatron-Bridge creates iter_0000000 directory with iteration=0 metadata
             # But Megatron-LM requires:
             #   - iteration > 0 OR metadata = "release"
             #   - If metadata = "release", checkpoint must be in "release/" directory
-            
+
             metadata_file = megatron_path / "latest_checkpointed_iteration.txt"
             iter_dir = megatron_path / "iter_0000000"
             release_dir = megatron_path / "release"
-            
+
             if metadata_file.exists() and iter_dir.exists():
-                with open(metadata_file, 'r') as f:
+                with open(metadata_file, "r") as f:
                     content = f.read().strip()
-                
+
                 if content == "0":
                     log_info("Fixing HuggingFace converted checkpoint structure:")
-                    
+
                     # Step 1: Update metadata file
                     log_info("  1. Changing metadata from '0' to 'release'")
-                    with open(metadata_file, 'w') as f:
+                    with open(metadata_file, "w") as f:
                         f.write("release")
-                    
+
                     # Step 2: Rename directory to match
                     if not release_dir.exists():
                         log_info("  2. Renaming 'iter_0000000' -> 'release'")
                         iter_dir.rename(release_dir)
-                    
+
                     log_success("Checkpoint structure fixed for Megatron-LM compatibility")
-            
+
             # Step 3: Add 'args' to common.pt for Megatron-LM compatibility
             # Megatron-Bridge saves config to run_config.yaml, but Megatron-LM expects 'args' in common.pt
             fix_common_pt_for_megatron_lm(release_dir if release_dir.exists() else iter_dir)
-            
+
             done_file.touch()
             log_success(f"Checkpoint prepared at {megatron_path}")
         finally:

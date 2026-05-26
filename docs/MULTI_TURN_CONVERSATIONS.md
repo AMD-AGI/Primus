@@ -26,14 +26,14 @@ modules:
     framework: megatron
     config: sft_trainer.yaml
     model: llama3_8B.yaml
-    
+
     overrides:
       stage: sft
-      
+
       # Use messages format for multi-turn conversations
       sft_dataset_name: "/path/to/conversations.jsonl"
       sft_conversation_format: "openai"  # or "messages"
-      
+
       # Training parameters
       train_iters: 1000
       global_batch_size: 128
@@ -223,28 +223,28 @@ def convert_to_messages(input_file, output_file):
     with open(input_file, 'r') as f_in, open(output_file, 'w') as f_out:
         for line in f_in:
             data = json.loads(line)
-            
+
             messages = []
-            
+
             # Add system prompt if exists
             if 'system' in data:
                 messages.append({
                     "role": "system",
                     "content": data['system']
                 })
-            
+
             # Add user message
             messages.append({
                 "role": "user",
                 "content": data.get('instruction', data.get('prompt', ''))
             })
-            
+
             # Add assistant response
             messages.append({
                 "role": "assistant",
                 "content": data.get('response', data.get('output', ''))
             })
-            
+
             f_out.write(json.dumps({"messages": messages}) + '\n')
 
 # Usage

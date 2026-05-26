@@ -36,16 +36,16 @@ modules:
     framework: megatron
     config: sft_trainer.yaml
     model: llama3_8B.yaml
-    
+
     overrides:
       stage: sft
-      
+
       # Use local JSONL file instead of HuggingFace dataset
       sft_dataset_name: "/path/to/your/data.jsonl"
-      
+
       # Or JSON file
       # sft_dataset_name: "/path/to/your/data.json"
-      
+
       sft_conversation_format: "alpaca"
       # ... other training parameters
 ```

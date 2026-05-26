@@ -7,36 +7,36 @@ modules:
   post_trainer:
     framework: megatron
     config: sft_trainer.yaml
-    
+
     # Model to run
     model: qwen3_235B_A22B.yaml
-    
+
     overrides:
       # Specify stage to use SFT trainer (required)
       stage: sft
-      
+
       hf_path: Qwen/Qwen3-235B-A22B
       tokenizer_model: Qwen/Qwen3-235B-A22B
 
       # SFT-specific configuration
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"
-      
+
       # Logging
       wandb_project: "Primus_Qwen3_235B_A22B_SFT"
       stderr_sink_level: DEBUG
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 10
-      
+
       # Training configuration
       train_iters: 20
       micro_batch_size: 1
       global_batch_size: 128
-      
+
       # Sequence length
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
-      
+
       # Learning rate (typically lower for fine-tuning)
       lr: 1.0e-5
       min_lr: 0.0
@@ -46,14 +46,14 @@ modules:
       weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
-      
+
       # Loss masking
       eod_mask_loss: false  # SFT uses custom loss masking
-      
+
       # Model initialization
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
-      
+
       # Parallelism configuration
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 4
@@ -61,12 +61,12 @@ modules:
       expert_model_parallel_size: 8
       context_parallel_size: 1
       sequence_parallel: 1
-      
+
       # Data parallelism
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: false
-      
+
       # Checkpoint configuration
       finetune: true  # Load pretrained checkpoint
       load: null  # Path to pretrained checkpoint
@@ -77,15 +77,15 @@ modules:
       no_save_rng: null
       disable_last_saving: false
       ckpt_format: torch
-      
+
       # Precision (BF16 mixed precision)
       bf16: true
-      
+
       # Turbo optimizations
       enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
-      
+
       # deepep
       use_turbo_deepep: true
       moe_shared_expert_overlap: false
@@ -93,10 +93,10 @@ modules:
       turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
       turbo_sync_free_moe_stage: 1
-      
+
       # Validation
       eval_iters: 10
-      
+
       # LoRA (Low-Rank Adaptation) configuration
       lora:
         enabled: true

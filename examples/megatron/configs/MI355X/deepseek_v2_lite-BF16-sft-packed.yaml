@@ -66,8 +66,8 @@ modules:
       TURBO_DEEPEEP: true
       TURBO_GROUPED_MLP: false
       LEGACY_GG: true
-      PRIMUS_DETERMINISTIC: 0 
-      USING_AIC: 1  
+      PRIMUS_DETERMINISTIC: 0
+      USING_AIC: 1
 
 
       train_iters: 20
@@ -197,7 +197,7 @@ modules:
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
 
-      
+
       # =====================================================================
       profile: true
       use_pytorch_profiler: true

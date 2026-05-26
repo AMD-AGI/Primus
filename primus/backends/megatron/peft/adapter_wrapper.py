@@ -19,7 +19,6 @@ import torch.nn as nn
 
 from primus.backends.megatron.peft.utils import ParallelLinearAdapter
 
-
 if TYPE_CHECKING:
     from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 
@@ -140,9 +139,9 @@ class AdapterWrapper(nn.Module):
             4. both: (out, bias, ln_out)
         """
         linear_output = self.to_wrap(x, *args, **kwargs)
-        assert isinstance(linear_output, tuple), (
-            f"{self.to_wrap} should return a tuple but instead returns {linear_output}"
-        )
+        assert isinstance(
+            linear_output, tuple
+        ), f"{self.to_wrap} should return a tuple but instead returns {linear_output}"
 
         bias = None
         layernorm_output = x

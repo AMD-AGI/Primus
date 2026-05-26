@@ -10,7 +10,7 @@ We chose to implement a custom `forward_step` in the SFT trainer rather than reu
 ### 1. **Original Design Requirement**
 
 The initial requirement explicitly stated:
-> "不要import Megatron-Bridge 的代码"  
+> "不要import Megatron-Bridge 的代码"
 > (Don't import Megatron-Bridge code)
 
 The goal was to create a **direct Megatron-LM integration** without external dependencies.

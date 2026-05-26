@@ -25,7 +25,6 @@ from megatron.core.transformer.module import MegatronModule
 from primus.backends.megatron.peft.recompute import maybe_enable_recompute_inputs_grad
 from primus.backends.megatron.peft.walk_utils import walk
 
-
 logger: logging.Logger = logging.getLogger(__name__)
 
 ModelType = TypeVar("ModelType", bound=Union[nn.Module, list[MegatronModule]])
@@ -56,7 +55,9 @@ class PEFT(ABC):
     params_to_save: set[str] = field(default_factory=set, init=False, repr=False)
 
     @abstractmethod
-    def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
+    def transform(
+        self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None
+    ) -> nn.Module:
         """Transform a single module according to the PEFT method.
 
         This method is called for each module in the model during the PEFT application process.

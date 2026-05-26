@@ -90,22 +90,22 @@ modules:
     framework: megatron
     config: sft_trainer.yaml
     model: llama3_8B.yaml
-    
+
     overrides:
       # Specify stage to use SFT trainer
       stage: sft
-      
+
       # Dataset configuration
       sft_dataset_name: "tatsu-lab/alpaca"
       # OR use local file:
       # sft_dataset_name: "/path/to/data.jsonl"
       sft_conversation_format: "alpaca"
-      
+
       # Training parameters
       train_iters: 1000
       global_batch_size: 128
       lr: 1.0e-5
-      
+
       # Checkpoint settings
       finetune: true
       load: /path/to/pretrained/checkpoint
@@ -307,7 +307,7 @@ The implementation includes comprehensive testing:
    - Registration tests for stage-based trainer selection
    - Messages format tests for multi-turn conversations
    - Offline dataset loading tests
-   
+
 2. **Integration Testing**
    - Verified with actual Megatron-LM environment
    - Fixed runtime errors through iterative testing
@@ -341,4 +341,3 @@ Potential improvements:
 - Streaming dataset support
 - Advanced loss weighting strategies
 - Integration with RLHF/PPO training stages
-

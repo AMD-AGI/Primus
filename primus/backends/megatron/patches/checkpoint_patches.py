@@ -35,9 +35,7 @@ def patch_apply_factory_merges_tolerant(ctx: PatchContext):
     only filters sharded_state_dict, not sh_ten_factories, so apply_factory_merges
     still raises on missing adapter keys.
     """
-    log_rank_0(
-        "[Patch:megatron.patch.apply_factory_merges_tolerant] Patching apply_factory_merges..."
-    )
+    log_rank_0("[Patch:megatron.patch.apply_factory_merges_tolerant] Patching apply_factory_merges...")
 
     import megatron.core.dist_checkpointing.mapping as mapping_module
     import megatron.core.dist_checkpointing.serialization as serialization_module
@@ -53,8 +51,7 @@ def patch_apply_factory_merges_tolerant(ctx: PatchContext):
             for k, v2 in x2.items():
                 if k not in x1:
                     log_rank_0(
-                        f"[Patch:apply_factory_merges] Skipping missing key in "
-                        f"checkpoint: {key + (k,)}"
+                        f"[Patch:apply_factory_merges] Skipping missing key in " f"checkpoint: {key + (k,)}"
                     )
                     continue
                 x1[k] = tolerant_apply_factory_merges(x1[k], v2, key=key + (k,))
@@ -86,9 +83,7 @@ def patch_apply_factory_merges_tolerant(ctx: PatchContext):
     mapping_module.apply_factory_merges = tolerant_apply_factory_merges
     serialization_module.apply_factory_merges = tolerant_apply_factory_merges
 
-    log_rank_0(
-        "[Patch:megatron.patch.apply_factory_merges_tolerant] Patch applied."
-    )
+    log_rank_0("[Patch:megatron.patch.apply_factory_merges_tolerant] Patch applied.")
 
 
 @register_patch(
@@ -103,23 +98,35 @@ def patch_apply_factory_merges_tolerant(ctx: PatchContext):
 def patch_load_checkpoint_for_distributed(ctx: PatchContext):
     """
     Patch load_checkpoint to handle KeyError: 'model' for torch_dist checkpoints.
-    
+
     For distributed checkpoints, model weights are loaded in-place during
     _load_base_checkpoint, so state_dict doesn't contain 'model' key.
     """
     log_rank_0("[Patch:megatron.checkpoint.load_checkpoint] Patching for distributed checkpoint support...")
-    
+
     from megatron.training import checkpointing, training
-    
+
     original_load_checkpoint = checkpointing.load_checkpoint
-    
-    def patched_load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
-                                strict=True, checkpointing_context=None, skip_load_to_model_and_opt=False):
+
+    def patched_load_checkpoint(
+        ddp_model,
+        optimizer,
+        opt_param_scheduler,
+        load_arg="load",
+        strict=True,
+        checkpointing_context=None,
+        skip_load_to_model_and_opt=False,
+    ):
         """Wrapper that handles missing 'model' key for torch_dist checkpoints in finetune mode."""
         try:
             return original_load_checkpoint(
-                ddp_model, optimizer, opt_param_scheduler, load_arg,
-                strict, checkpointing_context, skip_load_to_model_and_opt
+                ddp_model,
+                optimizer,
+                opt_param_scheduler,
+                load_arg,
+                strict,
+                checkpointing_context,
+                skip_load_to_model_and_opt,
             )
         except KeyError as e:
             if str(e) == "'model'":
@@ -129,11 +136,11 @@ def patch_load_checkpoint_for_distributed(ctx: PatchContext):
                 log_rank_0("[Patch] Model weights already loaded via dist_checkpointing.load()")
                 return 0, 0  # Return (iteration=0, num_floating_point_operations_so_far=0)
             raise
-    
+
     # Patch both the module and the imported reference in training.py
     checkpointing.load_checkpoint = patched_load_checkpoint
     training.load_checkpoint = patched_load_checkpoint
-    
+
     log_rank_0("[Patch:megatron.checkpoint.load_checkpoint] Patch applied successfully.")
 
 

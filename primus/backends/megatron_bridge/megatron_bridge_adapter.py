@@ -411,11 +411,7 @@ def _install_bridge_optional_stubs() -> list[str]:
         parent_path, child_name = pkg_name.rsplit(".", 1)
         parent = sys.modules.get(parent_path)
         child = sys.modules.get(pkg_name)
-        if (
-            parent is not None
-            and child is not None
-            and isinstance(child, _BridgeOptionalStub)
-        ):
+        if parent is not None and child is not None and isinstance(child, _BridgeOptionalStub):
             setattr(parent, child_name, child)
 
     return stubbed

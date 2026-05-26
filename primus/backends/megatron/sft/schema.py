@@ -89,9 +89,7 @@ class SFTSample:
         raw_messages = sample.get("messages")
         if isinstance(raw_messages, Sequence) and not isinstance(raw_messages, (str, bytes)):
             messages = tuple(
-                SFTMessage.from_mapping(message)
-                for message in raw_messages
-                if isinstance(message, Mapping)
+                SFTMessage.from_mapping(message) for message in raw_messages if isinstance(message, Mapping)
             )
             return cls(messages=messages)
 

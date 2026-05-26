@@ -70,7 +70,6 @@ from primus.backends.megatron.sft.preprocessing import (
 )
 from primus.backends.megatron.sft.schema import FormattedSFTSample
 
-
 # Bump whenever the on-disk pack layout changes (output dict keys, dtype of any
 # tensor, or the packing algorithm itself). Old caches with a different version
 # tag are ignored because the key hash includes this constant.
@@ -151,7 +150,7 @@ def _tokenize_no_pad(
             end = prefix_token_count
 
             if segment.supervise and start < len(token_ids):
-                loss_mask[start:min(end, len(token_ids))] = 1
+                loss_mask[start : min(end, len(token_ids))] = 1
             if start >= len(token_ids):
                 break
 
@@ -193,6 +192,7 @@ def _tokenize_no_pad(
         "length": len(token_ids),
     }
 
+
 ## 把多个真样本压进一条序列。把多个真样本物理拼接，cu_seqlens 记录每段边界，只有最末尾装不下时才用 pad_id 填满到 seq_length
 def _first_fit_pack(
     samples: List[Dict[str, np.ndarray]],
@@ -214,10 +214,7 @@ def _first_fit_pack(
             continue
         placed = False
         for b in bins:
-            if (
-                b["used"] + length <= max_seq_length
-                and len(b["indices"]) < raw_sample_cap
-            ):
+            if b["used"] + length <= max_seq_length and len(b["indices"]) < raw_sample_cap:
                 b["indices"].append(idx)
                 b["used"] += length
                 placed = True
@@ -306,7 +303,7 @@ def _build_packed_sequence(
             if length <= 0:
                 break
 
-        input_ids[offset:offset + length] = sample["input_ids"][:length]
+        input_ids[offset : offset + length] = sample["input_ids"][:length]
         # Next-token prediction: ``labels[i] = input_ids[i+1]`` inside each
         # sub-segment. Megatron's ``compute_language_model_loss`` does NOT
         # internally shift labels (it computes CE between logits[t] and
@@ -317,7 +314,7 @@ def _build_packed_sequence(
         # representation, which yields random-init-level loss (~13.6 instead
         # of ~4.3 for Llama-2 on SQuAD).
         if length >= 2:
-            labels[offset:offset + length - 1] = sample["input_ids"][1:length]
+            labels[offset : offset + length - 1] = sample["input_ids"][1:length]
         # ``labels[offset + length - 1]`` is undefined (no next token inside
         # this sub-segment); it stays as ``pad_id`` and is masked out below.
 
@@ -327,12 +324,12 @@ def _build_packed_sequence(
         # token. Mirrors Bridge ``loss_mask = item["loss_mask"][1:]`` in
         # sft.py:1219.
         if length >= 2:
-            loss_mask[offset:offset + length - 1] = sample["loss_mask"][1:length]
+            loss_mask[offset : offset + length - 1] = sample["loss_mask"][1:length]
         # The last position of every sub-segment has no in-segment next-token
         # target -- mask it out so it never contributes to the loss.
         loss_mask[offset + length - 1] = 0
         # Per-segment positional IDs (each sub-segment starts from 0)
-        position_ids[offset:offset + length] = np.arange(length, dtype=np.int64)
+        position_ids[offset : offset + length] = np.arange(length, dtype=np.int64)
 
         offset += length
         cu_seqlens.append(offset)
@@ -363,9 +360,9 @@ def _build_packed_sequence(
         f"Pack contains {num_segments} segments which exceeds "
         f"MAX_SEGMENTS_PER_PACK={MAX_SEGMENTS_PER_PACK}; raise the cap."
     )
-    assert cu_seqlens[-1] == max_seq_length, (
-        f"cu_seqlens[-1]={cu_seqlens[-1]} != max_seq_length={max_seq_length}"
-    )
+    assert (
+        cu_seqlens[-1] == max_seq_length
+    ), f"cu_seqlens[-1]={cu_seqlens[-1]} != max_seq_length={max_seq_length}"
 
     # Pad cu_seqlens to fixed size by repeating ``max_seq_length`` (zero-length
     # dummy entries accepted by TE; repeating the final offset would produce
@@ -560,9 +557,7 @@ class PackedSFTDataset(Dataset):
                     "loading packed dataset from disk."
                 )
                 self._packed = torch.load(cache_file, weights_only=False)
-                log_rank_0(
-                    f"[Pack] Loaded {len(self._packed)} packed sequences from cache."
-                )
+                log_rank_0(f"[Pack] Loaded {len(self._packed)} packed sequences from cache.")
                 return
 
             log_rank_0(
@@ -679,18 +674,11 @@ class PackedSFTDataset(Dataset):
         # Materialize each pack now so __getitem__ is just a list index.
         # Memory cost is small (packed_samples * max_seq_length * 4 bytes).
         packed: List[Dict[str, torch.Tensor]] = [
-            _build_packed_sequence(b, tokenized, max_seq_length, self.pad_id)
-            for b in bins
+            _build_packed_sequence(b, tokenized, max_seq_length, self.pad_id) for b in bins
         ]
 
-        avg_per_pack = (
-            sum(int(t["num_real_segments"].item()) for t in packed)
-            / max(len(packed), 1)
-        )
-        utilization = (
-            sum(int(t["real_tokens"].item()) for t in packed)
-            / max(len(packed) * max_seq_length, 1)
-        )
+        avg_per_pack = sum(int(t["num_real_segments"].item()) for t in packed) / max(len(packed), 1)
+        utilization = sum(int(t["real_tokens"].item()) for t in packed) / max(len(packed) * max_seq_length, 1)
         log_rank_0(
             f"[Pack] {len(tokenized)} raw samples -> {len(packed)} packed sequences. "
             f"avg samples/pack={avg_per_pack:.1f}, "

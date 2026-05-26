@@ -224,7 +224,9 @@ def _map_module(
     if not leaf_only or list(module.parameters(recurse=False)):
         new_module = func(new_module, **f_kwargs)
 
-    prefix = kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    prefix = (
+        kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    )
     kwargs.pop("i", None)
     kwargs.pop("name", None)
     kwargs.pop("prefix", None)
@@ -252,7 +254,12 @@ def _map_module(
 
 
 def _map_module_list(
-    module_list: _TModule, func: ModuleFunc, recurse=False, leaf_only=False, transformed_modules=None, **kwargs
+    module_list: _TModule,
+    func: ModuleFunc,
+    recurse=False,
+    leaf_only=False,
+    transformed_modules=None,
+    **kwargs,
 ) -> _TModule:
     """Apply a transformation function to a list of modules."""
     if transformed_modules is None:
@@ -263,7 +270,9 @@ def _map_module_list(
         module_list = func(module_list, **f_kwargs)
 
     mapped_modules = []
-    prefix = kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    prefix = (
+        kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    )
     kwargs.pop("i", None)
     kwargs.pop("name", None)
     kwargs.pop("prefix", None)
@@ -319,7 +328,9 @@ def _map_module_dict(
         module_dict = func(module_dict, **f_kwargs)
 
     mapped_modules = {}
-    prefix = kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    prefix = (
+        kwargs.get("name", "") if not kwargs.get("prefix", "") else f"{kwargs['prefix']}.{kwargs['name']}"
+    )
     kwargs.pop("i", None)
     kwargs.pop("name", None)
     kwargs.pop("prefix", None)

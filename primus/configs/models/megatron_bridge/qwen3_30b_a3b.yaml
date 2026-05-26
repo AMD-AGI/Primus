@@ -8,4 +8,3 @@ hf_path: Qwen/Qwen3-30B-A3B
 # ``_qwen3_moe_finetune_common`` and routed by ``get_default_dataset_config``.
 dataset:
     dataset_name: "rajpurkar/squad"
-

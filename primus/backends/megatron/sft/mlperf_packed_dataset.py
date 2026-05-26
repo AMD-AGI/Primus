@@ -65,7 +65,6 @@ to branch on dataset source.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -74,11 +73,7 @@ import torch
 from torch.utils.data import Dataset
 
 from primus.backends.megatron.sft.packing import MAX_SEGMENTS_PER_PACK
-from primus.backends.megatron.sft.preprocessing import (
-    _resolve_pad_token_id,
-    log_rank_0,
-)
-
+from primus.backends.megatron.sft.preprocessing import _resolve_pad_token_id, log_rank_0
 
 _MLPERF_TRAIN_FILENAME = "train.npy"
 _MLPERF_VAL_FILENAME = "validation.npy"
@@ -97,10 +92,7 @@ def is_mlperf_packed_dir(path: str) -> bool:
     p = Path(path)
     if not p.is_dir():
         return False
-    return (
-        (p / _MLPERF_TRAIN_FILENAME).is_file()
-        and (p / _MLPERF_METADATA_FILENAME).is_file()
-    )
+    return (p / _MLPERF_TRAIN_FILENAME).is_file() and (p / _MLPERF_METADATA_FILENAME).is_file()
 
 
 def _load_packed_metadata(metadata_path: Path) -> dict:
@@ -113,9 +105,9 @@ def _load_packed_metadata(metadata_path: Path) -> dict:
     """
     with open(metadata_path, "r") as f:
         records = json.load(f)
-    assert isinstance(records, list) and len(records) >= 1, (
-        f"packed_metadata.jsonl must be a non-empty json list, got: {records!r}"
-    )
+    assert (
+        isinstance(records, list) and len(records) >= 1
+    ), f"packed_metadata.jsonl must be a non-empty json list, got: {records!r}"
     return records[0]
 
 
@@ -151,9 +143,7 @@ class MlperfPackedDataset(Dataset):
         self._pad_id = int(pad_id)
         self._split_name = split_name
 
-        log_rank_0(
-            f"[MlperfPacked] Loading {split_name} dataset from {self._npy_path} ..."
-        )
+        log_rank_0(f"[MlperfPacked] Loading {split_name} dataset from {self._npy_path} ...")
         # ``allow_pickle`` is required because mlperf packs each sample as a
         # Python dict and stores them in an ``object`` ndarray.
         self._data = np.load(str(self._npy_path), allow_pickle=True)
@@ -188,8 +178,7 @@ class MlperfPackedDataset(Dataset):
             )
         if loss_mask_np.shape[0] != L:
             raise ValueError(
-                f"mlperf packed sample loss_mask length {loss_mask_np.shape[0]} "
-                f"!= input_ids length {L}."
+                f"mlperf packed sample loss_mask length {loss_mask_np.shape[0]} " f"!= input_ids length {L}."
             )
 
         # Shift labels and loss_mask by 1 to match Megatron's
@@ -330,8 +319,7 @@ def build_mlperf_packed_datasets(
         # mlperf llama2 recipe has no test split; mirror the squad path
         # by silently returning None.
         log_rank_0(
-            "[MlperfPacked] test split not supported by mlperf llama2 "
-            "dataset; returning None for test_ds."
+            "[MlperfPacked] test split not supported by mlperf llama2 " "dataset; returning None for test_ds."
         )
 
     return train_ds, valid_ds, test_ds

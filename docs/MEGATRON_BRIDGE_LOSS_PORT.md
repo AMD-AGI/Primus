@@ -132,20 +132,20 @@ Model 内部可以使用更优化的 loss 计算实现。
 def forward_step(data_iterator, model):
     import torch
     from megatron.training import get_args
-    
+
     args = get_args()
-    
+
     # Get batch
     try:
         batch = next(data_iterator)
     except StopIteration:
         return None, lambda output: (torch.tensor(0.0), torch.tensor(0), {})
-    
+
     # Extract tensors
     tokens = batch['input_ids'].long().cuda()
     labels = batch['labels'].long().cuda()
     loss_mask = batch['loss_mask'].float().cuda()
-    
+
     # Ensure 2D [batch, seq]
     if tokens.dim() == 1:
         tokens = tokens.unsqueeze(0)
@@ -153,33 +153,33 @@ def forward_step(data_iterator, model):
         labels = labels.unsqueeze(0)
     if loss_mask.dim() == 1:
         loss_mask = loss_mask.unsqueeze(0)
-    
+
     # Generate position_ids
     batch_size, seq_len = tokens.size()
     position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
     position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
-    
+
     # ✅ Forward with labels - model returns per-token losses
     output_tensor = model(tokens, position_ids, attention_mask=None, labels=labels)
-    
+
     # ✅ Simple loss function (Megatron-Bridge style)
     def loss_func(loss_mask, output_tensor):
         # Model returns per-token losses
         losses = output_tensor.view(-1).float()
         loss_mask = loss_mask.view(-1).float()
-        
+
         # Apply mask and sum
         loss = torch.sum(losses * loss_mask)
-        
+
         # Count tokens
         num_tokens = loss_mask.sum().clone().detach().to(torch.int)
-        
+
         # Reporting metrics
         reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
-        
+
         # Return standard Megatron format
         return (loss, num_tokens, {"lm loss": reporting_loss})
-    
+
     return output_tensor, lambda output: loss_func(loss_mask, output)
 ```
 

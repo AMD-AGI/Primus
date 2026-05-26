@@ -69,9 +69,7 @@ class PrimusConfig(object):
             if alias is not None and yaml_utils.has_key_in_namespace(self._exp.modules, alias):
                 module_name = alias
             else:
-                raise ValueError(
-                    f"Primus config ({self._exp.config_file}) has no module named {module_name}"
-                )
+                raise ValueError(f"Primus config ({self._exp.config_file}) has no module named {module_name}")
         module_config = yaml_utils.get_value_by_key(self._exp.modules, module_name)
         return module_config
 

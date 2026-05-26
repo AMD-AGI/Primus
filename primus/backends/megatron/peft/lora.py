@@ -33,8 +33,11 @@ from primus.backends.megatron.peft.lora_layers import (
     patch_linear_module,
 )
 from primus.backends.megatron.peft.module_matcher import ModuleMatcher
-from primus.backends.megatron.peft.utils import ParallelLinearAdapter, get_adapter_attributes_from_linear, is_expert_linear
-
+from primus.backends.megatron.peft.utils import (
+    ParallelLinearAdapter,
+    get_adapter_attributes_from_linear,
+    is_expert_linear,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +94,9 @@ class LoRA(PEFT, ModuleMatcher):
     a2a_experimental: bool = False
     lora_dtype: torch.dtype = None
 
-    def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
+    def transform(
+        self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None
+    ) -> nn.Module:
         """
         Applies LoRA to a specific module within the model architecture.
 
@@ -250,7 +255,9 @@ class LoRAMerge(PEFT):
         return base_weight + lora_weight
 
     @torch.no_grad()
-    def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
+    def transform(
+        self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None
+    ) -> nn.Module:
         """
         Merges the LoRA adapter with the base model weights.
 

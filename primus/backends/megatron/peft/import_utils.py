@@ -6,18 +6,18 @@
 
 """Import utilities for PEFT module."""
 
-from typing import Any, Tuple
 import importlib
+from typing import Any, Tuple
 
 
 def safe_import_from(module_path: str, attr_name: str) -> Tuple[Any, bool]:
     """
     Safely import an attribute from a module.
-    
+
     Args:
         module_path: Full path to the module (e.g., "megatron.core.extensions.transformer_engine")
         attr_name: Name of the attribute to import
-        
+
     Returns:
         Tuple of (attribute, success_flag). If import fails, returns (None, False).
     """
@@ -32,10 +32,10 @@ def safe_import_from(module_path: str, attr_name: str) -> Tuple[Any, bool]:
 def safe_import(module_name: str) -> Tuple[Any, bool]:
     """
     Safely import a module.
-    
+
     Args:
         module_name: Name of the module to import
-        
+
     Returns:
         Tuple of (module, success_flag). If import fails, returns (None, False).
     """

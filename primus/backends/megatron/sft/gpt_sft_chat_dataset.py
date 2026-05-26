@@ -260,58 +260,57 @@ class GPTSFTChatDataset(Dataset):
     def validate_and_report(self):
         """
         Validate dataset and report statistics.
-        
+
         This method samples up to 100 examples from the dataset to compute
         and report useful statistics about sequence lengths, loss ratios,
         and data quality.
         """
         try:
             total_samples = len(self)
-            
+
             if total_samples == 0:
                 logger.warning("Dataset is empty!")
                 return
-            
+
             # Sample up to 100 examples for statistics
             sample_size = min(100, total_samples)
             sample_indices = np.random.choice(total_samples, sample_size, replace=False)
-            
+
             seq_lengths = []
             loss_ratios = []
             context_lengths = []
-            answer_lengths = []
             errors = []
-            
+
             logger.info(f"Validating dataset with {sample_size} samples...")
-            
+
             for idx in sample_indices:
                 try:
                     sample = self[int(idx)]
-                    
+
                     # Collect statistics
-                    tokens_len = len(sample['tokens'])
+                    tokens_len = len(sample["tokens"])
                     seq_lengths.append(tokens_len)
-                    
+
                     # Calculate loss ratio (percentage of tokens that contribute to loss)
-                    loss_mask = sample['loss_mask']
+                    loss_mask = sample["loss_mask"]
                     if tokens_len > 0:
                         loss_ratio = loss_mask.sum().item() / tokens_len
                         loss_ratios.append(loss_ratio)
-                    
+
                     # Try to get context and answer lengths if available
-                    if 'position_ids' in sample:
-                        context_lengths.append(len(sample['position_ids']))
-                    
+                    if "position_ids" in sample:
+                        context_lengths.append(len(sample["position_ids"]))
+
                 except Exception as e:
                     errors.append(f"Sample {idx}: {str(e)}")
-            
+
             # Report statistics
             logger.info("=" * 80)
             logger.info("Dataset Validation Report")
             logger.info("=" * 80)
             logger.info(f"Total samples: {total_samples:,}")
             logger.info(f"Samples validated: {len(seq_lengths)}/{sample_size}")
-            
+
             if seq_lengths:
                 logger.info(f"\nSequence Length Statistics:")
                 logger.info(f"  Average: {np.mean(seq_lengths):.1f} tokens")
@@ -320,7 +319,7 @@ class GPTSFTChatDataset(Dataset):
                 logger.info(f"  Max: {np.max(seq_lengths)} tokens")
                 logger.info(f"  Std Dev: {np.std(seq_lengths):.1f} tokens")
                 logger.info(f"  Max allowed: {self.max_seq_length} tokens")
-                
+
                 # Check truncation rate
                 truncated = sum(1 for l in seq_lengths if l >= self.max_seq_length)
                 if truncated > 0:
@@ -328,14 +327,14 @@ class GPTSFTChatDataset(Dataset):
                         f"  {truncated}/{len(seq_lengths)} samples ({truncated/len(seq_lengths)*100:.1f}%) "
                         f"will be truncated!"
                     )
-            
+
             if loss_ratios:
                 logger.info(f"\nLoss Mask Statistics:")
                 logger.info(f"  Average loss ratio: {np.mean(loss_ratios):.2%}")
                 logger.info(f"  Median loss ratio: {np.median(loss_ratios):.2%}")
                 logger.info(f"  Min loss ratio: {np.min(loss_ratios):.2%}")
                 logger.info(f"  Max loss ratio: {np.max(loss_ratios):.2%}")
-                
+
                 # Warn about potential issues
                 avg_loss_ratio = np.mean(loss_ratios)
                 if avg_loss_ratio < 0.1:
@@ -348,16 +347,16 @@ class GPTSFTChatDataset(Dataset):
                         f"  Average loss ratio is very high ({avg_loss_ratio:.2%}). "
                         "Consider if instruction tokens should be masked."
                     )
-            
+
             if errors:
                 logger.warning(f"\nEncountered {len(errors)} errors during validation:")
                 for error in errors[:5]:  # Show first 5 errors
                     logger.warning(f"  {error}")
                 if len(errors) > 5:
                     logger.warning(f"  ... and {len(errors) - 5} more errors")
-            
+
             logger.info("=" * 80)
-            
+
         except Exception as e:
             logger.error(f"Error during dataset validation: {e}")
             logger.error("Continuing without validation...")

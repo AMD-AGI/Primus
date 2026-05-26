@@ -174,7 +174,7 @@ def tokenize_formatted_sft_sample(
             end = prefix_token_count
 
             if segment.supervise and start < len(token_ids):
-                loss_mask[start:min(end, len(token_ids))] = 1
+                loss_mask[start : min(end, len(token_ids))] = 1
             if start >= len(token_ids):
                 break
     else:

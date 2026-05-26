@@ -33,7 +33,6 @@ from megatron.core.transformer.moe.router import TopKRouter
 
 from primus.backends.megatron.peft.import_utils import safe_import_from
 
-
 TEColumnParallelLinear, HAVE_TE_COL_LINEAR = safe_import_from(
     "megatron.core.extensions.transformer_engine", "TEColumnParallelLinear"
 )
@@ -62,7 +61,9 @@ HAVE_TE = all(
     )
 )
 
-MixedFusedLayerNorm, HAVE_APEX = safe_import_from("apex.normalization.fused_layer_norm", "MixedFusedLayerNorm")
+MixedFusedLayerNorm, HAVE_APEX = safe_import_from(
+    "apex.normalization.fused_layer_norm", "MixedFusedLayerNorm"
+)
 
 TECL = (TEColumnParallelLinear, TELayerNormColumnParallelLinear, TEColumnParallelGroupedLinear)
 TERL = (TERowParallelLinear, TERowParallelGroupedLinear)
@@ -112,7 +113,9 @@ def get_adapter_attributes_from_linear(m: nn.Module, is_expert: bool = False) ->
     # setting `parallel_mode=None` (TE) or `explicit_expert_comm=True` (legacy).
     # https://github.com/NVIDIA/Megatron-LM/blob/5b1ef0703184299fbf71f6131bf2f9a5331e7238/megatron/core/transformer/moe/shared_experts.py#L95-L104
     # The weights are still TP-sharded though, so we must keep using the real TP size
-    disable_tensor_parallel_comm = getattr(m, "parallel_mode", "") is None or getattr(m, "explicit_expert_comm", False)
+    disable_tensor_parallel_comm = getattr(m, "parallel_mode", "") is None or getattr(
+        m, "explicit_expert_comm", False
+    )
     if disable_tensor_parallel_comm:
         disable_sequence_parallel_comm = True
 
@@ -622,7 +625,9 @@ class ParallelLinearAdapter(nn.Module):
 
         if self.config.cpu_offloading and self.config.cpu_offloading_activations:
             x.activation_offloading = True
-        x, _ = self.linear_in(x)  # (@adithyare) ColumnLinear returns output and bias, we are ignoring the bias term.
+        x, _ = self.linear_in(
+            x
+        )  # (@adithyare) ColumnLinear returns output and bias, we are ignoring the bias term.
 
         x = self.activation(x)
 

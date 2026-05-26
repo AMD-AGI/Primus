@@ -242,9 +242,7 @@ def create_formatter(name: str) -> ConversationFormatter:
         return OpenAIMessagesFormatter()
     if name in {"squad", "bridge_squad"}:
         return SquadFormatter()
-    raise ValueError(
-        f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages, squad"
-    )
+    raise ValueError(f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages, squad")
 
 
 __all__ = [

@@ -37,7 +37,7 @@ This document provides a complete summary of the Megatron-LM based Supervised Fi
   - Extensible formatter architecture
 
 #### 3. Stage-Based Trainer Registration
-- **Modified Files**: 
+- **Modified Files**:
   - `primus/core/backend/backend_registry.py`
   - `primus/core/backend/backend_adapter.py`
   - All backend adapters (megatron, torchtitan, megatron_bridge)
@@ -123,24 +123,24 @@ This document provides a complete summary of the Megatron-LM based Supervised Fi
 ## 🔧 Critical Fixes Applied
 
 ### 1. Tokenizer Interface Fix
-**Problem**: `_HuggingFaceTokenizer` missing `convert_tokens_to_ids()`  
+**Problem**: `_HuggingFaceTokenizer` missing `convert_tokens_to_ids()`
 **Solution**: Added `_tokenize_text()` helper supporting multiple tokenizer interfaces
 
 ### 2. Position IDs Fix
-**Problem**: `GPTModel.forward()` missing required `position_ids` argument  
+**Problem**: `GPTModel.forward()` missing required `position_ids` argument
 **Solution**: Generate proper position_ids tensor before model call
 
 ### 3. Loss Computation Fix
-**Problem**: Model called with `labels` parameter, returning loss instead of logits  
+**Problem**: Model called with `labels` parameter, returning loss instead of logits
 **Solution**: Remove `labels` parameter, compute loss separately with masking
 
 ### 4. Parallel State API Fix
-**Problem**: Used `tensor_parallel` module for data parallel operations  
+**Problem**: Used `tensor_parallel` module for data parallel operations
 **Solution**: Changed to correct `parallel_state` module
 
 ### 5. Data Parallel Loss Averaging Fix (Critical!)
-**Problem**: `all_reduce` sums without dividing by world_size  
-**Impact**: Loss inflated by world_size factor (2x on 2 GPUs, 8x on 8 GPUs)  
+**Problem**: `all_reduce` sums without dividing by world_size
+**Impact**: Loss inflated by world_size factor (2x on 2 GPUs, 8x on 8 GPUs)
 **Solution**: Added `loss = loss / parallel_state.get_data_parallel_world_size()`
 
 ## 📊 Implementation Statistics
@@ -342,14 +342,14 @@ modules:
 
 This implementation successfully delivers a **production-ready, well-documented, feature-rich SFT trainer** that:
 
-✅ Meets all original requirements  
-✅ Provides extensive additional features  
-✅ Incorporates user feedback iteratively  
-✅ Fixes all runtime issues encountered  
-✅ Ports best practices from Megatron-Bridge  
-✅ Maintains independence from external dependencies  
-✅ Provides comprehensive documentation  
-✅ Supports both research and production use cases  
+✅ Meets all original requirements
+✅ Provides extensive additional features
+✅ Incorporates user feedback iteratively
+✅ Fixes all runtime issues encountered
+✅ Ports best practices from Megatron-Bridge
+✅ Maintains independence from external dependencies
+✅ Provides comprehensive documentation
+✅ Supports both research and production use cases
 
 The trainer is **ready for immediate use** and provides a **solid foundation** for future enhancements.
 
@@ -363,7 +363,7 @@ For issues or questions:
 
 ---
 
-**Total Lines**: ~17,000+ (code + docs + configs + tests)  
-**Total Files**: 19 new files + 8 modified files  
-**Implementation Time**: Comprehensive, iterative development with user feedback  
+**Total Lines**: ~17,000+ (code + docs + configs + tests)
+**Total Files**: 19 new files + 8 modified files
+**Implementation Time**: Comprehensive, iterative development with user feedback
 **Status**: ✅ Complete and Production-Ready

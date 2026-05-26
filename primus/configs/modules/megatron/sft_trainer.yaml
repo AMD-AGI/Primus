@@ -4,7 +4,7 @@
 
 extends:
   - trainer_base.yaml
-      
+
 stage: sft
 
 # Training iterations and batch size
@@ -142,5 +142,7 @@ lora:
     - linear_fc1
     - linear_fc2
 
-ckpt_format: torch_dist
-fully_parallel_save: true
+# Note: ckpt_format and fully_parallel_save are already declared at the top of
+# this file (lines 41-42). Duplicate declarations were removed here to satisfy
+# yaml strict-mode parsers (e.g. ruamel.yaml) — value identical, behaviour
+# unchanged.

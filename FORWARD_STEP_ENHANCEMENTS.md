@@ -6,7 +6,7 @@ This document explains the enhancements made to the SFT trainer's `forward_step`
 
 ## Background
 
-**User Request**: "我的意思是可以把那部分代码移植过来，它实现挺完整的"  
+**User Request**: "我的意思是可以把那部分代码移植过来，它实现挺完整的"
 Translation: "We can port that part of the code over, its implementation is quite complete."
 
 Instead of importing `megatron.bridge.training.vlm_step.forward_step`, we ported the best practices and patterns to create a more robust, production-ready implementation while maintaining independence.
@@ -109,7 +109,7 @@ if parallel_state.get_data_parallel_world_size() > 1:
 ```python
 if parallel_state.get_data_parallel_world_size() > 1:
     torch.distributed.all_reduce(
-        loss, 
+        loss,
         group=parallel_state.get_data_parallel_group()
     )
     # Divide by world size to get average (all_reduce sums)
@@ -127,8 +127,8 @@ if parallel_state.get_data_parallel_world_size() > 1:
 **Added**:
 ```python
 losses = F.cross_entropy(
-    shift_logits, 
-    shift_labels, 
+    shift_logits,
+    shift_labels,
     reduction='none',
     ignore_index=-100  # Standard ignore index for padding
 )
@@ -147,11 +147,11 @@ losses = F.cross_entropy(
 def forward_step(data_iterator, model):
     """
     Enhanced forward step for SFT training.
-    
+
     This implementation is ported and adapted from Megatron-Bridge patterns
     to provide a more complete and robust training loop while maintaining
     independence from Megatron-Bridge as a dependency.
-    
+
     Key features:
     - Robust error handling for data iteration
     - Proper attention mask support for causal language modeling

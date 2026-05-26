@@ -105,7 +105,7 @@ modules:
 
       manual_gc: true
       manual_gc_interval: 100
-      
+
       # =====================================================================
       # Profile (aligned to Bridge yaml: capture iter 11 only)
       # =====================================================================

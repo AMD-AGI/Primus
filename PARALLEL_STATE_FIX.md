@@ -10,7 +10,7 @@ RuntimeError: module 'megatron.core.tensor_parallel' has no attribute 'get_data_
 ## Root Cause
 
 The SFT trainer was using incorrect Megatron-LM API:
-- Used `tensor_parallel.get_data_parallel_world_size()` 
+- Used `tensor_parallel.get_data_parallel_world_size()`
 - Used `tensor_parallel.get_data_parallel_group()`
 - These functions don't exist in `megatron.core.tensor_parallel`
 

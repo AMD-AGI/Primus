@@ -17,7 +17,6 @@ from typing import Any, Callable, Iterator, Tuple
 
 import torch
 
-
 _PRE_FORWARD_CANARY_DONE = False
 
 
@@ -62,6 +61,7 @@ def _pre_forward_canary(model: Any) -> None:
 
     try:
         import torch.distributed as dist
+
         if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
             return
     except Exception:
@@ -87,8 +87,7 @@ def _pre_forward_canary(model: Any) -> None:
                     flush=True,
                 )
             except Exception as e:
-                print(f"[PRE-FORWARD canary] {name}: ERR {type(e).__name__}: {e}",
-                      flush=True)
+                print(f"[PRE-FORWARD canary] {name}: ERR {type(e).__name__}: {e}", flush=True)
 
         # The pre-wrap canary stored these references on the unwrapped GPT
         # model. After LoRA wrap, the original linears live inside
@@ -127,8 +126,7 @@ def _pre_forward_canary(model: Any) -> None:
         _stat("L0.mlp.linear_fc1.layer_norm_weight", _fc1_lnw)
         _stat("L0.mlp.linear_fc2.weight", _fc2_w)
         _stat("final_layernorm.weight", lambda: base.decoder.final_layernorm.weight)
-        _stat("embedding.word_embeddings.weight",
-              lambda: base.embedding.word_embeddings.weight)
+        _stat("embedding.word_embeddings.weight", lambda: base.embedding.word_embeddings.weight)
         _stat("output_layer.weight", lambda: base.output_layer.weight)
 
         # Also probe whether the same Parameter object is reachable via
@@ -144,8 +142,7 @@ def _pre_forward_canary(model: Any) -> None:
                 cur = cur.module
                 depth += 1
                 chain.append(f".module={type(cur).__name__}")
-            print(f"[PRE-FORWARD canary] wrap-chain (depth={depth}): "
-                  f"{''.join(chain)}", flush=True)
+            print(f"[PRE-FORWARD canary] wrap-chain (depth={depth}): " f"{''.join(chain)}", flush=True)
             wrapped_layer0 = cur.decoder.layers[0]
             wqkv = wrapped_layer0.self_attention.linear_qkv
             wt = getattr(wqkv, "to_wrap", wqkv).weight
@@ -159,12 +156,10 @@ def _pre_forward_canary(model: Any) -> None:
                 flush=True,
             )
         except Exception as e:
-            print(f"[PRE-FORWARD canary] outer-wrapper probe ERR "
-                  f"{type(e).__name__}: {e}", flush=True)
+            print(f"[PRE-FORWARD canary] outer-wrapper probe ERR " f"{type(e).__name__}: {e}", flush=True)
 
     except Exception as e:
-        print(f"[PRE-FORWARD canary] OUTER ERR {type(e).__name__}: {e}",
-              flush=True)
+        print(f"[PRE-FORWARD canary] OUTER ERR {type(e).__name__}: {e}", flush=True)
 
 
 def _move_to_runtime_device(tensor: torch.Tensor) -> torch.Tensor:
@@ -237,26 +232,26 @@ def _build_packed_seq_params(
 def create_sft_forward_step() -> Callable:
     """
     Create and return the forward_step function for SFT training.
-    
+
     This follows the Megatron-Bridge pattern where:
     1. Model is called with labels and returns per-token losses
     2. Loss function applies masking to focus on response tokens
     3. Returns (loss, num_tokens, metrics_dict) for proper DP averaging
-    
+
     Returns:
         forward_step function compatible with Megatron's pretrain loop
     """
-    
+
     def forward_step(data_iterator: Iterator, model, return_schedule_plan: bool = False) -> Tuple:
         """
         Forward step for SFT training.
-        
+
         Args:
             data_iterator: Iterator over training data batches
             model: Megatron GPT model
             return_schedule_plan: Whether to return a schedule plan for
                 newer Megatron pipeline schedulers
-            
+
         Returns:
             Tuple of (output_tensor, loss_function)
             - output_tensor: Per-token losses from model
@@ -269,14 +264,14 @@ def create_sft_forward_step() -> Callable:
         # Handle case where data_iterator is None (e.g., during eval without valid dataset)
         if data_iterator is None:
             return None, lambda output: _empty_loss_result()
-        
+
         # Get batch from iterator
         try:
             batch = next(data_iterator)
         except StopIteration:
             # Return None and a no-op loss function for iteration completion
             return None, lambda output: _empty_loss_result()
-        
+
         # Extract tensors from batch
         tokens = _move_to_runtime_device(batch["input_ids"]).long()
         labels = _move_to_runtime_device(batch["labels"]).long()
@@ -314,11 +309,7 @@ def create_sft_forward_step() -> Callable:
         #   Set ``use_packed_attention: true`` in the YAML to re-enable the thd
         #   path once the backend supports it.
         use_packed_attention = bool(getattr(args, "use_packed_attention", False))
-        if (
-            use_packed_attention
-            and packed_seq_params is None
-            and "cu_seqlens" in batch
-        ):
+        if use_packed_attention and packed_seq_params is None and "cu_seqlens" in batch:
             packed_seq_params = _build_packed_seq_params(
                 batch["cu_seqlens"],
                 batch["num_segments"],
@@ -347,25 +338,25 @@ def create_sft_forward_step() -> Callable:
 
         # attention_mask: None for causal mask (standard GPT autoregressive)
         attention_mask = None
-        
+
         # Create loss function following Megatron-Bridge pattern
         def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model=None) -> Tuple:
             """
             Masked next-token loss function.
-            
+
             This function applies the loss mask to focus training only on
             response tokens (where mask=1), ignoring instruction tokens (mask=0).
-            
+
             Args:
                 loss_mask: Binary mask [batch, seq] where 1=compute loss, 0=ignore
                 output_tensor: Per-token losses from model [batch, seq] or [batch*seq]
-                
+
             Returns:
                 Tuple of (loss, num_tokens, metrics_dict):
                 - loss: Summed loss for backpropagation
                 - num_tokens: Number of non-masked tokens for proper averaging
                 - metrics_dict: Dictionary with reporting metrics for logging
-                
+
             Note:
                 This follows Megatron's standard loss function signature.
                 The training loop will use num_tokens to properly average loss
@@ -374,23 +365,20 @@ def create_sft_forward_step() -> Callable:
             # Model returns per-token losses, flatten for processing
             losses = output_tensor.view(-1).float()
             loss_mask = loss_mask.view(-1).float()
-            
+
             # Apply mask: only compute loss on response tokens (mask=1)
             # Instruction tokens (mask=0) are ignored
             loss = torch.sum(losses * loss_mask)
-            
+
             # Count number of non-masked tokens
             # This is crucial for proper loss averaging across micro-batches
             num_tokens = loss_mask.sum().clone().detach().to(torch.int)
-            
+
             # Create reporting loss for logging
             # Format: [loss_value, num_tokens] concatenated
             # This allows Megatron to compute proper weighted average across DP ranks
-            reporting_loss = torch.cat([
-                loss.clone().detach().view(1),
-                num_tokens.view(1)
-            ])
-            
+            reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
+
             # Return standard Megatron loss function signature
             # (loss, num_tokens, metrics_dict)
             return (loss, num_tokens, {"lm loss": reporting_loss})
@@ -427,5 +415,5 @@ def create_sft_forward_step() -> Callable:
         output_tensor = model(tokens, position_ids, attention_mask, **model_kwargs)
 
         return output_tensor, partial(loss_func, loss_mask, model=model)
-    
+
     return forward_step

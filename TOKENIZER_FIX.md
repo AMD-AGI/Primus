@@ -51,7 +51,7 @@ token_ids = tokenizer.encode(text, add_special_tokens=False)
 def _tokenize_text(self, text: str) -> List[int]:
     """
     Tokenize text and return token IDs.
-    
+
     Handles different tokenizer interfaces:
     - Megatron _HuggingFaceTokenizer (tokenize returns IDs)
     - Standard HuggingFace (tokenize + convert_tokens_to_ids)
@@ -59,26 +59,26 @@ def _tokenize_text(self, text: str) -> List[int]:
     """
     try:
         result = self.tokenizer.tokenize(text)
-        
+
         # Check if already token IDs
         if result and isinstance(result[0], int):
             return result
-        
+
         # Try convert_tokens_to_ids
         if hasattr(self.tokenizer, 'convert_tokens_to_ids'):
             return self.tokenizer.convert_tokens_to_ids(result)
-        
+
         # Try encode as fallback
         if hasattr(self.tokenizer, 'encode'):
             return self.tokenizer.encode(text, add_special_tokens=False)
-        
+
         raise AttributeError("Tokenizer missing required methods")
-        
+
     except (AttributeError, TypeError) as e:
         # Final fallback to encode
         if hasattr(self.tokenizer, 'encode'):
             return self.tokenizer.encode(text, add_special_tokens=False)
-        
+
         raise TypeError(
             f"Tokenizer must have either 'encode()' method or 'tokenize()' "
             f"method that returns token IDs. Got: {type(self.tokenizer)}"
@@ -125,7 +125,7 @@ All patterns now work correctly.
 
 - `primus/backends/megatron/core/datasets/sft_dataset.py`
   - Added `_tokenize_text()` method
-  - Updated `_tokenize_and_mask()` 
+  - Updated `_tokenize_and_mask()`
   - Updated `_tokenize_and_mask_messages()`
   - Removed direct calls to `convert_tokens_to_ids()`
 

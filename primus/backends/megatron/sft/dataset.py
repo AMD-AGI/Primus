@@ -43,9 +43,7 @@ class SFTDataset(Dataset):
         self.bridge_compat_inline_bos = bool(bridge_compat_inline_bos)
 
         is_local_file = (
-            dataset_name.endswith(".jsonl")
-            or dataset_name.endswith(".json")
-            or os.path.isfile(dataset_name)
+            dataset_name.endswith(".jsonl") or dataset_name.endswith(".json") or os.path.isfile(dataset_name)
         )
 
         if is_local_file:
@@ -149,6 +147,7 @@ def build_train_valid_test_datasets(
 
     if enable_packed_sequences:
         from primus.backends.megatron.sft.packing import PackedSFTDataset
+
         DatasetCls = PackedSFTDataset
     else:
         DatasetCls = SFTDataset

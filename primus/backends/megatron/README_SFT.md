@@ -63,26 +63,26 @@ modules:
     framework: megatron
     config: sft_trainer.yaml
     model: llama3_8B.yaml
-    
+
     overrides:
       # Specify stage to use SFT trainer
       stage: sft
-      
+
       # SFT-specific settings
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"
-      
+
       # Training settings
       train_iters: 1000
       micro_batch_size: 1
       global_batch_size: 128
       seq_length: 2048
-      
+
       # Learning rate (lower for fine-tuning)
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: 50
-      
+
       # Checkpoint settings
       finetune: true
       load: /path/to/pretrained/checkpoint

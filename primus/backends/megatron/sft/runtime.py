@@ -6,8 +6,8 @@
 
 """Runtime wiring helpers for Megatron-native SFT."""
 
-from collections.abc import Callable
 import inspect
+from collections.abc import Callable
 from typing import Any, Optional
 
 from primus.backends.megatron.sft.dataset import build_train_valid_test_datasets
@@ -27,10 +27,7 @@ def _supports_kwarg(sig: inspect.Signature, name: str) -> bool:
     if name in sig.parameters:
         return True
 
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in sig.parameters.values()
-    )
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in sig.parameters.values())
 
 
 def create_sft_datasets_provider() -> Callable:
@@ -55,9 +52,7 @@ def create_sft_datasets_provider() -> Callable:
         # Opt-in: reproduce NeMo Megatron-Bridge's packed-parquet token layout
         # (per-segment tokenize -> inline BOS in front of each supervised
         # segment -> trailing EOS). Used only for numerical A/B against Bridge.
-        bridge_compat_inline_bos = bool(
-            getattr(args, "sft_bridge_compat_inline_bos", False)
-        )
+        bridge_compat_inline_bos = bool(getattr(args, "sft_bridge_compat_inline_bos", False))
 
         log_rank_0(f"Building SFT datasets from: {dataset_name}")
         log_rank_0(f"Using conversation format: {conversation_format}")

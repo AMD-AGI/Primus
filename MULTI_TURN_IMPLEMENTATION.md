@@ -16,7 +16,7 @@ class OpenAIMessagesFormatter(ConversationFormatter):
         """Format messages and return assistant content positions."""
         # Formats with ChatML-style markers
         # Returns text and character positions of assistant messages
-        
+
     def format_conversation(self, ...):
         """Maintains compatibility with single-turn interface."""
 ```

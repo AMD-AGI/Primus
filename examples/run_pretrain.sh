@@ -251,7 +251,6 @@ LOG_INFO_RANK0 ""
 handle_hipblaslt_tuning() {
     local STAGE=${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}
     local TUNE_LOG_PATH=${PRIMUS_PATH}/output/tune_hipblaslt/${MODEL}
-    local RESULT_FILE=tune_hipblas_gemm_results.txt
     mkdir -p "$TUNE_LOG_PATH"
     case $STAGE in
         0)

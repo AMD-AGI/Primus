@@ -99,10 +99,10 @@ modules:
     overrides:
       # Option 1: HuggingFace Hub (online)
       sft_dataset_name: "tatsu-lab/alpaca"
-      
+
       # Option 2: Local JSONL file (offline)
       # sft_dataset_name: "/path/to/data.jsonl"
-      
+
       # Option 3: Local JSON file (offline)
       # sft_dataset_name: "/path/to/data.json"
 ```
@@ -112,8 +112,8 @@ modules:
 ### File Detection Logic
 ```python
 is_local_file = (
-    dataset_name.endswith('.jsonl') or 
-    dataset_name.endswith('.json') or 
+    dataset_name.endswith('.jsonl') or
+    dataset_name.endswith('.json') or
     os.path.isfile(dataset_name)
 )
 ```

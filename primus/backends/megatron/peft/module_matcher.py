@@ -19,9 +19,8 @@ from typing import Dict, List, Optional, Set
 from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from torch import nn
 
-from primus.backends.megatron.peft.utils import wildcard_match
 from primus.backends.megatron.peft.import_utils import safe_import_from
-
+from primus.backends.megatron.peft.utils import wildcard_match
 
 TEColumnParallelLinear, HAVE_TE_COL_LINEAR = safe_import_from(
     "megatron.core.extensions.transformer_engine", "TEColumnParallelLinear"
@@ -105,7 +104,9 @@ class ModuleMatcher:
             2) matches the current `full_name` with wildcard
             match is None if current module name doesn't match the specified targets.
             """
-            assert len(self.exclude_modules) == 0, "exclude_modules should be empty when using canonical_mapping"
+            assert (
+                len(self.exclude_modules) == 0
+            ), "exclude_modules should be empty when using canonical_mapping"
             for pattern in self.canonical_mapping:
                 if name == pattern or wildcard_match(pattern, full_name):
                     return (pattern, full_name)

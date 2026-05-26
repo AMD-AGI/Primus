@@ -25,6 +25,7 @@ from primus.backends.megatron.peft.adapter_wrapper import AdapterWrapper
 # Try to import bitsandbytes for quantization support
 try:
     import bitsandbytes
+
     HAVE_BNB = True
 except ImportError:
     bitsandbytes = None
@@ -39,7 +40,9 @@ class LoRALinear(AdapterWrapper):
     class to provide a specific implementation of the forward method.
     """
 
-    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self, x: torch.Tensor, *args: Any, **kwargs: Any
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass that combines the wrapped module output with the adapter output.
 
         Args:
@@ -683,7 +686,9 @@ def patch_linear_module(
     assert not hasattr(orig_linear, "super_fwd"), orig_linear.super_fwd
 
     if isinstance(orig_linear, nn.Linear):
-        LinearAdapter._init_adapter(orig_linear, dim, alpha, dropout, dropout_position, lora_A_init_method, lora_dtype)
+        LinearAdapter._init_adapter(
+            orig_linear, dim, alpha, dropout, dropout_position, lora_A_init_method, lora_dtype
+        )
         cls = orig_linear.__class__
         new_cls = type("PatchedLinearAdapter", (LinearAdapter, cls), {})
     elif orig_linear.__class__ == te.Linear:
