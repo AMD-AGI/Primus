@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.enums import Fp8Recipe
@@ -145,9 +144,9 @@ class MambaStack(MegatronModule):
     def _select_layers_for_pipeline_parallel(self, layer_type_list):
         num_layers_per_pipeline_rank = self.config.num_layers // self.pp_group.size()
 
-        assert self.config.virtual_pipeline_model_parallel_size is None, (
-            "The Mamba model does not currently support virtual/interleaved pipeline parallelism"
-        )
+        assert (
+            self.config.virtual_pipeline_model_parallel_size is None,
+        ), "The Mamba model does not currently support virtual/interleaved pipeline parallelism"
 
         offset = self.pp_group.rank() * num_layers_per_pipeline_rank
         selected_list = layer_type_list[offset : offset + num_layers_per_pipeline_rank]

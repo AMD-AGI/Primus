@@ -116,11 +116,12 @@ class HybridStack(MegatronModule):
         if hybrid_attention_ratio == 0.0 or hybrid_mlp_ratio == 0.0:
             try:
                 from megatron.training import get_args
+
                 args = get_args()
                 if hybrid_attention_ratio == 0.0:
-                    hybrid_attention_ratio = getattr(args, 'hybrid_attention_ratio', 0.0) or 0.0
+                    hybrid_attention_ratio = getattr(args, "hybrid_attention_ratio", 0.0) or 0.0
                 if hybrid_mlp_ratio == 0.0:
-                    hybrid_mlp_ratio = getattr(args, 'hybrid_mlp_ratio', 0.0) or 0.0
+                    hybrid_mlp_ratio = getattr(args, "hybrid_mlp_ratio", 0.0) or 0.0
             except (ImportError, AssertionError):
                 pass
 

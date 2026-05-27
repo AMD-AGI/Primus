@@ -61,4 +61,3 @@ modules:
       primus_turbo:
         enable_primus_turbo: true
         enable_attention_float8: false
- 
