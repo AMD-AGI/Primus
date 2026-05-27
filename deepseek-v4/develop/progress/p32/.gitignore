@@ -1,0 +1,8 @@
+*.log
+log_*.txt
+*.tgz
+*.json
+debug.log
+v4_bench_traces/
+csa_bench_traces/
+attention_bench_traces/

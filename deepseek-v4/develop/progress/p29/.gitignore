@@ -1,0 +1,10 @@
+*.log
+log_*.txt
+debug.log
+*.tgz
+*.json
+trace_*.txt
+*.tfevents*
+forensics_output.txt
+forensics2_output.txt
+forensics3_output.txt

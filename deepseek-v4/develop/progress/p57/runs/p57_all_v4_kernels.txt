@@ -1,0 +1,8 @@
+_v4_csa_attention_pool_sparse_bwd_partial_kernel                                              3  total=   8.165 ms  mean= 2.7217 ms
+_v4_attention_bwd_dkv_kernel                                                                  8  total=   7.213 ms  mean= 0.9017 ms
+_v4_attention_bwd_dq_kernel                                                                   8  total=   6.150 ms  mean= 0.7687 ms
+_v4_attention_fwd_kernel                                                                      8  total=   3.508 ms  mean= 0.4386 ms
+_v4_csa_attention_pool_sparse_merge_fwd_kernel                                                3  total=   2.934 ms  mean= 0.9778 ms
+_v4_csa_attention_pool_segreduce_kernel                                                       3  total=   1.423 ms  mean= 0.4743 ms
+_v4_attention_bwd_dkv_pool_mha_kernel                                                         2  total=   1.270 ms  mean= 0.6351 ms
+_v4_attention_bwd_preprocess_kernel                                                           8  total=   1.155 ms  mean= 0.1444 ms

@@ -1,0 +1,97 @@
+loading output/amd/tas-mi355x-20260509/p29_profile_after_pp1_ep8_seq4096/tensorboard/primus-megatron-exp[p29_profile_after_pp1_ep8_seq4096]-rank[0].1778301850351388452.pt.trace.json ...
+  109 matching kernels
+
+Distinct (input shapes, dtypes) of aten::sum -> reduce_kernel:
+  count=  33  total=    0.2 ms  avg=0.01 ms  shapes=((1, 4096, 4), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=  17  total=    1.3 ms  avg=0.08 ms  shapes=((1, 4096, 16384), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=  16  total=    0.1 ms  avg=0.01 ms  shapes=((4096, 6), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=  16  total=    0.2 ms  avg=0.01 ms  shapes=((1, 4096, 4, 4), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   8  total=    1.0 ms  avg=0.12 ms  shapes=((1, 4096, 64, 512), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   3  total=    0.0 ms  avg=0.01 ms  shapes=((1, 1024, 512), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   3  total=    0.1 ms  avg=0.05 ms  shapes=((23827, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   2  total=    0.0 ms  avg=0.01 ms  shapes=((4096,), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   2  total=    0.0 ms  avg=0.01 ms  shapes=((1, 32, 512), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   2  total=    0.0 ms  avg=0.00 ms  shapes=((8,), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.0 ms  avg=0.00 ms  shapes=((1,), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.1 ms  avg=0.06 ms  shapes=((1, 4096, 4, 4096), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.0 ms  avg=0.05 ms  shapes=((23883, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.0 ms  avg=0.03 ms  shapes=((11701, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.0 ms  avg=0.04 ms  shapes=((18360, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.1 ms  avg=0.08 ms  shapes=((41343, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+  count=   1  total=    0.0 ms  avg=0.04 ms  shapes=((17821, 2048), (), (), ())  types=('float', 'ScalarList', 'Scalar', '')
+
+Sample aten::sum cpu_op:
+{
+  "ph": "X",
+  "cat": "cpu_op",
+  "name": "aten::sum",
+  "pid": 22239,
+  "tid": 22239,
+  "ts": 3223291221522.804,
+  "dur": 22.1,
+  "args": {
+    "External id": 801,
+    "Sequence number": 12859,
+    "Fwd thread id": 0,
+    "Record function id": 0,
+    "Concrete Inputs": [
+      "",
+      "[-1]",
+      "True",
+      ""
+    ],
+    "Input type": [
+      "float",
+      "ScalarList",
+      "Scalar",
+      ""
+    ],
+    "Input Strides": [
+      [
+        6,
+        1
+      ],
+      [],
+      [],
+      []
+    ],
+    "Input Dims": [
+      [
+        4096,
+        6
+      ],
+      [],
+      [],
+      []
+    ],
+    "Ev Idx": 800
+  }
+}
+
+Sample matching kernel:
+{
+  "ph": "X",
+  "cat": "kernel",
+  "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+  "pid": 2,
+  "tid": 0,
+  "ts": 3223291221548.512,
+  "dur": 5.079,
+  "args": {
+    "External id": 801,
+    "device": 2,
+    "stream": 0,
+    "correlation": 22574,
+    "kind": "Dispatch Kernel",
+    "grid": [
+      32,
+      1,
+      1
+    ],
+    "block": [
+      4,
+      128,
+      1
+    ]
+  }
+}

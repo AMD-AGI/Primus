@@ -1,0 +1,14 @@
+# Plan-4 P27 — local smoke artefacts only.
+#
+# Same convention as P25 / P23: keep this phase folder in version control
+# for the summary docs / scripts; raw smoke logs and profile traces stay
+# local (large + noisy in PR diffs, per the user's plan-3 directive that
+# smoke logs MUST NOT be uploaded to GitHub).
+*.log
+log_*.txt
+debug.log
+*.tgz
+*.json
+# Allow markdown summaries and shell scripts inside the phase folder.
+!*.md
+!*.sh

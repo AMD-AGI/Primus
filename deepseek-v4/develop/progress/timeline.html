@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>DeepSeek-V4 in Primus — Development Timeline</title>
+<style>
+  :root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --bg-0: #05060a;
+    --bg-1: #0a0d18;
+    --bg-2: #11162a;
+    --bg-3: #181f3a;
+    --line: rgba(132, 174, 255, 0.18);
+    --line-strong: rgba(132, 174, 255, 0.35);
+    --text: #d5dcfa;
+    --text-dim: #8693c2;
+    --text-mute: #5b6688;
+    --accent-cyan: #4ddcff;
+    --accent-violet: #a86bff;
+    --accent-amber: #ffb46b;
+    --accent-emerald: #5fffa6;
+    --accent-rose: #ff6b9b;
+    --grid: rgba(77, 220, 255, 0.04);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: "";
+    position: fixed; inset: 0; z-index: 0;
+    background:
+      radial-gradient(900px 600px at 12% 8%, rgba(168, 107, 255, 0.18), transparent 60%),
+      radial-gradient(700px 500px at 92% 18%, rgba(77, 220, 255, 0.16), transparent 60%),
+      radial-gradient(900px 700px at 60% 110%, rgba(95, 255, 166, 0.10), transparent 60%);
+    pointer-events: none;
+  }
+
+  body::after {
+    content: "";
+    position: fixed; inset: 0; z-index: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 56px 56px;
+    pointer-events: none;
+    mix-blend-mode: screen;
+  }
+
+  main {
+    position: relative; z-index: 1;
+    max-width: 1320px; margin: 0 auto;
+    padding: 64px 32px 96px;
+  }
+
+  /* ---- header -------------------------------------------------- */
+  .hero { margin-bottom: 64px; }
+  .hero .meta {
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--text-mute); display: flex; gap: 24px; margin-bottom: 24px;
+  }
+  .hero .meta span::before { content: "// "; color: var(--accent-cyan); }
+  .hero h1 {
+    font-family: var(--font-sans); font-weight: 800;
+    font-size: clamp(40px, 6vw, 78px); line-height: 1; letter-spacing: -0.03em;
+  }
+  .hero h1 .grad {
+    background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-violet) 50%, var(--accent-rose) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.lead {
+    margin-top: 24px; max-width: 780px; color: var(--text-dim);
+    font-size: 17px; line-height: 1.65;
+  }
+
+  /* ---- summary cards ------------------------------------------- */
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 20px; margin: 48px 0 80px;
+  }
+  .stat {
+    border: 1px solid var(--line); background: var(--bg-1);
+    padding: 24px 28px; border-radius: 14px; position: relative; overflow: hidden;
+  }
+  .stat::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--accent-cyan);
+  }
+  .stat .label {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-mute);
+  }
+  .stat .num {
+    font-family: var(--font-sans); font-weight: 800; font-size: 44px; line-height: 1;
+    margin: 8px 0 4px;
+  }
+  .stat .desc { color: var(--text-dim); font-size: 13px; }
+  .stat:nth-child(2)::before { background: var(--accent-violet); }
+  .stat:nth-child(3)::before { background: var(--accent-emerald); }
+  .stat:nth-child(4)::before { background: var(--accent-amber); }
+  .stat:nth-child(5)::before { background: var(--accent-rose); }
+
+  /* ---- section heading ----------------------------------------- */
+  h2.section {
+    font-family: var(--font-sans); font-weight: 800;
+    font-size: clamp(26px, 3vw, 36px); letter-spacing: -0.02em;
+    margin: 64px 0 32px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px;
+  }
+  h2.section::before {
+    content: attr(data-num);
+    font-family: var(--font-mono); font-size: 12px;
+    letter-spacing: 0.18em; color: var(--accent-cyan);
+  }
+  h2.section .accent { color: var(--accent-violet); }
+
+  /* ---- timeline ------------------------------------------------ */
+  .timeline { position: relative; padding-left: 36px; }
+  .timeline::before {
+    content: ""; position: absolute; left: 12px; top: 6px; bottom: 6px;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent-cyan) 0%, var(--accent-violet) 50%, var(--accent-rose) 100%);
+    border-radius: 1px;
+  }
+  .lane {
+    position: relative; padding-bottom: 56px;
+  }
+  .lane::before {
+    content: ""; position: absolute; left: -30px; top: 4px;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--bg-0);
+    border: 2px solid var(--accent-cyan);
+    box-shadow: 0 0 0 4px rgba(77, 220, 255, 0.10);
+  }
+  .lane.violet::before { border-color: var(--accent-violet); box-shadow: 0 0 0 4px rgba(168, 107, 255, 0.10); }
+  .lane.emerald::before { border-color: var(--accent-emerald); box-shadow: 0 0 0 4px rgba(95, 255, 166, 0.10); }
+  .lane.amber::before { border-color: var(--accent-amber); box-shadow: 0 0 0 4px rgba(255, 180, 107, 0.10); }
+  .lane.rose::before { border-color: var(--accent-rose); box-shadow: 0 0 0 4px rgba(255, 107, 155, 0.10); }
+  .lane h3 {
+    font-family: var(--font-sans); font-weight: 700;
+    font-size: 22px; margin-bottom: 4px;
+  }
+  .lane .when {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.18em; color: var(--text-mute); text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  .lane .summary { color: var(--text-dim); margin-bottom: 18px; max-width: 880px; }
+
+  .phases {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+  .phase {
+    border: 1px solid var(--line);
+    background: linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 100%);
+    border-radius: 12px; padding: 18px 22px;
+    position: relative;
+  }
+  .phase .pid {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.18em; color: var(--accent-cyan);
+  }
+  .phase h4 {
+    font-family: var(--font-sans); font-weight: 700;
+    font-size: 16px; margin: 4px 0 8px;
+  }
+  .phase p { color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+  .phase .status {
+    position: absolute; top: 14px; right: 16px; font-size: 10px;
+    font-family: var(--font-mono); letter-spacing: 0.16em;
+    text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px;
+  }
+  .status.done { color: var(--accent-emerald); background: rgba(95, 255, 166, 0.08); border: 1px solid rgba(95, 255, 166, 0.25); }
+  .status.partial { color: var(--accent-amber); background: rgba(255, 180, 107, 0.08); border: 1px solid rgba(255, 180, 107, 0.25); }
+  .status.todo { color: var(--accent-rose); background: rgba(255, 107, 155, 0.08); border: 1px solid rgba(255, 107, 155, 0.25); }
+  .status.active { color: var(--accent-cyan); background: rgba(77, 220, 255, 0.08); border: 1px solid rgba(77, 220, 255, 0.25); }
+
+  /* ---- review findings card ------------------------------------ */
+  .findings {
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    margin-top: 28px;
+  }
+  .finding {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px 24px;
+    background: var(--bg-1);
+    position: relative; overflow: hidden;
+  }
+  .finding::after {
+    content: attr(data-tag);
+    position: absolute; top: 0; right: 0;
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.16em;
+    padding: 6px 12px;
+    color: var(--bg-0); font-weight: 700;
+  }
+  .finding.crit::after { background: var(--accent-rose); }
+  .finding.high::after { background: var(--accent-amber); }
+  .finding.med::after { background: var(--accent-violet); color: white; }
+  .finding h4 {
+    font-family: var(--font-sans); font-weight: 700;
+    font-size: 15px; margin: 24px 0 8px; max-width: 90%;
+  }
+  .finding p {
+    color: var(--text-dim); font-size: 13px; line-height: 1.5;
+  }
+  .finding code {
+    font-family: var(--font-mono); color: var(--accent-cyan);
+    background: rgba(77, 220, 255, 0.07);
+    border: 1px solid rgba(77, 220, 255, 0.14);
+    padding: 1px 6px; border-radius: 4px; font-size: 11.5px;
+  }
+
+  /* ---- gantt --------------------------------------------------- */
+  .gantt {
+    margin-top: 32px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--bg-1);
+    padding: 32px 40px 36px;
+    overflow-x: auto;
+  }
+  .gantt-grid {
+    display: grid;
+    grid-template-columns: 260px repeat(9, 1fr);
+    align-items: center; gap: 10px 6px;
+    min-width: 1180px;
+  }
+  .gantt-grid .col-head .day-name {
+    display: block; font-size: 9.5px; color: var(--text-mute);
+    margin-top: 4px; letter-spacing: 0.12em;
+  }
+  .gantt-grid .col-head.holiday-head {
+    color: var(--accent-rose);
+    background: linear-gradient(180deg, rgba(255, 107, 155, 0.10), transparent 80%);
+    border-radius: 6px 6px 0 0;
+  }
+  .bar.holiday {
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(255, 107, 155, 0.25) 0 8px,
+      rgba(255, 107, 155, 0.10) 8px 16px
+    );
+    border: 1px dashed var(--accent-rose);
+  }
+  .bar.holiday .label { color: var(--accent-rose); }
+  .gantt-grid .col-head {
+    font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.18em; color: var(--text-mute); text-transform: uppercase;
+    padding-bottom: 12px; border-bottom: 1px solid var(--line);
+    text-align: center;
+  }
+  .gantt-grid .row-head {
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-dim); padding-right: 16px; padding-left: 4px;
+  }
+  .bar {
+    height: 22px; border-radius: 999px;
+    position: relative;
+    background: linear-gradient(90deg, var(--accent-cyan) 0%, var(--accent-violet) 100%);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.05) inset;
+  }
+  .bar.violet { background: linear-gradient(90deg, var(--accent-violet) 0%, var(--accent-rose) 100%); }
+  .bar.emerald { background: linear-gradient(90deg, var(--accent-emerald) 0%, var(--accent-cyan) 100%); }
+  .bar.amber { background: linear-gradient(90deg, var(--accent-amber) 0%, var(--accent-rose) 100%); }
+  .bar.rose { background: linear-gradient(90deg, var(--accent-rose) 0%, var(--accent-violet) 100%); }
+  .bar .label {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: rgba(0,0,0,0.78); font-weight: 700; letter-spacing: 0.06em;
+  }
+
+  /* ---- footer -------------------------------------------------- */
+  footer {
+    color: var(--text-mute); font-size: 12px;
+    font-family: var(--font-mono);
+    margin-top: 80px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  }
+  footer a { color: var(--accent-cyan); text-decoration: none; }
+</style>
+</head>
+<body>
+<main>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="meta">
+    <span>Primus // DeepSeek-V4</span>
+    <span>Branch dev/wenx/deepseek-v4</span>
+    <span>2026-04-28 → present</span>
+    <span>Plan-2 lockdown</span>
+  </div>
+  <h1>
+    DeepSeek-V4 <span class="grad">Integration</span><br/>
+    Development Roadmap
+  </h1>
+  <p class="lead">
+    Plan-0 brought up the configs, dispatch path, layer specs, HC + Hybrid Attention,
+    MoE family and a single-node BF16 smoke. Plan-1 added a spec-driven runtime,
+    a TE/Turbo provider, and dispatcher-based MoE. Plan-2 takes a hard reset on the
+    architecture: it rebuilds the modules on Megatron's
+    <em>spec + config + provider + submodule + build_module</em> pattern and brings
+    the implementation into parity with the released DeepSeek-V4 reference.
+  </p>
+</section>
+
+<!-- STAT GRID -->
+<section class="stat-grid">
+  <div class="stat">
+    <div class="label">Phases (3 plans)</div>
+    <div class="num">22</div>
+    <div class="desc">P0–P11 (plan-0/1) + P12–P21 (plan-2)</div>
+  </div>
+  <div class="stat">
+    <div class="label">Modules built</div>
+    <div class="num">25+</div>
+    <div class="desc">attention / MoE / HC / RoPE / configs / provider</div>
+  </div>
+  <div class="stat">
+    <div class="label">Critical findings</div>
+    <div class="num">10</div>
+    <div class="desc">architecture parity gaps to fix in plan-2</div>
+  </div>
+  <div class="stat">
+    <div class="label">Distributed smoke</div>
+    <div class="num">3 / 3</div>
+    <div class="desc">PP=2 EP=4 reached on plan-1 stack</div>
+  </div>
+  <div class="stat">
+    <div class="label">Release gates</div>
+    <div class="num">G1–G13</div>
+    <div class="desc">defined in plan-2 / 04-test-strategy.md</div>
+  </div>
+</section>
+
+<!-- PLAN-0 -->
+<h2 class="section" data-num="01">Plan-0 <span class="accent">// MVP bring-up</span></h2>
+
+<div class="timeline">
+
+  <article class="lane">
+    <h3>Phase 0–3 — Investigation, Configs, Layer Specs</h3>
+    <div class="when">2026-04-28</div>
+    <p class="summary">
+      Architecture investigation + tech blog. YAML scaffolding for V4 base, V4-Flash and V4-Pro.
+      The trainer dispatch landed for <code>model_type=deepseek_v4</code>. Layer specs and a stub
+      transformer block scaffolding shipped.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P0</div><h4>Investigation + tech blog</h4><p>4 architecture diagrams + deep-dive doc.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P1</div><h4>YAML configs</h4><p>base / Flash / Pro + MI355X training yaml; tokenizer wired.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P2</div><h4>Trainer dispatch</h4><p><code>model_type=deepseek_v4</code> branch in <code>MegatronPretrainTrainer</code> + builder skeleton.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P3</div><h4>Layer specs + block scaffolding</h4><p>Layer-spec helpers + standalone block + V4 model class.</p></div>
+    </div>
+  </article>
+
+  <article class="lane violet">
+    <h3>Phase 4–5 — HC, Hybrid Attention, MoE family</h3>
+    <div class="when">2026-04-28</div>
+    <p class="summary">
+      HC mixer + HyperHead + Sinkhorn fp32 path. Compressor (overlap=True / False), Indexer with
+      causal top-K, sliding-window KV, attention sink, dual-base / partial RoPE. MoE: hash router,
+      sqrtsoftplus / sigmoid / softmax learned router, clamped SwiGLU, MTP head.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P4</div><h4>HC + Hybrid Attention</h4><p>HyperMixer / HyperHead / Compressor / Indexer / SWA / sink / dual-RoPE / Dense+CSA+HCA</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P5</div><h4>MoE + activation + MTP</h4><p>HashRouter / V4TopKRouter / clamped SwiGLU / MTP block (custom).</p></div>
+    </div>
+  </article>
+
+  <article class="lane emerald">
+    <h3>Phase 6–7 — End-to-end + single-node smoke</h3>
+    <div class="when">2026-04-28</div>
+    <p class="summary">
+      Builder swapped to the real model + HC + V4 attention + V4 MoE. PP layer construction lifted
+      onto Megatron's <code>get_num_layers_to_build</code>. EP routing landed (with all_reduce
+      fallback). 1×8 BF16 PP=2 EP=4 smoke reached <code>iteration 3/3</code>.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P6</div><h4>Trainer end-to-end + PP / EP</h4><p>Builder uses real V4Model; PP local layers; EP shards experts.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P7</div><h4>Single-node bring-up</h4><p><code>run_deepseek_v4.sh</code> green on <code>uswslocpm2m-106-2371</code>.</p></div>
+    </div>
+  </article>
+</div>
+
+<!-- PLAN-1 -->
+<h2 class="section" data-num="02">Plan-1 <span class="accent">// Spec-driven refactor</span></h2>
+
+<div class="timeline">
+  <article class="lane amber">
+    <h3>Phase 8 — ModuleSpec main-path refactor</h3>
+    <div class="when">2026-04-29</div>
+    <p class="summary">
+      Defined the V4 runtime spec topology end-to-end. <code>DeepseekV4Model</code> reroots on
+      <code>LanguageModule</code> and consumes the runtime decoder spec via <code>build_module</code>;
+      builder no longer depends on a GPT placeholder spec.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P8.1</div><h4>Spec topology</h4><p>Full decoder/attention/ffn/hc spec tree.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P8.2</div><h4>LanguageModule reroot</h4><p>Direct decoder build via spec.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P8.3</div><h4>Builder alignment</h4><p>Provider-driven runtime decoder spec.</p></div>
+    </div>
+  </article>
+
+  <article class="lane rose">
+    <h3>Phase 9 — TE provider reuse</h3>
+    <div class="when">2026-04-30</div>
+    <p class="summary">
+      <code>DeepSeekV4SpecProvider(PrimusTurboSpecProvider)</code> introduced as the single V4
+      provider entry. Norm + projection paths route through the provider; grouped-MLP expert
+      backend selectable. A/B validation report landed.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P9.1</div><h4>V4 provider class</h4><p>Inherits PrimusTurbo provider; norms + linears + grouped MLP.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P9.2</div><h4>MoE provider integration</h4><p>Grouped-GEMM build + local fallback.</p></div>
+      <div class="phase"><span class="status done">done</span><div class="pid">P9.3</div><h4>A/B report</h4><p>plan-1 / 03-phase9-provider-ab-report.md</p></div>
+    </div>
+  </article>
+
+  <article class="lane violet">
+    <h3>Phase 10 — MoE + distributed convergence</h3>
+    <div class="when">2026-04-30</div>
+    <p class="summary">
+      MoE migrated to a <code>submodules + build_module</code> pattern. Megatron token dispatcher
+      bridge wired (<code>route → preprocess → dispatch → expert_compute → combine → postprocess</code>).
+      Routed-output <code>all_reduce</code> retired from the active path; clamped-SwiGLU backend
+      compatibility checks added.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status done">done</span><div class="pid">P10.1</div><h4>Dispatcher bridge</h4><p>alltoall + flex paths reused.</p></div>
+      <div class="phase"><span class="status partial">partial</span><div class="pid">P10.2</div><h4>PP token-id propagation</h4><p>Hash-router stage ownership; fail-fast at boundaries — pending.</p></div>
+      <div class="phase"><span class="status partial">partial</span><div class="pid">P10.3</div><h4>Distributed smoke + routing snapshots</h4><p>1×8 + PP/EP smoke pending in plan-2.</p></div>
+    </div>
+  </article>
+
+  <article class="lane">
+    <h3>Phase 11 — Validation + release gates</h3>
+    <div class="when">paused</div>
+    <p class="summary">
+      Originally scoped: regression matrix, numerical alignment, short-run convergence, perf
+      reports. Paused — plan-2 supersedes; the matrix moves to plan-2 P19 / P20 with stricter gates.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">paused</span><div class="pid">P11</div><h4>Originally scoped gates</h4><p>Now superseded by plan-2 P19 / P20.</p></div>
+    </div>
+  </article>
+</div>
+
+<!-- REVIEW FINDINGS -->
+<h2 class="section" data-num="03">Code Review <span class="accent">// Critical findings</span></h2>
+
+<p style="color:var(--text-dim); max-width: 980px; margin-bottom: 16px;">
+  Cross-checked against <code>DeepSeek-V4-Flash/inference/model.py</code>, the
+  <code>transformers.models.deepseek_v4</code> reference and NeMo Automodel's V4 implementation.
+  Severity tags are <code>CRIT</code> (architecture parity), <code>HIGH</code> (distributed
+  / spec correctness), <code>MED</code> (reuse / hygiene). Full notes in
+  <code>plan-2/00-review-findings.md</code>.
+</p>
+
+<div class="findings">
+  <article class="finding crit" data-tag="A1 · CRIT">
+    <h4>Separate K and V projections</h4>
+    <p>Real V4 has a single <code>wkv</code> latent (K = V = kv). Wastes parameters and blocks checkpoint loading.</p>
+  </article>
+  <article class="finding crit" data-tag="A2/A3 · CRIT">
+    <h4>Missing q_norm and kv_norm</h4>
+    <p>HF / inference reference applies a per-head <code>q_rms</code> after <code>wq_b</code> and a <code>kv_norm</code> after <code>wkv</code>. Both are absent in Primus.</p>
+  </article>
+  <article class="finding crit" data-tag="A4 · CRIT">
+    <h4>No grouped low-rank O projection</h4>
+    <p>Real V4 has <code>wo_a</code> + <code>wo_b</code> with <code>o_groups=8, o_lora_rank=1024</code>. Primus uses a flat <code>linear_o_proj</code>.</p>
+  </article>
+  <article class="finding crit" data-tag="A5 · CRIT">
+    <h4>HashRouter has no learnable gate</h4>
+    <p>Real V4 hash gate gathers <em>learned</em> scores at <code>tid2eid</code> indices. Primus emits uniform <code>1/topk</code> weights.</p>
+  </article>
+  <article class="finding crit" data-tag="A6/A7 · CRIT">
+    <h4>Wrong clamped SwiGLU</h4>
+    <p>HF reference clamps gate / up <em>before</em> the multiply. Primus clamps the post-multiply output AND fuses <code>w1</code>/<code>w3</code>.</p>
+  </article>
+  <article class="finding crit" data-tag="A9 · HIGH">
+    <h4>No state-dict adapter</h4>
+    <p>Primus model cannot consume <code>DeepSeek-V4-Flash</code> safetensors for finetune / numerical alignment.</p>
+  </article>
+  <article class="finding high" data-tag="B1/B2 · CRIT">
+    <h4>Custom block / attention bypass MLA + TransformerBlock</h4>
+    <p>V4 attention is a plain <code>nn.Module</code>; block does not subclass <code>TransformerBlock</code>. Loses MLA backends, recompute, CUDA graph, sequence-parallel.</p>
+  </article>
+  <article class="finding high" data-tag="C1 · CRIT">
+    <h4>HC × PP boundary breaks the math</h4>
+    <p>HyperHead is applied at the end of every PP stage and re-expanded on the next; K-stream context is destroyed.</p>
+  </article>
+  <article class="finding high" data-tag="C2/C3/C4 · HIGH">
+    <h4>Anti-patterns in distributed forward</h4>
+    <p>Token-IDs stashed on <code>decoder._v4_token_ids</code>, position_ids replaced with <code>arange(S)</code>, projections built with <code>parallel_mode="duplicated"</code> (no TP).</p>
+  </article>
+  <article class="finding high" data-tag="B5 · HIGH">
+    <h4>MTP not on Megatron's MTP path</h4>
+    <p>Custom <code>DeepseekV4MTPBlock</code> is opt-in; default training has no MTP loss.</p>
+  </article>
+  <article class="finding med" data-tag="D1–D7 · MED">
+    <h4>Spec / provider hygiene</h4>
+    <p>Provider re-instantiated, activation_func returns a class, <code>compress_ratios</code> is a YAML string, scaling_factor ignored, etc.</p>
+  </article>
+  <article class="finding med" data-tag="E1–E5 · MED">
+    <h4>Reuse / hygiene gaps</h4>
+    <p>Local <code>_RMSNorm</code> duplicates, custom YaRN re-implementation, custom dual-RoPE, mixed concerns inside one 778-line block file.</p>
+  </article>
+</div>
+
+<!-- PLAN-2 -->
+<h2 class="section" data-num="04">Plan-2 <span class="accent">// Architecture-faithful rewrite</span></h2>
+
+<div class="timeline">
+  <article class="lane">
+    <h3>Phase 12 — Plan-2 lockdown</h3>
+    <div class="when">2026-05-01</div>
+    <p class="summary">
+      Review findings, plan-2 documents, and a Phase 12+ tracking section landed. Plan-1 P11 paused.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status active">in progress</span><div class="pid">P12</div><h4>Lockdown</h4><p>Plan-2 docs + status.md tracking section.</p></div>
+    </div>
+  </article>
+
+  <article class="lane violet">
+    <h3>Phase 13 — Faithful attention</h3>
+    <div class="when">~5 person-days</div>
+    <p class="summary">
+      <code>DeepseekV4Attention(MLASelfAttention)</code> with single-latent KV, per-head q_norm, kv_norm,
+      learnable attn_sink, grouped low-rank O. Compressor / Indexer move into spec submodules; CSA / HCA
+      retire as separate classes.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P13.1</div><h4>MLASelfAttention reuse</h4><p>Reuse low-rank Q + partial RoPE + core attention.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P13.2</div><h4>q_norm + kv_norm + sink</h4><p>Match HF reference forward.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P13.3</div><h4>Grouped low-rank O</h4><p><code>linear_o_a</code>/<code>linear_o_b</code> with TP shards.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P13.4</div><h4>Compressor / Indexer in spec</h4><p>Retire <code>csa_attention.py</code>/<code>hca_attention.py</code>.</p></div>
+    </div>
+  </article>
+
+  <article class="lane emerald">
+    <h3>Phase 14 — Faithful MoE + activation + router</h3>
+    <div class="when">~5 person-days</div>
+    <p class="summary">
+      Pre-mul clamped SwiGLU. <code>DeepseekV4LearnedRouter(TopKRouter)</code> + <code>DeepseekV4HashRouter(TopKRouter)</code>
+      with a learnable gate. <code>DeepseekV4MoE(MoELayer)</code> for free load-balance / z-loss / dispatcher
+      lifecycle. Token-IDs threaded as a forward kwarg.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P14.1</div><h4>Pre-mul clamped SwiGLU</h4><p>Separate <code>w1</code>/<code>w3</code>; provider activation_func callable.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P14.2</div><h4>Learned + hash routers</h4><p>Both subclass <code>TopKRouter</code>; share the gate.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P14.3</div><h4>MoELayer subclass</h4><p>Inherit upstream MoE features.</p></div>
+    </div>
+  </article>
+
+  <article class="lane amber">
+    <h3>Phase 15 — Faithful layer + block + HC × PP</h3>
+    <div class="when">~5 person-days</div>
+    <p class="summary">
+      <code>DeepseekV4HybridLayer(TransformerLayer)</code> with HC residual. <code>DeepseekV4TransformerBlock(TransformerBlock)</code>.
+      K-streams travel across PP via <code>[S,B,K,D] ↔ [S*K,B,D]</code> packing. <code>HyperHead</code> only on the last PP stage.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P15.1</div><h4>TransformerLayer reuse</h4><p>HC mixing replaces the residual path.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P15.2</div><h4>TransformerBlock reuse</h4><p>PP / recompute / SP for free.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P15.3</div><h4>HC across PP</h4><p>Lift / lower helpers + last-stage HyperHead.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P15.4</div><h4>token_ids forward kwarg</h4><p>Drop <code>decoder._v4_token_ids</code>.</p></div>
+    </div>
+  </article>
+
+  <article class="lane rose">
+    <h3>Phase 16 — MTP integration</h3>
+    <div class="when">~3 person-days</div>
+    <p class="summary">
+      <code>MultiTokenPredictionBlock</code> wired in for <code>mtp_num_layers > 0</code>. Per-layer
+      <code>HyperHead</code>. <code>process_mtp_loss</code> in the V4 forward. Custom MTP block retired.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P16</div><h4>Megatron MTP path</h4><p>MTP loss term shows up in train log.</p></div>
+    </div>
+  </article>
+
+  <article class="lane violet">
+    <h3>Phase 17 — State-dict adapter</h3>
+    <div class="when">~3 person-days</div>
+    <p class="summary">
+      <code>DeepSeekV4StateDictAdapter</code> maps released keys to Primus tensor names.
+      <code>scripts/load_v4_flash_check.py</code> validates BF16 forward parity against the HF reference.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P17</div><h4>Adapter + load gate</h4><p>Token-0 logits ≤1e-2 vs HF reference.</p></div>
+    </div>
+  </article>
+
+  <article class="lane">
+    <h3>Phase 18–21 — Spec audit, distributed, gates, cleanup</h3>
+    <div class="when">~6 person-days</div>
+    <p class="summary">
+      Spec-system audit, distributed re-validation matrix, numerical / convergence / perf gates, dead-code cleanup, and refreshed docs.
+    </p>
+    <div class="phases">
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P18</div><h4>Spec audit</h4><p>Provider singleton; activation callable; YAML schema test.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P19</div><h4>Distributed re-validation</h4><p>5-config smoke + routing snapshots.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P20</div><h4>Release gates</h4><p>Numerical + convergence + perf reports.</p></div>
+      <div class="phase"><span class="status todo">todo</span><div class="pid">P21</div><h4>Cleanup + docs</h4><p>Dead-code retirement + refreshed timeline.</p></div>
+    </div>
+  </article>
+</div>
+
+<!-- TIMELINE GANTT -->
+<h2 class="section" data-num="05">Timeline <span class="accent">// Day-by-day Gantt</span></h2>
+
+<p class="lead" style="margin-bottom: 24px; max-width: 880px;">
+  Past phases (Apr 28 → May 01) are landed on the dev branch. May 02 → May 05 is the
+  national holiday window — no engineering activity is scheduled. Plan-2 execution
+  resumes on May 06 and lands the remaining nine phases (P13 → P21) over four
+  intensive working days, ending on May 09.
+</p>
+
+<div class="gantt">
+  <div class="gantt-grid">
+    <div></div>
+    <div class="col-head">Apr 28<br/><span class="day-name">Tue</span></div>
+    <div class="col-head">Apr 29<br/><span class="day-name">Wed</span></div>
+    <div class="col-head">Apr 30<br/><span class="day-name">Thu</span></div>
+    <div class="col-head">May 01<br/><span class="day-name">Fri</span></div>
+    <div class="col-head holiday-head">May 02–05<br/><span class="day-name">Holiday</span></div>
+    <div class="col-head">May 06<br/><span class="day-name">Tue</span></div>
+    <div class="col-head">May 07<br/><span class="day-name">Wed</span></div>
+    <div class="col-head">May 08<br/><span class="day-name">Thu</span></div>
+    <div class="col-head">May 09<br/><span class="day-name">Fri</span></div>
+
+    <div class="row-head">P0–P3 Investigation + Configs + Specs</div>
+    <div style="grid-column: 2 / span 1;"><div class="bar emerald"><span class="label">P0–P3</span></div></div>
+
+    <div class="row-head">P4 HC + Hybrid Attention</div>
+    <div style="grid-column: 2 / span 1;"><div class="bar emerald"><span class="label">P4</span></div></div>
+
+    <div class="row-head">P5 MoE + Activation + MTP</div>
+    <div style="grid-column: 2 / span 1;"><div class="bar emerald"><span class="label">P5</span></div></div>
+
+    <div class="row-head">P6–P7 Trainer e2e + Single-node smoke</div>
+    <div style="grid-column: 2 / span 1;"><div class="bar emerald"><span class="label">P6–P7</span></div></div>
+
+    <div class="row-head">P8 ModuleSpec refactor</div>
+    <div style="grid-column: 3 / span 1;"><div class="bar amber"><span class="label">P8</span></div></div>
+
+    <div class="row-head">P9 TE / Turbo provider</div>
+    <div style="grid-column: 4 / span 1;"><div class="bar amber"><span class="label">P9</span></div></div>
+
+    <div class="row-head">P10 MoE + distributed convergence</div>
+    <div style="grid-column: 4 / span 1;"><div class="bar amber"><span class="label">P10</span></div></div>
+
+    <div class="row-head">P12 Plan-2 lockdown (review)</div>
+    <div style="grid-column: 5 / span 1;"><div class="bar"><span class="label">P12</span></div></div>
+
+    <!-- Holiday band -->
+    <div class="row-head" style="color: var(--text-mute);">— national holiday —</div>
+    <div style="grid-column: 6 / span 1;"><div class="bar holiday"><span class="label">May 02–05 · no work</span></div></div>
+
+    <!-- May 06 (Day 1) -->
+    <div class="row-head">P13 Faithful attention (MLA-rooted)</div>
+    <div style="grid-column: 7 / span 1;"><div class="bar"><span class="label">P13</span></div></div>
+
+    <div class="row-head">P14 MoE + activation + router</div>
+    <div style="grid-column: 7 / span 1;"><div class="bar violet"><span class="label">P14</span></div></div>
+
+    <!-- May 07 (Day 2) -->
+    <div class="row-head">P15 Layer / Block / HC × PP</div>
+    <div style="grid-column: 8 / span 1;"><div class="bar amber"><span class="label">P15</span></div></div>
+
+    <div class="row-head">P16 MTP integration</div>
+    <div style="grid-column: 8 / span 1;"><div class="bar rose"><span class="label">P16</span></div></div>
+
+    <!-- May 08 (Day 3) -->
+    <div class="row-head">P17 State-dict adapter + checkpoint load</div>
+    <div style="grid-column: 9 / span 1;"><div class="bar emerald"><span class="label">P17</span></div></div>
+
+    <div class="row-head">P18 Spec-system audit</div>
+    <div style="grid-column: 9 / span 1;"><div class="bar"><span class="label">P18</span></div></div>
+
+    <!-- May 09 (Day 4) -->
+    <div class="row-head">P19 Distributed re-validation</div>
+    <div style="grid-column: 10 / span 1;"><div class="bar violet"><span class="label">P19</span></div></div>
+
+    <div class="row-head">P20 Numerical / convergence / perf gates</div>
+    <div style="grid-column: 10 / span 1;"><div class="bar rose"><span class="label">P20</span></div></div>
+
+    <div class="row-head">P21 Cleanup + docs + handover</div>
+    <div style="grid-column: 10 / span 1;"><div class="bar amber"><span class="label">P21</span></div></div>
+  </div>
+</div>
+
+<footer>
+  <span>Generated 2026-05-01 // dev/wenx/deepseek-v4 // commit walk e194e039..HEAD</span>
+  <span>Sources: deepseek-v4/develop/{plan-0,plan-1,plan-2}/ + progress/status.md</span>
+</footer>
+
+</main>
+</body>
+</html>

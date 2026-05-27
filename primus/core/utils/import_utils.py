@@ -39,13 +39,27 @@ def get_model_provider(model_type="gpt"):
     Resolve model_provider across Megatron versions and model types.
 
     Args:
-        model_type (str): Type of model - 'gpt' or 'mamba'. Defaults to 'gpt'.
+        model_type (str): Type of model - 'gpt', 'mamba', or 'deepseek_v4'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
     - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
     """
-    # Try to import model_provider
+    # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
+    if model_type == "deepseek_v4":
+        deepseek_v4_module = importlib.import_module(
+            "primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded DeepSeek-V4 model_provider + builder "
+            f"from {deepseek_v4_module.__name__}"
+        )
+        return partial(
+            deepseek_v4_module.model_provider,
+            deepseek_v4_module.deepseek_v4_builder,
+        )
+
+    # Upstream Megatron-LM model types
     if model_type == "mamba":
         model_provider = lazy_import(
             ["model_provider", "pretrain_mamba"], "model_provider", log_prefix="[Primus][MegatronCompat]"

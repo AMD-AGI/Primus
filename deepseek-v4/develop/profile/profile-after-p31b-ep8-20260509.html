@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Plan-5 P31b — V4-Flash EP=8 Split CSA BWD Trace</title>
+<style>
+body { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; max-width: 1280px; margin: 1.5rem auto; padding: 0 1rem; color: #1d1f21; line-height: 1.45; }
+h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.3rem; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.15rem; margin-top: 2rem; }
+table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.92rem; }
+th, td { border: 1px solid #d0d7de; padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) td { background: #fafbfc; }
+code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pill { background: #ddf4ff; color: #0969da; padding: 1px 6px; border-radius: 999px; font-size: 0.85em; }
+.warn { background: #fff8c5; color: #9a6700; padding: 2px 6px; border-radius: 3px; }
+hr { border: none; border-top: 1px solid #d0d7de; margin: 1.5rem 0; }
+.hdr { color: #57606a; font-size: 0.9em; margin-bottom: 1rem; }
+</style>
+</head><body>
+
+<h1>Plan-5 P31b — V4-Flash EP=8 trace after split CSA backward</h1>
+<blockquote class='hdr'>Generated 2026-05-09T06:24:50 from <code>output/amd/tas-mi355x-20260509/p31_profile_csa_in_kernel_gather_pp1_ep8_seq4096/tensorboard/primus-megatron-exp[p31_profile_csa_in_kernel_gather_pp1_ep8_seq4096]-rank[0].1778324637328675032.pt.trace.json</code>.</blockquote>
+<h2>Key Findings</h2>
+<p>- <strong>P31b is the updated profile for the split CSA BWD redesign.</strong> The previous <code>profile-after-p31-ep8-20260509</code> report still describes the first P31 in-kernel gather/scatter path; this report uses trace <code>1778324637328675032</code>.</p>
+<p>- <strong>End-to-end proxy speed is now in the sub-second range.</strong> The clean post-profiler iter 10 line reports <strong>964.8 ms / iter</strong> and <strong>709.3 TFLOP/s/GPU</strong>; the running average is <strong>1114.5 ms</strong> and <strong>648.0 TFLOP/s/GPU</strong>.</p>
+<p>- <strong>The profiler steady window is 980.9 ms</strong> with <strong>940.0 ms GPU active</strong> (95.8 %). The trace still has a small profiler / host gap, so <code>proxy_ep8.md</code> uses the clean iter 10 line as the headline.</p>
+<p>- <strong>The monolithic CSA BWD bottleneck is gone.</strong> P31 had <code>_v4_csa_attention_pool_bwd_kernel</code> at <strong>3.50 s / 3 launches</strong>. P31b replaces it with <code>_v4_csa_attention_pool_sparse_bwd_kernel</code> at <strong>80.8 ms / 3 launches</strong> plus CSA-local work folded into <code>_v4_attention_bwd_kernel</code>.</p>
+<p>- <strong>Trace-estimated CSA BWD is about 179.6 ms</strong>, using P30/P31 dense-HCA <code>_v4_attention_bwd_kernel</code> cost (~161.0 ms) as the baseline and attributing the extra dense-kernel launches to CSA local BWD. This is a <strong>94.9 %</strong> reduction from the P31 monolithic CSA BWD trace. The standalone EP8-shape benchmark remains lower at <strong>35.43 ms</strong> because it excludes full-training profiler overhead and unrelated attention launches.</p>
+<p>- <strong>Current top kernels have shifted.</strong> <code>_v4_attention_bwd_kernel</code> is now rank 1 at <strong>259.7 ms / 8 launches</strong>, followed by CSA FWD at <strong>123.1 ms</strong> and CSA sparse BWD at <strong>80.8 ms</strong>. The next performance target is no longer the old per-row CSA BWD design.</p>
+<h2>Run Config Provenance</h2>
+<table><thead><tr>
+<th>key</th>
+<th>value</th>
+</tr></thead><tbody>
+<tr>
+<td>commit</td>
+<td><code>2c7cf59d</code></td>
+</tr>
+<tr>
+<td>host</td>
+<td><code>mi355-gpu-14</code></td>
+</tr>
+<tr>
+<td>container</td>
+<td><code>dev_primus_wenx_693</code></td>
+</tr>
+<tr>
+<td>trace</td>
+<td><code>1778324637328675032</code></td>
+</tr>
+<tr>
+<td>trace archive</td>
+<td><code>output/amd/tas-mi355x-20260509/p31_profile_csa_in_kernel_gather_pp1_ep8_seq4096/tensorboard/primus-megatron-exp[p31_profile_csa_in_kernel_gather_pp1_ep8_seq4096]-rank[0].1778324637328675032.pt.trace.json.tgz</code></td>
+</tr>
+<tr>
+<td>seq_length</td>
+<td>4096</td>
+</tr>
+<tr>
+<td>parallel</td>
+<td>TP=1 PP=1 EP=8</td>
+</tr>
+<tr>
+<td>micro_batch_size / global_batch_size</td>
+<td>1 / 8</td>
+</tr>
+<tr>
+<td>num_layers</td>
+<td>8</td>
+</tr>
+<tr>
+<td>num_experts</td>
+<td>256 (32/rank under EP=8)</td>
+</tr>
+<tr>
+<td>moe_router_topk</td>
+<td>6</td>
+</tr>
+<tr>
+<td>moe_ffn_hidden_size</td>
+<td>2048</td>
+</tr>
+<tr>
+<td>index_topk</td>
+<td>512</td>
+</tr>
+<tr>
+<td>compress_ratios</td>
+<td><code>[0,0,4,128,4,128,4,0]</code></td>
+</tr>
+<tr>
+<td>perf knobs</td>
+<td><code>use_v4_triton_attention=True</code>, <code>use_v4_triton_csa_attention=True</code>, <code>use_turbo_deepep=True</code>, <code>use_turbo_grouped_mlp=True</code>, <code>use_turbo_attention=False</code></td>
+</tr>
+</tbody></table>
+<h2>Per-Iter Wall Time</h2>
+<p>Training values are parsed from the rank-7 pre-trainer log for the latest run in this profile directory. The first two iterations include compile / warmup and are not used for the table headline.</p>
+<table><thead><tr>
+<th>iter</th>
+<th>ms / iter</th>
+<th>running avg ms</th>
+<th>TFLOP/s/GPU</th>
+<th>running avg TFLOP/s/GPU</th>
+<th>lm_loss</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td>38053.3</td>
+<td>-</td>
+<td>18.0</td>
+<td>-</td>
+<td>1.189969E+01</td>
+</tr>
+<tr>
+<td>2</td>
+<td>19604.7</td>
+<td>-</td>
+<td>34.9</td>
+<td>-</td>
+<td>1.175119E+01</td>
+</tr>
+<tr>
+<td>3</td>
+<td>1143.6</td>
+<td>1143.6</td>
+<td>598.4</td>
+<td>598.4</td>
+<td>1.116454E+01</td>
+</tr>
+<tr>
+<td>4</td>
+<td>968.9</td>
+<td>1056.2</td>
+<td>706.3</td>
+<td>652.3</td>
+<td>1.094465E+01</td>
+</tr>
+<tr>
+<td>5</td>
+<td>972.5</td>
+<td>1028.3</td>
+<td>703.6</td>
+<td>669.4</td>
+<td>1.038256E+01</td>
+</tr>
+<tr>
+<td>6</td>
+<td>979.1</td>
+<td>1016.0</td>
+<td>698.9</td>
+<td>676.8</td>
+<td>1.007907E+01</td>
+</tr>
+<tr>
+<td>7</td>
+<td>1956.6</td>
+<td>1204.1</td>
+<td>349.7</td>
+<td>611.4</td>
+<td>9.816036E+00</td>
+</tr>
+<tr>
+<td>8</td>
+<td>965.0</td>
+<td>1164.3</td>
+<td>709.1</td>
+<td>627.7</td>
+<td>9.447948E+00</td>
+</tr>
+<tr>
+<td>9</td>
+<td>965.6</td>
+<td>1135.9</td>
+<td>708.7</td>
+<td>639.2</td>
+<td>9.289451E+00</td>
+</tr>
+<tr>
+<td>10</td>
+<td>964.8</td>
+<td>1114.5</td>
+<td>709.3</td>
+<td>648.0</td>
+<td>9.259426E+00</td>
+</tr>
+</tbody></table>
+<h2>GPU Active / Idle</h2>
+<p>Steady profiler window: <strong>980.9 ms</strong>. This is the <code>ProfilerStep#6</code> window from the trace, not the full 10-iteration training average.</p>
+<table><thead><tr>
+<th>metric</th>
+<th>value</th>
+<th>% of profiler window</th>
+</tr></thead><tbody>
+<tr>
+<td>GPU active (union over HIP streams)</td>
+<td>940.04 ms</td>
+<td>95.8 %</td>
+</tr>
+<tr>
+<td>GPU idle / host-profiler gap</td>
+<td>40.87 ms</td>
+<td>4.2 %</td>
+</tr>
+<tr>
+<td>Sum of kernel durations</td>
+<td>940.04 ms</td>
+<td>95.8 %</td>
+</tr>
+<tr>
+<td>multi-stream overlap factor</td>
+<td>1.00x</td>
+<td>kernel sum / GPU active</td>
+</tr>
+</tbody></table>
+<h2>CSA Backward Split Attribution</h2>
+<table><thead><tr>
+<th>component</th>
+<th>launches</th>
+<th>total</th>
+<th>avg / launch</th>
+<th>note</th>
+</tr></thead><tbody>
+<tr>
+<td><code>_v4_attention_bwd_kernel</code></td>
+<td>8</td>
+<td>259.74 ms</td>
+<td>32.47 ms</td>
+<td>Dense/HCA BWD plus CSA-local BWD in the split path</td>
+</tr>
+<tr>
+<td>Estimated CSA-local part of <code>_v4_attention_bwd_kernel</code></td>
+<td>3</td>
+<td>98.75 ms</td>
+<td>32.92 ms</td>
+<td>Approximation: subtract P31 dense/HCA total 160.99 ms</td>
+</tr>
+<tr>
+<td><code>_v4_csa_attention_pool_sparse_bwd_kernel</code></td>
+<td>3</td>
+<td>80.81 ms</td>
+<td>26.94 ms</td>
+<td>New sparse pool BWD kernel</td>
+</tr>
+<tr>
+<td><strong>Estimated CSA BWD total in profile</strong></td>
+<td>3</td>
+<td><strong>179.56 ms</strong></td>
+<td><strong>59.85 ms</strong></td>
+<td>CSA-local estimate + sparse pool BWD</td>
+</tr>
+</tbody></table>
+<p>Standalone operator benchmark for the same EP8 CSA shape reports <strong>35.43 ms</strong> BWD total (<code>16.48 ms</code> local dense + <code>17.83 ms</code> sparse), which is the kernel-only target check used during P31b development.</p>
+<h2>Top-30 Kernels By Total Time</h2>
+<p>Total kernel time in profiler window: <strong>940.04 ms</strong> across <strong>10647</strong> launches.</p>
+<table><thead><tr>
+<th>rank</th>
+<th>kernel</th>
+<th>count</th>
+<th>total</th>
+<th>self avg</th>
+<th>% window</th>
+</tr></thead><tbody>
+<tr>
+<td>1</td>
+<td><code>_v4_attention_bwd_kernel</code></td>
+<td>8</td>
+<td>259.74 ms</td>
+<td>32.47 ms</td>
+<td>26.5 %</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>_v4_csa_attention_pool_fwd_kernel</code></td>
+<td>3</td>
+<td>123.07 ms</td>
+<td>41.02 ms</td>
+<td>12.5 %</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>_v4_csa_attention_pool_sparse_bwd_kernel</code></td>
+<td>3</td>
+<td>80.81 ms</td>
+<td>26.94 ms</td>
+<td>8.2 %</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 8, at::native::gpu_kernel_impl_noca...</code></td>
+<td>643</td>
+<td>58.96 ms</td>
+<td>91.7 us</td>
+<td>6.0 %</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;5, false&gt;, transformer_engine::multi_ten...</code></td>
+<td>321</td>
+<td>46.60 ms</td>
+<td>145.2 us</td>
+<td>4.8 %</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>_v4_attention_fwd_kernel</code></td>
+<td>5</td>
+<td>30.04 ms</td>
+<td>6.01 ms</td>
+<td>3.1 %</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>ncclDevKernel_Generic_1(ncclDevKernelArgsStorage&lt;4096ul&gt;)</code></td>
+<td>9</td>
+<td>29.96 ms</td>
+<td>3.33 ms</td>
+<td>3.1 %</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::bfloat16_copy_kernel_cuda(at...</code></td>
+<td>1390</td>
+<td>23.31 ms</td>
+<td>16.8 us</td>
+<td>2.4 %</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::bfloat16tofloat32_copy_kerne...</code></td>
+<td>1191</td>
+<td>21.82 ms</td>
+<td>18.3 us</td>
+<td>2.2 %</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>void primus_turbo::deep_ep::intranode::cached_notify_combine&lt;8&gt;(void**, int*, int, int, in...</code></td>
+<td>16</td>
+<td>14.23 ms</td>
+<td>889.2 us</td>
+<td>1.5 %</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocalTilePartitio...</code></td>
+<td>16</td>
+<td>14.11 ms</td>
+<td>881.9 us</td>
+<td>1.4 %</td>
+</tr>
+<tr>
+<td>12</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;8, at::native::CUDAFunctor_add&lt;c10::BFloat1...</code></td>
+<td>883</td>
+<td>13.23 ms</td>
+<td>15.0 us</td>
+<td>1.3 %</td>
+</tr>
+<tr>
+<td>13</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocalTilePartitio...</code></td>
+<td>16</td>
+<td>12.60 ms</td>
+<td>787.4 us</td>
+<td>1.3 %</td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;2, false&gt;, transformer_engine::multi_ten...</code></td>
+<td>321</td>
+<td>11.08 ms</td>
+<td>34.5 us</td>
+<td>1.1 %</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig&lt;at::native::(anonymous ...</code></td>
+<td>24</td>
+<td>10.09 ms</td>
+<td>420.6 us</td>
+<td>1.0 %</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::BinaryFunctor&lt;float, float, ...</code></td>
+<td>138</td>
+<td>9.77 ms</td>
+<td>70.8 us</td>
+<td>1.0 %</td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>void ck_tile::kentry&lt;1, ck_tile::GroupedGemmKernel&lt;ck_tile::GemmSpatiallyLocalTilePartitio...</code></td>
+<td>16</td>
+<td>9.55 ms</td>
+<td>596.8 us</td>
+<td>1.0 %</td>
+</tr>
+<tr>
+<td>18</td>
+<td><code>Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC1_AFEM...</code></td>
+<td>47</td>
+<td>9.35 ms</td>
+<td>198.9 us</td>
+<td>1.0 %</td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC1_AFEM...</code></td>
+<td>33</td>
+<td>9.26 ms</td>
+<td>280.5 us</td>
+<td>0.9 %</td>
+</tr>
+<tr>
+<td>20</td>
+<td><code>void primus_turbo::deep_ep::intranode::dispatch&lt;8, 1024, true&gt;(HIP_vector_type&lt;int, 4u&gt;*, ...</code></td>
+<td>16</td>
+<td>8.49 ms</td>
+<td>530.3 us</td>
+<td>0.9 %</td>
+</tr>
+<tr>
+<td>21</td>
+<td><code>void primus_turbo::deep_ep::intranode::combine&lt;hip_bfloat16, 8, 1024, true&gt;(hip_bfloat16*,...</code></td>
+<td>16</td>
+<td>8.24 ms</td>
+<td>515.2 us</td>
+<td>0.8 %</td>
+</tr>
+<tr>
+<td>22</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 8, at::native::gpu_kernel_impl_noca...</code></td>
+<td>122</td>
+<td>8.14 ms</td>
+<td>66.7 us</td>
+<td>0.8 %</td>
+</tr>
+<tr>
+<td>23</td>
+<td><code>void at::native::reduce_kernel&lt;512, 1, at::native::ReduceOp&lt;c10::BFloat16, at::native::Nor...</code></td>
+<td>12</td>
+<td>7.76 ms</td>
+<td>647.0 us</td>
+<td>0.8 %</td>
+</tr>
+<tr>
+<td>24</td>
+<td><code>Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC1_AFEM...</code></td>
+<td>33</td>
+<td>7.37 ms</td>
+<td>223.3 us</td>
+<td>0.8 %</td>
+</tr>
+<tr>
+<td>25</td>
+<td><code>void at::native::elementwise_kernel_manual_unroll&lt;128, 4, at::native::gpu_kernel_impl_noca...</code></td>
+<td>192</td>
+<td>7.22 ms</td>
+<td>37.6 us</td>
+<td>0.7 %</td>
+</tr>
+<tr>
+<td>26</td>
+<td><code>void multi_tensor_apply_kernel&lt;TensorListMetadata&lt;1, false&gt;, transformer_engine::multi_ten...</code></td>
+<td>321</td>
+<td>6.75 ms</td>
+<td>21.0 us</td>
+<td>0.7 %</td>
+</tr>
+<tr>
+<td>27</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;8, at::native::AUnaryFunctor&lt;c10::BFloat16,...</code></td>
+<td>12</td>
+<td>5.77 ms</td>
+<td>480.8 us</td>
+<td>0.6 %</td>
+</tr>
+<tr>
+<td>28</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;4, at::native::CUDAFunctor_add&lt;float&gt;, std:...</code></td>
+<td>115</td>
+<td>4.92 ms</td>
+<td>42.8 us</td>
+<td>0.5 %</td>
+</tr>
+<tr>
+<td>29</td>
+<td><code>Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1_AFEM1_AFE...</code></td>
+<td>16</td>
+<td>4.79 ms</td>
+<td>299.2 us</td>
+<td>0.5 %</td>
+</tr>
+<tr>
+<td>30</td>
+<td><code>void at::native::vectorized_elementwise_kernel&lt;8, at::native::FillFunctor&lt;c10::BFloat16&gt;, ...</code></td>
+<td>243</td>
+<td>4.22 ms</td>
+<td>17.4 us</td>
+<td>0.4 %</td>
+</tr>
+</tbody></table>
+<h2>Kernel Launch Cadence</h2>
+<p>Total kernels launched in the profiler window: <strong>10647</strong>.</p>
+<p>Median inter-launch interval: <strong>12.8 us</strong> (p50), <strong>88.2 us</strong> (p90), <strong>603.8 us</strong> (p99).</p>
+<h2>Module-Level CPU Op-Time Attribution</h2>
+<p>As in the earlier reports, PyTorch profiler CPU events are nested, so the sums below are attribution signals rather than exclusive CPU time.</p>
+<table><thead><tr>
+<th>module pattern</th>
+<th>events</th>
+<th>sum event dur</th>
+<th>% profiler window</th>
+</tr></thead><tbody>
+<tr>
+<td>other</td>
+<td>216482</td>
+<td>94.52 s</td>
+<td>9635.5 %</td>
+</tr>
+<tr>
+<td>DeepseekV4HybridLayer</td>
+<td>8</td>
+<td>264.94 ms</td>
+<td>27.0 %</td>
+</tr>
+<tr>
+<td>DeepseekV4MoE</td>
+<td>8</td>
+<td>206.74 ms</td>
+<td>21.1 %</td>
+</tr>
+<tr>
+<td>Optimizer</td>
+<td>2060</td>
+<td>146.64 ms</td>
+<td>14.9 %</td>
+</tr>
+<tr>
+<td>linear/matmul</td>
+<td>1307</td>
+<td>66.55 ms</td>
+<td>6.8 %</td>
+</tr>
+<tr>
+<td>DeepseekV4Attention</td>
+<td>8</td>
+<td>22.61 ms</td>
+<td>2.3 %</td>
+</tr>
+<tr>
+<td>v4_attention (Triton)</td>
+<td>55</td>
+<td>16.78 ms</td>
+<td>1.7 %</td>
+</tr>
+<tr>
+<td>LayerNorm/RMSNorm</td>
+<td>247</td>
+<td>11.03 ms</td>
+<td>1.1 %</td>
+</tr>
+<tr>
+<td>c10d/comm</td>
+<td>91</td>
+<td>6.81 ms</td>
+<td>0.7 %</td>
+</tr>
+<tr>
+<td>DualRoPE/RoPE</td>
+<td>21</td>
+<td>2.99 ms</td>
+<td>0.3 %</td>
+</tr>
+<tr>
+<td>softmax</td>
+<td>143</td>
+<td>2.54 ms</td>
+<td>0.3 %</td>
+</tr>
+</tbody></table>
+<h2>Comm Time</h2>
+<table><thead><tr>
+<th>kind</th>
+<th>total</th>
+<th>% profiler window</th>
+</tr></thead><tbody>
+<tr>
+<td>deepep</td>
+<td>0.0 us</td>
+<td>0.0 %</td>
+</tr>
+<tr>
+<td>nccl/c10d</td>
+<td>11.12 ms</td>
+<td>1.1 %</td>
+</tr>
+<tr>
+<td><strong>total comm</strong></td>
+<td><strong>11.12 ms</strong></td>
+<td><strong>1.1 %</strong></td>
+</tr>
+</tbody></table>
+<h2>P31 To P31b Comparison</h2>
+<table><thead><tr>
+<th>metric</th>
+<th>P31</th>
+<th>P31b</th>
+<th>delta</th>
+</tr></thead><tbody>
+<tr>
+<td>Proxy headline TFLOP/s/GPU</td>
+<td>158.5</td>
+<td>709.3</td>
+<td>4.48x</td>
+</tr>
+<tr>
+<td>Proxy headline iter time</td>
+<td>4317.0 ms</td>
+<td>964.8 ms</td>
+<td>-77.7 %</td>
+</tr>
+<tr>
+<td>CSA BWD profile cost</td>
+<td>3.50 s</td>
+<td>~179.6 ms</td>
+<td>-94.9 %</td>
+</tr>
+<tr>
+<td>CSA sparse BWD kernel</td>
+<td>n/a</td>
+<td>80.8 ms / 3</td>
+<td>new split kernel</td>
+</tr>
+<tr>
+<td>CSA FWD kernel</td>
+<td>123.5 ms / 3</td>
+<td>123.1 ms / 3</td>
+<td>stable</td>
+</tr>
+</tbody></table>
+<h2>Bottleneck Readout</h2>
+<p>- The original P31 CSA BWD bottleneck is solved for the current EP8 proxy shape.</p>
+<p>- <code>_v4_attention_bwd_kernel</code> is now the largest named kernel bucket because it includes dense, HCA, and CSA-local BWD work after the split. Further work should separate these launch classes in profiler annotations before tuning again.</p>
+<p>- CSA FWD remains visible at ~123 ms / step. It is now larger than CSA sparse BWD in the profile, so future cr=4 work should consider FWD pool gather locality and K-tile scheduling after validating correctness coverage.</p>
+<p>- Communication remains small in this single-node EP8 setup; DeepEP and c10d are not the next bottleneck.</p>
+</body></html>

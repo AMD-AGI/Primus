@@ -1,0 +1,35 @@
+{
+  "shape": {
+    "mode": "v4_flash",
+    "B": 1,
+    "HQ": 64,
+    "HK": 1,
+    "Sq": 4096,
+    "Sk": 4096,
+    "D": 512,
+    "dtype": "bf16",
+    "swa_window": 128,
+    "has_sink": true
+  },
+  "iters": 10,
+  "warmup": 3,
+  "n_input_copies": 4,
+  "l2_flush_mb": 512,
+  "flops_fwd": 67654123520,
+  "results": {
+    "triton": {
+      "mean_ms": 0.7524756014347076,
+      "median_ms": 0.7441675066947937,
+      "min_ms": 0.7189670205116272,
+      "max_ms": 0.8218079805374146,
+      "tflops_median": 90.91249337193521
+    },
+    "tilelang": {
+      "mean_ms": 5.22265944480896,
+      "median_ms": 5.240591526031494,
+      "min_ms": 5.037690162658691,
+      "max_ms": 5.380173206329346,
+      "tflops_median": 12.909634949402736
+    }
+  }
+}
