@@ -7,12 +7,6 @@
 #
 # Slurm launcher for cluster RDMA perf tests (ib_write_bw between two nodes)
 # inside a Docker container.
-#
-# Ported from:
-#   ROCm/dist-inf-cookbook : cluster-sphere/cluster-rdma-tests/slurm_scripts/
-#                            rdma_perf_tests.slurm
-# but re-styled to match the Primus kernel-benchmark launchers
-# (benchmark/kernel/rccl/run_slurm.sh, benchmark/kernel/ep_bench/run_slurm.sh):
 #   - env-driven configuration with sensible defaults
 #   - separate pre-pull and run srun stages
 #   - minimal default bind-mounts; site-specific mounts go through
@@ -32,7 +26,7 @@
 #   NNODES              Number of nodes [default: SLURM_NNODES, then 2]
 #   PARTITION           Slurm partition [default: unset; prefer -p on sbatch]
 #   IBDEVICES           InfiniBand HCA passed to ib_write_bw -d
-#                       [default: rdma0]
+#                       [default: mlx5_0]
 #   LOG_PATH            Host directory for benchmark logs and sbatch out/err
 #                       [default: ${SLURM_SUBMIT_DIR}/logs]
 #   CONTAINER_NAME      Docker container name [default: primus-rdma-tests]
@@ -56,7 +50,7 @@ set -euo pipefail
 
 DOCKER_IMAGE="${DOCKER_IMAGE:-lmsysorg/sglang:v0.5.7-rocm700-mi35x}"
 NNODES="${NNODES:-${SLURM_NNODES:-2}}"
-IBDEVICES="${IBDEVICES:-rdma0}"
+IBDEVICES="${IBDEVICES:-mlx5_0}"
 CONTAINER_NAME="${CONTAINER_NAME:-primus-rdma-tests}"
 MASTER_PORT="${MASTER_PORT:-39566}"
 BARRIER_PORT="${BARRIER_PORT:-5000}"

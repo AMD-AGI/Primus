@@ -84,10 +84,8 @@ A successful run prints a `ib_write_bw` results table on the client
 
 ## Site-specific overrides
 
-The default `docker run` mounts are intentionally minimal. If you are on the
-AMD MI3xx Oracle reference cluster (where the upstream cookbook script was
-originally written) you may want to forward the vendor RDMA libraries the
-same way upstream did. Pass them via `EXTRA_DOCKER_ARGS`:
+The default `docker run` mounts are intentionally minimal. If you may want to forward the vendor RDMA libraries,
+Pass them via `EXTRA_DOCKER_ARGS`:
 
 ```bash
 EXTRA_DOCKER_ARGS="\
