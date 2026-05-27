@@ -53,7 +53,6 @@ modules:
       test_data_path: null
 
       # MLA
-      moe_use_legacy_grouped_gemm: true
       multi_latent_attention: false
 
       # ckpt
@@ -73,7 +72,7 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: true
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_mlp: true
 
       # deepep
       use_turbo_deepep: true
@@ -87,7 +86,7 @@ modules:
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
+      turbo_sync_free_moe_stage: 2
 
       # remove once super flag is functional again
       moe_use_fused_router_with_aux_score: true
