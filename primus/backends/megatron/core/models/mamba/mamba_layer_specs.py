@@ -4,10 +4,8 @@
 """MambaStack-based spec using v26.2-compatible MambaStack with allocate_layers()."""
 
 from megatron.core.extensions.transformer_engine import (
-    TEColumnParallelLinear,
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
-    TELinear,
     TENorm,
     TERowParallelLinear,
 )

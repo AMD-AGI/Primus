@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-from torch import Tensor, nn
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
@@ -28,7 +27,12 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
-from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
+from megatron.core.utils import (
+    WrappedTensor,
+    deprecate_inference_params,
+    make_viewless_tensor,
+)
+from torch import Tensor, nn
 
 try:
     from megatron.core.transformer.enums import CudaGraphScope
@@ -142,8 +146,7 @@ class MambaStack(MegatronModule):
         num_layers_per_pipeline_rank = self.config.num_layers // self.pp_group.size()
 
         assert self.config.virtual_pipeline_model_parallel_size is None, (
-            "The Mamba model does not currently support "
-            "virtual/interleaved pipeline parallelism"
+            "The Mamba model does not currently support virtual/interleaved pipeline parallelism"
         )
 
         offset = self.pp_group.rank() * num_layers_per_pipeline_rank
