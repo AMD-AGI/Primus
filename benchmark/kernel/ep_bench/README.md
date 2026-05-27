@@ -1,24 +1,8 @@
 # MoRI EP-Bench (Slurm, no torchrun)
 
 This directory provides a Slurm-based launcher for the **MoRI** expert-parallel
-dispatch/combine microbenchmarks on AMD Instinct GPUs. It mirrors the style of
-[`benchmark/kernel/rccl/run_slurm.sh`](../rccl/run_slurm.sh) but drives the
-MoRI tests **without `torchrun`**.
+dispatch/combine microbenchmarks on AMD Instinct GPUs.
 
-## Why no torchrun?
-
-Both MoRI bench scripts use `torch.multiprocessing.spawn` internally to spawn
-one process per GPU on each node:
-
-- Intranode: [`tests/python/ops/bench_dispatch_combine.py`](https://github.com/ROCm/mori) spawns `world_size` (=GPUs) local processes itself.
-- Internode: [`examples/ops/dispatch_combine/test_dispatch_combine_internode.py`](https://github.com/ROCm/mori) reads
-  `RANK` as the **node rank**, `WORLD_SIZE` as the **number of nodes**, and
-  spawns `GPU_PER_NODE` local processes.
-
-So we only need **one task per node** from Slurm. `srun -N $NNODES
---ntasks-per-node=1` already provides `SLURM_NODEID` / `SLURM_NNODES` /
-`SLURM_JOB_NODELIST`, and the launcher forwards those as `NODE_RANK` /
-`NNODES` / `MASTER_ADDR` / `MASTER_PORT` to the inner script.
 
 ## Benchmarks covered
 
@@ -44,9 +28,7 @@ when `NNODES > 1`. (DeepEP tests are out of scope for this launcher.)
   Built on the latest stable upstream
   [`vllm/vllm-openai-rocm`](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags)
   image (which already provides ROCm, PyTorch, and vLLM) with **only MoRI**
-  added on top. AMD's `rocm/vllm` / `rocm/vllm-dev` images are deprecated in
-  favor of `vllm/vllm-openai-rocm`
-  (see [vLLM docker docs](https://docs.vllm.ai/en/stable/deployment/docker/)).
+  added on top.
 
   ```bash
   cd Primus/benchmark/kernel/ep_bench/docker
