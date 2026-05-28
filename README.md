@@ -171,3 +171,46 @@ Primus is released under the [Apache 2.0 License](./LICENSE).
 ---
 
 **Built with ❤️ by AMD AI Brain - Training at Scale (TAS) Team**
+
+
+
+I mainly work on Primus, AMD’s training framework for large-scale model training on AMD GPUs.
+
+My work covers both framework development and performance optimization. On the framework side, I help build the core Primus components, such as the unified training entry, configuration system, backend integration, patching mechanism, preflight checks, benchmark tools, and Slurm/container launch flow.
+
+On the optimization side, I focus on making training backends like Megatron and TorchTitan run better on AMD GPUs. This includes MoE training, FP8, distributed training, GEMM and RCCL benchmarking, communication-computation overlap, pipeline parallelism, and expert parallelism.
+
+In short, my job is to make Primus easier to use, more reliable, and faster, so internal teams and customers can train large models more efficiently on AMD GPUs.
+
+What I've been spending most of my time on lately. I've added a set of Cursor-agent skills that automate per-config performance tuning end-to-end. The goal is simple: **cut the engineer time spent on PoC tuning**, and make the tuning process itself controllable and reproducible — instead of relying on each engineer's tribal knowledge.
+
+I'm a Primus engineer at AMD. On the **framework side** I help build the core components — unified CLI, config system, backend patching, preflight checks, benchmark suite, Slurm/container launch flow. On the **optimization side** I focus on making Megatron and TorchTitan run faster on AMD GPUs: MoE, FP8, distributed training, comm-compute overlap, pipeline / expert parallelism. **Most recently** I've been adding a set of Cursor-agent skills that automate per-config performance tuning end-to-end — to cut PoC tuning time and make the process controllable and reproducible, instead of relying on per-engineer tribal knowledge.
+
+
+### A bit more detail
+
+**Framework side** — concrete pieces I've contributed to:
+
+- **`primus-cli` 1.0** (released Nov 2025): one CLI that drives local development, container runs, and Slurm cluster launches from the same command and the same YAML. Eliminates the per-environment shell-script sprawl users had before.
+- **Configuration system + `primus-defaults`**: YAML-driven config with reusable feature bundles (Primus-Turbo, DeepEP, rope-fusion, bf16-precision-aware-optimizer, gradient-accumulation-fusion, …) that users opt into per-model, instead of re-deriving the flag combination every time.
+- **Backend patching layer**: runtime patches applied at import time, keeping upstream Megatron-LM / TorchTitan / MaxText repositories unmodified. An upstream rebase does not force us to re-fork.
+- **Preflight cluster sanity checker**: verifies idle SLURM nodes before training — Docker daemon health, NIC QoS / DCQCN, RDMA link state, GID table, RCCL all-reduce throughput — so bad nodes are caught up front instead of failing 20 minutes into a multi-node run.
+- **Benchmark suite + HipBLASLt autotuning integration**: standardized perf-evaluation harness for GEMM, RCCL collectives, and end-to-end throughput regressions; HipBLASLt autotune wired into the training-time GEMM path.
+- **Slurm + container launch flow**: container mount / env / `srun` plumbing, plus a developer-mode workflow that attaches to an existing SLURM allocation without manual pod bring-up.
+
+**Optimization side** — what I work on per topic:
+
+- **MoE on MI300X** (DeepSeek-V2 / V3, Mixtral): DeepEP integration, `turbo_deepep_num_cu` tuning per EP size (64–80 CUs is the sweet spot at ep=8), and the trade-off between DeepEP and the alltoall-dispatcher + `moe_shared_expert_overlap` path on single- vs multi-node shapes.
+- **FP8**: Primus-Turbo FP8 GEMM / attention rollout across Megatron and TorchTitan, plus loss-stability regression coverage so FP8 doesn't silently break long runs.
+- **Distributed training**: full DP / TP / PP / EP / CP / VPP knob coverage, legal `mbs` / `gbs` combinations, pipeline-bubble accounting.
+- **GEMM + RCCL benchmarking**: hipBLASLt autotuning, RCCL collective profiling, kernel-time-based diagnosis of comm-bound vs compute-bound regimes.
+- **Comm-compute overlap**: `overlap_grad_reduce`, `overlap_param_gather`, `turbo_deepep_use_comm_stream` — characterized that these matter most on multi-node; on single-node xGMI keeps `comm_ratio ≈ 0` so overlap features are flat there.
+- **Per-feature integrations**: rope-fusion (which alone delivered +3.5 % on DeepSeek V2 Lite), grad-acc-fusion, bf16-precision-aware-optimizer (saves ~5 GB of optimizer state at near-zero throughput cost).
+
+**Recent focus: Primus Pilot — agent-driven proactive tuning** (`pilot/`)
+
+What I've been spending most of my time on lately. I've added a set of Cursor-agent skills that automate per-config performance tuning end-to-end. The goal is simple: **cut the engineer time spent on PoC tuning**, and make the tuning process itself controllable and reproducible — instead of relying on each engineer's tribal knowledge.
+
+**Recent: Backend-gap dashboard** (`tools/backend_gap_report/`)
+
+Shared engineering dashboard that tracks Megatron-LM / TorchTitan / Primus-Turbo drift against upstream and integrates weekly engineering reports into the same site. Each backend gap report is reproducible from git facts (commit gap, merge-base, dependency-file diff) instead of ad-hoc notes.
