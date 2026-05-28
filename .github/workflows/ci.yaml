@@ -221,9 +221,10 @@ jobs:
           pip3 uninstall aiter amd-aiter -y || true
           rm -rf /tmp/aiter || true
           cd /tmp
-          git clone --recursive https://github.com/ROCm/aiter.git
+          git clone https://github.com/ROCm/aiter.git
           cd aiter
-          git checkout ${PRIMUS_TURBO_AITER_COMMIT}
+          git checkout -f ${PRIMUS_TURBO_AITER_COMMIT}
+          git submodule sync
           git submodule update --init --recursive
           start_time=$(date +%s)
           echo "✅ [Build aiter] started at: $(date)"
