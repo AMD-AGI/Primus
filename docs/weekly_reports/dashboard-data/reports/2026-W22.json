@@ -1,0 +1,75 @@
+{
+  "report_id": "2026-W22",
+  "content_type": "weekly-report",
+  "title": "Primus Weekly Engineering Report — 2026-W22",
+  "report_path": "docs/weekly_reports/2026-W22-primus-weekly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/main/docs/weekly_reports/2026-W22-primus-weekly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-05-25T00:00:00+08:00",
+    "end": "2026-05-29T09:01:00+08:00"
+  },
+  "generated_at": "2026-05-29T09:01:00+08:00",
+  "merged_pr_count": 4,
+  "category_breakdown": {
+    "Bug Fix": 2,
+    "Performance Optimization": 0,
+    "Turbo/Dependency Version Update": 0,
+    "CI/Infra": 1,
+    "Refactor": 0,
+    "Docs": 0,
+    "Other": 1
+  },
+  "megatron_status": {
+    "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "pin_date": "2026-03-06",
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "ba9e0eaffd2a00ef475c5025f800a394f169a245",
+    "upstream_head_date": "2026-05-28",
+    "commit_gap": 603,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021",
+    "pin_date": "2025-10-15",
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "92abc88e7ad788404a6f51f708715ed23de019b7",
+    "upstream_head_date": "2026-05-28",
+    "commit_gap": 680,
+    "recommendation": "urgent sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "monthly_in_repo",
+    "month_start_ts": "2026-05-01T00:00:00+08:00",
+    "current_ci_commit": "06b8d3fefd91be26d6adfb5cd43c7524ef87b825",
+    "month_start_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+    "current_benchmark_commit": "06b8d3fefd91be26d6adfb5cd43c7524ef87b825",
+    "month_start_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+    "current_aiter_commit": "b5e03ed191fca11ee423226537ef8d9435e432a6",
+    "month_start_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+    "current_triton_commit": "88b227e23f0445f3f695bad05bbf1a363b4f50e0",
+    "month_start_triton_commit": null,
+    "drift_commits": 39,
+    "benchmark_drift_commits": 44,
+    "recommendation": "monitor"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "urgent sync",
+    "primus_turbo": "monitor"
+  },
+  "key_findings": [
+    "4 PRs merged to main in the 2026-W22 window (Bug Fix: 2, CI/Infra: 1, Other: 1).",
+    "No backend dependency pin change this week: PRIMUS_TURBO_COMMIT, PRIMUS_TURBO_AITER_COMMIT, TRITON_COMMIT, ROCSHMEM_COMMIT, and UCCL_COMMIT in .github/workflows/ci.yaml and .github/workflows/benchmark.yaml are unchanged from origin/main HEAD prior to the window. No third_party/* submodule SHA changed.",
+    "PR #731 wires args.deterministic_mode through PrimusTurboAttention so the underlying flash-attention call honors deterministic mode (previously hard-coded deterministic=False); refactors validate_args_on_rocm to drive deterministic-mode env validation from a single NON_DETERMINISTIC_ENVS mapping and extends the required set with PRIMUS_TURBO_AUTO_TUNE=0 and PRIMUS_DETERMINISTIC=1; runner/helpers/envs/base_env.sh auto-exports PRIMUS_TURBO_AUTO_TUNE=0 when PRIMUS_DETERMINISTIC=1.",
+    "PR #732 fixes the modern CLI override parser to safely literal_eval values starting with [, (, {, or equal to None so --profile_ranks '[0]' is converted to a real list (previously passed as the string '[0]', breaking Megatron's int in args.profile_ranks check); adds a new dedicated tests/unit_tests/core/utils/test_arg_utils.py covering bool/int/float/string/list/dict/None and parse_cli_overrides.",
+    "PR #727 adds a Megatron gpt_oss_20B sink-attention trainer functional test with micro_batch_size=2 (global_batch_size=16) so BSHD/SBHD transpose regressions in the Primus Turbo attention path are not masked by micro_batch_size=1 broadcasting.",
+    "PR #440 adds automatic MLflow artifact upload of PyTorch profiler trace files (tensorboard_dir) and training log files (exp_root_path/logs/) under artifacts/traces/ and artifacts/logs/ at end of training when MLflow is enabled; new runner options mlflow_upload_traces and mlflow_upload_logs; MLflow env vars passed through into the docker container; tensorboard_dir uses a unique timestamp-based suffix for multi-node consistency.",
+    "Megatron-LM upstream drift: pin d3528a21 (2026-03-06) is now 603 commits behind upstream HEAD ba9e0eaf (2026-05-28), +145 since W19. Highlights since W19: switch DSv3 on H100 to HybridEP (#5039), thread position_ids through MimoModel for multimodal RoPE (#4938), Megatron-FSDP full-iteration CUDA graphability (#4663), drain predecessor reduce-scatter at dispatch time (#4940), Paged Stashing (#4247), MTP-stage word_embeddings correctness tag (#5034), DDP wrap pg-size fixes (#5006), Release MTP assertion when EP overlap with PP=1 (#4796), TE 2.15 compatibility fix in cuda_graphs (#4874), TEFusedDenseMLP Dense+Grouped GEMM fusion (#4786), MTP recompute crash fix with packed sequences (#4593), MimoOptimizer non-colocated MIMO dist-ckpt fix (#4801). Recommendation: plan sync (unchanged).",
+    "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is now 680 commits behind upstream HEAD 92abc88e (2026-05-28), +70 since W19. Highlights since W19: RoPE refactor using model's max_sequence_length (#3395) + fix #3448, MoE refactor series [MoE][5/n]..[MoE][8/n] (#3386, #3389, #3423, #3425), [MoE][SAC] deterministic ops (#3146), [graph_trainer] separate EP process groups for overlap (#3369), [graph_trainer] DSv3 16B SDPA config (#3361), [graph_trainer] rework full_inductor_compilation_pass via regional_inductor (#3346), FSDP symmetric-memory configuration (#3105), [Module] replace from_nn_module with native Module subclasses (#3398), [rl] add Batcher in RL Loop (#3347), [loss] fix ChunkedCELoss + TP gradient placement mismatch (#3412). Recommendation: urgent sync (unchanged).",
+    "Primus-Turbo monthly drift: pins did NOT move this week. Current pins (CI and benchmark) at 06b8d3fe (Primus-Turbo #278, HYBRID FP8 format support for Triton backend in gemm and grouped_gemm) are +39 (CI) / +44 (benchmark) commits ahead of May month-start values 333b68d7 (CI) / a4488f6c (benchmark); AITER pin is b5e03ed1 vs month-start e83f9903; TRITON_COMMIT=88b227e is present vs not-present at month start. The drift is carried over from W19 PR #694 and W21 PR #723. Recommendation: monitor.",
+    "Backend-gap reports were not regenerated this week: no submodule SHA changed (Megatron-LM, torchtitan, Megatron-Bridge, Emerging-Optimizers, HummingbirdXT, maxtext are all unchanged on origin/main) and no tracked-config backend version pin changed in this window."
+  ]
+}
