@@ -1849,6 +1849,14 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
         self.register_parameter("weights", torch.nn.Parameter(weights))
 
+        # Capture the per-expert weights' extra attributes BEFORE deleting them.
+        saved_weight_attrs = [dict(getattr(self, f"weight{i}").__dict__) for i in range(self.num_gemms)]
+
+        # All experts share the same routing/parallel markers, so weight0's are
+        # representative for the consolidated parameter.
+        for attr_name, attr_val in saved_weight_attrs[0].items():
+            setattr(self.weights, attr_name, attr_val)
+
         # Free the per-expert weight{i} Parameters now that their data has been
         # consolidated into self.weights.
         for i in range(self.num_gemms):
@@ -1870,11 +1878,13 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         # so each Parameter ends up as a leaf with ``_base is None`` (which is
         # what Megatron's distributed-optimizer param-bucket re-mapping
         # expects), while still aliasing the same underlying storage.
+        # We also restore each weight{i}'s saved extra attributes so checkpoint /
+        # state-dict code that inspects them keeps seeing the right markers.
         for i in range(self.num_gemms):
-            self.register_parameter(
-                f"weight{i}",
-                torch.nn.Parameter(self.weights[i].detach(), requires_grad=False),
-            )
+            weight_i = torch.nn.Parameter(self.weights[i].detach(), requires_grad=False)
+            for attr_name, attr_val in saved_weight_attrs[i].items():
+                setattr(weight_i, attr_name, attr_val)
+            self.register_parameter(f"weight{i}", weight_i)
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
         self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
