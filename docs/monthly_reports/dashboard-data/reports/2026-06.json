@@ -1,0 +1,72 @@
+{
+  "report_id": "2026-06",
+  "content_type": "monthly-report",
+  "title": "Primus Monthly Engineering Report — 2026-06",
+  "report_path": "docs/monthly_reports/2026-06-primus-monthly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/main/docs/monthly_reports/2026-06-primus-monthly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-06-01T09:00:00+08:00",
+    "end": "2026-06-01T17:00:00+08:00"
+  },
+  "generated_at": "2026-06-01T17:00:00+08:00",
+  "merged_pr_count": 1,
+  "category_breakdown": {
+    "Bug Fix": 0,
+    "Performance Optimization": 1,
+    "Turbo/Dependency Version Update": 0,
+    "CI/Infra": 0,
+    "Refactor": 0,
+    "Docs": 0,
+    "Other": 0
+  },
+  "megatron_status": {
+    "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "pin_date": "2026-03-06",
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "3f6a2ed844373ef0ed6c0e6dbac58a431d088dcb",
+    "upstream_head_date": "2026-05-31",
+    "commit_gap": 616,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021",
+    "pin_date": "2025-10-15",
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "b72d98648aa8729f3b4a0f752f499006c95a99b0",
+    "upstream_head_date": "2026-05-31",
+    "commit_gap": 685,
+    "recommendation": "urgent sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "quarterly_in_repo",
+    "quarter_start_ts": "2026-04-01T00:00:00+08:00",
+    "current_ci_commit": "3974fc246be594d989156dd83e91da618274b0c8",
+    "quarter_start_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+    "current_benchmark_commit": "3974fc246be594d989156dd83e91da618274b0c8",
+    "quarter_start_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+    "current_aiter_commit": "b5e03ed191fca11ee423226537ef8d9435e432a6",
+    "quarter_start_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+    "current_triton_commit": "88b227e23f0445f3f695bad05bbf1a363b4f50e0",
+    "quarter_start_triton_commit": null,
+    "ci_drift_commits": 48,
+    "benchmark_drift_commits": 53,
+    "recommendation": "monitor (new pin landed)"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "urgent sync",
+    "primus_turbo": "monitor (new pin landed)"
+  },
+  "key_findings": [
+    "1 PR merged to main in the 2026-06 window (Performance Optimization: 1). Window covers the first day of 2026-06 starting at 09:00 GMT+8.",
+    "Backend dependency pin change: PR #735 bumps PRIMUS_TURBO_COMMIT from 06b8d3fe (Primus-Turbo #278) to 3974fc24 (Primus-Turbo #343, 'feat: refine rmsnorm ops') in both .github/workflows/ci.yaml and .github/workflows/benchmark.yaml, and synchronously in tools/daily/safe_wrapper.py. PRIMUS_TURBO_AITER_COMMIT (b5e03ed1) and TRITON_COMMIT (88b227e2) are unchanged in this window.",
+    "PR #735 adds first-class primus_turbo quantized-tensor support in primus/backends/megatron/core/extensions/primus_turbo.py and caches PrimusTurboQuantizedTensor / PrimusTurboQuantizedTensorPair across microbatches in all PrimusTurbo*Linear modules (forward axis=-1 and transposed-for-backward axis=-2), eliminating redundant per-microbatch FP8/FP4 weight re-quantization. Switches the RMSNorm path to the refined Primus-Turbo rmsnorm op (Turbo #343). Introduces _WeightGradBridge autograd Function + _bridge_weight_grad helper to route quantized-weight gradients into weight.main_grad and preserve DDP/distributed-optimizer hook ordering. Refactors PrimusTurboGroupedLinear to consolidate per-expert weight{i} into a single self.weights Parameter (transposed + contiguous) with zero-copy non-trainable views, removing per-step torch.stack().transpose().contiguous().",
+    "Megatron-LM upstream drift: pin d3528a21 (2026-03-06) is now 616 commits behind upstream HEAD 3f6a2ed8 (2026-05-31), +158 since the W19 snapshot 7cdf652c. Highlights since W19: Transformer Engine 2.16.0 dependency bump (#4992), energon version bump (#4572), simple-and-stable Inference APIs (#4697), DSv3 on H100 → HybridEP (#5039), MIMO multimodal RoPE position_ids threading (#4938), Megatron-FSDP conditional param.grad dereferencing for full-iteration CUDA graphability (#4663), MXFP8 LM-head opt-in (#4825), MXFP8/FP4-param-gather post-processing in eval (#4562), TEFusedDenseMLP Dense+Grouped GEMM fusion on SM100+ (#4786), drain predecessor reduce-scatter at dispatch time (#4940). Recommendation: plan sync.",
+    "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is now 685 commits behind upstream HEAD b72d9864 (2026-05-31), +75 since W19. Highlights since W19: Module-build native subclass conversion replacing from_nn_module (#3398, #3445, #3446), MoE refactor [5/n..8/n] with separated DeepEP/HybridEP dispatchers and shape-suffix MoE (#3386, #3389, #3423, #3425), GraphTrainer separate EP process groups (#3369), GraphTrainer DSv3 16B SDPA config (#3361), RoPE refactor with max_sequence_length upper bound (#3395), FSDP symmetric memory configuration (#3105), MoE deterministic ops in routing (#3146), Context Parallel in GraphTrainer (#3305), full_inductor_compilation_pass via regional inductor + CPU attr migration (#3346). Recommendation: urgent sync.",
+    "Primus-Turbo quarterly drift: pin advanced significantly since quarter start (2026-04-01 GMT+8). CI pin moved +48 commits (333b68d7 → 3974fc24); benchmark pin moved +53 commits (a4488f6c → 3974fc24); the two pins are now in sync at 3974fc24 (Primus-Turbo #343, refine rmsnorm). New since quarter-start: refined rmsnorm ops (#343), quantized tensor support (#335), grouped-GEMM default → Triton for BF16/FP8 (#320), HYBRID FP8 format on Triton GEMM (#278), torch.compile attention wrappers (#310), EPBackend Protocol + EPBufferConfig refactor (#297), SymmetricMemory rewrite (#276), blockwise FP8 GEMM gfx950/MI355X (#339), attention sbhd/bhsd layouts (#275, #304), flash_attn_varlen_func with AITER (#332). AITER pin advanced (e83f9903 → b5e03ed1). A new TRITON_COMMIT=88b227e (Triton built from source on release/3.7.x) was introduced this quarter by W19 PR #694. Recommendation: monitor (new pin landed).",
+    "Backend-gap reports were not regenerated this month: no third_party/* submodule SHA changed in the monthly window (Megatron-LM, torchtitan, Megatron-Bridge, Emerging-Optimizers, HummingbirdXT, maxtext are all unchanged on origin/main). The Primus-Turbo pin bump in PR #735 is a tracked-config backend-version change but Primus-Turbo is not currently surfaced as a separate backend under docs/backend-gap/, so the existing Megatron-LM (d3528a21 vs upstream main) and torchtitan (5fb7cc2e vs upstream main) baseline reports are unaffected."
+  ]
+}

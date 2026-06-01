@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-06-01T09:00:00Z",
+  "summary": {
+    "total_reports": 1,
+    "latest_report_id": "2026-06",
+    "latest_generated_at": "2026-06-01T17:00:00+08:00",
+    "latest_merged_pr_count": 1,
+    "tracked_drift_targets": [
+      "megatron",
+      "primus_turbo",
+      "torchtitan"
+    ],
+    "recommendation_counts": {
+      "plan sync": 1,
+      "urgent sync": 1,
+      "monitor (new pin landed)": 1
+    }
+  },
+  "reports": [
+    {
+      "report_id": "2026-06",
+      "content_type": "monthly-report",
+      "title": "Primus Monthly Engineering Report — 2026-06",
+      "report_path": "docs/monthly_reports/2026-06-primus-monthly.md",
+      "report_github_url": "https://github.com/AMD-AGI/Primus/blob/main/docs/monthly_reports/2026-06-primus-monthly.md",
+      "time_window": {
+        "timezone": "Asia/Shanghai",
+        "start": "2026-06-01T09:00:00+08:00",
+        "end": "2026-06-01T17:00:00+08:00"
+      },
+      "generated_at": "2026-06-01T17:00:00+08:00",
+      "merged_pr_count": 1,
+      "category_breakdown": {
+        "Bug Fix": 0,
+        "Performance Optimization": 1,
+        "Turbo/Dependency Version Update": 0,
+        "CI/Infra": 0,
+        "Refactor": 0,
+        "Docs": 0,
+        "Other": 0
+      },
+      "recommendations": {
+        "megatron": "plan sync",
+        "torchtitan": "urgent sync",
+        "primus_turbo": "monitor (new pin landed)"
+      }
+    }
+  ]
+}
