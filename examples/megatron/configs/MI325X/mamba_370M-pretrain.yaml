@@ -23,7 +23,7 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 32
+      micro_batch_size: 4
       global_batch_size: 256
 
       seq_length: 2048
@@ -42,7 +42,7 @@ modules:
       norm_epsilon: 1.0e-5
 
       # Mamba-specific: must provide spec
-      spec: ['primus.backends.megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+      spec: ['megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
 
       # parallel
       tensor_model_parallel_size: 1

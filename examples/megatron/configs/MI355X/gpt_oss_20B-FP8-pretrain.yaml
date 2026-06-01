@@ -40,7 +40,7 @@ modules:
       apply_rope_fusion: true
 
       # profile
-      profile: true
+      profile: false
       use_pytorch_profiler: true
       profile_step_end: 7
       profile_step_start: 6

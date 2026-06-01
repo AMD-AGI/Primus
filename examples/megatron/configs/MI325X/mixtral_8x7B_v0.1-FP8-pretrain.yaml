@@ -1,53 +1,47 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:mamba_370M-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x22B_v0.1-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:
-    framework: megatron
     config: pre_trainer.yaml
-
-    # model to run
-    model: mamba_370M.yaml
+    framework: megatron
+    model: mixtral_8x7B_v0.1.yaml
     overrides:
-      # log
-      wandb_project: "Primus_Mamba_Pretrain"
+      wandb_project: "Primus_DeepSeek_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
 
-      eval_iters: 0
-
+      # moe
+      moe_router_force_load_balancing: true
+      moe_router_dtype: null
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
+      # hyper parameters
       train_iters: 50
-      micro_batch_size: 32
-      global_batch_size: 256
-
-      seq_length: 2048
-      max_position_embeddings: 2048
-
-      lr: 3.0e-4
+      micro_batch_size: 2
+      global_batch_size: 32
+      seq_length: 4096
+      max_position_embeddings: 4096
+      lr: 1.0e-5
       min_lr: 0.0
-      lr_warmup_iters: 50000
-      lr_decay_iters: 73192188
+      lr_warmup_iters: 2
+      lr_decay_iters: null
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
       eod_mask_loss: true
-      init_method_std: 0.02
-      norm_epsilon: 1.0e-5
-
-      # Mamba-specific: must provide spec
-      spec: ['primus.backends.megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
 
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      expert_model_parallel_size: 8
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: false
@@ -57,6 +51,7 @@ modules:
       train_data_path: null
       valid_data_path: null
       test_data_path: null
+
 
       # ckpt
       finetune: false
@@ -71,11 +66,10 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo - may need to disable for Mamba if not supported
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
-
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "native"
-      # cross_entropy_loss_fusion: false
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # enable fp8 training
+      fp8: hybrid
+      moe_use_legacy_grouped_gemm: false
