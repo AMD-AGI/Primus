@@ -18,6 +18,7 @@ import primus.backends.transformer_engine.transformer_engine_torch as ptex
 
 if is_te_min_version("2.3", check_equality=False):
     from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizer
+
     try:  # TE >= 2.12: base classes moved to tensor.storage and renamed *Storage
         from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
             Float8BlockwiseQTensorStorage as Float8BlockwiseQTensorBase,

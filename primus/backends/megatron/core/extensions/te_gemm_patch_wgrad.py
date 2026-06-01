@@ -40,6 +40,7 @@ from transformer_engine.pytorch.rocm_utils import (
     clear_fp8_weight_transpose_cache,
     create_fp8_weight_transpose_cache,
 )
+
 try:  # TE >= 2.12: base classes moved to tensor.storage and renamed *Storage
     from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
         MXFP8TensorStorage as MXFP8TensorBase,
@@ -48,6 +49,7 @@ except ModuleNotFoundError:  # TE <= 2.8
     from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import (
         MXFP8TensorBase,
     )
+
 from transformer_engine.pytorch.utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
