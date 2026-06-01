@@ -56,9 +56,10 @@ RUN rm -rf /opt/rocSHMEM
 
 RUN pip3 uninstall aiter amd-aiter -y || true && \
     cd /opt && \
-    git clone --recursive https://github.com/ROCm/aiter.git && \
+    git clone https://github.com/ROCm/aiter.git && \
     cd aiter && \
-    git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git checkout -f ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git submodule sync && \
     git submodule update --init --recursive && \
     PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
