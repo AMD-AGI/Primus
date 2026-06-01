@@ -19,7 +19,7 @@ env:
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
-  BASE_IMAGE: docker.io/rocm/primus:v26.2
+  BASE_IMAGE: docker.io/rocm/primus:v26.3
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
 jobs:
@@ -105,7 +105,7 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.2 already includes AINIC under /workspace. Re-enable this
+          # Primus v26.3 already includes AINIC under /workspace. Re-enable this
           # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
@@ -200,7 +200,7 @@ jobs:
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
+    runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Clean stale Primus-Turbo checkout
