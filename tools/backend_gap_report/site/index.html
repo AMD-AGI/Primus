@@ -13,8 +13,9 @@
           <p class="eyebrow">Primus Engineering</p>
           <h1>Primus Dashboard</h1>
           <p class="hero__summary">
-            Weekly engineering updates, backend drift, and key recommendations for the
-            Primus main branch.
+            Engineering reports on a weekly and monthly cadence &mdash; each cycle
+            captures merged work on Primus main, upstream backend drift, and the
+            sync recommendations that need attention.
           </p>
           <div class="hero__chips" id="hero-chips"></div>
         </div>
@@ -23,13 +24,14 @@
 
     <main class="layout">
       <!-- ========== WEEKLY REPORTS SECTION ========== -->
-      <section class="section section--lead" aria-label="Latest weekly update">
+      <section class="section section--lead" aria-label="Latest engineering update">
         <div class="section-heading">
-          <p class="section-heading__eyebrow">Weekly update</p>
+          <p class="section-heading__eyebrow">Engineering update</p>
           <h2>Latest engineering snapshot</h2>
           <p>
             Start here for the current status of main: merged work, drift posture,
-            and recommendations that need attention.
+            and recommendations that need attention. The lead snapshot is the most
+            recent report, whether weekly or monthly.
           </p>
         </div>
 
@@ -38,10 +40,11 @@
         <article class="featured-panel" id="weekly-featured" hidden>
           <header class="featured-panel__header">
             <div>
-              <p class="featured-panel__eyebrow">Latest weekly report</p>
+              <p class="featured-panel__eyebrow">Latest report</p>
               <h2 id="weekly-featured-title">-</h2>
               <p class="featured-panel__window" id="weekly-featured-window">-</p>
             </div>
+            <span class="cadence-tag" id="weekly-featured-cadence" hidden></span>
           </header>
 
           <div class="featured-panel__grid">
@@ -89,16 +92,6 @@
             </select>
           </label>
 
-          <label class="field">
-            <span>Status</span>
-            <select id="status-filter">
-              <option value="all">All statuses</option>
-              <option value="verified">Verified</option>
-              <option value="draft">Draft</option>
-              <option value="superseded">Superseded</option>
-            </select>
-          </label>
-
           <label class="field field--search">
             <span>Search</span>
             <input
@@ -115,17 +108,25 @@
         <div id="report-list" class="backend-deep-dive-grid" hidden></div>
       </section>
 
-      <!-- ========== WEEKLY ARCHIVE SECTION ========== -->
-      <section class="section" aria-label="Weekly report archive">
+      <!-- ========== ENGINEERING REPORT ARCHIVE SECTION ========== -->
+      <section class="section" aria-label="Engineering report archive">
         <section class="panel panel--quiet">
           <div class="panel__header">
-            <h2>Weekly report archive</h2>
+            <h2>Engineering report archive</h2>
             <p class="panel__subtitle">
-              Available weekly Markdown reports. Newest first.
+              Weekly and monthly Markdown reports. Newest first.
             </p>
           </div>
 
           <div class="filter-row filter-row--compact" id="weekly-filter-row">
+            <label class="field">
+              <span>Cadence</span>
+              <select id="weekly-cadence-filter">
+                <option value="all">All cadences</option>
+                <option value="monthly">Monthly</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </label>
             <label class="field">
               <span>Status</span>
               <select id="weekly-recommendation-filter">
@@ -148,9 +149,9 @@
             </div>
           </div>
 
-          <div id="weekly-loading-state" class="state">Loading weekly reports...</div>
+          <div id="weekly-loading-state" class="state">Loading engineering reports...</div>
           <div id="weekly-error-state" class="state state--error" hidden></div>
-          <div id="weekly-empty-state" class="state" hidden>No weekly reports match.</div>
+          <div id="weekly-empty-state" class="state" hidden>No reports match.</div>
           <div id="weekly-list" class="card-list" hidden></div>
         </section>
       </section>
@@ -159,8 +160,9 @@
     <footer class="site-footer">
       <p>
         Generated from
-        <code>tools/backend_gap_report/</code>. Weekly report data comes from
-        <code>docs/weekly_reports/dashboard-data/</code>; backend gap data from
+        <code>tools/backend_gap_report/</code>. Engineering report data comes from
+        <code>docs/weekly_reports/dashboard-data/</code> and
+        <code>docs/monthly_reports/dashboard-data/</code>; backend gap data from
         <code>docs/backend-gap/dashboard-data/</code>.
       </p>
     </footer>

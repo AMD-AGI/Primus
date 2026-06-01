@@ -9,16 +9,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import periodic_reports as periodic
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_GAP_DOCS_ROOT = REPO_ROOT / "docs" / "backend-gap"
-WEEKLY_REPORTS_DOCS_ROOT = REPO_ROOT / "docs" / "weekly_reports"
 SITE_SOURCE_ROOT = REPO_ROOT / "tools" / "backend_gap_report" / "site"
 SOURCE_DASHBOARD_DATA_DIR = BACKEND_GAP_DOCS_ROOT / "dashboard-data"
-WEEKLY_REPORTS_DASHBOARD_DATA_DIR = WEEKLY_REPORTS_DOCS_ROOT / "dashboard-data"
 METADATA_REPORTS_DIR = SOURCE_DASHBOARD_DATA_DIR / "reports"
 PDF_TEMPLATE = REPO_ROOT / "tools" / "backend_gap_report" / "templates" / "pdf-report.css"
 BUILD_INDEX_SCRIPT = Path(__file__).resolve().with_name("build_dashboard_index.py")
-BUILD_WEEKLY_INDEX_SCRIPT = Path(__file__).resolve().with_name("build_weekly_reports_index.py")
+# Combined weekly + monthly report index consumed by the dashboard frontend.
+COMBINED_REPORTS_DIRNAME = "reports-data"
 REQUIRED_REPORT_FIELDS = (
     "id",
     "title",
@@ -81,14 +82,25 @@ def run_build_index() -> None:
         fail(f"failed to rebuild dashboard index (exit={exc.returncode})")
 
 
-def run_build_weekly_index() -> None:
-    if not WEEKLY_REPORTS_DASHBOARD_DATA_DIR.exists():
-        return
-    print("[weekly-report] Rebuild weekly-report dashboard index", flush=True)
-    try:
-        subprocess.run(["python3", str(BUILD_WEEKLY_INDEX_SCRIPT)], check=True)
-    except subprocess.CalledProcessError as exc:
-        fail(f"failed to rebuild weekly-report dashboard index (exit={exc.returncode})")
+def build_combined_reports_index(output_dir: Path) -> None:
+    """Assemble the unified weekly + monthly report index into the bundle.
+
+    The dashboard reads a single ``reports-data/index.json`` so both cadences
+    render through one generic path. The per-report metadata is validated while
+    it is loaded by the shared periodic-report core.
+    """
+
+    print("[reports] Build combined periodic-report index (weekly + monthly)", flush=True)
+    payload = periodic.build_combined_index()
+    target_dir = output_dir / COMBINED_REPORTS_DIRNAME
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "index.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    counts = payload["summary"]["cadence_counts"]
+    print(
+        f"[reports] Combined index: {payload['summary']['total_reports']} report(s) "
+        f"(weekly={counts.get('weekly', 0)}, monthly={counts.get('monthly', 0)})",
+        flush=True,
+    )
 
 
 def load_report_metadata() -> list[dict]:
@@ -232,10 +244,19 @@ def validate_bundle(bundle_dir: Path) -> None:
             f"index={sorted(index_report_ids)}, metadata={sorted(metadata_ids)}"
         )
 
+    combined_index = bundle_dir / COMBINED_REPORTS_DIRNAME / "index.json"
+    if not combined_index.exists():
+        fail(f"bundle missing combined periodic-report index: {combined_index}")
+    combined_payload = load_json(combined_index)
+    for key in ("summary", "reports"):
+        if key not in combined_payload:
+            fail(f"combined reports index missing required key: {key}")
+    if not isinstance(combined_payload["reports"], list):
+        fail("combined reports index field 'reports' must be a list")
+
 
 def build_site(output_dir: Path) -> None:
     run_build_index()
-    run_build_weekly_index()
     if not PDF_TEMPLATE.exists():
         fail(f"missing PDF template: {PDF_TEMPLATE}")
     if not SOURCE_DASHBOARD_DATA_DIR.exists():
@@ -248,12 +269,7 @@ def build_site(output_dir: Path) -> None:
     print("[backend-gap] Build standalone dashboard bundle", flush=True)
     copy_tree(SITE_SOURCE_ROOT, output_dir)
     copy_tree(SOURCE_DASHBOARD_DATA_DIR, output_dir / "dashboard-data")
-    if WEEKLY_REPORTS_DASHBOARD_DATA_DIR.exists():
-        print("[weekly-report] Copy weekly-report dashboard data", flush=True)
-        copy_tree(
-            WEEKLY_REPORTS_DASHBOARD_DATA_DIR,
-            output_dir / "weekly-reports-data",
-        )
+    build_combined_reports_index(output_dir)
     build_pdf_artifacts(output_dir)
     print("[backend-gap] Validate standalone dashboard bundle", flush=True)
     validate_bundle(output_dir)
