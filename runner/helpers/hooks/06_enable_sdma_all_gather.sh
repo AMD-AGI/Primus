@@ -25,7 +25,7 @@
 #      cuDeviceGetAttribute hipErrorInvalidValue TLS-leak hit by RCCL's
 #      cuMem code path on builds that don't have the upstream fix.
 #      Recompiled every time so it never goes stale relative to the
-#      source. 
+#      source.
 #      Lorri: Check JIRA ticket ROCM-24832 for more details.
 #
 # Anything else (HSA_SDMA_LINEAR_B2B, NCCL_DEBUG, ...) can be set
@@ -41,7 +41,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 1) Zero-CTA env for the RCCL copy-engine path. FSDP requests CTA=ZERO
 #    via pg_options too, but setting these explicitly here makes the
-#    dispatch path observable. 
+#    dispatch path observable.
 #Lorri: Check the header in sdma_symm_mem_collectives.py for more details.
 echo "env.NCCL_CTA_POLICY=2"
 echo "env.NCCL_CUMEM_ENABLE=1"

@@ -71,9 +71,7 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
     import torch.distributed.fsdp as _fsdp_pkg
     from torch.distributed.fsdp._fully_shard import _fsdp_collectives as _ffsc
     from torch.distributed.fsdp._fully_shard import _fully_shard as _ffs_mod
-    from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
-        SymmMemAllGather,
-    )
+    from torch.distributed.fsdp._fully_shard._fsdp_collectives import SymmMemAllGather
 
     # Hardcoded sensible defaults. SDMA_ALL_GATHER is the only knob.
     backend = "NCCL"
@@ -88,8 +86,7 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
         except Exception as e:
             if log_all:
                 log_rank_0(
-                    f"[Patch:sdma_symm_mem] skip (no _fsdp_state): "
-                    f"{type(fsdp_module).__name__}: {e}"
+                    f"[Patch:sdma_symm_mem] skip (no _fsdp_state): " f"{type(fsdp_module).__name__}: {e}"
                 )
             return
 
@@ -99,7 +96,7 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
             # groups (e.g. per-param mesh via shard_placement_fn). Leave
             # those alone; they will use whatever comm FSDP chose.
 
-            # Lorri: This was tested on Pytorch 2.12, 
+            # Lorri: This was tested on Pytorch 2.12,
             # other versions may be different.
             if log_all:
                 log_rank_0(
