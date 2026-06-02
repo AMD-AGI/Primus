@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - "docs/backend-gap/**"
+      - "docs/weekly_reports/**"
+      - "docs/monthly_reports/**"
       - "tools/backend_gap_report/**"
       - ".github/workflows/deploy-backend-gap-dashboard.yml"
 
