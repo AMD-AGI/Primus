@@ -33,9 +33,6 @@ try:
     from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
     from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
     from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-        grouped_gemm_compute_offs,
-    )
-    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
         grouped_gemm_fp8_impl as _grouped_gemm_fp8_impl,
     )
     from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
@@ -44,6 +41,9 @@ try:
     from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (
         grouped_gemm_impl,
         grouped_gemm_variable_k_impl,
+    )
+    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_utils import (
+        group_offs_from_lens,
     )
     from primus_turbo.pytorch.kernels.quantization.quantization_impl import (
         quant_fp8_blockwise_for_weight_impl,
@@ -60,7 +60,7 @@ except Exception as _e:  # pragma: no cover - depends on environment availabilit
     float8_e5m2 = None
     gemm_fp8_impl = None
     gemm_impl = None
-    grouped_gemm_compute_offs = None
+    group_offs_from_lens = None
     _grouped_gemm_fp8_impl = None
     grouped_gemm_fp8_variable_k_impl = None
     grouped_gemm_impl = None
@@ -295,7 +295,7 @@ def grouped_gemm_with_weight_gradient_store(
     if gg_backend == "turbo-gg":
         _require_primus_turbo("grouped_gemm_with_weight_gradient_store(turbo-gg)")
         if group_offs is None:
-            group_offs = grouped_gemm_compute_offs(group_lens)
+            group_offs = group_offs_from_lens(group_lens)
         group_gemm_backend_func = functools.partial(
             grouped_gemm_impl,
             group_offs=group_offs,
@@ -582,7 +582,7 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
         if weight_reshape_size is not None:
             weight = weight.view(*weight_reshape_size)
 
-        group_offs = grouped_gemm_compute_offs(group_lens)
+        group_offs = group_offs_from_lens(group_lens)
 
         if granularity == ScalingGranularity.TENSORWISE:
             a_fp8, a_scale_inv = quantize_fp8(input, fwd_dtype, granularity)
