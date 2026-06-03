@@ -24,8 +24,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 4096
+      micro_batch_size: ${PRIMUS_MBS:1}      # MAIDAS DSv3 64GPU FP8: MBS=1
+      global_batch_size: ${PRIMUS_GBS:64}    # MAIDAS DSv3 64GPU FP8: GBS(NBS)=64
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -43,11 +43,14 @@ modules:
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: ${PRIMUS_PP:16}
-      pipeline_model_parallel_layout: "Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L"
+      # MAIDAS DSv3 uses VPP=2 (interleaved) for high PP efficiency (~89.5%).
+      # Set VPP explicitly (no layout string) so the 61 layers auto-distribute
+      # across PP*VPP=32 virtual stages; avoids the layout/PP*VPP mismatch.
+      num_virtual_stages_per_pipeline_rank: ${PRIMUS_VPP:2}
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: true
+      gradient_accumulation_fusion: false
 
       # data
       mock_data: true
@@ -55,7 +58,10 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: true
+      # MoE: standard Megatron grouped GEMM + all-to-all dispatch (aligned with mi455 old repo)
+      moe_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false
+      moe_token_dispatcher_type: alltoall
       # MLA
       multi_latent_attention: true
 
@@ -68,10 +74,6 @@ modules:
       # rope fusion
       enable_experimental: true
       apply_rope_fusion: true
-
-      # recompute
-      recompute_granularity: full
-      recompute_layer_ids: "0,3,4,7,8,11,12,15,19,23,31,32,35,36,39,40,43,44,47,48,51"
 
       # ckpt
       finetune: false
@@ -87,23 +89,19 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      enable_primus_turbo: true
+      # Turbo/DeepEP disabled to align with mi455 old repo (vanilla Megatron MoE path).
+      enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
-      use_turbo_rms_norm: true
+      use_turbo_rms_norm: false
 
-      # deepep
-      use_turbo_deepep: true
+      # deepep disabled (using all-to-all token dispatch above)
+      use_turbo_deepep: false
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 80
-      turbo_deepep_use_comm_stream: false
-
-      # sync-free moe support stage 1-2, 0 means not use sync-free moe
-      # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
+      # sync-free moe disabled (0 = off; it would auto-enable DeepEP)
+      turbo_sync_free_moe_stage: 0
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
