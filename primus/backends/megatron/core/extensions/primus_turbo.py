@@ -719,6 +719,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
 
+        # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
+        # and let torch allocator can release the original tensor.
+        if torch.is_grad_enabled():
+            query = query.contiguous() if query.requires_grad else query
+            key = key.contiguous() if key.requires_grad else key
+            value = value.contiguous() if value.requires_grad else value
+
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)
             key = key.permute(1, 0, 2, 3)
@@ -1922,8 +1929,6 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 quant_config_internal = quant_config.data()
                 weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
 
-                # NOTE: grouped_gemm_fp8 is called with trans_b=False; weights layout is [G, K, N]
-                # so the forward (row) axis along K is -2 and the trans (col) axis along N is -1.
                 self.quantized_weight_buffer = PrimusTurboQuantizedTensor.quantize(
                     weights,
                     dest_dtype=weight_dtype,
