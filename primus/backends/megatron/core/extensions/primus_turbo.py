@@ -1929,6 +1929,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 quant_config_internal = quant_config.data()
                 weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
 
+                # NOTE: grouped_gemm_fp8 is called with trans_b=False; weights layout is [G, K, N]
+                # so the forward (row) axis along K is -2 and the trans (col) axis along N is -1.
                 self.quantized_weight_buffer = PrimusTurboQuantizedTensor.quantize(
                     weights,
                     dest_dtype=weight_dtype,
