@@ -443,14 +443,17 @@ fi
 # Allow RUN_MODE to be overridden by environment variable
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
-CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
+# Build the launch command as an ARRAY and execute it directly (no eval), so
+# Primus arg values containing shell metacharacters are passed verbatim.
+CMD=("${direct_config[script]:-}" "$@")
+
 if [[ "$RUN_MODE" == "single" ]]; then
-    CMD="python3 ${CMD}"
+    CMD=(python3 "${CMD[@]}")
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"
 elif [[ "$RUN_MODE" == "torchrun" ]]; then
     # Step 2: Add NUMA binding prefix if enabled
     if [[ "${direct_config[numa]:-}" == "true" ]]; then
-        CMD="--no-python ${RUNNER_DIR}/helpers/numa_bind.sh ${CMD}"
+        CMD=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" "${CMD[@]}")
         LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     else
         LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
@@ -484,7 +487,9 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         FILTER_ARG=()
     fi
 
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS:-} ${CMD}"
+    # LOCAL_RANKS stays unquoted to allow word-splitting into multiple tokens.
+    # shellcheck disable=SC2206
+    CMD=(torchrun "${DISTRIBUTED_ARGS[@]}" "${FILTER_ARG[@]}" ${LOCAL_RANKS:-} "${CMD[@]}")
 fi
 
 ###############################################################################
@@ -531,9 +536,9 @@ print_system_info
 
 PRINT_INFO_RANK0 "  Full Command:"
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 "    Would Execute: $CMD"
+    PRINT_INFO_RANK0 "    Would Execute: ${CMD[*]} 2>&1 | tee ${direct_config[log_file]}"
 else
-    PRINT_INFO_RANK0 "    Executing: $CMD"
+    PRINT_INFO_RANK0 "    Executing: ${CMD[*]} 2>&1 | tee ${direct_config[log_file]}"
 fi
 
 # In dry-run mode, exit after displaying the command
@@ -548,10 +553,10 @@ print_section ""
 ###############################################################################
 # STEP 11: Execute command
 ###############################################################################
-# Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+# PIPESTATUS[0] is the launcher's exit code.
 set +e
-eval "$CMD"
-exit_code=$?
+"${CMD[@]}" 2>&1 | tee "${direct_config[log_file]}"
+exit_code=${PIPESTATUS[0]}
 set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
