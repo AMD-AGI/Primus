@@ -1961,7 +1961,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
-            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=False)
+            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
         return out, None
 
