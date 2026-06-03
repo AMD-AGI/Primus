@@ -1845,7 +1845,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 weight = getattr(self, f"weight{i}")
                 buffer[i].copy_(weight)
 
-            weights = buffer.transpose(1, 2).contiguous()
+            weights = buffer.clone()
 
         self.register_parameter("weights", torch.nn.Parameter(weights))
 
@@ -1956,7 +1956,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 x,
                 quantized_weights,
                 m_splits,
-                trans_b=False,
+                trans_b=True,
                 config=quant_config.data(),
             )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
