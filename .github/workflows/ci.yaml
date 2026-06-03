@@ -270,6 +270,21 @@ jobs:
       - name: Install Primus
         run: |
           pip install -r requirements.txt
+      - name: Install fixed origami
+        run: |
+          # rocm/primus:v26.3 bundles origami 0.1.0, whose rank_configs() raises
+          # ValueError: vector::reserve during MoE grouped-gemm kernel selection and
+          # crashes training (turbo's _safe_rank_configs only catches RuntimeError).
+          # Install the fixed origami (rocm-libraries@223648a) over the bundled 0.1.0.
+          # TODO: drop this once a base image ships origami with the fix.
+          rm -rf /tmp/rocm-libraries
+          git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries
+          cd /tmp/rocm-libraries
+          git sparse-checkout init --cone
+          git sparse-checkout set shared/origami
+          git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
+          pip uninstall -y origami || true
+          pip install ./shared/origami/python
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
