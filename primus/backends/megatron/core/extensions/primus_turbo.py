@@ -1852,7 +1852,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 weight = getattr(self, f"weight{i}")
                 buffer[i].copy_(weight)
 
-            weights = buffer.transpose(1, 2).contiguous()
+            weights = buffer.clone()
 
         self.register_parameter("weights", torch.nn.Parameter(weights))
 
@@ -1937,7 +1937,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     granularity=quant_config_internal.granularity,
                     block_size=quant_config_internal.block_size,
                     scaling_recipe=weight_scaling_recipe,
-                    axis=-2,
+                    axis=-1,
                 )
 
                 if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
@@ -1947,8 +1947,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                         granularity=quant_config_internal.granularity,
                         block_size=quant_config_internal.block_size,
                         scaling_recipe=weight_scaling_recipe,
-                        # axis=-1 (along N) produces the transposed quantized weight for backward.
-                        axis=-1,
+                        axis=-2,
                     )
 
             x, quantized_weights = _bridge_weight_grad(
@@ -1963,13 +1962,13 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 x,
                 quantized_weights,
                 m_splits,
-                trans_b=False,
+                trans_b=True,
                 config=quant_config.data(),
             )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
-            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=False)
+            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
         return out, None
 
