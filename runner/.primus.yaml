@@ -121,7 +121,10 @@ direct:
   master_addr: "localhost"
 
   # Direct mode specific options
-  run_mode: "torchrun"
+  # run_mode: deliberately omitted here so that primus-cli-direct.sh can
+  # auto-select 'single' for subcommands that require it (e.g. node_smoke).
+  # Set run_mode explicitly in your own config to force a specific launcher.
+  # Precedence: CLI --single > user config direct.run_mode > auto-detect > torchrun.
   script: "primus/cli/main.py"
   numa: "auto"
   log_file: ""

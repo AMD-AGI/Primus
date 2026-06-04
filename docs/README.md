@@ -27,6 +27,7 @@ In-depth technical documentation:
 - **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
 - **[Performance Projection](./projection.md)** - Project training performance to multi-node configurations
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
+- **[Preflight Without Container](./preflight-direct.md)** - Run preflight directly on the host with a shared Python venv (SLURM-aware, no Docker required)
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
