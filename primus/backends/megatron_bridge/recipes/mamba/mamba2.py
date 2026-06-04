@@ -16,14 +16,12 @@ code needs to be modified.
 import os
 
 import torch
-from typing_extensions import TypedDict, Unpack
-
 from megatron.bridge.models.mamba import (
+    MambaModelProvider1P3B,
+    MambaModelProvider2P7B,
     MambaModelProvider130M,
     MambaModelProvider370M,
     MambaModelProvider780M,
-    MambaModelProvider1P3B,
-    MambaModelProvider2P7B,
     NVIDIAMambaHybridProvider8B,
     NVIDIAMambaModelProvider8B,
 )
@@ -45,11 +43,12 @@ from megatron.bridge.training.config import (
     TrainingConfig,
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig
-
+from typing_extensions import TypedDict, Unpack
 
 # ---------------------------------------------------------------------------
 # Typed kwargs for Mamba2 finetuning recipes
 # ---------------------------------------------------------------------------
+
 
 class Mamba2FinetuneKwargs(TypedDict, total=False):
     """Typed options accepted by Mamba2 finetuning recipe helpers."""
@@ -98,6 +97,7 @@ class Mamba2FinetuneKwargs(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 # Public finetune recipe helpers
 # ---------------------------------------------------------------------------
+
 
 def mamba2_130m_finetune_config(**user_kwargs: Unpack[Mamba2FinetuneKwargs]) -> ConfigContainer:
     """Return a finetuning config for Mamba2 130M."""
@@ -187,6 +187,7 @@ def mamba2_hybrid_8b_finetune_config(**user_kwargs: Unpack[Mamba2FinetuneKwargs]
 # Common finetuning configuration builder
 # ---------------------------------------------------------------------------
 
+
 def _mamba2_finetune_common(
     model_provider: (
         type[MambaModelProvider130M]
@@ -269,8 +270,12 @@ def _mamba2_finetune_common(
 
     # PEFT (LoRA / DoRA / None for full SFT)
     mamba_target_modules = [
-        "linear_qkv", "linear_proj", "linear_fc1", "linear_fc2",
-        "in_proj", "out_proj",
+        "linear_qkv",
+        "linear_proj",
+        "linear_fc1",
+        "linear_fc2",
+        "in_proj",
+        "out_proj",
     ]
     peft_config = default_peft_config(peft, target_modules=mamba_target_modules)
 

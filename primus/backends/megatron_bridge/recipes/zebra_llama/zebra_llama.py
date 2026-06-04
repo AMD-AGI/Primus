@@ -18,14 +18,6 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Optional, Union
 
 import torch
-from typing_extensions import TypedDict, Unpack
-
-from megatron.core.models.mamba import MambaModel as MCoreMambaModel
-from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
-from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer import ModuleSpec
-from megatron.core.transformer.enums import AttnBackend
-
 from megatron.bridge.models.model_provider import ModelProviderMixin
 from megatron.bridge.models.transformer_config import MLATransformerConfig
 from megatron.bridge.recipes.utils.dataset_utils import get_blend_fields_from_data_paths
@@ -36,7 +28,9 @@ from megatron.bridge.recipes.utils.finetune_utils import (
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
-from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
+from megatron.bridge.recipes.utils.tokenizer_utils import (
+    DEFAULT_NULL_TOKENIZER_VOCAB_SIZE,
+)
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -50,7 +44,12 @@ from megatron.bridge.training.config import (
 )
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
-
+from megatron.core.models.mamba import MambaModel as MCoreMambaModel
+from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer import ModuleSpec
+from megatron.core.transformer.enums import AttnBackend
+from typing_extensions import TypedDict, Unpack
 
 # ---------------------------------------------------------------------------
 # Hybrid Mamba+MLA Model Provider (extends MLATransformerConfig)
@@ -575,7 +574,13 @@ def _zebra_llama_pretrain_common(
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
 
     blend, blend_per_split, split = get_blend_fields_from_data_paths(
-        data_paths, data_args_path, train_data_path, valid_data_path, test_data_path, per_split_data_args_path, mock
+        data_paths,
+        data_args_path,
+        train_data_path,
+        valid_data_path,
+        test_data_path,
+        per_split_data_args_path,
+        mock,
     )
 
     model_cfg = model_provider(

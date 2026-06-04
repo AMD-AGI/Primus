@@ -67,9 +67,7 @@ def _parse_and_enrich(
         return log_string
 
     try:
-        elapsed_match = re.search(
-            r"elapsed time per iteration \(ms\):\s*([\d.]+)", log_string
-        )
+        elapsed_match = re.search(r"elapsed time per iteration \(ms\):\s*([\d.]+)", log_string)
         batch_match = re.search(r"global batch size:\s*(\d+)", log_string)
         if not elapsed_match or not batch_match:
             return log_string
@@ -85,20 +83,15 @@ def _parse_and_enrich(
         tokens_per_gpu = tokens_per_iter / elapsed_s / world_size
 
         throughput_seg = (
-            f" tokens per GPU (tokens/s/GPU): {tokens_per_gpu:.1f} |"
-            f" seq_length: {seq_length} |"
+            f" tokens per GPU (tokens/s/GPU): {tokens_per_gpu:.1f} |" f" seq_length: {seq_length} |"
         )
 
-        tflop_match = re.search(
-            r"throughput per GPU \(TFLOP/s/GPU\):\s*[\d.]+\s*\|", log_string
-        )
+        tflop_match = re.search(r"throughput per GPU \(TFLOP/s/GPU\):\s*[\d.]+\s*\|", log_string)
         if tflop_match:
             insert_pos = tflop_match.end()
             return log_string[:insert_pos] + throughput_seg + log_string[insert_pos:]
 
-        elapsed_end = re.search(
-            r"elapsed time per iteration \(ms\):\s*[\d.]+\s*\|", log_string
-        )
+        elapsed_end = re.search(r"elapsed time per iteration \(ms\):\s*[\d.]+\s*\|", log_string)
         if elapsed_end:
             insert_pos = elapsed_end.end()
             return log_string[:insert_pos] + throughput_seg + log_string[insert_pos:]

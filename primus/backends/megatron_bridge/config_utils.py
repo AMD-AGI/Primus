@@ -355,10 +355,7 @@ def _resolve_recipe(recipe: str, flavor: str):
 
     # Build a helpful error message listing all paths that were tried.
     tried = [f"{p}.{recipe}" for p in search_prefixes]
-    assert False, (
-        f"Recipe loading failed: Function '{flavor}' not found. "
-        f"Searched modules: {tried}"
-    )
+    assert False, f"Recipe loading failed: Function '{flavor}' not found. " f"Searched modules: {tried}"
 
 
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
