@@ -43,8 +43,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             log_rank_0("Using GPT model provider and training components")
 
         # Configure training components
-        if hasattr(train_valid_test_datasets_provider, "is_distributed"):
-            train_valid_test_datasets_provider.is_distributed = True
+        train_valid_test_datasets_provider.is_distributed = True
 
         # Handle Megatron version differences (v0.12.0 vs newer with inprocess_restart)
         wrapped_pretrain = pretrain
