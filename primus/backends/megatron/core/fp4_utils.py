@@ -129,7 +129,7 @@ if HAVE_TE and HAVE_TURBO:
             fp4_context = nullcontext()
         else:
             fp4_recipe, fp4_recipe_none_reason = get_fp4_recipe(config)
-            turbo_enabled = _primus_turbo_enabled() and not is_init
+            turbo_enabled = _primus_turbo_enabled()
 
             global WARN_ONCE
             if WARN_ONCE:
@@ -173,7 +173,9 @@ if HAVE_TE and HAVE_TURBO:
                 else:
                     # TE currently uses fp8_autocast for fp8 and fp4 quantization.
                     fp4_context = transformer_engine.pytorch.fp8_autocast(
-                        enabled=True, fp8_recipe=fp4_recipe, fp8_group=fp4_group
+                        enabled=True if fp4_recipe is not None else False,
+                        fp8_recipe=fp4_recipe,
+                        fp8_group=fp4_group
                     )
             else:
                 import inspect
@@ -196,13 +198,14 @@ elif HAVE_TE:
                 )
             fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
         elif config.fp4_recipe == Fp4Recipe.mxfp4:
-            if not is_te_min_version("2.8.0"):
+            try:
+                import os
+                fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
+                fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+            except AttributeError:
                 raise ValueError(
-                    "MXFP4BlockScaling requires TransformerEngine >= 2.8.0."
-            )
-            import os       
-            fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
-            fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+                    "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                )
         else:
             raise ValueError(
                 f"Unsupported FP4 recipe: {config.fp4_recipe}. "
