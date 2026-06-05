@@ -18,6 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection.memory_capture import (
+    MemoryBenchmarkRecorder,
+    format_bytes,
+)
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
 from primus.core.projection.module_profilers.language_model import (
@@ -33,6 +37,7 @@ from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
     get_sdpa_simulation_backend,
 )
+from primus.core.projection.config_validation import assert_recompute_pipeline_compat
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
@@ -50,40 +55,166 @@ _BYTES_PER_GB = 1024**3
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Bench-artifact JSON schema versions:
+#   v1: original — only profiling_results + metadata.
+#   v2: adds memory_results (top-level), extended metadata (gpus_per_node,
+#       framework_versions, gpu_arch, alloc_conf), and an explicit
+#       schema_version field.
+_ARTIFACT_SCHEMA_VERSION = 2
+
+
+def _collect_environment_metadata():
+    """Best-effort capture of host/library/runtime context for the artifact.
+
+    Captured on rank 0 only.  All fields are optional: anything that fails
+    to read is omitted rather than crashing the bench.
+    """
+    env: Dict[str, Any] = {
+        "alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF") or os.environ.get("PYTORCH_HIP_ALLOC_CONF"),
+        "gpus_per_node": int(os.getenv("GPUS_PER_NODE", "8")),
+    }
+
+    versions: Dict[str, str] = {}
+    try:
+        import torch
+
+        versions["torch"] = getattr(torch, "__version__", "")
+        if torch.cuda.is_available():
+            try:
+                env["gpu_arch"] = torch.cuda.get_device_properties(0).gcnArchName  # ROCm-specific
+            except Exception:
+                env["gpu_arch"] = torch.cuda.get_device_name(0)
+            try:
+                env["hip_version"] = torch.version.hip  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                env["cuda_version"] = torch.version.cuda  # type: ignore[attr-defined]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        import megatron  # type: ignore
+
+        versions["megatron"] = getattr(megatron, "__version__", "")
+    except Exception:
+        pass
+
+    try:
+        import primus  # type: ignore
+
+        versions["primus"] = getattr(primus, "__version__", "")
+    except Exception:
+        pass
+
+    if versions:
+        env["framework_versions"] = versions
+    return env
+
+
 def _save_profiling_results(profiling_results, reduction_info, save_path):
-    """Serialize profiling results + metadata to JSON for later hybrid sourcing."""
-    serializable = {}
+    """Serialize profiling results + metadata to JSON for later hybrid sourcing.
+
+    The on-disk format is schema v2:
+
+        {
+            "schema_version": 2,
+            "metadata": {...},                     # bench parallelism + env
+            "profiling_results": {...},            # per-layer timings (ints/strs)
+            "memory_results": {...} | null         # MemoryBenchmarkRecorder payload
+        }
+
+    Memory data is hoisted out of ``profiling_results["_memory_benchmark"]``
+    into a top-level ``memory_results`` field so consumers can read it
+    without traversing the per-layer dict.
+    """
+    serializable: Dict[str, Any] = {}
+    memory_results: Optional[Dict[str, Any]] = None
     for key, value in profiling_results.items():
+        if key == "_memory_benchmark":
+            # Hoist to top-level memory_results.
+            if isinstance(value, dict):
+                memory_results = copy.deepcopy(value)
+            continue
         str_key = str(key)
         if isinstance(value, dict):
             serializable[str_key] = copy.deepcopy(value)
         else:
             serializable[str_key] = value
 
+    metadata: Dict[str, Any] = {
+        "benchmark_ep": reduction_info.get("benchmark_ep", 1),
+        "benchmark_tp": reduction_info.get("benchmark_tp", 1),
+        "benchmark_pp": reduction_info.get("benchmark_pp", 1),
+        "benchmark_gpus": reduction_info.get("benchmark_gpus", 1),
+        "benchmark_world_size": int(os.getenv("WORLD_SIZE", "1")),
+        "original_ep": reduction_info.get("original_ep", 1),
+        "original_tp": reduction_info.get("original_tp", reduction_info.get("benchmark_tp", 1)),
+        "original_pp": reduction_info.get("original_pp", reduction_info.get("benchmark_pp", 1)),
+        "original_cp": reduction_info.get("original_cp", 1),
+        "original_num_experts": reduction_info.get("original_num_experts"),
+        "benchmark_num_experts": reduction_info.get("benchmark_num_experts"),
+    }
+    # Bench training-config summary (effective num_layers / moe_pattern after
+    # `_limit_layers_for_projection`).  Needed by the memory extrapolator
+    # when loading an artifact: it has to recreate the bench-shaped
+    # training_config to evaluate analytical-at-bench correctly.
+    bench_summary = reduction_info.get("bench_training_config_summary")
+    if bench_summary is not None:
+        metadata["bench_training_config_summary"] = bench_summary
+    metadata.update(_collect_environment_metadata())
+
     payload = {
+        "schema_version": _ARTIFACT_SCHEMA_VERSION,
+        "metadata": metadata,
         "profiling_results": serializable,
-        "metadata": {
-            "benchmark_ep": reduction_info.get("benchmark_ep", 1),
-            "benchmark_tp": reduction_info.get("benchmark_tp", 1),
-            "benchmark_pp": reduction_info.get("benchmark_pp", 1),
-            "benchmark_gpus": reduction_info.get("benchmark_gpus", 1),
-            "original_ep": reduction_info.get("original_ep", 1),
-            "original_num_experts": reduction_info.get("original_num_experts"),
-            "benchmark_num_experts": reduction_info.get("benchmark_num_experts"),
-        },
+        "memory_results": memory_results,
     }
 
     with open(save_path, "w") as f:
         json.dump(payload, f, indent=2)
 
 
+def _upgrade_artifact_to_v2(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort upgrade of pre-versioned (v1) artifacts to the v2 schema.
+
+    The mutation is in-place and returns the same dict.  v1 artifacts have
+    no ``schema_version`` field, no ``memory_results``, and a smaller
+    ``metadata`` block.
+    """
+    if payload.get("schema_version") == _ARTIFACT_SCHEMA_VERSION:
+        return payload
+
+    payload.setdefault("metadata", {})
+    payload.setdefault("profiling_results", {})
+
+    # v1 may have buried memory data inside profiling_results; hoist if found.
+    pr = payload["profiling_results"]
+    if "_memory_benchmark" in pr and "memory_results" not in payload:
+        payload["memory_results"] = pr.pop("_memory_benchmark")
+
+    payload.setdefault("memory_results", None)
+    payload["schema_version"] = _ARTIFACT_SCHEMA_VERSION
+    return payload
+
+
 def _load_profiling_results(load_path):
-    """Load profiling results + metadata from a JSON file."""
-    with open(load_path, "r") as f:
-        payload = json.load(f)
+    """Load profiling results + metadata from a JSON file.
+
+    Always returns the v2-shaped tuple ``(profiling_results, metadata)``
+    where ``profiling_results`` keeps a back-compat ``_memory_benchmark``
+    entry pointing at the top-level ``memory_results`` block.  Older
+    callers that only consume timing data are unaffected.
+
+    For new code that needs the memory payload directly, prefer
+    :func:`_load_artifact` which returns the full v2 dict.
+    """
+    payload = _load_artifact(load_path)
 
     raw = payload["profiling_results"]
-    profiling_results = {}
+    profiling_results: Dict[Any, Any] = {}
     for key, value in raw.items():
         try:
             int_key = int(key)
@@ -91,7 +222,24 @@ def _load_profiling_results(load_path):
         except ValueError:
             profiling_results[key] = value
 
+    # Re-inject memory_results as a `_memory_benchmark` entry so any
+    # consumer that previously read it from profiling_results keeps working.
+    mem = payload.get("memory_results")
+    if mem is not None:
+        profiling_results["_memory_benchmark"] = mem
+
     return profiling_results, payload.get("metadata", {})
+
+
+def _load_artifact(load_path):
+    """Load a bench artifact and upgrade it to v2 if needed.
+
+    Returns the full payload dict (with ``schema_version``,
+    ``metadata``, ``profiling_results``, ``memory_results``).
+    """
+    with open(load_path, "r") as f:
+        payload = json.load(f)
+    return _upgrade_artifact_to_v2(payload)
 
 
 def _merge_hybrid_profiling(
@@ -128,7 +276,7 @@ def _merge_hybrid_profiling(
     for layer_idx, current_data in current_results.items():
         if not isinstance(current_data, dict):
             continue
-        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark"):
+        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark", "_memory_benchmark"):
             continue
 
         # Find matching baseline layer (by index, or use the representative
@@ -548,11 +696,11 @@ def calculate_collective_communication_time(
         # the initial forward).  The ReduceScatter count is unchanged (1 per
         # layer backward).
         recompute_gran = getattr(mp_config, "recompute_granularity", None)
-        recomp_n_layers = getattr(mp_config, "recompute_num_layers", 0) or 0
+        recomp_n_layers = _recompute_layer_count(mp_config, num_layers)
         ag_multiplier = 1  # default: AG once per layer (forward)
         if recompute_gran == "full" and recomp_n_layers > 0:
             # Each recomputed layer needs a second AG in backward
-            recomp_ratio = min(recomp_n_layers, num_layers) / num_layers
+            recomp_ratio = recomp_n_layers / num_layers if num_layers > 0 else 0.0
             ag_multiplier = 1 + recomp_ratio  # e.g. 2.0 when all layers recomputed
 
         # Calculate total FSDP time for all layers
@@ -722,10 +870,12 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
     mp_config = training_config.model_parallel_config
     moe_pattern = model_config.moe_pattern  # Full model pattern (e.g., 27 layers)
 
+    num_total_layers = len(moe_pattern)
+
     # Get recomputation settings
     recompute_granularity = getattr(mp_config, "recompute_granularity", None)
-    recompute_num_layers = getattr(mp_config, "recompute_num_layers", 0) or 0
-    num_total_layers = len(moe_pattern)
+    recompute_layer_ids = _normalized_recompute_layer_ids(mp_config)
+    recompute_num_layers = _recompute_layer_count(mp_config, num_total_layers)
 
     # Get profiled layer indices
     profiled_layer_indices = sorted([k for k in profiling_results.keys() if isinstance(k, int)])
@@ -733,7 +883,13 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
         print(f"  Profiled layers: {profiled_layer_indices}")
         print(f"  Full model has {num_total_layers} transformer layers")
         if recompute_granularity == "full" and recompute_num_layers > 0:
-            print(f"  Recomputation: {recompute_num_layers} layers (granularity={recompute_granularity})")
+            if recompute_layer_ids is not None:
+                print(
+                    f"  Recomputation: {recompute_num_layers} layers via "
+                    f"recompute_layer_ids (granularity={recompute_granularity})"
+                )
+            else:
+                print(f"  Recomputation: {recompute_num_layers} layers (granularity={recompute_granularity})")
 
     total_time_ms = 0.0
 
@@ -826,18 +982,26 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
     # With recompute_granularity="full", during backward pass the forward is re-run for recomputed layers
     # This adds approximately 1x forward time per recomputed layer
     recompute_overhead_ms = 0.0
+    recompute_dense_layers = 0
+    recompute_moe_layers = 0
     if recompute_granularity == "full" and recompute_num_layers > 0:
-        # Calculate how many dense vs MoE layers are recomputed
-        # Typically recompute_num_layers applies to all transformer layers
-        recompute_ratio = min(recompute_num_layers, num_total_layers) / num_total_layers
-
-        # Recompute overhead = forward time for recomputed layers
-        recompute_dense_layers = int(num_dense_layers * recompute_ratio)
-        recompute_moe_layers = int(num_moe_layers * recompute_ratio)
-
-        recompute_overhead_ms = (avg_dense_fwd * recompute_dense_layers) + (
-            avg_moe_fwd * recompute_moe_layers
-        )
+        if recompute_layer_ids is not None:
+            for layer_idx in sorted(recompute_layer_ids):
+                if layer_idx >= len(moe_pattern):
+                    continue
+                if moe_pattern[layer_idx]:
+                    recompute_moe_layers += 1
+                    recompute_overhead_ms += avg_moe_fwd
+                else:
+                    recompute_dense_layers += 1
+                    recompute_overhead_ms += avg_dense_fwd
+        else:
+            recompute_ratio = min(recompute_num_layers, num_total_layers) / num_total_layers
+            recompute_dense_layers = int(num_dense_layers * recompute_ratio)
+            recompute_moe_layers = int(num_moe_layers * recompute_ratio)
+            recompute_overhead_ms = (avg_dense_fwd * recompute_dense_layers) + (
+                avg_moe_fwd * recompute_moe_layers
+            )
         total_time_ms += recompute_overhead_ms
 
         if is_rank_0:
@@ -1714,6 +1878,61 @@ def _add_io_layer_timings(chunk_timings: List[list[dict]], profiling_results: di
         last_chunk["activation"] += (output.get("activation_memory_bytes", 0.0) or 0.0) / _BYTES_PER_GB
 
 
+def _normalized_recompute_layer_ids(mp_cfg) -> Optional[frozenset]:
+    """Parse Megatron ``recompute_layer_ids`` into a set of global layer indices."""
+    raw = getattr(mp_cfg, "recompute_layer_ids", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        items = list(raw)
+    else:
+        return None
+    if not items:
+        return None
+    return frozenset(int(x) for x in items)
+
+
+def _recompute_layer_count(mp_cfg, total_layers: int) -> int:
+    """Number of transformer layers that recompute forward during backward."""
+    layer_ids = _normalized_recompute_layer_ids(mp_cfg)
+    if layer_ids is not None:
+        return len(layer_ids)
+    return min(getattr(mp_cfg, "recompute_num_layers", 0) or 0, total_layers)
+
+
+def _layer_needs_recompute_fwd_in_bwd(
+    global_layer_idx: int,
+    local_layer_idx: int,
+    recompute_num_layers: int,
+    recompute_layer_ids: Optional[frozenset],
+    total_layers: int,
+    pp_size: int,
+    vpp_size: int,
+) -> bool:
+    """Whether to add one forward pass into backward for this layer in the PP simulator.
+
+  When ``recompute_layer_ids`` is set (Megatron selective block recompute), only
+  those global indices are recomputed.
+
+  Otherwise Megatron ``recompute_num_layers`` is used.  Excel's column is often
+  the *model-wide* total (e.g. 48 of 61).  When YAML carries that large total,
+  use ``global_layer_idx < recompute_num_layers`` instead of per-chunk local_idx.
+    """
+    if total_layers <= 0:
+        return False
+    if recompute_layer_ids is not None:
+        return global_layer_idx in recompute_layer_ids
+    if recompute_num_layers <= 0:
+        return False
+    pp_vpp = max(1, pp_size * vpp_size)
+    typical_chunk_layers = max(4, (total_layers + pp_vpp - 1) // pp_vpp)
+    if recompute_num_layers > typical_chunk_layers:
+        return global_layer_idx < recompute_num_layers
+    return local_layer_idx < recompute_num_layers
+
+
 def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[List[List[dict]]]:
     model_cfg = getattr(training_config, "model_config", None)
     mp_cfg = getattr(training_config, "model_parallel_config", None)
@@ -1771,6 +1990,7 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
 
         # Get recomputation settings to account for extra forward pass during backward
         recompute_granularity = getattr(mp_cfg, "recompute_granularity", None)
+        recompute_layer_ids = _normalized_recompute_layer_ids(mp_cfg)
         recompute_num_layers = getattr(mp_cfg, "recompute_num_layers", 0) or 0
 
         rank_chunks = []
@@ -1787,13 +2007,16 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
                 chunk_entry["wgrad"] += metrics["wgrad"]
                 chunk_entry["activation"] += metrics.get("activation", 0.0)
 
-                # Recomputation: with recompute_granularity="full" and block method,
-                # the first recompute_num_layers layers per chunk re-run forward
-                # during backward, adding an extra forward time to backward.
-                if (
-                    recompute_granularity == "full"
-                    and recompute_num_layers
-                    and local_idx < recompute_num_layers
+                # Recomputation: isolated layer bench times exclude block checkpoint
+                # re-forward; add one measured fwd per recomputed layer here.
+                if recompute_granularity == "full" and _layer_needs_recompute_fwd_in_bwd(
+                    layer_idx,
+                    local_idx,
+                    recompute_num_layers,
+                    recompute_layer_ids,
+                    total_layers,
+                    pp_size,
+                    vpp_size,
                 ):
                     chunk_entry["bwd"] += fwd_time
             rank_chunks.append(chunk_entry)
@@ -2235,20 +2458,109 @@ def _report_simulation_results(sim_results, training_config):
     return step_time_ms
 
 
-def _run_layer_benchmark(primus_config, unknown_overrides):
-    from megatron.core.enums import ModelType
+def _reduction_info_from_artifact_metadata(
+    metadata: Dict[str, Any], gpus_per_node: int
+) -> Dict[str, Any]:
+    """Reconstruct a ``reduction_info`` dict from a loaded artifact's metadata.
 
+    Used by the perf launcher's ``--load-benchmark`` path: the artifact
+    persisted by an earlier bench run contains everything we need to
+    rebuild the reduction-info shape that downstream projection logic
+    expects, without re-running ``_calculate_single_node_config``.
+    """
+    benchmark_pp = int(metadata.get("benchmark_pp", 1) or 1)
+    benchmark_tp = int(metadata.get("benchmark_tp", 1) or 1)
+    benchmark_ep = int(metadata.get("benchmark_ep", 1) or 1)
+    benchmark_gpus = int(metadata.get("benchmark_gpus", 1) or 1)
+    original_pp = int(metadata.get("original_pp", benchmark_pp) or benchmark_pp)
+    original_tp = int(metadata.get("original_tp", benchmark_tp) or benchmark_tp)
+    original_ep = int(metadata.get("original_ep", benchmark_ep) or benchmark_ep)
+    original_cp = int(metadata.get("original_cp", 1) or 1)
+    original_num_experts = metadata.get("original_num_experts")
+    benchmark_num_experts = metadata.get("benchmark_num_experts")
+
+    adjusted = (
+        original_pp != benchmark_pp
+        or original_tp != benchmark_tp
+        or original_ep != benchmark_ep
+    )
+    gpus_required = _calculate_min_gpus(original_tp, original_pp, original_ep, original_cp)
+    nodes_required = (gpus_required + max(1, gpus_per_node) - 1) // max(1, gpus_per_node)
+
+    return {
+        "adjusted": adjusted,
+        "benchmark_pp": benchmark_pp,
+        "benchmark_tp": benchmark_tp,
+        "benchmark_ep": benchmark_ep,
+        "benchmark_gpus": benchmark_gpus,
+        "benchmark_num_experts": benchmark_num_experts,
+        "original_pp": original_pp,
+        "original_tp": original_tp,
+        "original_ep": original_ep,
+        "original_cp": original_cp,
+        "original_num_experts": original_num_experts,
+        "original_nodes_required": nodes_required,
+        "bench_training_config_summary": metadata.get("bench_training_config_summary"),
+    }
+
+
+def _summarize_bench_training_config(training_config) -> Dict[str, Any]:
+    """Capture a small summary of the bench-shaped training config.
+
+    Saved in the artifact metadata so the memory-projection extrapolator
+    can rehydrate a bench-shaped ``TrainingConfig`` from a stored
+    artifact (without needing the original primus YAML at load time).
+    """
+    mc = training_config.model_config
+    mp = training_config.model_parallel_config
+    rt = training_config.runtime_config
+    return {
+        "num_layers": getattr(mc, "num_layers", 0),
+        "moe_pattern": list(getattr(mc, "moe_pattern", []) or []),
+        "num_experts": getattr(mc, "num_experts", 0),
+        "tensor_model_parallel_size": getattr(mp, "tensor_model_parallel_size", 1),
+        "pipeline_model_parallel_size": getattr(mp, "pipeline_model_parallel_size", 1),
+        "virtual_pipeline_model_parallel_size": getattr(mp, "virtual_pipeline_model_parallel_size", 1),
+        "context_model_parallel_size": getattr(mp, "context_model_parallel_size", 1),
+        "expert_model_parallel_size": getattr(mp, "expert_model_parallel_size", 1),
+        "recompute_granularity": getattr(mp, "recompute_granularity", None),
+        "recompute_num_layers": getattr(mp, "recompute_num_layers", 0),
+        "recompute_layer_ids": (
+            sorted(_normalized_recompute_layer_ids(mp))
+            if _normalized_recompute_layer_ids(mp) is not None
+            else None
+        ),
+        "micro_batch_size": getattr(rt, "micro_batch_size", 1),
+        "sequence_length": getattr(rt, "sequence_length", 0),
+        "global_batch_size": getattr(rt, "global_batch_size", 1),
+    }
+
+
+def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
     module_config = primus_config.get_module_config("pre_trainer")
     _limit_layers_for_projection(module_config)
     rescale_info = _rescale_expert_parallelism(module_config)
     training_config = convert_primus_config_to_projection_config(primus_config)
+    # Surface the bench-shaped training config to the caller so it can be
+    # persisted in the artifact (used by the memory extrapolator's load
+    # path).  This is a no-op when reduction_info is None.
+    if reduction_info is not None:
+        reduction_info["bench_training_config_summary"] = _summarize_bench_training_config(
+            training_config
+        )
 
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
+
+    # Memory benchmark recorder: snapshots per-rank GPU memory at key phases
+    # so the memory-projection extrapolator can predict target-cluster peak.
+    # Snapshots are rank-0-only (see MemoryBenchmarkRecorder).
+    mem_recorder = MemoryBenchmarkRecorder(rank=rank)
+    mem_recorder.snapshot("pre_trainer_init")
 
     print("[Primus:Performance Projection] Initializing MegatronPretrainTrainer...")
     # Disable overlap features and FSDP2 for profiling (they add complexity without benefiting isolated layer benchmarking)
@@ -2259,19 +2571,28 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     cfg.use_torch_fsdp2 = False
 
     # Auto-enable Primus Turbo kernels when MLA or DeepEP is configured.
-    # Measured training runs use the full Turbo stack (PrimusMLASelfAttention,
-    # PrimusTurboColumnParallelLinear, TurboGroupedMLP).  Profiling without
-    # these causes systematic under-prediction (~8-15%).
+    # Do not override explicit YAML kernel choices (e.g. legacy grouped GEMM).
     _turbo_candidates = {
         "enable_primus_turbo": True,
         "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
         "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
     }
     if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
+        wants_legacy_grouped = bool(getattr(cfg, "moe_use_legacy_grouped_gemm", False))
         for flag, val in _turbo_candidates.items():
-            if val and not getattr(cfg, flag, False):
+            if not val:
+                continue
+            if flag == "use_turbo_grouped_mlp" and wants_legacy_grouped:
+                if not getattr(cfg, flag, False):
+                    print(
+                        "[Primus:Performance Projection] Respecting "
+                        "moe_use_legacy_grouped_gemm=true: NOT auto-enabling "
+                        "use_turbo_grouped_mlp"
+                    )
+                continue
+            if not getattr(cfg, flag, False):
                 setattr(cfg, flag, True)
-                print(f"[Primus:Performance Projection] Auto-enabled {flag} " "for profiling accuracy")
+                print(f"[Primus:Performance Projection] Auto-enabled {flag} for profiling accuracy")
 
     print("[Primus:Performance Projection] Config (with profiling overrides):")
     print(f"  overlap_grad_reduce: {cfg.overlap_grad_reduce}")
@@ -2291,18 +2612,15 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     )
 
     print("[Primus:Performance Projection] Initializing Megatron...")
-    trainer.init(skip_setup=True)
+    trainer.init()
+    mem_recorder.snapshot("post_megatron_init")
 
     print("[Primus:Performance Projection] Setting up model and optimizer...")
-    (
-        trainer.model,
-        trainer.optimizer,
-        trainer.opt_param_scheduler,
-    ) = trainer.setup_model_and_optimizer(
-        trainer.model_provider,
-        ModelType.encoder_or_decoder,
-        checkpointing_context=trainer.checkpointing_context,
-    )
+    trainer.setup()
+    # post_setup captures: params + distributed-optimizer state + grad buffers
+    # at the bench config.  This is the "static" memory anchor — what every
+    # rank pays before any forward pass.
+    mem_recorder.snapshot("post_setup")
 
     print("[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
@@ -2328,6 +2646,37 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
             )
         print(note)
 
+    # Benchmark actual TP-AllReduce on real silicon BEFORE the layer
+    # benchmark runs, so the analytical communication model can be anchored
+    # to measured numbers.
+    #
+    # ORDERING MATTERS: this sub-bench creates several short-lived NCCL
+    # subgroups via ``dist.new_group()`` and lets them go out of scope when
+    # the function returns.  On ROCm/NCCL, ``ProcessGroupNCCL::~ProcessGroupNCCL``
+    # calls ``abort() -> waitForFutureOrTimeout`` during destruction; if
+    # there is any FP8/MLA stream work still in flight (always true for
+    # DSv3 once ``run_layer_benchmark`` has touched the streams), that wait
+    # blocks for the full ``TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC`` (hours).
+    # By running the sub-bench HERE -- after Megatron init / setup but
+    # before any per-layer fwd/bwd kernels -- the CUDA streams are
+    # quiescent and the destructors drain immediately.
+    #
+    # Escape hatch: ``PRIMUS_BENCH_SKIP_TP_AR=1`` skips the sub-bench
+    # entirely (e.g. for debugging, or for trials where the hang still
+    # reproduces).  The projection then falls back to the pure analytical
+    # collective model with no measured calibration anchor.
+    if os.environ.get("PRIMUS_BENCH_SKIP_TP_AR", "0") == "1":
+        if rank == 0:
+            print(
+                "[Primus:Performance Projection] Skipping TP-AllReduce sub-bench "
+                "(PRIMUS_BENCH_SKIP_TP_AR=1)"
+            )
+        tp_ar_results = None
+    else:
+        if rank == 0:
+            print("[Primus:Performance Projection] Benchmarking TP-AllReduce (pre-layer)...")
+        tp_ar_results = _benchmark_tp_allreduce_on_gpu(training_config, rank, world_size)
+
     print("" + "=" * 100)
     print("[Primus:Performance Projection] Starting layer benchmarking...")
     print("=" * 100)
@@ -2337,11 +2686,40 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
         batch_size=batch_size,
         seq_len=seq_len,
     )
+    # post_layer_benchmark captures: static state + per-layer activation
+    # high-water mark + kernel workspaces (FA, GroupedGEMM, FP8 amax, etc.)
+    # accumulated through the per-layer fwd/bwd loops.  This is the bench-
+    # side proxy for "fwd+bwd peak" used by the OOM extrapolator.
+    mem_recorder.snapshot("post_layer_benchmark")
 
-    # Benchmark actual allreduce on GPU for analytical model validation
-    tp_ar_results = _benchmark_tp_allreduce_on_gpu(training_config, rank, world_size)
+    # Attach the (already-measured) TP-AllReduce calibration to the
+    # profiling results dict so downstream extraction can pick it up.
     if tp_ar_results:
         profiling_results["_tp_allreduce_benchmark"] = tp_ar_results
+
+    # Attach the memory benchmark payload to the profiling results dict so
+    # _save_profiling_results / _load_profiling_results can persist it
+    # alongside the timing data.  The key starts with "_" to avoid colliding
+    # with integer layer indices and to be filtered out by extraction code
+    # that iterates over layer entries.
+    mem_payload = mem_recorder.to_payload()
+    if mem_payload:
+        profiling_results["_memory_benchmark"] = mem_payload
+        if rank == 0:
+            print("")
+            print("[Primus:Memory Benchmark] Per-rank phase snapshots (rank 0):")
+            for snap in mem_payload["snapshots"]:
+                print(
+                    f"  {snap['label']:<28s} "
+                    f"alloc={format_bytes(snap['allocated_bytes'])}, "
+                    f"reserved={format_bytes(snap['reserved_bytes'])}, "
+                    f"max_alloc={format_bytes(snap['max_allocated_bytes'])}, "
+                    f"max_reserved={format_bytes(snap['max_reserved_bytes'])}"
+                )
+            print(
+                f"  GLOBAL PEAK   alloc={format_bytes(mem_payload['global_peak_allocated_bytes'])}, "
+                f"reserved={format_bytes(mem_payload['global_peak_reserved_bytes'])}"
+            )
 
     return profiling_results
 
@@ -2998,17 +3376,12 @@ def _run_multinode_projection(
             hardware_config_dict,
         )
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
-        moe_ar_no_overlap = target_message_info.get("moe_ar_no_overlap", False)
 
-        if moe_ar_no_overlap:
-            # MoE with EP: all2all sync barriers prevent gradient allreduce
-            # from overlapping effectively with backward. Add the full
-            # allreduce time as a per-iteration overhead.
-            grad_ar_per_iteration_ms = target_grad_ar
-        elif overlap_grad_reduce:
-            # Overlapped: all-reduce runs concurrently with backward of last microbatch.
-            # Only backward (~63% of compute) can overlap.
-            # Exposed portion = max(0, allreduce - backward_time)
+        if overlap_grad_reduce:
+            # Overlapped: all-reduce runs concurrently with backward of the last
+            # microbatch.  Only backward (~63% of pipeline compute) can hide AR.
+            # Excel / Megatron configs enable overlap_grad_reduce even for MoE;
+            # do not force the full AR on the critical path.
             backward_time = projected_compute_time_ms * 0.63
             grad_ar_per_iteration_ms = max(0, target_grad_ar - backward_time)
         else:
@@ -3367,6 +3740,11 @@ def launch_projection_from_cli(args, overrides):
             print(f"  {ov}")
 
     primus_config_original = copy.deepcopy(primus_config)
+    assert_recompute_pipeline_compat(
+        convert_primus_config_to_projection_config(primus_config_original),
+        primus_config=primus_config_original,
+        pipeline_schedule_algorithm=getattr(args, "pipeline_schedule_algorithm", None),
+    )
 
     # Check if we need to reduce config for single-node benchmarking
     gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
@@ -3383,16 +3761,43 @@ def launch_projection_from_cli(args, overrides):
     if target_nodes is None:
         target_nodes = getattr(args, "target_num_nodes", None)
 
+    # ── Optional: skip bench entirely and project from a saved artifact ──
+    # ``--load-benchmark`` lets a user run the perf projection from a JSON
+    # written by an earlier bench (e.g. one that fed the memory projection
+    # too).  When set, we reconstruct ``reduction_info`` from the
+    # artifact's metadata and load ``profiling_results`` from disk.
+    load_benchmark_path = getattr(args, "load_benchmark", None)
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+
     # Store original parallelism before any modifications
     module_config = primus_config.get_module_config("pre_trainer")
-    reduction_info = _calculate_single_node_config(
-        copy.deepcopy(module_config), gpus_per_node, benchmark_gpus=benchmark_gpus
-    )
+    if load_benchmark_path:
+        loaded_payload = _load_artifact(load_benchmark_path)
+        loaded_metadata = loaded_payload.get("metadata", {}) or {}
+        reduction_info = _reduction_info_from_artifact_metadata(
+            loaded_metadata, gpus_per_node
+        )
+        if is_rank_0:
+            print(
+                f"[Primus:Performance Projection] Loading bench artifact: {load_benchmark_path}"
+            )
+            print(
+                f"  metadata: TP={reduction_info['benchmark_tp']}/{reduction_info['original_tp']} "
+                f"PP={reduction_info['benchmark_pp']}/{reduction_info['original_pp']} "
+                f"EP={reduction_info['benchmark_ep']}/{reduction_info['original_ep']} "
+                f"(bench/target)"
+            )
+    else:
+        loaded_payload = None
+        loaded_metadata = {}
+        reduction_info = _calculate_single_node_config(
+            copy.deepcopy(module_config), gpus_per_node, benchmark_gpus=benchmark_gpus
+        )
 
     # Calculate minimum nodes required
     min_nodes_required = reduction_info["original_nodes_required"]
 
-    # If target_nodes not specified, default to minimum required
+    # If target_nodes not specified, default to minimum required.
     if target_nodes is None:
         target_nodes = min_nodes_required
 
@@ -3401,7 +3806,8 @@ def launch_projection_from_cli(args, overrides):
     # includes artifacts (different token routing, contention) that don't
     # represent the target config.  We automatically run bg=1 profiling
     # for clean compute and merge it with the bg=N measured A2A later.
-    # Skip when: bg==ep (no reduction), simulation mode, or --profile-only.
+    # Skip when: bg==ep (no reduction), simulation mode, --profile-only,
+    # or --load-benchmark (the artifact already has the merged compute).
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
     _auto_bg1_results = None
     _auto_bg1_meta = None
@@ -3411,9 +3817,9 @@ def launch_projection_from_cli(args, overrides):
         and profiling_mode in ("benchmark", "both")
         and not getattr(args, "profile_only", False)
         and not getattr(args, "compute_baseline", None)
+        and not load_benchmark_path
     )
     if need_auto_hybrid:
-        is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0:
             print(
                 f"\n[Primus:Performance Projection] EP reduced "
@@ -3422,7 +3828,7 @@ def launch_projection_from_cli(args, overrides):
             )
         _auto_bg1_results, _auto_bg1_meta = _run_automatic_bg1_baseline(args, reduction_info)
 
-    if reduction_info["adjusted"]:
+    if reduction_info["adjusted"] and not load_benchmark_path:
         benchmark_label = f"{benchmark_gpus}-GPU" if is_sub_node_benchmark else "single-node"
         print("" + "=" * 100)
         if is_sub_node_benchmark:
@@ -3512,7 +3918,20 @@ def launch_projection_from_cli(args, overrides):
             if hasattr(_bench_cfg, "model") and hasattr(getattr(_bench_cfg, "model", None), "moe"):
                 _bench_cfg.model.moe.use_turbo_deepep = False
 
-    if profiling_mode == "simulate":
+    if load_benchmark_path:
+        # Load pre-computed timing/memory from the artifact and skip the
+        # bench entirely.  `_load_artifact` was already called above to
+        # populate metadata; reload here so we get the keyed-by-int
+        # profiling_results that downstream code expects.
+        from_load_results, _ = _load_profiling_results(load_benchmark_path)
+        profiling_results = from_load_results
+        if is_rank_0:
+            n_layers = sum(1 for k in profiling_results if isinstance(k, int))
+            print(
+                f"[Primus:Performance Projection] Loaded {n_layers} profiled layers "
+                f"from artifact; bench step skipped."
+            )
+    elif profiling_mode == "simulate":
         # Pure simulation – no GPU / trainer required
         profiling_results = _run_layer_simulation(primus_config, args)
     elif profiling_mode == "both":
@@ -3520,7 +3939,7 @@ def launch_projection_from_cli(args, overrides):
         # downstream pipeline simulation / multinode projection, but print
         # a side-by-side comparison.
         sim_results = _run_layer_simulation(copy.deepcopy(primus_config), args)
-        bench_results = _run_layer_benchmark(primus_config, unknown_overrides)
+        bench_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info)
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0:
@@ -3550,14 +3969,25 @@ def launch_projection_from_cli(args, overrides):
         profiling_results = bench_results
     else:
         # Default: actual GPU benchmark
-        profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
+        profiling_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info)
 
-    # ── Save profiling results if requested (internal / subprocess use) ──
+    # ── Save bench artifact if requested ──
+    # ``--save-benchmark`` (preferred) and ``--save-profiling`` (deprecated)
+    # both land on the same artifact.  The new name is preferred so the
+    # bench artifact can be shared cleanly with memory projection.
+    save_benchmark_path = getattr(args, "save_benchmark", None)
     save_profiling_path = getattr(args, "save_profiling", None)
+    save_path = save_benchmark_path or save_profiling_path
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
-    if save_profiling_path and is_rank_0:
-        _save_profiling_results(profiling_results, reduction_info, save_profiling_path)
-        print(f"[Primus:Performance Projection] Profiling results saved to: {save_profiling_path}")
+    if save_path and is_rank_0:
+        if save_profiling_path and not save_benchmark_path:
+            print(
+                "[Primus:Performance Projection] WARNING: --save-profiling is "
+                "deprecated; use --save-benchmark instead. The artifact format "
+                "is unchanged and shareable between perf and memory projections."
+            )
+        _save_profiling_results(profiling_results, reduction_info, save_path)
+        print(f"[Primus:Performance Projection] Bench artifact saved to: {save_path}")
 
     # ── Early exit for --profile-only (used by bg=1 subprocess) ──
     if getattr(args, "profile_only", False):
