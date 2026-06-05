@@ -32,7 +32,7 @@ import torch
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils import logger as primus_logger
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
-from primus.modules.module_utils import log_rank_0, log_rank_all, warning_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 @dataclass
@@ -191,15 +191,6 @@ def _forward_single_node_training_log(message: str) -> None:
         if sink_logger is None:
             return
         sink_logger.bind(rank=last_rank, world_size=world_size, console_only=True).debug(payload[0])
-
-
-def _touch_log_rank_all_for_tests() -> None:  # pragma: no cover
-    """
-    Helper to keep ``log_rank_all`` referenced so that it is available for
-    unit tests that monkeypatch this symbol from this module.
-    """
-    if False:
-        log_rank_all("")  # type: ignore[arg-type]
 
 
 class MemoryStatsExtension:
@@ -527,7 +518,11 @@ def patch_training_log_unified(ctx: PatchContext):
             use_rocm_mem or (rocm_iters and len(rocm_iters) > 0)
         )
 
-        if not enable_rocm_stats:
+        # Forwarding the last-rank progress line to rank 0 only needs a
+        # single-node run; it is independent of ROCm/throughput stat injection.
+        should_forward_to_rank_0 = _should_forward_training_log_to_rank_0()
+
+        if not enable_rocm_stats and not should_forward_to_rank_0:
             # Nothing to do; leave Megatron's training_log and print_rank_last untouched.
             return
 
@@ -537,16 +532,18 @@ def patch_training_log_unified(ctx: PatchContext):
         if getattr(original_training_log, "_primus_training_log_print_rank_wrapper", False):
             return
 
-        # Create helper extensions once so they keep state (ROCm cache, avg windows)
-        # across all training_log invocations.
-        mem_ext = MemoryStatsExtension(config)
-        elapsed_ext = ElapsedAverageExtension(config)
-        throughput_ext = ThroughputAverageExtension(config)
+        # Create helper extensions only when stat injection is enabled so they
+        # keep state (ROCm cache, avg windows) across all training_log
+        # invocations. In forwarding-only mode they are not needed.
+        mem_ext = elapsed_ext = throughput_ext = None
+        if enable_rocm_stats:
+            mem_ext = MemoryStatsExtension(config)
+            elapsed_ext = ElapsedAverageExtension(config)
+            throughput_ext = ThroughputAverageExtension(config)
         call_count = 0
         # Capture the original ``print_rank_last`` so we can delegate actual
         # printing back to Megatron after mutating the log string.
         original_print_rank_last = megatron_training.print_rank_last
-        should_forward_to_rank_0 = _should_forward_training_log_to_rank_0()
         source_prefix = ""
         if should_forward_to_rank_0:
             source_prefix = "{}: ".format(
@@ -566,24 +563,28 @@ def patch_training_log_unified(ctx: PatchContext):
                   ``print_rank_last`` implementation.
             """
             nonlocal call_count
-            try:
-                # Track how many times we've seen print_rank_last in this run.
-                call_count += 1
-                # Parse the original log string once and share across extensions.
-                parsed = parse_training_log_line(log_string)
+            if enable_rocm_stats:
+                try:
+                    # Track how many times we've seen print_rank_last in this run.
+                    call_count += 1
+                    # Parse the original log string once and share across extensions.
+                    parsed = parse_training_log_line(log_string)
 
-                # Inject memory statistics, elapsed avg, throughput, and token
-                # throughput by mutating the parsed structure. These calls ignore
-                # their string return value when `parsed` is provided.
-                mem_ext.inject(log_string, call_count, parsed)
-                elapsed_ext.inject(log_string, parsed)
-                throughput_ext.inject(log_string, parsed)
+                    # Inject memory statistics, elapsed avg, throughput, and token
+                    # throughput by mutating the parsed structure. These calls ignore
+                    # their string return value when `parsed` is provided.
+                    mem_ext.inject(log_string, call_count, parsed)
+                    elapsed_ext.inject(log_string, parsed)
+                    throughput_ext.inject(log_string, parsed)
 
-                # Render the final line from the parsed structure.
-                updated = render_training_log_line(parsed)
-            except Exception as e:
-                # Logging must never break training; emit a warning and continue.
-                warning_rank_0(f"[Patch:megatron.training_log] Failed to append training stats: {e}")
+                    # Render the final line from the parsed structure.
+                    updated = render_training_log_line(parsed)
+                except Exception as e:
+                    # Logging must never break training; emit a warning and continue.
+                    warning_rank_0(f"[Patch:megatron.training_log] Failed to append training stats: {e}")
+                    updated = log_string
+            else:
+                # Forwarding-only mode: keep Megatron's original line untouched.
                 updated = log_string
 
             # Keep the runner's console filtering behavior unchanged for all
@@ -617,3 +618,73 @@ def patch_training_log_unified(ctx: PatchContext):
     except Exception as e:
         # Catch-all to make sure patch does not crash training.
         log_rank_0(f"[Patch:megatron.training_log][ERROR] Unexpected error: {e}")
+
+
+@register_patch(
+    "megatron_bridge.training_log.forward_to_rank0",
+    backend="megatron",
+    phase="before_train",
+    description="Forward Megatron-Bridge last-rank training_log line to rank 0 for single-node console visibility.",
+)
+def patch_bridge_training_log_forward(ctx: PatchContext):
+    """
+    Forward Megatron-Bridge's last-rank training_log line to rank 0.
+
+    Megatron-Bridge prints the detailed metric line via ``print_rank_last`` (last
+    rank only), while torchrun typically only exposes local rank 0 on the
+    console. On single-node runs this patch broadcasts that line to rank 0 so it
+    stays visible, mirroring the native Megatron forwarding behavior. The log
+    content itself is left unchanged (forwarding only, no stat injection).
+
+    Note: unlike native Megatron (where ``training_log`` and ``print_rank_last``
+    share one module), Bridge hosts ``training_log`` in
+    ``megatron.bridge.training.train`` (the call site) but resolves
+    ``print_rank_last`` from ``megatron.bridge.training.utils.train_utils``. We
+    therefore wrap the former and temporarily override the latter for the
+    duration of the call.
+    """
+    try:
+        if not _should_forward_training_log_to_rank_0():
+            return
+
+        import megatron.bridge.training.train as bridge_train  # type: ignore
+        import megatron.bridge.training.utils.train_utils as bridge_train_utils  # type: ignore
+
+        original_training_log = bridge_train.training_log
+
+        # Avoid double-wrapping training_log.
+        if getattr(original_training_log, "_primus_bridge_training_log_forward_wrapper", False):
+            return
+
+        original_print_rank_last = bridge_train_utils.print_rank_last
+        source_prefix = "{}: ".format(
+            primus_logger.module_format(
+                getattr(original_print_rank_last, "__module__", __name__).split(".")[-1],
+                getattr(getattr(original_print_rank_last, "__code__", None), "co_firstlineno", 0),
+            )
+        )
+
+        def primus_print_rank_last(log_string: str) -> None:
+            # Forward the last-rank line to rank 0, then delegate the actual
+            # printing back to Bridge's original print_rank_last unchanged.
+            _forward_single_node_training_log(f"{source_prefix}{log_string}")
+            original_print_rank_last(log_string)
+
+        def primus_training_log(*args, **kwargs):
+            saved_print_rank_last = bridge_train_utils.print_rank_last
+            try:
+                bridge_train_utils.print_rank_last = primus_print_rank_last
+                return original_training_log(*args, **kwargs)
+            finally:
+                bridge_train_utils.print_rank_last = saved_print_rank_last
+
+        setattr(primus_training_log, "_primus_bridge_training_log_forward_wrapper", True)
+        bridge_train.training_log = primus_training_log
+
+        log_rank_0("[Patch:megatron_bridge.training_log] Forwarding last-rank training_log to rank 0")
+
+    except ImportError as e:
+        log_rank_0(f"[Patch:megatron_bridge.training_log][SKIP] Import failed: {e}")
+    except Exception as e:
+        # Catch-all to make sure patch does not crash training.
+        log_rank_0(f"[Patch:megatron_bridge.training_log][ERROR] Unexpected error: {e}")

@@ -16,6 +16,7 @@ Unless the user explicitly asks otherwise, produce:
 - publish-time PDF copies of both reports with the same basename
 - Dashboard metadata: `docs/backend-gap/dashboard-data/reports/<backend>-<target>.json`
 - Refreshed dashboard index: `docs/backend-gap/dashboard-data/index.json`
+  (generated build artifact, not committed)
 
 If legacy report files already exist, update them in place instead of renaming them. For new report series, keep the default artifact names unsuffixed. Only add a language suffix when a non-default variant coexists or when a legacy file pattern already established one.
 
@@ -136,6 +137,8 @@ python3 tools/backend_gap_report/build_dashboard_index.py
 ```
 
 This validates metadata files and rewrites `docs/backend-gap/dashboard-data/index.json`.
+That index is a generated build artifact — do not commit it; commit only the
+per-report metadata under `dashboard-data/reports/`.
 
 ### 8.5 Build the Standalone Site Bundle
 
@@ -190,7 +193,9 @@ Before finishing:
 - `docs/backend-gap/` stores generated data and report artifacts, not the site templates.
 - The deployed site root is a generated standalone bundle.
 - Dashboard source data lives under `docs/backend-gap/dashboard-data/reports/`.
-- `docs/backend-gap/dashboard-data/index.json` is generated, not hand-maintained.
+- `docs/backend-gap/dashboard-data/index.json` is a generated build artifact —
+  not hand-maintained and not committed (only the per-report metadata under
+  `dashboard-data/reports/` is tracked).
 - Artifact paths in metadata are relative to the standalone published site root.
 - Backend deep-dive cards should render structured `dashboard_summary` fields when present. Do not make the frontend infer important conclusions from Markdown prose.
 
@@ -207,31 +212,43 @@ When generating backend metadata, add a `dashboard_summary` object whenever the 
 
 All `dashboard_summary` content must be derived from the same evidence used in the detailed report. Do not invent features, versions, or risks to make the dashboard look richer.
 
-## Weekly Engineering Report Integration
+## Periodic Engineering Report Integration (Weekly + Monthly)
 
 The shared dashboard under `tools/backend_gap_report/` surfaces two content
 types from a single static site:
 
 1. **Backend gap reports** — owned by this skill, stored under `docs/backend-gap/`.
-2. **Weekly engineering reports** — the automated weekly Primus reports under
-   `docs/weekly_reports/`.
+2. **Periodic engineering reports** — the automated Primus reports, on a
+   **weekly** cadence under `docs/weekly_reports/` and a **monthly** cadence
+   under `docs/monthly_reports/`.
 
-Weekly reports share the same site shell and the same build/publish pipeline.
-Routine weekly runs should update weekly data only and should not redesign
-the dashboard.
+Weekly and monthly reports share one schema, one validation core
+(`tools/backend_gap_report/periodic_reports.py`), and one combined dashboard
+index, so the dashboard renders both through a single generic path — cadence is
+just a data field. Routine report runs should update report data only and
+should not redesign the dashboard.
 
-### Weekly-report data plane
+### Periodic-report data plane
 
-- Per-report metadata: `docs/weekly_reports/dashboard-data/reports/{report_id}.json`
-- Aggregated index: `docs/weekly_reports/dashboard-data/index.json` (generated)
-- The Markdown report itself lives at `docs/weekly_reports/{report_id}-primus-weekly.md`
-  and is not bundled into the published site — the dashboard links to the
-  GitHub-rendered Markdown via `report_github_url` in each metadata file.
-- `report_id` uses ISO week format `YYYY-Www` (e.g. `2026-W17`).
+For each cadence directory (`weekly_reports` or `monthly_reports`):
 
-Required fields in each weekly metadata JSON:
+- Per-report metadata: `docs/<cadence>/dashboard-data/reports/{report_id}.json`
+- Per-cadence index: `docs/<cadence>/dashboard-data/index.json` (generated build
+  artifact, not committed)
+- The Markdown report lives at
+  `docs/<cadence>/{report_id}-primus-{weekly|monthly}.md` and is not bundled
+  into the published site — the dashboard links to the GitHub-rendered Markdown
+  via `report_github_url` in each metadata file.
+- `report_id` uses `YYYY-Www` (weekly, e.g. `2026-W17`) or `YYYY-MM` (monthly,
+  e.g. `2026-06`).
+- The combined `reports-data/index.json` consumed by the frontend is assembled
+  at bundle-build time from both cadences; it is generated, not committed.
+- A cadence directory that does not exist yet is treated as zero reports, so the
+  monthly plane activates automatically once the first monthly report lands.
 
-- `report_id`, `content_type` (`weekly-report`), `title`
+Required fields in each report metadata JSON (identical for both cadences):
+
+- `report_id`, `content_type` (`weekly-report` or `monthly-report`), `title`
 - `report_path`, `report_github_url`
 - `time_window` (`timezone`, `start`, `end`)
 - `generated_at`, `merged_pr_count`, `category_breakdown`
@@ -239,16 +256,17 @@ Required fields in each weekly metadata JSON:
 - `recommendations` (keys: `megatron`, `torchtitan`, `primus_turbo`)
 - `key_findings` (non-empty list of short, factual strings)
 
-### Weekly index builder
+### Index builders
 
-Run directly to refresh just the weekly index:
+Refresh a single cadence index directly:
 
 ```bash
 python3 tools/backend_gap_report/build_weekly_reports_index.py
+python3 tools/backend_gap_report/build_monthly_reports_index.py
 ```
 
-Run the full site bundle (which also invokes this script) to validate the
-combined bundle:
+Run the full site bundle (which assembles the combined index and validates every
+plane) to publish:
 
 ```bash
 python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-dashboard-site
@@ -256,28 +274,37 @@ python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-d
 
 ### Presentation rules for the shared dashboard
 
-- The homepage should lead with the latest weekly engineering snapshot because
-  the weekly report is the broad Primus status view.
-- Backend gap reports should appear as backend deep-dive cards, not as a
-  separate top-level dashboard module or tab.
-- Backend deep-dive cards should be generated from backend metadata records and
-  should automatically expand when new backend reports are added.
-- The backend card should prioritize `dashboard_summary` content: why it
-  matters, new upstream capabilities, dependency shifts, integration risks, and
-  PDF links.
-- Weekly archive/list sections should stay simple. Avoid unnecessary filters or
-  history affordances when there is only one report.
-- Visual style must remain calm, editorial, presentation-ready. No emoji,
-  no animations, no decorative gradients beyond the existing header treatment.
+- The homepage leads with the latest engineering snapshot — the most recent
+  report regardless of cadence (weekly or monthly).
+- Cadence is surfaced as a small badge on the featured snapshot and on each
+  archive card; the archive exposes a cadence filter only when more than one
+  cadence is present.
+- Backend gap reports appear as backend deep-dive cards, not as a separate
+  top-level dashboard module or tab.
+- Backend deep-dive cards are generated from backend metadata records and expand
+  automatically when new backend reports are added.
+- Backend cards prioritize `dashboard_summary` content: why it matters, new
+  upstream capabilities, dependency shifts, integration risks, and PDF links.
+- Keep interaction affordances earning their place: hide filters that do not yet
+  vary (e.g. a single-cadence archive, or a backend filter for only a few cards).
+- Visual style must remain calm, editorial, and presentation-ready: a system
+  serif display paired with a native sans body and native mono for hard data
+  (system fonts only, no web-font downloads — the dashboard must look identical
+  on networks where third-party font CDNs are blocked), restrained motion (at
+  most one reduced-motion-aware load reveal), and no emoji. Avoid generic AI
+  aesthetics and maximalist effects.
+- Card-internal layout must use container queries (not viewport media queries)
+  so columns reflow by the card's own width, and long tokens must wrap
+  (`overflow-wrap`) so they never overflow when zoomed.
 
-### When to update weekly-report dashboard shell
+### When to update the dashboard shell
 
-- Data-only runs (standard case): update only weekly metadata under
-  `docs/weekly_reports/dashboard-data/` and the refreshed Markdown report.
+- Data-only runs (standard case): update only report metadata under
+  `docs/<cadence>/dashboard-data/` and the refreshed Markdown report.
   Do not modify shared tooling, site, or this skill.
 - Shell updates are allowed only when there is a concrete structural gap
-  (missing weekly-report support, a rendering bug, a schema evolution) or
-  when the user explicitly requests a shell change.
+  (missing cadence support, a rendering bug, a schema evolution) or when the
+  user explicitly requests a shell change.
 
 ## Additional Resources
 

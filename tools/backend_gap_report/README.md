@@ -6,20 +6,32 @@ sources:
 
 1. **Backend gap reports** — backend-to-upstream comparison reports and
    per-report artifacts under `docs/backend-gap/`.
-2. **Weekly engineering reports** — the automated weekly Primus reports under
-   `docs/weekly_reports/`.
+2. **Periodic engineering reports** — the automated Primus engineering reports,
+   on a **weekly** cadence under `docs/weekly_reports/` and a **monthly**
+   cadence under `docs/monthly_reports/`.
+
+Weekly and monthly reports share one schema, one validation core, and one
+combined dashboard index, so the dashboard renders both cadences through a
+single generic path (cadence is just a data field).
 
 ## Responsibilities
 
+- `periodic_reports.py`: shared core for the periodic-report data plane. Owns
+  the cadence config (weekly / monthly), the schema validation rules, the
+  per-cadence index, and the combined weekly + monthly index.
+- `build_weekly_reports_index.py`: thin CLI that validates weekly metadata and
+  rewrites `docs/weekly_reports/dashboard-data/index.json`.
+- `build_monthly_reports_index.py`: thin CLI that validates monthly metadata and
+  rewrites `docs/monthly_reports/dashboard-data/index.json`.
 - `build_dashboard_index.py`: validate backend-gap report metadata and rewrite
   `docs/backend-gap/dashboard-data/index.json`.
-- `build_weekly_reports_index.py`: validate weekly-report metadata and rewrite
-  `docs/weekly_reports/dashboard-data/index.json`.
-- `build_site_bundle.py`: rebuild both dashboard indexes, assemble the
-  standalone publishable bundle (site shell + both data roots), generate PDF
-  artifacts for backend-gap reports, and run structural validation.
+- `build_site_bundle.py`: rebuild the backend-gap index, assemble the combined
+  periodic-report index, build the standalone publishable bundle (site shell +
+  data), generate PDF artifacts for backend-gap reports, and run structural
+  validation.
 - `templates/pdf-report.css`: shared PDF export stylesheet (backend-gap only).
-- `site/`: shared static dashboard source templates (one site, two sections).
+- `site/`: shared static dashboard source templates (one site, three sections:
+  latest snapshot, backend deep dives, report archive).
 
 ## Current Model
 
@@ -27,11 +39,25 @@ sources:
   repository:
   - backend-gap: `docs/backend-gap/`
   - weekly reports: `docs/weekly_reports/`
+  - monthly reports: `docs/monthly_reports/`
+- `report_id` uses ISO week format `YYYY-Www` (weekly) or `YYYY-MM` (monthly).
 - PDF artifacts are generated at bundle-build time (backend-gap only) and are
   not tracked in the repository.
-- Weekly reports are **not** bundled into the site — the dashboard links the
-  GitHub-rendered Markdown via `report_github_url` in each weekly metadata
-  file.
+- Periodic reports are **not** bundled into the site — the dashboard links the
+  GitHub-rendered Markdown via `report_github_url` in each metadata file.
+- All aggregate `index.json` files are generated build artifacts and are not
+  committed — the per-cadence `docs/<cadence>/dashboard-data/index.json`, the
+  backend-gap `docs/backend-gap/dashboard-data/index.json`, and the combined
+  `reports-data/index.json` (assembled into the bundle at build time). Only the
+  per-report JSON + Markdown are tracked. These indexes are not in `.gitignore`,
+  so leave any regenerated index unstaged.
+- A cadence directory that does not exist yet is treated as zero reports, so the
+  monthly plane activates automatically once the first monthly report lands.
+- Dashboard source templates live under `tools/backend_gap_report/site/`.
+- GitHub Pages publishes a generated bundle rather than the repository source
+  directory directly.
+- A cadence directory that does not exist yet is treated as zero reports, so the
+  monthly plane activates automatically once the first monthly report lands.
 - Dashboard source templates live under `tools/backend_gap_report/site/`.
 - GitHub Pages publishes a generated bundle rather than the repository source
   directory directly.
@@ -44,9 +70,9 @@ directory:
 - `index.html`, `assets/*` — shared dashboard shell
 - `dashboard-data/` — backend-gap dashboard data (index + per-report metadata)
 - `dashboard-data/reports/<backend>/<target>/*.pdf` — generated PDF artifacts
-- `weekly-reports-data/` — weekly-report dashboard data (index + per-week
-  metadata); copied verbatim from
-  `docs/weekly_reports/dashboard-data/` when that directory exists
+- `reports-data/index.json` — combined weekly + monthly periodic-report index,
+  assembled from `docs/weekly_reports/dashboard-data/` and
+  `docs/monthly_reports/dashboard-data/`
 
 ## Typical Flows
 
@@ -69,18 +95,22 @@ site bundle:
 python3 tools/backend_gap_report/build_dashboard_index.py
 ```
 
-### Weekly engineering report
-1. Generate or update:
-   - `docs/weekly_reports/{report_id}-primus-weekly.md`
-   - `docs/weekly_reports/dashboard-data/reports/{report_id}.json`
-2. Rebuild the aggregated weekly index (run directly, or as part of the
+### Periodic engineering report (weekly or monthly)
+1. Generate or update the report and its metadata:
+   - weekly: `docs/weekly_reports/{YYYY-Www}-primus-weekly.md` +
+     `docs/weekly_reports/dashboard-data/reports/{YYYY-Www}.json`
+   - monthly: `docs/monthly_reports/{YYYY-MM}-primus-monthly.md` +
+     `docs/monthly_reports/dashboard-data/reports/{YYYY-MM}.json`
+2. Rebuild the aggregated per-cadence index (run directly, or as part of the
    bundle build):
 
 ```bash
 python3 tools/backend_gap_report/build_weekly_reports_index.py
+python3 tools/backend_gap_report/build_monthly_reports_index.py
 ```
 
-3. Full bundle rebuild validates both data planes together:
+3. Full bundle rebuild validates every data plane together and assembles the
+   combined index:
 
 ```bash
 python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-dashboard-site
@@ -95,6 +125,5 @@ python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-d
   and consistent by report id
 - every backend-gap artifact path declared in dashboard data resolves to an
   existing file in the built bundle
-- if weekly-report data is present, the bundle includes
-  `weekly-reports-data/index.json` and validates each weekly metadata file
-  via `build_weekly_reports_index.py` before copy
+- the combined `reports-data/index.json` exists and is well-formed; every
+  periodic report is validated against the shared schema while it is loaded

@@ -387,8 +387,8 @@ fi
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
-# Default: disable PXN for NCCL
-export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
+# Default: enable PXN for NCCL to prevent failure of multi-node training on some clusters
+export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-0}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 # optimize nvte fp8 cast transpose

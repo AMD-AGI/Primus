@@ -42,12 +42,13 @@ class MegatronBridgeAdapter(BackendAdapter):
         super().__init__(framework)
         self.third_party_dir_name = "Megatron-Bridge"
 
-    def load_trainer_class(self, stage: str = "pretrain"):
+    def load_trainer_class(self, stage: str = "sft"):
         """
         Return the Megatron-Bridge Trainer class for the specified training stage.
 
         Args:
-            stage: Training stage ("sft" for supervised fine-tuning)
+            stage: Training stage ("sft" for supervised fine-tuning,
+                   "pretrain" also routes to SFT trainer)
 
         Returns:
             Trainer class for the specified stage
