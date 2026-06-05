@@ -1,7 +1,19 @@
 "use strict";
 
 const BACKEND_GAP_DATA_URL = "./dashboard-data/index.json";
-const WEEKLY_DATA_URL = "./weekly-reports-data/index.json";
+// Unified weekly + monthly index. The `weekly` namespace below renders all
+// periodic engineering reports regardless of cadence; cadence is a data field.
+const REPORTS_DATA_URL = "./reports-data/index.json";
+
+const CADENCE_LABELS = { weekly: "Weekly", monthly: "Monthly" };
+
+function cadenceLabel(cadence) {
+  if (CADENCE_LABELS[cadence]) return CADENCE_LABELS[cadence];
+  if (typeof cadence === "string" && cadence) {
+    return cadence.charAt(0).toUpperCase() + cadence.slice(1);
+  }
+  return "Report";
+}
 
 const state = {
   backendGap: {
@@ -23,12 +35,14 @@ const elements = {
     statRow: el("weekly-stat-row"),
     featured: el("weekly-featured"),
     featuredTitle: el("weekly-featured-title"),
+    featuredCadence: el("weekly-featured-cadence"),
     featuredWindow: el("weekly-featured-window"),
     featuredPrs: el("weekly-featured-prs"),
     featuredCategories: el("weekly-featured-categories"),
     featuredRecommendations: el("weekly-featured-recommendations"),
     featuredFindings: el("weekly-featured-findings"),
     filterRow: el("weekly-filter-row"),
+    cadenceFilter: el("weekly-cadence-filter"),
     recommendationFilter: el("weekly-recommendation-filter"),
     searchFilter: el("weekly-search-filter"),
     resultCount: el("weekly-result-count"),
@@ -43,7 +57,6 @@ const elements = {
     filterRow: el("gap-filter-row"),
     totalReports: null,
     backendFilter: el("backend-filter"),
-    statusFilter: el("status-filter"),
     searchFilter: el("search-filter"),
     resultCount: el("gap-result-count"),
     loadingState: el("loading-state"),
@@ -138,24 +151,23 @@ function recommendationCounts(summary) {
 
 // ---------- Weekly Reports ----------
 
-function renderHeroChips(weeklyPayload, gapPayload) {
+function renderHeroChips(reportsPayload, gapPayload) {
   elements.heroChips.innerHTML = "";
-  const weeklySummary = weeklyPayload && weeklyPayload.summary ? weeklyPayload.summary : {};
+  const summary = reportsPayload && reportsPayload.summary ? reportsPayload.summary : {};
   const gapSummary = gapPayload && gapPayload.summary ? gapPayload.summary : {};
-  const recCounts = recommendationCounts(weeklySummary);
+  const recCounts = recommendationCounts(summary);
 
-  if (weeklySummary.latest_report_id) {
-    elements.heroChips.append(heroChip("Latest week", weeklySummary.latest_report_id));
+  if (summary.latest_report_id) {
+    const cadence = summary.latest_cadence ? ` (${cadenceLabel(summary.latest_cadence)})` : "";
+    elements.heroChips.append(heroChip("Latest report", `${summary.latest_report_id}${cadence}`));
   }
-  if (weeklySummary.latest_merged_pr_count !== undefined) {
+  if (summary.latest_merged_pr_count !== undefined) {
     elements.heroChips.append(
-      heroChip("Merged PRs in latest week", formatNumber(weeklySummary.latest_merged_pr_count))
+      heroChip("Merged PRs in latest report", formatNumber(summary.latest_merged_pr_count))
     );
   }
-  if (weeklySummary.total_reports !== undefined) {
-    elements.heroChips.append(
-      heroChip("Weekly reports", formatNumber(weeklySummary.total_reports))
-    );
+  if (summary.total_reports !== undefined) {
+    elements.heroChips.append(heroChip("Reports tracked", formatNumber(summary.total_reports)));
   }
   if (recCounts.urgent) {
     elements.heroChips.append(heroChip("Urgent sync", formatNumber(recCounts.urgent)));
@@ -172,11 +184,17 @@ function renderWeeklyStatRow(payload) {
   elements.weekly.statRow.innerHTML = "";
   const summary = payload && payload.summary ? payload.summary : {};
   const recCounts = recommendationCounts(summary);
+  const latestSub = [
+    summary.latest_cadence ? cadenceLabel(summary.latest_cadence) : null,
+    formatDate(summary.latest_generated_at),
+  ]
+    .filter(Boolean)
+    .join(" · ");
   elements.weekly.statRow.append(
-    statTile("Total weekly reports", formatNumber(summary.total_reports || 0))
+    statTile("Total reports", formatNumber(summary.total_reports || 0))
   );
   elements.weekly.statRow.append(
-    statTile("Latest week", summary.latest_report_id || "-", formatDate(summary.latest_generated_at))
+    statTile("Latest report", summary.latest_report_id || "-", latestSub)
   );
   elements.weekly.statRow.append(
     statTile("Merged PRs (latest)", formatNumber(summary.latest_merged_pr_count || 0))
@@ -199,6 +217,16 @@ function renderWeeklyFeatured(report) {
   }
   elements.weekly.featured.hidden = false;
   elements.weekly.featuredTitle.textContent = report.title || report.report_id;
+
+  if (elements.weekly.featuredCadence) {
+    if (report.cadence) {
+      elements.weekly.featuredCadence.textContent = cadenceLabel(report.cadence);
+      elements.weekly.featuredCadence.dataset.cadence = report.cadence;
+      elements.weekly.featuredCadence.hidden = false;
+    } else {
+      elements.weekly.featuredCadence.hidden = true;
+    }
+  }
 
   const tw = report.time_window || {};
   const windowLabel =
@@ -255,9 +283,21 @@ function buildWeeklyCard(report) {
   const header = document.createElement("div");
   header.className = "weekly-card__header";
 
+  const idGroup = document.createElement("div");
+  idGroup.className = "weekly-card__id-group";
+
   const idEl = document.createElement("h3");
   idEl.className = "weekly-card__id";
   idEl.textContent = report.report_id;
+  idGroup.append(idEl);
+
+  if (report.cadence) {
+    const cadenceTag = document.createElement("span");
+    cadenceTag.className = "cadence-tag cadence-tag--sm";
+    cadenceTag.dataset.cadence = report.cadence;
+    cadenceTag.textContent = cadenceLabel(report.cadence);
+    idGroup.append(cadenceTag);
+  }
 
   const tw = report.time_window || {};
   const windowEl = document.createElement("span");
@@ -268,7 +308,7 @@ function buildWeeklyCard(report) {
     windowEl.textContent = report.generated_at ? formatDate(report.generated_at) : "";
   }
 
-  header.append(idEl, windowEl);
+  header.append(idGroup, windowEl);
 
   const meta = document.createElement("div");
   meta.className = "weekly-card__meta";
@@ -333,6 +373,16 @@ function renderWeeklyList(reports) {
   if (elements.weekly.filterRow) {
     elements.weekly.filterRow.hidden = state.weekly.reports.length <= 1;
   }
+  // The cadence filter is only meaningful once both weekly and monthly reports
+  // are present; otherwise it is dead UI, so hide it.
+  const cadenceField =
+    elements.weekly.cadenceFilter && elements.weekly.cadenceFilter.closest(".field");
+  if (cadenceField) {
+    const distinctCadences = new Set(
+      state.weekly.reports.map((report) => report.cadence).filter(Boolean)
+    );
+    cadenceField.hidden = distinctCadences.size <= 1;
+  }
   elements.weekly.resultCount.textContent = `${reports.length} report${
     reports.length === 1 ? "" : "s"
   }`;
@@ -351,10 +401,13 @@ function renderWeeklyList(reports) {
 }
 
 function applyWeeklyFilters() {
+  const cadence = elements.weekly.cadenceFilter ? elements.weekly.cadenceFilter.value : "all";
   const rec = elements.weekly.recommendationFilter.value;
   const search = elements.weekly.searchFilter.value.trim().toLowerCase();
 
   state.weekly.filteredReports = state.weekly.reports.filter((report) => {
+    const cadenceMatch = cadence === "all" || report.cadence === cadence;
+
     const recs = Object.values(report.recommendations || {}).map((v) =>
       (v || "").toLowerCase()
     );
@@ -363,19 +416,23 @@ function applyWeeklyFilters() {
     const haystackParts = [
       report.report_id,
       report.title,
+      report.cadence,
       ...(report.key_findings || []),
       ...Object.values(report.recommendations || {}),
       ...Object.keys(report.category_breakdown || {}),
     ];
     const haystack = haystackParts.join(" ").toLowerCase();
     const searchMatch = !search || haystack.includes(search);
-    return recMatch && searchMatch;
+    return cadenceMatch && recMatch && searchMatch;
   });
 
   renderWeeklyList(state.weekly.filteredReports);
 }
 
 function attachWeeklyFilters() {
+  if (elements.weekly.cadenceFilter) {
+    elements.weekly.cadenceFilter.addEventListener("change", applyWeeklyFilters);
+  }
   elements.weekly.recommendationFilter.addEventListener("change", applyWeeklyFilters);
   elements.weekly.searchFilter.addEventListener("input", applyWeeklyFilters);
 }
@@ -587,7 +644,9 @@ function renderBackendGapReports(reports) {
   const list = elements.backendGap.reportList;
   list.innerHTML = "";
   if (elements.backendGap.filterRow) {
-    elements.backendGap.filterRow.hidden = state.backendGap.reports.length <= 1;
+    // Backend/search filters add little value for a handful of self-evident
+    // deep-dive cards; surface them only once the set grows.
+    elements.backendGap.filterRow.hidden = state.backendGap.reports.length <= 3;
   }
   elements.backendGap.resultCount.textContent = `${reports.length} report${
     reports.length === 1 ? "" : "s"
@@ -609,12 +668,10 @@ function renderBackendGapReports(reports) {
 
 function applyBackendGapFilters() {
   const backendValue = elements.backendGap.backendFilter.value;
-  const statusValue = elements.backendGap.statusFilter.value;
   const searchValue = elements.backendGap.searchFilter.value.trim().toLowerCase();
 
   state.backendGap.filteredReports = state.backendGap.reports.filter((report) => {
     const backendMatch = backendValue === "all" || report.backend.key === backendValue;
-    const statusMatch = statusValue === "all" || report.status === statusValue;
 
     const haystack = [
       report.title,
@@ -636,7 +693,7 @@ function applyBackendGapFilters() {
       .toLowerCase();
 
     const searchMatch = !searchValue || haystack.includes(searchValue);
-    return backendMatch && statusMatch && searchMatch;
+    return backendMatch && searchMatch;
   });
 
   renderBackendGapReports(state.backendGap.filteredReports);
@@ -653,7 +710,6 @@ function populateBackendFilter(backends) {
 
 function attachBackendGapFilters() {
   elements.backendGap.backendFilter.addEventListener("change", applyBackendGapFilters);
-  elements.backendGap.statusFilter.addEventListener("change", applyBackendGapFilters);
   elements.backendGap.searchFilter.addEventListener("input", applyBackendGapFilters);
 }
 
@@ -676,22 +732,22 @@ async function loadDashboard() {
   attachWeeklyFilters();
   attachBackendGapFilters();
 
-  const weeklyResult = await fetchJsonOptional(WEEKLY_DATA_URL);
+  const reportsResult = await fetchJsonOptional(REPORTS_DATA_URL);
   const gapResult = await fetchJsonOptional(BACKEND_GAP_DATA_URL);
 
   // Hero chips (best effort — show whatever loaded)
-  renderHeroChips(weeklyResult.payload, gapResult.payload);
+  renderHeroChips(reportsResult.payload, gapResult.payload);
 
-  // --- Weekly reports section ---
+  // --- Engineering reports section (weekly + monthly) ---
   elements.weekly.loadingState.hidden = true;
-  if (weeklyResult.ok && weeklyResult.payload) {
-    state.weekly.reports = weeklyResult.payload.reports || [];
-    renderWeeklyStatRow(weeklyResult.payload);
+  if (reportsResult.ok && reportsResult.payload) {
+    state.weekly.reports = reportsResult.payload.reports || [];
+    renderWeeklyStatRow(reportsResult.payload);
     renderWeeklyFeatured(state.weekly.reports[0]);
     applyWeeklyFilters();
   } else {
     elements.weekly.errorState.hidden = false;
-    elements.weekly.errorState.textContent = `Unable to load weekly reports. ${weeklyResult.error || ""}`.trim();
+    elements.weekly.errorState.textContent = `Unable to load engineering reports. ${reportsResult.error || ""}`.trim();
     elements.weekly.list.hidden = true;
     elements.weekly.resultCount.textContent = "0 reports";
     elements.weekly.featured.hidden = true;

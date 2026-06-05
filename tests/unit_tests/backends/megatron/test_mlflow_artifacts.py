@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc.
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -32,8 +32,19 @@ _MODULE = "primus.backends.megatron.training.mlflow_artifacts"
 
 @pytest.fixture(autouse=True)
 def suppress_logging():
-    """Suppress log_rank_0 and warning_rank_0 in all tests."""
-    with patch(f"{_MODULE}.log_rank_0"), patch(f"{_MODULE}.warning_rank_0"):
+    """Suppress rank-conditional logging helpers in all tests.
+
+    ``mlflow_artifacts`` uses both rank-0 helpers (for code paths that may run on
+    rank 0, e.g., local TraceLens generation) and ``log_rank_last`` for MLflow
+    writer-only code paths (warnings on the writer rank are emitted as
+    ``log_rank_last("[WARNING] ...")``). Patch all three so tests don't hit the
+    uninitialised distributed logger.
+    """
+    with (
+        patch(f"{_MODULE}.log_rank_0"),
+        patch(f"{_MODULE}.warning_rank_0"),
+        patch(f"{_MODULE}.log_rank_last"),
+    ):
         yield
 
 

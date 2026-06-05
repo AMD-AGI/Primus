@@ -23,8 +23,8 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 16
-      global_batch_size: 128
+      micro_batch_size: 32
+      global_batch_size: 256
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -42,7 +42,11 @@ modules:
       norm_epsilon: 1.0e-5
 
       # Mamba-specific: must provide spec
-      spec: ['megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+      spec: ['primus.backends.megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: EleutherAI/gpt-neox-20b
 
       # parallel
       tensor_model_parallel_size: 1

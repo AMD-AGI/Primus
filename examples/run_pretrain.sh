@@ -219,7 +219,11 @@ export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 if [ "${BACKEND:-}" != "MaxText" ]; then
     export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 fi
-export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
+
+# In multi-node training, PXN can be enabled to improve inter-node all-to-all
+# communication efficiency, but it will increase GPU memory usage.
+# Default: enable PXN for NCCL to prevent failure of multi-node training on some clusters
+export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-0}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
