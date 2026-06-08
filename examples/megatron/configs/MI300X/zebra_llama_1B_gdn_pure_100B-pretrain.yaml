@@ -121,7 +121,7 @@ modules:
       #   global_batch_size = 64 × 8 = 512
       #   tokens/iter       = 512 × 2048 = 1,048,576
       #   total tokens      = 95368 × 1,048,576 ≈ 100 B
-      train_iters: 95368
+      train_iters: 50
       micro_batch_size: 64
       global_batch_size: 512
 

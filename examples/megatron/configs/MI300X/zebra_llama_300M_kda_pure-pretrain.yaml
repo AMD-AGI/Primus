@@ -50,9 +50,9 @@ modules:
       #   FLA: per_device_train_batch_size=128, 8 GPUs → global=1024
       #   tokens/step = 1024 * 2048 = 2,097,152
       #   total tokens ~= 4768 * 2,097,152 ≈ 10B
-      train_iters: 4768
-      micro_batch_size: 128
-      global_batch_size: 1024
+      train_iters: 50
+      micro_batch_size: 8
+      global_batch_size: 64
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -130,7 +130,7 @@ modules:
       # Memory cost: ~3.6 GiB / rank extra (un-sharded optim state). With
       # FLA-init checkpoint + both fusions on + expandable_segments we have
       # ~12 GiB free headroom at iter 200, so this fits.
-      overlap_grad_reduce: true
+      overlap_grad_reduce: false
       overlap_param_gather: false       # requires distributed optimizer
       gradient_accumulation_fusion: false
       use_torch_fsdp2: false

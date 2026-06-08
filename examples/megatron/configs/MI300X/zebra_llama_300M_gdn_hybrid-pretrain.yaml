@@ -49,9 +49,9 @@ modules:
       #   FLA: per_device_train_batch_size=128 × 8 GPUs → global=1024
       #   tokens/step = 1024 × 2048 = 2,097,152
       #   4768 steps × 2.097M ≈ 10B tokens
-      train_iters: 4768
-      micro_batch_size: 128
-      global_batch_size: 1024
+      train_iters: 50
+      micro_batch_size: 8
+      global_batch_size: 64
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -129,7 +129,7 @@ modules:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       use_distributed_optimizer: true   # ZeRO-1 — shards optimizer state
-      overlap_grad_reduce: true         # bucketed grad allreduce in backward
+      overlap_grad_reduce: false
       overlap_param_gather: false       # leave OFF — the skew that caused OOM
       gradient_accumulation_fusion: false
       use_torch_fsdp2: false
