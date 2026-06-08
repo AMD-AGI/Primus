@@ -60,8 +60,18 @@ primus-cli = "primus_cli:main"
 primus = "primus.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/AMD-AIG-AIMA/Primus"
-Repository = "https://github.com/AMD-AIG-AIMA/Primus"
+Homepage = "https://github.com/AMD-AGI/Primus"
+Repository = "https://github.com/AMD-AGI/Primus"
+
+[tool.black]
+# Pin the formatting target below py39 on purpose. black >= 23.1 infers its
+# target from `[project].requires-python`, and `>=3.10` would otherwise make it
+# reformat 300+ existing files (e.g. parenthesizing multi-context `with`
+# statements), breaking `code-lint` (pre-commit run --all-files). This affects
+# formatting STYLE only -- not the runtime Python requirement -- and keeps
+# formatting identical to the current main branch.
+line-length = 110
+target-version = ["py38"]
 
 ###############################################################################
 # Hatch build configuration
