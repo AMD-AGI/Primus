@@ -7,7 +7,7 @@
 """
 Legacy GroupedMLP weight gradient split patch for pipeline parallelism.
 
-When moe_use_legacy_grouped_gemm=True and use_turbo_grouped_mlp=False, MoE
+When moe_use_legacy_grouped_gemm=True and use_turbo_grouped_gemm=False, MoE
 experts use Megatron's native GroupedMLP whose forward calls gg.ops.gmm
 (grouped_gemm.ops.GroupedGemm autograd Function).  That autograd Function
 computes dgrad and wgrad together in backward, which prevents the Primus
@@ -217,6 +217,7 @@ def _make_patched_forward():
         )
         and getattr(get_args(ctx), "moe_use_legacy_grouped_gemm", False)
         and not getattr(get_args(ctx), "use_turbo_grouped_mlp", False)
+        and not getattr(get_args(ctx), "use_turbo_grouped_gemm", False)
     ),
 )
 def patch_legacy_grouped_mlp_wgrad(ctx: PatchContext):
