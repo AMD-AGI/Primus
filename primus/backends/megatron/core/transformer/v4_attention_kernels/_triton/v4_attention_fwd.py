@@ -417,7 +417,8 @@ def _launch_v4_attention_fwd(
     BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", "64"))
     BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_N", "16"))
     NUM_WARPS_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_WARPS", "8"))
-    NUM_STAGES_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_STAGES", "2"))
+    _default_stages_fwd = "1" if hca_local_seqlen else "2"
+    NUM_STAGES_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_STAGES", _default_stages_fwd))
     BLOCK_DMODEL = D  # head_dim must be a power of 2 for tl.dot
 
     grid = (triton.cdiv(Sq, BLOCK_M), B * HQ)
