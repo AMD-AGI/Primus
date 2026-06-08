@@ -1,21 +1,14 @@
 diff --git a/megatron/core/transformer/mlp.py b/megatron/core/transformer/mlp.py
-index 8a19fef87..74cfd16f3 100644
+index 8a19fef87..a0c53887b 100644
 --- a/megatron/core/transformer/mlp.py
 +++ b/megatron/core/transformer/mlp.py
-@@ -2,6 +2,7 @@
- from __future__ import annotations
- 
- import gc
-+import os
- import logging
- import warnings
- from collections.abc import Callable
-@@ -228,6 +229,16 @@ class MLP(MegatronModule):
+@@ -228,6 +228,17 @@ class MLP(MegatronModule):
          else:
              self.activation_func = self.config.activation_func
  
++        from megatron.training import get_args as _get_args
 +        self._use_fla_swiglu = False
-+        if int(os.environ.get('PRIMUS_FLA_SWIGLU', '1')):
++        if getattr(_get_args(), 'use_fla_fused_swiglu', True):
 +            if self.config.gated_linear_unit and self.config.activation_func == F.silu:
 +                try:
 +                    from fla.modules.activations import swiglu as _fla_swiglu

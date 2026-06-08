@@ -64,7 +64,7 @@ from primus.backends.megatron.core.transformer.fla_flash_attention import (
 # installed flash-attn version is newer than TE supports (>2.8.1) — that's
 # the case where TE silently drops to its Composable-Kernel backend and
 # loses ~30 ms/MLA-block on MI300X.  Auto-enabled by default; override
-# with `PRIMUS_FLA_MLA_ATTN=0` to force the TE path.
+# with `fla_mla_attn: "0"` in YAML (or `PRIMUS_FLA_MLA_ATTN=0`) to force the TE path.
 _MLA_CORE_ATTENTION = FLAFlashAttention if _fla_mla_attn_enabled() else TEDotProductAttention
 
 
@@ -82,7 +82,12 @@ def _record_spec_import_marker() -> None:
         with open(marker, "w") as fh:
             fh.write(f"file        = {__file__}\n")
             fh.write(f"_MLA_CORE_ATTENTION = {_MLA_CORE_ATTENTION!r}\n")
-            fh.write(f"PRIMUS_FLA_MLA_ATTN = {os.environ.get('PRIMUS_FLA_MLA_ATTN')!r}\n")
+            try:
+                from megatron.training import get_args as _ga
+                _mla_val = getattr(_ga(), 'fla_mla_attn', '')
+            except Exception:
+                _mla_val = '(args unavailable)'
+            fh.write(f"args.fla_mla_attn   = {_mla_val!r}\n")
             fh.write(f"is_enabled()        = {_fla_mla_attn_enabled()}\n")
             fh.write(f"pid                 = {os.getpid()}\n")
             fh.write(f"ts                  = {time.time()}\n")

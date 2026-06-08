@@ -5,7 +5,6 @@
 # This source code is licensed under the Apache license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -181,7 +180,8 @@ class HybridStack(MegatronModule):
                     assert False, "unexpected layer_type"
             self.layers.append(layer)
 
-        self._fuse_prenorm = int(os.environ.get('PRIMUS_FLA_NORM', '0')) == 1
+        from megatron.training import get_args as _get_args
+        self._fuse_prenorm = getattr(_get_args(), 'use_fla_fused_rmsnorm', False)
         if self._fuse_prenorm:
             from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer
             for i, (lt, layer) in enumerate(zip(self.layer_type_list, self.layers)):
@@ -192,12 +192,7 @@ class HybridStack(MegatronModule):
         self.num_layers_per_pipeline_rank = len(self.layers)
 
         if self.post_process and self.post_layer_norm:
-            if int(os.environ.get('PRIMUS_NO_TE', '0')):
-                from megatron.core.transformer.torch_norm import WrappedTorchNorm
-                norm_cls = WrappedTorchNorm
-            else:
-                norm_cls = TENorm
-            self.final_norm = norm_cls(
+            self.final_norm = TENorm(
                 config=self.config,
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,

@@ -72,6 +72,34 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: false
 
+      # ─────────────────────────────────────────────────────────────────────
+      # FLA runtime knobs — declarative YAML surface for the
+      # PRIMUS_FLA_*/PRIMUS_FUSED_CE* env vars.  Consumed by
+      # primus.backends.megatron.patches.fla_runtime_patches (phase=
+      # "build_args") which re-exports them as env vars so the existing
+      # consumers in fla_flash_attention.py / gated_delta_net.py /
+      # hybrid_block.py / mamba_model.py / mlp.py / pretrain_mamba.py
+      # see identical values.  Env vars set on the launcher still win
+      # over the YAML (backward compat).
+      # ─────────────────────────────────────────────────────────────────────
+      use_fla_fused_swiglu: true       # FLA Triton SwiGLU
+      use_fla_fused_rmsnorm: true      # FLA Triton RMSNorm + FusedRMSNormGated
+      use_fla_fused_gated_norm: true   # Same env var (PRIMUS_FLA_NORM)
+      use_fla_short_conv: true         # FLA Triton causal_conv1d for GDN short-conv
+      # ── Dataset source selector ───────────────────────────────────────
+      # use_fla_data + fla_cache_dir together pick the data path:
+      #   use_fla_data=false (or fla_cache_dir empty): vanilla Megatron
+      #     GPTDataset reading train_data_path (.bin/.idx).
+      #   use_fla_data=true  AND fla_cache_dir=<path>: replace
+      #     GPTDataset with tools/fla_order_dataset.FLAOrderGPTDataset
+      #     for bit-identical token order to FLA's HF DistributedSampler.
+      # The launcher script sets PRIMUS_FLA_CACHE_DIR; if you launch
+      # without it, uncomment fla_cache_dir below.
+      use_fla_data: true               # PRIMUS_FLA_DATA
+      # fla_cache_dir: /home/<user>/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train
+      fused_ce_mode: 1                 # 1=chunked FLA FusedLinearCrossEntropyLoss
+      fla_mla_attn: "1"                # FLA flash-attn for the MLA blocks
+
       # Hybrid GDN+MLA stack (no-TE spec to match FLA layers; same spec as pure GDN)
       # With hybrid_attention_ratio=0.25, the allocator places MLA at mixer blocks
       # [0, 4, 8] — identical to FLA's `attn.layers: [0, 4, 8]`.

@@ -687,9 +687,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         """
         args = get_args()
 
-        fla_data_flag = os.environ.get("PRIMUS_FLA_DATA", "0")
-        fla_cache = os.environ.get("PRIMUS_FLA_CACHE_DIR", "")
-        if fla_data_flag == "1" and fla_cache:
+        fla_data_flag = getattr(args, 'use_fla_data', False)
+        fla_cache = getattr(args, 'fla_cache_dir', "")
+        if fla_data_flag and fla_cache:
             from tools.fla_order_dataset import FLAOrderGPTDataset
 
             dp_size = parallel_state.get_data_parallel_world_size()

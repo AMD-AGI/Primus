@@ -52,13 +52,7 @@ try:
 except ImportError:
     causal_conv1d_fn = None
 
-# Optional FLA Triton causal_conv1d (accepts `[B, T, D]` directly, no
-# transpose/contiguous needed). Matches the conv1d backend FLA's reference
-# `ShortConvolution` uses in `fla/layers/kda.py`, so when this is enabled
-# Primus runs the same kernel as FLA. Gated by `PRIMUS_FLA_CONV=1` to match
-# GDN's parity recipe (`GDN_FLA_PARITY.md` "Env vars" table).
-import os as _os
-_USE_FLA_CONV = _os.environ.get('PRIMUS_FLA_CONV', '0') == '1'
+from megatron.training import get_args as _get_args
 try:
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
 except ImportError:
@@ -568,7 +562,8 @@ class KimiDeltaAttention(MegatronModule):
         #   (3) Pure-PyTorch fallback when neither is available or
         #       deterministic_mode is set.
         nvtx_range_push(suffix="kda_conv")
-        if _USE_FLA_CONV and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
+        _use_fla_conv = getattr(_get_args(), 'use_fla_short_conv', False)
+        if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
             assert self.activation in ["silu", "swish"]
             qkv, _ = _fla_causal_conv1d(
                 x=qkv,

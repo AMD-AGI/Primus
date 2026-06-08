@@ -34,3 +34,23 @@ norm_epsilon: 1.0e-5
 
 # Initialization
 init_method_std: 0.02
+
+# -----------------------------------------------------------------------------
+# FLA runtime knobs (consumed by primus.backends.megatron.patches.fla_runtime
+# patch which re-exports them as PRIMUS_FLA_* / PRIMUS_FUSED_CE* env vars).
+#
+# All are `null` here so the patch is a no-op for models that do not set any
+# of them; per-model YAMLs (or experiment `overrides:` blocks) can override
+# individual fields without having to re-declare the whole set.  See
+# primus/backends/megatron/patches/fla_runtime_patches.py for the full
+# precedence rules (launcher env var > YAML > documented default).
+# -----------------------------------------------------------------------------
+use_fla_fused_swiglu: null        # bool   — PRIMUS_FLA_SWIGLU      (default 1)
+use_fla_fused_rmsnorm: null       # bool   — PRIMUS_FLA_NORM        (default 0)
+use_fla_fused_gated_norm: null    # bool   — also PRIMUS_FLA_NORM   (default 0)
+use_fla_short_conv: null          # bool   — PRIMUS_FLA_CONV        (default 0)
+use_fla_data: null                # bool   — PRIMUS_FLA_DATA        (default 0)
+fla_cache_dir: null               # path   — PRIMUS_FLA_CACHE_DIR   (default "")
+fused_ce_mode: null               # 0/1/2  — PRIMUS_FUSED_CE        (default 1)
+fused_ce_chunks: null             # int    — PRIMUS_FUSED_CE_CHUNKS (default 32)
+fla_mla_attn: null                # str    — PRIMUS_FLA_MLA_ATTN    (default unset)

@@ -91,16 +91,19 @@ def _flash_attn_exceeds_te_range() -> bool:
 def is_enabled() -> bool:
     """Return True if MLA should use the direct flash-attn path.
 
-    Precedence:
-      1. ``PRIMUS_FLA_MLA_ATTN=0`` → force-disable (use TE).
-      2. ``PRIMUS_FLA_MLA_ATTN=1`` → force-enable (use wrapper).
-      3. Unset → auto-enable whenever the installed flash-attn version is
-         outside TE's supported range (e.g. 2.8.3 > 2.8.1), since that's
-         exactly the case where TE silently drops to its slower CK backend.
+    Precedence (resolved by fla_runtime_patches → ``args.fla_mla_attn``):
+      1. ``fla_mla_attn="0"`` → force-disable (use TE).
+      2. ``fla_mla_attn="1"`` → force-enable (use wrapper).
+      3. ``""`` / unset → auto-enable whenever the installed flash-attn
+         version is outside TE's supported range (> 2.8.1).
     """
-    env = os.environ.get("PRIMUS_FLA_MLA_ATTN")
-    if env is not None:
-        return env == "1"
+    try:
+        from megatron.training import get_args
+        val = getattr(get_args(), 'fla_mla_attn', "")
+    except Exception:
+        val = ""
+    if val:
+        return val == "1"
     return _flash_attn_exceeds_te_range()
 
 
@@ -175,16 +178,17 @@ class FLAFlashAttention(MegatronModule):
                 _ver = getattr(_fa, "__version__", "unknown")
             except Exception:
                 _ver = "unknown"
-            env = os.environ.get("PRIMUS_FLA_MLA_ATTN")
-            if env == "1":
-                _reason = "PRIMUS_FLA_MLA_ATTN=1"
-            elif env is None:
+            from megatron.training import get_args as _ga
+            _mla_val = getattr(_ga(), 'fla_mla_attn', "")
+            if _mla_val == "1":
+                _reason = "args.fla_mla_attn='1'"
+            elif not _mla_val:
                 _reason = (
                     f"auto-enabled (flash_attn {_ver} > TE max "
                     f"{'.'.join(str(x) for x in _TE_FLASH_ATTN_MAX_SUPPORTED)})"
                 )
             else:
-                _reason = f"PRIMUS_FLA_MLA_ATTN={env}"
+                _reason = f"args.fla_mla_attn={_mla_val!r}"
             _msg = (
                 f"[PRIMUS_FLA_MLA_ATTN] FLAFlashAttention active "
                 f"(layer={layer_number}, softmax_scale={softmax_scale}, "
