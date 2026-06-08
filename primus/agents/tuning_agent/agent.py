@@ -21,14 +21,13 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import dspy
 
 from .config import AgentConfig
 from .evaluator import Evaluator
 from .history import History
-from .legality import AxisLegality, derive_legality
+from .legality import derive_legality
 from .scratchpad import Scratchpad
 from .tools import build_tools
 from .workload import ArchitectureRecord

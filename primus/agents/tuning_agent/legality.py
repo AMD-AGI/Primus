@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .config import OptimizationConfig, TargetCluster
+from .config import TargetCluster
 from .workload import ArchitectureRecord
 
 
