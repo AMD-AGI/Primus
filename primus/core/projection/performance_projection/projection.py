@@ -2262,12 +2262,18 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     # Measured training runs use the full Turbo stack (PrimusMLASelfAttention,
     # PrimusTurboColumnParallelLinear, TurboGroupedMLP).  Profiling without
     # these causes systematic under-prediction (~8-15%).
+    #
+    # Respect an explicit `enable_primus_turbo: false` in the config: when the
+    # user deliberately benchmarks the vanilla Megatron path (e.g. to match a
+    # measured run that did not use Turbo), do not force the Turbo stack back on.
     _turbo_candidates = {
         "enable_primus_turbo": True,
         "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
         "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
     }
-    if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
+    if getattr(cfg, "enable_primus_turbo", False) and (
+        getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False)
+    ):
         for flag, val in _turbo_candidates.items():
             if val and not getattr(cfg, flag, False):
                 setattr(cfg, flag, True)
@@ -3000,17 +3006,27 @@ def _run_multinode_projection(
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
         moe_ar_no_overlap = target_message_info.get("moe_ar_no_overlap", False)
 
-        if moe_ar_no_overlap:
-            # MoE with EP: all2all sync barriers prevent gradient allreduce
-            # from overlapping effectively with backward. Add the full
-            # allreduce time as a per-iteration overhead.
-            grad_ar_per_iteration_ms = target_grad_ar
+        if overlap_grad_reduce and moe_ar_no_overlap:
+            # MoE+EP with distributed optimizer + overlap_grad_reduce: the
+            # expert/DP gradient reduce is bucketed onto a SEPARATE RCCL stream and
+            # fully overlapped with backward. Verified against a real MI355 Qwen3
+            # trace (PERFORMANCE_BREAKDOWN §5/§8a): one iteration is ~790 ms wall,
+            # total comm ~50 ms on its own stream (~57% hidden, ~21 ms exposed) —
+            # there is NO multi-second exposed reduce. Model it as ~0 on the
+            # critical path (the prior `moe_ar_no_overlap` full-exposure was a
+            # worst-case analytical artifact: full AR volume / FP32 / single
+            # inter-node link / zero overlap).
+            grad_ar_per_iteration_ms = 0.0
         elif overlap_grad_reduce:
-            # Overlapped: all-reduce runs concurrently with backward of last microbatch.
-            # Only backward (~63% of compute) can overlap.
-            # Exposed portion = max(0, allreduce - backward_time)
+            # Non-MoE overlapped: the all-reduce runs concurrently with the last
+            # microbatch's backward. Only that backward (~63% of one microbatch's
+            # compute) can overlap. Exposed = max(0, allreduce - backward_time).
             backward_time = projected_compute_time_ms * 0.63
             grad_ar_per_iteration_ms = max(0, target_grad_ar - backward_time)
+        elif moe_ar_no_overlap:
+            # MoE with EP and overlap DISABLED: all2all sync barriers + no bucketed
+            # overlap → full allreduce on the critical path.
+            grad_ar_per_iteration_ms = target_grad_ar
         else:
             # Not overlapped: all-reduce runs sequentially after backward
             grad_ar_per_iteration_ms = target_grad_ar
@@ -3234,12 +3250,15 @@ def _run_multinode_projection(
                 if op_name == "gradient_allreduce" and "gradient_allreduce_size_mb" in message_info:
                     moe_no_overlap = message_info.get("moe_ar_no_overlap", False)
                     if moe_no_overlap:
-                        detail = " [MoE: NOT overlapped]"
+                        moe_overlapped = overlap_grad_reduce
+                        detail = " [MoE: OVERLAPPED, ~0 on critical path]" if moe_overlapped else " [MoE: NOT overlapped]"
                         expert_ms = message_info.get("expert_ar_time_ms", 0)
                         non_expert_ms = message_info.get("non_expert_ar_time_ms", 0)
                         dp_reps = message_info.get("expert_ar_dp_replicas", 0)
                         detail += f"\n     Expert AR: {expert_ms:.1f} ms (across {dp_reps} nodes)"
                         detail += f" | Non-expert AR: {non_expert_ms:.1f} ms"
+                        if moe_overlapped:
+                            detail += " (bucketed on separate RCCL stream → hidden)"
                     else:
                         overlapped_flag = message_info.get("gradient_allreduce_overlapped", False)
                         detail = " [OVERLAPPED]" if overlapped_flag else ""

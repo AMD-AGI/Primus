@@ -31,6 +31,23 @@ export NVTE_FUSED_ATTN=1
 export NVTE_FUSED_ATTN_CK=0
 export NVTE_FUSED_ATTN_AOTRITON=1
 export NVTE_USE_CK_GEMM=0
+# Set PRIMUS_ATTN_AITER=1 to benchmark with the gfx1250-patched aiter Triton fused
+# flash-attn (Qwen3 GQA 128/128) instead of AOTriton.
+export NVTE_FLASH_ATTN=0
+export NVTE_FLASH_ATTN_AITER=0
+export NVTE_AITER_MLA_FLASH_ATTN=0
+export AITER_SRC=""
+ATTN_TAG="aotriton"
+if [[ "${PRIMUS_ATTN_AITER:-0}" == "1" ]]; then
+    echo "[attn] PRIMUS_ATTN_AITER=1 -> using aiter Triton flash-attn"
+    export NVTE_FUSED_ATTN=0
+    export NVTE_FUSED_ATTN_AOTRITON=0
+    export NVTE_FLASH_ATTN=1
+    export NVTE_FLASH_ATTN_AITER=1
+    export NVTE_AITER_MLA_FLASH_ATTN=1
+    export AITER_SRC="$TE_DIR/3rdparty/aiter"
+    ATTN_TAG="aiter"
+fi
 
 # Single-node loopback so 1-rank distributed init does not touch IB.
 export HSA_NO_SCRATCH_RECLAIM=1
@@ -55,11 +72,12 @@ DATA_PATH="${PRIMUS_PATH}/data"
 mkdir -p "$DATA_PATH"
 
 EXP=examples/megatron/configs/MI355X/qwen3_235B_A22B-FP8-pretrain.yaml
-LOG=qwen3-235B-FP8-projection-pp1ep4-64gpu.log
+LOG=qwen3-235B-FP8-projection-pp1ep4-64gpu-${ATTN_TAG}.log
 
 # Collect env to forward into the container.
 ENV_ARGS=()
 for v in DOCKER_IMAGE NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK NVTE_FUSED_ATTN_AOTRITON \
+         NVTE_FLASH_ATTN NVTE_FLASH_ATTN_AITER NVTE_AITER_MLA_FLASH_ATTN AITER_SRC \
          NVTE_USE_CK_GEMM HSA_NO_SCRATCH_RECLAIM NCCL_IB_DISABLE NCCL_P2P_DISABLE \
          NCCL_IB_HCA NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME RCCL_DISABLE_AMDSMI \
          NCCL_AMDSMI_DISABLE GPUS_PER_NODE NNODES PRIMUS_PP PRIMUS_EP PRIMUS_SEQ_LENGTH \
@@ -90,6 +108,17 @@ if [[ -n "${HIPBLASLT_LD_PRELOAD:-}" ]]; then
     HBL_PREFIX="export LD_PRELOAD=${HIPBLASLT_LD_PRELOAD}\${LD_PRELOAD:+:\$LD_PRELOAD} && "
 fi
 
+# aiter Triton flash-attn wiring (only when PRIMUS_ATTN_AITER=1 set AITER_SRC).
+AITER_PREFIX=""
+if [[ -n "${AITER_SRC:-}" ]]; then
+    AITER_PREFIX="pip install --quiet psutil ninja pandas 2>/dev/null && \
+        SP=\$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) && \
+        cp ${TE_DIR}/transformer_engine/pytorch/attention/dot_product_attention/utils.py \
+           \"\$SP/transformer_engine/pytorch/attention/dot_product_attention/utils.py\" && \
+        echo '[TE] patched utils.py (aiter MLA carve-out)' && \
+        export PYTHONPATH=${AITER_SRC}\${PYTHONPATH:+:\$PYTHONPATH} && "
+fi
+
 docker run --rm \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
@@ -101,7 +130,7 @@ docker run --rm \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         set -e && cd $PRIMUS_PATH && \
-        ${TE_INSTALL_PREFIX}${HBL_PREFIX}\
+        ${TE_INSTALL_PREFIX}${HBL_PREFIX}${AITER_PREFIX}\
         bash runner/primus-cli direct --single -- \
             projection performance \
             --config $EXP \

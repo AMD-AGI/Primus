@@ -110,6 +110,18 @@ def megatron_derive_default_args(args):
         )
     if not hasattr(args, "virtual_pipeline_model_parallel_size"):
         args.virtual_pipeline_model_parallel_size = None
+    # Newer Megatron expresses VPP via `num_virtual_stages_per_pipeline_rank`
+    # (chunks per pipeline rank == VPP size for uniform layouts). The legacy
+    # API used `virtual_pipeline_model_parallel_size` /
+    # `num_layers_per_virtual_pipeline_stage`. Honor the new field when the
+    # legacy ones are unset, otherwise YAMLs using it silently project as VPP=1.
+    num_virtual_stages = getattr(args, "num_virtual_stages_per_pipeline_rank", None)
+    if (
+        args.virtual_pipeline_model_parallel_size is None
+        and args.num_layers_per_virtual_pipeline_stage is None
+        and num_virtual_stages is not None
+    ):
+        args.virtual_pipeline_model_parallel_size = int(num_virtual_stages)
     if (
         args.num_layers_per_virtual_pipeline_stage is None
         and args.virtual_pipeline_model_parallel_size is None

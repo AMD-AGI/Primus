@@ -12,3 +12,6 @@ output
 experiment
 data
 pp_simulation_result
+run_logs
+gfx1250_bringup
+microbench
