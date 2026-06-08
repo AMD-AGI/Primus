@@ -140,31 +140,14 @@ modules:
       # Data — FLA-aligned FineWeb-Edu sample-10BT
       # Converted from FLA's preprocessed Arrow dataset so both
       # frameworks see the exact same tokens in the same order.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
-      # Checkpoints — load FLA-equivalent init weights so the iter-1 forward
-      # pass is bit-identical to FLA's (proven for GDN in GDN_FLA_PARITY.md).
-      # Without this Megatron's parameter-init traversal order differs from
-      # HF's, so even with the same `seed=42` and same `nn.init.normal_(std=0.02)`
-      # recipe the per-layer A_log/dt_bias/g_proj/etc. starting points diverge
-      # — producing the +0.7 lm-loss warmup gap we kept observing.
-      #
-      # Generate with:
-      #   python3 tools/convert_fla_kda_init_to_megatron.py
-      #     # (inside the rocm/primus container so FLA's Triton kernels are importable)
-      #
-      # `finetune: true` + `no_load_optim`/`no_load_rng: true` makes Megatron
-      # ingest only the `model` field of the pickle and start a fresh
-      # optimizer/RNG (FLA also starts with a fresh AdamW each run).
-      finetune: true
+      # Checkpoints
+      finetune: false
       auto_continue_train: false
-      no_load_optim: true
-      no_load_rng: true
-      load: /home/vanbhati@amd.com/Primus/output/fla_init_kda_300M
       save: ./output/zebra_llama_300M_kda_pure-pretrain
       save_interval: 1024
       disable_last_saving: false

@@ -90,9 +90,8 @@ modules:
       # hybrid 300M consumed, so per-token loss curves are directly
       # comparable).  No PRIMUS_FLA_DATA / PRIMUS_FLA_CACHE_DIR needed —
       # this is the indexed mmap version Megatron consumes natively.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
