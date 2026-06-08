@@ -94,7 +94,7 @@ modules:
       # optimizer state ~3.6GB easily fits per-rank). Switch to plain DDP
       # ALL-REDUCE to match FLA. Memory cost: +3GB/rank, expected: ~10-15% faster.
       # NOTE: overlap_param_gather requires distributed optimizer, so disable it.
-      overlap_grad_reduce: true
+      overlap_grad_reduce: false
       overlap_param_gather: false
       gradient_accumulation_fusion: false
       use_torch_fsdp2: false

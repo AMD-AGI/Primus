@@ -132,15 +132,9 @@ class HybridStack(MegatronModule):
         self.hybrid_mlp_ratio = hybrid_mlp_ratio
         self.hybrid_override_pattern = hybrid_override_pattern
 
-        # Modern Megatron `MambaModel` parses `hybrid_layer_pattern` into a
-        # concrete `layer_type_list` (list of `Symbols` like 'M', '*', '-',
-        # 'E') and a `pp_layer_offset`, then passes them to
-        # `build_module(mamba_stack_spec, ..., layer_type_list=..., pp_layer_offset=...)`.
-        # If we received a non-empty pre-computed list, USE IT.  An *empty*
-        # list (or None) means the caller didn't specify a pattern (e.g. pure
-        # GDN configs, or hybrid configs whose YAML uses `hybrid_attention_ratio`
-        # which upstream silently dropped as an arg); in that case fall back
-        # to the legacy ratio-based allocation so the old behaviour is preserved.
+        layer_type_list = kwargs.get('layer_type_list', None)
+        pp_layer_offset = kwargs.get('pp_layer_offset', 0)
+
         if layer_type_list:
             self.layer_type_list = list(layer_type_list)
         else:
@@ -219,6 +213,11 @@ class HybridStack(MegatronModule):
         layer_type_list = []
         num_attention_layers = int(num_layers // 2 * hybrid_attention_ratio)
         num_mamba_layers = num_layers // 2 - num_attention_layers
+
+        if num_attention_layers == 0:
+            layer_type_list = [LayerSymbols.MAMBA, LayerSymbols.MLP] * (num_layers // 2)
+            return layer_type_list
+
         num_mamba_per_attention_layer = num_mamba_layers // num_attention_layers
 
         if hybrid_attention_ratio <= 0.5:

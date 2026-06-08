@@ -101,7 +101,7 @@ modules:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       use_distributed_optimizer: true   # ZeRO-1 — shards optimizer state
-      overlap_grad_reduce: true         # bucketed grad allreduce in backward
+      overlap_grad_reduce: false        # DDP buffer assertion fails with hybrid models
       overlap_param_gather: false       # leave OFF — the skew that caused OOM
       gradient_accumulation_fusion: false
       use_torch_fsdp2: false

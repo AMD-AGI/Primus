@@ -18,6 +18,9 @@ tokenizer_model: null
 
 # Standard transformer settings that may be used by hybrid models
 is_hybrid_model: false
+hybrid_attention_ratio: 0.0
+hybrid_mlp_ratio: 0.0
+hybrid_override_pattern: null
 attention_dropout: 0.0
 hidden_dropout: 0.0
 
