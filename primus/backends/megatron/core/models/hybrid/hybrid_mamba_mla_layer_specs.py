@@ -8,25 +8,40 @@ from megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelLinear,
 )
-from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
-from primus.backends.megatron.core.models.hybrid.mamba_layer_adapter import Mamba2HybridLayer
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
-from primus.backends.megatron.core.models.hybrid.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
-from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer, GatedDeltaNetLayerSubmodules
-from primus.backends.megatron.core.models.hybrid.kimi_delta_attention import KimiDeltaAttention, KimiDeltaAttentionSubmodules
-from primus.backends.megatron.core.models.hybrid.kimi_delta_attention_layer import KimiDeltaAttentionLayer, KimiDeltaAttentionLayerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
+from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSubmodules,
+)
+
+from primus.backends.megatron.core.models.hybrid.gated_delta_net import (
+    GatedDeltaNet,
+    GatedDeltaNetSubmodules,
+)
+from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import (
+    GatedDeltaNetLayer,
+    GatedDeltaNetLayerSubmodules,
+)
 from primus.backends.megatron.core.models.hybrid.hybrid_block import (
     HybridStack,
     HybridStackSubmodules,
 )
-from megatron.core.transformer.multi_latent_attention import (
-    MLASelfAttention,
-    MLASelfAttentionSubmodules,
+from primus.backends.megatron.core.models.hybrid.kimi_delta_attention import (
+    KimiDeltaAttention,
+    KimiDeltaAttentionSubmodules,
+)
+from primus.backends.megatron.core.models.hybrid.kimi_delta_attention_layer import (
+    KimiDeltaAttentionLayer,
+    KimiDeltaAttentionLayerSubmodules,
+)
+from primus.backends.megatron.core.models.hybrid.mamba_layer_adapter import (
+    Mamba2HybridLayer,
 )
 
 # Inference layers may not be available in older Megatron versions
@@ -53,11 +68,13 @@ from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSubmodules,
 )
+
 from primus.backends.megatron.core.transformer.fla_flash_attention import (
     FLAFlashAttention,
+)
+from primus.backends.megatron.core.transformer.fla_flash_attention import (
     is_enabled as _fla_mla_attn_enabled,
 )
-
 
 # Route MLA's `core_attention` through a direct `flash_attn_func` call
 # instead of TransformerEngine's `TEDotProductAttention` whenever the
@@ -163,13 +180,6 @@ hybrid_stack_spec = ModuleSpec(
                     ),
                 ),
                 mlp_bda=get_bias_dropout_add,
-            ),
-        ),
-        moe_layer=ModuleSpec(
-            # TODO (rwaleffe): change this to be an "MoELayer" to work with CudaGraphs?
-            module=TransformerLayer,
-            submodules=TransformerLayerSubmodules(
-                pre_mlp_layernorm=TENorm, mlp=moe, mlp_bda=get_bias_dropout_add
             ),
         ),
     ),
@@ -290,9 +300,7 @@ gdn_hybrid_stack_spec_no_te = ModuleSpec(
                 pre_mlp_layernorm=WrappedTorchNorm,
                 mlp=ModuleSpec(
                     module=MLP,
-                    submodules=MLPSubmodules(
-                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
-                    ),
+                    submodules=MLPSubmodules(linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear),
                 ),
                 mlp_bda=get_bias_dropout_add,
             ),
@@ -360,9 +368,7 @@ mamba_hybrid_stack_spec_no_te = ModuleSpec(
                 pre_mlp_layernorm=WrappedTorchNorm,
                 mlp=ModuleSpec(
                     module=MLP,
-                    submodules=MLPSubmodules(
-                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
-                    ),
+                    submodules=MLPSubmodules(linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear),
                 ),
                 mlp_bda=get_bias_dropout_add,
             ),
@@ -497,9 +503,7 @@ kda_hybrid_stack_spec_no_te = ModuleSpec(
                 pre_mlp_layernorm=WrappedTorchNorm,
                 mlp=ModuleSpec(
                     module=MLP,
-                    submodules=MLPSubmodules(
-                        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
-                    ),
+                    submodules=MLPSubmodules(linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear),
                 ),
                 mlp_bda=get_bias_dropout_add,
             ),
