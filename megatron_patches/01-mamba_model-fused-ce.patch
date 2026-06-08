@@ -1,0 +1,85 @@
+diff --git a/megatron/core/models/mamba/mamba_model.py b/megatron/core/models/mamba/mamba_model.py
+index ae309e418..b093c319a 100644
+--- a/megatron/core/models/mamba/mamba_model.py
++++ b/megatron/core/models/mamba/mamba_model.py
+@@ -1,6 +1,7 @@
+ # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+ 
+ import logging
++import os
+ from typing import Literal, Optional
+ 
+ from torch import Tensor
+@@ -275,11 +276,62 @@ class MambaModel(LanguageModule):
+         if self.pre_process or self.post_process or self.mtp_process:
+             self.setup_embeddings_and_output_layer()
+ 
++        self._fused_ce_mode = 0
++        _ce_mode = int(os.environ.get('PRIMUS_FUSED_CE', '1'))
++        if _ce_mode == 2:
++            try:
++                from fla.modules import FusedCrossEntropyLoss
++                self._fused_ce = FusedCrossEntropyLoss(inplace_backward=True)
++                self._fused_ce_mode = 2
++            except ImportError:
++                pass
++        elif _ce_mode == 1:
++            try:
++                from fla.modules import FusedLinearCrossEntropyLoss
++                # num_chunks controls peak per-chunk memory: each chunk materializes
++                # a [N/num_chunks, vocab] bf16 logits tensor. Default 8 → 4.2 GB at
++                # batch=64, seq=2048, vocab=128k — OOMs on 1B/MI300X. 32 → ~1 GB,
++                # plenty of headroom. Numerics unchanged (same math, more chunks).
++                # Override with PRIMUS_FUSED_CE_CHUNKS (must be a power of 2).
++                _nc = int(os.environ.get('PRIMUS_FUSED_CE_CHUNKS', '32'))
++                self._fused_lce = FusedLinearCrossEntropyLoss(reduction='mean', num_chunks=_nc)
++                self._fused_ce_mode = 1
++            except ImportError:
++                pass
++        self._use_fused_cross_entropy = self._fused_ce_mode > 0
++
+         for name, module in self.named_modules():
+             if hasattr(module, 'finish_init'):
+                 quant_config = get_quant_config_or_none(name, self.config.quant_recipe)
+                 module.finish_init(quant_config)
+ 
++    def _fused_cross_entropy_loss(self, hidden_states, labels, output_weight,
++                                   runtime_gather_output=None):
++        """Compute loss using FLA's fused cross-entropy kernels.
++
++        Mode 1 (FusedLinearCrossEntropyLoss): computes logits + CE in chunks,
++               never materializing the full (batch*seq, vocab) logits tensor.
++        Mode 2 (FusedCrossEntropyLoss): materializes logits in bf16, then
++               uses a fused Triton CE kernel — matches FLA's exact computation.
++        """
++        s, b, h = hidden_states.shape
++
++        if self._fused_ce_mode == 2:
++            logits, _ = self.output_layer(
++                hidden_states, weight=output_weight,
++                runtime_gather_output=runtime_gather_output,
++            )
++            logits_2d = logits.permute(1, 0, 2).reshape(b * s, -1)
++            labels_1d = labels.reshape(b * s)
++            loss = self._fused_ce(logits_2d, labels_1d)
++            return loss.expand(b, s)
++        else:
++            hs_2d = hidden_states.permute(1, 0, 2).reshape(b * s, h)
++            labels_1d = labels.reshape(b * s)
++            weight = output_weight if output_weight is not None else self.output_layer.weight
++            loss = self._fused_lce(hs_2d, labels_1d, weight)
++            return loss.expand(b, s)
++
+     def set_input_tensor(self, input_tensor: Tensor) -> None:
+         """Sets input tensor to the model.
+ 
+@@ -439,6 +491,9 @@ class MambaModel(LanguageModule):
+                     hidden_states.squeeze(1).unsqueeze(0)
+                 ).unsqueeze(1)
+ 
++        if labels is not None and self._use_fused_cross_entropy:
++            return self._fused_cross_entropy_loss(hidden_states, labels, output_weight)
++
+         logits, _ = self.output_layer(
+             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
+         )

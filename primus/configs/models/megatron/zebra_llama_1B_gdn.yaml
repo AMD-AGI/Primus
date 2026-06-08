@@ -1,19 +1,19 @@
-bases:
+extends:
   - mamba_base.yaml
 
-# Zebra Llama 8B configuration
+# Zebra Llama 1B Pure GDN configuration
 model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
 tokenizer_type: HuggingFaceTokenizer
-tokenizer_model: meta-llama/Llama-3.2-1B
+tokenizer_model: fla-hub/gla-1.3B-100B
 
 # Model size parameters
 num_layers: 32
 hidden_size: 2048
-ffn_hidden_size: 8192
+ffn_hidden_size: 8192 
 
-# Hybrid model parameters
+# Pure GDN — no attention layers
 is_hybrid_model: true
-hybrid_attention_ratio: 0.25
+hybrid_attention_ratio: 0.0
 mamba_state_dim: 64
 mamba_head_dim: 64
 mamba_num_groups: 8
@@ -25,23 +25,14 @@ linear_value_head_dim: 64
 linear_num_key_heads: 8
 linear_num_value_heads: 16
 
-# MLA parameters
-# Disable standard GQA - MLA uses its own compression via LoRA
+# No MLA needed for pure GDN
 group_query_attention: false
 swiglu: true
 num_query_groups: null
-multi_latent_attention: true
+multi_latent_attention: false
 num_attention_heads: 32
-q_lora_rank: 1344   # Query LoRA rank
-kv_lora_rank: 128   # Key-Value LoRA rank
-qk_head_dim: 32     # Query-Key head dimension
-qk_pos_emb_head_dim: 32  # Positional embedding head dimension
-v_head_dim: 64      # Value head dimension
-rotary_scaling_factor: 1.0
-mscale: 1.0
-mscale_all_dim: 1.0
 
-# MLA uses its own internal positional encoding
+# Positional encoding
 rotary_base: 500000
 position_embedding_type: none
 add_position_embedding: true

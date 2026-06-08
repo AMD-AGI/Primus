@@ -1,0 +1,69 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""
+GatedDeltaNet / KimiDeltaAttention Configuration Patches
+
+Monkey-patch TransformerConfig with linear-attention fields required by
+GatedDeltaNet and KimiDeltaAttention layers, so that no changes are needed
+in the third-party Megatron-LM codebase.
+"""
+
+from primus.core.patches import PatchContext, get_args, register_patch
+from primus.modules.module_utils import log_rank_0
+
+_GDN_CONFIG_FIELDS = {
+    "linear_conv_kernel_dim": None,
+    "use_short_conv": True,
+    "linear_key_head_dim": None,
+    "linear_value_head_dim": None,
+    "linear_num_key_heads": None,
+    "linear_num_value_heads": None,
+    "use_fla_triton_kda": False,
+    "use_fla_triton_kda_hybrid": False,
+    # When True (default) and use_fla_triton_kda is also True, chunk_kda is
+    # called with use_gate_in_kernel=True (gate fused inside the Triton
+    # kernel). Set to False to materialize the gate up-front via
+    # fused_kda_gate() — bit-identical to FLA's pre-fusion path and to the
+    # tw006-validated numerics (loss=4.7281 @ iter 500 vs FLA/8=4.7350).
+    "use_fla_kda_in_kernel_gate": True,
+    # When True (default when use_fla_triton_kda=True), the output norm is
+    # replaced by fla.modules.FusedRMSNormGated (RMSNorm + sigmoid-gate +
+    # multiply in one Triton kernel). Set to False to use the unfused
+    # _apply_gated_norm path with explicit fp32 sigmoid (tw006 numerics).
+    "use_fla_fused_norm_gated": None,
+}
+
+
+def _has_any_gdn_field(args) -> bool:
+    return any(
+        getattr(args, name, None) is not None for name in _GDN_CONFIG_FIELDS
+    )
+
+
+@register_patch(
+    "megatron.transformer.gdn_config",
+    backend="megatron",
+    phase="before_train",
+    description=(
+        "Monkey-patch TransformerConfig with linear-attention fields "
+        "(linear_conv_kernel_dim, linear_key_head_dim, etc.) and FLA Triton flags "
+        "required by GatedDeltaNet and KimiDeltaAttention without modifying third-party code."
+    ),
+    condition=lambda ctx: _has_any_gdn_field(get_args(ctx)),
+)
+def patch_gdn_config(ctx: PatchContext):
+    args = get_args(ctx)
+
+    import megatron.core.transformer.transformer_config as config_mod
+
+    for field_name, default in _GDN_CONFIG_FIELDS.items():
+        value = getattr(args, field_name, default)
+        setattr(config_mod.TransformerConfig, field_name, value)
+        log_rank_0(
+            f"[Patch:megatron.transformer.gdn_config] "
+            f"TransformerConfig.{field_name} = {value}"
+        )

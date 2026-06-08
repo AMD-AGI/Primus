@@ -21,15 +21,15 @@ def zebra_llama_flops(args, batch_size):
 
     def calculate_layer_counts():
         """Calculate the number of attention, Mamba, and MLP layers."""
-        if args.hybrid_override_pattern:
+        if getattr(args, 'hybrid_override_pattern', None):
             counts = {"M": 0, "*": 0, "-": 0}
             for layer_type in args.hybrid_override_pattern:
                 if layer_type in counts:
                     counts[layer_type] += 1
             return counts["*"], counts["M"], counts["-"]
         else:
-            num_attn_layers = round(args.num_layers * args.hybrid_attention_ratio)
-            num_mlp_layers = round(args.num_layers * args.hybrid_mlp_ratio)
+            num_attn_layers = round(args.num_layers * getattr(args, 'hybrid_attention_ratio', 0.0))
+            num_mlp_layers = round(args.num_layers * getattr(args, 'hybrid_mlp_ratio', 0.0))
             num_mamba_layers = args.num_layers - num_attn_layers - num_mlp_layers
             return num_attn_layers, num_mamba_layers, num_mlp_layers
 

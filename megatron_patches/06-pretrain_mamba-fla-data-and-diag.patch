@@ -1,0 +1,215 @@
+diff --git a/pretrain_mamba.py b/pretrain_mamba.py
+index 0fecbef2c..4119e35c4 100644
+--- a/pretrain_mamba.py
++++ b/pretrain_mamba.py
+@@ -207,6 +207,110 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optio
+     return loss, num_tokens, report
+ 
+ 
++_PRIMUS_DUMP_ITER1_BATCH_DONE = False
++_PRIMUS_DUMP_ITER1_ACTS_DONE = False
++_PRIMUS_ACT_HOOKS_REGISTERED = False
++_PRIMUS_CAPTURED_ACTS: dict = {}
++
++
++def _primus_register_act_hooks(model_obj):
++    """Register forward hooks on the Primus model to capture per-layer
++    activations for diagnostic comparison with FLA. Called once on first
++    forward when PRIMUS_DUMP_ITER1_ACTS is set."""
++    global _PRIMUS_ACT_HOOKS_REGISTERED
++    if _PRIMUS_ACT_HOOKS_REGISTERED:
++        return
++
++    def make_hook(name, mod_class=""):
++        def hook(module, inp, out):
++            t = out[0] if isinstance(out, tuple) else out
++            if isinstance(t, torch.Tensor):
++                _PRIMUS_CAPTURED_ACTS[name] = t.detach().to(torch.float32).cpu().clone()
++        return hook
++
++    def make_pre_hook(name, mod_class=""):
++        def pre_hook(module, inp):
++            if isinstance(inp, tuple):
++                if len(inp) == 0:
++                    return
++                t = inp[0]
++            else:
++                t = inp
++            if isinstance(t, torch.Tensor):
++                _PRIMUS_CAPTURED_ACTS[name] = t.detach().to(torch.float32).cpu().clone()
++        return pre_hook
++
++    inner = model_obj
++    for _ in range(6):
++        if hasattr(inner, "module") and inner.__class__.__name__ != "MambaModel":
++            inner = inner.module
++        else:
++            break
++    print(f"[PRIMUS-ACT] inner model class = {inner.__class__.__name__}", flush=True)
++
++    found = []
++
++    if hasattr(inner, "embedding"):
++        emb = inner.embedding
++        emb.register_forward_hook(make_hook("embeddings_out"))
++        emb.register_forward_pre_hook(make_pre_hook("embeddings_IN"))
++        found.append(("embeddings_out", f"embedding [{emb.__class__.__name__}]"))
++        found.append(("embeddings_IN", f"embedding (PRE) [{emb.__class__.__name__}]"))
++        if hasattr(emb, "word_embeddings"):
++            we = emb.word_embeddings
++            we.register_forward_hook(make_hook("embeddings_word_out"))
++            found.append(("embeddings_word_out", f"embedding.word_embeddings [{we.__class__.__name__}]"))
++
++    if hasattr(inner, "decoder"):
++        dec = inner.decoder
++        dec.register_forward_pre_hook(make_pre_hook("decoder_IN"))
++        found.append(("decoder_IN", f"decoder (PRE) [{dec.__class__.__name__}]"))
++        if hasattr(dec, "final_norm") and dec.final_norm is not None:
++            dec.final_norm.register_forward_hook(make_hook("final_norm_out"))
++            dec.final_norm.register_forward_pre_hook(make_pre_hook("final_norm_IN"))
++            found.append(("final_norm_out", f"decoder.final_norm [{dec.final_norm.__class__.__name__}]"))
++            found.append(("final_norm_IN", f"decoder.final_norm (PRE) [{dec.final_norm.__class__.__name__}]"))
++
++        if hasattr(dec, "layers"):
++            for i, layer in enumerate(dec.layers):
++                gid = i // 2
++                tag = "gdn" if i % 2 == 0 else "mlp"
++                layer.register_forward_hook(make_hook(f"L{gid}.{tag}_residual_out"))
++                layer.register_forward_pre_hook(make_pre_hook(f"L{gid}.{tag}_residual_IN"))
++                found.append((f"L{gid}.{tag}_residual_out", f"decoder.layers[{i}] [{layer.__class__.__name__}]"))
++                found.append((f"L{gid}.{tag}_residual_IN", f"decoder.layers[{i}] (PRE) [{layer.__class__.__name__}]"))
++
++                if hasattr(layer, "norm") and layer.norm is not None:
++                    layer.norm.register_forward_hook(make_hook(f"L{gid}.attn_norm_out"))
++                    layer.norm.register_forward_pre_hook(make_pre_hook(f"L{gid}.attn_norm_IN"))
++                    found.append((f"L{gid}.attn_norm_out", f"layers[{i}].norm [{layer.norm.__class__.__name__}]"))
++                if hasattr(layer, "mixer") and layer.mixer is not None:
++                    layer.mixer.register_forward_hook(make_hook(f"L{gid}.attn_out"))
++                    layer.mixer.register_forward_pre_hook(make_pre_hook(f"L{gid}.attn_IN"))
++                    found.append((f"L{gid}.attn_out", f"layers[{i}].mixer [{layer.mixer.__class__.__name__}]"))
++                if hasattr(layer, "pre_mlp_layernorm") and layer.pre_mlp_layernorm is not None:
++                    layer.pre_mlp_layernorm.register_forward_hook(make_hook(f"L{gid}.mlp_norm_out"))
++                    layer.pre_mlp_layernorm.register_forward_pre_hook(make_pre_hook(f"L{gid}.mlp_norm_IN"))
++                    found.append((f"L{gid}.mlp_norm_out", f"layers[{i}].pre_mlp_layernorm [{layer.pre_mlp_layernorm.__class__.__name__}]"))
++                if hasattr(layer, "mlp") and layer.mlp is not None:
++                    layer.mlp.register_forward_hook(make_hook(f"L{gid}.mlp_out"))
++                    layer.mlp.register_forward_pre_hook(make_pre_hook(f"L{gid}.mlp_IN"))
++                    found.append((f"L{gid}.mlp_out", f"layers[{i}].mlp [{layer.mlp.__class__.__name__}]"))
++
++    if hasattr(inner, "output_layer"):
++        ol = inner.output_layer
++        ol.register_forward_hook(make_hook("output_layer_out"))
++        ol.register_forward_pre_hook(make_pre_hook("output_layer_IN"))
++        found.append(("output_layer_out", f"output_layer [{ol.__class__.__name__}]"))
++
++    print(f"[PRIMUS-ACT] registered {len(found)} forward hooks", flush=True)
++    for tag, mod_name in found[:30]:
++        print(f"[PRIMUS-ACT]   {tag:<32} -> {mod_name}", flush=True)
++    if len(found) > 30:
++        print(f"[PRIMUS-ACT]   ... ({len(found)} total)", flush=True)
++    _PRIMUS_ACT_HOOKS_REGISTERED = True
++
++
+ def forward_step(data_iterator, model: MambaModel):
+     """Forward training step.
+ 
+@@ -233,6 +337,36 @@ def forward_step(data_iterator, model: MambaModel):
+             max_seqlen,
+         ) = get_batch(data_iterator, vp_stage)
+ 
++    # Diagnostic: dump iter-1 batch tokens. Activated by PRIMUS_DUMP_ITER1_BATCH=<path>.
++    global _PRIMUS_DUMP_ITER1_BATCH_DONE
++    _dump_path = os.environ.get('PRIMUS_DUMP_ITER1_BATCH', '')
++    if _dump_path and not _PRIMUS_DUMP_ITER1_BATCH_DONE and tokens is not None:
++        try:
++            import torch.distributed as _d
++            _is_rank0 = (not _d.is_initialized()) or _d.get_rank() == 0
++        except Exception:
++            _is_rank0 = True
++        if _is_rank0:
++            os.makedirs(os.path.dirname(os.path.abspath(_dump_path)) or ".", exist_ok=True)
++            torch.save(
++                {
++                    "tokens": tokens.detach().cpu(),
++                    "labels": labels.detach().cpu(),
++                    "loss_mask": (loss_mask.detach().cpu() if loss_mask is not None else None),
++                    "position_ids": (position_ids.detach().cpu() if position_ids is not None else None),
++                },
++                _dump_path,
++            )
++            print(f"[ITER1-DUMP] saved iter-1 batch to {_dump_path} "
++                  f"(tokens.shape={list(tokens.shape)})", flush=True)
++        _PRIMUS_DUMP_ITER1_BATCH_DONE = True
++
++    # Diagnostic: register activation hooks on first forward when PRIMUS_DUMP_ITER1_ACTS is set.
++    global _PRIMUS_DUMP_ITER1_ACTS_DONE
++    _act_path = os.environ.get('PRIMUS_DUMP_ITER1_ACTS', '')
++    if _act_path and not _PRIMUS_DUMP_ITER1_ACTS_DONE:
++        _primus_register_act_hooks(model)
++
+     if cu_seqlens is None:
+         packed_seq_params = None
+     else:
+@@ -259,6 +393,24 @@ def forward_step(data_iterator, model: MambaModel):
+             loss_mask=loss_mask
+         )
+ 
++    # Diagnostic: save captured activations after first forward.
++    if _act_path and not _PRIMUS_DUMP_ITER1_ACTS_DONE and _PRIMUS_CAPTURED_ACTS:
++        try:
++            import torch.distributed as _d
++            _is_rank0 = (not _d.is_initialized()) or _d.get_rank() == 0
++        except Exception:
++            _is_rank0 = True
++        if _is_rank0:
++            os.makedirs(os.path.dirname(os.path.abspath(_act_path)) or ".", exist_ok=True)
++            torch.save(
++                {"activations": dict(_PRIMUS_CAPTURED_ACTS),
++                 "tokens_shape": list(tokens.shape)},
++                _act_path,
++            )
++            print(f"[PRIMUS-ACT] saved {len(_PRIMUS_CAPTURED_ACTS)} activations to {_act_path}",
++                  flush=True)
++        _PRIMUS_DUMP_ITER1_ACTS_DONE = True
++
+     # [ModelOpt]: model is needed to access ModelOpt distillation losses
+     return output_tensor, partial(loss_func, loss_mask, model=model)
+ 
+@@ -316,6 +468,37 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
+         train_val_test_num_samples : A list containing the number of samples in train test and validation.
+     """
+     args = get_args()
++
++    fla_data_flag = os.environ.get("PRIMUS_FLA_DATA", "0")
++    fla_cache = os.environ.get("PRIMUS_FLA_CACHE_DIR", "")
++    print_rank_0(f"> [FLA-check] PRIMUS_FLA_DATA={fla_data_flag!r}, cache={fla_cache!r}")
++    if fla_data_flag == "1" and fla_cache:
++        import importlib.util
++        _spec = importlib.util.spec_from_file_location(
++            "fla_order_dataset",
++            os.path.join(os.environ.get("PRIMUS_PATH", os.getcwd()), "tools", "fla_order_dataset.py"),
++        )
++        _mod = importlib.util.module_from_spec(_spec)
++        _spec.loader.exec_module(_mod)
++        FLAOrderGPTDataset = _mod.FLAOrderGPTDataset
++        from megatron.core import parallel_state
++
++        dp_size = parallel_state.get_data_parallel_world_size()
++        tokenizer = build_tokenizer(args)
++        print_rank_0(f"> building FLA-order dataset from {fla_cache} ...")
++        train_ds = FLAOrderGPTDataset(
++            cache_dir=fla_cache,
++            seq_length=args.seq_length,
++            micro_batch_size=args.micro_batch_size,
++            data_parallel_size=dp_size,
++            seed=args.seed,
++            pad_token_id=0,
++            eod_token=tokenizer.eod,
++            eod_mask_loss=args.eod_mask_loss,
++        )
++        print_rank_0(f"> FLA-order dataset: {len(train_ds)} samples")
++        return train_ds, None, None
++
+     config = core_gpt_dataset_config_from_args(args)
+ 
+     is_packed_sequence = False

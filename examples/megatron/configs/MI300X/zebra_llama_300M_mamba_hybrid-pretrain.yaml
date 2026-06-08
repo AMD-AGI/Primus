@@ -1,0 +1,113 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_300M_mamba_hybrid-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: zebra_llama_300M_mamba_hybrid.yaml
+    overrides:
+      wandb_project: "Primus_Zebra_Llama_300M_Mamba_Hybrid_Pretrain"
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      # 2 dataloader workers per rank — keeps the dataloader pipeline full
+      # without bloating host RSS (16 forked subprocs total at 8 GPUs).
+      num_workers: 2
+      create_attention_mask_in_dataloader: false
+
+      profile: false
+      use_pytorch_profiler: false
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: 100
+      check_for_nan_in_loss_and_grad: false
+      barrier_with_L1_time: false
+
+      seed: 42
+
+      # RMSNorm 1e-6 (override Megatron's default 1e-5)
+      layernorm_epsilon: 1.0e-6
+
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
+
+      # Training schedule — same as the GDN hybrid 300M run for direct
+      # comparison:
+      #   8 GPUs, micro=128, global=1024
+      #   tokens/step = 1024 × 2048 = 2,097,152
+      #   4768 steps × 2.097M ≈ 10B tokens
+      train_iters: 4768
+      micro_batch_size: 128
+      global_batch_size: 1024
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+      original_max_position_embeddings: 2048
+
+      # Optimizer — AdamW with cosine decay (lr 2e-4 → 2e-5 over 4768 iters)
+      clip_grad: 1.0
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 4768
+      lr_decay_style: cosine
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # Mamba2 + MLA hybrid stack via the proven `HybridStack` (no-TE) path.
+      #
+      # Why not the upstream `hybrid_stack_spec` (MambaStack)?  Megatron's
+      # `MambaStack` builder passes `pp_layer_offset` to MLASelfAttention,
+      # but this version of MLASelfAttention.__init__ doesn't accept it
+      # (Megatron API drift).  The HybridStack path used by the GDN/KDA
+      # hybrids doesn't pass that kwarg, so we mirror it for Mamba2.
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'mamba_hybrid_stack_spec_no_te']
+      no_persist_layer_norm: true
+
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.2-1B
+
+      # Parallelism — ZeRO-1 distributed optimizer for memory headroom.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      use_torch_fsdp2: false
+      ddp_average_in_collective: true
+
+      # Data — FLA-aligned FineWeb-Edu 10BT binary (same dataset the GDN
+      # hybrid 300M consumed, so per-token loss curves are directly
+      # comparable).  No PRIMUS_FLA_DATA / PRIMUS_FLA_CACHE_DIR needed —
+      # this is the indexed mmap version Megatron consumes natively.
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # Checkpoints — train from scratch; save once at the end (matches the
+      # GDN hybrid run, avoids mid-training host-RAM OOM from the state-dict
+      # materialisation).
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: ./output/zebra_llama_300M_mamba_hybrid-pretrain
+      save_interval: 99999
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # Turbo off (matches the GDN hybrid baseline)
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      context_parallel_size: 1
