@@ -87,12 +87,18 @@ def _collect_environment_metadata():
             try:
                 env["hip_version"] = torch.version.hip  # type: ignore[attr-defined]
             except Exception:
+                # Best-effort metadata collection: HIP version may be unavailable
+                # on non-ROCm builds/backends, so we intentionally omit it.
                 pass
             try:
                 env["cuda_version"] = torch.version.cuda  # type: ignore[attr-defined]
             except Exception:
+                # Best-effort metadata capture: CUDA version may be unavailable
+                # on non-CUDA/ROCm-only builds; ignore and continue.
                 pass
     except Exception:
+        # Best-effort metadata collection: torch may be unavailable or partially initialized.
+        # Intentionally ignore errors to avoid failing benchmark/projection execution.
         pass
 
     try:
@@ -100,6 +106,8 @@ def _collect_environment_metadata():
 
         versions["megatron"] = getattr(megatron, "__version__", "")
     except Exception:
+        # Best-effort metadata collection: megatron may be unavailable or fail
+        # to import in simulation/lightweight environments; ignore and continue.
         pass
 
     try:
@@ -107,6 +115,7 @@ def _collect_environment_metadata():
 
         versions["primus"] = getattr(primus, "__version__", "")
     except Exception:
+        # Optional best-effort metadata: ignore failures so projection never aborts.
         pass
 
     if versions:
