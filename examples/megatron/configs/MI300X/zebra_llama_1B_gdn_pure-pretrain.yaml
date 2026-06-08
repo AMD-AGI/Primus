@@ -70,12 +70,9 @@ modules:
       use_torch_fsdp2: false
       use_distributed_optimizer: true
 
-      # Data — FLA-aligned FineWeb-Edu sample-10BT
-      # Converted from FLA's preprocessed Arrow dataset so both
-      # frameworks see the exact same tokens in the same order.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      # Data
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 

@@ -462,21 +462,9 @@ modules:
       # by the launcher — see launch_gdn_pure_1B_100B.sh and
       # third_party/Megatron-LM/megatron/core/models/mamba/mamba_model.py.
 
-      # ── Data ─ FLA-aligned via PRIMUS_FLA_DATA=1 at runtime.
-      #
-      # `train_data_path` below is just a Megatron config-parser placeholder;
-      # FLAOrderGPTDataset overrides it when PRIMUS_FLA_DATA=1 + a valid
-      # PRIMUS_FLA_CACHE_DIR are exported.  Point the launcher's
-      # PRIMUS_FLA_CACHE_DIR at the sample-100BT cache (FLA has it on disk
-      # at /home/vanbhati@amd.com/flash-linear-attention/legacy/training/
-      # data/HuggingFaceFW/fineweb-edu/sample-100BT/train).
-      #
-      # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
-      # builder doesn't choke on a missing file — its actual indices and
-      # tokens are never read when FLAOrderGPTDataset is active.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      # Data
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
@@ -484,11 +472,8 @@ modules:
       finetune: false
       auto_continue_train: true
       load: null
-      # FLA's `path=` for this run is /home/vanbhati@amd.com/checkpoints/
-      # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
-      # the two runs' checkpoints can coexist on disk and downstream eval
-      # tools (tools/eval_gdn_lm_eval.py) can A/B them side-by-side.
-      save: /home/vanbhati@amd.com/checkpoints/primus_gdn_pure_1B_100B
+      # Checkpoint save path
+      save: ./output/zebra_llama_1B_gdn_pure_100B-pretrain
       # FLA's 100B launcher passes `save=99999` (HF `--save_steps 99999`),
       # meaning over 95368 iters HF never writes an intermediate ckpt — only
       # the final one at end-of-training (then `--save_total_limit 3` keeps
