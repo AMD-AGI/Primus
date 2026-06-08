@@ -110,9 +110,8 @@ modules:
       # Data — FLA-aligned FineWeb-Edu sample-10BT (same indexed binary the
       # pure GDN/KDA 300M runs consume; uses FLAOrderGPTDataset for identical
       # token ordering to FLA)
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 

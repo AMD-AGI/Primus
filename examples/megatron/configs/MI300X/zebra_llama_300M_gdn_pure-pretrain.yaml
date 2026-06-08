@@ -101,20 +101,16 @@ modules:
       use_distributed_optimizer: false
       ddp_average_in_collective: true
 
-      # Data — FLA-aligned FineWeb-Edu sample-10BT
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      # Data
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
-      # Checkpoints — load FLA-initialized weights for exact comparison
-      finetune: true
+      # Checkpoints
+      finetune: false
       auto_continue_train: false
-      no_load_optim: true
-      no_load_rng: true
-      load: /home/vanbhati@amd.com/Primus/output/fla_init_ckpt_300M
-      save: ./output/zebra_llama_300M_gdn_pure-pretrain-fla-init-v2
+      save: ./output/zebra_llama_300M_gdn_pure-pretrain
       save_interval: 1024
       disable_last_saving: false
       ckpt_format: torch
