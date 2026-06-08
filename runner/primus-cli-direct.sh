@@ -443,9 +443,20 @@ fi
 # Allow RUN_MODE to be overridden by environment variable
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
+# Resolve the launch target. Normally this is the script path
+# (direct_config[script], default: primus/cli/main.py) relative to the repo
+# checkout. When Primus is run from an installed wheel outside the repo, that
+# file is absent; in that case fall back to the installed module form
+# (-m primus.cli.main) so `primus-cli direct ...` works from any directory.
+LAUNCH_TARGET=("${direct_config[script]:-}")
+if [[ "${direct_config[script]:-}" == "primus/cli/main.py" && ! -f "${direct_config[script]:-}" ]]; then
+    LAUNCH_TARGET=(-m primus.cli.main)
+    LOG_INFO_RANK0 "[direct] Default script '${direct_config[script]}' not found in CWD; using installed module 'python -m primus.cli.main'"
+fi
+
 # Build the launch command as an ARRAY and execute it directly (no eval), so
 # Primus arg values containing shell metacharacters are passed verbatim.
-CMD=("${direct_config[script]:-}" "$@")
+CMD=("${LAUNCH_TARGET[@]}" "$@")
 
 if [[ "$RUN_MODE" == "single" ]]; then
     CMD=(python3 "${CMD[@]}")
@@ -502,7 +513,7 @@ else
 fi
 
 PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]:-}"
-PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]:-}"
+PRINT_INFO_RANK0 "  Script Path     : ${LAUNCH_TARGET[*]:-${direct_config[script]:-}}"
 PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
 PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]:-}"
 PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]:-}"
