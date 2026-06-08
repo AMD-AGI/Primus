@@ -82,25 +82,27 @@ EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
   bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
 ```
 
-### Recommended env-var profile
+### Recommended toggle profile (YAML or env var)
 
-KDA uses the same toggle set as GDN (defined in
-[`megatron_patch.sh`](megatron_patch.sh)). The defaults are tuned for
-matching FLA's numerics on MI300X:
+KDA uses the same toggle set as GDN.  Each knob is exposed at two
+equivalent surfaces — the YAML knob (canonical, declarative; co-located
+with the rest of the run config) and the legacy env var (ad-hoc, for
+one-off A/B without editing a YAML).  When both are set, the env var
+wins (backward compat); see
+`primus/backends/megatron/patches/fla_runtime_patches.py` for the
+precedence rules.  Defaults below match FLA's numerics on MI300X:
 
-| Env var | Default | Effect |
-|--|--|--|
-| `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `0` = native Megatron CE. |
-| `PRIMUS_FLA_SWIGLU` | `1` | Replaces Megatron's naive SwiGLU with FLA's Triton-fused kernel (≈20 ms/step saved). |
-| `PRIMUS_FLA_NORM` | `1` | Use FLA's `RMSNorm` Triton kernel via `WrappedTorchNorm`. KDA's gated output norm is selected separately via `use_fla_fused_norm_gated` in the model YAML. |
-| `PRIMUS_FLA_CONV` | `1` | Route KDA's depthwise short conv1d through FLA's Triton `causal_conv1d` (saves ~35 ms/iter by accepting `[B, T, D]` directly — no `transpose+contiguous` round-trip). |
-| `PRIMUS_TORCH_OPTIM` | `1` | Use `torch.optim.AdamW(fused=True)` instead of TE/Apex `FusedAdam` (matches FLA bit-for-bit). |
-| `PRIMUS_FLA_DATA` | `0` | When set together with `PRIMUS_FLA_CACHE_DIR=<HF dataset cache path>`, replace Megatron's `GPTDataset` with the `FLAOrderGPTDataset` shim that emits tokens in the exact same order as FLA's HuggingFace `DistributedSampler`. |
-| `PRIMUS_DUMP_ITER1_BATCH` | unset | Path to dump iter-1 token IDs for cross-framework comparison. |
-| `PRIMUS_DUMP_ITER1_ACTS` | unset | Path to dump per-layer iter-1 activations (registers forward hooks). |
+| YAML knob | Env var | Default | Effect |
+|--|--|--|--|
+| `fused_ce_mode` | `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `0` = native Megatron CE. |
+| `fused_ce_chunks` | `PRIMUS_FUSED_CE_CHUNKS` | `32` | Number of chunks the FLA CE splits the logits across.  Lower = faster but bigger peak allocation. |
+| `use_fla_fused_swiglu` | `PRIMUS_FLA_SWIGLU` | `1` | Replaces Megatron's naive SwiGLU with FLA's Triton-fused kernel (≈20 ms/step saved). |
+| `use_fla_fused_rmsnorm` | `PRIMUS_FLA_NORM` | `1` | Use FLA's `RMSNorm` Triton kernel via `WrappedTorchNorm`.  KDA's gated output norm is selected separately via `use_fla_fused_norm_gated` in the model YAML. |
+| `use_fla_short_conv` | `PRIMUS_FLA_CONV` | `1` | Route KDA's depthwise short conv1d through FLA's Triton `causal_conv1d` (saves ~35 ms/iter by accepting `[B, T, D]` directly — no `transpose+contiguous` round-trip). |
+| _(env-only)_ | `PRIMUS_TORCH_OPTIM` | `1` | Use `torch.optim.AdamW(fused=True)` instead of TE/Apex `FusedAdam` (matches FLA bit-for-bit). |
+| `use_fla_data` + `fla_cache_dir` | `PRIMUS_FLA_DATA` + `PRIMUS_FLA_CACHE_DIR` | `0` / `""` | When `use_fla_data=true` and `fla_cache_dir=<HF dataset cache path>`, replace Megatron's `GPTDataset` with the `FLAOrderGPTDataset` shim that emits tokens in the exact same order as FLA's HuggingFace `DistributedSampler`. |
 
-`PRIMUS_NATIVE_GVA` and `PRIMUS_NO_TE` are GDN-only and have no effect on
-KDA. KDA's TE/no-TE selection is done by the `spec:` line in the YAML
+KDA's TE/no-TE selection is done by the `spec:` line in the YAML
 (`kda_hybrid_stack_spec_no_te` for no-TE, which is the default).
 
 ---
@@ -118,7 +120,7 @@ in `GDN_FLA_PARITY.md`).
 | `primus/backends/megatron/core/models/hybrid/kimi_delta_attention.py` | Replace six separate `hidden_states → X` projections (q, k, v, beta, f_a, g_a) with a single fused `in_proj: ColumnParallelLinear` of width `2·qk_dim + v_dim + 2·head_v_dim + num_v_heads`. Split downstream into `[qkv | f_a | g_a | beta]`. The two low-rank-bottleneck expansion projections (`f_b`, `g_b`) stay separate because their input is the 64-dim bottleneck output, not `hidden_states`. | Matches GDN's fusion recipe. On ROCm each separate matmul pays ~3-5 ms of HIP dispatch + autograd overhead; the GDN parity work measured this same fusion at ~250 ms/iter saved. KDA was originally launching 6 matmuls/layer × 12 layers = 72 dispatches; now it's 12. |
 | same file | Add optional `FusedRMSNormGated` (RMSNorm + sigmoid-gate + multiply in ONE Triton kernel) for the per-head output gate, gated by `use_fla_fused_norm_gated` (default `True` when `use_fla_triton_kda=True`). | Avoids materializing the post-norm tensor and the fp32-upcast gate for backward — saves ~6.4 GiB activation memory per rank at micro_batch=128. Matches `fla/layers/kda.py` exactly. |
 | same file | Add optional in-kernel gate fusion path: when `use_fla_kda_in_kernel_gate=True`, call `chunk_kda(..., A_log=…, dt_bias=…, use_gate_in_kernel=True)` and let the kernel fuse `−exp(A_log) · softplus(g + dt_bias) + cumsum` internally (recomputed in backward). The pre-fusion `fused_kda_gate()` path is kept under `use_fla_kda_in_kernel_gate=False` for bit-identical comparison with FLA's old code. | Smallest activation footprint. The bf16 in-kernel accumulator drifts ~+0.2 lm-loss vs the explicit-gate path on ROCm at 12 layers depth; the FLA-init checkpoint cancels the drift, giving GDN-style parity. |
-| same file | Add optional FLA Triton `causal_conv1d` path under `PRIMUS_FLA_CONV=1`. The FLA kernel accepts `[B, T, D]` directly (no `transpose+contiguous` round-trip). | Matches the conv backend FLA's `ShortConvolution` uses. Saves ~35 ms/iter (two avoided full-qkv buffer copies × ~17 ms each). |
+| same file | Add optional FLA Triton `causal_conv1d` path under `args.use_fla_short_conv` (was `PRIMUS_FLA_CONV`). The FLA kernel accepts `[B, T, D]` directly (no `transpose+contiguous` round-trip). | Matches the conv backend FLA's `ShortConvolution` uses. Saves ~35 ms/iter (two avoided full-qkv buffer copies × ~17 ms each). |
 | same file | `g_b_proj.bias=True` and `dt_bias` initialised by FLA's log-uniform + inverse-softplus recipe (was `nn.init.ones_` → `dt ≈ 1.31`, ~20× larger than FLA's intended range). `beta = b_proj(h).float().sigmoid()` (fp32 sigmoid stops bf16 drift across 12 layers). Removed the `@torch.compiler.disable` decorator on `forward()`. | (a) `g_b_proj` bias matches `fla/layers/kda.py:189`. (b) `dt_bias` init matches `fla/layers/kda.py:180-184`; without it the gate's initial decay step is ~20× too large and the loss curve drifts visibly by iter 100. (c) fp32 sigmoid eliminates ~+0.2 lm-loss bf16 drift. (d) the compiler-disable was a leftover from debugging and cost ~25 ms/iter in dispatch overhead. |
 | same file | Materialize `q.contiguous() / k.contiguous() / v.contiguous()` after the `torch.split` on the fused in_proj output. | The `torch.split` along `dim=-1` returns non-contiguous views; passing them into `chunk_kda` as views makes the Triton kernel allocate a second internal contiguous copy while autograd still pins the original views. Net 2× activation memory for Q/K/V (~29 GiB extra at micro_batch=128). The explicit `.contiguous()` here gives autograd a single canonical buffer to save. Tested: 184 GiB → 155 GiB at iter 1. |
 | `primus/backends/megatron/core/models/hybrid/kimi_delta_attention_layer.py` | Add `KimiDeltaAttentionLayerSubmodules.norm` field (default `IdentityOp`). When set to `WrappedTorchNorm`, the layer applies an explicit pre-norm matching `fla/models/kda/modeling_kda.py:113` `hidden_states = self.attn_norm(...)`. `eps` is forwarded explicitly because `WrappedTorchNorm` defaults to `1e-5` while KDA configs (and FLA) use `1e-6`. | Required for the no-TE spec (which uses plain `ColumnParallelLinear` for `in_proj`) to apply the pre-norm separately. Without this fix the no-TE path skipped the pre-norm entirely, producing nonsense at iter 1. |
@@ -236,7 +238,7 @@ DeepSpeed sum-across-ranks):
 
 The persistent gap (iter 50–500) is attributable to dataloader ordering —
 Megatron `GPTDataset` uses its own random shuffler while FLA uses
-HuggingFace's `DistributedSampler`. With `PRIMUS_FLA_DATA=1` the gap
+HuggingFace's `DistributedSampler`. With `use_fla_data: true` the gap
 closes further but Primus has been verified to converge to within ±1% by
 iter 1000 even without it.
 
@@ -252,7 +254,7 @@ megatron_patches/                                  # 6 patches (same as GDN)
   03-mlp-fla-swiglu.patch
   04-torch_norm-fla-rmsnorm.patch
   05-transformer_config-hybrid-init.patch
-  06-pretrain_mamba-fla-data-and-diag.patch
+  06-pretrain_mamba-fla-data.patch
 primus/backends/megatron/core/models/hybrid/
   kimi_delta_attention.py                          # FLA-aligned mixer
   kimi_delta_attention_layer.py                    # wrapper w/ pre-norm

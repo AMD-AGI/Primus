@@ -210,7 +210,7 @@ no_load_optim: true
 no_load_rng: true
 ```
 
-The Primus repo includes `tools/init_primus_from_fla.py` (untracked, kept for forensics) that takes the FLA HuggingFace random-init checkpoint and writes a Megatron-shape `iter_0000000/mp_rank_00/model_optim_rng.pt`. Skip this step if you're happy with Primus's own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
+The Primus repo includes `tools/convert_fla_gdn_init_to_megatron.py` (the GDN counterpart of `tools/convert_fla_kda_init_to_megatron.py`) that takes the FLA HuggingFace random-init checkpoint and writes a Megatron-shape `iter_0000000/mp_rank_00/model_optim_rng.pt`. Skip this step if you're happy with Primus's own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
 
 ---
 
@@ -254,9 +254,28 @@ EXP=examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml \
 
 This brings up `torchrun` with 8 ranks on the local node. Expected wall time on a healthy MI300X box: **~1h 54m** for the full 4768 iters.
 
-### 5.3 Recommended env-var profile (for FLA parity)
+### 5.3 Recommended toggle profile (for FLA parity)
 
-The defaults are already good; for *bit-level* parity with FLA's optimizer/CE/SwiGLU kernels, also set:
+The defaults are already good; for *bit-level* parity with FLA's
+optimizer/CE/SwiGLU kernels, set the following.  Either surface works
+(YAML wins for declarative runs; env vars win for ad-hoc overrides
+since the patch `fla_runtime_patches.py` does not overwrite an
+already-set env var).
+
+Preferred (canonical) — add to the experiment YAML's `overrides:` block:
+
+```yaml
+use_fla_fused_swiglu: true       # FLA Triton SwiGLU
+use_fla_fused_rmsnorm: true      # FLA fused RMSNorm
+use_fla_fused_gated_norm: true   # FLA FusedRMSNormGated path
+fused_ce_mode: 1                 # FLA FusedLinearCrossEntropyLoss (chunked, no full logits tensor)
+fused_ce_chunks: 32              # Chunk count for FLA fused CE
+# Only if you did Option B (FLA-aligned data) AND want bit-identical iter-1:
+use_fla_data: true
+fla_cache_dir: /home/<user>/Primus/data/huggingface
+```
+
+Legacy (still supported):
 
 ```bash
 export PRIMUS_FUSED_CE=1          # FLA FusedLinearCrossEntropyLoss (chunked, no full logits tensor)
@@ -487,7 +506,7 @@ megatron_patches/
 ├── 03-mlp-fla-swiglu.patch
 ├── 04-torch_norm-fla-rmsnorm.patch
 ├── 05-transformer_config-hybrid-init.patch
-└── 06-pretrain_mamba-fla-data-and-diag.patch
+└── 06-pretrain_mamba-fla-data.patch
 examples/megatron/configs/MI300X/
 └── zebra_llama_300M_gdn_pure-pretrain.yaml            ← training config
 primus/configs/models/megatron/
