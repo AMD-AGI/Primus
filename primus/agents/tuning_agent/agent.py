@@ -301,8 +301,13 @@ class _RLMProgressCallback(dspy.utils.callback.BaseCallback):
                     "text": text[:3000],
                     "text_len": len(text),
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort callback: never break agent execution on progress/log formatting failures.
+            self._session_log.append({
+                "ts": datetime.now().isoformat(),
+                "kind": "lm_output_callback_error",
+                "error": str(e),
+            })
 
 
 # ---------------------------------------------------------------------------

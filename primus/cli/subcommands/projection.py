@@ -90,6 +90,8 @@ def run(args, overrides):
                 try:
                     os.unlink(save_path)
                 except OSError:
+                    # Best-effort cleanup: ignore temp-file deletion failures
+                    # to avoid masking projection/benchmark errors.
                     pass
     else:
         raise NotImplementedError(f"Unsupported projection suite: {args.suite}")

@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import logging
 import os
 from typing import Optional
 
@@ -23,6 +24,7 @@ from .utils import benchmark_layer, _install_balanced_routing_patches, _kernel_p
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
+_LOGGER = logging.getLogger(__name__)
 
 
 def _estimate_layernorm_residual_time_ms(
@@ -483,7 +485,8 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
                         try:
                             restore()
                         except Exception:
-                            pass
+                            # Best-effort cleanup: restore failures should not fail benchmarking.
+                            _LOGGER.debug("Failed to restore routing patch during cleanup.", exc_info=True)
             else:
                 self._cached_results = self._get_benchmark_composite_results(batch_size, seq_len)
             self._cache_key = cache_key

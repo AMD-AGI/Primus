@@ -360,7 +360,8 @@ def launch_projection_from_cli(args, overrides):
         if torch.cuda.is_available():
             _, total_vram_bytes = torch.cuda.mem_get_info()
     except Exception:
-        pass
+        # Best-effort probe only: if torch/cuda info is unavailable, keep fallback.
+        total_vram_bytes = 0
 
     if is_rank_0:
         target_label = (
