@@ -41,7 +41,7 @@ modules:
       #   8 GPUs, micro=128, global=1024
       #   tokens/step = 1024 × 2048 = 2,097,152
       #   4768 steps × 2.097M ≈ 10B tokens
-      train_iters: 4768
+      train_iters: 50
       micro_batch_size: 128
       global_batch_size: 1024
 

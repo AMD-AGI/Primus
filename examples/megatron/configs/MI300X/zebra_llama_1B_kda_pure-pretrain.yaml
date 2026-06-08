@@ -27,7 +27,7 @@ modules:
       #   batch=16, update=1, gpus=4, context=2048
       #   global_batch = 16 * 4 = 64, tokens/step = 64 * 2048 = 131,072
       #   total tokens ~= 76294 * 131072 ≈ 10B
-      train_iters: 76294
+      train_iters: 50
       micro_batch_size: 16
       global_batch_size: 64
 

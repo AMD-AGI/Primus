@@ -25,7 +25,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 38147
+      train_iters: 50
       micro_batch_size: 4
       global_batch_size: 32
 
