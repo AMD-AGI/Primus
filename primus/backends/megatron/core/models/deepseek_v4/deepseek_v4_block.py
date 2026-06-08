@@ -914,6 +914,76 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
     # ------------------------------------------------------------------
 
+    def _recompute_local_layer_indices(self) -> Optional[set]:
+        """Local indices of layers to activation-checkpoint on this stage.
+
+        Returns ``None`` when no recompute should be applied (the caller
+        then runs the plain forward loop). Mirrors Megatron semantics:
+
+        * only active when ``recompute_granularity == 'full'`` and training;
+        * ``recompute_method == 'block'``   -> first ``recompute_num_layers``
+          layers of this PP stage;
+        * ``recompute_method == 'uniform'`` -> every layer on this stage
+          (chunk size ``recompute_num_layers``; for full-layer checkpointing
+          the chunk boundary does not change which layers are recomputed);
+        * Primus ``recompute_layer_ids`` (explicit GLOBAL indices) takes
+          precedence when set.
+        """
+        if not self.training:
+            return None
+
+        cfg = self.config
+        if getattr(cfg, "recompute_granularity", None) != "full":
+            return None
+
+        n_local = len(self.layers)
+        if n_local == 0:
+            return None
+
+        recompute_layer_ids = getattr(cfg, "recompute_layer_ids", None)
+        if recompute_layer_ids:
+            wanted = {int(i) for i in recompute_layer_ids}
+            local = {
+                local_idx
+                for local_idx, global_idx in enumerate(self.global_layer_indices)
+                if int(global_idx) in wanted
+            }
+            return local or None
+
+        num = int(getattr(cfg, "recompute_num_layers", 0) or 0)
+        if num <= 0:
+            return None
+
+        method = getattr(cfg, "recompute_method", None) or "block"
+        if method == "block":
+            return set(range(min(num, n_local)))
+        if method == "uniform":
+            return set(range(n_local))
+        raise ValueError(f"Invalid recompute_method for DeepSeek-V4: {method!r}")
+
+    def _forward_layer_checkpointed(self, layer, x, position_ids, token_ids):
+        """Run one V4 layer under activation checkpointing.
+
+        Only the hidden-state tensor ``x`` is passed as the checkpointed
+        arg (``args[0]``); ``position_ids`` / ``token_ids`` are integer
+        tensors that need no grad and are captured by closure. The closure
+        returns just the hidden tensor (V4 layers return ``(hidden, None)``)
+        so the checkpoint backward sees a single grad-requiring output.
+        """
+        from megatron.core import tensor_parallel
+
+        def _run(hidden):
+            out, _ = layer(hidden, position_ids=position_ids, token_ids=token_ids)
+            return out
+
+        return tensor_parallel.checkpoint(
+            _run,
+            self.config.distribute_saved_activations,
+            x,
+        )
+
+    # ------------------------------------------------------------------
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1002,12 +1072,16 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         # Run the layers. Each V4 layer returns ``(hidden, None)`` for
         # upstream-tuple compatibility (see DeepseekV4HybridLayer.forward).
-        for layer in self.layers:
-            x, _ = layer(
-                x,
-                position_ids=position_ids,
-                token_ids=token_ids,
-            )
+        recompute_local = self._recompute_local_layer_indices()
+        for local_idx, layer in enumerate(self.layers):
+            if recompute_local is not None and local_idx in recompute_local:
+                x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids)
+            else:
+                x, _ = layer(
+                    x,
+                    position_ids=position_ids,
+                    token_ids=token_ids,
+                )
 
         # Final HC collapse on post_process stage; non-final stages
         # forward the multi-stream form through PP P2P.
