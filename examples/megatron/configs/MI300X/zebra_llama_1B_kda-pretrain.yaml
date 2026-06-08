@@ -55,9 +55,9 @@ modules:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
-      overlap_grad_reduce: true
-      overlap_param_gather: true
-      gradient_accumulation_fusion: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
       use_torch_fsdp2: false
       use_distributed_optimizer: true
 
