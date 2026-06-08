@@ -88,6 +88,10 @@ modules:
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec_no_te']
       use_fla_triton_kda: true
 
+      # Force pure KDA: override shared model's hybrid_attention_ratio to 0.0
+      # so HybridStack.allocate_layers produces all M- (KDA+MLP) pairs, zero attention.
+      hybrid_attention_ratio: 0.0
+
       # Full FLA-exact kernel fusion (matches fla/layers/kda.py exactly):
       #   use_fla_kda_in_kernel_gate=True  → chunk_kda(use_gate_in_kernel=True,
       #     use_qk_l2norm_in_kernel=True); gate `-exp(A_log)*softplus(g+dt_bias)

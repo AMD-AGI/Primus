@@ -57,6 +57,10 @@ modules:
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec']
       use_fla_triton_kda: true
 
+      # Force pure KDA: override shared model's hybrid_attention_ratio to 0.0
+      # so HybridStack.allocate_layers produces all M- (KDA+MLP) pairs, zero attention.
+      hybrid_attention_ratio: 0.0
+
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
       tokenizer_model: meta-llama/Llama-3.2-1B
