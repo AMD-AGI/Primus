@@ -22,25 +22,20 @@ Tools provided to the LLM:
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime
-from pathlib import Path
 from typing import Callable
 
 from .config import AgentConfig
-from .evaluator import Evaluator, EvalResult
+from .evaluator import EvalResult, Evaluator
 from .history import History
-from .legality import (
-    AxisLegality, TrialConfig, derive_legality, fill_defaults_from_baseline,
-    derived_dp,
-)
+from .legality import AxisLegality, TrialConfig, fill_defaults_from_baseline
 from .scratchpad import Scratchpad
 from .workload import ArchitectureRecord
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _safe_load_json(s: str) -> dict | None:
     if isinstance(s, dict):
@@ -82,6 +77,7 @@ def _tag(cfg: TrialConfig, idx: int) -> str:
 # Tool-belt builder
 # ---------------------------------------------------------------------------
 
+
 def build_tools(
     agent_cfg: AgentConfig,
     arch: ArchitectureRecord,
@@ -100,11 +96,13 @@ def build_tools(
     budget = agent_cfg.optimization.budget
 
     def _log(kind: str, **payload):
-        session_log.append({
-            "ts": datetime.now().isoformat(),
-            "kind": kind,
-            **payload,
-        })
+        session_log.append(
+            {
+                "ts": datetime.now().isoformat(),
+                "kind": kind,
+                **payload,
+            }
+        )
         if not quiet:
             print(f"    [tool:{kind}] {payload.get('summary', '')[:160]}")
 
@@ -122,9 +120,13 @@ def build_tools(
                 if t.config == cfg.as_dict():
                     return {"already_evaluated": True, **t.result}
         if mode == "simulate" and evaluator.n_simulate_calls >= budget.max_perf_calls:
-            return {"error": f"simulate budget exhausted ({evaluator.n_simulate_calls}/{budget.max_perf_calls})"}
+            return {
+                "error": f"simulate budget exhausted ({evaluator.n_simulate_calls}/{budget.max_perf_calls})"
+            }
         if mode == "benchmark" and evaluator.n_benchmark_calls >= budget.max_benchmark_calls:
-            return {"error": f"benchmark budget exhausted ({evaluator.n_benchmark_calls}/{budget.max_benchmark_calls})"}
+            return {
+                "error": f"benchmark budget exhausted ({evaluator.n_benchmark_calls}/{budget.max_benchmark_calls})"
+            }
 
         idx = len(history.trials)
         tag = _tag(cfg, idx)
@@ -136,9 +138,12 @@ def build_tools(
             r = evaluator.evaluate_benchmark(cfg, tag)
         history.add(cfg.as_dict(), r, notes=f"mode={mode}")
         out = _result_for_llm(r)
-        _log("evaluate",
-             summary=f"{mode} #{idx} legal={r.legal} tps={r.tokens_per_s_per_gpu} mem={r.memory_per_gpu_gb}",
-             config=cfg.as_dict(), result=out)
+        _log(
+            "evaluate",
+            summary=f"{mode} #{idx} legal={r.legal} tps={r.tokens_per_s_per_gpu} mem={r.memory_per_gpu_gb}",
+            config=cfg.as_dict(),
+            result=out,
+        )
         return out
 
     def evaluate_simulate(config_json: str) -> str:
@@ -185,11 +190,13 @@ def build_tools(
         b = history.best(agent_cfg.optimization.objective)
         if b is None:
             return json.dumps({"none": True})
-        return json.dumps({
-            "idx": b.idx,
-            "config": b.config,
-            "result": b.result,
-        })
+        return json.dumps(
+            {
+                "idx": b.idx,
+                "config": b.config,
+                "result": b.result,
+            }
+        )
 
     def get_legal_axes() -> str:
         """Per-axis legal value sets for this (model, cluster)."""
@@ -201,28 +208,32 @@ def build_tools(
 
     def get_cluster() -> str:
         """Target cluster spec."""
-        return json.dumps({
-            "name": agent_cfg.target_cluster.name,
-            "num_nodes": agent_cfg.target_cluster.num_nodes,
-            "gpus_per_node": agent_cfg.target_cluster.gpus_per_node,
-            "gpu_arch": agent_cfg.target_cluster.gpu_arch,
-            "world_size": agent_cfg.target_cluster.num_nodes * agent_cfg.target_cluster.gpus_per_node,
-            "hbm_capacity_gb": agent_cfg.optimization.hbm_capacity_gb,
-            "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
-            "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
-            "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
-        })
+        return json.dumps(
+            {
+                "name": agent_cfg.target_cluster.name,
+                "num_nodes": agent_cfg.target_cluster.num_nodes,
+                "gpus_per_node": agent_cfg.target_cluster.gpus_per_node,
+                "gpu_arch": agent_cfg.target_cluster.gpu_arch,
+                "world_size": agent_cfg.target_cluster.num_nodes * agent_cfg.target_cluster.gpus_per_node,
+                "hbm_capacity_gb": agent_cfg.optimization.hbm_capacity_gb,
+                "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
+                "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
+                "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
+            }
+        )
 
     def get_budget_status() -> str:
         """Remaining call budget."""
-        return json.dumps({
-            "simulate_used": evaluator.n_simulate_calls,
-            "simulate_max": budget.max_perf_calls,
-            "benchmark_used": evaluator.n_benchmark_calls,
-            "benchmark_max": budget.max_benchmark_calls,
-            "memory_only_used": evaluator.n_memory_calls,
-            "trials_total": len(history.trials),
-        })
+        return json.dumps(
+            {
+                "simulate_used": evaluator.n_simulate_calls,
+                "simulate_max": budget.max_perf_calls,
+                "benchmark_used": evaluator.n_benchmark_calls,
+                "benchmark_max": budget.max_benchmark_calls,
+                "memory_only_used": evaluator.n_memory_calls,
+                "trials_total": len(history.trials),
+            }
+        )
 
     # -----------------------------------------------------------------
     # Scratchpad tools
@@ -248,6 +259,7 @@ def build_tools(
         """
         try:
             import dspy
+
             lm = dspy.settings.lm
             messages = []
             if system:

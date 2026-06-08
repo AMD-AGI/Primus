@@ -7,10 +7,10 @@ from pathlib import Path
 from .history import History
 
 
-def plot_history(history: History, out_path: Path,
-                 objective: str = "tokens_per_s_per_gpu") -> Path | None:
+def plot_history(history: History, out_path: Path, objective: str = "tokens_per_s_per_gpu") -> Path | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:

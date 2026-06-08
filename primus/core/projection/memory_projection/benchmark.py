@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection.config_validation import assert_recompute_pipeline_compat
 from primus.core.projection.memory_projection.extrapolation import (
     BenchMeasurement,
     extract_bench_measurement,
@@ -37,11 +38,9 @@ from primus.core.projection.module_profilers.language_model import (
     build_profiler,
     get_language_model_profiler_spec,
 )
-from primus.core.projection.config_validation import assert_recompute_pipeline_compat
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -110,7 +109,7 @@ def _build_bench_training_config(
     # Layer bench runs at PP=1; keep the target's 16-stage layout string only when
     # PP×VPP matches, or LanguageModelProfiler raises during memory extrapolation.
     bench_pp = int(getattr(mp, "pipeline_model_parallel_size", 1) or 1)
-    bench_vpp = int(getattr(mp, "virtual_pipeline_model_parallel_size", 1) or 1)
+    int(getattr(mp, "virtual_pipeline_model_parallel_size", 1) or 1)
     if bench_pp <= 1:
         mp.virtual_pipeline_model_parallel_size = 1
         mp.pipeline_model_parallel_layout = None
@@ -203,9 +202,7 @@ def _run_bench(
 
 def _load_bench(load_path: str) -> Tuple[Dict[Any, Any], Dict[str, Any]]:
     """Load a previously saved bench artifact."""
-    from primus.core.projection.performance_projection.projection import (
-        _load_artifact,
-    )
+    from primus.core.projection.performance_projection.projection import _load_artifact
 
     payload = _load_artifact(load_path)
     profiling_results = payload.get("profiling_results", {}) or {}
@@ -234,9 +231,7 @@ def launch_projection_from_cli(args, overrides):
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
-        raise FileNotFoundError(
-            f"[Primus:Memory Projection] Config file '{cfg_path}' not found."
-        )
+        raise FileNotFoundError(f"[Primus:Memory Projection] Config file '{cfg_path}' not found.")
 
     primus_config, _unknown = load_primus_config(args, overrides or [])
     primus_config_original = copy.deepcopy(primus_config)
@@ -263,15 +258,11 @@ def launch_projection_from_cli(args, overrides):
     load_path = _resolve_load_path(args)
     if load_path:
         if is_rank_0:
-            print(
-                f"[Primus:Memory Projection] Loading bench artifact: {load_path}"
-            )
+            print(f"[Primus:Memory Projection] Loading bench artifact: {load_path}")
         profiling_results, metadata = _load_bench(load_path)
     else:
         if is_rank_0:
-            print(
-                f"[Primus:Memory Projection] Running bench on {benchmark_gpus} GPU(s)..."
-            )
+            print(f"[Primus:Memory Projection] Running bench on {benchmark_gpus} GPU(s)...")
         profiling_results, metadata = _run_bench(
             args,
             overrides or [],
@@ -291,9 +282,7 @@ def launch_projection_from_cli(args, overrides):
 
     bench_summary = metadata.get("bench_training_config_summary")
     if bench_summary:
-        bench_training_config = _build_bench_training_config(
-            target_training_config, bench_summary
-        )
+        bench_training_config = _build_bench_training_config(target_training_config, bench_summary)
     else:
         # Best-effort fallback: assume bench config equals target with the
         # parallelism dims overridden.  Activation correction will still
@@ -309,9 +298,7 @@ def launch_projection_from_cli(args, overrides):
         mp.pipeline_model_parallel_size = int(metadata.get("benchmark_pp", 1) or 1)
         mp.expert_model_parallel_size = int(metadata.get("benchmark_ep", 1) or 1)
         if metadata.get("benchmark_num_experts") is not None:
-            bench_training_config.model_config.num_experts = int(
-                metadata["benchmark_num_experts"]
-            )
+            bench_training_config.model_config.num_experts = int(metadata["benchmark_num_experts"])
 
     target_profiler = build_profiler(get_language_model_profiler_spec(target_training_config))
     bench_profiler = build_profiler(get_language_model_profiler_spec(bench_training_config))

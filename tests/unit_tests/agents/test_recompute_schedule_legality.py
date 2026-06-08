@@ -37,7 +37,13 @@ def test_validate_rejects_recompute_with_zbv():
     cluster = _cluster()
     legality = derive_legality(arch, cluster)
     cfg = TrialConfig(
-        tp=1, pp=4, ep=1, cp=1, mbs=2, gbs=128, vpp=2,
+        tp=1,
+        pp=4,
+        ep=1,
+        cp=1,
+        mbs=2,
+        gbs=128,
+        vpp=2,
         pp_schedule="zbv-formatted",
         recompute_granularity="full",
         recompute_num_layers=4,

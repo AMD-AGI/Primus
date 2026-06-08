@@ -40,7 +40,7 @@ from .legality import derive_legality
 from .plan import build_seed_plan
 from .plotting import plot_history
 from .scratchpad import Scratchpad
-from .workload import resolve_workload, _find_primus_root
+from .workload import _find_primus_root, resolve_workload
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -48,33 +48,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         prog="primus.agents.tuning_agent",
         description="LLM-driven search for an optimal Primus parallelization configuration.",
     )
-    p.add_argument("--workload", required=True, type=Path,
-                   help="Path to a Primus pretrain YAML.")
-    p.add_argument("--target-cluster", required=True, type=Path,
-                   help="Path to target_cluster.yaml.")
-    p.add_argument("--out-dir", type=Path, default=None,
-                   help="Output directory for trials, plot, scratchpad.")
-    p.add_argument("--mode", choices=("dry", "memory-real", "full"),
-                   default="full",
-                   help="Evaluator mode (default: full). See module docstring.")
-    p.add_argument("--profiling-mode", choices=("simulate", "benchmark"),
-                   default="simulate",
-                   help=("Profiling backend for `projection performance` in --mode full. "
-                         "`simulate` uses Origami (no GPU); `benchmark` runs real GPUs "
-                         "via torch.distributed.run on the local node and projects to "
-                         "target_cluster.num_nodes (requires has_gpu=true)."))
-    p.add_argument("--dry-run", action="store_true",
-                   help="Shorthand for --mode dry.")
-    p.add_argument("--seed-only", action="store_true",
-                   help="Evaluate the systematic seed plan only; skip LLM.")
-    p.add_argument("--no-agent", action="store_true",
-                   help="Alias for --seed-only.")
-    p.add_argument("--agent-only", action="store_true",
-                   help="Skip seed evaluation; run LLM agent on existing history.")
-    p.add_argument("--resume", action="store_true",
-                   help="Reuse an existing trials.jsonl in --out-dir.")
-    p.add_argument("--seed-budget", type=int, default=12,
-                   help="Max seed candidates evaluated before the LLM takes over.")
+    p.add_argument("--workload", required=True, type=Path, help="Path to a Primus pretrain YAML.")
+    p.add_argument("--target-cluster", required=True, type=Path, help="Path to target_cluster.yaml.")
+    p.add_argument(
+        "--out-dir", type=Path, default=None, help="Output directory for trials, plot, scratchpad."
+    )
+    p.add_argument(
+        "--mode",
+        choices=("dry", "memory-real", "full"),
+        default="full",
+        help="Evaluator mode (default: full). See module docstring.",
+    )
+    p.add_argument(
+        "--profiling-mode",
+        choices=("simulate", "benchmark"),
+        default="simulate",
+        help=(
+            "Profiling backend for `projection performance` in --mode full. "
+            "`simulate` uses Origami (no GPU); `benchmark` runs real GPUs "
+            "via torch.distributed.run on the local node and projects to "
+            "target_cluster.num_nodes (requires has_gpu=true)."
+        ),
+    )
+    p.add_argument("--dry-run", action="store_true", help="Shorthand for --mode dry.")
+    p.add_argument(
+        "--seed-only", action="store_true", help="Evaluate the systematic seed plan only; skip LLM."
+    )
+    p.add_argument("--no-agent", action="store_true", help="Alias for --seed-only.")
+    p.add_argument(
+        "--agent-only", action="store_true", help="Skip seed evaluation; run LLM agent on existing history."
+    )
+    p.add_argument("--resume", action="store_true", help="Reuse an existing trials.jsonl in --out-dir.")
+    p.add_argument(
+        "--seed-budget", type=int, default=12, help="Max seed candidates evaluated before the LLM takes over."
+    )
     return p.parse_args(argv)
 
 
@@ -100,13 +107,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[tuning-agent] out dir:         {agent_cfg.out_dir}")
     print(f"[tuning-agent] primus root:     {primus_root}")
     arch = resolve_workload(workload_yaml, primus_root=primus_root)
-    print(f"[tuning-agent] resolved model:  {arch.model_name} "
-          f"(layers={arch.num_layers}, hidden={arch.hidden_size}, "
-          f"moe={arch.is_moe} experts={arch.num_experts} topk={arch.moe_router_topk})")
+    print(
+        f"[tuning-agent] resolved model:  {arch.model_name} "
+        f"(layers={arch.num_layers}, hidden={arch.hidden_size}, "
+        f"moe={arch.is_moe} experts={arch.num_experts} topk={arch.moe_router_topk})"
+    )
 
     legality = derive_legality(arch, agent_cfg.target_cluster)
-    print(f"[tuning-agent] legal axes: TP={legality.tp} PP={legality.pp} "
-          f"EP={legality.ep} CP={legality.cp} MBS={legality.mbs} VPP={legality.vpp}")
+    print(
+        f"[tuning-agent] legal axes: TP={legality.tp} PP={legality.pp} "
+        f"EP={legality.ep} CP={legality.cp} MBS={legality.mbs} VPP={legality.vpp}"
+    )
 
     # ── output dirs ─────────────────────────────────────────────────────
     agent_cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -116,8 +127,10 @@ def main(argv: list[str] | None = None) -> int:
     summary_path = agent_cfg.out_dir / "summary.json"
 
     if not args.resume and history_path.exists():
-        print(f"[tuning-agent] WARN: {history_path} exists; re-using "
-              f"(pass --resume to suppress this warning).")
+        print(
+            f"[tuning-agent] WARN: {history_path} exists; re-using "
+            f"(pass --resume to suppress this warning)."
+        )
 
     history = History.load(history_path)
     scratchpad = Scratchpad(scratchpad_path)
@@ -126,10 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[tuning-agent] evaluator mode:  {eval_mode}")
     print(f"[tuning-agent] profiling mode:  {args.profiling_mode}")
     if args.profiling_mode == "benchmark" and not agent_cfg.benchmark_host.has_gpu:
-        print("[tuning-agent] WARN: --profiling-mode benchmark but "
-              "available_for_benchmark.has_gpu=false; benchmark trials will be "
-              "marked illegal. Edit the target-cluster YAML to enable.",
-              file=sys.stderr)
+        print(
+            "[tuning-agent] WARN: --profiling-mode benchmark but "
+            "available_for_benchmark.has_gpu=false; benchmark trials will be "
+            "marked illegal. Edit the target-cluster YAML to enable.",
+            file=sys.stderr,
+        )
 
     # ── seed evaluation ─────────────────────────────────────────────────
     if args.agent_only:
@@ -137,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     seed = build_seed_plan(arch, agent_cfg, max_candidates=args.seed_budget)
     if not args.agent_only:
         print(f"\n[tuning-agent] seed plan: {seed.rationale}")
-    for cfg in ([] if args.agent_only else seed.candidates):
+    for cfg in [] if args.agent_only else seed.candidates:
         sig = cfg.signature()
         if history.already_evaluated(cfg.as_dict()):
             print(f"    [seed] skip (already evaluated): {sig}")
@@ -175,8 +190,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from .agent import run_agent
         except ImportError as e:
-            print(f"[tuning-agent] WARNING: cannot import agent ({e}); skipping LLM stage. "
-                  f"Install dspy + python-dotenv to enable.", file=sys.stderr)
+            print(
+                f"[tuning-agent] WARNING: cannot import agent ({e}); skipping LLM stage. "
+                f"Install dspy + python-dotenv to enable.",
+                file=sys.stderr,
+            )
         else:
             try:
                 summary = run_agent(
@@ -206,7 +224,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  trial #{best.idx}  source={best.source}")
     cfg = best.config
     print(f"  TP={cfg.get('tp')} PP={cfg.get('pp')} EP={cfg.get('ep')} CP={cfg.get('cp')}")
-    print(f"  MBS={cfg.get('mbs')} GBS={cfg.get('gbs')} VPP={cfg.get('vpp')} schedule={cfg.get('pp_schedule')}")
+    print(
+        f"  MBS={cfg.get('mbs')} GBS={cfg.get('gbs')} VPP={cfg.get('vpp')} schedule={cfg.get('pp_schedule')}"
+    )
     print(f"  recompute={cfg.get('recompute_granularity')}/{cfg.get('recompute_num_layers')}")
     print(f"  → tokens/s/GPU = {best.result.get('tokens_per_s_per_gpu')}")
     if best.result.get("tflops_per_s_per_gpu") is not None:
@@ -224,10 +244,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  # then pass --micro-batch-size {cfg.get('mbs')} --global-batch-size {cfg.get('gbs')}")
 
     if not summary_path.exists():
-        summary_path.write_text(json.dumps({
-            "best": best.as_dict(),
-            "trials_total": len(history.trials),
-        }, indent=2, default=str))
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "best": best.as_dict(),
+                    "trials_total": len(history.trials),
+                },
+                indent=2,
+                default=str,
+            )
+        )
 
     print(f"\n[tuning-agent] artifacts in {agent_cfg.out_dir}/")
     print(f"  trials.jsonl  trials.png  scratchpad.txt  summary.json  trials/*.yaml")

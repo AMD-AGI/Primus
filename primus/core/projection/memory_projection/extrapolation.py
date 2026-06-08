@@ -61,7 +61,6 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterator, Optional
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,12 +90,7 @@ class ActivationBreakdown:
 
     @property
     def total(self) -> int:
-        return (
-            self.transformer_layers_bytes
-            + self.embedding_bytes
-            + self.output_bytes
-            + self.loss_bytes
-        )
+        return self.transformer_layers_bytes + self.embedding_bytes + self.output_bytes + self.loss_bytes
 
 
 @dataclass
@@ -111,10 +105,7 @@ class AnalyticalBreakdown:
     @property
     def total(self) -> int:
         return (
-            self.static.total
-            + self.activations.total
-            + self.deepep_buffers_bytes
-            + self.comm_buffers_bytes
+            self.static.total + self.activations.total + self.deepep_buffers_bytes + self.comm_buffers_bytes
         )
 
 
@@ -274,9 +265,7 @@ def corrected_activation_bytes(
     # Compute per-layer-type corrections from bench measurements.
     factors: Dict[str, float] = {}
     for layer_type, measured in bench.per_layer_activation_bytes.items():
-        analytical_bench = per_layer_analytical_activation(
-            bench_profiler, layer_type, batch_size, seq_len
-        )
+        analytical_bench = per_layer_analytical_activation(bench_profiler, layer_type, batch_size, seq_len)
         if measured > 0 and analytical_bench > 0:
             factors[layer_type] = measured / analytical_bench
 
@@ -297,18 +286,14 @@ def corrected_activation_bytes(
     analytical_dense_per_layer = per_layer_analytical_activation(
         target_profiler, "dense", batch_size, seq_len
     )
-    analytical_moe_per_layer = per_layer_analytical_activation(
-        target_profiler, "moe", batch_size, seq_len
-    )
+    analytical_moe_per_layer = per_layer_analytical_activation(target_profiler, "moe", batch_size, seq_len)
 
     # Scale per-layer type contributions by the per-type correction factor.
-    weighted_correction = (
-        num_dense_target * analytical_dense_per_layer * factors.get("dense", 1.0)
-        + num_moe_target * analytical_moe_per_layer * factors.get("moe", 1.0)
-    )
+    weighted_correction = num_dense_target * analytical_dense_per_layer * factors.get(
+        "dense", 1.0
+    ) + num_moe_target * analytical_moe_per_layer * factors.get("moe", 1.0)
     weighted_uncorrected = (
-        num_dense_target * analytical_dense_per_layer
-        + num_moe_target * analytical_moe_per_layer
+        num_dense_target * analytical_dense_per_layer + num_moe_target * analytical_moe_per_layer
     )
 
     if weighted_uncorrected <= 0:
@@ -598,10 +583,7 @@ def extrapolate_per_rank_peak(
     # Upper bound: residual gets the safety-margin treatment; the
     # analytical part is already the conservative point estimate.
     point_total = analytical_target_corrected.total + residual_total
-    upper_total = (
-        analytical_target_corrected.total
-        + int(residual_total * (1.0 + safety_margin))
-    )
+    upper_total = analytical_target_corrected.total + int(residual_total * (1.0 + safety_margin))
 
     breakdown = {
         "analytical_at_bench": asdict(analytical_bench),
@@ -630,9 +612,7 @@ def extrapolate_per_rank_peak(
         "bench_global_peak_reserved_bytes": int(bench.global_peak_reserved_bytes),
         "framework_overhead_bytes": int(framework_overhead),
         "live_tensor_excess_bytes": int(live_tensor_excess),
-        "analytical_share": (
-            analytical_target_corrected.total / point_total if point_total > 0 else 0.0
-        ),
+        "analytical_share": (analytical_target_corrected.total / point_total if point_total > 0 else 0.0),
         "residual_share": residual_total / point_total if point_total > 0 else 0.0,
     }
     if bench_world_size * 8 < target_world_size:

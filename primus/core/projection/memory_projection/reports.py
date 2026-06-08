@@ -107,8 +107,7 @@ def print_per_rank_breakdown(
             "(allocated − analytical_at_bench, clamped ≥ 0)"
         )
         print(
-            f"    Total residual:         {_gb(residual_total)}  "
-            "(added to point; ×(1+margin) for upper)"
+            f"    Total residual:         {_gb(residual_total)}  " "(added to point; ×(1+margin) for upper)"
         )
     print(f"    Safety margin on UB:    {_pct(margin)}")
     print("")
@@ -127,8 +126,7 @@ def print_per_rank_breakdown(
         print("")
         print(f"  VRAM available per GPU: {_gb(total_vram_bytes)}")
         print(
-            f"  Headroom (point):       {_gb(headroom_point)}"
-            f" ({'FITS' if headroom_point > 0 else 'OOM'})"
+            f"  Headroom (point):       {_gb(headroom_point)}" f" ({'FITS' if headroom_point > 0 else 'OOM'})"
         )
         print(
             f"  Headroom (upper):       {_gb(headroom_upper)}"
@@ -181,12 +179,8 @@ def compare_simulate_vs_benchmark(
     diag = projection.diagnostics
     bench_static = bd.get("analytical_at_target_corrected", {}).get("static", {})
     bench_acts = bd.get("analytical_at_target_corrected", {}).get("activations", {})
-    bench_deepep = bd.get("analytical_at_target_corrected", {}).get(
-        "deepep_buffers_bytes", 0
-    )
-    bench_comm = bd.get("analytical_at_target_corrected", {}).get(
-        "comm_buffers_bytes", 0
-    )
+    bench_deepep = bd.get("analytical_at_target_corrected", {}).get("deepep_buffers_bytes", 0)
+    bench_comm = bd.get("analytical_at_target_corrected", {}).get("comm_buffers_bytes", 0)
     # Prefer the new total-residual field; fall back to the legacy
     # allocated-residual for back-compat with older fixtures.
     bench_residual = bd.get(
@@ -240,14 +234,8 @@ def compare_simulate_vs_benchmark(
             f"{_gb(sim_acts):>14s}  {_gb(bench_acts_total):>14s}  "
             f"{_delta(sim_acts, bench_acts_total):>8s}"
         )
-        print(
-            f"  {'DeepEP buffers':<30s} "
-            f"{'(n/a)':>14s}  {_gb(bench_deepep):>14s}  {'-':>8s}"
-        )
-        print(
-            f"  {'Comm buffers':<30s} "
-            f"{'(n/a)':>14s}  {_gb(bench_comm):>14s}  {'-':>8s}"
-        )
+        print(f"  {'DeepEP buffers':<30s} " f"{'(n/a)':>14s}  {_gb(bench_deepep):>14s}  {'-':>8s}")
+        print(f"  {'Comm buffers':<30s} " f"{'(n/a)':>14s}  {_gb(bench_comm):>14s}  {'-':>8s}")
         print(
             f"  {'Residual (framework + excess)':<30s} "
             f"{'(n/a)':>14s}  {_gb(bench_residual):>14s}  {'-':>8s}"
@@ -259,10 +247,7 @@ def compare_simulate_vs_benchmark(
         f"{_delta(sim_total, point):>8s}"
     )
     upper_label = f"TOTAL (upper bound, {int(bench_safety * 100)}% margin)"
-    print(
-        f"  {upper_label:<30s} "
-        f"{'(n/a)':>14s}  {_gb(upper):>14s}  {'-':>8s}"
-    )
+    print(f"  {upper_label:<30s} " f"{'(n/a)':>14s}  {_gb(upper):>14s}  {'-':>8s}")
     print("=" * 100)
     print(
         "  Δ legend: simulate − benchmark, expressed as % of benchmark.  "

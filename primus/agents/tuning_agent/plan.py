@@ -41,7 +41,12 @@ import itertools
 from dataclasses import dataclass
 
 from .config import AgentConfig
-from .legality import TrialConfig, derive_legality, validate, fill_defaults_from_baseline
+from .legality import (
+    TrialConfig,
+    derive_legality,
+    fill_defaults_from_baseline,
+    validate,
+)
 from .workload import ArchitectureRecord
 
 
@@ -51,8 +56,7 @@ class SeedPlan:
     rationale: str
 
 
-def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
-                    max_candidates: int = 12) -> SeedPlan:
+def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candidates: int = 12) -> SeedPlan:
     """Generate the deterministic seed plan.
 
     Order of returned candidates (small ``--seed-budget`` runs the first N):
@@ -160,20 +164,25 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
 
     _SENTINEL = object()  # sentinel meaning "use the workload's value"
 
-    def _make(tp: int, pp: int, ep: int, cp: int, mbs: int,
-              vpp: int | None,
-              *,
-              recompute=_SENTINEL,
-              pp_schedule: str = "auto",
-              enable_zero_bubble: bool | None = _SENTINEL,
-              use_turbo_deepep: bool | None = _SENTINEL,
-              sync_free_stage: int | None = _SENTINEL,
-              fp8: str | None = _SENTINEL,
-              cross_entropy_loss_fusion: bool | None = _SENTINEL,
-              use_torch_fsdp2: bool | None = _SENTINEL,
-              use_distributed_optimizer: bool | None = _SENTINEL,
-              target_ep_size: int | None = _SENTINEL,
-              ) -> TrialConfig | None:
+    def _make(
+        tp: int,
+        pp: int,
+        ep: int,
+        cp: int,
+        mbs: int,
+        vpp: int | None,
+        *,
+        recompute=_SENTINEL,
+        pp_schedule: str = "auto",
+        enable_zero_bubble: bool | None = _SENTINEL,
+        use_turbo_deepep: bool | None = _SENTINEL,
+        sync_free_stage: int | None = _SENTINEL,
+        fp8: str | None = _SENTINEL,
+        cross_entropy_loss_fusion: bool | None = _SENTINEL,
+        use_torch_fsdp2: bool | None = _SENTINEL,
+        use_distributed_optimizer: bool | None = _SENTINEL,
+        target_ep_size: int | None = _SENTINEL,
+    ) -> TrialConfig | None:
         """Build a TrialConfig, fill defaults, validate; return None if illegal.
 
         Each Tier-A/B knob (DeepEP, SyncFree, FP8, FSDP2, etc.) defaults to
@@ -187,7 +196,10 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
             return default if v is _SENTINEL else v
 
         cfg = TrialConfig(
-            tp=tp, pp=pp, ep=ep, cp=cp,
+            tp=tp,
+            pp=pp,
+            ep=ep,
+            cp=cp,
             mbs=mbs,
             gbs=arch.global_batch_size or 1,
             vpp=vpp,
@@ -256,8 +268,7 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
     else:
         recompute_strategies = [arch.recompute_granularity, "none"]
     seen_rc: set = set()
-    recompute_strategies = [r for r in recompute_strategies
-                            if not (r in seen_rc or seen_rc.add(r))]
+    recompute_strategies = [r for r in recompute_strategies if not (r in seen_rc or seen_rc.add(r))]
 
     # ── 2. Memory levers at baseline parallelism ──────────────────────────
     # Sweep recompute first: it's the cheapest way to recover throughput
@@ -304,8 +315,9 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
                 break
             # Primary: match the workload's recompute knob (full + layer-id
             # count) to mirror the published reference as closely as possible.
-            _push(_make(btp, cand_pp, bep, bcp, bmbs, cand_vpp,
-                        recompute=arch.recompute_granularity or "full"))
+            _push(
+                _make(btp, cand_pp, bep, bcp, bmbs, cand_vpp, recompute=arch.recompute_granularity or "full")
+            )
 
         # Secondary: for the most-impactful (PP, VPP) pairs (those that match
         # the workload's total stage count, e.g. PP=8/VPP=2 ≡ PP=16/VPP=1
@@ -324,14 +336,14 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
             # MBS=1 with same recompute=full — halves activation per stage,
             # often dodges the v26.2 FP8 sub-node bench crash.
             if 1 != bmbs:
-                _push(_make(btp, cand_pp, bep, bcp, 1, cand_vpp,
-                            recompute=arch.recompute_granularity or "full"))
+                _push(
+                    _make(btp, cand_pp, bep, bcp, 1, cand_vpp, recompute=arch.recompute_granularity or "full")
+                )
                 if _full():
                     break
             # Selective recompute (saves attention activations only — ~45%
             # cheaper than full) — common winner when HBM has headroom.
-            _push(_make(btp, cand_pp, bep, bcp, bmbs, cand_vpp,
-                        recompute="selective"))
+            _push(_make(btp, cand_pp, bep, bcp, bmbs, cand_vpp, recompute="selective"))
 
     # ── 3. Tier-A MoE communication (DeepEP + SyncFree) ───────────────────
     # Per the skill, DeepEP is "the largest single-optimization throughput
@@ -355,9 +367,7 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
             moe_combos.append(("DeepEP", {"use_turbo_deepep": True}))
             # Then DeepEP + recompute=none — the highest-leverage achievable
             # combo on environments without TEGroupedMLP.
-            moe_combos.append(
-                ("DeepEP+recompute=none",
-                 {"use_turbo_deepep": True, "recompute": "none"}))
+            moe_combos.append(("DeepEP+recompute=none", {"use_turbo_deepep": True, "recompute": "none"}))
         for _name, kw in moe_combos:
             _push(_make(btp, bp, bep, bcp, bmbs, bvpp, **kw))
             if _full():
@@ -369,12 +379,9 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
     if not _full() and not fp8_already_on:
         _push(_make(btp, bp, bep, bcp, bmbs, bvpp, fp8="hybrid"))
         if not _full():
-            _push(_make(btp, bp, bep, bcp, bmbs, bvpp,
-                        fp8="hybrid", recompute="none"))
+            _push(_make(btp, bp, bep, bcp, bmbs, bvpp, fp8="hybrid", recompute="none"))
         if not _full() and arch.is_moe and not deepep_already_on:
-            _push(_make(btp, bp, bep, bcp, bmbs, bvpp,
-                        fp8="hybrid", use_turbo_deepep=True,
-                        recompute="none"))
+            _push(_make(btp, bp, bep, bcp, bmbs, bvpp, fp8="hybrid", use_turbo_deepep=True, recompute="none"))
 
     # ── 5. Combined-best Tier-A (DeepEP + SyncFree=3 + FP8 + recompute=none)
     # SyncFree=3 is best-case overlap per the skill but requires the
@@ -418,8 +425,13 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
     # ``PP=16 + zerobubble`` was the previous best (1045 tps) by reducing
     # pipeline bubble; the same trick at PP=8 can offset the slightly
     # higher per-stage compute cost from running fewer pipeline ranks.
-    if (arch.pipeline_model_parallel_layout and arch.num_layers and 8 in legality.pp
-            and 8 != bp and 8 not in schedule_pp_targets):
+    if (
+        arch.pipeline_model_parallel_layout
+        and arch.num_layers
+        and 8 in legality.pp
+        and 8 != bp
+        and 8 not in schedule_pp_targets
+    ):
         schedule_pp_targets.append(8)
     # Heuristic: when baseline PP=1 but model is large enough that DP-only
     # is unlikely to fit, also try a sensible PP (largest legal PP that is
@@ -455,9 +467,19 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
             if sched in legality.pp_schedules_by_vpp.get(1, []):
                 # Split-wgrad schedules cannot pair with activation recompute
                 # (projection assert + runtime wgrad cache pins inputs).
-                _push(_make(btp, spp, bep, bcp, bmbs, 1,
-                            pp_schedule=sched, enable_zero_bubble=True,
-                            recompute="none"))
+                _push(
+                    _make(
+                        btp,
+                        spp,
+                        bep,
+                        bcp,
+                        bmbs,
+                        1,
+                        pp_schedule=sched,
+                        enable_zero_bubble=True,
+                        recompute="none",
+                    )
+                )
                 if _full():
                     break
         # VPP=2 candidates: ZBV variants.
@@ -465,18 +487,13 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
         # Historically we gated this by ``(num_layers // pp) % 2 == 0``.
         # That misses valid layout-driven interleaving cases (DSv3 PP=8 with
         # 16-stage layout). Allow ZBV when either check passes.
-        can_try_zbv = (
-            not _full()
-            and (
-                (arch.num_layers and (arch.num_layers // spp) % 2 == 0)
-                or _layout_implies_vpp(spp, 2)
-            )
+        can_try_zbv = not _full() and (
+            (arch.num_layers and (arch.num_layers // spp) % 2 == 0) or _layout_implies_vpp(spp, 2)
         )
         if can_try_zbv:
             for sched in ("zbv-formatted", "zbv-greedy-half"):
                 if sched in legality.pp_schedules_by_vpp.get(2, []):
-                    _push(_make(btp, spp, bep, bcp, bmbs, 2,
-                                pp_schedule=sched, recompute="none"))
+                    _push(_make(btp, spp, bep, bcp, bmbs, 2, pp_schedule=sched, recompute="none"))
                     if _full():
                         break
 
@@ -516,19 +533,15 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig,
     # heavier but unlocks more headroom for very large models. Both are
     # alternatives — `validate()` already rejects enabling them simultaneously.
     if not _full():
-        _push(_make(btp, bp, bep, bcp, bmbs, bvpp,
-                    use_distributed_optimizer=True))
+        _push(_make(btp, bp, bep, bcp, bmbs, bvpp, use_distributed_optimizer=True))
     if not _full():
         # FSDP2 with no recompute: tests whether the optimizer/grad sharding
         # buys enough memory headroom to drop recompute entirely.
-        _push(_make(btp, bp, bep, bcp, bmbs, bvpp,
-                    recompute="none",
-                    use_torch_fsdp2=True))
+        _push(_make(btp, bp, bep, bcp, bmbs, bvpp, recompute="none", use_torch_fsdp2=True))
 
     # ── 9. Coarse parallelism grid ────────────────────────────────────────
     if not _full():
-        for tp, pp, ep, cp, mbs, vpp in itertools.product(
-                tp_set, pp_set, ep_set, cp_set, mbs_set, vpp_set):
+        for tp, pp, ep, cp, mbs, vpp in itertools.product(tp_set, pp_set, ep_set, cp_set, mbs_set, vpp_set):
             if pp == 1 and vpp not in (None, 1):
                 continue
             _push(_make(tp, pp, ep, cp, mbs, vpp))

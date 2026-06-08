@@ -24,7 +24,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,10 +34,10 @@ from .config import AgentConfig
 from .legality import TrialConfig, derived_dp, validate
 from .workload import ArchitectureRecord
 
-
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class EvalResult:
@@ -46,7 +46,7 @@ class EvalResult:
     memory_per_gpu_gb: float | None = None
     memory_per_gpu_gb_adjusted: float | None = None
     memory_per_gpu_gb_upper: float | None = None  # bench-mode 5%-margin upper bound
-    memory_source: str | None = None              # "benchmark_point" | "simulate" | …
+    memory_source: str | None = None  # "benchmark_point" | "simulate" | …
     memory_warning: str | None = None
     param_optimizer_gb: float | None = None
     activation_gb: float | None = None
@@ -71,17 +71,27 @@ class EvalResult:
 # ---------------------------------------------------------------------------
 
 _PARALLEL_OVERRIDES_KEYS = {
-    "tensor_model_parallel_size", "pipeline_model_parallel_size",
-    "expert_model_parallel_size", "context_parallel_size",
+    "tensor_model_parallel_size",
+    "pipeline_model_parallel_size",
+    "expert_model_parallel_size",
+    "context_parallel_size",
     "num_virtual_stages_per_pipeline_rank",
     "virtual_pipeline_model_parallel_size",
-    "micro_batch_size", "global_batch_size",
-    "recompute_granularity", "recompute_method", "recompute_num_layers",
-    "overlap_grad_reduce", "overlap_param_gather",
+    "micro_batch_size",
+    "global_batch_size",
+    "recompute_granularity",
+    "recompute_method",
+    "recompute_num_layers",
+    "overlap_grad_reduce",
+    "overlap_param_gather",
     # Tier-A/B keys from the Primus Projection skill
-    "use_turbo_deepep", "sync_free_stage", "fp8",
-    "cross_entropy_loss_fusion", "use_torch_fsdp2",
-    "use_distributed_optimizer", "enable_zero_bubble",
+    "use_turbo_deepep",
+    "sync_free_stage",
+    "fp8",
+    "cross_entropy_loss_fusion",
+    "use_torch_fsdp2",
+    "use_distributed_optimizer",
+    "enable_zero_bubble",
 }
 
 
@@ -127,8 +137,7 @@ def _build_pipeline_layout(num_layers: int, pp: int, vpp: int) -> str | None:
     return "|".join(parts) + ",L"
 
 
-def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig,
-                     out_dir: Path, tag: str) -> Path:
+def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig, out_dir: Path, tag: str) -> Path:
     """Write a copy of the workload YAML with cfg's overrides applied.
 
     Knobs are applied in roughly the priority order from the Projection
@@ -147,7 +156,7 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig,
     src = Path(arch.workload_path)
     raw = yaml.safe_load(src.read_text())
 
-    pre_trainer = ((raw.get("modules") or {}).get("pre_trainer") or {})
+    pre_trainer = (raw.get("modules") or {}).get("pre_trainer") or {}
     overrides = dict(pre_trainer.get("overrides") or {})
 
     # 1) parallelism ------------------------------------------------------
@@ -206,11 +215,11 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig,
     if cfg.enable_zero_bubble is not None:
         overrides["enable_zero_bubble"] = cfg.enable_zero_bubble
     if cfg.pp_schedule and cfg.pp_schedule != "auto":
-        from primus.core.projection.config_validation import PP_SCHEDULE_TO_RUNTIME_ALGORITHM
-
-        overrides["pp_algorithm"] = PP_SCHEDULE_TO_RUNTIME_ALGORITHM.get(
-            cfg.pp_schedule, cfg.pp_schedule
+        from primus.core.projection.config_validation import (
+            PP_SCHEDULE_TO_RUNTIME_ALGORITHM,
         )
+
+        overrides["pp_algorithm"] = PP_SCHEDULE_TO_RUNTIME_ALGORITHM.get(cfg.pp_schedule, cfg.pp_schedule)
 
     # 3) MoE communication (Tier-A — biggest single MoE win per skill) ----
     # Required-by-runtime couplings for the Primus Turbo MoE stack:
@@ -227,7 +236,7 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig,
         overrides["use_turbo_deepep"] = cfg.use_turbo_deepep
     if cfg.sync_free_stage is not None:
         overrides["sync_free_stage"] = cfg.sync_free_stage
-    sync_free_high = (cfg.sync_free_stage is not None and cfg.sync_free_stage >= 2)
+    sync_free_high = cfg.sync_free_stage is not None and cfg.sync_free_stage >= 2
     deepep_active = bool(cfg.use_turbo_deepep) or sync_free_high
     if deepep_active:
         overrides["moe_router_dtype"] = "fp32"
@@ -308,7 +317,7 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig,
 _FLOAT = r"([\-+]?\d+(?:[\.,]\d+)*(?:\.\d+)?)"
 
 _RE_PARAM_OPT = re.compile(rf"Param\+Optimizer Memory:\s*{_FLOAT}\s*GB", re.IGNORECASE)
-_RE_ACT       = re.compile(rf"Activation Memory[^:]*:\s*{_FLOAT}\s*GB", re.IGNORECASE)
+_RE_ACT = re.compile(rf"Activation Memory[^:]*:\s*{_FLOAT}\s*GB", re.IGNORECASE)
 _RE_TOTAL_MEM = re.compile(rf"Projected Total Memory:\s*{_FLOAT}\s*GB", re.IGNORECASE)
 # Bench-anchored memory projection (memory_projection.benchmark) prints:
 #   "Point estimate (per rank): X GB"   ← OOM-accurate per-rank peak
@@ -317,12 +326,12 @@ _RE_TOTAL_MEM = re.compile(rf"Projected Total Memory:\s*{_FLOAT}\s*GB", re.IGNOR
 # are present (e.g. in --memory-mode both output).
 _RE_BENCH_POINT = re.compile(rf"Point estimate \(per rank\):\s*{_FLOAT}\s*GB", re.IGNORECASE)
 _RE_BENCH_UPPER = re.compile(rf"Upper bound\s*\(per rank\):\s*{_FLOAT}\s*GB", re.IGNORECASE)
-_RE_ITER_MS   = re.compile(rf"Iteration Time:\s*{_FLOAT}\s*ms", re.IGNORECASE)
-_RE_TPS       = re.compile(rf"Tokens/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
+_RE_ITER_MS = re.compile(rf"Iteration Time:\s*{_FLOAT}\s*ms", re.IGNORECASE)
+_RE_TPS = re.compile(rf"Tokens/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
 # Primus's projection prints both "TFLOPs/s/GPU" and "TFLOP/s/GPU" depending
 # on version and output source.
-_RE_TFLOPS    = re.compile(rf"TFLOPs?/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
-_RE_MFU       = re.compile(rf"\bMFU(?:\s*\(.*?\))?:\s*{_FLOAT}", re.IGNORECASE)
+_RE_TFLOPS = re.compile(rf"TFLOPs?/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
+_RE_MFU = re.compile(rf"\bMFU(?:\s*\(.*?\))?:\s*{_FLOAT}", re.IGNORECASE)
 
 
 def _to_float(s: str) -> float | None:
@@ -336,38 +345,39 @@ def _to_float(s: str) -> float | None:
 
 def _parse_metrics(stdout: str) -> dict:
     out: dict[str, Any] = {}
-    if (m := _RE_PARAM_OPT.search(stdout)):
+    if m := _RE_PARAM_OPT.search(stdout):
         out["param_optimizer_gb"] = _to_float(m.group(1))
-    if (m := _RE_ACT.search(stdout)):
+    if m := _RE_ACT.search(stdout):
         out["activation_gb"] = _to_float(m.group(1))
     # Prefer the bench-anchored point estimate when present — it is
     # OOM-accurate (real per-rank peak measured + analytical extrapolation
     # to target).  Fall back to simulate-mode "Projected Total Memory" or
     # the param+act sum when the bench section isn't in this output.
-    if (m := _RE_BENCH_POINT.search(stdout)):
+    if m := _RE_BENCH_POINT.search(stdout):
         out["memory_per_gpu_gb"] = _to_float(m.group(1))
         out["memory_source"] = "benchmark_point"
-        if (mu := _RE_BENCH_UPPER.search(stdout)):
+        if mu := _RE_BENCH_UPPER.search(stdout):
             out["memory_per_gpu_gb_upper"] = _to_float(mu.group(1))
-    elif (m := _RE_TOTAL_MEM.search(stdout)):
+    elif m := _RE_TOTAL_MEM.search(stdout):
         out["memory_per_gpu_gb"] = _to_float(m.group(1))
         out["memory_source"] = "simulate"
     elif "param_optimizer_gb" in out and "activation_gb" in out:
         out["memory_per_gpu_gb"] = out["param_optimizer_gb"] + out["activation_gb"]
         out["memory_source"] = "simulate_summed"
-    if (m := _RE_ITER_MS.search(stdout)):
+    if m := _RE_ITER_MS.search(stdout):
         out["iteration_ms"] = _to_float(m.group(1))
-    if (m := _RE_TPS.search(stdout)):
+    if m := _RE_TPS.search(stdout):
         out["tokens_per_s_per_gpu"] = _to_float(m.group(1))
-    if (m := _RE_TFLOPS.search(stdout)):
+    if m := _RE_TFLOPS.search(stdout):
         out["tflops_per_s_per_gpu"] = _to_float(m.group(1))
-    if (m := _RE_MFU.search(stdout)):
+    if m := _RE_MFU.search(stdout):
         out["mfu"] = _to_float(m.group(1))
     return out
 
 
-def _python_invoker(primus_root: Path, profiling_mode: str | None = None,
-                    nproc_per_node: int | None = None) -> list[str]:
+def _python_invoker(
+    primus_root: Path, profiling_mode: str | None = None, nproc_per_node: int | None = None
+) -> list[str]:
     """Pick how to invoke `primus/cli/main.py`.
 
     For ``simulate`` (and ``memory``) we use ``sys.executable`` directly so
@@ -377,11 +387,15 @@ def _python_invoker(primus_root: Path, profiling_mode: str | None = None,
     the Megatron launcher env (NODE_RANK / RANK / WORLD_SIZE / MASTER_*).
     """
     import sys as _sys
+
     main_py = str(primus_root / "primus" / "cli" / "main.py")
     if profiling_mode == "benchmark" and nproc_per_node and nproc_per_node > 0:
         return [
-            _sys.executable, "-m", "torch.distributed.run",
-            "--standalone", "--nnodes=1",
+            _sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nnodes=1",
             f"--nproc-per-node={nproc_per_node}",
             main_py,
         ]
@@ -399,18 +413,21 @@ def _build_perf_cmd(
 ) -> list[str]:
     bench_gpus = (
         agent_cfg.benchmark_host.benchmark_gpus
-        if agent_cfg.benchmark_host.has_gpu
-        and agent_cfg.benchmark_host.benchmark_gpus > 0
+        if agent_cfg.benchmark_host.has_gpu and agent_cfg.benchmark_host.benchmark_gpus > 0
         else agent_cfg.target_cluster.gpus_per_node
     )
     cmd: list[str] = [
-        *_python_invoker(primus_root, profiling_mode=profiling_mode,
-                         nproc_per_node=bench_gpus),
-        "projection", "performance",
-        "--config", str(yaml_path),
-        "--target-nodes", str(agent_cfg.target_cluster.num_nodes),
-        "--profiling-mode", profiling_mode,
-        "--gpu-arch", agent_cfg.target_cluster.gpu_arch,
+        *_python_invoker(primus_root, profiling_mode=profiling_mode, nproc_per_node=bench_gpus),
+        "projection",
+        "performance",
+        "--config",
+        str(yaml_path),
+        "--target-nodes",
+        str(agent_cfg.target_cluster.num_nodes),
+        "--profiling-mode",
+        profiling_mode,
+        "--gpu-arch",
+        agent_cfg.target_cluster.gpu_arch,
     ]
     if profiling_mode == "benchmark":
         cmd += ["--benchmark-gpus", str(bench_gpus)]
@@ -463,8 +480,10 @@ def _build_memory_cmd(
     """
     cmd: list[str] = [
         *_python_invoker(primus_root),
-        "projection", "memory",
-        "--config", str(yaml_path),
+        "projection",
+        "memory",
+        "--config",
+        str(yaml_path),
     ]
     if memory_mode and memory_mode != "simulate":
         cmd += ["--memory-mode", memory_mode]
@@ -486,8 +505,7 @@ def _build_memory_cmd(
     return cmd
 
 
-def _build_env(agent_cfg: AgentConfig, primus_root: Path,
-               profiling_mode: str | None = None) -> dict:
+def _build_env(agent_cfg: AgentConfig, primus_root: Path, profiling_mode: str | None = None) -> dict:
     env = os.environ.copy()
     # For memory + simulate: pass the real target-cluster shape so
     # `projection memory`'s ``get_dp_size`` doesn't enter the "recompute min
@@ -531,18 +549,28 @@ def _run(cmd: list[str], cwd: Path, env: dict, timeout: int) -> tuple[int, str, 
     started = time.time()
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd), env=env, timeout=timeout,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            check=False, text=True,
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            text=True,
         )
         return proc.returncode, proc.stdout or "", time.time() - started
     except subprocess.TimeoutExpired as e:
-        return 124, (e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")), time.time() - started
+        return (
+            124,
+            (e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")),
+            time.time() - started,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Public evaluator class
 # ---------------------------------------------------------------------------
+
 
 class Evaluator:
     """Stateful evaluator. Tracks call counts so the agent stays within budget.
@@ -561,9 +589,14 @@ class Evaluator:
       for simulate and a GPU for benchmark.
     """
 
-    def __init__(self, agent_cfg: AgentConfig, arch: ArchitectureRecord,
-                 primus_root: Path, dry_run: bool = False,
-                 mode: str = "full"):
+    def __init__(
+        self,
+        agent_cfg: AgentConfig,
+        arch: ArchitectureRecord,
+        primus_root: Path,
+        dry_run: bool = False,
+        mode: str = "full",
+    ):
         self.cfg = agent_cfg
         self.arch = arch
         self.primus_root = primus_root
@@ -573,7 +606,7 @@ class Evaluator:
         if mode not in ("dry", "memory-real", "full"):
             raise ValueError(f"unknown evaluator mode: {mode!r}")
         self.mode = mode
-        self.dry_run = (mode == "dry")
+        self.dry_run = mode == "dry"
         self.trials_dir = agent_cfg.out_dir / "trials"
         self.trials_dir.mkdir(parents=True, exist_ok=True)
         self.n_memory_calls = 0
@@ -591,8 +624,10 @@ class Evaluator:
     def evaluate_benchmark(self, cfg: TrialConfig, tag: str) -> EvalResult:
         if not self.cfg.benchmark_host.has_gpu:
             return EvalResult(
-                legal=False, reason="benchmark requested but has_gpu=false",
-                source="benchmark", config=cfg.as_dict(),
+                legal=False,
+                reason="benchmark requested but has_gpu=false",
+                source="benchmark",
+                config=cfg.as_dict(),
             )
         return self._evaluate(cfg, tag, mode="benchmark")
 
@@ -600,11 +635,16 @@ class Evaluator:
 
     def _evaluate(self, cfg: TrialConfig, tag: str, mode: str) -> EvalResult:
         from .legality import derive_legality
+
         legality = derive_legality(self.arch, self.cfg.target_cluster)
         ok, reason = validate(cfg, self.arch, self.cfg.target_cluster, legality)
-        result = EvalResult(legal=ok, reason=reason, source=mode,
-                            config=cfg.as_dict(),
-                            derived_dp=derived_dp(cfg, self.arch, self.cfg.target_cluster))
+        result = EvalResult(
+            legal=ok,
+            reason=reason,
+            source=mode,
+            config=cfg.as_dict(),
+            derived_dp=derived_dp(cfg, self.arch, self.cfg.target_cluster),
+        )
         if not ok:
             return result
 
@@ -627,8 +667,9 @@ class Evaluator:
 
         # 1. memory (cheap, always run for legality + headroom check)
         mem_cmd = _build_memory_cmd(yaml_path, cfg, self.cfg, self.primus_root)
-        rc, out, dur = _run(mem_cmd, cwd=self.primus_root,
-                            env=_build_env(self.cfg, self.primus_root), timeout=300)
+        rc, out, dur = _run(
+            mem_cmd, cwd=self.primus_root, env=_build_env(self.cfg, self.primus_root), timeout=300
+        )
         self.n_memory_calls += 1
         result.cmd = mem_cmd
         result.returncode = rc
@@ -706,10 +747,12 @@ class Evaluator:
         # ``_evaluate_benchmark`` via the early-return above).
         profiling_mode = "simulate"
         perf_cmd = _build_perf_cmd(yaml_path, cfg, self.cfg, profiling_mode, self.primus_root)
-        rc2, out2, dur2 = _run(perf_cmd, cwd=self.primus_root,
-                               env=_build_env(self.cfg, self.primus_root,
-                                              profiling_mode=profiling_mode),
-                               timeout=600)
+        rc2, out2, dur2 = _run(
+            perf_cmd,
+            cwd=self.primus_root,
+            env=_build_env(self.cfg, self.primus_root, profiling_mode=profiling_mode),
+            timeout=600,
+        )
         self.n_simulate_calls += 1
         result.cmd = perf_cmd
         result.returncode = rc2
@@ -741,9 +784,7 @@ class Evaluator:
         """
         import tempfile
 
-        cap = self.cfg.optimization.hbm_capacity_gb * (
-            1 - self.cfg.optimization.memory_safety_margin
-        )
+        cap = self.cfg.optimization.hbm_capacity_gb * (1 - self.cfg.optimization.memory_safety_margin)
 
         fd, tmp_path = tempfile.mkstemp(prefix="tuning_agent_bench_", suffix=".json")
         os.close(fd)
@@ -751,11 +792,16 @@ class Evaluator:
         try:
             # ---- 1. perf bench (writes artifact) -------------------------
             perf_cmd = _build_perf_cmd(
-                yaml_path, cfg, self.cfg, "benchmark", self.primus_root,
+                yaml_path,
+                cfg,
+                self.cfg,
+                "benchmark",
+                self.primus_root,
                 save_benchmark=artifact,
             )
             rc1, out1, dur1 = _run(
-                perf_cmd, cwd=self.primus_root,
+                perf_cmd,
+                cwd=self.primus_root,
                 env=_build_env(self.cfg, self.primus_root, profiling_mode="benchmark"),
                 timeout=3600,
             )
@@ -769,10 +815,7 @@ class Evaluator:
 
             if rc1 != 0:
                 result.legal = False
-                result.reason = (
-                    f"projection performance --benchmark failed (rc={rc1}); "
-                    f"see stdout_tail"
-                )
+                result.reason = f"projection performance --benchmark failed (rc={rc1}); " f"see stdout_tail"
                 return result
 
             if not artifact.exists() or artifact.stat().st_size == 0:
@@ -785,13 +828,17 @@ class Evaluator:
 
             # ---- 2. memory in benchmark/load mode -----------------------
             mem_cmd = _build_memory_cmd(
-                yaml_path, cfg, self.cfg, self.primus_root,
+                yaml_path,
+                cfg,
+                self.cfg,
+                self.primus_root,
                 memory_mode="benchmark",
                 load_benchmark=artifact,
                 safety_margin=self.cfg.optimization.memory_safety_margin,
             )
             rc2, out2, dur2 = _run(
-                mem_cmd, cwd=self.primus_root,
+                mem_cmd,
+                cwd=self.primus_root,
                 # Memory-from-artifact path doesn't need megatron; pass
                 # default env (NNODES=target so projection sees the right
                 # cluster shape for analytical extrapolation).
@@ -800,9 +847,9 @@ class Evaluator:
             )
             self.n_memory_calls += 1
             result.duration_s += dur2
-            result.stdout_tail = (
-                result.stdout_tail + "\n--- mem (bench/load) ---\n" + _tail(out2, 6000)
-            )[-14000:]
+            result.stdout_tail = (result.stdout_tail + "\n--- mem (bench/load) ---\n" + _tail(out2, 6000))[
+                -14000:
+            ]
             mem_metrics = _parse_metrics(out2)
             for k, v in mem_metrics.items():
                 setattr(result, k, v)
@@ -850,8 +897,7 @@ def _tail(s: str, n: int) -> str:
     return s if len(s) <= n else s[-n:]
 
 
-def _synth_tps_from_memory(cfg: TrialConfig, result: EvalResult,
-                           arch: ArchitectureRecord) -> float:
+def _synth_tps_from_memory(cfg: TrialConfig, result: EvalResult, arch: ArchitectureRecord) -> float:
     """A *very* coarse heuristic so the agent has a relative signal in
     ``memory-real`` mode (no Origami, no GPU). Higher is better.
 

@@ -49,10 +49,11 @@ def _resolve_api_key() -> str:
         return ocp
     return ""
 
+
 _ENV_CANDIDATES = (
     Path.cwd() / ".env",
-    Path(__file__).resolve().parents[3] / ".env",       # repo root
-    Path(__file__).resolve().parents[4] / ".env",       # ~/code/.env when checked out under ~/code/Primus
+    Path(__file__).resolve().parents[3] / ".env",  # repo root
+    Path(__file__).resolve().parents[4] / ".env",  # ~/code/.env when checked out under ~/code/Primus
     Path.home() / "code" / ".env",
     Path.home() / ".env",
 )
@@ -76,13 +77,14 @@ def load_env(extra: Path | None = None) -> Path | None:
 # Dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TargetCluster:
     name: str = "unnamed"
     num_nodes: int = 1
     gpus_per_node: int = 8
     gpu_arch: str = "mi355x"
-    hardware_config: str | None = None        # path to existing primus hardware yaml
+    hardware_config: str | None = None  # path to existing primus hardware yaml
     gpu_clock_mhz: int | None = None
 
 
@@ -95,24 +97,33 @@ class BenchmarkHost:
 
 @dataclass
 class Budget:
-    max_proposals: int = 30                   # LLM-proposed candidates
-    max_perf_calls: int = 30                  # simulate calls
-    max_benchmark_calls: int = 0              # GPU benchmark calls
-    max_rounds: int = 8                       # outer agent rounds
-    max_rlm_iterations: int = 30              # inner RLM iterations per round
+    max_proposals: int = 30  # LLM-proposed candidates
+    max_perf_calls: int = 30  # simulate calls
+    max_benchmark_calls: int = 0  # GPU benchmark calls
+    max_rounds: int = 8  # outer agent rounds
+    max_rlm_iterations: int = 30  # inner RLM iterations per round
 
 
 @dataclass
 class OptimizationConfig:
     objective: str = "tokens_per_s_per_gpu"
     memory_safety_margin: float = 0.10
-    hbm_capacity_gb: float = 192.0            # MI300X/MI325X/MI355X = 192/256/288
+    hbm_capacity_gb: float = 192.0  # MI300X/MI325X/MI355X = 192/256/288
     budget: Budget = field(default_factory=Budget)
-    axes: dict[str, bool] = field(default_factory=lambda: {
-        "tp": True, "pp": True, "ep": True, "cp": True,
-        "mbs": True, "gbs": False, "vpp": True,
-        "pp_schedule": True, "recompute": True, "overlap_grad_reduce": False,
-    })
+    axes: dict[str, bool] = field(
+        default_factory=lambda: {
+            "tp": True,
+            "pp": True,
+            "ep": True,
+            "cp": True,
+            "mbs": True,
+            "gbs": False,
+            "vpp": True,
+            "pp_schedule": True,
+            "recompute": True,
+            "overlap_grad_reduce": False,
+        }
+    )
 
 
 @dataclass
@@ -140,13 +151,13 @@ class AgentConfig:
 # Loading
 # ---------------------------------------------------------------------------
 
+
 def _from_env(key: str, default: Any = None) -> Any:
     val = os.environ.get(key)
     return val if val not in (None, "") else default
 
 
-def load_config(target_cluster_yaml: Path, workload_yaml: Path,
-                out_dir: Path | None = None) -> AgentConfig:
+def load_config(target_cluster_yaml: Path, workload_yaml: Path, out_dir: Path | None = None) -> AgentConfig:
     """Build the agent config from a target-cluster YAML and the env."""
     load_env()
 
