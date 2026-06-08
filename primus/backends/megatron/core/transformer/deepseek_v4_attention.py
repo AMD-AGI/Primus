@@ -1092,13 +1092,15 @@ class DeepseekV4Attention(MLASelfAttention):
         """
         device = hidden.device
         pooled = self.compressor(hidden)  # [B, P, head_dim]
-        P = pooled.shape[1]
+        B, P = pooled.shape[0], pooled.shape[1]
 
         # Compress-base partial RoPE on compressed indices [0..P).
         comp_pos = torch.arange(P, device=device)
         cos, sin = self.rope.compress_rope(comp_pos)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
+        cos = cos.unsqueeze(0).expand(B, -1, -1)
+        sin = sin.unsqueeze(0).expand(B, -1, -1)
         pool_kv = pooled.unsqueeze(2)  # [B, P, 1, head_dim]
         pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
         return pool_kv.squeeze(2)  # [B, P, head_dim]
