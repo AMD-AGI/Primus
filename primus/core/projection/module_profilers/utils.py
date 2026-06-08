@@ -387,8 +387,9 @@ def _uninstall_routing_patches(restores) -> None:
     for restore in restores:
         try:
             restore()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort cleanup: do not fail teardown if one restore callback fails.
+            print(f"[primus] warning: failed to restore routing patch: {exc}")
 
 
 def benchmark_moe_layer_decomposed(

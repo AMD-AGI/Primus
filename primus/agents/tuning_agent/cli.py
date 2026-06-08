@@ -36,7 +36,7 @@ from pathlib import Path
 from .config import load_config
 from .evaluator import Evaluator
 from .history import History
-from .legality import TrialConfig, derive_legality
+from .legality import derive_legality
 from .plan import build_seed_plan
 from .plotting import plot_history
 from .scratchpad import Scratchpad

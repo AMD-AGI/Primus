@@ -30,7 +30,6 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 

@@ -41,7 +41,7 @@ import itertools
 from dataclasses import dataclass
 
 from .config import AgentConfig
-from .legality import AxisLegality, TrialConfig, derive_legality, validate, fill_defaults_from_baseline
+from .legality import TrialConfig, derive_legality, validate, fill_defaults_from_baseline
 from .workload import ArchitectureRecord
 
 
