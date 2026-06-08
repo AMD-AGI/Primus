@@ -9,7 +9,7 @@ Entry point:
     python -m primus.agents.tuning_agent --workload <yaml> --target-cluster <yaml>
 """
 
-from .config import AgentConfig, TargetCluster, OptimizationConfig, load_config
+from .config import AgentConfig, OptimizationConfig, TargetCluster, load_config
 from .workload import ArchitectureRecord, resolve_workload
 
 __all__ = [

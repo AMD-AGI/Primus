@@ -56,10 +56,10 @@ def run(args, overrides):
         from primus.core.projection.memory_projection.benchmark import (
             launch_projection_from_cli as memory_benchmark_launch,
         )
-        from primus.pretrain import setup_backend_path
         from primus.core.projection.performance_projection import (
             launch_projection_from_cli as performance_launch,
         )
+        from primus.pretrain import setup_backend_path
 
         setup_backend_path(framework=framework, verbose=True)
 
@@ -424,9 +424,7 @@ def register_subcommand(subparsers):
     from primus.core.launcher.parser import add_pretrain_parser
 
     # ---------- memory ----------
-    memory = suite_parsers.add_parser(
-        "memory", help="Memory projection (per-GPU memory analysis)."
-    )
+    memory = suite_parsers.add_parser("memory", help="Memory projection (per-GPU memory analysis).")
     add_pretrain_parser(memory)
     _add_memory_args(memory)
     _add_topology_args(memory)

@@ -48,11 +48,16 @@ class History:
                     continue
                 try:
                     d = json.loads(line)
-                    h.trials.append(TrialRecord(
-                        idx=d["idx"], timestamp=d["timestamp"], config=d["config"],
-                        result=d["result"], source=d.get("source", "unknown"),
-                        notes=d.get("notes", ""),
-                    ))
+                    h.trials.append(
+                        TrialRecord(
+                            idx=d["idx"],
+                            timestamp=d["timestamp"],
+                            config=d["config"],
+                            result=d["result"],
+                            source=d.get("source", "unknown"),
+                            notes=d.get("notes", ""),
+                        )
+                    )
                     sig = _sig(d["config"])
                     h.seen_signatures.add(sig)
                 except (json.JSONDecodeError, KeyError):
@@ -79,8 +84,7 @@ class History:
         return _sig(config) in self.seen_signatures
 
     def best(self, objective: str = "tokens_per_s_per_gpu") -> TrialRecord | None:
-        legal = [t for t in self.trials if t.result.get("legal")
-                 and t.result.get(objective) is not None]
+        legal = [t for t in self.trials if t.result.get("legal") and t.result.get(objective) is not None]
         if not legal:
             return None
         return max(legal, key=lambda t: t.result.get(objective) or 0.0)
@@ -102,9 +106,7 @@ class History:
                 f"recompute={cfg.get('recompute_granularity')}"
             )
             tag = "OK" if r.get("legal") else f"REJECT({r.get('reason','')[:60]})"
-            lines.append(
-                f"#{t.idx:03d} [{t.source:9s}] {tag:40s} tps={tps_s:>10s} mem={mem_s:>8s} | {cfg_s}"
-            )
+            lines.append(f"#{t.idx:03d} [{t.source:9s}] {tag:40s} tps={tps_s:>10s} mem={mem_s:>8s} | {cfg_s}")
         return "\n".join(lines) if lines else "(no trials yet)"
 
 

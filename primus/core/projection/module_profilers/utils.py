@@ -187,11 +187,7 @@ def benchmark_layer(
                     # get destructed inside the *next* forward call (showing
                     # up as a 100-1000x inflation of forward time on MoE
                     # transformer layers under ``rec=none``).
-                    if (
-                        isinstance(out, torch.Tensor)
-                        and out.requires_grad
-                        and out.grad_fn is not None
-                    ):
+                    if isinstance(out, torch.Tensor) and out.requires_grad and out.grad_fn is not None:
                         grad_outputs.append(torch.randn_like(out))
                         output_indices.append(i)
 
@@ -351,9 +347,7 @@ def _install_balanced_routing_patches(moe_module: torch.nn.Module):
                 positions = torch.arange(num_tokens * k, device=device)
                 row = positions // k
                 col = positions % e
-                routing_map = torch.zeros(
-                    num_tokens, e, dtype=torch.bool, device=device
-                )
+                routing_map = torch.zeros(num_tokens, e, dtype=torch.bool, device=device)
                 routing_map.index_put_(
                     (row, col),
                     torch.ones(1, device=device, dtype=torch.bool),
@@ -469,9 +463,7 @@ def benchmark_moe_layer_decomposed(
     # cost on high-expert MoE benches.
     routing_restores = []
     if _kernel_pad_enabled():
-        routing_restores, routing_descriptors = _install_balanced_routing_patches(
-            moe_module
-        )
+        routing_restores, routing_descriptors = _install_balanced_routing_patches(moe_module)
         if routing_descriptors and is_rank_0:
             _, topk, num_experts = routing_descriptors[0]
             # The bench feeds a single [seq_len, batch_size, hidden] input,
@@ -480,7 +472,11 @@ def benchmark_moe_layer_decomposed(
             # shape).
             num_tokens = 1
             for spec in input_shapes:
-                shape = spec[0] if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], torch.dtype) else spec
+                shape = (
+                    spec[0]
+                    if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], torch.dtype)
+                    else spec
+                )
                 # [seq, batch, hidden]
                 if len(shape) >= 2:
                     num_tokens = int(shape[0]) * int(shape[1])
@@ -521,11 +517,7 @@ def benchmark_moe_layer_decomposed(
                         # walks the autograd graph (and releases saved
                         # tensors), instead of being a no-op on detached
                         # custom-autograd outputs / leaf parameters.
-                        if (
-                            isinstance(out, torch.Tensor)
-                            and out.requires_grad
-                            and out.grad_fn is not None
-                        ):
+                        if isinstance(out, torch.Tensor) and out.requires_grad and out.grad_fn is not None:
                             grad_outputs.append(torch.randn_like(out))
                             output_indices.append(i)
 

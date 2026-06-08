@@ -32,10 +32,10 @@ from .scratchpad import Scratchpad
 from .tools import build_tools
 from .workload import ArchitectureRecord
 
-
 # ---------------------------------------------------------------------------
 # DSPy LM configuration
 # ---------------------------------------------------------------------------
+
 
 def _amd_onprem_llm_headers(subscription_key: str) -> dict[str, str]:
     """Match ``openai.OpenAI(..., default_headers=…)`` for llm-api.amd.com."""
@@ -99,8 +99,7 @@ def patch_dspy_python_interpreter(workspace: Path) -> None:
                 os.environ["PATH"] = f"{c}{os.pathsep}{os.environ.get('PATH', '')}"
                 break
         else:
-            print("[tuning-agent] WARNING: deno not found; dspy.RLM REPL may fail",
-                  file=sys.stderr)
+            print("[tuning-agent] WARNING: deno not found; dspy.RLM REPL may fail", file=sys.stderr)
             return
 
     # Some hosts (e.g. this WSL setup) have a root-owned ~/.cache, which makes
@@ -111,18 +110,23 @@ def patch_dspy_python_interpreter(workspace: Path) -> None:
     os.environ["DENO_DIR"] = str(deno_dir)
 
     importmap = workspace / "deno_importmap.json"
-    importmap.write_text(json.dumps({
-        "imports": {
-            "https://deno.land/std@0.186.0/":
-            "https://raw.githubusercontent.com/denoland/std/0.186.0/"
-        }
-    }))
+    importmap.write_text(
+        json.dumps(
+            {
+                "imports": {
+                    "https://deno.land/std@0.186.0/": "https://raw.githubusercontent.com/denoland/std/0.186.0/"
+                }
+            }
+        )
+    )
     runner = Path(_pi.__file__).parent / "runner.js"
     custom_cmd = [
-        "deno", "run",
+        "deno",
+        "run",
         "--unsafely-ignore-certificate-errors",
         f"--import-map={importmap}",
-        "--allow-all", str(runner),
+        "--allow-all",
+        str(runner),
     ]
     _orig_init = _pi.PythonInterpreter.__init__
 
@@ -135,6 +139,7 @@ def patch_dspy_python_interpreter(workspace: Path) -> None:
 # ---------------------------------------------------------------------------
 # DSPy signatures
 # ---------------------------------------------------------------------------
+
 
 class TuningPlanSignature(dspy.Signature):
     """Before touching any tools, design a structured search plan for tuning a
@@ -154,6 +159,7 @@ class TuningPlanSignature(dspy.Signature):
     intra/inter-node boundaries, and known trade-offs (e.g. MoE topk
     dominating activations, EP-spans-nodes hurting A2A).
     """
+
     architecture: str = dspy.InputField(desc="JSON architecture record")
     cluster: str = dspy.InputField(desc="JSON target cluster spec")
     legal_axes: str = dspy.InputField(desc="JSON per-axis legal sets")
@@ -256,9 +262,7 @@ class TuningSearchSignature(dspy.Signature):
     history_summary: str = dspy.InputField(desc="Compact text summary of prior trials")
     extra_guidance: str = dspy.InputField(desc="User-provided guidance")
 
-    best_config: str = dspy.OutputField(
-        desc="JSON object: the winning trial config (or empty {} if none)."
-    )
+    best_config: str = dspy.OutputField(desc="JSON object: the winning trial config (or empty {} if none).")
     summary: str = dspy.OutputField(
         desc="5-8 sentences on the search: what was tried, what worked, what didn't."
     )
@@ -270,6 +274,7 @@ class TuningSearchSignature(dspy.Signature):
 # ---------------------------------------------------------------------------
 # Progress callback (mirrors iterative_fix._RLMProgressCallback)
 # ---------------------------------------------------------------------------
+
 
 class _RLMProgressCallback(dspy.utils.callback.BaseCallback):
     def __init__(self, session_log: list[dict]):
@@ -293,25 +298,30 @@ class _RLMProgressCallback(dspy.utils.callback.BaseCallback):
                 self._iter += 1
                 preview = "\n    │  ".join(text.strip().splitlines()[:20])
                 print(f"\n    [RLM iter {self._iter}] LM output:\n    │  {preview}\n")
-                self._session_log.append({
-                    "ts": datetime.now().isoformat(),
-                    "kind": "lm_output",
-                    "iter": self._iter,
-                    "text": text[:3000],
-                    "text_len": len(text),
-                })
+                self._session_log.append(
+                    {
+                        "ts": datetime.now().isoformat(),
+                        "kind": "lm_output",
+                        "iter": self._iter,
+                        "text": text[:3000],
+                        "text_len": len(text),
+                    }
+                )
         except Exception as e:
             # Best-effort callback: never break agent execution on progress/log formatting failures.
-            self._session_log.append({
-                "ts": datetime.now().isoformat(),
-                "kind": "lm_output_callback_error",
-                "error": str(e),
-            })
+            self._session_log.append(
+                {
+                    "ts": datetime.now().isoformat(),
+                    "kind": "lm_output_callback_error",
+                    "error": str(e),
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def run_agent(
     agent_cfg: AgentConfig,
@@ -343,8 +353,10 @@ def run_agent(
         try:
             plan = planner(**plan_inputs)
         except Exception as e:
-            print(f"[tuning-agent] planner parse failed ({e}); retrying with ChatAdapter fallback",
-                  file=sys.stderr)
+            print(
+                f"[tuning-agent] planner parse failed ({e}); retrying with ChatAdapter fallback",
+                file=sys.stderr,
+            )
             dspy.configure(adapter=dspy.ChatAdapter())
             plan = planner(**plan_inputs)
         if not getattr(plan, "polish_plan", None):
@@ -396,12 +408,15 @@ def run_agent(
             rounds_run += 1
             best = history.best(agent_cfg.optimization.objective)
             cur_best_idx = best.idx if best else None
-            print(f"\n    [round summary] best so far: trial #{cur_best_idx} "
-                  f"tps={best.result.get('tokens_per_s_per_gpu') if best else None}")
+            print(
+                f"\n    [round summary] best so far: trial #{cur_best_idx} "
+                f"tps={best.result.get('tokens_per_s_per_gpu') if best else None}"
+            )
 
             # early stop if no improvement and budget mostly used
-            if (last_best_idx == cur_best_idx
-                    and evaluator.n_simulate_calls >= int(budget.max_perf_calls * 0.7)):
+            if last_best_idx == cur_best_idx and evaluator.n_simulate_calls >= int(
+                budget.max_perf_calls * 0.7
+            ):
                 print("    [round summary] no improvement and budget mostly spent — stopping.")
                 break
             last_best_idx = cur_best_idx
@@ -425,14 +440,16 @@ def run_agent(
 
 
 def _cluster_blob(agent_cfg: AgentConfig) -> str:
-    return json.dumps({
-        "name": agent_cfg.target_cluster.name,
-        "num_nodes": agent_cfg.target_cluster.num_nodes,
-        "gpus_per_node": agent_cfg.target_cluster.gpus_per_node,
-        "world_size": agent_cfg.target_cluster.num_nodes * agent_cfg.target_cluster.gpus_per_node,
-        "gpu_arch": agent_cfg.target_cluster.gpu_arch,
-        "hbm_capacity_gb": agent_cfg.optimization.hbm_capacity_gb,
-        "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
-        "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
-        "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
-    })
+    return json.dumps(
+        {
+            "name": agent_cfg.target_cluster.name,
+            "num_nodes": agent_cfg.target_cluster.num_nodes,
+            "gpus_per_node": agent_cfg.target_cluster.gpus_per_node,
+            "world_size": agent_cfg.target_cluster.num_nodes * agent_cfg.target_cluster.gpus_per_node,
+            "gpu_arch": agent_cfg.target_cluster.gpu_arch,
+            "hbm_capacity_gb": agent_cfg.optimization.hbm_capacity_gb,
+            "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
+            "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
+            "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
+        }
+    )

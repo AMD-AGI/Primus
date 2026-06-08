@@ -13,10 +13,10 @@ from typing import Iterable
 from .config import TargetCluster
 from .workload import ArchitectureRecord
 
-
 # ---------------------------------------------------------------------------
 # Trial config record (what the LLM proposes / the evaluator consumes)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TrialConfig:
@@ -38,6 +38,7 @@ class TrialConfig:
     Fields with default ``None`` mean "inherit from workload yaml" — the
     evaluator only writes overrides for fields that are explicitly set.
     """
+
     # parallelism
     tp: int = 1
     pp: int = 1
@@ -50,24 +51,29 @@ class TrialConfig:
     pp_schedule: str = "auto"
     enable_zero_bubble: bool | None = None
     # memory levers
-    recompute_granularity: str | None = None     # None / "selective" / "full"
+    recompute_granularity: str | None = None  # None / "selective" / "full"
     recompute_num_layers: int = 0
     cross_entropy_loss_fusion: bool | None = None
     use_torch_fsdp2: bool | None = None
     use_distributed_optimizer: bool | None = None
     # MoE comm (Tier-A; high impact for MoE)
     use_turbo_deepep: bool | None = None
-    sync_free_stage: int | None = None        # 0=off, 1, 2, 3
+    sync_free_stage: int | None = None  # 0=off, 1, 2, 3
     target_ep_size: int | None = None
     # precision (Tier-A; high impact)
-    fp8: str | None = None                    # None / "hybrid"
+    fp8: str | None = None  # None / "hybrid"
     # batching
     overlap_grad_reduce: bool = True
 
     def as_dict(self) -> dict:
         return {
-            "tp": self.tp, "pp": self.pp, "ep": self.ep, "cp": self.cp,
-            "mbs": self.mbs, "gbs": self.gbs, "vpp": self.vpp,
+            "tp": self.tp,
+            "pp": self.pp,
+            "ep": self.ep,
+            "cp": self.cp,
+            "mbs": self.mbs,
+            "gbs": self.gbs,
+            "vpp": self.vpp,
             "pp_schedule": self.pp_schedule,
             "enable_zero_bubble": self.enable_zero_bubble,
             "recompute_granularity": self.recompute_granularity,
@@ -130,6 +136,7 @@ class TrialConfig:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _divisors(n: int, max_val: int | None = None) -> list[int]:
     if n <= 0:
         return [1]
@@ -150,6 +157,7 @@ def _powers_of_two(max_val: int) -> list[int]:
 # Per-axis legal sets
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AxisLegality:
     tp: list[int]
@@ -163,20 +171,28 @@ class AxisLegality:
 
     def to_prompt_dict(self) -> dict:
         return {
-            "tp": self.tp, "pp": self.pp, "ep": self.ep, "cp": self.cp,
-            "mbs": self.mbs, "vpp": self.vpp,
+            "tp": self.tp,
+            "pp": self.pp,
+            "ep": self.ep,
+            "cp": self.cp,
+            "mbs": self.mbs,
+            "vpp": self.vpp,
             "pp_schedules_by_vpp": {str(k): v for k, v in self.pp_schedules_by_vpp.items()},
             "recompute_granularity": self.recompute_granularity,
             # Tier-A/B optimisation axes from the Primus Projection skill.
             # Boolean flags accept true/false/null (null = inherit yaml).
-            "use_turbo_deepep": [None, False, True],          # MoE only; +35% per skill
-            "sync_free_stage": [None, 0, 1, 2, 3],            # MoE only; 2/3 auto-enables DeepEP
-            "fp8": [None, "hybrid"],                          # ~2x compute on linear layers
-            "enable_zero_bubble": [None, False, True],        # pairs with VPP=1 zerobubble schedules
-            "cross_entropy_loss_fusion": [None, True, False], # large-vocab memory + compute win
-            "use_distributed_optimizer": [None, True, False], # ZeRO-1 optimizer sharding
-            "use_torch_fsdp2": [None, True, False],           # full FSDP2; mutually exclusive with distributed_optimizer
-            "target_ep_size": [None],                         # int override; agent fills as needed
+            "use_turbo_deepep": [None, False, True],  # MoE only; +35% per skill
+            "sync_free_stage": [None, 0, 1, 2, 3],  # MoE only; 2/3 auto-enables DeepEP
+            "fp8": [None, "hybrid"],  # ~2x compute on linear layers
+            "enable_zero_bubble": [None, False, True],  # pairs with VPP=1 zerobubble schedules
+            "cross_entropy_loss_fusion": [None, True, False],  # large-vocab memory + compute win
+            "use_distributed_optimizer": [None, True, False],  # ZeRO-1 optimizer sharding
+            "use_torch_fsdp2": [
+                None,
+                True,
+                False,
+            ],  # full FSDP2; mutually exclusive with distributed_optimizer
+            "target_ep_size": [None],  # int override; agent fills as needed
         }
 
 
@@ -186,8 +202,9 @@ def derive_legality(arch: ArchitectureRecord, cluster: TargetCluster) -> AxisLeg
     gpn = cluster.gpus_per_node
 
     # TP: divides num_attention_heads AND hidden_size, ≤ gpus_per_node
-    tp_candidates = sorted(set(_divisors(arch.num_attention_heads, gpn))
-                           & set(_divisors(arch.hidden_size, gpn)))
+    tp_candidates = sorted(
+        set(_divisors(arch.num_attention_heads, gpn)) & set(_divisors(arch.hidden_size, gpn))
+    )
     if not tp_candidates:
         tp_candidates = [1]
 
@@ -273,7 +290,12 @@ def derive_legality(arch: ArchitectureRecord, cluster: TargetCluster) -> AxisLeg
     recompute_granularity = ["none", "selective", "full"]
 
     return AxisLegality(
-        tp=tp_candidates, pp=pp, ep=ep, cp=cp, mbs=mbs, vpp=vpp,
+        tp=tp_candidates,
+        pp=pp,
+        ep=ep,
+        cp=cp,
+        mbs=mbs,
+        vpp=vpp,
         pp_schedules_by_vpp=pp_schedules_by_vpp,
         recompute_granularity=recompute_granularity,
     )
@@ -282,6 +304,7 @@ def derive_legality(arch: ArchitectureRecord, cluster: TargetCluster) -> AxisLeg
 # ---------------------------------------------------------------------------
 # Candidate validation
 # ---------------------------------------------------------------------------
+
 
 def derived_dp(cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluster) -> int:
     world = cluster.num_nodes * cluster.gpus_per_node
@@ -292,8 +315,9 @@ def derived_dp(cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluste
     return world // denom if denom > 0 else 0
 
 
-def validate(cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluster,
-             legality: AxisLegality) -> tuple[bool, str]:
+def validate(
+    cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluster, legality: AxisLegality
+) -> tuple[bool, str]:
     """Check a trial config against (model, cluster) legality. Returns
     (ok, reason). reason is empty when ok is True."""
     world = cluster.num_nodes * cluster.gpus_per_node
@@ -359,17 +383,14 @@ def validate(cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluster,
         return False, f"derived DP={dp} (gpus_per_replica={gpus_per_replica})"
 
     if cfg.gbs % (cfg.mbs * dp) != 0:
-        return False, (
-            f"GBS({cfg.gbs}) must be divisible by MBS({cfg.mbs}) × DP({dp}) = {cfg.mbs*dp}"
-        )
+        return False, (f"GBS({cfg.gbs}) must be divisible by MBS({cfg.mbs}) × DP({dp}) = {cfg.mbs*dp}")
 
     # schedule × vpp coherence
     vpp_for_lookup = cfg.vpp or 1
     sched_set = legality.pp_schedules_by_vpp.get(vpp_for_lookup, ["auto"])
     if cfg.pp_schedule not in sched_set:
         return False, (
-            f"schedule '{cfg.pp_schedule}' not legal for VPP={vpp_for_lookup}; "
-            f"legal: {sched_set}"
+            f"schedule '{cfg.pp_schedule}' not legal for VPP={vpp_for_lookup}; " f"legal: {sched_set}"
         )
 
     if cfg.recompute_granularity not in (None, "none", "selective", "full"):
@@ -402,8 +423,7 @@ def validate(cfg: TrialConfig, arch: ArchitectureRecord, cluster: TargetCluster,
 
     # SyncFree stages 2/3 implicitly enable DeepEP per the projection CLI;
     # explicitly setting use_turbo_deepep=False with stage>=2 is contradictory.
-    if (cfg.sync_free_stage and cfg.sync_free_stage >= 2
-            and cfg.use_turbo_deepep is False):
+    if cfg.sync_free_stage and cfg.sync_free_stage >= 2 and cfg.use_turbo_deepep is False:
         return False, (
             f"sync_free_stage={cfg.sync_free_stage} auto-enables DeepEP; "
             f"setting use_turbo_deepep=False is contradictory"

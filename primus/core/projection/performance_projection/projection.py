@@ -18,10 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
-from primus.core.projection.memory_capture import (
-    MemoryBenchmarkRecorder,
-    format_bytes,
-)
+from primus.core.projection.config_validation import assert_recompute_pipeline_compat
+from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
 from primus.core.projection.module_profilers.language_model import (
@@ -37,7 +35,6 @@ from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
     get_sdpa_simulation_backend,
 )
-from primus.core.projection.config_validation import assert_recompute_pipeline_compat
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
@@ -1922,12 +1919,12 @@ def _layer_needs_recompute_fwd_in_bwd(
 ) -> bool:
     """Whether to add one forward pass into backward for this layer in the PP simulator.
 
-  When ``recompute_layer_ids`` is set (Megatron selective block recompute), only
-  those global indices are recomputed.
+    When ``recompute_layer_ids`` is set (Megatron selective block recompute), only
+    those global indices are recomputed.
 
-  Otherwise Megatron ``recompute_num_layers`` is used.  Excel's column is often
-  the *model-wide* total (e.g. 48 of 61).  When YAML carries that large total,
-  use ``global_layer_idx < recompute_num_layers`` instead of per-chunk local_idx.
+    Otherwise Megatron ``recompute_num_layers`` is used.  Excel's column is often
+    the *model-wide* total (e.g. 48 of 61).  When YAML carries that large total,
+    use ``global_layer_idx < recompute_num_layers`` instead of per-chunk local_idx.
     """
     if total_layers <= 0:
         return False
@@ -2467,9 +2464,7 @@ def _report_simulation_results(sim_results, training_config):
     return step_time_ms
 
 
-def _reduction_info_from_artifact_metadata(
-    metadata: Dict[str, Any], gpus_per_node: int
-) -> Dict[str, Any]:
+def _reduction_info_from_artifact_metadata(metadata: Dict[str, Any], gpus_per_node: int) -> Dict[str, Any]:
     """Reconstruct a ``reduction_info`` dict from a loaded artifact's metadata.
 
     Used by the perf launcher's ``--load-benchmark`` path: the artifact
@@ -2488,11 +2483,7 @@ def _reduction_info_from_artifact_metadata(
     original_num_experts = metadata.get("original_num_experts")
     benchmark_num_experts = metadata.get("benchmark_num_experts")
 
-    adjusted = (
-        original_pp != benchmark_pp
-        or original_tp != benchmark_tp
-        or original_ep != benchmark_ep
-    )
+    adjusted = original_pp != benchmark_pp or original_tp != benchmark_tp or original_ep != benchmark_ep
     gpus_required = _calculate_min_gpus(original_tp, original_pp, original_ep, original_cp)
     nodes_required = (gpus_required + max(1, gpus_per_node) - 1) // max(1, gpus_per_node)
 
@@ -2556,9 +2547,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     # persisted in the artifact (used by the memory extrapolator's load
     # path).  This is a no-op when reduction_info is None.
     if reduction_info is not None:
-        reduction_info["bench_training_config_summary"] = _summarize_bench_training_config(
-            training_config
-        )
+        reduction_info["bench_training_config_summary"] = _summarize_bench_training_config(training_config)
 
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
@@ -3783,13 +3772,9 @@ def launch_projection_from_cli(args, overrides):
     if load_benchmark_path:
         loaded_payload = _load_artifact(load_benchmark_path)
         loaded_metadata = loaded_payload.get("metadata", {}) or {}
-        reduction_info = _reduction_info_from_artifact_metadata(
-            loaded_metadata, gpus_per_node
-        )
+        reduction_info = _reduction_info_from_artifact_metadata(loaded_metadata, gpus_per_node)
         if is_rank_0:
-            print(
-                f"[Primus:Performance Projection] Loading bench artifact: {load_benchmark_path}"
-            )
+            print(f"[Primus:Performance Projection] Loading bench artifact: {load_benchmark_path}")
             print(
                 f"  metadata: TP={reduction_info['benchmark_tp']}/{reduction_info['original_tp']} "
                 f"PP={reduction_info['benchmark_pp']}/{reduction_info['original_pp']} "

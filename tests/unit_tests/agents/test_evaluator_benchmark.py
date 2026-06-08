@@ -33,7 +33,6 @@ from types import SimpleNamespace
 
 import pytest
 
-
 # Skip the whole module if the tuning-agent isn't importable in this env
 # (e.g. running unit_tests against the outer Primus alone without the
 # tuning-agent subtree on PYTHONPATH).
@@ -113,12 +112,24 @@ def _make_arch():
 
 def _make_trial_cfg() -> TrialConfig:
     return TrialConfig(
-        tp=1, pp=1, ep=8, cp=1, mbs=2, gbs=32, vpp=None,
-        pp_schedule="auto", enable_zero_bubble=None,
-        recompute_granularity=None, recompute_num_layers=0,
-        cross_entropy_loss_fusion=None, use_torch_fsdp2=None,
-        use_distributed_optimizer=None, use_turbo_deepep=None,
-        sync_free_stage=None, target_ep_size=None, fp8=None,
+        tp=1,
+        pp=1,
+        ep=8,
+        cp=1,
+        mbs=2,
+        gbs=32,
+        vpp=None,
+        pp_schedule="auto",
+        enable_zero_bubble=None,
+        recompute_granularity=None,
+        recompute_num_layers=0,
+        cross_entropy_loss_fusion=None,
+        use_torch_fsdp2=None,
+        use_distributed_optimizer=None,
+        use_turbo_deepep=None,
+        sync_free_stage=None,
+        target_ep_size=None,
+        fp8=None,
         overlap_grad_reduce=True,
     )
 
@@ -134,7 +145,11 @@ def test_build_perf_cmd_appends_save_benchmark(tmp_path):
     primus_root = Path("/fake/primus")
     save = tmp_path / "art.json"
     cmd = _build_perf_cmd(
-        tmp_path / "trial.yaml", cfg, agent_cfg, "benchmark", primus_root,
+        tmp_path / "trial.yaml",
+        cfg,
+        agent_cfg,
+        "benchmark",
+        primus_root,
         save_benchmark=save,
     )
     assert "--save-benchmark" in cmd
@@ -148,7 +163,11 @@ def test_build_perf_cmd_skips_save_benchmark_in_simulate(tmp_path):
     agent_cfg = _make_agent_cfg(tmp_path)
     cfg = _make_trial_cfg()
     cmd = _build_perf_cmd(
-        tmp_path / "trial.yaml", cfg, agent_cfg, "simulate", Path("/fake/primus"),
+        tmp_path / "trial.yaml",
+        cfg,
+        agent_cfg,
+        "simulate",
+        Path("/fake/primus"),
         save_benchmark=tmp_path / "ignored.json",
     )
     # save-benchmark only makes sense in benchmark mode; the helper must
@@ -161,7 +180,10 @@ def test_build_memory_cmd_with_load_benchmark(tmp_path):
     agent_cfg = _make_agent_cfg(tmp_path)
     art = tmp_path / "art.json"
     cmd = _build_memory_cmd(
-        tmp_path / "trial.yaml", _make_trial_cfg(), agent_cfg, Path("/fake/primus"),
+        tmp_path / "trial.yaml",
+        _make_trial_cfg(),
+        agent_cfg,
+        Path("/fake/primus"),
         memory_mode="benchmark",
         load_benchmark=art,
         safety_margin=0.10,
@@ -176,7 +198,10 @@ def test_build_memory_cmd_with_load_benchmark(tmp_path):
 def test_build_memory_cmd_default_simulate_is_clean(tmp_path):
     agent_cfg = _make_agent_cfg(tmp_path)
     cmd = _build_memory_cmd(
-        tmp_path / "trial.yaml", _make_trial_cfg(), agent_cfg, Path("/fake/primus"),
+        tmp_path / "trial.yaml",
+        _make_trial_cfg(),
+        agent_cfg,
+        Path("/fake/primus"),
     )
     # Default invocation: no --memory-mode (=> simulate), no
     # --load-benchmark, no --memory-safety-margin.
@@ -203,9 +228,7 @@ def test_build_env_promotes_primus_root_and_strips_tuning_agent(tmp_path):
     primus_root = Path("/outer/primus")
     nested = "/outer/primus/primus/agents/tuning-agent"
     saved = os.environ.get("PYTHONPATH")
-    os.environ["PYTHONPATH"] = (
-        f"{nested}{os.pathsep}/some/other/lib{os.pathsep}{primus_root}"
-    )
+    os.environ["PYTHONPATH"] = f"{nested}{os.pathsep}/some/other/lib{os.pathsep}{primus_root}"
     try:
         env = _build_env(_make_agent_cfg(tmp_path), primus_root)
     finally:
@@ -327,7 +350,8 @@ def test_evaluate_benchmark_shares_artifact_and_parses_both(evaluator, tmp_path,
     monkeypatch.setattr(ev_mod, "_run", fake_run)
     # Bypass write_trial_yaml: just create a placeholder.
     monkeypatch.setattr(
-        ev_mod, "write_trial_yaml",
+        ev_mod,
+        "write_trial_yaml",
         lambda arch, cfg, out, tag: out / f"trial_{tag}.yaml",
     )
     # Stub legality helpers (imported into evaluator's namespace) — the
@@ -371,14 +395,12 @@ def test_evaluate_benchmark_rejects_when_upper_exceeds_cap(evaluator, tmp_path, 
             Path(cmd[idx + 1]).write_text("{}")
             return 0, _make_perf_stdout(), 1.0
         # Memory returns an upper bound > 259 GB cap (288 × 0.9).
-        return 0, (
-            "  Point estimate (per rank): 270.0 GB\n"
-            "  Upper bound    (per rank): 285.0 GB\n"
-        ), 0.5
+        return 0, ("  Point estimate (per rank): 270.0 GB\n" "  Upper bound    (per rank): 285.0 GB\n"), 0.5
 
     monkeypatch.setattr(ev_mod, "_run", fake_run)
     monkeypatch.setattr(
-        ev_mod, "write_trial_yaml",
+        ev_mod,
+        "write_trial_yaml",
         lambda arch, cfg, out, tag: out / f"trial_{tag}.yaml",
     )
     _stub_legality(monkeypatch)
@@ -403,7 +425,8 @@ def test_evaluate_benchmark_handles_perf_failure(evaluator, tmp_path, monkeypatc
 
     monkeypatch.setattr(ev_mod, "_run", fake_run)
     monkeypatch.setattr(
-        ev_mod, "write_trial_yaml",
+        ev_mod,
+        "write_trial_yaml",
         lambda arch, cfg, out, tag: out / f"trial_{tag}.yaml",
     )
     _stub_legality(monkeypatch)

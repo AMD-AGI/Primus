@@ -20,7 +20,11 @@ from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
-from .utils import benchmark_layer, _install_balanced_routing_patches, _kernel_pad_enabled
+from .utils import (
+    _install_balanced_routing_patches,
+    _kernel_pad_enabled,
+    benchmark_layer,
+)
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default

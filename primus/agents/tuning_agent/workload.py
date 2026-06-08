@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-
 # ---------------------------------------------------------------------------
 # Architecture record
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ArchitectureRecord:
@@ -46,17 +46,17 @@ class ArchitectureRecord:
     hidden_size: int = 0
     ffn_hidden_size: int = 0
     num_attention_heads: int = 0
-    num_query_groups: int | None = None       # GQA / MQA
+    num_query_groups: int | None = None  # GQA / MQA
     kv_channels: int | None = None
     seq_length: int = 0
     max_position_embeddings: int = 0
-    attention_type: str = "standard"          # "standard" | "mla"
+    attention_type: str = "standard"  # "standard" | "mla"
     is_moe: bool = False
     num_experts: int = 0
     moe_router_topk: int = 0
     moe_ffn_hidden_size: int | None = None
     moe_shared_expert_intermediate_size: int | None = None
-    vocab_size: int | None = None             # padded vocab size if known
+    vocab_size: int | None = None  # padded vocab size if known
     precision: str = "bf16"
 
     # baseline runtime overrides
@@ -107,6 +107,7 @@ class ArchitectureRecord:
 # ---------------------------------------------------------------------------
 # Loading helpers
 # ---------------------------------------------------------------------------
+
 
 def _vpp_from_layout(layout: str | None, pp: int) -> int | None:
     """Infer VPP from a Primus `pipeline_model_parallel_layout` string.
@@ -165,19 +166,20 @@ def _resolve_model_chain(start: Path) -> dict:
 
 
 def _detect_attention_type(model: dict) -> str:
-    if any(k.startswith("q_lora_rank") or k.startswith("kv_lora_rank") or k == "multi_latent_attention"
-           for k in model):
+    if any(
+        k.startswith("q_lora_rank") or k.startswith("kv_lora_rank") or k == "multi_latent_attention"
+        for k in model
+    ):
         return "mla"
     return "standard"
 
 
-def resolve_workload(workload_yaml: Path,
-                     primus_root: Path | None = None) -> ArchitectureRecord:
+def resolve_workload(workload_yaml: Path, primus_root: Path | None = None) -> ArchitectureRecord:
     """Resolve a Primus pretrain YAML into an ArchitectureRecord."""
     workload_yaml = workload_yaml.resolve()
     raw = _load_yaml(workload_yaml)
 
-    pre_trainer = (((raw.get("modules") or {}).get("pre_trainer")) or {})
+    pre_trainer = ((raw.get("modules") or {}).get("pre_trainer")) or {}
     framework = pre_trainer.get("framework", "megatron")
     model_filename = pre_trainer.get("model")
     if not model_filename:
@@ -198,8 +200,7 @@ def resolve_workload(workload_yaml: Path,
             model_path = candidate
         else:
             raise FileNotFoundError(
-                f"Could not find model YAML for '{model_filename}' "
-                f"under {model_path} or {candidate}"
+                f"Could not find model YAML for '{model_filename}' " f"under {model_path} or {candidate}"
             )
 
     model = _resolve_model_chain(model_path)
@@ -222,10 +223,14 @@ def resolve_workload(workload_yaml: Path,
         num_query_groups=model.get("num_query_groups"),
         kv_channels=model.get("kv_channels"),
         seq_length=int(_strip_env(overrides.get("seq_length", model.get("seq_length", 0)))),
-        max_position_embeddings=int(_strip_env(overrides.get(
-            "max_position_embeddings",
-            model.get("max_position_embeddings", 0),
-        ))),
+        max_position_embeddings=int(
+            _strip_env(
+                overrides.get(
+                    "max_position_embeddings",
+                    model.get("max_position_embeddings", 0),
+                )
+            )
+        ),
         attention_type=_detect_attention_type(model),
         is_moe=is_moe,
         num_experts=int(model.get("num_experts", 0) or 0),

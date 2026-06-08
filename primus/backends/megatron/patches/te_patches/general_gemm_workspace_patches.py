@@ -90,15 +90,8 @@ def patch_te_general_gemm_workspace_helper(ctx: PatchContext):
     # in some half-applied state.
     try:
         from primus.backends.transformer_engine.pytorch.module.base import (
-            get_workspace as primus_get_workspace,
+            get_workspace as workspace_helper,
         )
-    except (ImportError, ModuleNotFoundError) as exc:
-        te_ext._get_workspace = None
-        log_rank_0(
-            "[Patch:megatron.te.general_gemm_workspace_helper] "
-            f"Primus workspace helper unavailable ({exc}); disabled workspace injection"
-        )
-        return
 
         helper_source = "Primus"
     except (ImportError, ModuleNotFoundError) as exc:
