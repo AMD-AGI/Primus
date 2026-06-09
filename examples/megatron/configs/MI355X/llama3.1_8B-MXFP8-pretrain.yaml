@@ -27,7 +27,7 @@ modules:
       train_iters: ${PRIMUS_TRAIN_ITERS:50}
       micro_batch_size: 2               # grad_acc = global_batch_size / (micro_batch_size * num_gpus) = 32 / (2 * 8) = 2
       global_batch_size: 32
-      
+
       seq_length: 8192
       max_position_embeddings: 8192
 
@@ -101,7 +101,7 @@ modules:
 
       # --- Mixed Precision Config ---
       fp8: e4m3
-      fp8_recipe: mxfp8  
+      fp8_recipe: mxfp8
 
       accumulate_allreduce_grads_in_fp32: false
       grad_reduce_in_bf16: true

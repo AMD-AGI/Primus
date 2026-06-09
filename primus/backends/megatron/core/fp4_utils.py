@@ -67,14 +67,19 @@ if HAVE_TE and HAVE_TURBO:
                 try:
                     fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
                 except AttributeError:
-                    fp4_recipe_none_reason = "NVFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                    fp4_recipe_none_reason = (
+                        "NVFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                    )
             elif config.fp4_recipe == Fp4Recipe.mxfp4:
                 try:
                     import os
+
                     fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
                     fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
                 except AttributeError:
-                    fp4_recipe_none_reason = "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                    fp4_recipe_none_reason = (
+                        "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                    )
             else:
                 fp4_recipe_none_reason = f"Unsupported FP4 recipe: {config.fp4_recipe}."
         else:
@@ -175,7 +180,7 @@ if HAVE_TE and HAVE_TURBO:
                     fp4_context = transformer_engine.pytorch.fp8_autocast(
                         enabled=True if fp4_recipe is not None else False,
                         fp8_recipe=fp4_recipe,
-                        fp8_group=fp4_group
+                        fp8_group=fp4_group,
                     )
             else:
                 import inspect
@@ -193,13 +198,12 @@ elif HAVE_TE:
         """Return fp4 recipe."""
         if config.fp4_recipe == Fp4Recipe.nvfp4:
             if not is_te_min_version("2.7.0.dev0"):
-                raise ValueError(
-                    "NVFP4BlockScaling requires TransformerEngine >= 2.7.0.dev0."
-                )
+                raise ValueError("NVFP4BlockScaling requires TransformerEngine >= 2.7.0.dev0.")
             fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
         elif config.fp4_recipe == Fp4Recipe.mxfp4:
             try:
                 import os
+
                 fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
                 fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
             except AttributeError:
@@ -207,10 +211,7 @@ elif HAVE_TE:
                     "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
                 )
         else:
-            raise ValueError(
-                f"Unsupported FP4 recipe: {config.fp4_recipe}. "
-                "Supported: nvfp4, mxfp4."
-            )
+            raise ValueError(f"Unsupported FP4 recipe: {config.fp4_recipe}. " "Supported: nvfp4, mxfp4.")
         return fp4_recipe
 
     def get_fp4_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
