@@ -20,25 +20,54 @@ See:
 python3 -m venv ~/code/Primus/.venv-agent
 source ~/code/Primus/.venv-agent/bin/activate
 pip install -r primus/agents/tuning_agent/requirements.txt
-# Optional, only if you want --profiling-mode simulate to run:
+# Optional: only needed for --profiling-mode simulate
 pip install git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python
 ```
 
-The agent picks up LLM credentials from a `.env` file. It searches:
+## LLM Setup
+
+The agent uses [DSPy](https://dspy.ai), which routes LLM calls through
+[LiteLLM](https://docs.litellm.ai/docs/providers) internally — **no separate
+proxy process is required**.
+
+Set credentials for whichever provider you use:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY=sk-...
+export LLM_MODEL=openai/gpt-4o           # default if unset
+
+# Anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+export LLM_MODEL=anthropic/claude-opus-4-5
+
+# Any OpenAI-compatible endpoint (Ollama, vLLM, local LiteLLM proxy, …)
+export OPENAI_API_KEY=dummy              # or the real key if required
+export OPENAI_API_BASE=http://localhost:11434/v1
+export LLM_MODEL=openai/llama3
+```
+
+The model string follows LiteLLM's provider-prefixed naming convention
+(`<provider>/<model-name>`).  See the
+[LiteLLM providers list](https://docs.litellm.ai/docs/providers) for all
+supported backends.
+
+Alternatively, put these in a `.env` file; the agent searches:
 
 ```
 $CWD/.env
 <repo-root>/.env
-~/code/.env       <-- shared with iterative_fix
 ~/.env
 ```
 
-Required keys:
+You can also set them directly in your target-cluster YAML under `agent.llm`:
 
-```bash
-LITELLM_BASE_URL=https://llm-api.amd.com
-OCP_APIM_SUBSCRIPTION_KEY=          # or use LITELLM_API_KEY for the same key
-LITELLM_MODEL=GPT-oss-20B           # optional; default in code
+```yaml
+agent:
+  llm:
+    model: anthropic/claude-opus-4-5
+    api_key: sk-ant-...         # optional if set in env
+    base_url: ...               # optional; override for custom endpoints
 ```
 
 ## Quickstart

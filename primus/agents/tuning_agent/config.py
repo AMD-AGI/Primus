@@ -1,18 +1,24 @@
 """Agent configuration: .env, target_cluster.yaml, optimization knobs.
 
-Mirrors iterative_fix's config conventions so the same `.env` (typically at
-`~/code/.env` for this developer setup) feeds both projects:
+LLM credentials are resolved from standard provider environment variables,
+exactly as DSPy/LiteLLM expect them.  Common examples:
 
-    LITELLM_BASE_URL=https://llm-api.amd.com
-    LITELLM_API_KEY=...                   # or set ``OCP_APIM_SUBSCRIPTION_KEY`` alone for AMD
-    LITELLM_MODEL=GPT-oss-20B             # optional; gateway-specific
+    # OpenAI
+    OPENAI_API_KEY=sk-...
 
-    AMD ``llm-api.amd.com``: the agent sends ``Ocp-Apim-Subscription-Key`` and ``user``
-    headers like the OpenAI Python client. Set ``OCP_APIM_SUBSCRIPTION_KEY`` or
-    ``LITELLM_API_KEY`` to that key; optional ``AMD_LLM_USER`` (else ``$USER``);
-    optional ``LITELLM_OPENAI_API_KEY`` for the dummy Bearer (default ``dummy``).
+    # Anthropic
+    ANTHROPIC_API_KEY=sk-ant-...
 
-    For a local LiteLLM sidecar, set ``LITELLM_BASE_URL=http://localhost:4000``.
+    # Any OpenAI-compatible endpoint (local Ollama, vLLM, LiteLLM proxy, …)
+    OPENAI_API_KEY=<key-or-dummy>
+    OPENAI_API_BASE=http://localhost:11434/v1
+
+    # Override the model from the environment (takes precedence over YAML)
+    LLM_MODEL=openai/gpt-4o
+
+The ``model`` field follows LiteLLM's provider-prefixed convention:
+``openai/gpt-4o``, ``anthropic/claude-opus-4-5``, ``ollama/llama3``, etc.
+See https://docs.litellm.ai/docs/providers for the full list.
 """
 
 from __future__ import annotations
@@ -30,31 +36,21 @@ except ImportError:  # pragma: no cover
     load_dotenv = None  # type: ignore[assignment]
 
 
-DEFAULT_BASE_URL = "https://llm-api.amd.com"
-DEFAULT_MODEL = "claude-opus-4-6"
+DEFAULT_MODEL = "openai/gpt-4o"
 
 
 def _resolve_api_key() -> str:
-    """Accept any of the common LiteLLM key names from .env.
-
-    ``OCP_APIM_SUBSCRIPTION_KEY`` is last so OpenAI-style ``LITELLM_API_KEY=sk-…``
-    still wins on local proxies; use it when only the Azure APIM key is set.
-    """
-    for key in ("LITELLM_API_KEY", "LITELLM_MASTER_KEY", "LLM_GATEWAY_KEY", "OPENAI_API_KEY"):
+    """Return the first populated credential env var, in priority order."""
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY"):
         val = os.environ.get(key)
         if val:
             return val
-    ocp = os.environ.get("OCP_APIM_SUBSCRIPTION_KEY")
-    if ocp:
-        return ocp
     return ""
 
 
 _ENV_CANDIDATES = (
     Path.cwd() / ".env",
     Path(__file__).resolve().parents[3] / ".env",  # repo root
-    Path(__file__).resolve().parents[4] / ".env",  # ~/code/.env when checked out under ~/code/Primus
-    Path.home() / "code" / ".env",
     Path.home() / ".env",
 )
 
@@ -128,8 +124,7 @@ class OptimizationConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "litellm"
-    base_url: str = DEFAULT_BASE_URL
+    base_url: str = ""
     api_key: str = ""
     model: str = DEFAULT_MODEL
     timeout: int = 300
@@ -202,10 +197,9 @@ def load_config(target_cluster_yaml: Path, workload_yaml: Path, out_dir: Path | 
     )
 
     llm = LLMConfig(
-        provider=str(llm_raw.get("provider", "litellm")),
-        base_url=str(llm_raw.get("base_url") or _from_env("LITELLM_BASE_URL", DEFAULT_BASE_URL)),
+        base_url=str(llm_raw.get("base_url") or _from_env("OPENAI_API_BASE") or ""),
         api_key=str(llm_raw.get("api_key") or _resolve_api_key()),
-        model=str(llm_raw.get("model") or _from_env("LITELLM_MODEL", DEFAULT_MODEL)),
+        model=str(llm_raw.get("model") or _from_env("LLM_MODEL", DEFAULT_MODEL)),
         timeout=int(llm_raw.get("timeout", 300)),
         max_tokens=int(llm_raw.get("max_tokens", 16000)),
     )
