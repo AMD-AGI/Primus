@@ -460,18 +460,24 @@ def _get_sync_free_moe_options(stage: int) -> dict:
         raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
 
     sync_free_moe = {
-        1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
+        1: {
+            "moe_use_fused_router_with_aux_score": True,
+            "moe_permute_fusion": True,
+            "use_turbo_permute_padding": True,
+        },
         2: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
+            "use_turbo_permute_padding": True,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
+            "use_turbo_permute_padding": True,
             "use_turbo_fused_act_with_probs": True,
         },
     }
@@ -498,19 +504,24 @@ def validate_args_on_rocm(args):
         # Set fill_uninitialized_memory to False to avoid calling extra fill kernel in deterministic mode.
         torch.utils.deterministic.fill_uninitialized_memory = False
 
+    if getattr(args, "use_turbo_parallel_linear", False):
+        print_rank_last("use_turbo_parallel_linear is deprecated, please use use_turbo_gemm instead.")
+    use_turbo_gemm = getattr(args, "use_turbo_gemm", False) or getattr(
+        args, "use_turbo_parallel_linear", False
+    )
     # Turbo FP8 linear check
-    if args.fp8 and args.use_turbo_parallel_linear:
+    if args.fp8 and use_turbo_gemm:
         support_fp8_recipe = ["tensorwise", "blockwise", "mxfp8"]
         assert (
             args.fp8_recipe in support_fp8_recipe
-        ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+        ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_gemm`."
 
     # Turbo FP4 linear check
-    if args.fp4 and args.use_turbo_parallel_linear:
+    if args.fp4 and use_turbo_gemm:
         support_fp4_recipe = ["mxfp4"]
         assert (
             args.fp4_recipe in support_fp4_recipe
-        ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+        ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_gemm`."
 
     # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
     if args.fp8_recipe == "mxfp8":
@@ -530,11 +541,12 @@ def validate_args_on_rocm(args):
     use_turbo_grouped_gemm = getattr(args, "use_turbo_grouped_gemm", False) or getattr(
         args, "use_turbo_grouped_mlp", False
     )
-    if use_turbo_grouped_gemm and getattr(args, "moe_use_legacy_grouped_gemm", False):
-        raise ValueError(
-            "use_turbo_grouped_gemm=True or use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
-            "please set moe_use_legacy_grouped_gemm=False."
-        )
+    if use_turbo_grouped_gemm:
+        if getattr(args, "moe_use_legacy_grouped_gemm", False):
+            raise ValueError(
+                "use_turbo_grouped_gemm=True or use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
+                "please set moe_use_legacy_grouped_gemm=False."
+            )
 
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
