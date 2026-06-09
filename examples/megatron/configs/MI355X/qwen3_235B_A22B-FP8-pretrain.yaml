@@ -60,6 +60,11 @@ modules:
       train_data_path: null
       valid_data_path: null
       test_data_path: null
+      # Attention is causal fused flash-attn (aiter Triton / AOTriton); the kernel
+      # masks via its IS_CAUSAL flag, so the dense [1,1,S,S] bool mask the dataloader
+      # would otherwise build is dead weight. Disabling it removes a 16 MiB pageable
+      # H2D copy (~5ms) + a TP broadcast every step with zero functional impact.
+      create_attention_mask_in_dataloader: false
 
       # optimizer
       use_precision_aware_optimizer: true
