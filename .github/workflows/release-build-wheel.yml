@@ -91,6 +91,8 @@ jobs:
               "primus/runner/primus-cli",
               "primus/runner/lib/common.sh",
               "primus/runner/primus-cli-direct.sh",
+              "primus/runner/primus-cli-deps.sh",
+              "primus/_thirdparty.lock",
           ]
           missing = [r for r in required if r not in names]
           if missing:

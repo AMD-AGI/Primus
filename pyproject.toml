@@ -104,3 +104,6 @@ include = [
     "LICENSE",
     "pyproject.toml",
 ]
+# _thirdparty.lock is generated at build time and git-ignored; force it into the
+# sdist too, so `python -m build` (sdist -> wheel) keeps it in the final wheel.
+artifacts = ["primus/_thirdparty.lock"]
