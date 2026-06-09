@@ -64,6 +64,9 @@ Examples:
     # Dry-run to see commands without execution:
     primus-cli --dry-run slurm srun -N 4 -- benchmark gemm
 
+    # Sync third_party backend sources (Megatron/TorchTitan/...) for an installed wheel:
+    primus-cli deps sync --dir ~/.cache/Primus/third_party
+
 Notes:
     - [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
     - All arguments after [--] are passed to the Primus Python CLI (see 'primus-cli direct -- --help').
