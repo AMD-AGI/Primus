@@ -37,11 +37,13 @@ Supported modes:
     slurm      Launch distributed workflows via Slurm cluster (srun/sbatch)
     container  Launch workflows in a managed Docker/Podman container
     direct     Launch workflows directly on the current host or container
+    deps       Sync third_party sources (from packaged lock) for an installed wheel
 
     Mode-specific help:
         primus-cli slurm --help         Show usage for slurm mode
         primus-cli container --help     Show usage for container mode (single node or debugging)
         primus-cli direct --help        Show usage for direct mode (host/container)
+        primus-cli deps --help          Show usage for deps mode (sync third_party sources)
 
 Examples:
     # Distributed GEMM benchmark using srun on 4 nodes:
@@ -130,7 +132,7 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN_MODE=true
             shift
             ;;
-        slurm|container|direct)
+        slurm|container|direct|deps)
             # Found valid mode, stop parsing global options
             MODE="$1"
             shift

@@ -2,6 +2,7 @@ __pycache__
 *.so
 build
 dist/
+primus/_thirdparty.lock
 .coverage_*
 *.egg-info
 *~

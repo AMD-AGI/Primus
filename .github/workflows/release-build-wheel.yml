@@ -68,13 +68,11 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade pip build
 
-      # Dynamically expose each third_party submodule as a pip extra pinned to
-      # its exact commit (e.g. `pip install primus[megatron]`). Reads the pins
-      # from this checkout, so each branch/release gets its own commits.
-      - name: Inject third_party submodules as pip extras
-        run: |
-          python -m pip install tomlkit
-          python tools/pip_index/gen_thirdparty_extras.py
+      # Generate the third_party lock (submodule name/url/pinned-commit) into the
+      # primus package so the wheel ships it. `primus-cli deps sync` then clones
+      # the full sources (incl. nested submodules). Pins come from this checkout.
+      - name: Generate third_party lock
+        run: python tools/pip_index/gen_thirdparty_lock.py
 
       - name: Build sdist and wheel
         run: python -m build
