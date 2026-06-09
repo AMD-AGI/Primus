@@ -11,10 +11,10 @@ python-dotenv>=1.0
 # Plotting (optional but recommended)
 matplotlib>=3.7
 
-# DSPy + litellm — the LLM agent stack.
-# Use a recent dspy that ships dspy.RLM and the deno PythonInterpreter.
+# DSPy — the LLM agent stack. Brings LiteLLM as a dependency, which handles
+# all provider routing (OpenAI, Anthropic, Ollama, Azure, etc.) without a
+# separate proxy process.
 dspy>=3.0
-litellm>=1.50
 
 # Origami is required for `projection performance --profiling-mode simulate`.
 # Install it separately when you need the simulate path:

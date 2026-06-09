@@ -1,6 +1,6 @@
 """DSPy planner + RLM driver for the tuning agent.
 
-Mirrors the iterative_fix two-stage pattern:
+Two-stage flow:
 
   1. Planner (ChainOfThought) — produces an investigation plan and the
      initial set of high-priority axes / hypotheses, given the architecture,
@@ -8,13 +8,14 @@ Mirrors the iterative_fix two-stage pattern:
   2. RLM — actually exercises the tool belt: evaluates configs, reads the
      scratchpad, queries a sub-LLM, etc.
 
-Both stages share the same .env / litellm / dspy configuration as
-iterative_fix so the same proxy can host both.
+LLM configuration uses DSPy's built-in LiteLLM integration — no external
+proxy is required. Set the model string and credentials via environment
+variables (see config.py) or via the target-cluster YAML ``agent.llm``
+section.
 """
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import shutil
@@ -37,42 +38,34 @@ from .workload import ArchitectureRecord
 # ---------------------------------------------------------------------------
 
 
-def _amd_onprem_llm_headers(subscription_key: str) -> dict[str, str]:
-    """Match ``openai.OpenAI(..., default_headers=…)`` for llm-api.amd.com."""
-    user = (
-        os.environ.get("AMD_LLM_USER")
-        or os.environ.get("USER")
-        or os.environ.get("LOGNAME")
-        or getpass.getuser()
-    )
-    return {
-        "Ocp-Apim-Subscription-Key": subscription_key,
-        "user": user,
-    }
-
-
 def configure_dspy(agent_cfg: AgentConfig) -> None:
+    """Configure the global DSPy LM from AgentConfig.
+
+    DSPy uses LiteLLM under the hood, so ``model`` follows LiteLLM's
+    provider-prefixed naming convention (e.g. ``openai/gpt-4o``,
+    ``anthropic/claude-opus-4-5``, ``ollama/llama3``).  Any provider
+    supported by LiteLLM works without an additional proxy.
+
+    Credentials are taken from the environment as usual for each provider
+    (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, etc.) or from the
+    ``api_key`` / ``base_url`` fields in the target-cluster YAML.
+    """
     model = agent_cfg.llm.model
-    dspy_model = model if model.startswith("openai/") else f"openai/{model}"
-    base_url = agent_cfg.llm.base_url or ""
-    api_key = agent_cfg.llm.api_key or ""
+    api_key = agent_cfg.llm.api_key or None
+    base_url = agent_cfg.llm.base_url or None
 
     lm_kwargs: dict = {
-        "api_base": base_url,
-        "api_key": api_key,
         "cache": False,
         "timeout": agent_cfg.llm.timeout,
         "max_tokens": agent_cfg.llm.max_tokens,
     }
-
-    # AMD corporate gateway: APIM subscription header + dummy OpenAI api_key.
-    sub_key = os.environ.get("OCP_APIM_SUBSCRIPTION_KEY") or api_key
-    if "llm-api.amd.com" in base_url and sub_key:
-        lm_kwargs["headers"] = _amd_onprem_llm_headers(sub_key)
-        lm_kwargs["api_key"] = os.environ.get("LITELLM_OPENAI_API_KEY") or "dummy"
+    if api_key:
+        lm_kwargs["api_key"] = api_key
+    if base_url:
+        lm_kwargs["api_base"] = base_url
 
     # ChatAdapter avoids JSONAdapter failures when the model wraps output in ```json.
-    lm = dspy.LM(dspy_model, **lm_kwargs)
+    lm = dspy.LM(model, **lm_kwargs)
     try:
         dspy.configure(lm=lm, adapter=dspy.ChatAdapter())
     except TypeError:
