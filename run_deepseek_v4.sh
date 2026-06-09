@@ -2,20 +2,44 @@
 set -euo pipefail
 set -x
 
+_RUN_START_SEC=$(date +%s)
+_RUN_START_TS=$(date '+%Y-%m-%d %H:%M:%S')
+_print_run_elapsed() {
+  local _end_sec _end_ts _elapsed _exit=$1
+  _end_sec=$(date +%s)
+  _end_ts=$(date '+%Y-%m-%d %H:%M:%S')
+  _elapsed=$((_end_sec - _RUN_START_SEC))
+  echo "----------------------------------------"
+  echo "run_deepseek_v4.sh wall time"
+  echo "  start:   ${_RUN_START_TS}"
+  echo "  end:     ${_end_ts}"
+  echo "  elapsed: ${_elapsed}s ($((_elapsed / 60))m $((_elapsed % 60))s)"
+  echo "  exit:    ${_exit}"
+}
+trap '_print_run_elapsed $?' EXIT
+
 export HF_TOKEN="${HF_TOKEN:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 
-export NNODES=${PET_NNODES:-1}
-export TRAIN_ITERS=${TRAIN_ITERS:-10}
+export NNODES=${NNODES:-1}
+export TRAIN_ITERS=${TRAIN_ITERS:-20}
+
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"tasimage/primus:pr-715-ainic"}
+export SLURM_PARTITION=Compute-DCPT
+export SLURM_NODELIST="${SLURM_NODELIST:-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
+export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
-export NCCL_IB_HCA="${NCCL_IB_HCA:-ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1}"
+export NCCL_IB_HCA="ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1"
+export GLOO_SOCKET_IFNAME=fenic
+export NCCL_SOCKET_IFNAME=fenic
+export NCCL_IB_GID_INDEX=1
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Phase-7 fixed knobs for single-node bring-up.
 export MBS=${MBS:-1}
-export GBS=${GBS:-16}
+export GBS=${GBS:-$((16 * NNODES * MBS))}
 export PRIMUS_TP=${PRIMUS_TP:-1}
 export PRIMUS_PP=${PRIMUS_PP:-1}
 export PRIMUS_EP=${PRIMUS_EP:-8}
@@ -120,6 +144,13 @@ if [ "$PRECISION_TYPE" = "FP8" ]; then
   export FP8_RECIPE=${FP8_RECIPE:-delayed}
 fi
 
+PP_LAYOUT_ARGS=()
+if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
+  PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
+fi
+
+PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
+
 export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
 export BACKEND_PATH=${BACKEND_PATH:-"$(pwd)/third_party/Megatron-LM"}
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
@@ -134,8 +165,14 @@ fi
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 
-./primus-cli direct \
+./primus-cli slurm -N "$NNODES" \
+  ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
+  ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
+  -- --image "${DOCKER_IMAGE}" --clean -- --numa \
   -- train pretrain --config "$EXP" \
+  "${PP_LAYOUT_ARGS[@]}" \
+  --moe_router_force_load_balancing True \
+  --log_avg_skip_iterations 3 \
   --backend_path "$BACKEND_PATH" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
   --train_iters "$TRAIN_ITERS" \
@@ -171,7 +208,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \
-  --recompute_num_layers 0 \
+  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
   --recompute_granularity full \
   --recompute_method block \
   --overlap_grad_reduce False \
