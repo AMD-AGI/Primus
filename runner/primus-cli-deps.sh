@@ -29,7 +29,7 @@ Description:
 
 Options:
     --dir DIR     Target directory
-                  (default: $PRIMUS_THIRDPARTY_DIR or ~/.primus/third_party)
+                  (default: $PRIMUS_THIRDPARTY_DIR or ~/.cache/Primus/third_party)
     --dry-run     Show what would be cloned without doing it
     -h, --help    Show this help
 EOF
@@ -59,7 +59,7 @@ LOCK_FILE="${RUNNER_DIR}/../_thirdparty.lock"
 
 case "$SUB" in
     sync)
-        DEST="${PRIMUS_THIRDPARTY_DIR:-$HOME/.primus/third_party}"
+        DEST="${PRIMUS_THIRDPARTY_DIR:-$HOME/.cache/Primus/third_party}"
         DRY_RUN=0
         while [[ $# -gt 0 ]]; do
             case "$1" in
