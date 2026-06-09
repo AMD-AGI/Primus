@@ -68,6 +68,14 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade pip build
 
+      # Dynamically expose each third_party submodule as a pip extra pinned to
+      # its exact commit (e.g. `pip install primus[megatron]`). Reads the pins
+      # from this checkout, so each branch/release gets its own commits.
+      - name: Inject third_party submodules as pip extras
+        run: |
+          python -m pip install tomlkit
+          python tools/pip_index/gen_thirdparty_extras.py
+
       - name: Build sdist and wheel
         run: python -m build
 
@@ -131,6 +139,21 @@ jobs:
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          # Wait until the just-uploaded wheel is visible via the Releases API,
+          # so the dashboard's build_pip_index does not read an empty asset list
+          # due to eventual consistency (which produced an empty pip index).
+          echo "Waiting for the release wheel to be visible via the API..."
+          for i in $(seq 1 18); do
+            whl_count=$(gh release view "$TAG" --json assets \
+              --jq '[.assets[] | select(.name | endswith(".whl"))] | length' 2>/dev/null || echo 0)
+            if [ "${whl_count:-0}" -ge 1 ]; then
+              echo "Wheel asset is visible (count=$whl_count)."
+              break
+            fi
+            echo "  not visible yet ($i/18); sleeping 10s..."
+            sleep 10
+          done
           echo "Triggering 'Deploy Backend Gap Dashboard' to refresh the pip index..."
           gh workflow run deploy-backend-gap-dashboard.yml --ref main
