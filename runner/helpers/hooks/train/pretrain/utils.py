@@ -91,3 +91,18 @@ def get_env_case_insensitive(var_name: str) -> str | None:
         if key.lower() == var_name.lower():
             return value
     return None
+
+
+def default_backend_path(primus_path, dir_name: str) -> Path:
+    """Default backend source dir for prepare hooks.
+
+    Prefer the source-tree location ``<primus_path>/third_party/<dir_name>`` when
+    it exists; otherwise fall back to the deps-sync dir used by installed wheels
+    (``$PRIMUS_THIRDPARTY_DIR`` or ``~/.cache/Primus/third_party``), populated by
+    ``primus-cli deps sync``.
+    """
+    src = Path(primus_path) / "third_party" / dir_name
+    if src.exists():
+        return src
+    tp_root = os.getenv("PRIMUS_THIRDPARTY_DIR") or str(Path.home() / ".cache" / "Primus" / "third_party")
+    return Path(tp_root) / dir_name
