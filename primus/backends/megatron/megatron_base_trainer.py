@@ -50,6 +50,7 @@ class MegatronBaseTrainer(BaseTrainer):
 
         # clean up torch pg resources on exit
         if dist.is_initialized():
+            log_rank_0("[MegatronBaseTrainer] calling dist.destroy_process_group()")
             dist.destroy_process_group()
 
         exit_fast = os.environ.get("PRIMUS_EXIT_FAST", "0") == "1"
