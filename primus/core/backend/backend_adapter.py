@@ -14,7 +14,7 @@ class BackendAdapter(ABC):
 
     BackendAdapter is responsible for four main tasks:
         1. Backend initialization (env, patching, paths)
-        2. Convert Primus TypedConfig → backend native config / args
+        2. Convert Primus TypedConfig -> backend native config / args
         3. Build Trainer class or call backend launcher
         4. Optional hooks (patch, override behavior)
     """
@@ -65,7 +65,7 @@ class BackendAdapter(ABC):
                 if norm_path not in sys.path:
                     sys.path.insert(0, norm_path)
                     try:
-                        log_rank_0(f"[Primus:{self.framework}] sys.path.insert → {norm_path}")
+                        log_rank_0(f"[Primus:{self.framework}] sys.path.insert -> {norm_path}")
                     except Exception:
                         # Logger may not be initialized yet; sys.path is already updated.
                         pass

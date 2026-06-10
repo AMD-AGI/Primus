@@ -23,6 +23,7 @@ from typing import Any
 import primus.backends.torchtitan.patches  # noqa: F401
 from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
+from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_rank_0
 
 
@@ -47,14 +48,14 @@ class TorchTitanAdapter(BackendAdapter):
         Default behavior:
           - Lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
         """
-        if stage == "pretrain":
-            from primus.backends.torchtitan.torchtitan_pretrain_trainer import (
-                TorchTitanPretrainTrainer,
-            )
-
-            return TorchTitanPretrainTrainer
-        else:
-            raise ValueError(f"Invalid stage: {stage}")
+        try:
+            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
+        except (ValueError, AssertionError) as exc:
+            raise RuntimeError(
+                "[Primus:TorchTitanAdapter] 'torchtitan' backend trainer not registered. "
+                "Ensure primus.backends.torchtitan.trainers (or equivalent) registers "
+                "the trainer class via BackendRegistry."
+            ) from exc
 
     # Version Detection
     def detect_backend_version(self) -> str:
