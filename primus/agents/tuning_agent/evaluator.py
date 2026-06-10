@@ -485,7 +485,10 @@ def _build_memory_cmd(
         "--config",
         str(yaml_path),
     ]
-    if memory_mode and memory_mode != "simulate":
+    if memory_mode:
+        # Pass the memory mode explicitly so the agent does not rely on the
+        # CLI's default (which is ``benchmark`` and would launch a GPU
+        # sub-node layer benchmark for the simulate/memory-only path).
         cmd += ["--memory-mode", memory_mode]
     if load_benchmark is not None:
         cmd += ["--load-benchmark", str(load_benchmark)]
