@@ -48,6 +48,10 @@ class MegatronBaseTrainer(BaseTrainer):
         else:
             self._end_mlflow_run()
 
+        # clean up torch pg resources on exit
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
         exit_fast = os.environ.get("PRIMUS_EXIT_FAST", "0") == "1"
 
         if exit_fast and not on_error:
