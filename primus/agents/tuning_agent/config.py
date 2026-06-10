@@ -102,6 +102,10 @@ class Budget:
 
 @dataclass
 class OptimizationConfig:
+    # ``mode`` selects the search surface:
+    #   "training"  — distributed pretraining throughput (default).
+    #   "inference" — serving (TTFT / ITL / throughput / KV capacity).
+    mode: str = "training"
     objective: str = "tokens_per_s_per_gpu"
     memory_safety_margin: float = 0.10
     hbm_capacity_gb: float = 192.0  # MI300X/MI325X/MI355X = 192/256/288
@@ -120,6 +124,14 @@ class OptimizationConfig:
             "overlap_grad_reduce": False,
         }
     )
+    # Serving request profile (only used when mode == "inference").
+    #   input_len / output_len: prompt + generation lengths (tokens)
+    #   max_concurrency: resident sequences for KV sizing (default: batch)
+    inference: dict[str, Any] = field(default_factory=lambda: {
+        "input_len": 1024,
+        "output_len": 128,
+        "max_concurrency": None,
+    })
 
 
 @dataclass
@@ -182,10 +194,17 @@ def load_config(target_cluster_yaml: Path, workload_yaml: Path, out_dir: Path | 
     )
 
     budget_raw = (opt_raw.get("budget") or {}) if isinstance(opt_raw, dict) else {}
+    mode = str(opt_raw.get("mode", "training")).strip().lower()
+    # Sensible default objective per mode (training keeps the historical one).
+    default_objective = (
+        "decode_throughput_tps_per_gpu" if mode == "inference" else "tokens_per_s_per_gpu"
+    )
     optimization = OptimizationConfig(
-        objective=opt_raw.get("objective", "tokens_per_s_per_gpu"),
+        mode=mode,
+        objective=opt_raw.get("objective", default_objective),
         memory_safety_margin=float(opt_raw.get("memory_safety_margin", 0.10)),
         hbm_capacity_gb=float(opt_raw.get("hbm_capacity_gb", 192.0)),
+        inference={**OptimizationConfig().inference, **(opt_raw.get("inference") or {})},
         budget=Budget(
             max_proposals=int(budget_raw.get("max_proposals", 30)),
             max_perf_calls=int(budget_raw.get("max_perf_calls", 30)),

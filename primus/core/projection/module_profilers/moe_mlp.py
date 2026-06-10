@@ -144,7 +144,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         ep_size = self.config.model_parallel_config.expert_model_parallel_size
 
         hidden_size = self.config.model_config.hidden_size
-        batch_tokens = batch_size * seq_len // tp_size // cp_size
+        batch_tokens = max(1, batch_size * seq_len // tp_size // cp_size)
         topk = self.config.model_config.moe_router_topk
         topk_tokens = batch_tokens * topk
 
@@ -155,7 +155,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
         num_experts = self.config.model_config.num_experts or 1
         num_local_experts = num_experts // ep_size
-        tokens_per_expert = topk_tokens // max(num_local_experts, 1)
+        # Floor at 1: small decode batches yield < 1 token per expert, which
+        # would size a 0-row grouped GEMM and divide-by-zero in the simulator.
+        tokens_per_expert = max(1, topk_tokens // max(num_local_experts, 1))
 
         # FP8-hybrid: MoE expert MLP projections run in FP8
         gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"

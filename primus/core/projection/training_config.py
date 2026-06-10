@@ -5,8 +5,8 @@
 ###############################################################################
 
 import os
-from dataclasses import dataclass, fields
-from typing import List, Optional
+from dataclasses import dataclass, field, fields
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -97,6 +97,206 @@ class TrainingConfig:
     model_config: ModelConfig
     runtime_config: RuntimeConfig
     model_parallel_config: ModelParallelConfig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inference / serving configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def dtype_num_bytes(dtype: Optional[str]) -> float:
+    """Return the byte width of a (loosely-named) tensor dtype.
+
+    Accepts the informal names used throughout the projection layer
+    (``bf16``, ``fp16``, ``fp8``, ``int8``, ``fp32``).  Unknown / ``None``
+    values fall back to bf16 (2 bytes) which is the projection default.
+    """
+    if dtype is None:
+        return 2.0
+    key = str(dtype).lower().strip()
+    return {
+        "fp32": 4.0,
+        "float32": 4.0,
+        "bf16": 2.0,
+        "bfloat16": 2.0,
+        "fp16": 2.0,
+        "float16": 2.0,
+        "half": 2.0,
+        "fp8": 1.0,
+        "fp8_e4m3": 1.0,
+        "fp8_e5m2": 1.0,
+        "int8": 1.0,
+        "uint8": 1.0,
+        "fp4": 0.5,
+        "int4": 0.5,
+    }.get(key, 2.0)
+
+
+@dataclass
+class InferenceRequestConfig:
+    """Describes the *serving* workload an inference projection targets.
+
+    Unlike :class:`RuntimeConfig` (which models a training microbatch /
+    global-batch / gradient-accumulation pipeline) this captures the
+    request profile that drives prefill + autoregressive decode.
+    """
+
+    # Prompt (prefill) and generation (decode) lengths, in tokens.
+    input_seq_len: int = 1024
+    output_seq_len: int = 128
+    # Number of sequences processed together in one forward (a decode batch).
+    batch_size: int = 1
+    # Max number of sequences whose KV cache is resident at once (for memory
+    # sizing / continuous batching).  Defaults to ``batch_size``.
+    max_concurrency: Optional[int] = None
+    # Largest context (prompt + generated) any sequence can reach.  Drives
+    # KV-cache capacity.  Defaults to ``input_seq_len + output_seq_len``.
+    max_context_len: Optional[int] = None
+
+    # ---- Precision ----
+    weight_dtype: str = "bf16"     # weights kept resident (bf16 | fp8 | ...)
+    kv_cache_dtype: str = "bf16"   # KV cache precision (bf16 | fp8 | int8 | ...)
+
+    # ---- Inference features ----
+    # Chunked prefill: split a long prompt into chunks of this many tokens
+    # (0 disables; the whole prompt is one forward).
+    chunked_prefill_size: int = 0
+    # Speculative decoding: number of draft tokens proposed per verify step
+    # (0 disables) and the expected acceptance rate in [0, 1].
+    speculative_num_tokens: int = 0
+    speculative_acceptance_rate: float = 0.0
+
+    def resolved_max_context_len(self) -> int:
+        if self.max_context_len is not None:
+            return int(self.max_context_len)
+        return int(self.input_seq_len) + int(self.output_seq_len)
+
+    def resolved_max_concurrency(self) -> int:
+        if self.max_concurrency is not None:
+            return int(self.max_concurrency)
+        return int(self.batch_size)
+
+
+@dataclass
+class InferenceCollectiveConfig:
+    """Knobs for the explicit inference communication model (feature B).
+
+    When :attr:`enabled` the inference performance projector replaces the
+    layer profiler's *implicit* TP-AllReduce / EP-AllToAll cost with an
+    explicit, reportable communication model.  At default values it
+    reproduces the implicit cost; the knobs below let a user model
+    **custom collective ops** — forcing a specific algorithm, hiding comm
+    behind compute (overlap), or applying a fused-op speedup (e.g.
+    AllReduce+RMSNorm fusion, DeepEP-style overlapped dispatch/combine).
+    """
+
+    enabled: bool = True
+    # Algorithm override for the TP AllReduce / EP AllToAll. ``auto`` lets the
+    # collective model pick the fastest; otherwise force a specific algorithm.
+    tp_allreduce_algo: str = "auto"  # auto | ring | one_shot | two_shot | hierarchical
+    ep_a2a_algo: str = "auto"  # auto | direct | single_shot | hierarchical
+    # Fraction of communication hidden behind compute (0 = none, fully
+    # exposed; 1 = fully overlapped). Set per phase.
+    prefill_overlap: float = 0.0
+    decode_overlap: float = 0.0
+    # Custom fused-op efficiency multipliers applied to comm time
+    # (<1.0 = faster, models kernel fusion / better algorithms). 1.0 = none.
+    tp_allreduce_efficiency: float = 1.0
+    ep_a2a_efficiency: float = 1.0
+    # Whether to charge pipeline-stage P2P (send/recv) latency. Only nonzero
+    # when pipeline_model_parallel_size > 1.
+    include_pp_p2p: bool = True
+    # Optional hardware overrides forwarded to ``get_default_args`` (node_bw,
+    # pod_bw, bw_eff, latencies, ...). ``None`` uses the model defaults.
+    hardware_config: Optional[Dict] = None
+
+
+@dataclass
+class DisaggregationConfig:
+    """Prefill/decode disaggregation (feature A).
+
+    Models separate prefill and decode worker pools, each with its own
+    parallelism, plus the KV-cache transfer cost incurred when a request
+    migrates from a prefill worker to a decode worker.  When disabled the
+    projector runs the standard colocated two-phase model.
+    """
+
+    enabled: bool = False
+    # Per-pool parallelism overrides. ``None`` falls back to the shared
+    # ``model_parallel_config`` values.
+    prefill_tp: Optional[int] = None
+    prefill_pp: Optional[int] = None
+    prefill_ep: Optional[int] = None
+    decode_tp: Optional[int] = None
+    decode_pp: Optional[int] = None
+    decode_ep: Optional[int] = None
+    # Number of replicas in each pool (for aggregate-throughput / GPU split).
+    prefill_replicas: int = 1
+    decode_replicas: int = 1
+    # KV-cache transfer link. ``None`` bw uses the inter-node (pod) bandwidth
+    # from the collective model; latency is a fixed per-transfer overhead (us).
+    kv_transfer_bw_gbps: Optional[float] = None
+    kv_transfer_latency_us: float = 0.0
+
+    def prefill_parallel(self, mp: ModelParallelConfig) -> "ModelParallelConfig":
+        return _override_parallel(mp, self.prefill_tp, self.prefill_pp, self.prefill_ep)
+
+    def decode_parallel(self, mp: ModelParallelConfig) -> "ModelParallelConfig":
+        return _override_parallel(mp, self.decode_tp, self.decode_pp, self.decode_ep)
+
+
+def _override_parallel(
+    mp: ModelParallelConfig, tp: Optional[int], pp: Optional[int], ep: Optional[int]
+) -> ModelParallelConfig:
+    """Return a copy of ``mp`` with TP/PP/EP optionally overridden."""
+    from copy import copy
+
+    out = copy(mp)
+    if tp is not None:
+        out.tensor_model_parallel_size = int(tp)
+    if pp is not None:
+        out.pipeline_model_parallel_size = int(pp)
+    if ep is not None:
+        out.expert_model_parallel_size = int(ep)
+    return out
+
+
+@dataclass
+class InferenceConfig:
+    """Configuration for inference / serving projection.
+
+    Reuses the same :class:`ModelConfig` / :class:`ModelParallelConfig` as
+    training (so the existing profiler tree can estimate forward compute and
+    parameter counts) but swaps the training :class:`RuntimeConfig` for an
+    :class:`InferenceRequestConfig`.
+    """
+
+    model_config: ModelConfig
+    request_config: InferenceRequestConfig
+    model_parallel_config: ModelParallelConfig
+    collective_config: InferenceCollectiveConfig = field(
+        default_factory=InferenceCollectiveConfig
+    )
+    disaggregation_config: DisaggregationConfig = field(
+        default_factory=DisaggregationConfig
+    )
+
+    def as_training_config(self, *, batch_size: int, seq_len: int) -> TrainingConfig:
+        """Build a throwaway :class:`TrainingConfig` view for a given
+        (batch, seq_len) so the existing profiler tree can be reused for
+        forward-only compute estimation.
+        """
+        runtime = RuntimeConfig(
+            global_batch_size=batch_size,
+            micro_batch_size=batch_size,
+            sequence_length=seq_len,
+            data_parallel_size=1,
+        )
+        return TrainingConfig(
+            model_config=self.model_config,
+            runtime_config=runtime,
+            model_parallel_config=self.model_parallel_config,
+        )
 
 
 def update_config_from_args(config, args):
@@ -204,3 +404,81 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     )
 
     return training_config
+
+
+def convert_primus_config_to_inference_config(
+    primus_config,
+    *,
+    inference_overrides: Optional[dict] = None,
+) -> InferenceConfig:
+    """Build an :class:`InferenceConfig` from a primus config.
+
+    Reuses :func:`convert_primus_config_to_projection_config` for the model
+    and parallelism config, then layers an :class:`InferenceRequestConfig`
+    on top.  ``inference_overrides`` (typically parsed from CLI flags) takes
+    precedence over any ``inference:`` block embedded in the YAML.
+    """
+    training_config = convert_primus_config_to_projection_config(primus_config)
+
+    # Allow an optional ``inference:`` block in the pre_trainer module config
+    # (so a single workload YAML can carry a default serving profile).
+    args = primus_config.get_module_config("pre_trainer")
+    yaml_inf = getattr(args, "inference", None) or {}
+    if not isinstance(yaml_inf, dict):
+        yaml_inf = {}
+
+    request = InferenceRequestConfig()
+    # 1) seed from the training seq_length so a bare config still works.
+    if getattr(training_config.runtime_config, "sequence_length", 0):
+        request.input_seq_len = int(training_config.runtime_config.sequence_length)
+    # 2) apply YAML inference block, then 3) CLI overrides.
+    overrides = inference_overrides or {}
+    for source in (yaml_inf, overrides):
+        for f in fields(request):
+            if f.name in source and source[f.name] is not None:
+                setattr(request, f.name, source[f.name])
+
+    # ---- Collective (feature B) + disaggregation (feature A) configs ----
+    collective = InferenceCollectiveConfig()
+    disagg = DisaggregationConfig()
+    # YAML may carry nested ``collective:`` / ``disaggregation:`` blocks; CLI
+    # overrides arrive flattened (e.g. ``collective_*`` / ``disagg_*`` keys).
+    yaml_coll = yaml_inf.get("collective") if isinstance(yaml_inf.get("collective"), dict) else {}
+    yaml_disagg = (
+        yaml_inf.get("disaggregation") if isinstance(yaml_inf.get("disaggregation"), dict) else {}
+    )
+    _apply_fields(collective, yaml_coll)
+    _apply_fields(disagg, yaml_disagg)
+    _apply_prefixed(collective, overrides, prefix="collective_")
+    _apply_prefixed(disagg, overrides, prefix="disagg_")
+
+    return InferenceConfig(
+        model_config=training_config.model_config,
+        request_config=request,
+        model_parallel_config=training_config.model_parallel_config,
+        collective_config=collective,
+        disaggregation_config=disagg,
+    )
+
+
+def _apply_fields(target, source: dict) -> None:
+    """Set dataclass fields on ``target`` from matching keys in ``source``."""
+    if not source:
+        return
+    valid = {f.name for f in fields(target)}
+    for key, val in source.items():
+        if key in valid and val is not None:
+            setattr(target, key, val)
+
+
+def _apply_prefixed(target, source: dict, *, prefix: str) -> None:
+    """Set dataclass fields from ``source`` keys of the form ``<prefix><field>``."""
+    if not source:
+        return
+    valid = {f.name for f in fields(target)}
+    for key, val in source.items():
+        if not key.startswith(prefix):
+            continue
+        name = key[len(prefix):]
+        if name in valid and val is not None:
+            setattr(target, name, val)

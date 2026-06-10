@@ -1,0 +1,36 @@
+target_cluster:
+  name: "mi355x-inference"
+  num_nodes: 1
+  gpus_per_node: 8
+  gpu_arch: mi355x
+  hardware_config: examples/hardware_configs/mi355x.yaml
+
+available_for_benchmark:
+  has_gpu: false
+  benchmark_gpus: 0
+
+optimization:
+  # Tune for serving instead of training throughput.
+  mode: inference
+  # Objective: maximize decode throughput per GPU. Other options:
+  #   min_ttft | min_latency | min_itl | max_throughput | max_concurrency
+  objective: max_throughput
+  memory_safety_margin: 0.10
+  hbm_capacity_gb: 288.0
+  # Serving request profile.
+  inference:
+    input_len: 4096
+    output_len: 256
+    max_concurrency: null   # defaults to the trial batch size
+  budget:
+    max_proposals: 16
+    max_perf_calls: 16
+    max_benchmark_calls: 0
+    max_rounds: 1
+    max_rlm_iterations: 8
+
+agent:
+  llm:
+    provider: litellm
+    timeout: 300
+    max_tokens: 8000
