@@ -44,16 +44,11 @@
 #       the output layer (matching FLA's initializer_range), instead of
 #       the depth-scaled init that's appropriate only for pure transformers.
 #
-#   06-pretrain_mamba-fla-data-and-diag.patch
-#       (a) Adds an opt-in FLA-order dataset shim activated by
-#           PRIMUS_FLA_DATA=1 + PRIMUS_FLA_CACHE_DIR=<path>; uses
-#           tools/fla_order_dataset.py to feed the exact same token order as
-#           FLA's HuggingFace DistributedSampler.
-#       (b) Adds env-var-gated diagnostic dumps for iter-1 batch tokens
-#           (PRIMUS_DUMP_ITER1_BATCH=<path>) and per-layer activations
-#           (PRIMUS_DUMP_ITER1_ACTS=<path>) used during loss-divergence
-#           debugging. Both paths are inert when env vars are unset
-#           (cost: ~4 string lookups per iter, microseconds).
+#   06-pretrain_mamba-fla-data.patch
+#       Adds an opt-in FLA-order dataset shim activated by
+#       PRIMUS_FLA_DATA=1 + PRIMUS_FLA_CACHE_DIR=<path>; uses
+#       tools/fla_order_dataset.py to feed the exact same token order as
+#       FLA's HuggingFace DistributedSampler.
 #
 # Usage:
 #   bash megatron_patch.sh           # apply all patches
@@ -62,12 +57,10 @@
 #
 # Runtime toggles (no re-patching needed):
 #   PRIMUS_FUSED_CE      0=off, 1=FusedLinearCE [default], 2=FusedCE-match-FLA
+#   PRIMUS_FUSED_CE_CHUNKS  Number of chunks for FusedLinearCE (default 32)
 #   PRIMUS_FLA_SWIGLU    1=FLA Triton SwiGLU [default], 0=Megatron native
 #   PRIMUS_FLA_NORM      1=FLA fused RMSNorm, 0=torch.nn.RMSNorm [default]
 #   PRIMUS_FLA_CONV      1=FLA Triton causal_conv1d, 0=Tri-Dao CUDA [default]
-#   PRIMUS_NATIVE_GVA    1=skip pre-expand, let FLA kernel handle GVA
-#   PRIMUS_NO_TE         1=use WrappedTorchNorm (with PRIMUS_FLA_NORM=1 →
-#                          FLA RMSNorm) instead of TENorm
 #   PRIMUS_TORCH_OPTIM   1=torch AdamW(fused=True), 0=TE/Apex FusedAdam
 #   PRIMUS_FLA_DATA      1=use FLA-order dataset shim (also need
 #                          PRIMUS_FLA_CACHE_DIR=<HF dataset cache path>)
@@ -95,7 +88,7 @@ PATCHES=(
     "03-mlp-fla-swiglu.patch"
     "04-torch_norm-fla-rmsnorm.patch"
     "05-transformer_config-hybrid-init.patch"
-    "06-pretrain_mamba-fla-data-and-diag.patch"
+    "06-pretrain_mamba-fla-data.patch"
 )
 
 apply_one() {

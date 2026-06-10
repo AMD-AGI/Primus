@@ -267,7 +267,24 @@ EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
 Expected wall time on a healthy MI300X box: **~1h 56m** for the full 4768
 iters (about 2 min faster than FLA's HF-Trainer reference run).
 
-### 5.3 Recommended env-var profile (for FLA parity)
+### 5.3 Recommended toggle profile (for FLA parity)
+
+Preferred (canonical) — add to the experiment YAML's `overrides:` block:
+
+```yaml
+# FLA runtime knobs (consumed by primus.backends.megatron.patches.fla_runtime_patches)
+use_fla_fused_swiglu: true       # FLA Triton SwiGLU
+use_fla_fused_rmsnorm: true      # FLA fused RMSNorm
+use_fla_fused_gated_norm: true   # FLA FusedRMSNormGated for KDA gated output norm
+use_fla_short_conv: true         # FLA Triton causal_conv1d (no transpose round-trip)
+fused_ce_mode: 1                 # FLA FusedLinearCrossEntropyLoss (chunked, no full logits tensor)
+fused_ce_chunks: 32              # Chunk count for FLA fused CE
+# Only if you want bit-identical iter-1 batch ordering:
+use_fla_data: true
+fla_cache_dir: /home/<user>/Primus/data/huggingface
+```
+
+Legacy (still supported, env-var wins over YAML when set):
 
 ```bash
 export PRIMUS_FUSED_CE=1          # FLA FusedLinearCrossEntropyLoss (chunked, no full logits tensor)
@@ -281,8 +298,7 @@ export PRIMUS_FLA_CACHE_DIR=/home/<user>/Primus/data/huggingface
 ```
 
 See [`KDA_FLA_PARITY.md`](../../KDA_FLA_PARITY.md) for the cost-of-each-flag
-breakdown. `PRIMUS_NATIVE_GVA` and `PRIMUS_NO_TE` are GDN-only and have no
-effect on KDA.
+breakdown.
 
 ### 5.4 Output layout
 

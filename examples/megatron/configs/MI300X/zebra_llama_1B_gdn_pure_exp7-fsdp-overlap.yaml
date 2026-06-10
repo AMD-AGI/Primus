@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn_pure_100B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn_pure_exp7-fsdp-overlap}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ modules:
       #   global_batch_size = 64 × 8 = 512
       #   tokens/iter       = 512 × 2048 = 1,048,576
       #   total tokens      = 95368 × 1,048,576 ≈ 100 B
-      train_iters: 95368
+      train_iters: 50    # PERF EXP: 50 iters to measure steady-state
       micro_batch_size: 64
       global_batch_size: 512
 
@@ -318,14 +318,11 @@ modules:
       # ──────────────────────────────────────────────────────────────────
       use_megatron_fsdp: true
       data_parallel_sharding_strategy: optim_grads
-      # 2026-05-26 EXP7: FSDP path's overlap is a DIFFERENT code path than
-      # ZeRO-1's (which segfaulted in EXP4). With both flags on:
-      #   ZeRO-1 baseline:        2768 ms/iter (+19.8% vs FLA)
-      #   FSDP+rare flush (EXP5): 2684 ms/iter (+16.2% vs FLA)
-      #   FSDP+overlap (EXP7):   2414 ms/iter (+4.5% vs FLA)  ← winner
-      # 100B run savings: 95k iters × (2768-2414) ms = ~9.3 hours vs old prod
-      overlap_grad_reduce: true
-      overlap_param_gather: true
+      # EXP7: FSDP path's overlap_grad_reduce is DIFFERENT code than ZeRO-1's
+      # (which segfaulted in EXP4). FSDP uses ReduceScatter into its own buffer.
+      # If this works, we save ~152 ms/iter (NCCL all-reduce → overlapped with backward).
+      overlap_grad_reduce: true        # EXP7: enable ReduceScatter overlap (FSDP path, not ZeRO-1 path)
+      overlap_param_gather: true       # EXP7: enable AllGather overlap (free with overlap_grad_reduce)
       gradient_accumulation_fusion: false
       ddp_average_in_collective: true
       use_torch_fsdp2: false
@@ -340,7 +337,7 @@ modules:
       # ─────────────────────────────────────────────────────────────────────
       profile: false
       use_pytorch_profiler: false
-      tensorboard_dir: output/amd/root/zebra_llama_1B_gdn_pure_100B-pretrain/tensorboard
+      tensorboard_dir: /tmp/primus_perf_exp7-fsdp-overlap_tb
 
       # ─────────────────────────────────────────────────────────────────────
       # MEMORY: empty_unused_memory_level + empty_cache_interval
@@ -412,13 +409,14 @@ modules:
       # ── Dataset source selector ───────────────────────────────────────
       # use_fla_data + fla_cache_dir together pick the data path:
       #   use_fla_data=false (or fla_cache_dir empty): vanilla Megatron
-      #     GPTDataset reading train_data_path (.bin/.idx).  Megatron's
-      #     native sampler order — fine for standalone runs, NOT bit-
-      #     comparable to FLA's loss curve.
+      #     GPTDataset reading train_data_path (.bin/.idx).  This is
+      #     Megatron's native sampler order — fine for standalone runs
+      #     but NOT bit-comparable to FLA's loss curve.
       #   use_fla_data=true  AND fla_cache_dir=<path>: replace
       #     GPTDataset with tools/fla_order_dataset.FLAOrderGPTDataset
       #     which emits tokens in the exact same order as FLA's HF
-      #     DistributedSampler (eliminates the data-ordering drift).
+      #     DistributedSampler (eliminates the data-ordering drift that
+      #     caused the +2.4 nat warm-up spike we debugged for GDN/KDA).
       # The launcher script sets PRIMUS_FLA_CACHE_DIR; if you launch
       # without it, uncomment fla_cache_dir below to make this YAML
       # self-contained.
@@ -488,7 +486,7 @@ modules:
       # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
       # the two runs' checkpoints can coexist on disk and downstream eval
       # tools (tools/eval_gdn_lm_eval.py) can A/B them side-by-side.
-      save: /home/vanbhati@amd.com/checkpoints/primus_gdn_pure_1B_100B
+      save: /tmp/primus_perf_exp_ckpt_unused
       # FLA's 100B launcher passes `save=99999` (HF `--save_steps 99999`),
       # meaning over 95368 iters HF never writes an intermediate ckpt — only
       # the final one at end-of-training (then `--save_total_limit 3` keeps
@@ -501,7 +499,7 @@ modules:
       # FLA's "almost never save" and ~2× lighter than the previous 5000
       # setting. `disable_last_saving: false` still guarantees the very last
       # iter is saved exactly like FLA does at end-of-training.
-      save_interval: 10000
+      save_interval: 100000   # PERF EXP: never save
       disable_last_saving: false
       ckpt_format: fsdp_dtensor   # Megatron-FSDP requires this when use_megatron_fsdp=true
 

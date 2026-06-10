@@ -1,21 +1,15 @@
 diff --git a/megatron/core/models/mamba/mamba_model.py b/megatron/core/models/mamba/mamba_model.py
-index ae309e418..b093c319a 100644
+index ae309e418..9abb3d25d 100644
 --- a/megatron/core/models/mamba/mamba_model.py
 +++ b/megatron/core/models/mamba/mamba_model.py
-@@ -1,6 +1,7 @@
- # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
- 
- import logging
-+import os
- from typing import Literal, Optional
- 
- from torch import Tensor
-@@ -275,11 +276,62 @@ class MambaModel(LanguageModule):
+@@ -275,11 +275,59 @@ class MambaModel(LanguageModule):
          if self.pre_process or self.post_process or self.mtp_process:
              self.setup_embeddings_and_output_layer()
  
++        from megatron.training import get_args as _get_args
++        _args = _get_args()
 +        self._fused_ce_mode = 0
-+        _ce_mode = int(os.environ.get('PRIMUS_FUSED_CE', '1'))
++        _ce_mode = getattr(_args, 'fused_ce_mode', 1)
 +        if _ce_mode == 2:
 +            try:
 +                from fla.modules import FusedCrossEntropyLoss
@@ -26,12 +20,7 @@ index ae309e418..b093c319a 100644
 +        elif _ce_mode == 1:
 +            try:
 +                from fla.modules import FusedLinearCrossEntropyLoss
-+                # num_chunks controls peak per-chunk memory: each chunk materializes
-+                # a [N/num_chunks, vocab] bf16 logits tensor. Default 8 → 4.2 GB at
-+                # batch=64, seq=2048, vocab=128k — OOMs on 1B/MI300X. 32 → ~1 GB,
-+                # plenty of headroom. Numerics unchanged (same math, more chunks).
-+                # Override with PRIMUS_FUSED_CE_CHUNKS (must be a power of 2).
-+                _nc = int(os.environ.get('PRIMUS_FUSED_CE_CHUNKS', '32'))
++                _nc = getattr(_args, 'fused_ce_chunks', 32)
 +                self._fused_lce = FusedLinearCrossEntropyLoss(reduction='mean', num_chunks=_nc)
 +                self._fused_ce_mode = 1
 +            except ImportError:
@@ -73,7 +62,7 @@ index ae309e418..b093c319a 100644
      def set_input_tensor(self, input_tensor: Tensor) -> None:
          """Sets input tensor to the model.
  
-@@ -439,6 +491,9 @@ class MambaModel(LanguageModule):
+@@ -439,6 +487,9 @@ class MambaModel(LanguageModule):
                      hidden_states.squeeze(1).unsqueeze(0)
                  ).unsqueeze(1)
  

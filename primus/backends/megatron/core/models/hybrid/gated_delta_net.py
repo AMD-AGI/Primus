@@ -47,14 +47,7 @@ except ImportError:
 
     HAVE_FLA = False
 
-import os
-_USE_FLA_FUSED_GATED_NORM = os.environ.get('PRIMUS_FLA_NORM', '0') == '1'
-# When PRIMUS_FLA_CONV=1, route the depthwise short conv1d through FLA's
-# Triton implementation (fla.modules.conv.causal_conv1d) instead of Tri Dao's
-# causal_conv1d CUDA package. The FLA reference run uses the Triton backend
-# by default; matching it here makes Primus's GDN forward+backward
-# bit-identical to FLA's.
-_USE_FLA_CONV = os.environ.get('PRIMUS_FLA_CONV', '0') == '1'
+from megatron.training import get_args as _get_args
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -215,7 +208,8 @@ class GatedDeltaNet(MegatronModule):
 
         # Output layernorm before projection
         self._use_fla_fused_gated_norm = False
-        if _USE_FLA_FUSED_GATED_NORM and config.normalization == "RMSNorm":
+        _use_fla_gated_norm = getattr(_get_args(), 'use_fla_fused_gated_norm', False)
+        if _use_fla_gated_norm and config.normalization == "RMSNorm":
             try:
                 from fla.modules.fused_norm_gate import FusedRMSNormGated
                 self.out_norm = FusedRMSNormGated(
@@ -359,7 +353,8 @@ class GatedDeltaNet(MegatronModule):
         # Convolution on qkv (or SiLU-only when use_short_conv=False)
         nvtx_range_push(suffix="conv1d")
         if self.use_short_conv:
-            if _USE_FLA_CONV and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
+            _use_fla_conv = getattr(_get_args(), 'use_fla_short_conv', False)
+            if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
                 # FLA's Triton causal_conv1d expects [B, T, D] (no transpose needed)
                 # and matches FLA reference run bit-for-bit.
                 assert self.activation in ["silu", "swish"]
@@ -395,16 +390,11 @@ class GatedDeltaNet(MegatronModule):
         query = query.reshape(batch, seq_len, -1, self.key_head_dim)
         key = key.reshape(batch, seq_len, -1, self.key_head_dim)
         value = value.reshape(batch, seq_len, -1, self.value_head_dim)
-        # GVA head expansion. FLA's chunk_gated_delta_rule kernel handles GVA
-        # internally (accepts q/k with H<HV, replicating inside the kernel),
-        # which gives a different bf16 backward than user-side repeat_interleave
-        # because PyTorch's repeat_interleave backward sums repeats post-hoc in
-        # the autograd graph. Set PRIMUS_NATIVE_GVA=1 to skip pre-expansion and
-        # let the kernel handle GVA itself — matches FLA's gradient layout.
+        # GVA head expansion: pre-expand Q/K via repeat_interleave so the
+        # GDN kernel sees one K-head per V-head.
         if self.num_value_heads // self.num_key_heads > 1:
-            if os.environ.get('PRIMUS_NATIVE_GVA', '0') != '1':
-                query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
-                key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+            query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
+            key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
 
         # Make contiguous
         query = query.contiguous()
