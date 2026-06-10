@@ -1,0 +1,24 @@
+# Target cluster: 4 x MI355X nodes (8 GPU/node). Benchmark host = a single
+# idle 8-GPU MI355X node; the agent runs sub-node layer benchmarks there and
+# projects to the 4-node target.
+target_cluster:
+  name: mi355x_4nodes
+  num_nodes: 4
+  gpus_per_node: 8
+  gpu_arch: mi355x
+  hardware_config: examples/hardware_configs/mi355x.yaml
+
+available_for_benchmark:
+  has_gpu: true
+  benchmark_gpus: 8
+  benchmark_arch: mi355x
+
+optimization:
+  objective: tokens_per_s_per_gpu
+  memory_safety_margin: 0.10
+  hbm_capacity_gb: 288.0
+  budget:
+    max_benchmark_calls: 12
+    max_proposals: 0
+    max_perf_calls: 0
+    max_rounds: 0

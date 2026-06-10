@@ -249,8 +249,10 @@ def resolve_workload(workload_yaml: Path, primus_root: Path | None = None) -> Ar
         # divide by PP. Layout stages are pipe-separated entries, e.g.
         # "Et*1|t*2|...|t*1,L" → 32 stages.
         virtual_pipeline_model_parallel_size=(
-            overrides.get("num_virtual_stages_per_pipeline_rank")
-            or overrides.get("virtual_pipeline_model_parallel_size")
+            _coerce_opt_int(
+                overrides.get("num_virtual_stages_per_pipeline_rank")
+                or overrides.get("virtual_pipeline_model_parallel_size")
+            )
             or _vpp_from_layout(
                 overrides.get("pipeline_model_parallel_layout"),
                 int(_strip_env(overrides.get("pipeline_model_parallel_size", 1))),
@@ -307,6 +309,14 @@ def _strip_env(value: Any) -> Any:
     if isinstance(value, str) and value.startswith("${") and ":" in value and value.endswith("}"):
         return value.split(":", 1)[1].rstrip("}")
     return value
+
+
+def _coerce_opt_int(value: Any) -> int | None:
+    """Strip ``${VAR:default}`` templating and coerce to int, or None when unset."""
+    value = _strip_env(value)
+    if value in (None, ""):
+        return None
+    return int(value)
 
 
 def _expand_primus_templates(s: str) -> str:

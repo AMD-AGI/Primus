@@ -37,17 +37,34 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
-from primus_turbo.pytorch.core import QuantizedTensor as PrimusTurboQuantizedTensor
-from primus_turbo.pytorch.core import (
-    QuantizedTensorPair as PrimusTurboQuantizedTensorPair,
-)
+# QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
+# quantization paths (added in PR #735).  Older primus_turbo 0.2.0 builds shipped
+# in the rocm/primus v26.2 / v26.3 containers do not export them yet.  Keep the
+# module importable so the BF16 turbo attention / linear paths still work, and only
+# fail (with a clear AttributeError on None) if an FP8 quantization path is hit.
+try:
+    from primus_turbo.pytorch.core import QuantizedTensor as PrimusTurboQuantizedTensor
+    from primus_turbo.pytorch.core import (
+        QuantizedTensorPair as PrimusTurboQuantizedTensorPair,
+    )
+except (ImportError, ModuleNotFoundError):
+    PrimusTurboQuantizedTensor = None
+    PrimusTurboQuantizedTensorPair = None
+
+# ScalingRecipe was renamed to MXScalingRecipe in primus_turbo 0.2.0; keep a fallback
+# alias so the module imports against both old and new builds.
+try:
+    from primus_turbo.pytorch.core.low_precision import ScalingRecipe
+except (ImportError, ModuleNotFoundError):
+    from primus_turbo.pytorch.core.low_precision import (
+        MXScalingRecipe as ScalingRecipe,
+    )
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
     Format,
     ScaleDtype,
     ScalingGranularity,
-    ScalingRecipe,
     ScalingStrategy,
     check_fp8_support,
     check_mxfp4_support,
