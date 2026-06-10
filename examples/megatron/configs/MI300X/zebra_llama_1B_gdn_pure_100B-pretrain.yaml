@@ -121,7 +121,7 @@ modules:
       #   global_batch_size = 64 × 8 = 512
       #   tokens/iter       = 512 × 2048 = 1,048,576
       #   total tokens      = 95368 × 1,048,576 ≈ 100 B
-      train_iters: 95368
+      train_iters: 50
       micro_batch_size: 64
       global_batch_size: 512
 
@@ -264,7 +264,7 @@ modules:
       #   data_parallel_sharding_strategy: no_shard
       # (Rest of config is FSDP-safe AND ZeRO-1-safe.)
       # ─────────────────────────────────────────────────────────────────────
-      use_distributed_optimizer: true
+      use_distributed_optimizer: false
       # ── Megatron-FSDP ATTEMPTS (2026-05-25 + 2026-05-26) ─────────────────
       # Take #1 (2026-05-25): `use_megatron_fsdp: true` +
       #   `data_parallel_sharding_strategy: optim_grads` crashed at iter-1
@@ -324,8 +324,8 @@ modules:
       #   FSDP+rare flush (EXP5): 2684 ms/iter (+16.2% vs FLA)
       #   FSDP+overlap (EXP7):   2414 ms/iter (+4.5% vs FLA)  ← winner
       # 100B run savings: 95k iters × (2768-2414) ms = ~9.3 hours vs old prod
-      overlap_grad_reduce: true
-      overlap_param_gather: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
       gradient_accumulation_fusion: false
       ddp_average_in_collective: true
       use_torch_fsdp2: false
@@ -474,9 +474,8 @@ modules:
       # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
       # builder doesn't choke on a missing file — its actual indices and
       # tokens are never read when FLAOrderGPTDataset is active.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
@@ -504,6 +503,7 @@ modules:
       save_interval: 10000
       disable_last_saving: false
       ckpt_format: fsdp_dtensor   # Megatron-FSDP requires this when use_megatron_fsdp=true
+      exit_on_missing_checkpoint: false
 
       # Turbo (kept off for the comparison run; can flip on later)
       enable_primus_turbo: false

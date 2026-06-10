@@ -25,9 +25,9 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 38147
+      train_iters: 50
       micro_batch_size: 4
-      global_batch_size: 32 # micro_batch_size * num_gpus
+      global_batch_size: 32
 
       seq_length: 8192  
       max_position_embeddings: 8192
@@ -55,30 +55,27 @@ modules:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
-      overlap_grad_reduce: true
-      overlap_param_gather: true
-      gradient_accumulation_fusion: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
       use_torch_fsdp2: false
-      use_distributed_optimizer: true
+      use_distributed_optimizer: false
 
       # data
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_0_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_1_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_2_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_3_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
       # ckpt
       finetune: false
       auto_continue_train: true
-      load: ./output/amd/root/zebra_llama_1B_kda-pretrain/checkpoints
+      load: null
       save: ./output/zebra_llama_1B_kda-pretrain
       save_interval: 1000
       disable_last_saving: false
       ckpt_format: torch
+      exit_on_missing_checkpoint: false
 
       # Turbo
       enable_primus_turbo: false

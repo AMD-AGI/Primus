@@ -264,7 +264,7 @@ modules:
       #   data_parallel_sharding_strategy: no_shard
       # (Rest of config is FSDP-safe AND ZeRO-1-safe.)
       # ─────────────────────────────────────────────────────────────────────
-      use_distributed_optimizer: true
+      use_distributed_optimizer: false
       # ── Megatron-FSDP ATTEMPTS (2026-05-25 + 2026-05-26) ─────────────────
       # Take #1 (2026-05-25): `use_megatron_fsdp: true` +
       #   `data_parallel_sharding_strategy: optim_grads` crashed at iter-1
@@ -321,8 +321,8 @@ modules:
       # EXP7: FSDP path's overlap_grad_reduce is DIFFERENT code than ZeRO-1's
       # (which segfaulted in EXP4). FSDP uses ReduceScatter into its own buffer.
       # If this works, we save ~152 ms/iter (NCCL all-reduce → overlapped with backward).
-      overlap_grad_reduce: true        # EXP7: enable ReduceScatter overlap (FSDP path, not ZeRO-1 path)
-      overlap_param_gather: true       # EXP7: enable AllGather overlap (free with overlap_grad_reduce)
+      overlap_grad_reduce: false
+      overlap_param_gather: false
       gradient_accumulation_fusion: false
       ddp_average_in_collective: true
       use_torch_fsdp2: false
@@ -472,9 +472,8 @@ modules:
       # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
       # builder doesn't choke on a missing file — its actual indices and
       # tokens are never read when FLAOrderGPTDataset is active.
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
@@ -502,6 +501,7 @@ modules:
       save_interval: 100000   # PERF EXP: never save
       disable_last_saving: false
       ckpt_format: fsdp_dtensor   # Megatron-FSDP requires this when use_megatron_fsdp=true
+      exit_on_missing_checkpoint: false
 
       # Turbo (kept off for the comparison run; can flip on later)
       enable_primus_turbo: false

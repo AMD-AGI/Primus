@@ -49,7 +49,7 @@ modules:
       #   FLA: per_device_train_batch_size=128 × 8 GPUs → global=1024
       #   tokens/step = 1024 × 2048 = 2,097,152
       #   4768 steps × 2.097M ≈ 10B tokens
-      train_iters: 4768
+      train_iters: 50
       micro_batch_size: 128
       global_batch_size: 1024
 
@@ -128,9 +128,9 @@ modules:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
-      use_distributed_optimizer: true   # ZeRO-1 — shards optimizer state
-      overlap_grad_reduce: true         # bucketed grad allreduce in backward
-      overlap_param_gather: false       # leave OFF — the skew that caused OOM
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
       gradient_accumulation_fusion: false
       use_torch_fsdp2: false
       ddp_average_in_collective: true
@@ -138,9 +138,8 @@ modules:
       # Data — FLA-aligned FineWeb-Edu sample-10BT (same indexed binary the
       # pure GDN/KDA 300M runs consume; uses FLAOrderGPTDataset for identical
       # token ordering to FLA)
-      mock_data: false
-      train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      mock_data: true
+      train_data_path: null
       valid_data_path: null
       test_data_path: null
 
@@ -153,6 +152,7 @@ modules:
       finetune: false
       auto_continue_train: false
       load: null
+      exit_on_missing_checkpoint: false
       save: ./output/zebra_llama_300M_gdn_hybrid-pretrain
       # FLA parity: FLA's setup_and_train_gdn_hybrid_300M.sh uses `save=99999`,
       # i.e. it only writes a checkpoint at the very end of the 4768-step run.
