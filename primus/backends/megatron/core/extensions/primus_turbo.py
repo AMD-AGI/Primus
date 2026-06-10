@@ -30,7 +30,6 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -1356,210 +1355,6 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         return out, None
 
 
-class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
-    """
-    Wrapper for the Transformer-Engine's `Linear` layer but specialized similar
-    to megatron's `ColumnParallelLinear` layer.
-    """
-
-    def __init__(
-        self,
-        input_size,
-        output_size,
-        *,
-        config: ModelParallelConfig,
-        init_method: Callable,
-        bias=True,
-        gather_output=False,
-        stride=1,
-        keep_master_weight_for_test=False,
-        skip_bias_add=False,
-        skip_weight_param_allocation: bool = False,
-        embedding_activation_buffer: Optional[List[torch.Tensor]] = None,
-        grad_output_buffer: Optional[List[torch.Tensor]] = None,
-        is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
-        disable_grad_reduce: bool = False,
-        tp_group: Optional[torch.distributed.ProcessGroup] = None,
-    ):
-        args = get_args()
-        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
-        assert not self.offload, "gemm offload still have some problems"
-
-        super().__init__(
-            input_size,
-            output_size,
-            config=config,
-            init_method=init_method,
-            bias=bias,
-            gather_output=gather_output,
-            stride=stride,
-            keep_master_weight_for_test=keep_master_weight_for_test,
-            skip_bias_add=skip_bias_add,
-            skip_weight_param_allocation=skip_weight_param_allocation,
-            embedding_activation_buffer=embedding_activation_buffer,
-            grad_output_buffer=grad_output_buffer,
-            is_expert=is_expert,
-            tp_comm_buffer_name=tp_comm_buffer_name,
-            disable_grad_reduce=disable_grad_reduce,
-            tp_group=tp_group,
-        )
-        tp_size = get_pg_size(tp_group)
-        assert tp_size == 1, "PrimusTurboColumnParallelLinearTorch only supports tensor parallel size = 1"
-
-        self.is_first_microbatch = True
-        self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
-        self.register_buffer("quantized_weight_buffer", None, persistent=False)
-        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        runtime_gather_output: Optional[bool] = None,
-    ):
-        _is_first_microbatch = self.is_first_microbatch
-
-        # Rewrite quant context
-        quant_context = _get_fp8_autocast_for_quant_params(
-            getattr(self, "te_quant_params", None), self.training
-        )
-
-        with quant_context:
-            out = self.forward_internal(x, weight, runtime_gather_output, _is_first_microbatch)
-
-        self.is_first_microbatch = False
-
-        return out
-
-    def forward_internal(
-        self,
-        x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        runtime_gather_output: Optional[bool] = None,
-        is_first_microbatch: bool = False,
-    ):
-        if weight is None:
-            weight = self.weight
-
-        bias_tensor = self.bias if not self.skip_bias_add else None
-
-        original_shape = x.size()
-        if not x.is_contiguous():
-            x = x.contiguous()
-        x = x.view(-1, original_shape[-1])
-
-        if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_torch_input", x)
-
-        if _use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            out = gemm_with_weight_gradient_store(x, weight, bias=None)
-        else:
-            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                assert (
-                    quant_config.mxfp8_scaling()
-                    or quant_config.current_scaling()
-                    or quant_config.block_scaling()
-                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
-
-                if is_first_microbatch:
-                    weight_dtype = float8_e4m3
-                    quant_config_internal = quant_config.data()
-
-                    if quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                        weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
-                    else:
-                        weight_scaling_recipe = None
-
-                    self.quantized_weight_buffer = PrimusTurboQuantizedTensor.quantize(
-                        weight,
-                        dest_dtype=weight_dtype,
-                        granularity=quant_config_internal.granularity,
-                        block_size=quant_config_internal.block_size,
-                        scaling_recipe=weight_scaling_recipe,
-                        axis=-1,
-                    )
-
-                    if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
-                        self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
-                            weight,
-                            dest_dtype=weight_dtype,
-                            granularity=quant_config_internal.granularity,
-                            block_size=quant_config_internal.block_size,
-                            scaling_recipe=weight_scaling_recipe,
-                            # axis=-2 means quant weight along axis 2 which will get a transposed quantized weight.
-                            axis=-2,
-                        )
-
-                x, quantized_weight = _bridge_weight_grad(
-                    x,
-                    weight,
-                    PrimusTurboQuantizedTensorPair(
-                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
-                    ),
-                )
-                out = primus_turbo_torch.ops.gemm_fp8(
-                    x,
-                    quantized_weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    config=quant_config.data(),
-                )
-            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
-
-                if is_first_microbatch:
-                    quant_config_internal = quant_config.data()
-                    weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
-
-                    self.quantized_weight_buffer = PrimusTurboQuantizedTensor.quantize(
-                        weight,
-                        dest_dtype=float4_e2m1fn_x2,
-                        granularity=quant_config_internal.granularity,
-                        block_size=quant_config_internal.block_size,
-                        scaling_recipe=weight_scaling_recipe,
-                        axis=-1,
-                    )
-
-                    if not self.disable_parameter_transpose_cache:
-                        self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
-                            weight,
-                            dest_dtype=float4_e2m1fn_x2,
-                            granularity=quant_config_internal.granularity,
-                            block_size=quant_config_internal.block_size,
-                            scaling_recipe=weight_scaling_recipe,
-                            # axis=-2 means quant weight along axis 2 which will get a transposed quantized weight.
-                            axis=-2,
-                        )
-
-                x, quantized_weight = _bridge_weight_grad(
-                    x,
-                    weight,
-                    PrimusTurboQuantizedTensorPair(
-                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
-                    ),
-                )
-                out = primus_turbo_torch.ops.gemm_fp4(
-                    x,
-                    quantized_weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    config=quant_config.data(),
-                )
-            else:
-                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
-
-        out = out.view(original_shape[0], original_shape[1], -1)
-
-        return out, bias_tensor
-
-
 class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
     """
     Wrapper for the Transformer-Engine's `LayerNormLinear` layer that combines
@@ -2095,7 +1890,18 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
-        use_turbo_grouped_gemm = args.use_turbo_grouped_gemm or args.use_turbo_grouped_mlp
+        pad_multiple = 0
+        if args.use_turbo_permute_padding:
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                pad_multiple = (
+                    32
+                    if PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().mxfp8_scaling()
+                    else 16
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                pad_multiple = 32
+
+        use_turbo_grouped_gemm = args.use_turbo_grouped_gemm
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
@@ -2104,6 +1910,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             tp_ep_group=self.tp_ep_group,
             expert_capacity_factor=config.moe_expert_capacity_factor,
             permute_fusion=config.moe_permute_fusion,
+            pad_multiple=pad_multiple,
             permute_max_token_num=permute_max_token_num,
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,

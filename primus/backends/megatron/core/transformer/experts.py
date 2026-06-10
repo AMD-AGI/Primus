@@ -39,6 +39,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.use_turbo_permute_padding = args.use_turbo_permute_padding
 
     def bias_act_func_with_mask(
         self,
@@ -93,8 +94,8 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        # TODO(ruibin): remove extra d2h and h2d by fuse padding into permute kernel
-        if self.config.fp8 or self.config.fp4:
+        if not self.use_turbo_permute_padding and (self.config.fp8 or self.config.fp4):
+            # NOTE: When use_turbo_permute_padding is true the token is padded. So we can skip the padding here to reduce cpu sync.
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
             actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
             permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
@@ -154,7 +155,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         output = self._apply_bias(output, output_bias, tokens_per_expert.tolist(), permuted_probs)
 
         # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
+        if not self.use_turbo_permute_padding and (self.config.fp8 or self.config.fp4):
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None
