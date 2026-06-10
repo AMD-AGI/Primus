@@ -346,6 +346,27 @@ mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 ###############################################################################
+# STEP 5.5: Auto-sync third_party sources for installed wheels
+###############################################################################
+# When running from an installed wheel (the packaged _thirdparty.lock exists),
+# clone the pinned backend sources on first use and prepend them to PYTHONPATH,
+# so backends like Megatron run from full source (Makefile/helpers can compile).
+# Set PRIMUS_AUTO_DEPS_SYNC=0 to skip.
+_PRIMUS_LOCK="${RUNNER_DIR}/../_thirdparty.lock"
+if [[ "${PRIMUS_AUTO_DEPS_SYNC:-1}" != "0" && -f "$_PRIMUS_LOCK" ]]; then
+    _PRIMUS_TP_DIR="${PRIMUS_THIRDPARTY_DIR:-$HOME/.cache/Primus/third_party}"
+    if [[ ! -d "${_PRIMUS_TP_DIR}/Megatron-LM" || ! -d "${_PRIMUS_TP_DIR}/torchtitan" ]]; then
+        LOG_INFO_RANK0 "[direct] third_party sources not found; running 'primus-cli deps sync' (set PRIMUS_AUTO_DEPS_SYNC=0 to skip)"
+        bash "${RUNNER_DIR}/primus-cli-deps.sh" sync --dir "${_PRIMUS_TP_DIR}" || LOG_WARN "[direct] deps sync failed; continuing"
+    fi
+    if [[ -d "${_PRIMUS_TP_DIR}" ]]; then
+        for _primus_tp in "${_PRIMUS_TP_DIR}"/*/; do
+            [[ -d "$_primus_tp" ]] && export PYTHONPATH="${_primus_tp%/}${PYTHONPATH:+:$PYTHONPATH}"
+        done
+    fi
+fi
+
+###############################################################################
 # STEP 6: Execute hooks and capture extra arguments / env
 ###############################################################################
 # Hooks can return:
@@ -443,7 +464,18 @@ fi
 # Allow RUN_MODE to be overridden by environment variable
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
-CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
+# Resolve the launch target. Normally this is the script path
+# (direct_config[script], default: primus/cli/main.py) relative to the repo
+# checkout. When Primus runs from an installed wheel outside the repo, that file
+# is absent; fall back to the installed module form (-m primus.cli.main) so
+# `primus-cli direct ...` works from any directory.
+LAUNCH_TARGET="${direct_config[script]:-}"
+if [[ "${direct_config[script]:-}" == "primus/cli/main.py" && ! -f "${direct_config[script]:-}" ]]; then
+    LAUNCH_TARGET="-m primus.cli.main"
+    LOG_INFO_RANK0 "[direct] Default script '${direct_config[script]}' not found in CWD; using installed module 'python -m primus.cli.main'"
+fi
+
+CMD="${LAUNCH_TARGET} $* 2>&1 | tee ${direct_config[log_file]:-}"
 if [[ "$RUN_MODE" == "single" ]]; then
     CMD="python3 ${CMD}"
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"

@@ -39,6 +39,7 @@ from typing import Optional
 from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     log_error_and_exit,
     log_info,
@@ -77,7 +78,7 @@ def resolve_backend_path(
             path = Path(env_value).resolve()
             log_info(f"{env_var.upper()} found in environment: {path}")
         else:
-            path = primus_path / default_subdir
+            path = default_backend_path(primus_path, Path(default_subdir).name)
             log_info(f"{env_var.upper()} not found, falling back to: {path}")
     return path
 
