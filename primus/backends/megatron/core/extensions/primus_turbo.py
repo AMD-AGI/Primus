@@ -37,6 +37,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
+
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
 # quantization paths (added in PR #735).  Older primus_turbo 0.2.0 builds shipped
 # in the rocm/primus v26.2 / v26.3 containers do not export them yet.  Keep the
@@ -59,6 +60,7 @@ except (ImportError, ModuleNotFoundError):
     from primus_turbo.pytorch.core.low_precision import (
         MXScalingRecipe as ScalingRecipe,
     )
+
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
