@@ -68,11 +68,21 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade pip build
 
-      # Generate the third_party lock (submodule name/url/pinned-commit) into the
-      # primus package so the wheel ships it. `primus-cli deps sync` then clones
-      # the full sources (incl. nested submodules). Pins come from this checkout.
-      - name: Generate third_party lock
-        run: python tools/pip_index/gen_thirdparty_lock.py
+      # The third_party lock (submodule name/url/pinned-commit) is committed at
+      # primus/_thirdparty.lock, so every install path (pip install ., git+, sdist,
+      # wheel) ships it. Regenerate it here and fail if it drifted from the
+      # submodule pins in this checkout -- a submodule bump must not be released
+      # without a matching lock update. (`primus-cli deps sync` later clones the
+      # full sources, incl. nested submodules, from these pins.)
+      - name: Verify third_party lock is up to date
+        run: |
+          python tools/pip_index/gen_thirdparty_lock.py
+          if ! git diff --quiet -- primus/_thirdparty.lock; then
+            echo "::error::primus/_thirdparty.lock is out of date. Run 'python tools/pip_index/gen_thirdparty_lock.py' and commit the result."
+            git --no-pager diff -- primus/_thirdparty.lock
+            exit 1
+          fi
+          echo "OK: primus/_thirdparty.lock matches the submodule pins."
 
       - name: Build sdist and wheel
         run: python -m build
