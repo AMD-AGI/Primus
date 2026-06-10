@@ -82,7 +82,106 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--seed-budget", type=int, default=12, help="Max seed candidates evaluated before the LLM takes over."
     )
+    p.add_argument(
+        "--inference",
+        action="store_true",
+        help=(
+            "Tune for inference/serving (TTFT/ITL/throughput/KV) instead of "
+            "training. Overrides optimization.mode in the target-cluster YAML."
+        ),
+    )
     return p.parse_args(argv)
+
+
+def _run_inference(args, agent_cfg, arch, primus_root) -> int:
+    """Inference / serving tuning loop (deterministic seed sweep over the
+    serving search space, scored by the configured objective)."""
+    from .inference_tuning import (
+        build_inference_seed_plan,
+        derive_inference_legality,
+        objective_is_minimize,
+        resolve_objective,
+        score_result,
+    )
+
+    objective = resolve_objective(agent_cfg.optimization.objective)
+    minimize = objective_is_minimize(objective)
+    direction = "minimize" if minimize else "maximize"
+
+    agent_cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    history_path = agent_cfg.out_dir / "inference_trials.jsonl"
+    history = History.load(history_path)
+    eval_mode = "dry" if args.dry_run else args.mode
+    evaluator = Evaluator(agent_cfg, arch, primus_root, mode=eval_mode)
+
+    leg = derive_inference_legality(arch, agent_cfg.target_cluster)
+    print(f"[tuning-agent] MODE: inference  objective={objective} ({direction})")
+    print(f"[tuning-agent] legal serving axes: TP={leg.tp} PP={leg.pp} EP={leg.ep} "
+          f"batch={leg.batch_size} kv_dtype={leg.kv_cache_dtype} "
+          f"weight_dtype={leg.weight_dtype}")
+
+    plan = build_inference_seed_plan(
+        arch, agent_cfg.target_cluster, agent_cfg.optimization,
+        max_candidates=args.seed_budget,
+    )
+    print(f"\n[tuning-agent] {plan.rationale}")
+
+    best = None
+    best_score = None
+    for cfg in plan.candidates:
+        sig = cfg.signature()
+        if history.already_evaluated(cfg.as_dict()):
+            print(f"    [seed] skip (already evaluated): {sig}")
+            continue
+        idx = len(history.trials)
+        tag = (f"inf_{idx:03d}_tp{cfg.tp}_pp{cfg.pp}_ep{cfg.ep}"
+               f"_bs{cfg.batch_size}_{cfg.weight_dtype}_kv{cfg.kv_cache_dtype}")
+        r = evaluator.evaluate_inference(cfg, tag)
+        history.add(cfg.as_dict(), r, notes="inference[seed]")
+        if not r.legal:
+            print(f"    [inf #{idx}] REJECT: {r.reason}")
+            continue
+        sc = score_result(r.as_dict(), objective)
+        print(f"    [inf #{idx}] OK ttft={r.ttft_ms}ms itl={r.itl_ms}ms "
+              f"dec_tps/gpu={r.decode_throughput_tps_per_gpu} "
+              f"mem={r.memory_per_gpu_gb}GB maxconc={r.max_concurrent_sequences} cfg={sig}")
+        if sc is not None and (best_score is None or sc > best_score):
+            best_score, best = sc, (cfg, r)
+
+    if best is None:
+        print("\n[tuning-agent] no legal serving config found.")
+        return 1
+
+    cfg, r = best
+    print("\n=== BEST SERVING CONFIGURATION ===")
+    print(f"  objective: {objective} ({direction})")
+    print(f"  TP={cfg.tp} PP={cfg.pp} EP={cfg.ep} CP={cfg.cp}")
+    print(f"  batch={cfg.batch_size} input_len={cfg.input_len} output_len={cfg.output_len}")
+    print(f"  weight_dtype={cfg.weight_dtype} kv_cache_dtype={cfg.kv_cache_dtype}")
+    print(f"  chunked_prefill={cfg.chunked_prefill_size} "
+          f"speculative={cfg.speculative_num_tokens}")
+    print(f"  → TTFT               = {r.ttft_ms} ms")
+    print(f"  → ITL / TPOT         = {r.itl_ms} ms")
+    print(f"  → decode throughput  = {r.decode_throughput_tps} tok/s "
+          f"({r.decode_throughput_tps_per_gpu} tok/s/gpu)")
+    print(f"  → prefill throughput = {r.prefill_throughput_tps} tok/s")
+    print(f"  → memory/GPU         = {r.memory_per_gpu_gb} GB "
+          f"(KV {r.kv_cache_gb} GB)")
+    print(f"  → max concurrency    = {r.max_concurrent_sequences} sequences")
+
+    summary = {
+        "mode": "inference",
+        "objective": objective,
+        "best_config": cfg.as_dict(),
+        "best_result": r.as_dict(),
+        "trials_total": len(history.trials),
+    }
+    (agent_cfg.out_dir / "inference_summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(f"\n[tuning-agent] artifacts in {agent_cfg.out_dir}/ "
+          f"(inference_trials.jsonl, inference_summary.json, trials/*.yaml)")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +211,12 @@ def main(argv: list[str] | None = None) -> int:
         f"(layers={arch.num_layers}, hidden={arch.hidden_size}, "
         f"moe={arch.is_moe} experts={arch.num_experts} topk={arch.moe_router_topk})"
     )
+
+    # ── inference / serving tuning branch ───────────────────────────────
+    if args.inference:
+        agent_cfg.optimization.mode = "inference"
+    if agent_cfg.optimization.mode == "inference":
+        return _run_inference(args, agent_cfg, arch, primus_root)
 
     legality = derive_legality(arch, agent_cfg.target_cluster)
     print(

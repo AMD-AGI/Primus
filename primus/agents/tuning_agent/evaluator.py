@@ -54,6 +54,15 @@ class EvalResult:
     tokens_per_s_per_gpu: float | None = None
     tflops_per_s_per_gpu: float | None = None
     mfu: float | None = None
+    # ---- inference / serving metrics (mode == "inference") ----
+    ttft_ms: float | None = None
+    itl_ms: float | None = None
+    request_latency_ms: float | None = None
+    decode_throughput_tps: float | None = None
+    decode_throughput_tps_per_gpu: float | None = None
+    prefill_throughput_tps: float | None = None
+    kv_cache_gb: float | None = None
+    max_concurrent_sequences: int | None = None
     source: str = "memory_only"
     stdout_tail: str = ""
     returncode: int = 0
@@ -508,6 +517,74 @@ def _build_memory_cmd(
     return cmd
 
 
+def write_inference_trial_yaml(arch: ArchitectureRecord, cfg, out_dir: Path, tag: str) -> Path:
+    """Write a workload YAML overlay for an inference trial.
+
+    Only the serving *parallelism* is overlaid into the YAML; the request
+    profile (input/output len, batch, dtypes, features) is passed to
+    ``projection inference`` via CLI flags by :func:`_build_inference_cmd`.
+    """
+    src = Path(arch.workload_path)
+    raw = yaml.safe_load(src.read_text())
+    pre_trainer = ((raw.get("modules") or {}).get("pre_trainer") or {})
+    overrides = dict(pre_trainer.get("overrides") or {})
+    overrides["tensor_model_parallel_size"] = cfg.tp
+    overrides["pipeline_model_parallel_size"] = cfg.pp
+    overrides["expert_model_parallel_size"] = cfg.ep
+    overrides["context_parallel_size"] = cfg.cp
+    pre_trainer["overrides"] = overrides
+    raw.setdefault("modules", {})["pre_trainer"] = pre_trainer
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"inf_trial_{tag}.yaml"
+    out_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    return out_path
+
+
+def _build_inference_cmd(
+    yaml_path: Path,
+    cfg,
+    agent_cfg: AgentConfig,
+    primus_root: Path,
+) -> list[str]:
+    cmd: list[str] = [
+        *_python_invoker(primus_root),
+        "projection", "inference",
+        "--config", str(yaml_path),
+        "--inference-mode", "both",
+        "--gpu-arch", agent_cfg.target_cluster.gpu_arch,
+        "--input-len", str(cfg.input_len),
+        "--output-len", str(cfg.output_len),
+        "--inference-batch-size", str(cfg.batch_size),
+        "--weight-dtype", cfg.weight_dtype,
+        "--kv-cache-dtype", cfg.kv_cache_dtype,
+        "--hbm-capacity-gb", str(agent_cfg.optimization.hbm_capacity_gb),
+    ]
+    if cfg.max_concurrency is not None:
+        cmd += ["--max-concurrency", str(cfg.max_concurrency)]
+    if cfg.chunked_prefill_size:
+        cmd += ["--chunked-prefill-size", str(cfg.chunked_prefill_size)]
+    if cfg.speculative_num_tokens:
+        cmd += ["--speculative-num-tokens", str(cfg.speculative_num_tokens)]
+        cmd += ["--speculative-acceptance-rate", str(cfg.speculative_acceptance_rate)]
+    # Feature B: custom collective ops.
+    if getattr(cfg, "tp_allreduce_algo", "auto") not in (None, "auto"):
+        cmd += ["--tp-allreduce-algo", str(cfg.tp_allreduce_algo)]
+    if getattr(cfg, "ep_a2a_algo", "auto") not in (None, "auto"):
+        cmd += ["--ep-a2a-algo", str(cfg.ep_a2a_algo)]
+    # Feature A: prefill/decode disaggregation.
+    if getattr(cfg, "disaggregate", False):
+        cmd += ["--disaggregate"]
+        if getattr(cfg, "prefill_tp", None):
+            cmd += ["--prefill-tp", str(cfg.prefill_tp)]
+        if getattr(cfg, "decode_tp", None):
+            cmd += ["--decode-tp", str(cfg.decode_tp)]
+        if getattr(cfg, "decode_replicas", 1) and cfg.decode_replicas > 1:
+            cmd += ["--decode-replicas", str(cfg.decode_replicas)]
+    if agent_cfg.target_cluster.gpu_clock_mhz:
+        cmd += ["--gpu-clock-mhz", str(agent_cfg.target_cluster.gpu_clock_mhz)]
+    return cmd
+
+
 def _build_env(agent_cfg: AgentConfig, primus_root: Path, profiling_mode: str | None = None) -> dict:
     env = os.environ.copy()
     # For memory + simulate: pass the real target-cluster shape so
@@ -633,6 +710,70 @@ class Evaluator:
                 config=cfg.as_dict(),
             )
         return self._evaluate(cfg, tag, mode="benchmark")
+
+    def evaluate_inference(self, cfg, tag: str) -> EvalResult:
+        """Score a serving config via ``projection inference`` (memory + perf).
+
+        ``cfg`` is an :class:`inference_tuning.InferenceTrialConfig`.  Returns
+        an :class:`EvalResult` populated with TTFT / ITL / throughput / KV /
+        memory.  Enforces the HBM memory cap (illegal if it does not fit).
+        """
+        from .inference_tuning import (
+            derive_inference_legality,
+            parse_inference_metrics,
+            validate_inference,
+        )
+
+        legality = derive_inference_legality(self.arch, self.cfg.target_cluster)
+        ok, reason = validate_inference(cfg, self.arch, self.cfg.target_cluster, legality)
+        result = EvalResult(legal=ok, reason=reason, source="inference",
+                            config=cfg.as_dict())
+        if not ok:
+            return result
+
+        if self.mode == "dry":
+            # Synthesise plausible serving metrics for loop testing.
+            result.ttft_ms = 50.0 + cfg.input_len * 0.01
+            result.itl_ms = 10.0 + cfg.tp * 2.0
+            result.decode_throughput_tps = cfg.batch_size * 1000.0 / result.itl_ms
+            result.decode_throughput_tps_per_gpu = (
+                result.decode_throughput_tps / max(1, cfg.tp * cfg.pp)
+            )
+            result.memory_per_gpu_gb = 80.0
+            return result
+
+        yaml_path = write_inference_trial_yaml(self.arch, cfg, self.trials_dir, tag)
+        cmd = _build_inference_cmd(yaml_path, cfg, self.cfg, self.primus_root)
+        rc, out, dur = _run(cmd, cwd=self.primus_root,
+                            env=_build_env(self.cfg, self.primus_root), timeout=600)
+        self.n_simulate_calls += 1
+        result.cmd = cmd
+        result.returncode = rc
+        result.duration_s = dur
+        result.stdout_tail = _tail(out, 8000)
+        for k, v in parse_inference_metrics(out).items():
+            setattr(result, k, v)
+
+        if rc != 0 or result.ttft_ms is None:
+            result.legal = False
+            result.reason = (
+                f"projection inference failed (rc={rc}, ttft={result.ttft_ms}); "
+                f"see stdout_tail"
+            )
+            return result
+
+        # Memory cap: serving weights + KV cache must fit the safety-margined HBM.
+        cap = self.cfg.optimization.hbm_capacity_gb * (
+            1 - self.cfg.optimization.memory_safety_margin
+        )
+        if result.memory_per_gpu_gb is not None and result.memory_per_gpu_gb > cap:
+            result.legal = False
+            result.reason = (
+                f"inference memory {result.memory_per_gpu_gb:.1f} GB > cap {cap:.1f} GB "
+                f"(HBM={self.cfg.optimization.hbm_capacity_gb} GB, "
+                f"margin={self.cfg.optimization.memory_safety_margin})"
+            )
+        return result
 
     # ── internal ──────────────────────────────────────────────────────────
 

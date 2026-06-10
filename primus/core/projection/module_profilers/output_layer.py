@@ -49,7 +49,7 @@ class OutputLayerProfiler(BaseModuleProfiler):
         """Simulate output layer using GEMM backend (vocab projection GEMM)."""
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
-        batch_tokens = batch_size * seq_len // tp_size // cp_size
+        batch_tokens = max(1, batch_size * seq_len // tp_size // cp_size)
         hidden_size = self.config.model_config.hidden_size
         vocab_size = self.config.model_config.padded_vocab_size
 

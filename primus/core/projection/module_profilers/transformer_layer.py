@@ -270,6 +270,19 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
+    def set_inference_phase(self, phase, kv_seq_len=None):
+        """Propagate forward-only inference phase to the attention profiler.
+
+        The layer-level cache is keyed only on ``(batch, seq_len)`` so it
+        must be invalidated whenever the attention KV length changes (e.g.
+        between decode steps).
+        """
+        attn = self.sub_profilers.get("self_attention")
+        if attn is not None and hasattr(attn, "set_inference_phase"):
+            attn.set_inference_phase(phase, kv_seq_len)
+        self._cached_results = None
+        self._cache_key = None
+
     def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return (
             self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
@@ -380,6 +393,19 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         self.sub_profilers["mlp"].set_module(layer_module.mlp)
 
         # Invalidate cache when layer changes
+        self._cached_results = None
+        self._cache_key = None
+
+    def set_inference_phase(self, phase, kv_seq_len=None):
+        """Propagate forward-only inference phase to the attention profiler.
+
+        The layer-level cache is keyed only on ``(batch, seq_len)`` so it
+        must be invalidated whenever the attention KV length changes (e.g.
+        between decode steps).
+        """
+        attn = self.sub_profilers.get("self_attention")
+        if attn is not None and hasattr(attn, "set_inference_phase"):
+            attn.set_inference_phase(phase, kv_seq_len)
         self._cached_results = None
         self._cache_key = None
 

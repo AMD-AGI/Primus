@@ -21,6 +21,11 @@ class AttentionProfiler(BaseModuleProfiler):
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
+        # Inference phase: None=training (default), "prefill" or "decode".
+        # When set, the SDPA simulation uses a distinct KV-cache length and
+        # drops the backward pass (forward-only serving).
+        self._inference_phase = None
+        self._kv_seq_len = None
 
     def set_module(self, module):
         """Set the actual attention module for benchmarking."""
@@ -38,6 +43,22 @@ class AttentionProfiler(BaseModuleProfiler):
     def set_sdpa_backend(self, backend):
         """Set an SDPA simulation backend for attention computation."""
         self._sdpa_backend = backend
+        self._cached_results = None
+        self._cache_key = None
+
+    def set_inference_phase(self, phase, kv_seq_len=None):
+        """Configure forward-only inference SDPA.
+
+        Args:
+            phase: ``"prefill"`` (query = chunk of prompt, attends to KV of
+                length ``kv_seq_len``) or ``"decode"`` (query length is the
+                ``seq_len`` passed to the profiler — usually 1 — attending to
+                a KV cache of length ``kv_seq_len``).  ``None`` restores the
+                default training behaviour.
+            kv_seq_len: Length of the resident KV cache the query attends to.
+        """
+        self._inference_phase = phase
+        self._kv_seq_len = kv_seq_len
         self._cached_results = None
         self._cache_key = None
 
@@ -255,8 +276,10 @@ class AttentionProfiler(BaseModuleProfiler):
         tp_size = max(1, mp.tensor_model_parallel_size)
         cp_size = max(1, mp.context_model_parallel_size)
 
-        batch_tokens = batch_size * seq_len // tp_size // cp_size
-        slen_per_cp = seq_len // cp_size
+        # Floor at 1: single-token decode with TP>1 can underflow to 0,
+        # which would divide-by-zero inside the GEMM/SDPA simulators.
+        batch_tokens = max(1, batch_size * seq_len // tp_size // cp_size)
+        slen_per_cp = max(1, seq_len // cp_size)
 
         fwd_time = 0.0
         bwd_time = 0.0
@@ -303,24 +326,52 @@ class AttentionProfiler(BaseModuleProfiler):
                 sdpa_head_dim = args.kv_channels
                 sdpa_head_dim_v = None  # same as head_dim
 
-            sdpa_result = self._sdpa_backend.simulate_sdpa(
-                batch_size=batch_size,
-                num_heads=heads_per_rank,
-                seq_len=slen_per_cp,
-                head_dim=sdpa_head_dim,
-                causal=True,
-                dtype="bf16",
-                head_dim_v=sdpa_head_dim_v,
-            )
-            fwd_time += sdpa_result.forward_time_ms
-            bwd_time += sdpa_result.backward_time_ms
+            if self._inference_phase is not None:
+                # Forward-only serving: query length = slen_per_cp (1 for
+                # decode, chunk size for chunked prefill), KV length = the
+                # resident cache.  GQA stores fewer KV heads.
+                num_query_groups = (
+                    args.num_query_groups
+                    if args.group_query_attention and args.num_query_groups
+                    else args.num_attention_heads
+                )
+                kv_heads_per_rank = max(1, num_query_groups // tp_size)
+                kv_len = self._kv_seq_len if self._kv_seq_len is not None else slen_per_cp
+                # Prefill keeps causal masking; decode (single query) attends
+                # to the whole cache so masking is irrelevant.
+                causal = self._inference_phase == "prefill"
+                sdpa_result = self._sdpa_backend.simulate_sdpa(
+                    batch_size=batch_size,
+                    num_heads=heads_per_rank,
+                    seq_len=slen_per_cp,
+                    head_dim=sdpa_head_dim,
+                    causal=causal,
+                    dtype="bf16",
+                    seq_len_kv=int(kv_len),
+                    num_heads_kv=kv_heads_per_rank,
+                    head_dim_v=sdpa_head_dim_v,
+                )
+                fwd_time += sdpa_result.forward_time_ms
+                # bwd_time intentionally left untouched (serving is fwd-only).
+            else:
+                sdpa_result = self._sdpa_backend.simulate_sdpa(
+                    batch_size=batch_size,
+                    num_heads=heads_per_rank,
+                    seq_len=slen_per_cp,
+                    head_dim=sdpa_head_dim,
+                    causal=True,
+                    dtype="bf16",
+                    head_dim_v=sdpa_head_dim_v,
+                )
+                fwd_time += sdpa_result.forward_time_ms
+                bwd_time += sdpa_result.backward_time_ms
 
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
-        cache_key = (batch_size, seq_len)
+        cache_key = (batch_size, seq_len, self._inference_phase, self._kv_seq_len)
 
         if self._cached_results is None or self._cache_key != cache_key:
             if self._gemm_backend is not None or self._sdpa_backend is not None:

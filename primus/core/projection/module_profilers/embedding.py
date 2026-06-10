@@ -51,7 +51,7 @@ class EmbeddingProfiler(BaseModuleProfiler):
         """Estimate embedding time analytically (lookup is memory-bound, very fast)."""
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
-        tokens = batch_size * seq_len // tp_size // cp_size
+        tokens = max(1, batch_size * seq_len // tp_size // cp_size)
         hidden = self.config.model_config.hidden_size
         # Embedding lookup: read tokens indices + write output embeddings
         # Very fast relative to GEMM layers – use small fixed estimate

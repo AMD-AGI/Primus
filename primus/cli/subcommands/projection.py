@@ -50,6 +50,14 @@ def run(args, overrides):
         )
 
         launch_projection_from_cli(args, overrides)
+    elif args.suite == "inference":
+        # Inference / serving projection.  Forward-only analytical model
+        # (simulation backends), so no training backend import is required.
+        from primus.core.projection.inference_projection import (
+            launch_projection_from_cli,
+        )
+
+        launch_projection_from_cli(args, overrides)
     elif args.suite == "both":
         # Run the perf bench once, save the artifact, then run memory
         # projection from the loaded artifact (no second bench).
@@ -385,6 +393,171 @@ def _add_performance_args(parser):
     )
 
 
+def _add_inference_args(parser):
+    """Inference / serving projection knobs.
+
+    Reuses ``--gpu-arch`` / ``--gpu-clock-mhz`` / ``--gemm-backend`` from the
+    perf arg group (added separately) for the simulation backends.
+    """
+    parser.add_argument(
+        "--inference-mode",
+        type=str,
+        required=False,
+        default="both",
+        choices=["performance", "memory", "both"],
+        help="Which inference projection to run (default: both).",
+    )
+    # ---- Request / serving workload ----
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None,
+        help="Prompt length in tokens (prefill). Defaults to the config seq_length.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="Number of tokens to generate (decode steps).",
+    )
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=None,
+        help="Number of sequences processed together per decode forward.",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Max resident sequences for KV-cache sizing (default: batch size).",
+    )
+    parser.add_argument(
+        "--max-context-len",
+        type=int,
+        default=None,
+        help="Largest context (prompt+generated) for KV sizing (default: input+output).",
+    )
+    # ---- Precision ----
+    parser.add_argument(
+        "--weight-dtype",
+        type=str,
+        default=None,
+        help="Resident weight precision (bf16 | fp8 | ...). Default: bf16.",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        default=None,
+        help="KV-cache precision (bf16 | fp8 | int8 | ...). Default: bf16.",
+    )
+    # ---- Serving features ----
+    parser.add_argument(
+        "--chunked-prefill-size",
+        type=int,
+        default=None,
+        help="Chunked-prefill chunk size in tokens (0 disables).",
+    )
+    parser.add_argument(
+        "--speculative-num-tokens",
+        type=int,
+        default=None,
+        help="Draft tokens proposed per speculative verify step (0 disables).",
+    )
+    parser.add_argument(
+        "--speculative-acceptance-rate",
+        type=float,
+        default=None,
+        help="Expected per-token acceptance rate for speculative decoding [0,1].",
+    )
+    # ---- Capacity ----
+    parser.add_argument(
+        "--hbm-capacity-gb",
+        type=float,
+        default=None,
+        help="Per-GPU HBM capacity (GB). When set, reports fit + max concurrency.",
+    )
+    # ---- Feature B: custom collective ops ----
+    coll = parser.add_argument_group("inference collectives (feature B)")
+    coll.add_argument(
+        "--comm-model",
+        type=str,
+        default=None,
+        choices=["explicit", "builtin"],
+        help="Communication model: 'explicit' (knob-driven breakdown, default) "
+        "or 'builtin' (folded into layer time, no breakdown).",
+    )
+    coll.add_argument(
+        "--tp-allreduce-algo",
+        type=str,
+        default=None,
+        choices=["auto", "ring", "one_shot", "two_shot", "hierarchical"],
+        help="Force the TP AllReduce algorithm (default: auto = fastest).",
+    )
+    coll.add_argument(
+        "--ep-a2a-algo",
+        type=str,
+        default=None,
+        choices=["auto", "direct", "single_shot", "hierarchical"],
+        help="Force the EP AllToAll algorithm (default: auto = fastest).",
+    )
+    coll.add_argument(
+        "--prefill-comm-overlap",
+        type=float,
+        default=None,
+        help="Fraction of prefill comm hidden behind compute [0,1] (default 0).",
+    )
+    coll.add_argument(
+        "--decode-comm-overlap",
+        type=float,
+        default=None,
+        help="Fraction of decode comm hidden behind compute [0,1] (default 0).",
+    )
+    coll.add_argument(
+        "--tp-allreduce-efficiency",
+        type=float,
+        default=None,
+        help="TP AllReduce time multiplier (<1 = fused-op speedup, default 1.0).",
+    )
+    coll.add_argument(
+        "--ep-a2a-efficiency",
+        type=float,
+        default=None,
+        help="EP AllToAll time multiplier (<1 = fused/overlapped speedup, default 1.0).",
+    )
+    # ---- Feature A: prefill/decode disaggregation ----
+    dis = parser.add_argument_group("inference disaggregation (feature A)")
+    dis.add_argument(
+        "--disaggregate",
+        action="store_true",
+        help="Enable prefill/decode disaggregation (separate worker pools).",
+    )
+    dis.add_argument("--prefill-tp", type=int, default=None, help="Prefill-pool tensor parallelism.")
+    dis.add_argument("--prefill-pp", type=int, default=None, help="Prefill-pool pipeline parallelism.")
+    dis.add_argument("--prefill-ep", type=int, default=None, help="Prefill-pool expert parallelism.")
+    dis.add_argument("--decode-tp", type=int, default=None, help="Decode-pool tensor parallelism.")
+    dis.add_argument("--decode-pp", type=int, default=None, help="Decode-pool pipeline parallelism.")
+    dis.add_argument("--decode-ep", type=int, default=None, help="Decode-pool expert parallelism.")
+    dis.add_argument(
+        "--prefill-replicas", type=int, default=None, help="Number of prefill-pool replicas."
+    )
+    dis.add_argument(
+        "--decode-replicas", type=int, default=None, help="Number of decode-pool replicas."
+    )
+    dis.add_argument(
+        "--kv-transfer-bw-gbps",
+        type=float,
+        default=None,
+        help="KV-cache transfer bandwidth GB/s (default: inter-node pod BW).",
+    )
+    dis.add_argument(
+        "--kv-transfer-latency-us",
+        type=float,
+        default=None,
+        help="Fixed KV-cache transfer latency overhead (us).",
+    )
+
+
 def register_subcommand(subparsers):
     """
     Register the 'projection' subcommand to the main CLI parser.
@@ -467,6 +640,18 @@ def register_subcommand(subparsers):
     # it should NOT be a memory-load alias here because the orchestrator
     # always runs a fresh bench.
     _add_perf_compute_baseline_arg(both)
+
+    # ---------- inference ----------
+    inference = suite_parsers.add_parser(
+        "inference",
+        help="Inference / serving projection (TTFT, ITL, throughput, KV cache).",
+    )
+    add_pretrain_parser(inference)
+    _add_topology_args(inference)
+    # Reuse the perf knobs for the simulation backend selection
+    # (--gpu-arch, --gpu-clock-mhz, --gemm-backend, etc.).
+    _add_performance_args(inference)
+    _add_inference_args(inference)
 
     parser.set_defaults(func=run)
     return parser

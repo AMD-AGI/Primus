@@ -236,6 +236,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if gemm_backend is not None and hasattr(loss_p, "set_gemm_backend"):
                 loss_p.set_gemm_backend(gemm_backend)
 
+    def set_inference_phase(self, phase, kv_seq_len=None):
+        """Propagate a forward-only inference phase to layer profilers.
+
+        See :meth:`AttentionProfiler.set_inference_phase`.  ``phase=None``
+        restores default training behaviour.
+        """
+        for key in ("dense_transformer_layer", "moe_transformer_layer"):
+            layer_profiler = self.sub_profilers.get(key)
+            if layer_profiler is not None and hasattr(layer_profiler, "set_inference_phase"):
+                layer_profiler.set_inference_phase(phase, kv_seq_len)
+
     def get_layers_for_rank(
         self,
         global_rank: int,
