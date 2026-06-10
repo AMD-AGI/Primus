@@ -54,17 +54,25 @@ def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
 
 
 def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
+    sub_profiler_specs = {
+        "embedding": EmbeddingProfiler,
+        "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
+    }
+    # Only build the MoE sub-tree when the model actually has experts. Dense
+    # models (num_experts unset) must neither instantiate nor walk the MoE
+    # branch: the hierarchy printer iterates every sub-profiler unconditionally,
+    # so an always-built MoE tree would be evaluated on dense models. All
+    # compute paths guard MoE access with `is_moe` / `key in sub_profilers`,
+    # so omitting it here is safe.
+    if config.model_config.num_experts:
+        sub_profiler_specs["moe_transformer_layer"] = get_moe_transformer_layer_profiler_spec(config)
+    sub_profiler_specs["final_layernorm"] = LayerNormProfiler
+    sub_profiler_specs["output_layer"] = OutputLayerProfiler
+    sub_profiler_specs["calc_loss"] = LossProfiler
     return ModuleProfilerSpec(
         profiler=LanguageModelProfiler,
         config=config,
-        sub_profiler_specs={
-            "embedding": EmbeddingProfiler,
-            "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
-            "moe_transformer_layer": get_moe_transformer_layer_profiler_spec(config),
-            "final_layernorm": LayerNormProfiler,
-            "output_layer": OutputLayerProfiler,
-            "calc_loss": LossProfiler,
-        },
+        sub_profiler_specs=sub_profiler_specs,
     )
 
 
@@ -417,14 +425,18 @@ class LanguageModelProfiler(BaseModuleProfiler):
     def get_dp_size(self) -> int:
         num_nodes = int(os.getenv("NNODES", "1"))
         if num_nodes == 1:
-            # Calculate the minimum number of needed nodes
-            num_nodes = (
+            # Calculate the minimum number of needed nodes. Round up to whole
+            # nodes and never drop below 1: a config that fits within a single
+            # node must still report 1 node, otherwise num_nodes=0 leads to a
+            # downstream division-by-zero (world_size/dp_size == 0).
+            gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+            parallel_gpus = (
                 self.config.model_parallel_config.tensor_model_parallel_size
                 * self.config.model_parallel_config.context_model_parallel_size
                 * self.config.model_parallel_config.pipeline_model_parallel_size
                 * self.config.model_parallel_config.expert_model_parallel_size
-                // int(os.getenv("GPUS_PER_NODE", "8"))
             )
+            num_nodes = max(1, (parallel_gpus + gpus_per_node - 1) // gpus_per_node)
         world_size = num_nodes * int(os.getenv("GPUS_PER_NODE", "8"))
         dp_size = (
             world_size
