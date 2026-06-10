@@ -55,7 +55,7 @@ class MegatronBaseTrainer(BaseTrainer):
                 dist.destroy_process_group()
             except Exception:
                 log_rank_0(
-                    "[MegatronBaseTrainer] unable to destroy process group, it may have already " \
+                    "[MegatronBaseTrainer] unable to destroy process group, it may have already "
                     "been destroyed"
                 )
 
