@@ -96,7 +96,11 @@ def main() -> int:
         return 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(payload, encoding="utf-8")
+    # Force LF (newline="\n") so the lock is byte-identical regardless of the OS
+    # that runs this generator. The committed lock is LF (see .gitattributes), and
+    # CI regenerates it on Linux to diff against the commit; a CRLF write on Windows
+    # would otherwise make that drift check fail spuriously.
+    output.write_text(payload, encoding="utf-8", newline="\n")
     print(f"[lock] wrote {len(entries)} entrie(s) to {output}")
     return 0
 
