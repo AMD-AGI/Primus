@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: 3974fc246be594d989156dd83e91da618274b0c8 # feat: refine rmsnorm ops (#343)
+  PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
   PRIMUS_TURBO_AITER_COMMIT: b5e03ed191fca11ee423226537ef8d9435e432a6 # Fix dsink bf16 noise in Triton MHA one-kernel backward (#3070)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)

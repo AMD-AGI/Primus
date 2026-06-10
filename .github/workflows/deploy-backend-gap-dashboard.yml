@@ -41,6 +41,20 @@ jobs:
       - name: Build and validate standalone dashboard bundle
         run: python3 tools/backend_gap_report/build_site_bundle.py --output-dir "${{ runner.temp }}/backend-gap-site"
 
+      # Append a PEP 503 "simple" index for released Primus wheels into the same
+      # site bundle (under /simple/). The wheels stay on GitHub Releases; only
+      # small HTML index files are published here. Runs AFTER the bundle build
+      # because build_site_bundle.py wipes and recreates the output directory.
+      - name: Add pip (PEP 503) index for released wheels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/pip_index/build_pip_index.py \
+            --repo "${{ github.repository }}" \
+            --package primus \
+            --requires-python ">=3.10" \
+            --output-dir "${{ runner.temp }}/backend-gap-site/simple"
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
