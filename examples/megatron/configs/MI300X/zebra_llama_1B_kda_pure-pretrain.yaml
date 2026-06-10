@@ -29,7 +29,7 @@ modules:
       #   total tokens ~= 76294 * 131072 ≈ 10B
       train_iters: 50
       micro_batch_size: 16
-      global_batch_size: 64
+      global_batch_size: 128
 
       seq_length: 2048
       max_position_embeddings: 2048
