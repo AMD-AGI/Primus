@@ -64,7 +64,15 @@ from primus.backends.megatron.core.extensions.transformer_engine_spec_provider i
 from primus.backends.megatron.core.models.deepseek_v4 import (
     DeepseekV4HybridLayer,
     DeepseekV4HybridLayerSubmodules,
+    DeepseekV4TransformerBlock,
+    DeepseekV4TransformerBlockSubmodules,
     get_v4_mtp_block_spec,
+)
+from primus.backends.megatron.core.models.deepseek_v4.build_context import (
+    resolve_v4_provider,
+)
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_layer import (
+    DeepseekV4MTPLayer,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -127,7 +135,10 @@ def test_helper_emits_one_layer_spec_per_depth(mtp_num_layers: int) -> None:
     assert len(layer_specs) == mtp_num_layers
     for layer_spec in layer_specs:
         assert isinstance(layer_spec, ModuleSpec)
-        assert layer_spec.module is MultiTokenPredictionLayer
+        # V4 uses its own mHC-aware MTP layer (per-depth HyperHead), not the
+        # vanilla upstream MultiTokenPredictionLayer.
+        assert layer_spec.module is DeepseekV4MTPLayer
+        assert issubclass(DeepseekV4MTPLayer, MultiTokenPredictionLayer)
 
 
 def test_helper_threads_v4_inner_layer_unchanged() -> None:
@@ -144,7 +155,11 @@ def test_helper_threads_v4_inner_layer_unchanged() -> None:
 
 def test_helper_pulls_norm_and_linear_from_v4_provider() -> None:
     cfg = _make_v4_config(mtp_num_layers=1)
-    provider = DeepSeekV4SpecProvider(config=cfg)
+    # Resolve the provider through the same singleton helper the MTP spec
+    # builder uses (``resolve_v4_provider`` caches one provider on the config),
+    # so the identity comparison is against the exact provider that wired the
+    # spec — not a second, independently-constructed provider instance.
+    provider = resolve_v4_provider(cfg)
     spec = get_v4_mtp_block_spec(cfg, transformer_layer_spec=_placeholder_layer_spec())
     sub = spec.submodules.layer_specs[0].submodules
     expected_norm = provider.v4_norm_module()
@@ -153,6 +168,26 @@ def test_helper_pulls_norm_and_linear_from_v4_provider() -> None:
     assert sub.hnorm is expected_norm
     assert sub.layer_norm is expected_norm
     assert sub.eh_proj is expected_col
+
+
+def test_helper_extracts_last_hybrid_layer_from_block_spec() -> None:
+    """When handed the decoder *block* spec (as DeepseekV4Model does), the
+    MTP helper must extract a single hybrid-layer spec (the last one) as the
+    MTP inner layer — not thread the whole block spec through (which would
+    trip MultiTokenPredictionLayer's TransformerLayerSubmodules validation)."""
+    cfg = _make_v4_config(mtp_num_layers=1)
+    first = _placeholder_layer_spec()
+    last = _placeholder_layer_spec()
+    block_spec = ModuleSpec(
+        module=DeepseekV4TransformerBlock,
+        submodules=DeepseekV4TransformerBlockSubmodules(layer_specs=[first, last]),
+    )
+    spec = get_v4_mtp_block_spec(cfg, transformer_layer_spec=block_spec)
+    sub = spec.submodules.layer_specs[0].submodules
+    assert sub.mtp_model_layer is last, (
+        "MTP inner layer must be the last hybrid-layer spec extracted from the "
+        "decoder block spec (mirrors upstream GPT spec.layer_specs[-1])."
+    )
 
 
 def test_helper_rejects_zero_mtp_num_layers() -> None:

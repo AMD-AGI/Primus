@@ -492,16 +492,54 @@ class DeepseekV4HybridLayer(TransformerLayer):
         *,
         layer_idx: int,
         compress_ratio: int,
-        rope: DualRoPE,
+        rope: Optional[DualRoPE] = None,
         pg_collection=None,
         submodules: Optional[DeepseekV4HybridLayerSubmodules] = None,
         layer_number: Optional[int] = None,
+        is_mtp_layer: bool = False,
+        vp_stage: Optional[int] = None,
+        **_mtp_build_kwargs,
     ) -> None:
         # Bypass TransformerLayer.__init__ (it expects the upstream
         # submodule contract — cross-attn, BDA, and a self_attention
         # signature that takes layer_number / cp_comm_type). We build
         # the V4 attribute set directly via MegatronModule.
+        #
+        # ``is_mtp_layer`` / ``vp_stage`` / ``**_mtp_build_kwargs`` are
+        # accepted (and ignored) so this layer can be built by the
+        # upstream :class:`MultiTokenPredictionLayer`, whose
+        # ``build_module(self.submodules.mtp_model_layer, config=...,
+        # vp_stage=..., layer_number=..., is_mtp_layer=True)`` call passes
+        # a richer kwarg set than the main decoder block does.
+        del is_mtp_layer, vp_stage, _mtp_build_kwargs
         MegatronModule.__init__(self, config=config)
+
+        # ``rope`` is normally injected by ``DeepseekV4TransformerBlock``
+        # (one shared DualRoPE for the whole stack). When this layer is
+        # built standalone — e.g. as the inner layer of a V4 MTP depth via
+        # the upstream MTP ``build_module`` path, which does NOT thread
+        # ``rope`` — fall back to constructing a private DualRoPE from the
+        # config. DualRoPE holds only RoPE cos/sin caches (no trainable
+        # params), so a per-MTP-depth instance is numerically a no-op vs.
+        # sharing the trunk's.
+        if rope is None:
+            rope = DualRoPE(
+                rotary_dim=int(config.qk_pos_emb_head_dim),
+                rope_theta=float(config.rotary_base),
+                compress_rope_theta=float(config.compress_rope_theta),
+                yarn_factor=float(config.rotary_scaling_factor),
+                yarn_beta_fast=32.0,
+                yarn_beta_slow=1.0,
+                original_max_position_embeddings=int(config.original_max_position_embeddings),
+            )
+            # Register the privately-built RoPE as a real submodule so its
+            # (non-persistent) cos/sin ``inv_freq`` buffers follow the layer
+            # onto the GPU under ``module.to(device)`` / ``.cuda()``. The main
+            # decoder path instead receives the block-owned ``self.rope`` (a
+            # registered submodule of the block) and keeps it in the
+            # attention's ``self._rope`` *list* to avoid double-registration;
+            # here there is no other owner, so this layer must register it.
+            self._fallback_rope = rope
 
         self.layer_idx = int(layer_idx)
         self.compress_ratio = int(compress_ratio)

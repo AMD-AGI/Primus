@@ -77,6 +77,17 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     hc_sinkhorn_iters: int = 20
     hc_eps: float = 1.0e-6
 
+    # ---- DeepSeek-V4 MTP (multi-token prediction) ----
+    # The released V4 checkpoint gives each MTP depth its OWN small
+    # ``hc_head_fn`` (a per-depth :class:`HyperHead`) instead of reusing the
+    # main trunk's HyperHead. With ``hc_mult > 1`` the MTP inner
+    # :class:`DeepseekV4HybridLayer` runs on the K-stream form and must be
+    # collapsed back to a single stream by this per-depth head before the
+    # MTP final-layernorm + shared LM head. Set ``False`` to fall back to a
+    # single-stream MTP inner layer (no per-depth head); see
+    # ``deepseek_v4_mtp_layer.DeepseekV4MTPLayer``.
+    mtp_use_separate_hc_head: bool = True
+
     compress_ratios: Optional[Union[str, List[int], Tuple[int, ...]]] = None
     compress_rope_theta: float = 160000.0
 

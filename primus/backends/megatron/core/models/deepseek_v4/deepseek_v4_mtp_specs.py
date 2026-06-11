@@ -44,7 +44,6 @@ from typing import Optional
 from megatron.core.transformer.multi_token_prediction import (
     MultiTokenPredictionBlock,
     MultiTokenPredictionBlockSubmodules,
-    MultiTokenPredictionLayer,
     MultiTokenPredictionLayerSubmodules,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -55,9 +54,46 @@ from primus.backends.megatron.core.extensions.transformer_engine_spec_provider i
 from primus.backends.megatron.core.models.deepseek_v4.build_context import (
     resolve_v4_provider,
 )
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
+    DeepseekV4TransformerBlock,
+    DeepseekV4TransformerBlockSubmodules,
+)
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_layer import (
+    DeepseekV4MTPLayer,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
+
+
+def _extract_v4_inner_layer_spec(transformer_layer_spec: ModuleSpec) -> ModuleSpec:
+    """Return a single :class:`DeepseekV4HybridLayer` spec for an MTP depth.
+
+    :class:`DeepseekV4Model` resolves the decoder as a
+    :class:`DeepseekV4TransformerBlock` ``ModuleSpec`` whose
+    ``submodules.layer_specs`` is the stage-local list of hybrid-layer specs.
+    Upstream :class:`MultiTokenPredictionLayer` needs a *single*
+    :class:`~megatron.core.transformer.transformer_layer.TransformerLayer`-style
+    spec as its inner layer (its ``__init__`` validates
+    ``mtp_model_layer.submodules`` against ``TransformerLayerSubmodules``),
+    so when handed the block spec we extract the last hybrid layer spec
+    (mirroring upstream GPT's ``spec.layer_specs[-1]`` convention; the last
+    decoder layer is ``cr=0`` dense in both V4-Flash and V4-Pro). When already
+    handed a layer spec (e.g. CPU unit tests) we thread it through unchanged.
+    """
+    submods = getattr(transformer_layer_spec, "submodules", None)
+    is_block_spec = getattr(transformer_layer_spec, "module", None) is DeepseekV4TransformerBlock or isinstance(
+        submods, DeepseekV4TransformerBlockSubmodules
+    )
+    if is_block_spec:
+        layer_specs = getattr(submods, "layer_specs", None)
+        if not layer_specs:
+            raise ValueError(
+                "Cannot build a V4 MTP inner layer: the decoder block spec has "
+                "no stage-local layer_specs to extract from."
+            )
+        return layer_specs[-1]
+    return transformer_layer_spec
 
 
 def _v4_mtp_layer_spec(
@@ -81,13 +117,15 @@ def _v4_mtp_layer_spec(
     norm_module = provider.v4_norm_module()
     column_parallel = provider.column_parallel_linear()
 
+    inner_layer_spec = _extract_v4_inner_layer_spec(transformer_layer_spec)
+
     return ModuleSpec(
-        module=MultiTokenPredictionLayer,
+        module=DeepseekV4MTPLayer,
         submodules=MultiTokenPredictionLayerSubmodules(
             enorm=norm_module,
             hnorm=norm_module,
             eh_proj=column_parallel,
-            mtp_model_layer=transformer_layer_spec,
+            mtp_model_layer=inner_layer_spec,
             layer_norm=norm_module,
         ),
     )
