@@ -560,6 +560,23 @@ class DeepseekV4Attention(MLASelfAttention):
             self.compressor = self._build_compressor(submodules.compressor)
             if self.compress_ratio == 4:
                 self.indexer = self._build_indexer(submodules.indexer)
+                # The Indexer is a non-differentiable top-K *selector*: the only
+                # consumed output is ``topk_idxs`` (argTopK indices); its scores
+                # are discarded (``topk_idxs, _ = self.indexer(...)`` in forward)
+                # and this model has no indexer auxiliary/distillation loss, so
+                # none of the Indexer's params can ever receive a gradient.
+                # Leaving them trainable inserts permanently-dead params into the
+                # distributed-optimizer grad buckets, which both wastes grad /
+                # optimizer state + cross-node grad-sync bandwidth AND trips
+                # Megatron's overlap_grad_reduce invariant (every bucket param
+                # must fire its grad-ready backward hook) -- the latter is what
+                # forced overlap_grad_reduce/param_gather OFF and crippled
+                # cross-node DP scaling. Freeze them so Megatron excludes them
+                # from the grad buckets entirely. Set PRIMUS_V4_INDEXER_TRAINABLE=1
+                # to re-enable (e.g. once an indexer aux loss is added).
+                if os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1":
+                    for _indexer_param in self.indexer.parameters():
+                        _indexer_param.requires_grad_(False)
 
         # ---- core attention (Turbo / TE flash) — dense layers only ----
         # Plan-3 P22: when the spec emits a ``core_attention`` submodule
