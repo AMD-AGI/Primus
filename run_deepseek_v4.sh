@@ -26,6 +26,17 @@ export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:-"tasimage/primus:pr-715-ainic"}
 export SLURM_PARTITION=Compute-DCPT
+# === 节点选择: 必须挑 ionic 内核 ABI 一致(同构)的节点 ===
+# 2026-06-04 实测分组(srun 逐节点读 /sys/class/infiniband_verbs/uverbs0/abi_version + /sys/module/ionic/version):
+#   - ABI 1 (内核模块 26.03.3.001 / libionic1 54.0-187): 集群绝大多数节点
+#   - ABI 4 (内核模块 25.11.1.001 / libionic1 54.0-149): 仅 n01-25, n01-29 两台(异类)
+# 镜像(tasimage/primus:pr-715-ainic)自带的 ionic provider 是 ABI1, 因此【只能用 ABI1 节点】,
+# 这样容器内 provider 与 host 内核 ABI 匹配, 无需任何嫁接/挂载, ibv_devices 即可枚举到 ionic.
+# 之前 hang/崩 的根因: nodelist 里混入了 ABI4 的 n01-25 作为 rank0, 它在 ABI1 镜像下枚举不到设备.
+# 下面默认列出"全部在线(非 down/maint/drain) 且 ABI=1"的节点; 已排除的不可用节点:
+#   n02-29(down), n02-21(maint), n03-25(drain), 以及 ABI4 的 n01-25 / n01-29.
+# 注意: primus-cli 要求 --nodelist 节点数 == NNODES。只跑 N 台时, 请把 NNODES 设为 N 并从下表取前 N 个,
+#       或把 NNODES 设成下表长度(当前 15)。(n01-21 之前曾被你单独调试占用, 如仍要保留请从列表里删掉它。)
 export SLURM_NODELIST="${SLURM_NODELIST:-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
 
@@ -98,8 +109,50 @@ if [ "$USE_TURBO_DEEPEP" = "True" ]; then
 fi
 
 export PRECISION_TYPE=${PRECISION_TYPE:-BF16}
-export FP8=null
-export FP8_RECIPE=null
+# Honor an incoming FP8 / FP8_RECIPE env (e.g. FP8_RECIPE=mxfp8); default null
+# so non-FP8 runs are unchanged. (Previously these were hard-set to null,
+# which silently clobbered a caller-provided recipe.)
+export FP8=${FP8:-null}
+export FP8_RECIPE=${FP8_RECIPE:-null}
+
+# ---------- Optimizer selection (adam default; muon = DeepSeek-V4 recipe) ----
+# OPTIMIZER=adam (default): unchanged behaviour (BF16 precision-aware AdamW
+#   from the EXP yaml); overlap_grad_reduce / overlap_param_gather stay ON.
+# OPTIMIZER=muon: Primus distributed-Muon path (primus .../optimizer/moun.py).
+#   Megatron asserts plain `muon` is incompatible with distributed optimizer +
+#   grad/param overlap, so we force them OFF and switch optimizer states to
+#   fp32 (Muon does not support the precision-aware optimizer). The
+#   Newton-Schulz coefficient set auto-selects 'deepseekv4' (8 aggressive + 2
+#   stable) for V4 configs inside get_megatron_muon_optimizer. Requires the
+#   emerging_optimizers package -> we set PRIMUS_INSTALL_EMERGING_OPTIMIZERS so
+#   the in-container install hook (runner/.../01_install_emerging_optimizers.sh)
+#   provisions it.
+export OPTIMIZER=${OPTIMIZER:-adam}
+export PRIMUS_OVERLAP_GRAD_REDUCE=${PRIMUS_OVERLAP_GRAD_REDUCE:-True}
+export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-True}
+OPTIMIZER_CLI_ARGS=()
+if [ "$OPTIMIZER" = "muon" ] || [ "$OPTIMIZER" = "dist_muon" ]; then
+  export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-1}
+  export MUON_MOMENTUM=${MUON_MOMENTUM:-0.95}
+  export MUON_EXTRA_SCALE_FACTOR=${MUON_EXTRA_SCALE_FACTOR:-0.18}
+  # Both plain muon (Megatron asserts) and dist_muon (LayerWiseDistributed-
+  # Optimizer docstring: "keep all megatron distributed-optimizer related
+  # options OFF"; it manages its own param all-gather, so DDP
+  # overlap_param_gather double-drives start_param_sync -> crash) need the
+  # DDP grad/param overlap OFF.
+  PRIMUS_OVERLAP_GRAD_REDUCE=False
+  PRIMUS_OVERLAP_PARAM_GATHER=False
+  OPTIMIZER_CLI_ARGS=(
+    --optimizer "$OPTIMIZER"
+    --muon_momentum "$MUON_MOMENTUM"
+    --muon_extra_scale_factor "$MUON_EXTRA_SCALE_FACTOR"
+    --use_distributed_optimizer False
+    --use_precision_aware_optimizer False
+    --main_grads_dtype fp32
+    --exp_avg_dtype fp32
+    --exp_avg_sq_dtype fp32
+  )
+fi
 
 # Plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
 # Precedence in DeepseekV4Attention.forward:
@@ -108,6 +161,11 @@ export FP8_RECIPE=null
 # These are V4-only; they have no effect on other model types.
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
+
+# Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
+# USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
+# in-container config regardless of env propagation.
+export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
 
 # Plan-8 tilelang attention kernels (OPTIONAL — default OFF).
 # Tilelang is NOT bundled in the default Primus container, so we leave
@@ -144,6 +202,26 @@ if [ "$PRECISION_TYPE" = "FP8" ]; then
   export FP8_RECIPE=${FP8_RECIPE:-delayed}
 fi
 
+# ---------- MXFP8 + FP8 param-gather (Muon path; Megatron #4987 analogue) ----
+# Plan-9: combine the distributed-Muon (LayerWise) path with an MXFP8 forward
+# recipe + FP8 parameter all-gather. Enable with FP8_PARAM_GATHER=True (best
+# paired with OPTIMIZER=dist_muon + PRECISION_TYPE=FP8 FP8_RECIPE=mxfp8).
+# MXFP8 on ROCm/TE requires NVTE_ROCM_ENABLE_MXFP8=1; the mxfp8 param-AG path
+# is most memory-efficient with --reuse-grad-buf-for-mxfp8-param-ag. NOTE:
+# Megatron auto-disables --fp8-param-gather on TE>=2.0.0 (falls back to a
+# bf16/all_gather), so on such containers this exercises the MXFP8 forward +
+# dist-Muon path with param-gather requested-but-possibly-downgraded.
+export FP8_PARAM_GATHER=${FP8_PARAM_GATHER:-False}
+FP8_PARAM_GATHER_CLI_ARGS=()
+if [ "$FP8_PARAM_GATHER" = "True" ]; then
+  export NVTE_ROCM_ENABLE_MXFP8=${NVTE_ROCM_ENABLE_MXFP8:-1}
+  export REUSE_GRAD_BUF_FOR_MXFP8_PARAM_AG=${REUSE_GRAD_BUF_FOR_MXFP8_PARAM_AG:-True}
+  FP8_PARAM_GATHER_CLI_ARGS=(--fp8_param_gather True)
+  if [ "$REUSE_GRAD_BUF_FOR_MXFP8_PARAM_AG" = "True" ] && [ "$FP8_RECIPE" = "mxfp8" ]; then
+    FP8_PARAM_GATHER_CLI_ARGS+=(--reuse_grad_buf_for_mxfp8_param_ag True)
+  fi
+fi
+
 PP_LAYOUT_ARGS=()
 if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
   PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
@@ -164,6 +242,8 @@ if [ ! -d "$BACKEND_PATH" ] || [ -z "$(ls -A "$BACKEND_PATH" 2>/dev/null)" ]; th
 fi
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+
+export PRIMUS_EXIT_FAST=1
 
 ./primus-cli slurm -N "$NNODES" \
   ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
@@ -195,12 +275,13 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --index_topk "$PRIMUS_INDEX_TOPK" \
   --v4_grouped_experts_support_clamped_swiglu "$PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU" \
   --compress_ratios "$PRIMUS_COMPRESS_RATIOS" \
-  --mtp_num_layers 0 \
+  --mtp_num_layers "${MTP_NUM_LAYERS:-0}" \
   --mock_data True \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
   --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
   --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
@@ -208,13 +289,15 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+  "${OPTIMIZER_CLI_ARGS[@]}" \
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \
+  "${FP8_PARAM_GATHER_CLI_ARGS[@]}" \
   --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
   --recompute_granularity full \
   --recompute_method block \
-  --overlap_grad_reduce True \
-  --overlap_param_gather True \
+  --overlap_grad_reduce "$PRIMUS_OVERLAP_GRAD_REDUCE" \
+  --overlap_param_gather "$PRIMUS_OVERLAP_PARAM_GATHER" \
   --disable_last_saving True \
   --disable_wandb True \
   --disable_tensorboard True \
