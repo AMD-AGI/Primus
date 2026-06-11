@@ -170,6 +170,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
   -- --image "${DOCKER_IMAGE}" --clean -- --numa \
   -- train pretrain --config "$EXP" \
+  --manual_gc True \
+  --manual_gc_interval 100 \
   "${PP_LAYOUT_ARGS[@]}" \
   --moe_router_force_load_balancing True \
   --log_avg_skip_iterations 3 \
@@ -211,8 +213,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
   --recompute_granularity full \
   --recompute_method block \
-  --overlap_grad_reduce False \
-  --overlap_param_gather False \
+  --overlap_grad_reduce True \
+  --overlap_param_gather True \
   --disable_last_saving True \
   --disable_wandb True \
   --disable_tensorboard True \
