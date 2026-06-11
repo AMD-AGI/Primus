@@ -45,3 +45,15 @@ repos:
     rev: v0.10.0.1
     hooks:
       - id: shellcheck
+  - repo: local
+    hooks:
+      # Keep the committed primus/_thirdparty.lock in sync with the submodule
+      # pins. always_run because a submodule bump changes a gitlink, not a file
+      # pre-commit would otherwise match; if the lock changes the commit fails so
+      # the regenerated lock gets staged. Mirrors the release CI drift check.
+      - id: thirdparty-lock
+        name: regenerate primus/_thirdparty.lock from submodule pins
+        entry: python tools/pip_index/gen_thirdparty_lock.py
+        language: system
+        pass_filenames: false
+        always_run: true

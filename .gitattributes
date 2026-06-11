@@ -1,0 +1,5 @@
+# Keep the generated third_party lock byte-stable across platforms. It is
+# committed (shipped in every install path) and CI regenerates + diffs it to
+# guard against drift from the submodule pins, so it must always be LF even on
+# Windows checkouts where core.autocrlf=true.
+primus/_thirdparty.lock text eol=lf
