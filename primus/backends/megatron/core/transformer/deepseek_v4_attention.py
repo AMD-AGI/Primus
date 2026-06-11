@@ -821,6 +821,7 @@ class DeepseekV4Attention(MLASelfAttention):
             index_n_heads=index_n_heads,
             index_topk=index_topk,
             compress_ratio=self.compress_ratio,
+            use_fp8_qk=bool(getattr(self.config, "use_v4_fp8_indexer", False)),
         )
         if spec is None:
             return Indexer(**kwargs)

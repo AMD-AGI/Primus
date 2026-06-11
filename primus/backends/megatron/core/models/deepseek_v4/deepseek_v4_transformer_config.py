@@ -98,6 +98,19 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     index_head_dim: int = 128
     index_n_heads: int = 64
 
+    # ---- DeepSeek-V4 FP8 Indexer (CSA selector QK path) ----
+    # When True, the CSA :class:`Indexer` fake-quantizes its query / compressed
+    # key activations to FP8 (E4M3) before the QK scoring einsum, simulating
+    # the released V4 low-precision indexer QK path (the report runs the
+    # indexer QK in FP4/FP8 while keeping the BF16 index-score / top-k path).
+    # The score reduction (ReLU + per-head weight + sum + causal mask) and the
+    # top-k selection stay in the activation dtype (BF16). The indexer is a
+    # non-differentiable, frozen top-k selector, so this is an inference-side
+    # precision reduction (no straight-through estimator needed). Default False
+    # so existing BF16 runs are bit-unchanged; enable via
+    # ``PRIMUS_USE_V4_FP8_INDEXER`` (see run_deepseek_v4.sh / flash yaml).
+    use_v4_fp8_indexer: bool = False
+
     # ---- DeepSeek-V4 plan-4 in-tree Triton attention kernels ----
     # Plan-4 P25: when ``use_v4_triton_attention=True`` the dense
     # (``compress_ratio == 0``) and HCA (``compress_ratio == 128``)

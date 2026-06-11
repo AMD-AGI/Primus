@@ -44,13 +44,50 @@ Phase 4 contract:
 
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+logger = logging.getLogger(__name__)
+
+
+def _is_rank0() -> bool:
+    try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank() == 0
+    except Exception:
+        pass
+    return True
+
 from primus.backends.megatron.core.transformer.compressor import Compressor
+
+# E4M3 finite max magnitude (float8_e4m3fn): largest representable value.
+_FP8_E4M3_MAX = 448.0
+
+
+def fake_quantize_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
+    """Per-tensor dynamic FP8 (E4M3) fake-quantization.
+
+    Scales ``x`` so its max magnitude maps to the E4M3 finite range, rounds
+    through ``torch.float8_e4m3fn``, then dequantizes back to ``x.dtype``. This
+    simulates the precision of an FP8 QK GEMM input while keeping the matmul
+    itself in the activation dtype (QAT-style "simulated FP8" path). Returns
+    ``x`` unchanged when the platform/torch build lacks ``float8_e4m3fn`` or
+    when ``x`` is all-zero (degenerate scale).
+    """
+    if not hasattr(torch, "float8_e4m3fn"):
+        return x
+    orig_dtype = x.dtype
+    amax = x.detach().abs().amax()
+    if not torch.isfinite(amax) or float(amax) <= 0.0:
+        return x
+    scale = (_FP8_E4M3_MAX / amax).to(x.dtype)
+    x_scaled = torch.clamp(x * scale, -_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+    x_fp8 = x_scaled.to(torch.float8_e4m3fn)
+    return x_fp8.to(orig_dtype) / scale
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
     indexer_score_triton,
 )
@@ -97,6 +134,7 @@ class Indexer(nn.Module):
         index_topk: int,
         compress_ratio: int = 4,
         dq_rank: int = None,
+        use_fp8_qk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -105,6 +143,16 @@ class Indexer(nn.Module):
         self.index_topk = index_topk
         self.compress_ratio = compress_ratio
         self.dq_rank = dq_rank if dq_rank is not None else index_head_dim
+        # FP8 (E4M3) fake-quant of the QK scoring inputs (V4 low-precision
+        # indexer QK path). See ``fake_quantize_fp8_e4m3`` / config flag
+        # ``use_v4_fp8_indexer``.
+        self.use_fp8_qk = bool(use_fp8_qk)
+        if self.use_fp8_qk and _is_rank0():
+            logger.info(
+                "[V4-Indexer] FP8 (E4M3) QK scoring path ENABLED "
+                "(query/compressed-key activations fake-quantized; "
+                "BF16 index-score + top-k preserved)."
+            )
 
         # W^{DQ}: low-rank query down-projection.
         self.w_dq = nn.Linear(hidden_size, self.dq_rank, bias=False)
@@ -186,6 +234,18 @@ class Indexer(nn.Module):
         #                                    (einsum + tail in one kernel).
         #   else                          → fully eager.
         k_icomp_2d = k_icomp.squeeze(2)
+
+        # FP8 (E4M3) QK path: fake-quantize the query / compressed-key
+        # activations BEFORE the scoring einsum so every dispatch path
+        # (full-fuse Triton, post-einsum-tail Triton, eager) consumes the
+        # FP8-rounded values. The ReLU + per-head weight + sum + causal mask +
+        # top-k stay in the activation dtype (BF16 index-score path). ``w_i``
+        # (per-head score weights) is left in BF16 — it is not part of the QK
+        # GEMM the report quantizes.
+        if self.use_fp8_qk:
+            q_i = fake_quantize_fp8_e4m3(q_i)
+            k_icomp_2d = fake_quantize_fp8_e4m3(k_icomp_2d)
+
         if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,

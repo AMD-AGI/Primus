@@ -56,6 +56,11 @@ attn_sink: true
 use_v4_triton_attention: false
 use_v4_triton_csa_attention: false
 
+# FP8 (E4M3) Indexer QK path (CSA selector). Default off; the indexer QK
+# scoring inputs are fake-quantized to FP8 when enabled (BF16 index-score /
+# top-k path is preserved). Surface via PRIMUS_USE_V4_FP8_INDEXER.
+use_v4_fp8_indexer: false
+
 # Plan-8 tilelang attention kernels (OPTIONAL dependency, default OFF).
 # Tilelang is NOT bundled in the default Primus container; enabling
 # these flags without a tilelang install logs a one-time rank-0

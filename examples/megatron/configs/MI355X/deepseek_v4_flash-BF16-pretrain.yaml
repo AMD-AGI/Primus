@@ -113,6 +113,9 @@ modules:
       use_v4_triton_attention: ${PRIMUS_USE_V4_TRITON_ATTENTION:false}
       use_v4_triton_csa_attention: ${PRIMUS_USE_V4_TRITON_CSA_ATTENTION:false}
 
+      # FP8 (E4M3) Indexer QK path (CSA selector); BF16 index-score preserved.
+      use_v4_fp8_indexer: ${PRIMUS_USE_V4_FP8_INDEXER:false}
+
       # Plan-8 tilelang attention kernels (OPTIONAL — tilelang is NOT
       # bundled in the default Primus container). When enabled, the
       # V4 attention dispatcher routes through the tilelang FWD/BWD;
