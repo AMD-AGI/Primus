@@ -142,6 +142,13 @@ class MounOptimizerConfig:
     muon_num_ns_steps: int = 5
     """The number of iteration steps to use in the Newton-Schulz iteration."""
 
+    muon_coefficient_type: str = "quintic"
+    """Newton-Schulz coefficient set name (emerging_optimizers ``NSCoeffT``):
+    one of 'simple' / 'quintic' / 'polar_express' / 'cans' / 'aol' /
+    'deepseekv4' / 'cubic5'. DeepSeek-V4 uses 'deepseekv4' (8x aggressive +
+    2x stable per the report); ``get_megatron_muon_optimizer`` auto-selects it
+    for V4 configs when this is left at the default 'quintic'."""
+
     muon_tp_mode: str = "blockwise"
     """How to perform NS calculation for tensor parallel weights. Defaults to "blockwise"."""
 

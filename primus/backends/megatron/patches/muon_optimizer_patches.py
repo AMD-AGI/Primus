@@ -107,3 +107,105 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
         "[Patch:megatron.optimizer.muon] Patched get_megatron_optimizer in megatron.training.training "
         "to dispatch to muon when optimizer contains 'muon'."
     )
+
+
+@register_patch(
+    "megatron.optimizer.muon_builder",
+    backend="megatron",
+    phase="before_train",
+    description=(
+        "Redirect megatron.training.training.get_megatron_muon_optimizer to the "
+        "Primus moun.get_megatron_muon_optimizer (new emerging_optimizers API + "
+        "DeepSeek-V4 'deepseekv4' Newton-Schulz coefficients)."
+    ),
+)
+def patch_get_megatron_muon_optimizer_builder(ctx: PatchContext) -> None:
+    """Point Megatron's ``get_megatron_muon_optimizer`` at the Primus version.
+
+    Megatron's ``setup_model_and_optimizer`` (training.py) branches on
+    ``'muon' in config.optimizer`` and calls ``get_megatron_muon_optimizer``
+    **directly** (training.py:1538) -- so the ``get_megatron_optimizer``
+    dispatch patch above never sees the Muon path. The upstream
+    ``megatron.core.optimizer.muon`` builder targets an OLDER
+    ``emerging_optimizers`` API (``use_nesterov`` / ``mode``) that the pinned
+    package (>=0.4.0a0, the first version carrying the ``deepseekv4``
+    coefficient set) renamed to ``nesterov`` / ``tp_mode``, so the upstream
+    builder raises ``TypeError`` at ``OrthogonalizedOptimizer.__init__``.
+
+    The Primus ``moun.get_megatron_muon_optimizer`` is already adapted to the
+    new API and auto-selects the report's ``deepseekv4`` hybrid Newton-Schulz
+    schedule (8 aggressive + 2 stable) for V4 configs. We rebind the name in
+    the ``training`` module namespace (where it was imported at line 130) so
+    the Muon branch builds through the Primus path. R6.2-compliant: no
+    third_party edit.
+    """
+    try:
+        import megatron.training.training as training_module
+    except ImportError as e:
+        log_rank_0(f"[Patch:megatron.optimizer.muon_builder] Skip patch (Megatron not available): {e}")
+        return
+
+    original_builder = getattr(training_module, "get_megatron_muon_optimizer", None)
+    if original_builder is None:
+        log_rank_0(
+            "[Patch:megatron.optimizer.muon_builder] training module has no "
+            "get_megatron_muon_optimizer symbol; nothing to patch."
+        )
+        return
+    if getattr(original_builder, "_primus_muon_builder_wrapper", False):
+        return
+
+    def _patched_get_megatron_muon_optimizer(*func_args, **func_kwargs):
+        config = func_kwargs.get("config")
+        if config is None and func_args:
+            config = func_args[0]
+        model_chunks = func_kwargs.get("model_chunks")
+        if model_chunks is None and len(func_args) >= 2:
+            model_chunks = func_args[1]
+        config_overrides = func_kwargs.get("config_overrides")
+        # The Primus moun builder constructs/forwards a ProcessGroupCollection
+        # to the inner AdamW get_megatron_optimizer, and Megatron asserts that
+        # Gloo process groups are incompatible with a provided pg_collection.
+        # Force gloo off for the Muon path (it does not need it).
+        use_gloo_process_groups = False
+        optimizer_name = getattr(config, "optimizer", "muon") or "muon"
+        layer_wise_distributed_optimizer = func_kwargs.get(
+            "layer_wise_distributed_optimizer", "dist" in optimizer_name
+        )
+
+        from primus.backends.megatron.core.optimizer.moun import (
+            get_megatron_muon_optimizer,
+        )
+        from primus.backends.megatron.core.optimizer.moun_optimizer_config import (
+            MounOptimizerConfig,
+        )
+
+        # Build a MounOptimizerConfig from the backend args so all muon_*
+        # fields (incl. the Primus-only muon_coefficient_type) are populated;
+        # fall back to copying from the passed OptimizerConfig when an arg is
+        # absent.
+        args = ctx.extra.get("backend_args", {})
+        kwargs = {}
+        for f in dataclasses.fields(MounOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+            elif hasattr(config, f.name):
+                kwargs[f.name] = getattr(config, f.name)
+        moun_config = MounOptimizerConfig(**kwargs)
+        moun_config.timers = getattr(config, "timers", None)
+
+        return get_megatron_muon_optimizer(
+            moun_config,
+            model_chunks,
+            config_overrides=config_overrides,
+            use_gloo_process_groups=use_gloo_process_groups,
+            layer_wise_distributed_optimizer=layer_wise_distributed_optimizer,
+        )
+
+    setattr(_patched_get_megatron_muon_optimizer, "_primus_muon_builder_wrapper", True)
+    training_module.get_megatron_muon_optimizer = _patched_get_megatron_muon_optimizer
+    log_rank_0(
+        "[Patch:megatron.optimizer.muon_builder] Redirected get_megatron_muon_optimizer "
+        "in megatron.training.training to the Primus moun builder (new emerging_optimizers "
+        "API + deepseekv4 coefficients)."
+    )

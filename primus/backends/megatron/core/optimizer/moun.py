@@ -51,6 +51,52 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _param_goes_to_muon(param) -> bool:
+    """Return True if ``param`` should be optimized by Muon, else AdamW.
+
+    DeepSeek-V4 report §9.5.1 parameter assignment (and the general Muon rule):
+
+    * **AdamW**: embedding, prediction/output head, RMSNorm weights, and every
+      other 1-D parameter -- which for V4 includes the mHC static bias
+      (``HyperMixer.base`` / ``HyperHead.base``, shape ``[out_dim]`` / ``[K]``)
+      and the mHC gating scale (``HyperMixer.scale``, shape ``[3]``).
+    * **Muon**: every 2-D weight matrix -- attention projections, MoE expert
+      weights, and the mHC mixing matrix ``HyperMixer.fn`` / ``HyperHead.fn``.
+
+    The classification is structural (embedding/output flag + tensor rank), so
+    it matches the report's table without per-name allow/deny lists.
+    """
+    if getattr(param, "is_embedding_or_output_parameter", False):
+        return False
+    # Muon orthogonalizes 2-D weight MATRICES; route every <2-D param
+    # (scalars like a per-stream gate, and 1-D vectors like RMSNorm weights,
+    # biases, mHC base/scale, attn_sink) to AdamW. (Newton-Schulz computes
+    # ``grad.size(-2)`` and fails on 0-/1-D tensors.)
+    if param.dim() < 2:
+        return False
+    return True
+
+
+def _resolve_muon_coefficient_type(config, model_chunks) -> str:
+    """Resolve the Newton-Schulz coefficient set name.
+
+    Precedence: an explicit ``config.muon_coefficient_type`` (anything other
+    than the upstream ``"quintic"`` default) wins; otherwise auto-select
+    ``"deepseekv4"`` (the report's 8-aggressive + 2-stable hybrid schedule)
+    when any model chunk is a DeepSeek-V4 transformer config; otherwise keep
+    ``"quintic"``.
+    """
+    coeff = str(getattr(config, "muon_coefficient_type", "quintic") or "quintic")
+    if coeff == "quintic":
+        is_v4 = any(
+            type(getattr(mc, "config", None)).__name__ == "DeepSeekV4TransformerConfig"
+            for mc in model_chunks
+        )
+        if is_v4:
+            coeff = "deepseekv4"
+    return coeff
+
+
 class TensorParallelMuon(OrthogonalizedOptimizer):
     """Tensor Parallel Muon optimizer."""
 
@@ -96,7 +142,8 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
                 coefficient_type=coefficient_type,
                 tp_group=tp_group,
                 partition_dim=partition_dim,
-                mode="duplicated" if mode == "blockwise" else mode,
+                # emerging_optimizers>=0.4.0a0 renamed the kwarg ``mode`` -> ``tp_mode``.
+                tp_mode="duplicated" if mode == "blockwise" else mode,
             )
             scale_factor = get_muon_scale_factor(size[0], size[1], mode=scale_mode)
             return orth_grad * scale_factor * extra_scale_factor
@@ -112,8 +159,10 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             params,
             lr,
             momentum_beta,
-            use_nesterov=use_nesterov,
-            weight_decay=weight_decay,
+            weight_decay,
+            # emerging_optimizers>=0.4.0a0 renamed the kwarg ``use_nesterov`` ->
+            # ``nesterov`` (now keyword-only).
+            nesterov=use_nesterov,
             weight_decay_method=weight_decay_method,
             fp32_matmul_prec=fp32_matmul_prec,
             scaled_orthogonalize_fn=scaled_orthogonalize_fn,
@@ -237,11 +286,43 @@ def get_megatron_muon_optimizer(
             # TODO(deyuf): support MLA
             if "linear_qkv.weight" in name and len(param.shape) == 2:
                 param.is_qkv = True
-            # TODO(deyuf): might not be sufficient for future algorithm. revisit this conditioning
-            if not getattr(param, "is_embedding_or_output_parameter", False) and not (len(param.shape) == 1):
+            # DeepSeek-V4 §9.5.1 split: 2-D weight matrices -> Muon
+            # (linear_params); embedding/output + all 1-D params (RMSNorm,
+            # mHC base/scale, biases) -> AdamW (nonlinear_params).
+            if _param_goes_to_muon(param):
                 linear_params.append(param)
             else:
                 nonlinear_params.append(param)
+
+    # ---- Newton-Schulz coefficient set + step count resolution ----------
+    # DeepSeek-V4 uses the report's hybrid schedule (8x aggressive
+    # (3.4445,-4.7750,2.0315) + 2x stable (2.0,-1.5,0.5)), exposed by
+    # emerging_optimizers as the built-in coefficient set "deepseekv4".
+    # Precedence:
+    #   1. explicit config.muon_coefficient_type (anything != the "quintic"
+    #      default) wins;
+    #   2. else auto-select "deepseekv4" when any model chunk is a
+    #      DeepSeek-V4 transformer config (so V4 Muon runs get the paper
+    #      recipe without a new CLI arg / Megatron arguments.py edit);
+    #   3. else keep the upstream "quintic" default.
+    coefficient_type = _resolve_muon_coefficient_type(config, model_chunks)
+    num_ns_steps = int(config.muon_num_ns_steps)
+    if coefficient_type == "deepseekv4" and num_ns_steps < 10:
+        # The deepseekv4 schedule has 10 (8+2) coefficient tuples; running
+        # fewer steps would silently truncate the stable tail. Megatron's
+        # --muon-num-ns-steps default is 5, so bump to 10 here.
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[Muon] coefficient_type='deepseekv4': raising num_ns_steps "
+            f"{num_ns_steps} -> 10 (8 aggressive + 2 stable).",
+        )
+        num_ns_steps = 10
+    log_single_rank(
+        logger,
+        logging.INFO,
+        f"[Muon] Newton-Schulz coefficient_type={coefficient_type!r}, num_ns_steps={num_ns_steps}.",
+    )
 
     # freezing nonlinear params and get param groups for muon
     for param in nonlinear_params:
@@ -260,7 +341,8 @@ def get_megatron_muon_optimizer(
         use_nesterov=config.muon_use_nesterov,
         weight_decay=config.weight_decay,
         fp32_matmul_prec=config.muon_fp32_matmul_prec,
-        num_ns_steps=config.muon_num_ns_steps,
+        num_ns_steps=num_ns_steps,
+        coefficient_type=coefficient_type,
         scale_mode=config.muon_scale_mode,
         split_qkv=config.muon_split_qkv,
         is_qkv_fn=lambda p: getattr(p, "is_qkv", False),
