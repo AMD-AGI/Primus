@@ -198,15 +198,6 @@ jobs:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
-      # Temporary fix for the gfx942 aiter FMHA v3/CK *backward* kernel crash on known-bad
-      # attention shapes (MHA hd128/hd256, MLA hd128; ROCm/aiter#1332). The
-      # turbo_attn_hd128_te_fallback patch is OFF by default and only reroutes those shapes to
-      # TEDotProductAttention when this is set (other shapes keep Turbo attention). Kept at job
-      # level so every step inherits it -- in particular the multi-GPU "Run Primus Model Tests
-      # -- Megatron-LM" step, whose pretrain UTs (qwen3_5_35B_A3B, deepseek_v2_lite, llama3, ...)
-      # would otherwise SIGABRT on the first backward. Remove together with the patch once the
-      # upstream aiter fix lands.
-      PRIMUS_TURBO_ATTN_HD128_FALLBACK_TE: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
@@ -294,6 +285,47 @@ jobs:
           git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
           pip uninstall -y origami || true
           pip install ./shared/origami/python
+      - name: Preload aiter mha_bwd (RTLD_GLOBAL symbol-interposition shim)
+        run: |
+          # gfx942 hd128 backward crash workaround (ROCm/aiter#1332): the base image's TE
+          # bundles a STALE vendored libmha_bwd.so (old aiter) that interposes the global
+          # symbol `aiter::mha_bwd` over the fixed aiter -> backward mis-selects the swa
+          # variant -> gridDim.x=0 -> hipErrorInvalidValue -> SIGABRT. This job runs on the
+          # runner base env (not the fixed image), so instead of rebuilding TE we
+          # RTLD_GLOBAL-preload the fixed aiter's module_fmha_v3_bwd.so before TE import, via a
+          # sitecustomize on a PYTHONPATH-prepended dir (site-packages root is shadowed by
+          # /usr/lib's sitecustomize; LD_PRELOAD is unusable -- the .so hard-depends on
+          # libtorch and pollutes child processes). Gated by PRIMUS_AITER_MHA_PRELOAD=1.
+          # TEMPORARY: remove once the base image's TE vendored aiter is updated.
+          SHIM_DIR="${PRIMUS_WORKDIR}/aiter_preload_shim"
+          rm -rf "${SHIM_DIR}"
+          mkdir -p "${SHIM_DIR}"
+          cat > "${SHIM_DIR}/sitecustomize.py" <<'PYEOF'
+          import os
+
+          if os.environ.get("PRIMUS_AITER_MHA_PRELOAD", "0") == "1":
+              try:
+                  import ctypes
+                  import glob
+                  import importlib.util
+
+                  import torch  # noqa: F401  (bring libc10/libtorch_hip into scope for the aiter .so deps)
+
+                  # Locate the installed aiter package without importing/executing it.
+                  spec = importlib.util.find_spec("aiter")
+                  aiter_dir = os.path.dirname(spec.origin)
+                  cand = os.path.join(aiter_dir, "jit", "module_fmha_v3_bwd.so")
+                  if not os.path.exists(cand):
+                      # robust fallback: any module_fmha_v3_bwd.so under the aiter package
+                      hits = glob.glob(os.path.join(aiter_dir, "**", "module_fmha_v3_bwd.so"), recursive=True)
+                      cand = hits[0] if hits else cand
+                  ctypes.CDLL(cand, mode=ctypes.RTLD_GLOBAL)
+                  print(f"[aiter_preload_shim] RTLD_GLOBAL preloaded aiter mha_bwd: {cand}", flush=True)
+              except Exception as e:  # pragma: no cover
+                  print(f"[aiter_preload_shim] aiter mha_bwd preload FAILED: {e}", flush=True)
+          PYEOF
+          echo "PYTHONPATH=${SHIM_DIR}${PYTHONPATH:+:${PYTHONPATH}}" >> $GITHUB_ENV
+          echo "PRIMUS_AITER_MHA_PRELOAD=1" >> $GITHUB_ENV
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
