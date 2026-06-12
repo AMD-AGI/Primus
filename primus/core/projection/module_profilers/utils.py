@@ -102,9 +102,15 @@ def benchmark_layer(
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,  # Match typical microbatch count
     transformer_config=None,  # Optional: pass config to enable FP8 context
+    forward_only: bool = False,  # Inference: time forward only, under no_grad
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
+
+    When ``forward_only`` is set (used by the inference projection's benchmark
+    mode) the backward pass is skipped entirely and the forward is run under
+    ``torch.no_grad()`` so the measurement reflects a serving forward pass (no
+    autograd graph construction). The returned backward time is ``0.0``.
 
     Optimizations for accurate timing:
     1. Warmup (20 iterations) to fully warm GPU caches and JIT
@@ -166,8 +172,17 @@ def benchmark_layer(
     output_indices = []
     num_warmup, num_iterations = _bench_iter_count(20, num_iterations)
 
+    if forward_only:
+        # Inference warmup: forward-only under no_grad (no autograd graph).
+        with fp8_context:
+            for _ in range(num_warmup):
+                with torch.no_grad():
+                    layer_module(*inputs)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
     with fp8_context:
-        for _ in range(num_warmup):
+        for _ in range(num_warmup if not forward_only else 0):
             outputs = layer_module(*inputs)
             if not isinstance(outputs, (tuple, list)):
                 outputs = (outputs,)
@@ -211,7 +226,8 @@ def benchmark_layer(
         torch.cuda.synchronize(device)
     mem_before = torch.cuda.memory_allocated(device)
 
-    with fp8_context:
+    _mem_grad_ctx = torch.no_grad() if forward_only else nullcontext()
+    with fp8_context, _mem_grad_ctx:
         for _ in range(num_iterations):
             outputs = layer_module(*inputs)
 
@@ -229,6 +245,22 @@ def benchmark_layer(
     # ===========================================================================
     forward_times = []
     backward_times = []
+
+    if forward_only:
+        with fp8_context, torch.no_grad():
+            for _ in range(num_iterations):
+                forward_start = torch.cuda.Event(enable_timing=True)
+                forward_end = torch.cuda.Event(enable_timing=True)
+
+                forward_start.record()
+                layer_module(*inputs)
+                forward_end.record()
+
+                torch.cuda.synchronize(device)
+                forward_times.append(forward_start.elapsed_time(forward_end))
+
+        avg_forward_time = _bench_central_value(forward_times)
+        return avg_forward_time, 0.0, int(activation_memory)
 
     with fp8_context:
         for _ in range(num_iterations):

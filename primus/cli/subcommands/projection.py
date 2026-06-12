@@ -51,8 +51,17 @@ def run(args, overrides):
 
         launch_projection_from_cli(args, overrides)
     elif args.suite == "inference":
-        # Inference / serving projection.  Forward-only analytical model
-        # (simulation backends), so no training backend import is required.
+        # Inference / serving projection.  Simulation mode is a forward-only
+        # analytical model (no training backend needed), but benchmark mode —
+        # and the spawned benchmark worker — build the real model and therefore
+        # require the Megatron backend on the path.
+        inf_profiling_mode = getattr(args, "profiling_mode", "simulate")
+        is_bench_worker = getattr(args, "inference_bench_worker", False)
+        if is_bench_worker or inf_profiling_mode == "benchmark":
+            from primus.pretrain import setup_backend_path
+
+            setup_backend_path(framework=framework, verbose=True)
+
         from primus.core.projection.inference_projection import (
             launch_projection_from_cli,
         )
@@ -556,6 +565,38 @@ def _add_inference_args(parser):
         default=None,
         help="Fixed KV-cache transfer latency overhead (us).",
     )
+    # ---- Serving / continuous-batching dynamics ----
+    serv = parser.add_argument_group("inference serving dynamics")
+    serv.add_argument(
+        "--serving-model",
+        type=str,
+        default=None,
+        choices=["continuous", "static"],
+        help=(
+            "Decode latency model: 'continuous' (continuous batching with mixed "
+            "prefill+decode steps → models TPOT pollution; default) or 'static' "
+            "(idealized pure-decode batch; prefill charged once as TTFT)."
+        ),
+    )
+    serv.add_argument(
+        "--decode-step-overhead-us",
+        type=float,
+        default=None,
+        help="Fixed per-decode-step host/launch overhead (us). CUDA graphs reduce this. Default 0.",
+    )
+    serv.add_argument(
+        "--mixed-batch-penalty",
+        type=float,
+        default=None,
+        help="Extra cost fraction for mixed prefill+decode steps (PIECEWISE vs FULL CUDA graph). Default 0.",
+    )
+    # Internal: marks this process as the spawned GPU benchmark worker.
+    parser.add_argument(
+        "--inference-bench-worker",
+        action="store_true",
+        default=False,
+        help=_argparse.SUPPRESS,
+    )
 
 
 def register_subcommand(subparsers):
@@ -649,9 +690,14 @@ def register_subcommand(subparsers):
     add_pretrain_parser(inference)
     _add_topology_args(inference)
     # Reuse the perf knobs for the simulation backend selection
-    # (--gpu-arch, --gpu-clock-mhz, --gemm-backend, etc.).
+    # (--gpu-arch, --gpu-clock-mhz, --gemm-backend, etc.) plus --profiling-mode.
     _add_performance_args(inference)
+    _add_save_benchmark_arg(inference)  # provides --save-profiling for the bench worker
+    _add_load_benchmark_arg(inference, include_compute_baseline_alias=False)  # --load-benchmark reuse
     _add_inference_args(inference)
+    # Inference defaults to pure simulation (no GPU). Opt into real-GPU layer
+    # timing with ``--profiling-mode benchmark``.
+    inference.set_defaults(profiling_mode="simulate")
 
     parser.set_defaults(func=run)
     return parser
