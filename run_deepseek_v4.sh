@@ -252,6 +252,7 @@ export PRIMUS_EXIT_FAST=1
   -- train pretrain --config "$EXP" \
   --manual_gc True \
   --manual_gc_interval 100 \
+  --pp_warmup "${PP_WARMUP:-True}" \
   "${PP_LAYOUT_ARGS[@]}" \
   --moe_router_force_load_balancing True \
   --log_avg_skip_iterations 3 \
