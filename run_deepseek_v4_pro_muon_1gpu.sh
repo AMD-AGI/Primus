@@ -25,11 +25,18 @@
 #                                          the per-rank shape of the EP=8
 #                                          production run; topk ceil(6/8)=1.
 #                                          ~48 experts x 66M x 4L + Muon fp32
-#                                          states ≈ 215 GB -> fits the 432 GiB
+#                                          states + seq-4096 activations -> 273
+#                                          GB peak (measured), fits the 432 GiB
 #                                          card; full 384 will NOT fit.)
 #   - moe_ffn_hidden  3072                 (full Pro MoE width; from yaml)
-#   - seq_length      512                  (MINIMUM; CSA gather scales w/ seq)
-#   - index_topk      64                   (CSA top-K; <= cr=4 pool 512/4=128)
+#   - seq_length      4096                 (raised from 512: at GBS=8 the fixed
+#                                          Muon Newton-Schulz cost otherwise
+#                                          dominates ~81% of GPU time; 4096
+#                                          tokens/microbatch amortizes it to a
+#                                          representative profile. CSA gather
+#                                          scales w/ seq. Set 512 for a fast smoke.)
+#   - index_topk      64                   (CSA top-K; <= cr=4 pool seq/4, i.e.
+#                                          4096/4=1024 at the default seq)
 #   - precision       FP8 e4m3 + tensorwise (paper fp8 LAYOUT, per-tensor scale;
 #                                          mxfp8/ue8m0 is GUARDED off — diverges
 #                                          on this build. CK-free TE path.
@@ -137,7 +144,7 @@ export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-48}
 export PRIMUS_MOE_TOPK=${PRIMUS_MOE_TOPK:-1}
 export PRIMUS_MOE_FFN_HIDDEN_SIZE=${PRIMUS_MOE_FFN_HIDDEN_SIZE:-3072}
 export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-64}
-export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-512}
+export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 export MBS=${MBS:-1}
 export GBS=${GBS:-8}
