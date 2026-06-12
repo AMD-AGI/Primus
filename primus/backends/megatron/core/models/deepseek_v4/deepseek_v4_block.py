@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import ast
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
@@ -961,7 +962,31 @@ class DeepseekV4TransformerBlock(TransformerBlock):
             return set(range(n_local))
         raise ValueError(f"Invalid recompute_method for DeepSeek-V4: {method!r}")
 
-    def _forward_layer_checkpointed(self, layer, x, position_ids, token_ids):
+    def _layer_fp8_context(self, global_idx: int):
+        """FP8 autocast for a single V4 layer (no-op when fp8 is off).
+
+        DeepseekV4TransformerBlock.forward overrides Megatron's
+        TransformerBlock.forward with a custom layer loop, so the per-layer
+        ``get_fp8_context`` wrapping that Megatron's stock forward uses to
+        activate fp8 — and, via Primus's ``fp8_patches``, Primus-Turbo fp8 —
+        is not inherited and must be re-applied here. Without it the
+        ``primus_turbo_fp8_autocast`` context is never entered, so
+        ``PRIMUS_TURBO_FP8_ENABLED`` stays False and every GEMM silently runs
+        bf16 regardless of ``--fp8`` / ``--fp8_recipe``.
+
+        ``get_fp8_context`` is resolved as a module attribute at call time so
+        the ``before_train`` fp8 patch (which rebinds
+        ``megatron.core.fp8_utils.get_fp8_context``) is honored. ``global_idx``
+        is the 0-based global layer index (matches the function's ``layer_no``
+        contract / ``is_first_last_bf16_layer`` gating).
+        """
+        if not self.config.fp8:
+            return nullcontext()
+        from megatron.core import fp8_utils
+
+        return fp8_utils.get_fp8_context(self.config, global_idx)
+
+    def _forward_layer_checkpointed(self, layer, x, position_ids, token_ids, global_idx):
         """Run one V4 layer under activation checkpointing.
 
         Only the hidden-state tensor ``x`` is passed as the checkpointed
@@ -969,11 +994,16 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         tensors that need no grad and are captured by closure. The closure
         returns just the hidden tensor (V4 layers return ``(hidden, None)``)
         so the checkpoint backward sees a single grad-requiring output.
+
+        The fp8 context is entered *inside* the checkpointed closure so it is
+        re-established on recompute (backward), keeping the recomputed forward
+        in fp8 to match the original pass.
         """
         from megatron.core import tensor_parallel
 
         def _run(hidden):
-            out, _ = layer(hidden, position_ids=position_ids, token_ids=token_ids)
+            with self._layer_fp8_context(global_idx):
+                out, _ = layer(hidden, position_ids=position_ids, token_ids=token_ids)
             return out
 
         return tensor_parallel.checkpoint(
@@ -1074,14 +1104,16 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         # upstream-tuple compatibility (see DeepseekV4HybridLayer.forward).
         recompute_local = self._recompute_local_layer_indices()
         for local_idx, layer in enumerate(self.layers):
+            global_idx = self.global_layer_indices[local_idx]
             if recompute_local is not None and local_idx in recompute_local:
-                x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids)
+                x = self._forward_layer_checkpointed(layer, x, position_ids, token_ids, global_idx)
             else:
-                x, _ = layer(
-                    x,
-                    position_ids=position_ids,
-                    token_ids=token_ids,
-                )
+                with self._layer_fp8_context(global_idx):
+                    x, _ = layer(
+                        x,
+                        position_ids=position_ids,
+                        token_ids=token_ids,
+                    )
 
         # Final HC collapse on post_process stage; non-final stages
         # forward the multi-stream form through PP P2P.

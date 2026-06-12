@@ -34,6 +34,16 @@ except (ImportError, ModuleNotFoundError):
     # Primus-Turbo not found
     pass
 
+# gfx1250 / turbo-free FP8: on builds where primus_turbo is only an import shim
+# (not a real install), the turbo FP8 path (PrimusTurboQuantConfig +
+# primus_turbo_fp8_autocast) cannot run. Set PRIMUS_FP8_DISABLE_TURBO=1 to force
+# the TE-native FP8 branch (transformer_engine.pytorch.fp8_autocast), which needs
+# no turbo. Opt-in; the production turbo path is unaffected when unset.
+import os as _os
+
+if _os.environ.get("PRIMUS_FP8_DISABLE_TURBO", "0") == "1":
+    HAVE_TURBO = False
+
 
 SCALING_BLOCK_SIZE = 128
 MX_SCALING_BLOCK_SIZE = 32

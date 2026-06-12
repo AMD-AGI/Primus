@@ -39,7 +39,13 @@
 #   PRIMUS_TOTAL_LAYERS=4 PRIMUS_SEQ_LENGTH=512 GBS=8 \
 #       ./run_deepseek_v4_pro_muon.sh                              # cheap validation
 #   OPTIMIZER=adam ./run_deepseek_v4_pro_muon.sh                   # A/B vs AdamW
+#   PRECISION_TYPE=BF16 ./run_deepseek_v4_pro_muon.sh             # A/B vs BF16 (fp8 is default-on)
 #   PROFILE=True DISABLE_TENSORBOARD=False ...                     # capture 1-step trace
+#
+# Precision: FP8 training is ON by default (FP8=e4m3, FP8_RECIPE=tensorwise).
+# Paper recipe is ue8m0/mxfp8 but it's not runnable on this gfx950 build (see the
+# "FP8 training" block below); tensorwise gives the paper's fp8 layout on the
+# weight GEMMs. PRECISION_TYPE=BF16 to A/B back to bf16.
 ###############################################################################
 set -euo pipefail
 set -x
@@ -52,7 +58,7 @@ export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 # ---------- Model: DeepSeek-V4 Pro -----------------------------------------
 export PRIMUS_MODEL=${PRIMUS_MODEL:-deepseek_v4_pro}
-export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
+export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-FP8-pretrain.yaml}
 
 # ---------- Pro production widths (paper §4.2.1) ----------------------------
 export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-384}
@@ -140,6 +146,53 @@ export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
 export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
 
+# ---------- FP8 training (paper §4.x quantization / techblog §9.6) ----------
+# Paper recipe: "FP4 + FP8 Mixed" — MoE experts + CSA-Indexer QK in FP4 (MXFP4),
+# EVERYTHING ELSE in FP8, all with the **ue8m0** microscaling scale format.
+# On this stack the ue8m0 path is `fp8_recipe=mxfp8` → TE MXFP8BlockScaling →
+# Primus-Turbo MX_BLOCKWISE granularity with scale_dtype=E8M0 (fp8_utils.py:148),
+# i.e. the paper's exact scaling format, native on MI355X/CDNA4.
+#
+# Integration gap vs the paper (NOT config — Primus V4 TODO, develop techblog
+# item 10 "Phase 2 FP4/FP8 Mixed"): the FP4 expert / FP4-Indexer path is not yet
+# wired in V4, so experts run at FP8 here (FP8 everywhere) rather than FP4. This
+# is the closest supported step toward the paper recipe. FP8 is highly outlier-
+# sensitive, which is why the paper pairs it with clamped SwiGLU (swiglu_limit,
+# already on above via PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=True).
+# Precision toggle — shared interface with run_deepseek_v4.sh / the flash proxy:
+#   PRECISION_TYPE=FP8 (default) -> e4m3 + tensorwise; BF16 -> fp8 off.
+# FP8 / FP8_RECIPE still override directly (e.g. FP8_RECIPE=blockwise, or FP8=null).
+export PRECISION_TYPE=${PRECISION_TYPE:-FP8}
+if [ "$PRECISION_TYPE" = "FP8" ]; then
+  export FP8=${FP8:-e4m3}                      # forward fp8 format (paper E4M3); "hybrid" = E4M3 fwd / E5M2 bwd
+  # Paper recipe is ue8m0 microscaling (mxfp8), but mxfp8 is NOT runnable on this
+  # gfx950 build (turbo grouped-GEMM has no MX path; TE ROCm MXFP8 needs K%128==0,
+  # V4 has a K=224 proj). `tensorwise` is the working recipe — paper fp8 layout,
+  # non-ue8m0 scale. (other: blockwise [TE-ROCm unsupported] / delayed)
+  export FP8_RECIPE=${FP8_RECIPE:-tensorwise}
+  # GUARD: mxfp8 (paper ue8m0) is NUMERICALLY UNSTABLE for V4 training on this
+  # build. ROOT CAUSE (2026-06-11, exhaustively isolated): mxfp8's per-layer
+  # quantization noise AMPLIFIES MULTIPLICATIVELY THROUGH THE BACKWARD DEPTH.
+  # Decisive evidence: stable at 2 layers (grad 4.5->0.36, both Muon & Adam),
+  # EXPLODES at 4 layers (grad 14->5e10) -> real V4-Pro is 61 layers, so unusable.
+  # Also UPDATE-DRIVEN (LR=0 stays flat ~13.7) but NOT optimizer-specific (Muon &
+  # Adam both explode at L4) and NOT a kernel bug (both MX GEMMs are ~4% correct on
+  # the REAL E2E inputs via capture-replay; error is zero-mean). Tested & did NOT
+  # help: stochastic rounding on the weight quant (noise is zero-mean variance, not
+  # bias), grad clipping, warmup, larger batch. tensorwise's smooth per-tensor fp32
+  # scale does NOT amplify through depth -> stable (loss 12->0.82 at full depth).
+  # Set MXFP8_I_KNOW_ITS_BROKEN=1 to override (kernel debugging / shallow models).
+  if [ "$FP8_RECIPE" = "mxfp8" ] && [ "${MXFP8_I_KNOW_ITS_BROKEN:-0}" != "1" ]; then
+    echo "[FATAL] FP8_RECIPE=mxfp8 diverges for V4 on this build (e8m0 jagged-landscape" >&2
+    echo "        instability; see the FP8 block in $0). Use FP8_RECIPE=tensorwise." >&2
+    echo "        Override only for kernel debugging: MXFP8_I_KNOW_ITS_BROKEN=1" >&2
+    exit 1
+  fi
+else
+  export FP8=${FP8:-null}                  # PRECISION_TYPE=BF16 -> disable fp8
+  export FP8_RECIPE=${FP8_RECIPE:-null}
+fi
+
 TURBO_DEEPEP_CLI_ARGS=()
 if [ "$USE_TURBO_DEEPEP" = "True" ]; then
   export TURBO_DEEPEP_NUM_CU=${TURBO_DEEPEP_NUM_CU:-80}
@@ -219,8 +272,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm False \
-  --fp8 null \
-  --fp8_recipe null \
+  --fp8 "$FP8" \
+  --fp8_recipe "$FP8_RECIPE" \
   --recompute_num_layers 1 \
   --recompute_granularity full \
   --recompute_method uniform \
