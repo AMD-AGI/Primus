@@ -1,0 +1,130 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_5_35B_A3B-nanrepro-turbogg}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# ============================================================================
+# MI355X 128k MoE NaN 复现配置
+# 目标：复现 docs/MI355X_128k_MoE_NaN_repro.md 中描述的现象
+#   seq_len=131072 时 MoE fused grouped-GEMM (TEColumnParallelGroupedLinear,
+#   hipBLASLt) 从正常量级输入产生 NaN -> grad_norm=NaN。
+#
+# NaN 触发要素（本配置全部命中）：
+#   1. 长序列 seq_length=131072            -> 单 expert M 维度极大
+#   2. DeepEP dispatch (use_turbo_deepep)  -> 放大不均衡
+#   3. TE grouped GEMM (非 turbo / 非 legacy) -> TEColumnParallelGroupedLinear
+#   4. 不均衡路由（关闭 force_load_balancing + load_balancing_type=none）
+#   5. EP=4 -> 64 local experts/rank
+#
+# 与原始 worker 文档的偏差（已在对应行注明）：
+#   - TP=2 而非 4：repo 的 qwen3_5_35B_A3B 模型 num_query_groups=2，
+#     GQA 要求 num_query_groups % TP == 0，故 TP 最大只能取 2。
+#     （文档 TP=4 针对的是 Qwen3.6-35B-A3B，kv_channels=128，模型不同。）
+# ============================================================================
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:qwen3_5_35B_A3B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Qwen3_5_35B_A3B_NaNRepro"
+      stderr_sink_level: DEBUG
+
+      # debug —— 关键：关闭强制负载均衡，制造不均衡 expert group（NaN 触发要素 4）
+      moe_router_force_load_balancing: false
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: 10
+      micro_batch_size: 1                  # doc: 1 datum/step
+      global_batch_size: 4                 # DP=4 (8 GPU / TP2 / PP1) * mbs1 -> 单 microbatch
+      seq_length: ${PRIMUS_SEQ_LENGTH:131072}                  # doc: 131072（NaN 触发要素 1）
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
+      lr: 1.0e-5                           # doc benchmark 使用 1e-5
+      min_lr: 1.0e-5
+      lr_warmup_iters: 0
+      lr_decay_iters: null
+      lr_decay_style: constant
+      weight_decay: 0.0                    # doc: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0                       # doc: grad-norm clip 1.0（grad_norm 返回 NaN）
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-6
+
+      # MoE —— 命中 NaN 路径（要素 3/4）
+      moe_router_load_balancing_type: none # doc: none
+      moe_aux_loss_coeff: 0.0              # doc: 0.0
+      moe_expert_capacity_factor: null     # doc: 无 token dropping/cap
+      moe_router_dtype: fp32               # DeepEP 要求 fp32 probs
+      moe_permute_fusion: true
+      moe_grouped_gemm: true               # TE grouped GEMM 总开关
+      moe_use_legacy_grouped_gemm: false   # 不用 legacy -> 走 TEColumnParallelGroupedLinear
+      moe_shared_expert_overlap: false     # DeepEP 要求 false
+      calculate_per_token_loss: false
+
+      # recompute —— doc: full / uniform / 1
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # parallel —— doc: TP4 PP1 EP4 CP1 ETP1 SP=true（此处 TP=2，见文件头说明）
+      tensor_model_parallel_size: ${PRIMUS_TP:2}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:4}
+      context_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      sequence_parallel: true
+      # overlap_grad_reduce/param_gather 需要分布式优化器；doc 用 use_distributed_optimizer=false，故关闭
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+
+      # optimizer —— doc
+      use_distributed_optimizer: false
+      gradient_accumulation_fusion: false
+
+      # data —— mock 数据即可复现（doc: reduction ladder 第 4 步仍 NaN）
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+      # 关键：seq=131072 时若在 dataloader 建 [s,s] attention mask 会 ~17GB/样本 -> 主机 OOM。
+      # flash/TE attention 内部处理因果掩码，无需显式 mask。
+      create_attention_mask_in_dataloader: false
+      num_workers: 1
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo —— 验证：改用 turbo grouped gemm（PrimusTurboColumnParallel/RowParallelGroupedLinear）
+      # 替代 TE grouped GEMM，看是否消除 NaN
+      enable_primus_turbo: true
+      use_turbo_attention: false           # 与 TE-path 复现保持一致，单变量只换 grouped gemm
+      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: true         # ← 走 turbo grouped gemm（本次唯一变量）
+
+      # deepep —— DeepEP dispatch（NaN 触发要素 2）
+      use_turbo_deepep: true               # 自动设置 moe_enable_deepep=True, dispatcher='flex'
+      turbo_deepep_num_cu: 64              # = BT_DEEPEP_NUM_USE_CU
+      turbo_deepep_use_comm_stream: true   # doc worker 默认 true（BT_DEEPEP_COMM_STREAM）
+
+      # sync-free moe 必须关闭：stage>=2 会强制 use_turbo_grouped_gemm=True，
+      # 从而绕开 TE grouped GEMM 这条 NaN 路径
+      turbo_sync_free_moe_stage: 0
