@@ -26,17 +26,6 @@ export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:-"tasimage/primus:pr-715-ainic"}
 export SLURM_PARTITION=Compute-DCPT
-# === 节点选择: 必须挑 ionic 内核 ABI 一致(同构)的节点 ===
-# 2026-06-04 实测分组(srun 逐节点读 /sys/class/infiniband_verbs/uverbs0/abi_version + /sys/module/ionic/version):
-#   - ABI 1 (内核模块 26.03.3.001 / libionic1 54.0-187): 集群绝大多数节点
-#   - ABI 4 (内核模块 25.11.1.001 / libionic1 54.0-149): 仅 n01-25, n01-29 两台(异类)
-# 镜像(tasimage/primus:pr-715-ainic)自带的 ionic provider 是 ABI1, 因此【只能用 ABI1 节点】,
-# 这样容器内 provider 与 host 内核 ABI 匹配, 无需任何嫁接/挂载, ibv_devices 即可枚举到 ionic.
-# 之前 hang/崩 的根因: nodelist 里混入了 ABI4 的 n01-25 作为 rank0, 它在 ABI1 镜像下枚举不到设备.
-# 下面默认列出"全部在线(非 down/maint/drain) 且 ABI=1"的节点; 已排除的不可用节点:
-#   n02-29(down), n02-21(maint), n03-25(drain), 以及 ABI4 的 n01-25 / n01-29.
-# 注意: primus-cli 要求 --nodelist 节点数 == NNODES。只跑 N 台时, 请把 NNODES 设为 N 并从下表取前 N 个,
-#       或把 NNODES 设成下表长度(当前 15)。(n01-21 之前曾被你单独调试占用, 如仍要保留请从列表里删掉它。)
 export SLURM_NODELIST="${SLURM_NODELIST:-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
 
