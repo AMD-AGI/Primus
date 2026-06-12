@@ -111,7 +111,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
 
     >**Note**: this will only install the Primus CLI in your virtual environment under the `site-packages` directory, without other dependencies. The third party submodules will be downloaded on the first run. The complete dependencies and training software stack is provided in the AMD published training Docker images. You can use `primus-cli` to launch the training in container from any directory.
 
-    >**Note**: If you don't want to use docker container to run training, and want to install the complete dependencies and training software stack on your host machine, please refer to the instruction: [Install Primus on your host machine](./docs/quickstart.md#install-primus-on-your-host-machine). The automated installation script is under development and will be released soon.
+    >**Note**: If you don't want to use docker container to run training, and want to install the complete dependencies and training software stack on your host machine, please refer to the instruction: [Install training environment on your host machine](docs/install-on-host.md). The automated installation script is under development and will be released soon.
 
 2. **Run training in container using pip-installed Primus**
 
