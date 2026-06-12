@@ -118,6 +118,13 @@ export MUON_MOMENTUM=${MUON_MOMENTUM:-0.95}            # paper momentum 0.95
 # extra_scale_factor (orth_grad RMS≈1/√max(m,n), times spectral scale √max(m,n)),
 # so 0.18 maps directly here.  Megatron default is 1.0 (≈5.5× too large vs paper).
 export MUON_EXTRA_SCALE_FACTOR=${MUON_EXTRA_SCALE_FACTOR:-0.18}
+# Newton-Schulz hardening knobs (matter for mxfp8, where NS can diverge on the
+# quant-noised gradient). num_ns_steps = NS iterations (more = better convergence
+# on ill-conditioned input); fp32_matmul_prec = precision of the NS matmuls
+# ("medium" = tf32-ish, "high" = full fp32 — full precision keeps a near-σ=1
+# input from being pushed past the quintic's stable region by rounding error).
+export MUON_NUM_NS_STEPS=${MUON_NUM_NS_STEPS:-5}
+export MUON_FP32_MATMUL_PREC=${MUON_FP32_MATMUL_PREC:-medium}
 # NOTE: muon_weight_decay is yaml-only (trainer_base.yaml=0.01); paper=0.1.
 # No CLI flag, so it stays 0.01 here unless overridden in an EXP yaml.
 # Muon hard requirements (Megatron arguments.py:1422):
@@ -170,23 +177,29 @@ if [ "$PRECISION_TYPE" = "FP8" ]; then
   # V4 has a K=224 proj). `tensorwise` is the working recipe — paper fp8 layout,
   # non-ue8m0 scale. (other: blockwise [TE-ROCm unsupported] / delayed)
   export FP8_RECIPE=${FP8_RECIPE:-tensorwise}
-  # GUARD: mxfp8 (paper ue8m0) is NUMERICALLY UNSTABLE for V4 training on this
-  # build. ROOT CAUSE (2026-06-11, exhaustively isolated): mxfp8's per-layer
-  # quantization noise AMPLIFIES MULTIPLICATIVELY THROUGH THE BACKWARD DEPTH.
-  # Decisive evidence: stable at 2 layers (grad 4.5->0.36, both Muon & Adam),
-  # EXPLODES at 4 layers (grad 14->5e10) -> real V4-Pro is 61 layers, so unusable.
-  # Also UPDATE-DRIVEN (LR=0 stays flat ~13.7) but NOT optimizer-specific (Muon &
-  # Adam both explode at L4) and NOT a kernel bug (both MX GEMMs are ~4% correct on
-  # the REAL E2E inputs via capture-replay; error is zero-mean). Tested & did NOT
-  # help: stochastic rounding on the weight quant (noise is zero-mean variance, not
-  # bias), grad clipping, warmup, larger batch. tensorwise's smooth per-tensor fp32
-  # scale does NOT amplify through depth -> stable (loss 12->0.82 at full depth).
-  # Set MXFP8_I_KNOW_ITS_BROKEN=1 to override (kernel debugging / shallow models).
-  if [ "$FP8_RECIPE" = "mxfp8" ] && [ "${MXFP8_I_KNOW_ITS_BROKEN:-0}" != "1" ]; then
-    echo "[FATAL] FP8_RECIPE=mxfp8 diverges for V4 on this build (e8m0 jagged-landscape" >&2
-    echo "        instability; see the FP8 block in $0). Use FP8_RECIPE=tensorwise." >&2
-    echo "        Override only for kernel debugging: MXFP8_I_KNOW_ITS_BROKEN=1" >&2
-    exit 1
+  # mxfp8 (paper ue8m0) + Muon: TRAINS, but shows a transient early-training
+  # grad-norm spike. Earlier 8-iter runs only caught the spike and mislabelled it
+  # a divergence; a 40-iter run shows it SELF-HEALS and the loss descends cleanly.
+  #   What's happening: mxfp8 quant noise ill-conditions the gradient early (random
+  #   init), so Muon's Newton-Schulz update norm spikes for ~10-20 iters, then
+  #   settles as the model organizes. RAW grads stay ~0.99 throughout; only the
+  #   NS-orthogonalized UPDATE norm spikes (Muon-specific: Adam@same-config is flat).
+  #   It is NOT a kernel bug (both MX GEMMs ~4% correct on REAL E2E inputs via
+  #   capture-replay; error zero-mean).
+  #   FIX (verified, L4/64-expert/GBS512/seq128, 40 iters):
+  #     no warmup  -> loss 12->0.80, grad-norm peak ~2.4e5 (settles to ~35)
+  #     warmup=10  -> loss 12->0.44, grad-norm peak ~2.1e4 (12x lower), no NaN
+  #   So LR warmup tames the transient AND improves the loss — and it is what the
+  #   paper does. We therefore AUTO-ENABLE warmup for mxfp8 (default 10; override
+  #   LR_WARMUP_ITERS). Two more NS-hardening knobs are exposed if needed:
+  #   MUON_NUM_NS_STEPS (more iters) and MUON_FP32_MATMUL_PREC=high. tensorwise
+  #   stays the conservative default (smooth per-tensor scale, no transient).
+  #   NOTE: validated at reduced depth/width; full 61-layer/384-expert is a
+  #   separate multi-GPU confirmation.
+  if [ "$FP8_RECIPE" = "mxfp8" ]; then
+    export LR_WARMUP_ITERS=${LR_WARMUP_ITERS:-10}
+    echo "[INFO] FP8_RECIPE=mxfp8 + Muon: expect a transient early grad-norm spike" >&2
+    echo "       (self-heals; LR warmup auto-set to ${LR_WARMUP_ITERS} to damp it)." >&2
   fi
 else
   export FP8=${FP8:-null}                  # PRECISION_TYPE=BF16 -> disable fp8
@@ -230,7 +243,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --backend_path "$BACKEND_PATH" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
   --train_iters "$TRAIN_ITERS" \
-  --lr_warmup_iters 0 \
+  --lr_warmup_iters "${LR_WARMUP_ITERS:-0}" \
   --lr_decay_iters "$TRAIN_ITERS" \
   --micro_batch_size "$MBS" \
   --global_batch_size "$GBS" \
@@ -256,6 +269,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --optimizer "$OPTIMIZER" \
   --muon_momentum "$MUON_MOMENTUM" \
   --muon_extra_scale_factor "$MUON_EXTRA_SCALE_FACTOR" \
+  --muon_num_ns_steps "$MUON_NUM_NS_STEPS" \
+  --muon_fp32_matmul_prec "$MUON_FP32_MATMUL_PREC" \
   --use_distributed_optimizer "$USE_DISTRIBUTED_OPTIMIZER" \
   --use_precision_aware_optimizer "$USE_PRECISION_AWARE_OPTIMIZER" \
   --main_grads_dtype fp32 \
