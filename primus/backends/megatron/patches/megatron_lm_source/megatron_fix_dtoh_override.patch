@@ -1,0 +1,14 @@
+diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
+--- a/megatron/core/transformer/moe/token_dispatcher.py
++++ b/megatron/core/transformer/moe/token_dispatcher.py
+@@ -462,7 +462,9 @@
+             "before_finish": 3,
+             "no_sync": 4,
+         }
+-        self.cuda_dtoh_point = "before_permutation_1"
++        self.cuda_dtoh_point = (
++            "no_sync" if self._p4_skip_sync else "before_permutation_1"
++        )
+         if MoEAlltoAllTokenDispatcher.cuda_dtoh_stream is None:
+             MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = torch.cuda.Stream()
+ 

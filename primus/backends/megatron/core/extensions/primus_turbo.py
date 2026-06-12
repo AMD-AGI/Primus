@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import functools
+import os
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
@@ -1155,6 +1156,16 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        self._device_initiated_gemm = (
+            os.environ.get("PRIMUS_DEVICE_INITIATED_GEMM", "0") == "1"
+        )
+        if self._device_initiated_gemm and dist.get_rank() == 0:
+            print(
+                "[PrimusTurboGroupedMLP] Device-initiated GEMM enabled: "
+                "CUDA-graph-safe (zero host sync, pre-allocated offsets + static buffers)"
+            )
+        self._di_fc1_out: torch.Tensor | None = None
+        self._di_fc2_out: torch.Tensor | None = None
         args = get_args()
         self.offload = args.offload and "grouped_linear" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1233,6 +1244,24 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
+            if self._device_initiated_gemm:
+                if self._di_fc1_out is None:
+                    M_max = permuted_local_hidden_states.shape[0]
+                    device = permuted_local_hidden_states.device
+                    fc1_N = w1.shape[2] if not use_split_wgrad_op() else (
+                        self.config.moe_ffn_hidden_size * 2 if self.config.gated_linear_unit
+                        else self.config.moe_ffn_hidden_size
+                    )
+                    fc2_N = self.config.hidden_size
+                    self._di_fc1_out = torch.empty(M_max, fc1_N, device=device, dtype=torch.bfloat16)
+                    self._di_fc2_out = torch.empty(M_max, fc2_N, device=device, dtype=torch.bfloat16)
+                else:
+                    assert permuted_local_hidden_states.shape[0] == self._di_fc1_out.shape[0], (
+                        f"M_total changed: expected {self._di_fc1_out.shape[0]}, "
+                        f"got {permuted_local_hidden_states.shape[0]}. "
+                        "This breaks CUDA graph replay. Ensure token dispatcher "
+                        "uses a static budget (capacity_factor pre-allocation)."
+                    )
             if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 fc1_output = pt.ops.grouped_gemm_fp8(
@@ -1241,6 +1270,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
+                    out=self._di_fc1_out,
                 )
             else:
                 fc1_output = self.grouped_gemm(
@@ -1266,6 +1296,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                         tokens_per_expert,
                         trans_b=False,
                         config=quant_config.data(),
+                        out=self._di_fc2_out,
                     )
                 else:
                     fc2_output = self.grouped_gemm(
@@ -1289,6 +1320,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                         tokens_per_expert,
                         trans_b=False,
                         config=quant_config.data(),
+                        out=self._di_fc2_out,
                     )
                 else:
                     fc2_output = self.grouped_gemm(

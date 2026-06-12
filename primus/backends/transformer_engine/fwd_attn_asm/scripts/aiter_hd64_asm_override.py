@@ -52,6 +52,32 @@ _KMODULE_BY_DEV: dict = {}
 # Cached CK aux_ctx_tensors templates, keyed by (qkv_layout, mask_type, dropout).
 _AUX_CTX_TEMPLATES: dict = {}
 
+# ENABLE_CG=1: use pre-allocated round-robin buffer pools (CUDA-graph-safe).
+# ENABLE_CG=0 (default): dynamically allocate on every call (eager-safe).
+_ENABLE_CG: bool = os.environ.get("ENABLE_CG", "0") == "1"
+
+# Round-robin buffer pools for CUDA-graph-safe reuse (active when ENABLE_CG=1).
+#
+# GPT-OSS 20B has ~40 transformer layers.  All attention fwd calls happen
+# before any attention bwd call, so at any instant up to N (num_layers)
+# buffers are simultaneously "live" (forward written, backward not yet read).
+# A single static buffer per (device, shape, dtype) would be overwritten by
+# each successive layer, corrupting earlier layers' outputs before their
+# backward pass reads them.
+#
+# Solution: a pool of _POOL_SIZE buffers per (device, shape, dtype), accessed
+# with a monotonically increasing counter.  Each call within a step gets a
+# distinct slot.  The counter only advances in eager/capture Python execution;
+# CUDA graph replay re-uses the pointers baked at capture time automatically.
+#
+# Safety invariant: _POOL_SIZE >= num_attention_layers_per_forward_pass.
+# GPT-OSS 20B has 24 attention layers; 32 gives a one-third safety margin.
+_POOL_SIZE: int = int(os.environ.get("FMHA_HD64_ASM_POOL_SIZE", "32"))
+
+# Pool state: (dev_id, shape, dtype) -> {"bufs": [Tensor, ...], "next": int}
+_STATIC_O: dict = {}
+_STATIC_LSE: dict = {}
+
 
 def _ensure_hip_lib():
     """Load libamdhip64 and bind argtypes once. Returns the CDLL handle."""
@@ -216,10 +242,54 @@ def _eligible(*, q, k, v, attn_mask_type, window_size, qkv_layout, dropout,
     return True
 
 
+def _get_static_buf(cache, shape, dtype, device):
+    """Return a buffer for the kernel output / LSE.
+
+    When ENABLE_CG=1: round-robin pool (CUDA-graph-safe).
+      Each (device_id, shape, dtype) key owns a pool of _POOL_SIZE tensors.
+      A per-pool counter selects the slot: slot = counter % _POOL_SIZE.  The
+      counter advances only during eager/capture Python execution, never during
+      CUDA graph replay (replay reuses the pointers baked at capture time).
+      This guarantees that concurrent "live" layers each hold a distinct buffer.
+
+    When ENABLE_CG=0 (default): dynamic allocation on every call (eager-safe).
+      Equivalent to the original torch.empty() path — no persistent state.
+    """
+    import torch
+    if not _ENABLE_CG:
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    dev_id = device.index if hasattr(device, "index") and device.index is not None \
+        else torch.cuda.current_device()
+    key = (dev_id, shape, dtype)
+    entry = cache.get(key)
+    if entry is None:
+        entry = {"bufs": [], "next": 0}
+        cache[key] = entry
+
+    pool = entry["bufs"]
+    idx = entry["next"] % _POOL_SIZE
+    entry["next"] += 1
+
+    if idx >= len(pool):
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        pool.append(buf)
+        if dev_id == 0:
+            print(f"[fwd-attn-asm] allocated static buf #{len(pool)}/{_POOL_SIZE}: "
+                  f"shape={shape} dtype={dtype} ptr=0x{buf.data_ptr():x} "
+                  f"device={dev_id}", flush=True)
+
+    return pool[idx]
+
+
 def _launch(q, k, v, qkv_layout: str, *, attn_scale: float,
             attn_mask_type: str, window_size, lse_out):
-    """Launch the hand-tuned kernel. Writes output to a freshly allocated `o`
-    and softmax_lse to `lse_out`. Returns `o`."""
+    """Launch the hand-tuned kernel. Writes output to a static `o` buffer
+    and softmax_lse to `lse_out`. Returns `o`.
+
+    CUDA-graph safe: uses a persistent output buffer and launches on the
+    current CUDA stream so the kernel is recorded into any active graph.
+    """
     import torch
 
     if qkv_layout.startswith("bshd"):
@@ -235,14 +305,12 @@ def _launch(q, k, v, qkv_layout: str, *, attn_scale: float,
         s_k, h_k, b_k = k.stride(0), k.stride(2), k.stride(1)
         s_v, h_v, b_v = v.stride(0), v.stride(2), v.stride(1)
 
-    o = torch.empty_like(q)
+    o = _get_static_buf(_STATIC_O, q.shape, q.dtype, q.device)
     if qkv_layout.startswith("bshd"):
         s_o, h_o, b_o = o.stride(1), o.stride(2), o.stride(0)
     else:
         s_o, h_o, b_o = o.stride(0), o.stride(2), o.stride(1)
 
-    # CK form: scale_s = (1/sqrt(D)) * log2(e). The kernel was tuned for this
-    # convention, so we ignore TE's attn_scale (which may be None or 1/sqrt(D)).
     scale_s = (1.0 / math.sqrt(D)) * math.log2(math.e)
 
     wl, wr = _ck_window_args(window_size, attn_mask_type)
@@ -271,12 +339,26 @@ def _launch(q, k, v, qkv_layout: str, *, attn_scale: float,
         ctypes.c_void_p(0x03),
     )
     kfunc = _get_kfunc_for_device(q.device)
+    stream_ptr = torch.cuda.current_stream(q.device).cuda_stream
+    if not hasattr(_launch, "_logged_stream"):
+        _launch._logged_stream = True
+        import torch.distributed as dist
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        enable_cg = os.environ.get("ENABLE_CG", "0") == "1"
+        if rank == 0 and enable_cg:
+            o_pool_sizes = {k: len(v["bufs"]) for k, v in _STATIC_O.items()}
+            lse_pool_sizes = {k: len(v["bufs"]) for k, v in _STATIC_LSE.items()}
+            print(f"[fwd-attn-asm] CUDA-graph-safe launch: "
+                  f"stream=0x{stream_ptr:x} (current_stream), "
+                  f"pool_size={_POOL_SIZE}, "
+                  f"o_pools={o_pool_sizes}, "
+                  f"lse_pools={lse_pool_sizes}", flush=True)
     rc = _HIP_LIB.hipModuleLaunchKernel(
         kfunc,
         HQ, S // _BLOCK_M, B,
         _BLOCK_THREADS, 1, 1,
         _LDS_BYTES,
-        ctypes.c_void_p(0),
+        ctypes.c_void_p(stream_ptr),
         ctypes.c_void_p(0),
         ctypes.cast(extra, ctypes.c_void_p),
     )
@@ -395,10 +477,11 @@ def _install_fused_attn_override():
         else:
             S, B, HQ, _ = q.shape
 
-        # CK ships softmax_lse as (B, HQ, S, 1). The kernel only reads
-        # stride(1)==S and stride(0)==HQ*S, so the trailing singleton is free
-        # and lets aux_ctx[0] match what fused_attn_bwd expects bit-for-bit.
-        lse = torch.empty(B, HQ, S, 1, dtype=torch.float32, device=q.device)
+        # CK ships softmax_lse as (B, HQ, S, 1). Use a static buffer so
+        # the address is stable across CUDA graph replays.
+        lse = _get_static_buf(
+            _STATIC_LSE, (B, HQ, S, 1), torch.float32, q.device,
+        )
         try:
             out = _launch(
                 q, k, v, qkv_layout,

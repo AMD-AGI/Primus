@@ -821,7 +821,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 args.data_parallel_random_init,
                 args.te_rng_tracker,
                 args.inference_rng_tracker,
-                use_cudagraphable_rng=args.enable_cuda_graph,
+                use_cudagraphable_rng=args.enable_cuda_graph
+                    or os.environ.get('CUDA_GRAPH_SCOPE', '') == 'full_iteration',
             )
 
             # Setup MoE aux loss scale value.
@@ -1562,6 +1563,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         one_logger_utils.track_e2e_metrics()
 
+        # Stop PyTorch profiler immediately after the training loop exits,
+        # before any post-loop cleanup that might race with profiler
+        # finalization (trace export, ROCTracer teardown).
+        if prof is not None:
+            prof.stop()
+            prof = None
+
         if args.dump_pp_data:
             from .utils import dump_pp_data
 
@@ -1690,10 +1698,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
         # so we must gather across mp ranks
-        update_successful = logical_and_across_model_parallel_group(update_successful)
+        if getattr(args, "check_optimizer_step_success", True):
+            update_successful = logical_and_across_model_parallel_group(update_successful)
         # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
-        # so we must gather across mp ranks
-        grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+        # so we must gather across mp ranks (unless skipped for CUDA graph / sync-free training).
+        if not getattr(args, "skip_sync_grad_norm_across_mp", False):
+            grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
         if args.log_num_zeros_in_grad:
             num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
 

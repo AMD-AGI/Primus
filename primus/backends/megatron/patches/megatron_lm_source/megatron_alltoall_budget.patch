@@ -1,0 +1,50 @@
+diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
+--- a/megatron/core/transformer/moe/token_dispatcher.py
++++ b/megatron/core/transformer/moe/token_dispatcher.py
+@@ -429,6 +429,26 @@
+             self.moe_expert_capacity_factor = self.config.moe_expert_capacity_factor
+         self.capacity = None
+ 
++        # When MOE_EXPERT_RANK_CAPACITY_FACTOR is set, skip the D2H round-trip.
++        # cuda_dtoh_point is set to "no_sync" so _maybe_dtoh_and_synchronize never starts
++        # the async copy -- tokens_per_expert stays as a GPU tensor (no D2H at all).
++        # _maybe_update_cuda_sync_point calls in preprocess() are guarded by _p4_skip_sync
++        # so cuda_sync_point also stays at "no_sync" -- d2h_event.synchronize() never fires.
++        # moe_layer.py does tokens_per_expert.to(device) immediately after dispatch; with a
++        # GPU tensor that call is a no-op. No budget math, no capacity cap, no token dropping.
++        # The env var value is used only as a boolean flag; only its presence matters.
++        self._p4_skip_sync = bool(os.environ.get("MOE_EXPERT_RANK_CAPACITY_FACTOR", ""))
++        if self._p4_skip_sync:
++            self.cuda_dtoh_point = "no_sync"  # prevent D2H from ever starting
++            if not getattr(MoEAlltoAllTokenDispatcher, "_p4_printed", False):
++                print(
++                    "[MoEAlltoAllTokenDispatcher] D2H round-trip skipped:"
++                    " tokens_per_expert stays on GPU (MOE_EXPERT_RANK_CAPACITY_FACTOR="
++                    + os.environ["MOE_EXPERT_RANK_CAPACITY_FACTOR"] + ")",
++                    flush=True,
++                )
++                MoEAlltoAllTokenDispatcher._p4_printed = True
++
+         # A cuda stream synchronization is needed in during token permutation in some cases,
+         # because there are several non-blocking DtoH data transfers called at
+         # `self.cuda_dtoh_point`. The synchronization happens at `self.cuda_sync_point`, which is
+@@ -552,7 +572,8 @@
+ 
+             # A synchronization is needed before the returns
+             # to get the `num_tokens_per_local_expert` CPU value.
+-            self._maybe_update_cuda_sync_point("before_finish")
++            if not self._p4_skip_sync:  # skip: tokens_per_expert stays on GPU
++                self._maybe_update_cuda_sync_point("before_finish")
+ 
+         if self.num_local_experts > 1:
+             # [tp_size * ep_size, num_local_experts]. Represents the number of tokens sent
+@@ -563,7 +584,8 @@
+             if not self.config.moe_permute_fusion:
+                 # A synchronization is needed before permutation 2
+                 # to get the `num_global_tokens_per_local_expert` CPU value.
+-                self._maybe_update_cuda_sync_point("before_permutation_2")
++                if not self._p4_skip_sync:  # skip: identity sort for EP=1
++                    self._maybe_update_cuda_sync_point("before_permutation_2")
+ 
+         assert (
+             self.cuda_sync_point_priority[self.cuda_dtoh_point]

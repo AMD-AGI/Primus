@@ -1,0 +1,16 @@
+diff --git a/megatron/core/models/common/language_module/language_module.py b/megatron/core/models/common/language_module/language_module.py
+--- a/megatron/core/models/common/language_module/language_module.py
++++ b/megatron/core/models/common/language_module/language_module.py
+@@ -134,9 +134,10 @@
+                 if te_parallel_cross_entropy is not None:
+                     labels = torch.as_strided(labels, labels.size(), (labels.size()[1], 1))
+                     # Use is_cg_capturable=True for full iteration CUDA graphs to avoid torch.equal checks
+                     is_cg_capturable = (
+-                        hasattr(self.config, 'cuda_graph_scope')
+-                        and self.config.cuda_graph_scope == 'full_iteration'
++                        (hasattr(self.config, 'cuda_graph_scope')
++                         and self.config.cuda_graph_scope == 'full_iteration')
++                        or os.environ.get('CUDA_GRAPH_SCOPE', '') == 'full_iteration'
+                     )
+                     if is_cg_capturable and not is_te_min_version("2.7.0"):
+                         from megatron.core.utils import get_te_version
