@@ -29,8 +29,74 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
+
+
+# --- MoE expert-load imbalance <-> Zipf exponent --------------------------------
+# Production MoE routing is usually characterised by a *measurable* load-imbalance
+# factor  I = max_e(tokens_e) / mean_e(tokens_e)  (1.0 = perfectly balanced; an
+# all-to-one degenerate router approaches I = num_experts). We let the user pass
+# that workload-meaningful number (``--moe-imbalance``) instead of a raw Zipf
+# exponent ``s``: for a Zipf popularity law p(rank) ~ 1/rank**s over N experts,
+# the steady-state imbalance is  I(s) = N / H_N(s)  where H_N(s) = sum 1/r**s is
+# the generalised harmonic number. I(s) is monot[on]ic in s (I(0)=1, I(inf)=N),
+# so we invert it by bisection. ``random`` benchmark/InferenceX-style data lands
+# near a modest I (the trained router on random tokens is only mildly skewed),
+# while real domain-clustered traffic pushes I higher — hence the field.
+
+
+def _harmonic(num_experts: int, s: float) -> float:
+    return sum(1.0 / (r ** s) for r in range(1, int(num_experts) + 1))
+
+
+def _imbalance_for_s(num_experts: int, s: float) -> float:
+    """Steady-state max/mean expert-load for a Zipf(s) popularity law."""
+    if num_experts <= 1:
+        return 1.0
+    return num_experts / _harmonic(num_experts, s)
+
+
+def _s_for_imbalance(num_experts: int, imbalance: float, tol: float = 1e-4) -> float:
+    """Invert I(s) = N / H_N(s) for the Zipf exponent giving target imbalance."""
+    if num_experts <= 1 or imbalance <= 1.0:
+        return 0.0
+    target = min(float(imbalance), float(num_experts) - 1e-6)
+    lo, hi = 0.0, 6.0
+    while _imbalance_for_s(num_experts, hi) < target and hi < 64.0:
+        hi *= 2.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if _imbalance_for_s(num_experts, mid) < target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
+def _num_experts(model: str, trust_remote_code: bool) -> int:
+    """Best-effort number of routed experts from the HF config (0 if unknown)."""
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+    except Exception:
+        return 0
+    for attr in ("num_local_experts", "n_routed_experts", "num_experts",
+                 "moe_num_experts", "num_experts_per_tok"):
+        v = getattr(cfg, attr, None)
+        if isinstance(v, int) and v > 1 and attr != "num_experts_per_tok":
+            return v
+    text_cfg = getattr(cfg, "text_config", None)
+    if text_cfg is not None:
+        for attr in ("num_local_experts", "n_routed_experts", "num_experts"):
+            v = getattr(text_cfg, attr, None)
+            if isinstance(v, int) and v > 1:
+                return v
+    return 0
 
 
 _ZIPF_MARKER = "PRIMUS_ZIPF_ROUTING"
@@ -148,14 +214,31 @@ def _measure(llm, prompts, out_len: int, reps: int) -> float:
     return best
 
 
-def _measure_batch(llm, input_len: int, batch: int, decode_steps: int) -> dict:
+def _measure_batch(llm, input_len: int, batch: int, decode_steps: int,
+                   random_tokens: bool = False, vocab: int = 30000, seed: int = 0) -> dict:
     """Measure whole-model prefill + steady-state decode step latency at ``batch``.
 
     Subtracting a 1-token run from a K-token run cancels prefill and fixed
     overheads, isolating one decode step for the full batch.
+
+    With ``random_tokens`` each sequence gets independent uniform-random token
+    ids. This matters for **real-weight** runs: the trained router maps token
+    content -> experts, so identical/degenerate prompts would route to a single
+    expert (pathological), whereas random tokens reproduce InferenceX's
+    random-data regime and let the genuine router generate the realized
+    token->expert distribution per concurrency (no imposed distribution needed).
     """
-    token_ids = [(i % 100) + 1 for i in range(input_len)]
-    prompts = [{"prompt_token_ids": list(token_ids)} for _ in range(batch)]
+    if random_tokens:
+        import random as _r
+
+        rng = _r.Random(seed)
+        prompts = [
+            {"prompt_token_ids": [rng.randint(1, max(2, vocab - 1)) for _ in range(input_len)]}
+            for _ in range(batch)
+        ]
+    else:
+        token_ids = [(i % 100) + 1 for i in range(input_len)]
+        prompts = [{"prompt_token_ids": list(token_ids)} for _ in range(batch)]
 
     _measure(llm, prompts, out_len=4, reps=1)  # warmup + CUDA-graph capture
     lat1 = _measure(llm, prompts, out_len=1, reps=3)
@@ -172,9 +255,26 @@ def run_vllm_benchmark(args) -> dict:
 
     routing = str(getattr(args, "routing_dist", "zipf") or "none").lower()
     routing_applied = "none"
+    # Resolve the Zipf exponent from a measurable imbalance factor if requested.
+    zipf_s = float(getattr(args, "zipf_s", 1.0))
+    imbalance_target = getattr(args, "moe_imbalance", None)
+    n_experts = 0
+    imbalance_realized = None
+    if imbalance_target is not None and float(imbalance_target) > 1.0:
+        n_experts = _num_experts(args.model, args.trust_remote_code)
+        if n_experts > 1:
+            zipf_s = _s_for_imbalance(n_experts, float(imbalance_target))
+            imbalance_realized = _imbalance_for_s(n_experts, zipf_s)
+            routing = "zipf"
+            print(f"[Primus:Inference:vLLM-Benchmark] MoE imbalance "
+                  f"I={float(imbalance_target):.2f} -> zipf s={zipf_s:.3f} "
+                  f"(N={n_experts} experts, realized I={imbalance_realized:.2f})")
+        else:
+            print("[Primus:Inference:vLLM-Benchmark] WARNING: could not read "
+                  "expert count; falling back to --zipf-s")
     if routing == "zipf":
-        if _install_zipf_routing(getattr(args, "zipf_s", 1.0)):
-            routing_applied = f"zipf(s={getattr(args, 'zipf_s', 1.0)})"
+        if _install_zipf_routing(zipf_s):
+            routing_applied = f"zipf(s={zipf_s})"
             print(f"[Primus:Inference:vLLM-Benchmark] MoE routing = {routing_applied}")
     elif routing in ("uniform", "uniform_random"):
         os.environ["VLLM_MOE_ROUTING_SIMULATION_STRATEGY"] = "uniform_random"
@@ -195,7 +295,7 @@ def run_vllm_benchmark(args) -> dict:
     kwargs = dict(
         model=args.model,
         tensor_parallel_size=args.tp,
-        load_format="dummy",
+        load_format=args.load_format,
         gpu_memory_utilization=args.gpu_mem_util,
         max_model_len=max_len,
         max_num_seqs=max(256, max_batch),
@@ -209,9 +309,13 @@ def run_vllm_benchmark(args) -> dict:
 
     llm = LLM(**kwargs)  # loaded once; reused across the batch sweep
 
+    real_weights = args.load_format != "dummy"
+    # Real weights => the trained router needs varied input to route realistically.
+    random_tokens = args.random_tokens or real_weights
     sweep = []
     for b in batches:
-        entry = _measure_batch(llm, args.input_len, b, args.decode_steps)
+        entry = _measure_batch(llm, args.input_len, b, args.decode_steps,
+                               random_tokens=random_tokens, vocab=args.vocab)
         sweep.append(entry)
         print(f"[Primus:Inference:vLLM-Benchmark] batch={b} "
               f"prefill={entry['prefill_ms']:.2f}ms decode_step={entry['decode_ms']:.2f}ms")
@@ -232,7 +336,14 @@ def run_vllm_benchmark(args) -> dict:
             "kv_cache_dtype": args.kv_cache_dtype,
             "enforce_eager": args.enforce_eager,
             "use_aiter": os.environ.get("VLLM_ROCM_USE_AITER", "0") == "1",
+            "load_format": args.load_format,
+            "real_weights": real_weights,
+            "random_tokens": random_tokens,
             "moe_routing": routing_applied,
+            "zipf_s": zipf_s if routing == "zipf" else None,
+            "moe_imbalance_target": float(imbalance_target) if imbalance_target else None,
+            "moe_imbalance_realized": imbalance_realized,
+            "num_experts": n_experts or None,
             "model": args.model,
         },
     }
@@ -251,6 +362,16 @@ def main():
     ap.add_argument("--batch", type=int, default=16, help="ref batch (anchor) when no --batches")
     ap.add_argument("--batches", default=None, help="comma list to sweep, e.g. 4,8,16,32,64")
     ap.add_argument("--max-model-len", type=int, default=None)
+    ap.add_argument("--load-format", default="dummy",
+                    help="vLLM load_format: 'dummy' (random weights, needs an "
+                         "imposed routing dist) or 'auto'/'safetensors' (REAL "
+                         "weights -> the trained router sets the distribution; "
+                         "use with --routing-dist none for a constant-free run)")
+    ap.add_argument("--random-tokens", action="store_true",
+                    help="use independent random token ids per sequence "
+                         "(auto-on for real weights; matches InferenceX random data)")
+    ap.add_argument("--vocab", type=int, default=30000,
+                    help="upper bound for random token ids")
     ap.add_argument("--gpu-mem-util", type=float, default=0.9)
     ap.add_argument("--trust-remote-code", action="store_true")
     ap.add_argument("--enforce-eager", action="store_true")
@@ -262,6 +383,12 @@ def main():
                          "(default: zipf; 'none' uses the model's own router)")
     ap.add_argument("--zipf-s", type=float, default=1.0,
                     help="Zipfian skew exponent (0=uniform, larger=more skewed)")
+    ap.add_argument("--moe-imbalance", type=float, default=None,
+                    help="Target MoE expert-load imbalance I=max/mean tokens-per-"
+                         "expert (1.0=balanced). Overrides --zipf-s by solving for "
+                         "the Zipf exponent at the model's expert count. Use a "
+                         "measured/expected production value (random data ~ low I, "
+                         "domain-clustered traffic ~ higher I).")
     ap.add_argument("--save", required=True)
     args = ap.parse_args()
 
