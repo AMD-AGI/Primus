@@ -43,29 +43,7 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/backends
 
 ## 🚀 Setup & Deployment
 
-Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-run environment optimized for AMD GPUs. This eliminates manual dependency and environment configuration.
-
-### Install as a Python package (pip)
-
-Besides the Docker image, Primus can be installed as a wheel that bundles the `primus-cli` launcher.
-
-```bash
-# Option 1 — install directly from the Git repository (pin a tag, branch, or commit):
-pip install "git+https://github.com/AMD-AGI/Primus.git@v26.2.0rc1"
-
-# Option 2 — install a released wheel from the GitHub Pages index (recommended; pin the version):
-pip install "primus==26.2.0rc1" --extra-index-url https://amd-agi.github.io/Primus/simple/
-```
-
-The wheel ships the `primus-cli` toolkit but not the heavy backend sources. Fetch the backend
-sources pinned for that release (full source, including nested submodules) with:
-
-```bash
-primus-cli deps sync --dir ~/.cache/Primus/third_party
-```
-
-`primus-cli direct` also auto-runs `deps sync` on first use when the sources are missing
-(set `PRIMUS_AUTO_DEPS_SYNC=0` to disable).
+Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-run environment optimized for AMD GPUs. This eliminates manual dependency and environment configuration.  **It is recommended to use the AMD published training Docker images to run training.**
 
 ### Prerequisites
 
@@ -74,13 +52,22 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 - ROCm-compatible AMD GPUs (e.g., Instinct MI300 series)
 - Proper permissions for Docker and GPU device access
 
+### Quick Start with Primus CLI and AMD published training Docker images
 
-### Quick Start with Primus CLI
+#### Option 1: git clone this repository and run training in container (recommended)
 
 1. **Pull the latest Docker image**
 
+    Check the AMD published training Docker images here:
+
+    - For Megatron-LM and TorchTitan backends: https://hub.docker.com/r/rocm/primus/tags
+    - For MaxText backend: https://hub.docker.com/r/rocm/jax-training/tags
+
     ```bash
-    docker pull docker.io/rocm/primus:v26.3
+    # For Megatron-LM and TorchTitan backends
+    docker pull rocm/primus:v26.3
+    # For MaxText backend
+    docker pull rocm/jax-training:v26.3
     ```
 
 2. **Clone the repository**
@@ -88,6 +75,9 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     ```bash
     git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
     cd Primus
+    # checkout the branch for the specific release
+    git checkout release/v26.3
+    git submodule update --init --recursive
     ```
 
 3. **Run your first training**
@@ -96,12 +86,49 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # Run training in container
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
+    # Run in the Primus repository root directory
     ./primus-cli container --image rocm/primus:v26.3 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
 
 For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).
+
+#### Option 2: wheel installation of Primus and run training in container
+
+1. **Install Primus as a Python package**
+
+    It is recommended to install Primus and other dependencies in a virtual environment. 
+
+    ```bash
+    # Create a virtual environment
+    python -m venv primus-env
+    source primus-env/bin/activate
+    # Install Primus
+    pip install "primus==26.3.1" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    
+    ```
+
+    >**Note**: this will only install the Primus CLI in your virtual environment under the `site-packages` directory, without other dependencies. The third party submodules will be downloaded on the first run. The complete dependencies and training software stack is provided in the AMD published training Docker images. You can use `primus-cli` to launch the training in container from any directory.
+
+    >**Note**: If you don't want to use docker container to run training, and want to install the complete dependencies and training software stack on your host machine, please refer to the instruction: [Install Primus on your host machine](./docs/quickstart.md#install-primus-on-your-host-machine). The automated installation script is under development and will be released soon.
+
+2. **Run training in container using pip-installed Primus**
+
+    ```bash
+    primus-cli container --image rocm/primus:v26.3 \
+    --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    --volume /path/to/your/data:/data  -- --log_file /data/run.log \
+    -- train pretrain --config /data/your/config.yaml
+    ```
+
+    > **Note**: The `--volume` option is used to mount the local data directory to the container. The `--log_file` option is used to save the training log to the local data directory. if `--log_file` is not specified, the training log will be saved to the primus installation directory (`site-packages/primus/logs` by default).
+
+    If you install all the dependencies and training software stack on your host machine, you can run the training without using docker container.
+
+    ```bash
+    primus-cli direct -- train pretrain --config /path/to/your/config.yaml
+    ```
 
 ---
 
