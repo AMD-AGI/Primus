@@ -21,6 +21,7 @@ Serving features modelled here: chunked prefill, KV-cache quantization
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -122,7 +123,7 @@ class InferencePerfResult:
 class InferencePerformanceProjector:
     """Builds the profiler once and answers prefill / decode timing queries."""
 
-    def __init__(self, inference_config: InferenceConfig, args=None):
+    def __init__(self, inference_config: InferenceConfig, args=None, benchmark_layer_times=None):
         self.cfg = inference_config
         self._args_ref = args
         gpu_arch = getattr(args, "gpu_arch", None) if args else None
@@ -160,6 +161,172 @@ class InferencePerformanceProjector:
             else None
         )
 
+        # Benchmark mode (BENCHMARK-BASED PROJECTION — no calibration factors).
+        # We use the *measured* silicon times directly as the projection. Two
+        # measurement schemas are supported:
+        #
+        #   * whole-model (vLLM/SGLang): measured prefill / decode *step* latency
+        #     (ms) for the full model, optionally swept over batch. Stored as
+        #     per-phase (batch -> ms) curves; interpolated by concurrency.
+        #   * per-layer (Megatron worker): measured forward time of one dense and
+        #     one MoE layer per phase. Composed directly by layer counts.
+        #
+        # Empty => pure simulation.
+        self._meas_whole: Dict[str, list] = {}   # {"prefill": [(batch, ms)], "decode": [...]}
+        self._meas_prefill_rate_ms_per_tok: float = 0.0  # for sub-prompt prefill pieces
+        self._meas_layer: Dict[tuple, float] = {}        # {(phase, ltype): ms}
+        self._meas_ref_input: int = 0
+        self._bench_backend: str = "megatron"
+        self._bench_measured = benchmark_layer_times
+        if benchmark_layer_times:
+            self.set_benchmark_calibration(benchmark_layer_times)
+
+    @property
+    def is_benchmark_calibrated(self) -> bool:
+        return bool(self._meas_whole or self._meas_layer)
+
+    @property
+    def _measured_mode(self) -> bool:
+        return bool(self._meas_whole or self._meas_layer)
+
+    @staticmethod
+    def _interp(batch: int, pts: list) -> float:
+        """Piecewise-linear interpolation of a sorted (batch, value) curve.
+
+        Clamps to the endpoints outside the measured range so concurrencies
+        below/above the swept batches reuse the nearest measured anchor.
+        """
+        if not pts:
+            return 0.0
+        if batch <= pts[0][0]:
+            return pts[0][1]
+        if batch >= pts[-1][0]:
+            return pts[-1][1]
+        for (b0, v0), (b1, v1) in zip(pts, pts[1:]):
+            if b0 <= batch <= b1:
+                w = (batch - b0) / (b1 - b0) if b1 > b0 else 0.0
+                return v0 + w * (v1 - v0)
+        return pts[-1][1]
+
+    # -- measured-time accessors (benchmark-based projection) ------------------
+
+    def _measured_decode_step_ms(self, batch: int) -> float:
+        """Measured whole-model / composed decode *step* latency at ``batch``."""
+        if self._meas_whole.get("decode"):
+            return self._interp(batch, self._meas_whole["decode"])
+        # Per-layer schema: sum measured layer times by layer count.
+        d = self._meas_layer.get(("decode", "dense"), 0.0)
+        m = self._meas_layer.get(("decode", "moe"), 0.0)
+        return self._n_dense * d + self._n_moe * m
+
+    def _measured_full_prefill_ms(self, batch: int) -> float:
+        """Measured whole-model / composed prefill latency for the full prompt."""
+        if self._meas_whole.get("prefill"):
+            return self._interp(batch, self._meas_whole["prefill"])
+        d = self._meas_layer.get(("prefill", "dense"), 0.0)
+        m = self._meas_layer.get(("prefill", "moe"), 0.0)
+        return self._n_dense * d + self._n_moe * m
+
+    def _measured_prefill_tokens_ms(self, total_tokens: int) -> float:
+        """Measured prefill time for an arbitrary token count (chunk pieces).
+
+        Prefill is compute-bound and ~linear in total processed tokens, so we
+        scale by a measured per-token rate rather than re-simulating.
+        """
+        rate = self._meas_prefill_rate_ms_per_tok
+        if rate <= 0:
+            return 0.0
+        return rate * max(1, total_tokens)
+
+    # -- benchmark ingestion ---------------------------------------------------
+
+    def _builtin_comm_ms(self, ltype: str, batch: int, q_len: int) -> float:
+        """Implicit comm baked into the layer profiler's forward time."""
+        tp_ar_one = _estimate_tp_allreduce_time_ms(self._view, batch, q_len)
+        if ltype == "moe":
+            return 2.0 * tp_ar_one + _estimate_moe_a2a_time_ms(self._view, batch, q_len, self._gemm)
+        return 2.0 * tp_ar_one
+
+    def set_benchmark_calibration(self, benchmark_layer_times: dict) -> None:
+        """Ingest measured silicon times for a **benchmark-based** projection.
+
+        No calibration factors are applied to the analytical model: the measured
+        times are used *directly* as the projection. Two schemas are accepted:
+
+        * whole-model (vLLM/SGLang)::
+
+              {"backend": "vllm",
+               "measured": {"model": {"prefill_ms", "decode_ms"}},
+               "sweep": [{"batch", "prefill_ms", "decode_ms"}, ...],
+               "meta": {"batch", "input_len", ...}}
+
+          ``prefill_ms``/``decode_ms`` are full-model step latencies; ``sweep``
+          gives the per-concurrency curve (preferred), interpolated by batch.
+
+        * per-layer (Megatron worker)::
+
+              {"measured": {"dense"|"moe": {"prefill_ms", "decode_ms"}},
+               "meta": {"batch", "input_len"}}
+
+          composed by layer counts.
+        """
+        if not benchmark_layer_times:
+            return
+        measured = benchmark_layer_times.get("measured", benchmark_layer_times)
+        meta = benchmark_layer_times.get("meta", {})
+        self._bench_backend = str(benchmark_layer_times.get("backend", "megatron"))
+        ref_batch = int(meta.get("batch") or self.cfg.request_config.batch_size or 1)
+        ref_input = int(meta.get("input_len") or self.cfg.request_config.input_seq_len or 1)
+
+        self._meas_ref_input = ref_input
+
+        # Whole-model schema (vLLM/SGLang): measured step latencies, used
+        # DIRECTLY (no factor, no simulator). ``sweep`` gives the per-batch
+        # curve; fall back to the single ``model`` anchor at ``ref_batch``.
+        model_step = measured.get("model")
+        if model_step:
+            sweep = benchmark_layer_times.get("sweep") or []
+            pre_pts, dec_pts = [], []
+            for e in sweep:
+                try:
+                    b = int(e["batch"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if e.get("prefill_ms"):
+                    pre_pts.append((b, float(e["prefill_ms"])))
+                if e.get("decode_ms"):
+                    dec_pts.append((b, float(e["decode_ms"])))
+            if not pre_pts and model_step.get("prefill_ms"):
+                pre_pts = [(ref_batch, float(model_step["prefill_ms"]))]
+            if not dec_pts and model_step.get("decode_ms"):
+                dec_pts = [(ref_batch, float(model_step["decode_ms"]))]
+            self._meas_whole = {
+                k: v for k, v in (("prefill", sorted(pre_pts)), ("decode", sorted(dec_pts))) if v
+            }
+            # Per-token prefill rate (for sub-prompt chunk pieces): full-prompt
+            # prefill of ``b`` seqs processes ``b * ref_input`` tokens.
+            if pre_pts and ref_input > 0:
+                rates = [ms / (b * ref_input) for b, ms in pre_pts if b > 0]
+                self._meas_prefill_rate_ms_per_tok = sum(rates) / len(rates) if rates else 0.0
+            return
+
+        # Per-layer schema (Megatron worker): measured forward time of one dense
+        # and one MoE layer per phase. Used directly, composed by layer counts.
+        layer: Dict[tuple, float] = {}
+        for ltype in ("dense", "moe"):
+            entry = measured.get(ltype)
+            if not entry:
+                continue
+            if entry.get("prefill_ms"):
+                layer[("prefill", ltype)] = float(entry["prefill_ms"])
+            if entry.get("decode_ms"):
+                layer[("decode", ltype)] = float(entry["decode_ms"])
+        self._meas_layer = layer
+        # Prefill rate from the dominant (per-layer * count) prefill total.
+        if ref_input > 0:
+            full_pre = self._measured_full_prefill_ms(ref_batch)
+            self._meas_prefill_rate_ms_per_tok = full_pre / (ref_batch * ref_input)
+
     # -- per-pass forward time -------------------------------------------------
 
     def _forward_times(self, batch: int, q_len: int, phase: str, kv_len: int) -> PhaseForwardTimes:
@@ -169,16 +336,24 @@ class InferencePerformanceProjector:
         dense_p = lm.sub_profilers.get("dense_transformer_layer")
         moe_p = lm.sub_profilers.get("moe_transformer_layer")
 
-        dense_fwd = (
-            dense_p.measured_forward_time(batch, q_len) if (self._n_dense and dense_p) else 0.0
-        )
-        moe_fwd = moe_p.measured_forward_time(batch, q_len) if (self._n_moe and moe_p) else 0.0
+        has_dense = bool(self._n_dense and dense_p)
+        has_moe = bool(self._n_moe and moe_p)
 
-        # Feature B: replace the implicit per-layer comm baked into the layer
-        # forward time with the explicit, knob-driven model (delta approach so
-        # default knobs reproduce the implicit cost exactly).
+        dense_raw = dense_p.measured_forward_time(batch, q_len) if has_dense else 0.0
+        moe_raw = moe_p.measured_forward_time(batch, q_len) if has_moe else 0.0
+
+        # Split implicit per-layer comm out of the raw forward time so it can be
+        # handled explicitly below.  Doing this unconditionally (not only when
+        # the explicit comm model is active) lets the benchmark calibration
+        # scale the *compute* part without disturbing communication cost.
+        builtin_dense_comm = self._builtin_comm_ms("dense", batch, q_len) if has_dense else 0.0
+        builtin_moe_comm = self._builtin_comm_ms("moe", batch, q_len) if has_moe else 0.0
+        dense_compute = max(0.0, dense_raw - builtin_dense_comm) if has_dense else 0.0
+        moe_compute = max(0.0, moe_raw - builtin_moe_comm) if has_moe else 0.0
+
         comm = CommBreakdown()
         if self._comm is not None:
+            # Feature B: explicit, knob-driven communication model.
             overlap = (
                 float(self._cc.prefill_overlap)
                 if phase == "prefill"
@@ -187,25 +362,19 @@ class InferencePerformanceProjector:
             overlap = min(max(overlap, 0.0), 1.0)
             keep = 1.0 - overlap
 
-            # Implicit comm currently inside the layer forward time.
-            tp_ar_one = _estimate_tp_allreduce_time_ms(self._view, batch, q_len)
-            builtin_dense_comm = 2.0 * tp_ar_one
-            builtin_moe_a2a = _estimate_moe_a2a_time_ms(self._view, batch, q_len, self._gemm)
-            builtin_moe_comm = 2.0 * tp_ar_one + builtin_moe_a2a
-
-            # New explicit comm (already exposed; overlap applied below).
             new_tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
             new_ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
 
-            if self._n_dense and dense_p:
-                dense_fwd = dense_fwd - builtin_dense_comm + new_tp_ar * keep
-            if self._n_moe and moe_p:
-                moe_fwd = moe_fwd - builtin_moe_comm + (new_tp_ar + new_ep_a2a) * keep
+            dense_fwd = dense_compute + (new_tp_ar * keep if has_dense else 0.0)
+            moe_fwd = moe_compute + ((new_tp_ar + new_ep_a2a) * keep if has_moe else 0.0)
 
-            # Reportable breakdown (exposed times that contribute to latency).
             comm.tp_allreduce_ms = (self._n_dense + self._n_moe) * new_tp_ar * keep
             comm.ep_a2a_ms = self._n_moe * new_ep_a2a * keep
             comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
+        else:
+            # Implicit comm: add the built-in cost back onto (calibrated) compute.
+            dense_fwd = dense_compute + builtin_dense_comm
+            moe_fwd = moe_compute + builtin_moe_comm
 
         layers = self._n_dense * dense_fwd + self._n_moe * moe_fwd
 
@@ -233,6 +402,15 @@ class InferencePerformanceProjector:
 
     def prefill_latency_ms(self, batch: int, input_len: int) -> float:
         """Time to process the prompt (→ first token).  Honors chunked prefill."""
+        # Benchmark-based: use the measured full-prompt prefill step directly.
+        if self._measured_mode:
+            if self._meas_whole.get("prefill") or self._meas_layer:
+                # Measured anchor is at ``ref_input``; scale by the per-token
+                # prefill rate when the requested prompt differs in length.
+                if self._meas_ref_input and input_len != self._meas_ref_input:
+                    return self._measured_prefill_tokens_ms(batch * input_len)
+                return self._measured_full_prefill_ms(batch)
+
         chunk = int(self.cfg.request_config.chunked_prefill_size or 0)
         if chunk <= 0 or chunk >= input_len:
             ft = self._forward_times(batch, input_len, "prefill", input_len)
@@ -251,9 +429,20 @@ class InferencePerformanceProjector:
 
     # -- decode ----------------------------------------------------------------
 
+    def _decode_step_overhead_ms(self) -> float:
+        """Fixed per-step host/launch overhead (CUDA-graph-reducible)."""
+        return max(0.0, float(self.cfg.request_config.decode_step_overhead_us)) / 1000.0
+
     def _decode_step_latency_ms(self, batch: int, kv_len: int, q_len: int = 1) -> float:
+        # Benchmark-based: use the measured decode step directly (memory-bound,
+        # ~flat in context over a generation, so no simulator context-scaling).
+        if self._measured_mode:
+            step = self._measured_decode_step_ms(batch)
+            if q_len > 1:
+                step *= q_len  # speculative decode verifies q_len tokens/step
+            return step + self._decode_step_overhead_ms()
         ft = self._forward_times(batch, q_len, "decode", kv_len)
-        return ft.total_ms
+        return ft.total_ms + self._decode_step_overhead_ms()
 
     def decode_total_ms(self, batch: int, input_len: int, output_len: int) -> float:
         """Integrate per-token decode latency over the growing KV cache.
@@ -288,6 +477,105 @@ class InferencePerformanceProjector:
             samples.append(self._decode_step_latency_ms(batch, ctx, q_len=q_len))
         avg_step = sum(samples) / len(samples)
         return avg_step * num_steps
+
+    # -- continuous batching (steady-state TPOT) -------------------------------
+
+    def _continuous_decode_metrics(self, input_len: int, output_len: int, concurrency: int) -> Dict[str, float]:
+        """Steady-state decode under *continuous batching*.
+
+        Real servers (vLLM, SGLang, ...) keep ``concurrency`` sequences resident
+        and admit a new request's prefill the moment one finishes.  That makes a
+        fraction of scheduler steps **mixed** (1 prefill chunk + ``C-1`` decode)
+        which are far slower per token than a uniform **pure-decode** step — the
+        "TPOT pollution" effect.  This models the blended steady state.
+
+        Accounting (per admitted request, the ``R`` factor cancels):
+          * a request's prefill is processed in ``n_chunks`` mixed steps;
+          * pure steps emit ``C * tok/step`` decode tokens, mixed steps emit
+            ``(C-1) * tok/step``;
+          * total decode tokens per request = ``OSL``.
+        From the per-request window time ``T`` we get
+        ``TPOT = C * T / OSL`` and system ``throughput = 1000 * OSL / T``.
+        """
+        req = self.cfg.request_config
+        ISL = max(1, input_len)
+        OSL = max(1, output_len)
+        C = max(1, int(concurrency))
+
+        spec_k = int(req.speculative_num_tokens or 0)
+        q_len = (spec_k + 1) if spec_k > 0 else 1
+        tok_per_step = max(1e-6, self._spec_tokens_per_step())
+
+        # Prefill of a newly-admitted request is split into chunks; with chunked
+        # prefill each mixed step carries only one chunk (less pollution/step).
+        chunk = int(req.chunked_prefill_size or 0)
+        if chunk <= 0 or chunk >= ISL:
+            n_chunks = 1
+            chunk_tokens = ISL
+        else:
+            n_chunks = max(1, math.ceil(ISL / chunk))
+            chunk_tokens = chunk
+
+        penalty = max(0.0, float(req.mixed_batch_penalty))
+        ov = self._decode_step_overhead_ms()
+
+        if self._measured_mode:
+            # Benchmark-based: measured decode is ~flat in context, so the pure
+            # and mixed steps are constant across the generation window.
+            spec = q_len if q_len > 1 else 1
+            t_pure = self._measured_decode_step_ms(C) * spec + ov
+            prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
+            dec_piece = self._measured_decode_step_ms(max(1, C - 1)) * spec
+            t_mixed = (prefill_piece + dec_piece) * (1.0 + penalty) + ov
+        else:
+            # Simulation: average pure/mixed step latency over the (uniform)
+            # context distribution [ISL, ISL+OSL].
+            n_samples = min(8, max(2, int(OSL)))
+            ctx_lo, ctx_hi = ISL, ISL + OSL
+            pure, mixed = [], []
+            for i in range(n_samples):
+                frac = i / (n_samples - 1) if n_samples > 1 else 0.0
+                ctx = int(ctx_lo + frac * (ctx_hi - ctx_lo))
+                t_pure = self._forward_times(C, q_len, "decode", ctx).total_ms + ov
+                prefill_piece = self._forward_times(1, chunk_tokens, "prefill", min(ctx, ISL)).total_ms
+                dec_piece = self._forward_times(max(1, C - 1), q_len, "decode", ctx).total_ms
+                t_mixed = (prefill_piece + dec_piece) * (1.0 + penalty) + ov
+                pure.append(t_pure)
+                mixed.append(t_mixed)
+            t_pure = sum(pure) / len(pure)
+            t_mixed = sum(mixed) / len(mixed)
+
+        # Pure steps per request needed to make up the decode tokens the mixed
+        # steps did not cover.
+        mixed_tokens = n_chunks * (C - 1) * tok_per_step
+        n_pure = max(0.0, (OSL - mixed_tokens) / (C * tok_per_step))
+        window_ms = n_pure * t_pure + n_chunks * t_mixed
+        if window_ms <= 0:
+            window_ms = t_pure
+
+        tpot_ms = C * window_ms / OSL
+        system_tps = 1000.0 * OSL / window_ms
+        decode_total_ms = tpot_ms * OSL
+        total_steps = n_pure + n_chunks
+        mixed_fraction = (n_chunks / total_steps) if total_steps > 0 else 0.0
+        pollution_pct = (n_chunks * t_mixed / window_ms * 100.0) if window_ms > 0 else 0.0
+
+        return {
+            "tpot_ms": tpot_ms,
+            "decode_total_ms": decode_total_ms,
+            "system_tps": system_tps,
+            "pure_step_ms": t_pure,
+            "mixed_step_ms": t_mixed,
+            "mixed_step_fraction": mixed_fraction,
+            "tpot_pollution_pct": pollution_pct,
+            "concurrency": float(C),
+        }
+
+    def _use_continuous_batching(self, concurrency: int, output_len: int) -> bool:
+        model = (self.cfg.request_config.serving_model or "continuous").lower()
+        # With a single resident sequence there are no concurrent mixed batches,
+        # so continuous batching degenerates to the static (pure-decode) case.
+        return model == "continuous" and concurrency > 1 and output_len > 0
 
     # -- comm reporting --------------------------------------------------------
 
@@ -331,25 +619,47 @@ class InferencePerformanceProjector:
         input_len = max(1, req.input_seq_len)
         output_len = max(0, req.output_seq_len)
 
-        ttft = self.prefill_latency_ms(batch, input_len)
-        decode_total = self.decode_total_ms(batch, input_len, output_len)
-
-        # Representative decode-step latency (mid context) for ITL/throughput.
-        mid_ctx = input_len + output_len // 2
+        concurrency = max(1, req.resolved_max_concurrency())
         spec_k = int(req.speculative_num_tokens or 0)
         q_len = (spec_k + 1) if spec_k > 0 else 1
-        step_latency = self._decode_step_latency_ms(batch, mid_ctx, q_len=q_len)
-
-        itl = (decode_total / output_len) if output_len > 0 else step_latency
-        request_latency = ttft + decode_total
-        per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
-        decode_tps = (batch * 1000.0 / step_latency) if step_latency > 0 else 0.0
         replica_gpus = _replica_gpus(self.cfg)
+
+        ttft = self.prefill_latency_ms(batch, input_len)
+        extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
+
+        if self._use_continuous_batching(concurrency, output_len):
+            # Continuous batching: TPOT is the blended pure/mixed steady state.
+            m = self._continuous_decode_metrics(input_len, output_len, concurrency)
+            decode_total = m["decode_total_ms"]
+            itl = m["tpot_ms"]
+            step_latency = m["pure_step_ms"]
+            decode_tps = m["system_tps"]
+            per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
+            extras.update(
+                {
+                    "serving_continuous_batching": 1.0,
+                    "concurrency": m["concurrency"],
+                    "pure_step_latency_ms": m["pure_step_ms"],
+                    "mixed_step_latency_ms": m["mixed_step_ms"],
+                    "mixed_step_fraction": m["mixed_step_fraction"],
+                    "tpot_pollution_pct": m["tpot_pollution_pct"],
+                }
+            )
+        else:
+            decode_total = self.decode_total_ms(batch, input_len, output_len)
+            mid_ctx = input_len + output_len // 2
+            step_latency = self._decode_step_latency_ms(batch, mid_ctx, q_len=q_len)
+            itl = (decode_total / output_len) if output_len > 0 else step_latency
+            per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
+            decode_tps = (batch * 1000.0 / step_latency) if step_latency > 0 else 0.0
+
+        request_latency = ttft + decode_total
         decode_tps_per_gpu = decode_tps / replica_gpus if replica_gpus else 0.0
         prefill_tps = (batch * input_len * 1000.0 / ttft) if ttft > 0 else 0.0
 
-        extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
         extras.update(self._comm_extras(batch, input_len, output_len))
+        if self.is_benchmark_calibrated:
+            extras["benchmark_calibrated"] = 1.0
 
         return InferencePerfResult(
             ttft_ms=ttft,
@@ -412,8 +722,12 @@ class InferencePerformanceProjector:
             model_parallel_config=disagg.decode_parallel(mp),
             disaggregation_config=replace(disagg, enabled=False),
         )
-        prefill_proj = InferencePerformanceProjector(prefill_cfg, args=self._args_ref)
-        decode_proj = InferencePerformanceProjector(decode_cfg, args=self._args_ref)
+        prefill_proj = InferencePerformanceProjector(
+            prefill_cfg, args=self._args_ref, benchmark_layer_times=self._bench_measured
+        )
+        decode_proj = InferencePerformanceProjector(
+            decode_cfg, args=self._args_ref, benchmark_layer_times=self._bench_measured
+        )
 
         # Prefill phase on the prefill pool (drives TTFT + prefill throughput).
         ttft_compute = prefill_proj.prefill_latency_ms(batch, input_len)
@@ -444,6 +758,8 @@ class InferencePerformanceProjector:
 
         extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
         extras.update(decode_proj._comm_extras(batch, input_len, output_len))
+        if self.is_benchmark_calibrated:
+            extras["benchmark_calibrated"] = 1.0
         extras["prefill_compute_ttft_ms"] = ttft_compute
         extras["prefill_replicas"] = float(disagg.prefill_replicas)
         extras["decode_replicas"] = float(disagg.decode_replicas)
@@ -468,6 +784,8 @@ class InferencePerformanceProjector:
 
 
 def project_inference_performance(
-    inference_config: InferenceConfig, args=None
+    inference_config: InferenceConfig, args=None, benchmark_layer_times=None
 ) -> InferencePerfResult:
-    return InferencePerformanceProjector(inference_config, args=args).project()
+    return InferencePerformanceProjector(
+        inference_config, args=args, benchmark_layer_times=benchmark_layer_times
+    ).project()

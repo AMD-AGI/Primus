@@ -166,6 +166,22 @@ class InferenceRequestConfig:
     speculative_num_tokens: int = 0
     speculative_acceptance_rate: float = 0.0
 
+    # ---- Serving / continuous-batching dynamics ----
+    # How decode latency is modelled:
+    #   "continuous" — continuous batching with mixed prefill+decode steps
+    #                  (models the TPOT "pollution" real servers like vLLM see).
+    #   "static"     — an idealized batch doing pure decode (legacy behaviour;
+    #                  prefill is charged once as TTFT only).
+    serving_model: str = "continuous"
+    # Fixed per-decode-step host/launch overhead (microseconds). At low decode
+    # batch the step is launch-bound; CUDA-graph capture shrinks this. Added to
+    # every decode/mixed step. 0 = ignore (pure kernel-compute model).
+    decode_step_overhead_us: float = 0.0
+    # Extra cost fraction applied to a *mixed* (prefill+decode) step to model
+    # vLLM's less-efficient PIECEWISE CUDA-graph path vs the FULL graph used for
+    # uniform pure-decode steps. 0 = no penalty.
+    mixed_batch_penalty: float = 0.0
+
     def resolved_max_context_len(self) -> int:
         if self.max_context_len is not None:
             return int(self.max_context_len)
