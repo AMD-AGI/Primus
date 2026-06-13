@@ -2,6 +2,9 @@
 disable_primus_topk_router: false
 moe_router_force_load_balancing: false
 use_deprecated_20241209_moe_layer: false
+# Replace the MoE layer with the ROCMoE EP-engine-backed layer (EP-only, TP=1,
+# PP=1, bf16). Tune per-expert capacity via the ROCMOE_OVER_PROVISION env var.
+use_rocmoe: false
 
 # softcapping for logits (for x.ai grok2)
 final_logit_softcapping: null # float
