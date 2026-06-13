@@ -203,9 +203,10 @@ def test_build_memory_cmd_default_simulate_is_clean(tmp_path):
         agent_cfg,
         Path("/fake/primus"),
     )
-    # Default invocation: no --memory-mode (=> simulate), no
-    # --load-benchmark, no --memory-safety-margin.
-    assert "--memory-mode" not in cmd
+    # Default invocation: explicit --memory-mode simulate (the CLI default is
+    # 'benchmark', which would launch a GPU sub-node layer bench, so simulate
+    # must be passed explicitly), and no --load-benchmark / --memory-safety-margin.
+    assert cmd[cmd.index("--memory-mode") + 1] == "simulate"
     assert "--load-benchmark" not in cmd
     assert "--memory-safety-margin" not in cmd
     # --target-nodes is always passed so simulate-mode's get_dp_size sees
