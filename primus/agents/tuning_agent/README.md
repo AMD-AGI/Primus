@@ -4,15 +4,12 @@ LLM-driven iterative search for an optimal Primus parallelization
 configuration on a target cluster, using the **Primus Projection** tool
 (memory + simulate + optional benchmark) as an oracle.
 
-See:
-- [`docs/agents/tuning_agent.md`](../../../docs/agents/tuning_agent.md) — full
-  user/operator guide (modes, configuration, troubleshooting, worked
-  example).
-- [`docs/projection_optimizer.md`](../../../docs/projection_optimizer.md) —
-  design write-up, paper-ready problem statement, and the list of deferred
-  future features (cluster-spec retrieval, persistent memory cache,
-  agent-proposed scale-down models, telemetry plug-ins, calibration learning,
-  sub-agent test-proposer, …).
+See [`docs/tuning_agent.md`](../../../docs/tuning_agent.md) — the full
+user/operator guide (modes, configuration, troubleshooting, worked example)
+plus the design write-up, paper-ready problem statement, and the list of
+deferred future features (cluster-spec retrieval, persistent memory cache,
+agent-proposed scale-down models, telemetry plug-ins, calibration learning,
+sub-agent test-proposer, …).
 
 ## Install
 
