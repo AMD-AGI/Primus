@@ -70,6 +70,7 @@ class EvalResult:
 # Per-trial YAML generation
 # ---------------------------------------------------------------------------
 
+
 def _build_pipeline_layout(num_layers: int, pp: int, vpp: int) -> str | None:
     """Build a Primus ``pipeline_model_parallel_layout`` string for the
     given (pp, vpp) split of ``num_layers``.
