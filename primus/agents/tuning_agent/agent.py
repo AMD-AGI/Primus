@@ -386,7 +386,7 @@ def run_agent(
                     tools=tools,
                     max_iterations=budget.max_rlm_iterations,
                 )
-                result = rlm(
+                rlm(
                     plan=plan_blob,
                     architecture=json.dumps(arch.as_prompt_dict()),
                     cluster=_cluster_blob(agent_cfg),

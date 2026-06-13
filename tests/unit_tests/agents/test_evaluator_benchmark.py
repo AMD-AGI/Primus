@@ -40,7 +40,6 @@ pytest.importorskip("primus.agents.tuning_agent.evaluator")
 
 from primus.agents.tuning_agent import evaluator as ev_mod  # noqa: E402
 from primus.agents.tuning_agent.evaluator import (  # noqa: E402
-    EvalResult,
     Evaluator,
     _build_env,
     _build_memory_cmd,

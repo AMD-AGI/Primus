@@ -33,9 +33,6 @@ import pytest
 
 pytest.importorskip("primus.core.projection.performance_projection.projection")
 
-from primus.core.projection.performance_projection import (  # noqa: E402
-    projection as proj,
-)
 from primus.core.projection.performance_projection.projection import (  # noqa: E402
     _BYTES_PER_GB,
     _add_io_layer_timings,
