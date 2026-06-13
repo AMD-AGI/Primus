@@ -14,9 +14,7 @@ GPU / no distributed init), so the tests are fast and deterministic.
 
 import pytest
 
-from primus.core.pipeline_parallel.scheduler.algorithms.base import (
-    PipelineScheduleAlgo,
-)
+from primus.core.pipeline_parallel.scheduler.algorithms.base import PipelineScheduleAlgo
 from primus.core.pipeline_parallel.scheduler.schedule_table_factory import (
     produce_schedule_instance,
 )
