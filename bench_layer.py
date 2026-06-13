@@ -53,6 +53,7 @@ def init_dist_ep8():
 
 SEQ = int(os.environ.get("BENCH_SEQ", "4096"))
 MBS = int(os.environ.get("BENCH_MBS", "1"))
+SHARED = os.environ.get("BENCH_SHARED", "1") == "1"
 H = 7168
 F = 2048
 E = 256
@@ -68,7 +69,7 @@ def build_config():
         num_moe_experts=E,
         moe_router_topk=K,
         moe_ffn_hidden_size=F,
-        moe_shared_expert_intermediate_size=F,
+        moe_shared_expert_intermediate_size=(F if SHARED else None),
         moe_grouped_gemm=True,
         moe_token_dispatcher_type="alltoall",
         moe_router_load_balancing_type="aux_loss",
@@ -80,6 +81,49 @@ def build_config():
         expert_model_parallel_size=8,
         sequence_parallel=False,
     )
+
+
+TPROF = os.environ.get("BENCH_TORCH_PROFILE", "0") == "1"
+
+
+def _torch_profile(layer, name, fwd, gy, iters=10):
+    """Kineto trace over fwd-only and fwd+bwd, print per-kernel CUDA breakdown."""
+    from torch.profiler import profile, ProfilerActivity, record_function
+
+    for _ in range(3):
+        y = fwd(); y.backward(gy)
+        layer.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for _ in range(iters):
+            with record_function("FWD"):
+                y = fwd()
+            with record_function("BWD"):
+                y.backward(gy)
+            layer.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+
+    if dist.get_rank() == 0:
+        ka = prof.key_averages()
+        # total device time over all GPU kernels
+        tot = sum(e.self_device_time_total for e in ka)
+        print(f"\n===== [{name}] torch.profiler kernel breakdown "
+              f"(iters={iters}, total GPU={tot/iters/1e3:.2f} ms/iter) =====", flush=True)
+        rows = sorted(ka, key=lambda e: e.self_device_time_total, reverse=True)
+        shown = 0
+        for e in rows:
+            dt = e.self_device_time_total
+            if dt <= 0:
+                continue
+            print(f"  {dt/iters/1e3:8.3f} ms  {e.key[:70]}", flush=True)
+            shown += 1
+            if shown >= 25:
+                break
+        path = f"/tmp/trace_{name}.json"
+        prof.export_chrome_trace(path)
+        print(f"  [trace] {path}", flush=True)
 
 
 def time_layer(layer, name, iters=20, warmup=5):
@@ -99,6 +143,9 @@ def time_layer(layer, name, iters=20, warmup=5):
         layer.zero_grad(set_to_none=True)
     dist.barrier()
     torch.cuda.synchronize()
+
+    if TPROF:
+        _torch_profile(layer, name, fwd, gy)
 
     # forward-only
     f_ev = [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
@@ -158,7 +205,7 @@ def main():
 
     if dist.get_rank() == 0:
         print(f"=== MoE layer bench: H={H} F={F} E={E} K={K} EP=8 "
-              f"seq={SEQ} mbs={MBS} b_per_rank={SEQ * MBS} ===", flush=True)
+              f"seq={SEQ} mbs={MBS} b_per_rank={SEQ * MBS} shared={SHARED} ===", flush=True)
 
     if args.which in ("baseline", "both"):
         from megatron.core.transformer.moe.moe_layer import MoELayer
