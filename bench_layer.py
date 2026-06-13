@@ -138,7 +138,12 @@ def main():
 
     init_dist_ep8()
     apply_te_workspace_shim()
-    set_args(SimpleNamespace(seq_length=SEQ, micro_batch_size=MBS))
+    # PrimusTopKRouter.routing reads these off the global args; set them so the
+    # standalone bench (no Primus patch/config) falls back to stock routing.
+    set_args(SimpleNamespace(seq_length=SEQ, micro_batch_size=MBS,
+                             enable_primus_turbo=False,
+                             moe_use_fused_router_with_aux_score=False,
+                             router_logit_softcapping=None))
 
     # Primus' logger isn't initialized in this bare harness; stub log_rank_0
     # (used in ROCMoELayer.__init__) to a plain rank-0 print before import.

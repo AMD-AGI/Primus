@@ -31,7 +31,6 @@ from megatron.core import utils as mcore_utils
 from megatron.core.tensor_parallel.layers import set_tensor_model_parallel_attributes
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import get_default_pg_collection
-from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.spec_utils import build_module
 from megatron.training.global_vars import get_args
 
@@ -75,10 +74,21 @@ class ROCMoELayer(MegatronModule):
         assert tp_size == 1, "ROCMoE bring-up supports TP=1 only"
         assert not config.sequence_parallel, "ROCMoE bring-up does not support sequence parallel"
 
-        # Router stays Megatron's (produces probs + boolean routing_map).
-        router_builder = TopKRouter
-        if submodules is not None and getattr(submodules, "router", None) is not None:
-            router_builder = submodules.router
+        # Router (produces probs + boolean routing_map).  Use the Primus
+        # (turbo) TopKRouter to stay aligned with the rest of Primus / the turbo
+        # baseline: the topk-router patch normally sets submodules.router to
+        # PrimusTopKRouter at spec-build time, but our ROCMoELayer is not the
+        # stock MoELayer (so that patch's MoELayer.__init__ fallback does not
+        # apply), and the standalone microbench builds the spec without the
+        # patch.  So: honor an explicitly-customized router, but replace a stock
+        # Megatron TopKRouter with PrimusTopKRouter.
+        from primus.backends.megatron.core.transformer.moe.router import (
+            PrimusTopKRouter,
+        )
+        router_builder = PrimusTopKRouter
+        sub_router = getattr(submodules, "router", None) if submodules is not None else None
+        if sub_router is not None and getattr(sub_router, "__name__", "") != "TopKRouter":
+            router_builder = sub_router
         self.router = router_builder(
             config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer
         )
