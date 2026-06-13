@@ -86,7 +86,7 @@ def debug_rank_0(msg, *args, **kwargs):
         log_func(msg, module_name, function_name, line)
 
 
-def debug_rank_all(msg, *args, **kwargs):
+def debug_rank_all(msg="", *args, **kwargs):
     log_func = logger.debug_with_caller
 
     caller = inspect.stack()[1]

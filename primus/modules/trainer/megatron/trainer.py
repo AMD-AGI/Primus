@@ -512,14 +512,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # with main branch behavior for "gpt" (default) case
         if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
-            if model_type == "mamba":
+            if model_type != "gpt":
                 self.model_provider = functools.partial(
                     primus_model_provider, get_model_provider(model_type=model_type)
                 )
             else:
                 self.model_provider = functools.partial(primus_model_provider, get_model_provider())
         else:
-            if model_type == "mamba":
+            # Pass model_type through for any non-gpt model (mamba, deepseek_v4, ...)
+            # so the correct builder is selected. Without this, deepseek_v4 falls
+            # back to the stock GPT builder (SelfAttention instead of
+            # DeepseekV4Attention) — which is what made the projection benchmark
+            # stock attention and ignore use_v4_triton_attention / compress_ratios.
+            if model_type != "gpt":
                 log_rank_0(f"-getting model provider for model_type={model_type}")
                 model_provider = get_model_provider(model_type=model_type)
                 log_rank_0(f"-model_provider: {model_provider}")
@@ -610,8 +615,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.do_valid,
             args.do_test,
             args.dataloader_type,
-            args.retro_project_dir,
-            args.retro_cyclic_train_iters,
         )
 
         # Print setup timing.
@@ -916,9 +919,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer = get_megatron_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
             )
         else:
@@ -931,9 +931,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer = get_megatron_muon_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
                 layer_wise_distributed_optimizer="dist" in config.optimizer,
             )
