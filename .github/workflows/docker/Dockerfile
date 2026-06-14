@@ -101,32 +101,6 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     fi
 
 # ---------------------------------------------------------------------------
-# Root-cause fix for the gfx942 hd128 backward crash (ROCm/aiter#1332): the base
-# image's transformer_engine bundles a STALE vendored libmha_bwd.so (old aiter)
-# that, via libck_fused_attn.so's DT_NEEDED, interposes the global symbol
-# `aiter::mha_bwd` over the freshly installed (pinned) aiter. Backward then runs
-# the old host dispatch, mis-selects the swa hd128 variant and launches with
-# gridDim.x=0 -> hipErrorInvalidValue -> 8-rank SIGABRT.
-# Rebuild only the backward device lib from the pinned aiter source
-# (op_tests/cpp/mha/compile.py --api bwd; reuses /opt/aiter, GPU_ARCHS drives
-# codegen so no GPU is needed at build) and overwrite the stale copy, so the
-# image is self-sufficient (no runtime shim). Forward (libmha_fwd.so) is the
-# non-crashing path and is left as-is. Skipped for JAX (no TE CK fused-attn).
-# TODO: drop once the base image ships a TE with updated aiter.
-RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
-    set -eux && \
-    TE_LIB_DIR="$(python3 -c 'import os, transformer_engine as te; print(os.path.join(os.path.dirname(te.__file__), "lib"))')" && \
-    echo "[te-vendored-aiter] stale: $(md5sum ${TE_LIB_DIR}/libmha_bwd.so)" && \
-    cd /opt/aiter/op_tests/cpp/mha && \
-    python3 compile.py --api bwd && \
-    nm -D libmha_bwd.so | grep -q "_ZN5aiter7mha_bwd" && \
-    cp -f libmha_bwd.so "${TE_LIB_DIR}/libmha_bwd.so" && \
-    echo "[te-vendored-aiter] rebuilt: $(md5sum ${TE_LIB_DIR}/libmha_bwd.so)" && \
-    python3 -c "import transformer_engine.pytorch" && \
-    rm -rf /opt/aiter/op_tests/cpp/mha/libmha_bwd.so /opt/aiter/aiter/jit/build; \
-    fi
-
-# ---------------------------------------------------------------------------
 # Install fixed origami (rocm-libraries@223648a) over the base image's bundled
 # 0.1.0. The bundled origami's rank_configs() raises
 # `ValueError: vector::reserve` during MoE grouped-gemm kernel selection and

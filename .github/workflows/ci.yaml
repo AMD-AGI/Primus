@@ -285,47 +285,6 @@ jobs:
           git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
           pip uninstall -y origami || true
           pip install ./shared/origami/python
-      - name: Preload aiter mha_bwd (RTLD_GLOBAL symbol-interposition shim)
-        run: |
-          # gfx942 hd128 backward crash workaround (ROCm/aiter#1332): the base image's TE
-          # bundles a STALE vendored libmha_bwd.so (old aiter) that interposes the global
-          # symbol `aiter::mha_bwd` over the fixed aiter -> backward mis-selects the swa
-          # variant -> gridDim.x=0 -> hipErrorInvalidValue -> SIGABRT. This job runs on the
-          # runner base env (not the fixed image), so instead of rebuilding TE we
-          # RTLD_GLOBAL-preload the fixed aiter's module_fmha_v3_bwd.so before TE import, via a
-          # sitecustomize on a PYTHONPATH-prepended dir (site-packages root is shadowed by
-          # /usr/lib's sitecustomize; LD_PRELOAD is unusable -- the .so hard-depends on
-          # libtorch and pollutes child processes). Gated by PRIMUS_AITER_MHA_PRELOAD=1.
-          # TEMPORARY: remove once the base image's TE vendored aiter is updated.
-          SHIM_DIR="${PRIMUS_WORKDIR}/aiter_preload_shim"
-          rm -rf "${SHIM_DIR}"
-          mkdir -p "${SHIM_DIR}"
-          cat > "${SHIM_DIR}/sitecustomize.py" <<'PYEOF'
-          import os
-
-          if os.environ.get("PRIMUS_AITER_MHA_PRELOAD", "0") == "1":
-              try:
-                  import ctypes
-                  import glob
-                  import importlib.util
-
-                  import torch  # noqa: F401  (bring libc10/libtorch_hip into scope for the aiter .so deps)
-
-                  # Locate the installed aiter package without importing/executing it.
-                  spec = importlib.util.find_spec("aiter")
-                  aiter_dir = os.path.dirname(spec.origin)
-                  cand = os.path.join(aiter_dir, "jit", "module_fmha_v3_bwd.so")
-                  if not os.path.exists(cand):
-                      # robust fallback: any module_fmha_v3_bwd.so under the aiter package
-                      hits = glob.glob(os.path.join(aiter_dir, "**", "module_fmha_v3_bwd.so"), recursive=True)
-                      cand = hits[0] if hits else cand
-                  ctypes.CDLL(cand, mode=ctypes.RTLD_GLOBAL)
-                  print(f"[aiter_preload_shim] RTLD_GLOBAL preloaded aiter mha_bwd: {cand}", flush=True)
-              except Exception as e:  # pragma: no cover
-                  print(f"[aiter_preload_shim] aiter mha_bwd preload FAILED: {e}", flush=True)
-          PYEOF
-          echo "PYTHONPATH=${SHIM_DIR}${PYTHONPATH:+:${PYTHONPATH}}" >> $GITHUB_ENV
-          echo "PRIMUS_AITER_MHA_PRELOAD=1" >> $GITHUB_ENV
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
