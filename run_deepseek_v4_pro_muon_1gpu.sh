@@ -82,15 +82,30 @@ export NVTE_FUSED_ATTN_AOTRITON=1
 export NVTE_USE_CK_GEMM=0
 export NVTE_FLASH_ATTN=0
 
-# ---------- hipBLASLt: STOCK ONLY (container built-in gfx1250 catalog) ------
-# Hard-pinned to stock: no LD_PRELOAD, no tuned Tensile catalog, no env opt-in.
-# The tuned feba897 bundle DEADLOCKS on a backward-FP8 GSU split-K kernel on
-# this host (GPU wedge -> node reboot, debugged 2026-06-10), so this script
-# deliberately has no tuned path. Also do NOT export an empty
-# HIPBLASLT_TENSILE_LIBPATH into the container — a missing path breaks even
-# stock hipBLASLt ("Cannot read TensileLibrary...", HIPBLASLT Error: 3).
-unset HIPBLASLT_DIR HIPBLASLT_LD_PRELOAD HIPBLASLT_TENSILE_LIBPATH
-echo "[hipblaslt] STOCK (container built-in gfx1250 catalog); tuned path intentionally not supported here"
+# ---------- hipBLASLt: STOCK by default; opt-in TUNED (PRIMUS_TUNED_HIPBLASLT=1) -
+# Stock is the safe default: the older feba897 tuned bundle DEADLOCKED on a
+# backward-FP8 GSU split-K kernel on this host (GPU wedge -> node reboot,
+# 2026-06-10). PRIMUS_TUNED_HIPBLASLT=1 opts into a freshly built GridBased
+# gfx1250 tuned library (qwen3/dsv3 tuned; swept clean on dsv4 fwd shapes) via
+# LD_PRELOAD + HIPBLASLT_TENSILE_LIBPATH. This is a GUARDED EXPERIMENT: run with
+# a watchdog and expect a possible node reboot if the backward path still wedges.
+# NOTE: never export an EMPTY HIPBLASLT_TENSILE_LIBPATH into the container — a
+# missing path breaks even stock hipBLASLt ("Cannot read TensileLibrary...").
+export PRIMUS_TUNED_HIPBLASLT=${PRIMUS_TUNED_HIPBLASLT:-0}
+export HBL_TUNED_RELEASE=${HBL_TUNED_RELEASE:-/home/yanyuqin/hipblaslt/rocm-libraries/projects/hipblaslt/build/release}
+if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
+    if [ ! -f "$HBL_TUNED_RELEASE/library/libhipblaslt.so.1" ]; then
+        echo "[hipblaslt] ERROR: tuned lib not found at $HBL_TUNED_RELEASE/library/libhipblaslt.so.1" >&2
+        exit 1
+    fi
+    # LD_PRELOAD / LD_LIBRARY_PATH are injected INSIDE the container (below) so the
+    # image's own rocm/torch lib paths are preserved (prepend, not override).
+    export HIPBLASLT_TENSILE_LIBPATH="$HBL_TUNED_RELEASE/Tensile/library/gfx1250"
+    echo "[hipblaslt] TUNED (opt-in): libpath=$HIPBLASLT_TENSILE_LIBPATH, LD_PRELOAD=libhipblaslt.so.1 (GUARDED: watch for wedge)"
+else
+    unset HIPBLASLT_DIR HIPBLASLT_LD_PRELOAD HIPBLASLT_TENSILE_LIBPATH
+    echo "[hipblaslt] STOCK (container built-in gfx1250 catalog)"
+fi
 
 # ---------- REQUIRED gfx1250 RCCL AVG->SUM workaround -----------------------
 export PYTHONPATH="$SCRIPT_DIR/rccl_avg_workaround:${PYTHONPATH:-}"
@@ -139,7 +154,10 @@ export PRIMUS_MODEL=${PRIMUS_MODEL:-deepseek_v4_pro}
 export PRIMUS_TP=${PRIMUS_TP:-1}
 export PRIMUS_PP=${PRIMUS_PP:-1}
 export PRIMUS_EP=${PRIMUS_EP:-1}
-export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-4}
+# 3 layers (down from 4): the 22.3B/4-layer model sits at ~94% of the 432GB
+# gfx1250 and OOMs at iter 2 (each V4-Pro layer ≈5B params ≈ ~87GB with Muon
+# fp32 states). Dropping the last layer frees the headroom for a warm step.
+export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-3}
 export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-48}
 export PRIMUS_MOE_TOPK=${PRIMUS_MOE_TOPK:-1}
 export PRIMUS_MOE_FFN_HIDDEN_SIZE=${PRIMUS_MOE_FFN_HIDDEN_SIZE:-3072}
@@ -204,6 +222,12 @@ export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-0}
 export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-0}
+
+# V4-Pro (22.3B params, Muon fp32 states) sits at ~94% of the 432GB gfx1250 and
+# OOMs at iter 2 with ~46GB "reserved but unallocated" (fragmentation). The HIP
+# caching allocator's expandable_segments reclaims that fragmentation; required
+# to reach a warm step (otherwise step 2 fails to allocate the Muon workspace).
+export PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-expandable_segments:True}
 
 export ENABLE_PRIMUS_TURBO=False
 if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "$USE_TURBO_DEEPEP" = "True" ] || [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
@@ -371,7 +395,8 @@ for v in DOCKER_IMAGE NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK NVTE_FUSED_ATTN_AOTRITO
          PRIMUS_TEAM PRIMUS_USER PRIMUS_EXP_NAME \
          PRIMUS_STACK_GROUPED_WEIGHT_TRITON PRIMUS_ROPE_TRITON \
          PRIMUS_SINKHORN_TRITON PRIMUS_HC_TRITON PRIMUS_INDEXER_TRITON \
-         PRIMUS_INDEXER_TRITON_FULL PRIMUS_V4_ROUTER_TRITON; do
+         PRIMUS_INDEXER_TRITON_FULL PRIMUS_V4_ROUTER_TRITON \
+         PYTORCH_ALLOC_CONF; do
     ENV_ARGS+=("--env" "$v")
 done
 [[ -n "${HIP_VISIBLE_DEVICES:-}" ]] && ENV_ARGS+=("--env" "HIP_VISIBLE_DEVICES")
@@ -382,6 +407,18 @@ done
 VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 [[ -d "$TE_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TE_WHEEL_DIR":"$TE_WHEEL_DIR")
 [[ -d "$TE_DIR" ]] && VOLUME_ARGS+=(-v "$TE_DIR":"$TE_DIR")
+# Opt-in tuned hipBLASLt: mount the built library at the same path and pass the
+# loader env into the container (only when enabled, to keep stock runs untouched).
+if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
+    VOLUME_ARGS+=(-v "$HBL_TUNED_RELEASE":"$HBL_TUNED_RELEASE")
+    ENV_ARGS+=("--env" "PRIMUS_TUNED_HIPBLASLT" "--env" "HIPBLASLT_TENSILE_LIBPATH" \
+               "--env" "HBL_TUNED_RELEASE")
+fi
+# Container-side loader injection for the tuned lib (prepends to the image's paths).
+HBL_PRELOAD_PREFIX=""
+if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
+    HBL_PRELOAD_PREFIX="export LD_LIBRARY_PATH=\"\$HBL_TUNED_RELEASE/library:\${LD_LIBRARY_PATH:-}\" && export LD_PRELOAD=\"\$HBL_TUNED_RELEASE/library/libhipblaslt.so.1\${LD_PRELOAD:+:\$LD_PRELOAD}\" && echo \"[hipblaslt] container LD_PRELOAD=\$LD_PRELOAD\" && "
+fi
 
 TE_INSTALL_PREFIX="\
     if ls ${TE_WHEEL_DIR}/transformer_engine-*.whl >/dev/null 2>&1; then \
@@ -405,6 +442,7 @@ docker run --rm \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         set -e && cd $PRIMUS_PATH && \
+        ${HBL_PRELOAD_PREFIX}\
         ${TE_INSTALL_PREFIX}\
         echo '==================== V4-PRO + MUON 1-GPU PROXY (gfx1250, BF16, eager, no profiler) ====================' && \
         EXP=$EXP PRIMUS_MODEL=$PRIMUS_MODEL GPUS_PER_NODE=1 NNODES=1 bash examples/run_pretrain.sh \
