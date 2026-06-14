@@ -203,9 +203,13 @@ export PRIMUS_MOE_ENABLE_EXPERT_BIAS=${PRIMUS_MOE_ENABLE_EXPERT_BIAS:-False}
 # Muon needs fp32 optimizer states (precision-aware off forces this anyway).
 OPT_DTYPE_ARGS="--main_grads_dtype fp32 --exp_avg_dtype fp32 --exp_avg_sq_dtype fp32"
 
-# ---------- Perf knobs: OFF for a robust first bring-up ---------------------
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-False}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-False}
+# ---------- Perf knobs: V4 Triton attention ON; turbo paths OFF ------------
+# V4 Triton attention backend (replaces the unfused/eager path). Covers the
+# dense + HCA layers (compress_ratio in {0, 128}) via USE_V4_TRITON_ATTENTION
+# and the CSA layers (compress_ratio == 4) via USE_V4_TRITON_CSA_ATTENTION.
+# Validated on gfx1250 after the WMMA tile-floor fix (06ae5214).
+export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
+export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
 export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
