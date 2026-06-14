@@ -1217,9 +1217,15 @@ def _launch_v4_csa_attention_pool_fwd_split(
     # ST x NW sweep (`p57/r2_sweep.sh`); BLOCK_K=32 ran out of LDS at
     # num_stages>=2 and regressed 2-3 x. The R2 win for cr=4 FWD comes
     # from the *local-SWA* kernel re-tile, not this kernel.
-    BLOCK_H = 64 if HQ >= 64 else triton.next_power_of_2(HQ)
-    if BLOCK_H > HQ:
-        BLOCK_H = max(triton.next_power_of_2(HQ), 16)
+    # BLOCK_H must be >= 16 so the head axis maps to a valid gfx1250 WMMA
+    # M-tile. Without the floor, HQ in {1, 2, 4, 8} (a power of two below
+    # 16 — e.g. high tensor-parallel head sharding, or tiny test shapes)
+    # leaves ``next_power_of_2(HQ) == HQ`` and the old ``BLOCK_H > HQ``
+    # guard never fired, so BLOCK_H stayed < 16 and the sparse ``tl.dot``
+    # failed to select a matrix-core intrinsic ("no matching matrix core
+    # intrinsic for wmma version 3 ... instruction shape [0, 0, K]").
+    # Surplus heads in the 16-wide tile are masked by H_DIVISIBLE/h_mask.
+    BLOCK_H = 64 if HQ >= 64 else max(triton.next_power_of_2(HQ), 16)
     BLOCK_K = 16
     BLOCK_DMODEL = D
     sparse_grid = (Sq, triton.cdiv(HQ, BLOCK_H), B)
