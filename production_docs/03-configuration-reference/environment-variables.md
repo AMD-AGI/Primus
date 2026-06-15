@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-This document catalogs environment variables you may encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow).
+This document catalogs the main environment variables you may encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow). It is a practical reference, not a complete list of every variable accepted by upstream libraries.
 
 **Legend**
 
@@ -108,7 +108,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NCCL_NET_PLUGIN` | (unset) | User | RCCL | Alternate network plugin (e.g. `librccl-anp.so`). |
 | `RCCL_MSCCL_ENABLE` | `0` | `base_env.sh` | RCCL | Enable MSCCL algorithms. |
 | `RCCL_MSCCLPP_THRESHOLD` | `1GiB` default | `base_env.sh` | RCCL | MSCCL++ message-size threshold. |
-| `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING` | `0` in hooks | `runner/helpers/hooks/03_enable_ainic.sh`, `enable_ainic.sh` | RCCL | Stricter GDR flush memory ordering; relevant for some NIC/GPU combos. |
+| `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING` | `0` in hooks | `runner/helpers/hooks/03_enable_ainic.sh` | RCCL | Stricter GDR flush memory ordering; relevant for some NIC/GPU combos. |
 | `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK` | `0` | `base_env.sh` | PyTorch + RCCL | Tensor allocator hook for NCCL registration. |
 | `TORCH_NCCL_HIGH_PRIORITY` | `1` | `base_env.sh` | PyTorch | High-priority NCCL streams. |
 
@@ -119,7 +119,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `HSA_ENABLE_SDMA` | `1` | `base_env.sh` | ROCm runtime | Enable SDMA engines for copies. |
-| `HSA_NO_SCRATCH_RECLAIM` | `0` | `base_env.sh`, container passthrough | ROCm runtime; documented for MoE stability | `1` keeps scratch allocated (often used for MoE stability). See [ROCR environment](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-7.1.1/environment_variables.html). |
+| `HSA_NO_SCRATCH_RECLAIM` | `1` | `base_env.sh`, container passthrough | ROCm runtime; documented for MoE stability | `1` keeps scratch allocated (often used for MoE stability). See [ROCR environment](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-7.1.1/environment_variables.html). |
 | `HIP_VISIBLE_DEVICES` | `0..GPUS_PER_NODE-1` | `base_env.sh` | ROCm device visibility | Restricts which GPU indices ROCm exposes. |
 | `ROCBLAS_DEFAULT_ATOMICS_MODE` | (unset) | User | `primus/modules/trainer/megatron/utils.py` | Read for deterministic / accuracy-sensitive GEMM behavior. |
 
@@ -139,7 +139,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `NVTE_ROCM_ENABLE_MXFP8` | `1` | `base_env.sh` | Transformer Engine on ROCm | Enable MXFP8 paths. |
-| `NVTE_CK_USES_BWD_V3` | `0` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
+| `NVTE_CK_USES_BWD_V3` | `1` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
 | `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / `examples/run_pretrain.sh`, container passthrough | TE / CK | Atomic FP32 mode for CK v3 backward. |
 | `PATCH_TE_FLASH_ATTN` | `0` | `base_env.sh`, container passthrough | `runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh` | Trigger TE flash-attn patch hook when `1`. |
 
@@ -199,7 +199,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 Forwarded keys:
 
-`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`
+`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`
 
 ---
 

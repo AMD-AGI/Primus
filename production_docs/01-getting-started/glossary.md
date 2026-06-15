@@ -6,7 +6,7 @@ Alphabetical reference for terms used in Primus documentation and configuration.
 
 ### AINIC
 
-**AMD Infinity NIC** — AMD’s high-performance network interface for multi-node GPU communication.
+**AMD Pensando™ Pollara 400 AI NICs** — AMD’s high-performance network interface for multi-node GPU communication.
 
 ---
 
@@ -186,7 +186,7 @@ Core **orchestrator**: loads configuration, resolves the backend, applies patche
 
 ### Primus-SaFE
 
-**Stability and Fault-tolerance Engine** — ecosystem component for **cluster management** and resilience (external to this repo).
+**Stability and Fault-tolerance Engine** — external ecosystem component for **cluster management** and resilience. This repository references it in auxiliary tooling but does not include a production integration guide.
 
 ---
 

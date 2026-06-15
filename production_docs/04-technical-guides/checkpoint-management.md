@@ -113,7 +113,7 @@ TorchTitan also defines `activation_checkpoint` (activation recomputation) separ
 
 ## 4. MaxText checkpoint configuration
 
-MaxText (JAX) uses configuration keys surfaced in Primus documentation and MaxText configs under `third_party/maxtext`. Typical training flags:
+MaxText (JAX) uses configuration keys surfaced in Primus documentation and MaxText configs under `third_party/maxtext`. Primus overlay presets set the defaults shown below, while upstream MaxText `base.yml` is still loaded at runtime via `base_config: "base.yml"` and may define different upstream defaults. Typical training flags:
 
 | Parameter | Typical default | Description |
 |-----------|-----------------|-------------|

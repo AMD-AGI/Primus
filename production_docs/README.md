@@ -42,13 +42,13 @@ Core workflows and day-to-day usage.
 
 ### [03 - Configuration Reference](./03-configuration-reference/)
 
-Complete parameter references for each backend and all environment variables.
+Parameter references for Primus presets, backend-facing keys, and commonly used environment variables.
 
-- [Megatron Parameters](./03-configuration-reference/megatron-parameters.md) -- all Megatron-LM backend YAML parameters
-- [TorchTitan Parameters](./03-configuration-reference/torchtitan-parameters.md) -- all TorchTitan backend YAML parameters
-- [MaxText Parameters](./03-configuration-reference/maxtext-parameters.md) -- all MaxText (JAX) backend YAML parameters
-- [Megatron Bridge Parameters](./03-configuration-reference/megatron-bridge-parameters.md) -- all Megatron Bridge backend YAML parameters
-- [Environment Variables](./03-configuration-reference/environment-variables.md) -- comprehensive reference for all environment variables
+- [Megatron Parameters](./03-configuration-reference/megatron-parameters.md) -- Megatron-LM backend YAML parameters and Primus overrides
+- [TorchTitan Parameters](./03-configuration-reference/torchtitan-parameters.md) -- Primus TorchTitan preset keys and common JobConfig fields
+- [MaxText Parameters](./03-configuration-reference/maxtext-parameters.md) -- Primus MaxText overlay defaults and common fields
+- [Megatron Bridge Parameters](./03-configuration-reference/megatron-bridge-parameters.md) -- Megatron Bridge recipe, SFT, and pretraining fields surfaced through Primus
+- [Environment Variables](./03-configuration-reference/environment-variables.md) -- practical reference for commonly encountered environment variables
 
 ### [04 - Technical Guides](./04-technical-guides/)
 
@@ -116,7 +116,7 @@ For contributors and maintainers.
 ## External Resources
 
 - [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) -- high-performance operators and kernels
-- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) -- stability and platform layer
+- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) -- external stability/platform layer; this repository does not include a production integration guide
 - [AMD ROCm Documentation](https://rocm.docs.amd.com/)
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
 - [TorchTitan](https://github.com/pytorch/torchtitan)

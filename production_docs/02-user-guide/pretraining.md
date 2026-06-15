@@ -34,7 +34,7 @@ From the repository root, with Docker or Podman available:
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
-This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.1` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
+This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.2` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
 
 ### Example walkthrough: `llama2_7B-BF16-pretrain.yaml`
 
@@ -117,7 +117,7 @@ The following files ship in the repository (sorted by name). Parallelism columns
 ### Multi-node training with Slurm
 
 ```bash
-./runner/primus-cli slurm srun -N 4 -p <partition> -- container -- train pretrain \
+./runner/primus-cli slurm srun -N 4 -p <partition> -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -246,7 +246,7 @@ NNODES=1 bash ./examples/run_slurm_pretrain.sh
 
 ## Supported models (summary)
 
-The tables in the Megatron, TorchTitan, and MaxText sections list **every** `examples/**/configs/MI300X/*.yaml` file in this repository for those backends. Use them as the authoritative list of shipped example configs.
+The tables in the Megatron, TorchTitan, and MaxText sections are curated MI300X examples from this repository. Use the filesystem under `examples/<backend>/configs/` as the authoritative inventory because new presets and hardware-specific examples may be added without a full rewrite of this guide.
 
 | Backend | Example region | Parallelism vocabulary |
 | --- | --- | --- |

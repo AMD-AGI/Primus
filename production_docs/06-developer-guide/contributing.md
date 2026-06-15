@@ -33,7 +33,7 @@ This guide summarizes how to set up a development environment, follow project co
 5. **Quick verification** (from the repository root, with Primus on your `PATH` or via the bundled launcher):
 
    ```bash
-   ./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+   ./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
    ```
 
 ## 2. Code Style
@@ -56,7 +56,7 @@ isort --profile black .
 autoflake --remove-all-unused-imports --remove-unused-variables --expand-star-imports --ignore-init-module-imports --recursive --in-place .
 ```
 
-CI runs autoflake, isort, and black in **check** mode (see [Testing Guide](testing.md) and `.github/workflows/ci.yaml`).
+CI runs `pre-commit run --all-files --show-diff-on-failure`, so lint behavior follows `.pre-commit-config.yaml` rather than a separate hand-written list of formatter commands.
 
 ## 3. Branch Naming Convention
 

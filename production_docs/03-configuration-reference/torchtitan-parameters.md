@@ -1,6 +1,6 @@
 # TorchTitan Backend Configuration Reference
 
-This page lists **all** configuration keys available to Primus when `framework: torchtitan`. Defaults are taken from the TorchTitan module preset (`pre_trainer.yaml`), its `extends` chain (`module_base.yaml`, `quantize.yaml`), and the example model preset `llama3_8B.yaml`.
+This page lists Primus preset keys and common TorchTitan `JobConfig` fields used when `framework: torchtitan`. Defaults are taken from the TorchTitan module preset (`pre_trainer.yaml`), its `extends` chain (`module_base.yaml`, `quantize.yaml`), and the example model preset `llama3_8B.yaml`. It is not a complete upstream TorchTitan `JobConfig` reference.
 
 **Where parameters live.** Provide overrides under `modules.pre_trainer.overrides:` in your experiment YAML. TorchTitan’s `JobConfig` is hierarchical: use **dot notation** for flat overrides, or nest YAML objects under `overrides`—both are equivalent when merged.
 
@@ -63,8 +63,8 @@ modules:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `training.mock_data` | `true` | Use synthetic data instead of reading `dataset_path`. |
-| `training.debug_moe_force_load_balance` | `false` | Debug helper to force MoE load balancing behavior. |
+| `training.mock_data` | `true` | Primus preset extension: use synthetic data instead of reading `dataset_path`. |
+| `training.debug_moe_force_load_balance` | `false` | Primus preset extension/debug helper to force MoE load balancing behavior. |
 | `training.dataset` | `c4` | Dataset name key for TorchTitan dataset loaders. |
 | `training.dataset_path` | `null` | Filesystem or remote path to dataset assets. |
 | `training.deterministic` | `false` | Prefer deterministic algorithms (often slower). |

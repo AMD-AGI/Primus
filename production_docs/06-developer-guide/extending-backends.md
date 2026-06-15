@@ -9,7 +9,7 @@ The runtime is built around:
 - **`BaseTrainer`** – defines the minimal training lifecycle that all backends follow
 - **`PrimusRuntime`** – orchestrates config loading, environment setup, patches, adapter, and trainer
 
-The examples below use a minimal **`dummy`** backend, but the pattern is the same for real backends (Megatron, TorchTitan, MaxText, and so on).
+The examples below use a minimal **`dummy`** backend as a template. The dummy files are illustrative and are not checked into this repository; existing backends such as Megatron, TorchTitan, MaxText, Megatron Bridge, and HummingbirdXT show the production pattern.
 
 ---
 
@@ -36,15 +36,14 @@ the runtime (`PrimusRuntime`) does roughly:
    # run "build_args" patches and merge back into module_config.params
    ```
 
-8. Detect backend version (for patches) via `adapter.detect_backend_version()`
-9. Load and construct the trainer:
+8. Load and construct the trainer:
 
    ```python
    TrainerClass = adapter.load_trainer_class(stage=module_config.params.stage or "pretrain")
    trainer = TrainerClass(backend_args=backend_args)
    ```
 
-10. Execute the trainer lifecycle (with patches around it):
+9. Execute the trainer lifecycle (with patches around it). Backend version detection is lazy during patch handling through `adapter.detect_backend_version()` rather than a separate pre-trainer step:
 
     ```python
     # PrimusRuntime:
@@ -91,7 +90,7 @@ This mirrors the pattern used by existing backends (for example Megatron, TorchT
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any
 
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
@@ -115,17 +114,23 @@ class DummyAdapter(BackendAdapter):
         log_rank_0("[Primus:DummyAdapter] setup_backend_path: no-op for in-tree dummy backend")
         return ""
 
-    def convert_config(self, config: Any) -> Dict[str, Any]:
+    def convert_config(self, params: Any) -> Any:
         """
-        Convert Primus ModuleConfig → backend-specific args.
+        Convert Primus module params → backend-specific args.
 
         For a real backend you would build a structured args object. Here we
-        just wrap `config.params` in a SimpleNamespace.
+        just wrap the incoming params in a SimpleNamespace.
         """
-        params = getattr(config, "params", {}) or {}
-        backend_args = SimpleNamespace(**params)
+        if isinstance(params, dict):
+            backend_args = SimpleNamespace(**params)
+        else:
+            backend_args = params
         log_rank_0("[Primus:DummyAdapter] Converted Primus params -> dummy backend_args")
         return backend_args
+
+    def detect_backend_version(self) -> str:
+        """Return a version string used by patch filtering."""
+        return "dummy-0.1"
 
     def load_trainer_class(self, stage: str = "pretrain"):
         """Return the Trainer class for the specified training stage."""
@@ -218,7 +223,7 @@ At runtime, when `framework: dummy` is requested:
 
 ## Minimal config example
 
-Create an experiment YAML (simplified; full example in the next section):
+Create an experiment YAML (simplified; full template in the next section):
 
 ```yaml
 modules:
@@ -234,10 +239,10 @@ Run:
 ./primus-cli direct -- train pretrain --config examples/dummy/configs/dummy_8B-pretrain.yaml
 ```
 
-You should see logs similar to:
+Because this dummy backend is an in-tree template and `setup_backend_path()` is a no-op, you should see logs similar to:
 
-- `[Primus:dummy] sys.path.insert → .../third_party/dummy`
-- `[Primus:dummy] Backend prepared`
+- `[Primus:DummyAdapter] setup_backend_path: no-op for in-tree dummy backend`
+- `[Primus:DummyAdapter] Converted Primus params -> dummy backend_args`
 - `[DummyPretrainTrainer] setup()`
 - `[DummyPretrainTrainer] init()`
 - `[DummyPretrainTrainer] train()`
@@ -246,7 +251,7 @@ You should see logs similar to:
 
 ## Example end-to-end YAML configs
 
-This example mirrors the Megatron pattern:
+This template mirrors the Megatron pattern. Create these files only when you are actually adding a dummy backend for local development or tests:
 
 - The **top-level experiment config** lives under `examples/<backend>/configs/...`
 - The **module config** is resolved from `primus/configs/modules/{framework}/`
@@ -331,8 +336,8 @@ Run:
 Primus will:
 
 - load `examples/dummy/configs/dummy_8B-pretrain.yaml`
-- resolve `dummy_trainer.config` → `primus/configs/modules/dummy/dummy_trainer.yaml`
-- resolve `dummy_trainer.model` → `primus/configs/models/dummy/dummy_8B.yaml`
+- resolve `modules.pre_trainer.config` → `primus/configs/modules/dummy/dummy_trainer.yaml`
+- resolve `modules.pre_trainer.model` → `primus/configs/models/dummy/dummy_8B.yaml`
 - build `module_config.params` from these sources plus `overrides`
 - call `DummyAdapter.convert_config(params)` to build `backend_args`
 - construct `DummyPretrainTrainer(backend_args=...)`

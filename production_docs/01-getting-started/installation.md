@@ -41,7 +41,7 @@ Containers match the tested ROCm + Python + framework combination and reduce hos
 ### 1. Pull the image
 
 ```bash
-docker pull docker.io/rocm/primus:v26.1
+docker pull docker.io/rocm/primus:v26.2
 ```
 
 ### 2. Clone the repository
@@ -58,8 +58,8 @@ cd Primus
 From the repository root:
 
 ```bash
-./primus-cli container --image rocm/primus:v26.1 -- \
-  benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli container --image rocm/primus:v26.2 -- \
+  benchmark gemm --M 4096 --N 4096 --K 4096
 ```
 
 A successful run exercises the GPU stack and Primus CLI wiring without launching a full training job.
@@ -100,7 +100,7 @@ Ensure your **PyTorch** and **ROCm** builds match AMD’s compatibility matrix f
 ### 3. Run a verification benchmark
 
 ```bash
-./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
 ```
 
 ---
@@ -130,8 +130,8 @@ Exact names may vary with your scheduler integration; align with your cluster’
 Two nodes, container image on the worker command line:
 
 ```bash
-./primus-cli slurm srun -N 2 -- container --image rocm/primus:v26.1 -- \
-  benchmark gemm -M 4096
+./primus-cli slurm srun -N 2 -- \
+  benchmark gemm --M 4096
 ```
 
 Adjust partition, account, GPU GRES, and bind mounts to match your site. For production training, mount datasets, caches, and artifact directories as needed.
@@ -143,7 +143,7 @@ Adjust partition, account, GPU GRES, and bind mounts to match your site. For pro
 | Step | Check |
 |------|--------|
 | **ROCm** | `rocm-smi` shows expected GPUs and no driver errors. |
-| **Container engine** | `docker run --rm ... rocm/primus:v26.1` (or your site’s GPU test) succeeds. |
+| **Container engine** | `docker run --rm ... rocm/primus:v26.2` (or your site’s GPU test) succeeds. |
 | **GEMM benchmark** | `./primus-cli` **container** or **direct** benchmark completes (see sections above). |
 | **Preflight** | Run preflight diagnostics against your cluster when available (`primus/tools/preflight/` in-repo docs). |
 

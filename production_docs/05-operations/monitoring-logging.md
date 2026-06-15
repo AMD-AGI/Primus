@@ -217,12 +217,6 @@ Collection is evaluated where `log_throughput` drives the extended iteration log
 
 **MLflow** (Megatron, when enabled): Parameters, environment snapshot, and git metadata artifact provide a structured record of the run configuration and repository state.
 
-**Merged configuration export**
+**Resolved configuration**
 
-Use the CLI to write the **fully merged** experiment YAML (after presets, `extends`, and overrides):
-
-```bash
-primus-cli train --config path/to/experiment.yaml --export_config /path/to/merged.yaml
-```
-
-`PrimusParser.export` writes the resolved `exp` object to YAML (`primus/core/launcher/parser.py`). This is the authoritative way to archive the exact configuration Primus will use, alongside log files and checkpoints under `exp_root`.
+The launcher and parser accept `--export_config`, but the default core training path (`primus/cli/subcommands/train.py` into `PrimusRuntime`) does not currently write a resolved YAML file. Archive the submitted experiment YAML, any referenced presets, launcher config, and runtime logs with each run. Treat resolved-config export as a legacy or future capability unless your deployment has implemented it on the core runtime path.

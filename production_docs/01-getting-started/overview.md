@@ -21,7 +21,7 @@
 | **Preflight diagnostics** | Cluster-oriented checks for host, GPU, and network health before long jobs. |
 | **Performance projection** | Tools to estimate memory use and throughput without occupying a full cluster. |
 
-Workflows span **pretraining**, **post-training** (including SFT and LoRA), and **RL-oriented** pipelines, depending on backend and recipe support.
+Workflows span **pretraining** and **post-training** (including SFT and LoRA). Some Megatron configuration files include RL-related parameters, but this doc set does not treat RL workflows as publication-ready until maintainers add examples and support guidance.
 
 ---
 
@@ -49,7 +49,7 @@ Primus-LM sits between stability/platform services and low-level operators:
                     +------------------+
 ```
 
-- **Primus-SaFE**: Stability and fault-tolerance oriented cluster management (external component).
+- **Primus-SaFE**: Stability and fault-tolerance oriented cluster management referenced by auxiliary tooling, but not documented here as an in-repo production integration.
 - **Primus-LM**: Training orchestration, backends, CLI, and configs (this repository).
 - **Primus-Turbo**: High-performance operators (for example FlashAttention-style kernels, GEMM, collectives).
 
@@ -75,7 +75,7 @@ Backend choice is expressed in experiment YAML and resolved through Primus’s a
 |------|----------------|
 | **GPUs** | AMD Instinct **MI300X**, **MI325X**, **MI355X** |
 | **Platform** | **ROCm** (version **≥ 7.0** recommended) |
-| **Container image (reference)** | `docker.io/rocm/primus:v26.1` |
+| **Container image (reference)** | `docker.io/rocm/primus:v26.2` |
 
 Exact kernel and driver packages should match AMD’s documentation for your GPU SKU and ROCm release.
 
