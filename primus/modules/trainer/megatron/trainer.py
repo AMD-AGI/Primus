@@ -648,7 +648,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_dataiters_finish_time"] = one_logger_utils.get_timestamp_in_ms()
 
         # Track if training is enabled. Can only be done once args.do_train is assigned after dataloader is built.
-        one_logger_utils.track_config_flags(
+        # The pinned Megatron-LM's ``track_config_flags`` signature varies (6 vs 8
+        # positional args across commits); pass only what the installed version accepts.
+        import inspect as _inspect
+
+        _tcf_args = [
             args.train_iters,
             args.skip_train,
             args.do_train,
@@ -657,7 +661,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.dataloader_type,
             args.retro_project_dir,
             args.retro_cyclic_train_iters,
-        )
+        ]
+        try:
+            _tcf_nparams = len(_inspect.signature(one_logger_utils.track_config_flags).parameters)
+        except (TypeError, ValueError):
+            _tcf_nparams = len(_tcf_args)
+        one_logger_utils.track_config_flags(*_tcf_args[:_tcf_nparams])
 
         # Print setup timing.
         log_rank_0("done with setup ...")
