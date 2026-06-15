@@ -4,10 +4,13 @@ The **Tuning Agent** is an LLM-driven search for a near-optimal Primus
 **training configuration** — the full parallelism strategy *plus* the coupled
 batching, pipeline-schedule, memory, MoE-communication, and precision knobs —
 on a target GPU cluster, **without running the workload at scale**. It drives
-the [Primus Projection](./projection.md) tool (memory + simulate + optional
-benchmark) as an evaluation oracle and returns the configuration that maximizes
-`tokens/s/GPU` subject to a per-GPU memory safety margin. See
-[Knobs Searched](#knobs-searched) for the full set of levers it tunes.
+the [Primus Projection](./projection.md) tool as an evaluation oracle. Projection
+provides two estimates — **memory** and **performance** — each of which runs
+**benchmark-anchored by default** (measuring what fits on a sub-node run and
+scaling the rest analytically) with a fully analytical **no-GPU `simulate`**
+fallback. The agent returns the configuration that maximizes `tokens/s/GPU`
+subject to a per-GPU memory safety margin. See [Knobs Searched](#knobs-searched)
+for the full set of levers it tunes.
 
 - **Package**: [`primus/agents/tuning_agent/`](../primus/agents/tuning_agent/)
 - **Entry point**: `python -m primus.agents.tuning_agent`
@@ -562,11 +565,14 @@ These are honest caveats, not future features:
    fragmentation, and communication scratch are not fully modeled. The
    `memory_safety_margin` compensates conservatively; the benchmark-based
    memory path (see `projection.md`) closes most of this gap.
-3. **Search-space explosion** with all axes on. The agent mitigates by tiering
-   — coarse over (TP, PP, EP, CP), polish over (MBS, schedule, recompute).
+3. **Search-space explosion** with all axes on. The agent mitigates with an
+   impact-ordered deterministic seed plan — high-leverage levers first
+   (recompute, MoE DeepEP / sync-free, FP8, then schedule and VPP/MBS
+   neighbors), with the broad TP×PP×EP×CP grid evaluated last and capped by
+   `--seed-budget` — so the LLM starts from an informed incumbent and spends
+   its budget on polish.
 4. **Cluster-description lossiness**: averaged bandwidth/latency cannot capture
    contention or per-rail asymmetry.
-5. **Schedule × VPP legality** is a coded table, not delegated to the LLM.
 
 ---
 
@@ -600,11 +606,13 @@ compute for one-to-two orders of magnitude less activation memory on MoE layers.
 
 We formulate the search as **LLM-as-policy over a hybrid analytical /
 benchmark-driven evaluator**. The evaluator is the Primus Projection tool,
-which provides three calls of increasing fidelity and cost: (i) an analytical
-**memory projection**; (ii) a fully analytical **performance projection** built
-on the Origami GEMM model and an SDPA simulator; and (iii) a **hybrid
-benchmark** that measures per-layer compute on as few as one GPU and
-analytically scales PP/EP/DP to the target cluster. The LLM proposes candidate
+which provides three calls of increasing fidelity and cost: (i) a **memory
+projection** that runs either analytically (no GPU) or, by default,
+benchmark-anchored — measuring the real per-rank peak on a sub-node run and
+extrapolating it for an OOM-accurate estimate; (ii) a fully analytical
+**performance projection** built on the Origami GEMM model and an SDPA
+simulator; and (iii) a **hybrid benchmark** that measures per-layer compute on
+as few as one GPU and analytically scales PP/EP/DP to the target cluster. The LLM proposes candidate
 configurations conditioned on the resolved architecture, the cluster
 description, and the history of prior trials; the evaluator returns memory
 feasibility, throughput, and a structured breakdown. The loop returns, within a
@@ -634,10 +642,11 @@ analytical predictions.
    levers (FP8, MoE DeepEP / sync-free, fused cross-entropy,
    distributed-optimizer / FSDP2) — restricted by per-architecture legality.
    See [Knobs Searched](#knobs-searched) for the complete list.
-5. Two evaluator paths: a **no-GPU path** (`projection memory` + `projection
-   performance --profiling-mode simulate`), always available; and a
-   **with-GPU path** that adds benchmark runs for promising candidates and
-   periodic calibration.
+5. Two evaluator paths: a **no-GPU path** (`projection memory --memory-mode
+   simulate` + `projection performance --profiling-mode simulate`), always
+   available; and a **with-GPU path** that uses the default benchmark-anchored
+   memory and performance projections for OOM-accurate feasibility and
+   higher-fidelity throughput on promising candidates.
 6. LLM driven via **DSPy/LiteLLM** (no separate proxy process); provider,
    model, and budget are user-configurable.
 7. Output: the best legal configuration (YAML overlay + `PRIMUS_*` env
@@ -691,10 +700,11 @@ the agent small.
 2. **Memory-projection blind spots** — A2A buffers, allocator fragmentation,
    and comm scratch are not modeled analytically; the benchmark-based memory
    projection closes most of this gap by anchoring on a measured peak.
-3. **Search-space explosion** — mitigated by tiering.
+3. **Search-space explosion** — mitigated by an impact-ordered deterministic
+   seed plan (high-leverage levers first, broad parallelism grid last) plus
+   LLM-guided search from the seed incumbent.
 4. **Cluster-description lossiness** — averaged bandwidth/latency cannot capture
    contention or per-rail asymmetry.
-5. **Schedule × VPP legality** must be a coded table, not delegated to the LLM.
 
 ---
 
