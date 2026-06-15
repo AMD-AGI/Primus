@@ -109,9 +109,14 @@ def project_inference_memory(
     max_conc = None
     fits = None
     if hbm_bytes is not None:
-        free_for_kv = hbm_bytes - weight_bytes - activation_bytes
+        # Serving engines only hand a fraction of HBM to the runtime (vLLM
+        # gpu_memory_utilization / SGLang mem_fraction_static); the rest is
+        # reserved for the driver/CUDA context and fragmentation headroom.
+        fraction = inference_config.request_config.kv_cache_memory_fraction
+        usable_bytes = int(hbm_bytes * float(fraction)) if fraction else hbm_bytes
+        free_for_kv = usable_bytes - weight_bytes - activation_bytes
         max_conc = max_concurrent_sequences(inference_config, layers_on_rank, free_for_kv)
-        fits = total <= hbm_bytes
+        fits = total <= usable_bytes
 
     result = InferenceMemoryResult(
         rank=eff_rank,
@@ -149,6 +154,11 @@ def _print_memory(inference_config: InferenceConfig, r: InferenceMemoryResult) -
     print(f"  Projected Total Memory:   {r.total_bytes / _GB:.4f} GB")
     if r.hbm_capacity_bytes is not None:
         print(f"  HBM capacity:             {r.hbm_capacity_bytes / _GB:.4f} GB")
+        if req.kv_cache_memory_fraction:
+            usable = r.hbm_capacity_bytes * float(req.kv_cache_memory_fraction)
+            print(
+                f"  Usable HBM (frac={req.kv_cache_memory_fraction:.2f}): {usable / _GB:.4f} GB"
+            )
         print(f"  Fits:                     {r.fits}")
         print(f"  Max concurrent sequences: {r.max_concurrent_sequences}")
     print("=" * 100)

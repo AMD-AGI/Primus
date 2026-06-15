@@ -486,6 +486,13 @@ def _add_inference_args(parser):
         default=None,
         help="Per-GPU HBM capacity (GB). When set, reports fit + max concurrency.",
     )
+    parser.add_argument(
+        "--kv-cache-memory-fraction",
+        type=float,
+        default=None,
+        help="Fraction of HBM the engine may use (vLLM gpu_memory_utilization / "
+        "SGLang mem_fraction_static). Bounds usable HBM + max concurrency. Default: full HBM.",
+    )
     # ---- Feature B: custom collective ops ----
     coll = parser.add_argument_group("inference collectives (feature B)")
     coll.add_argument(
@@ -565,6 +572,14 @@ def _add_inference_args(parser):
         default=None,
         help="Fixed KV-cache transfer latency overhead (us).",
     )
+    dis.add_argument(
+        "--transfer-backend",
+        type=str,
+        default=None,
+        choices=["nixl", "mooncake", "mori"],
+        help="KV-transfer engine preset (sets link BW + latency unless overridden "
+        "by --kv-transfer-bw-gbps / --kv-transfer-latency-us).",
+    )
     # ---- Serving / continuous-batching dynamics ----
     serv = parser.add_argument_group("inference serving dynamics")
     serv.add_argument(
@@ -589,6 +604,14 @@ def _add_inference_args(parser):
         type=float,
         default=None,
         help="Extra cost fraction for mixed prefill+decode steps (PIECEWISE vs FULL CUDA graph). Default 0.",
+    )
+    serv.add_argument(
+        "--cudagraph-mode",
+        type=str,
+        default=None,
+        choices=["none", "piecewise", "full"],
+        help="CUDA-graph capture preset: 'none' (eager), 'piecewise', or 'full'. "
+        "Sets per-step overhead + mixed-batch penalty unless those are given explicitly.",
     )
     # Internal: marks this process as the spawned GPU benchmark worker.
     parser.add_argument(
