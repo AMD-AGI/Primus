@@ -59,6 +59,8 @@ class InferenceTrialConfig:
     # feature B: custom collective ops
     tp_allreduce_algo: str = "auto"
     ep_a2a_algo: str = "auto"
+    # MoE A2A backend: DeepEP overlaps dispatch/combine behind expert compute
+    use_turbo_deepep: bool = False
     # feature A: prefill/decode disaggregation
     disaggregate: bool = False
     prefill_tp: int | None = None
@@ -118,6 +120,7 @@ class InferenceAxisLegality:
     ep_a2a_algo: list[str] = field(
         default_factory=lambda: ["auto", "direct", "single_shot", "hierarchical"]
     )
+    use_turbo_deepep: list[bool] = field(default_factory=lambda: [False])
 
     def to_prompt_dict(self) -> dict:
         return {
@@ -129,6 +132,7 @@ class InferenceAxisLegality:
             "speculative_num_tokens": self.speculative_num_tokens,
             "tp_allreduce_algo": self.tp_allreduce_algo,
             "ep_a2a_algo": self.ep_a2a_algo,
+            "use_turbo_deepep": self.use_turbo_deepep,
         }
 
 
@@ -141,7 +145,8 @@ def derive_inference_legality(
     tp = sorted(set(_divisors(arch.num_attention_heads, gpn))
                 & set(_divisors(arch.hidden_size, gpn))) or [1]
     pp = _divisors(arch.num_layers, world) if arch.num_layers else [1]
-    if getattr(arch, "is_moe", False) and arch.num_experts:
+    is_moe = bool(getattr(arch, "is_moe", False))
+    if is_moe and arch.num_experts:
         ep = _divisors(arch.num_experts, world) or [1]
     else:
         ep = [1]
@@ -155,6 +160,10 @@ def derive_inference_legality(
     chunked_prefill_size = [0, 512, 1024, 2048]
     speculative_num_tokens = [0, 2, 4]
 
+    # DeepEP only matters for MoE (it overlaps the EP All-to-All); offer the
+    # on/off choice only when the workload is MoE.
+    use_turbo_deepep = [False, True] if is_moe else [False]
+
     return InferenceAxisLegality(
         tp=tp, pp=pp, ep=ep, cp=cp,
         batch_size=batch_size,
@@ -162,6 +171,7 @@ def derive_inference_legality(
         kv_cache_dtype=kv_cache_dtype,
         chunked_prefill_size=chunked_prefill_size,
         speculative_num_tokens=speculative_num_tokens,
+        use_turbo_deepep=use_turbo_deepep,
     )
 
 
@@ -188,6 +198,8 @@ def validate_inference(
         return False, "speculative_num_tokens must be >= 0"
     if not getattr(arch, "is_moe", False) and cfg.ep > 1:
         return False, "EP>1 is only meaningful for MoE workloads"
+    if cfg.use_turbo_deepep and not getattr(arch, "is_moe", False):
+        return False, "use_turbo_deepep is only meaningful for MoE workloads"
     if cfg.tp_allreduce_algo not in legality.tp_allreduce_algo:
         return False, f"tp_allreduce_algo={cfg.tp_allreduce_algo} not in {legality.tp_allreduce_algo}"
     if cfg.ep_a2a_algo not in legality.ep_a2a_algo:
@@ -318,6 +330,15 @@ def build_inference_seed_plan(
             feasible_tp = [t for t in leg.tp if t * ep <= world]
             tp_for_ep = max(feasible_tp) if feasible_tp else 1
             add(mk(tp=tp_for_ep, ep=ep, batch_size=16))
+
+    # 9b) MoE DeepEP — overlap the EP All-to-All behind expert compute. Only
+    #     meaningful with EP>1, so pair it with the largest feasible EP.
+    if is_moe:
+        ep_for_deepep = max([e for e in leg.ep if e in (2, 4, 8) and e <= world] or [1])
+        if ep_for_deepep > 1:
+            feasible_tp = [t for t in leg.tp if t * ep_for_deepep <= world]
+            tp_deepep = max(feasible_tp) if feasible_tp else 1
+            add(mk(tp=tp_deepep, ep=ep_for_deepep, batch_size=16, use_turbo_deepep=True))
 
     # 10) Feature B — custom collective ops. Force alternate algorithms for the
     #     dominant collective (TP AllReduce when TP>1, EP AllToAll for MoE).

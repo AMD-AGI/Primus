@@ -83,6 +83,7 @@ def _collect_inference_overrides(args) -> Dict[str, object]:
 
 def _print_performance(inference_config, perf) -> None:
     req = inference_config.request_config
+    mc = inference_config.model_config
     print("\n" + "=" * 100)
     print("[Primus:Inference] Performance Projection")
     print("=" * 100)
@@ -100,6 +101,9 @@ def _print_performance(inference_config, perf) -> None:
         )
     if req.kv_cache_dtype != "bf16":
         feats.append(f"kv_dtype={req.kv_cache_dtype}")
+    if getattr(mc, "use_turbo_deepep", False):
+        sync_free = getattr(mc, "turbo_sync_free_moe_stage", 0) or 0
+        feats.append("deepep" + (f"(sync_free={sync_free})" if sync_free else ""))
     if feats:
         print(f"  Features: {', '.join(feats)}")
     if perf.is_disaggregated:
@@ -193,6 +197,15 @@ def launch_projection_from_cli(args, overrides):
     inference_config = convert_primus_config_to_inference_config(
         primus_config, inference_overrides=inf_overrides
     )
+
+    # DeepEP / SyncFree (shared perf flags) — enable async EP All-to-All overlap
+    # for the serving projection, mirroring the training projection override.
+    if getattr(args, "enable_deepep", False):
+        inference_config.model_config.use_turbo_deepep = True
+    sync_free_stage = getattr(args, "sync_free_stage", 0) or 0
+    if sync_free_stage > 0:
+        inference_config.model_config.turbo_sync_free_moe_stage = sync_free_stage
+        inference_config.model_config.use_turbo_deepep = True
 
     mode = getattr(args, "inference_mode", "both") or "both"
     hbm_gb = getattr(args, "hbm_capacity_gb", None)

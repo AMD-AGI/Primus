@@ -547,6 +547,8 @@ def _build_inference_cmd(
         cmd += ["--tp-allreduce-algo", str(cfg.tp_allreduce_algo)]
     if getattr(cfg, "ep_a2a_algo", "auto") not in (None, "auto"):
         cmd += ["--ep-a2a-algo", str(cfg.ep_a2a_algo)]
+    if getattr(cfg, "use_turbo_deepep", False):
+        cmd += ["--enable-deepep"]
     # Feature A: prefill/decode disaggregation.
     if getattr(cfg, "disaggregate", False):
         cmd += ["--disaggregate"]

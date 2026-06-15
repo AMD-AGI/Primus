@@ -40,6 +40,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _calculate_single_node_config,
     _compute_micro_batches,
     _extract_layer_type_timings,
+    _get_deepep_overlap_efficiency,
     _has_dense_layers,
     _layer_needs_recompute_fwd_in_bwd,
     _limit_layers_for_projection,
@@ -399,3 +400,21 @@ def test_single_node_config_reduces_ep_for_moe():
     assert info["benchmark_ep"] == 8
     # num_experts reduced proportionally (experts_per_rank preserved = 1).
     assert info["benchmark_num_experts"] == 8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _get_deepep_overlap_efficiency  (DeepEP / SyncFree A2A-compute overlap ladder)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_deepep_overlap_efficiency_baseline():
+    # Called only when DeepEP is enabled; stage 0 is the plain-DeepEP baseline.
+    assert _get_deepep_overlap_efficiency(SimpleNamespace(turbo_sync_free_moe_stage=0)) == 0.65
+    # Missing field defaults to the baseline too.
+    assert _get_deepep_overlap_efficiency(SimpleNamespace()) == 0.65
+
+
+def test_deepep_overlap_efficiency_sync_free_ladder():
+    assert _get_deepep_overlap_efficiency(SimpleNamespace(turbo_sync_free_moe_stage=1)) == 0.75
+    assert _get_deepep_overlap_efficiency(SimpleNamespace(turbo_sync_free_moe_stage=2)) == 0.80
+    assert _get_deepep_overlap_efficiency(SimpleNamespace(turbo_sync_free_moe_stage=3)) == 0.85

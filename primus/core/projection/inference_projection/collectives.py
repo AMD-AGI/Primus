@@ -40,6 +40,29 @@ from primus.core.projection.training_config import (
 _PROTOCOLS = ("simple", "ll", "ll64", "ll128")
 
 
+def deepep_overlap_efficiency(model_config) -> float:
+    """Fraction of EP All-to-All hidden behind compute under DeepEP/SyncFree.
+
+    DeepEP issues the dispatch/combine asynchronously so the All-to-All
+    overlaps with grouped-GEMM expert compute. SyncFree stages progressively
+    remove CPU sync stalls and push the overlap higher. Returns ``0.0`` when
+    neither ``use_turbo_deepep`` nor ``turbo_sync_free_moe_stage`` is set.
+
+    The efficiency ladder mirrors the training projection's
+    ``_get_deepep_overlap_efficiency`` so serving and training agree.
+    """
+    sync_free_stage = getattr(model_config, "turbo_sync_free_moe_stage", 0) or 0
+    if not (getattr(model_config, "use_turbo_deepep", False) or sync_free_stage > 0):
+        return 0.0
+    if sync_free_stage >= 3:
+        return 0.85
+    if sync_free_stage >= 2:
+        return 0.80
+    if sync_free_stage >= 1:
+        return 0.75
+    return 0.65
+
+
 def _min_over_protocols(fn, args, msg_size, gpus, groups) -> float:
     """Run a low-level collective ``fn`` over every protocol, return the min (us)."""
     best = float("inf")
@@ -124,6 +147,10 @@ class InferenceCollectiveModel:
         self.hidden = model_config.hidden_size
         self.topk = getattr(model_config, "moe_router_topk", 2) or 2
 
+        # DeepEP / SyncFree overlap the EP All-to-All behind expert compute;
+        # the exposed A2A cost is scaled down by this fraction (0 = disabled).
+        self._deepep_overlap = deepep_overlap_efficiency(model_config)
+
         gpn = gpus_per_node if gpus_per_node else int(os.environ.get("GPUS_PER_NODE", "8"))
         nn = num_nodes if num_nodes else int(os.environ.get("NNODES", "1"))
         self._args = get_default_args(
@@ -187,8 +214,14 @@ class InferenceCollectiveModel:
                 raw = _min_over_protocols(cm.run_alltoall, self._args, msg, self.ep, ["ep"])
             # Forced algorithms must carry the same fixed overhead as ``auto``.
             one = raw + _alltoall_overhead_us(self._args, self.ep)
-        # dispatch + combine.
-        return 2.0 * (one / 1000.0) * float(self.cc.ep_a2a_efficiency)
+        # dispatch + combine, scaled by the custom-op efficiency and reduced by
+        # the DeepEP/SyncFree compute-overlap fraction (exposed A2A only).
+        return (
+            2.0
+            * (one / 1000.0)
+            * float(self.cc.ep_a2a_efficiency)
+            * (1.0 - self._deepep_overlap)
+        )
 
     # -- Pipeline P2P ----------------------------------------------------------
 

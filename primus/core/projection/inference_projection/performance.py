@@ -39,7 +39,11 @@ from primus.core.projection.simulation_backends.factory import (
 )
 from primus.core.projection.training_config import InferenceConfig
 
-from .collectives import CommBreakdown, InferenceCollectiveModel
+from .collectives import (
+    CommBreakdown,
+    InferenceCollectiveModel,
+    deepep_overlap_efficiency,
+)
 
 
 def _safe_forward(profiler, batch: int, seq_len: int) -> float:
@@ -148,6 +152,11 @@ class InferencePerformanceProjector:
         self._moe_pattern = mc.moe_pattern or [0] * mc.num_layers
         self._n_moe = sum(1 for x in self._moe_pattern if x)
         self._n_dense = mc.num_layers - self._n_moe
+
+        # DeepEP / SyncFree EP-A2A compute-overlap fraction (0 = disabled).
+        # Applied to the *builtin* comm path here; the explicit comm model
+        # (``InferenceCollectiveModel``) applies the same factor internally.
+        self._deepep_overlap = deepep_overlap_efficiency(mc)
 
         # Feature B: explicit, knob-driven communication model. When enabled we
         # replace the layer profiler's *implicit* TP-AllReduce / EP-AllToAll
@@ -372,9 +381,16 @@ class InferencePerformanceProjector:
             comm.ep_a2a_ms = self._n_moe * new_ep_a2a * keep
             comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
         else:
-            # Implicit comm: add the built-in cost back onto (calibrated) compute.
+            # Implicit comm: add the built-in cost back onto (calibrated)
+            # compute. When DeepEP/SyncFree is enabled, the EP A2A overlaps
+            # expert compute, so charge only the exposed (non-overlapped)
+            # fraction of the raw A2A baked into the layer time.
+            eff_moe_comm = builtin_moe_comm
+            if self._deepep_overlap > 0 and has_moe:
+                a2a_raw = _estimate_moe_a2a_time_ms(self._view, batch, q_len, self._gemm)
+                eff_moe_comm = builtin_moe_comm - a2a_raw * self._deepep_overlap
             dense_fwd = dense_compute + builtin_dense_comm
-            moe_fwd = moe_compute + builtin_moe_comm
+            moe_fwd = moe_compute + eff_moe_comm
 
         layers = self._n_dense * dense_fwd + self._n_moe * moe_fwd
 
