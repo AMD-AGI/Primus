@@ -416,22 +416,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
     def get_dp_size(self) -> int:
         num_nodes = int(os.getenv("NNODES", "1"))
-        if num_nodes == 1:
-            # Calculate the minimum number of needed nodes
-            num_nodes = (
-                self.config.model_parallel_config.tensor_model_parallel_size
-                * self.config.model_parallel_config.context_model_parallel_size
-                * self.config.model_parallel_config.pipeline_model_parallel_size
-                * self.config.model_parallel_config.expert_model_parallel_size
-                // int(os.getenv("GPUS_PER_NODE", "8"))
-            )
-        world_size = num_nodes * int(os.getenv("GPUS_PER_NODE", "8"))
-        dp_size = (
-            world_size
-            // self.config.model_parallel_config.expert_model_parallel_size
-            // self.config.model_parallel_config.pipeline_model_parallel_size
+        gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+        mp = self.config.model_parallel_config
+        parallel_gpus = (
+            mp.tensor_model_parallel_size
+            * mp.context_model_parallel_size
+            * mp.pipeline_model_parallel_size
+            * mp.expert_model_parallel_size
         )
-        return dp_size
+        if num_nodes == 1:
+            # Minimum nodes to host the model-parallel mesh (ceil division).
+            # Plain ``parallel_gpus // gpus_per_node`` is 0 when mesh fits on
+            # one node (e.g. TP=PP=EP=CP=1), which breaks activation scaling.
+            num_nodes = max(1, (parallel_gpus + gpus_per_node - 1) // gpus_per_node)
+        world_size = num_nodes * gpus_per_node
+        dp_size = world_size // mp.expert_model_parallel_size // mp.pipeline_model_parallel_size
+        return max(1, dp_size)
 
     def get_num_bytes_per_param(self) -> float:
         dp_size = self.get_dp_size()
