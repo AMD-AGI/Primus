@@ -79,30 +79,6 @@ class EvalResult:
 # Per-trial YAML generation
 # ---------------------------------------------------------------------------
 
-_PARALLEL_OVERRIDES_KEYS = {
-    "tensor_model_parallel_size",
-    "pipeline_model_parallel_size",
-    "expert_model_parallel_size",
-    "context_parallel_size",
-    "num_virtual_stages_per_pipeline_rank",
-    "virtual_pipeline_model_parallel_size",
-    "micro_batch_size",
-    "global_batch_size",
-    "recompute_granularity",
-    "recompute_method",
-    "recompute_num_layers",
-    "overlap_grad_reduce",
-    "overlap_param_gather",
-    # Tier-A/B keys from the Primus Projection skill
-    "use_turbo_deepep",
-    "sync_free_stage",
-    "fp8",
-    "cross_entropy_loss_fusion",
-    "use_torch_fsdp2",
-    "use_distributed_optimizer",
-    "enable_zero_bubble",
-}
-
 
 def _build_pipeline_layout(num_layers: int, pp: int, vpp: int) -> str | None:
     """Build a Primus ``pipeline_model_parallel_layout`` string for the

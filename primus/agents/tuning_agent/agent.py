@@ -194,8 +194,10 @@ class TuningPlanSignature(dspy.Signature):
 
 
 class TuningSearchSignature(dspy.Signature):
-    """Drive an iterative search for the best parallelization configuration
-    of a distributed training workload, using the available tools.
+    """Drive an iterative search for the best training configuration of a
+    distributed training workload — the parallelism strategy plus the coupled
+    batching, pipeline-schedule, memory, MoE-communication, and precision knobs
+    — using the available tools.
 
     Tools available (call them from Python):
 
@@ -386,7 +388,7 @@ def run_agent(
                     tools=tools,
                     max_iterations=budget.max_rlm_iterations,
                 )
-                result = rlm(
+                rlm(
                     plan=plan_blob,
                     architecture=json.dumps(arch.as_prompt_dict()),
                     cluster=_cluster_blob(agent_cfg),
