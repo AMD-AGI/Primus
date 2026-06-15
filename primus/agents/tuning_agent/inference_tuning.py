@@ -61,11 +61,17 @@ class InferenceTrialConfig:
     ep_a2a_algo: str = "auto"
     # MoE A2A backend: DeepEP overlaps dispatch/combine behind expert compute
     use_turbo_deepep: bool = False
+    # CUDA-graph capture preset: none | piecewise | full (None = engine default)
+    cudagraph_mode: str | None = None
+    # fraction of HBM the engine may use (bounds usable HBM + max concurrency)
+    kv_cache_memory_fraction: float | None = None
     # feature A: prefill/decode disaggregation
     disaggregate: bool = False
     prefill_tp: int | None = None
     decode_tp: int | None = None
     decode_replicas: int = 1
+    # KV-transfer engine preset for disaggregation: nixl | mooncake | mori
+    transfer_backend: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -121,6 +127,15 @@ class InferenceAxisLegality:
         default_factory=lambda: ["auto", "direct", "single_shot", "hierarchical"]
     )
     use_turbo_deepep: list[bool] = field(default_factory=lambda: [False])
+    cudagraph_mode: list[str] = field(
+        default_factory=lambda: ["none", "piecewise", "full"]
+    )
+    kv_cache_memory_fraction: list[float] = field(
+        default_factory=lambda: [0.8, 0.85, 0.9]
+    )
+    transfer_backend: list[str] = field(
+        default_factory=lambda: ["nixl", "mooncake", "mori"]
+    )
 
     def to_prompt_dict(self) -> dict:
         return {
@@ -133,6 +148,9 @@ class InferenceAxisLegality:
             "tp_allreduce_algo": self.tp_allreduce_algo,
             "ep_a2a_algo": self.ep_a2a_algo,
             "use_turbo_deepep": self.use_turbo_deepep,
+            "cudagraph_mode": self.cudagraph_mode,
+            "kv_cache_memory_fraction": self.kv_cache_memory_fraction,
+            "transfer_backend": self.transfer_backend,
         }
 
 
@@ -204,6 +222,15 @@ def validate_inference(
         return False, f"tp_allreduce_algo={cfg.tp_allreduce_algo} not in {legality.tp_allreduce_algo}"
     if cfg.ep_a2a_algo not in legality.ep_a2a_algo:
         return False, f"ep_a2a_algo={cfg.ep_a2a_algo} not in {legality.ep_a2a_algo}"
+    if cfg.cudagraph_mode is not None and cfg.cudagraph_mode not in legality.cudagraph_mode:
+        return False, f"cudagraph_mode={cfg.cudagraph_mode} not in {legality.cudagraph_mode}"
+    if cfg.kv_cache_memory_fraction is not None and not (0.0 < cfg.kv_cache_memory_fraction <= 1.0):
+        return False, f"kv_cache_memory_fraction={cfg.kv_cache_memory_fraction} must be in (0, 1]"
+    if cfg.transfer_backend is not None:
+        if not cfg.disaggregate:
+            return False, "transfer_backend only applies when disaggregate is set"
+        if cfg.transfer_backend not in legality.transfer_backend:
+            return False, f"transfer_backend={cfg.transfer_backend} not in {legality.transfer_backend}"
 
     replica_gpus = cfg.tp * cfg.pp * (cfg.ep if getattr(arch, "is_moe", False) else 1)
     if replica_gpus > world:
@@ -324,6 +351,11 @@ def build_inference_seed_plan(
         add(mk(batch_size=16, chunked_prefill_size=1024))
     # 8) speculative decoding (latency)
     add(mk(speculative_num_tokens=4, speculative_acceptance_rate=0.7))
+    # 8b) CUDA-graph capture (per-step launch overhead / mixed-step penalty).
+    add(mk(batch_size=16, cudagraph_mode="full"))
+    add(mk(batch_size=16, cudagraph_mode="piecewise"))
+    # 8c) KV-cache memory fraction (usable HBM → max concurrency).
+    add(mk(batch_size=16, kv_cache_memory_fraction=0.9))
     # 9) MoE EP sweep — pick the largest TP that still fits with this EP.
     if is_moe:
         for ep in [e for e in leg.ep if e in (1, 2, 4, 8)]:
@@ -370,6 +402,18 @@ def build_inference_seed_plan(
                 prefill_tp=hi_tp,
                 decode_tp=lo_tp,
                 decode_replicas=dec_replicas,
+            )
+        )
+        # Same split, naming the KV-transfer engine (NIXL link preset).
+        add(
+            mk(
+                tp=lo_tp,
+                batch_size=16,
+                disaggregate=True,
+                prefill_tp=hi_tp,
+                decode_tp=lo_tp,
+                decode_replicas=dec_replicas,
+                transfer_backend="nixl",
             )
         )
 

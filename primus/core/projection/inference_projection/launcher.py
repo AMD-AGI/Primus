@@ -33,6 +33,8 @@ _ARG_TO_FIELD = {
     "serving_model": "serving_model",
     "decode_step_overhead_us": "decode_step_overhead_us",
     "mixed_batch_penalty": "mixed_batch_penalty",
+    "cudagraph_mode": "cudagraph_mode",
+    "kv_cache_memory_fraction": "kv_cache_memory_fraction",
 }
 
 # Feature B (custom collective ops): CLI arg → ``collective_<field>`` key.
@@ -57,6 +59,7 @@ _DISAGG_ARG_TO_FIELD = {
     "decode_replicas": "disagg_decode_replicas",
     "kv_transfer_bw_gbps": "disagg_kv_transfer_bw_gbps",
     "kv_transfer_latency_us": "disagg_kv_transfer_latency_us",
+    "transfer_backend": "disagg_transfer_backend",
 }
 
 _GB = 1024.0 ** 3
@@ -104,6 +107,10 @@ def _print_performance(inference_config, perf) -> None:
     if getattr(mc, "use_turbo_deepep", False):
         sync_free = getattr(mc, "turbo_sync_free_moe_stage", 0) or 0
         feats.append("deepep" + (f"(sync_free={sync_free})" if sync_free else ""))
+    if req.cudagraph_mode:
+        feats.append(f"cudagraph={req.cudagraph_mode}")
+    if req.kv_cache_memory_fraction:
+        feats.append(f"kv_mem_frac={req.kv_cache_memory_fraction:.2f}")
     if feats:
         print(f"  Features: {', '.join(feats)}")
     if perf.is_disaggregated:

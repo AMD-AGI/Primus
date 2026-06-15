@@ -549,6 +549,11 @@ def _build_inference_cmd(
         cmd += ["--ep-a2a-algo", str(cfg.ep_a2a_algo)]
     if getattr(cfg, "use_turbo_deepep", False):
         cmd += ["--enable-deepep"]
+    # Preset-style serving knobs (CUDA-graph capture, KV-cache memory fraction).
+    if getattr(cfg, "cudagraph_mode", None):
+        cmd += ["--cudagraph-mode", str(cfg.cudagraph_mode)]
+    if getattr(cfg, "kv_cache_memory_fraction", None):
+        cmd += ["--kv-cache-memory-fraction", str(cfg.kv_cache_memory_fraction)]
     # Feature A: prefill/decode disaggregation.
     if getattr(cfg, "disaggregate", False):
         cmd += ["--disaggregate"]
@@ -558,6 +563,8 @@ def _build_inference_cmd(
             cmd += ["--decode-tp", str(cfg.decode_tp)]
         if getattr(cfg, "decode_replicas", 1) and cfg.decode_replicas > 1:
             cmd += ["--decode-replicas", str(cfg.decode_replicas)]
+        if getattr(cfg, "transfer_backend", None):
+            cmd += ["--transfer-backend", str(cfg.transfer_backend)]
     if agent_cfg.target_cluster.gpu_clock_mhz:
         cmd += ["--gpu-clock-mhz", str(agent_cfg.target_cluster.gpu_clock_mhz)]
     return cmd

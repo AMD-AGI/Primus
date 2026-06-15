@@ -447,7 +447,7 @@ class InferencePerformanceProjector:
 
     def _decode_step_overhead_ms(self) -> float:
         """Fixed per-step host/launch overhead (CUDA-graph-reducible)."""
-        return max(0.0, float(self.cfg.request_config.decode_step_overhead_us)) / 1000.0
+        return max(0.0, self.cfg.request_config.resolved_decode_step_overhead_us()) / 1000.0
 
     def _decode_step_latency_ms(self, batch: int, kv_len: int, q_len: int = 1) -> float:
         # Benchmark-based: use the measured decode step directly (memory-bound,
@@ -532,7 +532,7 @@ class InferencePerformanceProjector:
             n_chunks = max(1, math.ceil(ISL / chunk))
             chunk_tokens = chunk
 
-        penalty = max(0.0, float(req.mixed_batch_penalty))
+        penalty = max(0.0, req.resolved_mixed_batch_penalty())
         ov = self._decode_step_overhead_ms()
 
         if self._measured_mode:
@@ -712,8 +712,8 @@ class InferencePerformanceProjector:
             )
         return comm.kv_transfer_ms(
             kv.bytes_total,
-            bw_gbps=disagg.kv_transfer_bw_gbps,
-            latency_us=disagg.kv_transfer_latency_us,
+            bw_gbps=disagg.resolved_kv_transfer_bw_gbps(),
+            latency_us=disagg.resolved_kv_transfer_latency_us(),
         )
 
     def _project_disaggregated(self) -> InferencePerfResult:

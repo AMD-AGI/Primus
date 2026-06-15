@@ -152,6 +152,11 @@ class InferenceRequestConfig:
     # Largest context (prompt + generated) any sequence can reach.  Drives
     # KV-cache capacity.  Defaults to ``input_seq_len + output_seq_len``.
     max_context_len: Optional[int] = None
+    # Fraction of per-GPU HBM the serving engine may use (vLLM
+    # ``gpu_memory_utilization`` / SGLang ``mem_fraction_static``).  Bounds the
+    # usable HBM for weights + KV + activations and therefore the max concurrent
+    # sequences.  ``None`` = use the full HBM capacity (legacy behaviour).
+    kv_cache_memory_fraction: Optional[float] = None
 
     # ---- Precision ----
     weight_dtype: str = "bf16"     # weights kept resident (bf16 | fp8 | ...)
@@ -181,6 +186,16 @@ class InferenceRequestConfig:
     # vLLM's less-efficient PIECEWISE CUDA-graph path vs the FULL graph used for
     # uniform pure-decode steps. 0 = no penalty.
     mixed_batch_penalty: float = 0.0
+    # CUDA-graph capture strategy. A friendly preset over the two low-level
+    # knobs above:
+    #   "none"      — eager, launch-bound per step (high per-step overhead).
+    #   "piecewise" — piecewise graphs; mixed prefill+decode steps fall off the
+    #                 captured graph (moderate overhead + a mixed-step penalty).
+    #   "full"      — one full graph capture (minimal overhead, no penalty).
+    # ``None`` leaves ``decode_step_overhead_us`` / ``mixed_batch_penalty`` at
+    # their explicit values (legacy behaviour). An explicit non-zero value of
+    # either low-level knob overrides the preset.
+    cudagraph_mode: Optional[str] = None
 
     def resolved_max_context_len(self) -> int:
         if self.max_context_len is not None:
@@ -191,6 +206,32 @@ class InferenceRequestConfig:
         if self.max_concurrency is not None:
             return int(self.max_concurrency)
         return int(self.batch_size)
+
+    def resolved_decode_step_overhead_us(self) -> float:
+        """Per-decode-step launch overhead, honoring the cudagraph preset.
+
+        An explicit non-zero ``decode_step_overhead_us`` always wins; otherwise
+        the ``cudagraph_mode`` preset (if any) supplies a representative value.
+        """
+        if self.decode_step_overhead_us:
+            return float(self.decode_step_overhead_us)
+        return _CUDAGRAPH_PRESETS.get(self.cudagraph_mode, (0.0, 0.0))[0]
+
+    def resolved_mixed_batch_penalty(self) -> float:
+        """Mixed-step penalty fraction, honoring the cudagraph preset."""
+        if self.mixed_batch_penalty:
+            return float(self.mixed_batch_penalty)
+        return _CUDAGRAPH_PRESETS.get(self.cudagraph_mode, (0.0, 0.0))[1]
+
+
+# CUDA-graph presets → (decode_step_overhead_us, mixed_batch_penalty).
+# Representative, ROCm-order-of-magnitude values; override with the explicit
+# low-level knobs for a measured number.
+_CUDAGRAPH_PRESETS = {
+    "none": (40.0, 0.0),
+    "piecewise": (8.0, 0.15),
+    "full": (3.0, 0.0),
+}
 
 
 @dataclass
@@ -253,12 +294,37 @@ class DisaggregationConfig:
     # from the collective model; latency is a fixed per-transfer overhead (us).
     kv_transfer_bw_gbps: Optional[float] = None
     kv_transfer_latency_us: float = 0.0
+    # Friendly preset over the two link knobs above, naming the KV-transfer
+    # engine: "nixl", "mooncake", or "mori".  ``None`` leaves the explicit link
+    # values untouched.  An explicit non-zero/non-None link knob overrides the
+    # preset value for that field.
+    transfer_backend: Optional[str] = None
+
+    def resolved_kv_transfer_bw_gbps(self) -> Optional[float]:
+        if self.kv_transfer_bw_gbps:
+            return float(self.kv_transfer_bw_gbps)
+        return _TRANSFER_BACKEND_PRESETS.get(self.transfer_backend, (None, 0.0))[0]
+
+    def resolved_kv_transfer_latency_us(self) -> float:
+        if self.kv_transfer_latency_us:
+            return float(self.kv_transfer_latency_us)
+        return _TRANSFER_BACKEND_PRESETS.get(self.transfer_backend, (None, 0.0))[1]
 
     def prefill_parallel(self, mp: ModelParallelConfig) -> "ModelParallelConfig":
         return _override_parallel(mp, self.prefill_tp, self.prefill_pp, self.prefill_ep)
 
     def decode_parallel(self, mp: ModelParallelConfig) -> "ModelParallelConfig":
         return _override_parallel(mp, self.decode_tp, self.decode_pp, self.decode_ep)
+
+
+# KV-transfer engine presets → (kv_transfer_bw_gbps, kv_transfer_latency_us).
+# Representative effective point-to-point KV link numbers; override with the
+# explicit link knobs for a measured fabric.
+_TRANSFER_BACKEND_PRESETS = {
+    "nixl": (400.0, 5.0),
+    "mooncake": (200.0, 10.0),
+    "mori": (300.0, 7.0),
+}
 
 
 def _override_parallel(

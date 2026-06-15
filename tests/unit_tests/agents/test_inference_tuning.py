@@ -33,8 +33,14 @@ from primus.core.projection.inference_projection.collectives import (  # noqa: E
     InferenceCollectiveModel,
     deepep_overlap_efficiency,
 )
+from primus.core.projection.inference_projection.memory import (  # noqa: E402
+    project_inference_memory,
+)
 from primus.core.projection.training_config import (  # noqa: E402
+    DisaggregationConfig,
     InferenceCollectiveConfig,
+    InferenceConfig,
+    InferenceRequestConfig,
     ModelConfig,
     ModelParallelConfig,
 )
@@ -202,3 +208,176 @@ def test_ep_a2a_zero_when_no_expert_parallelism():
     deepep = InferenceCollectiveModel(_moe_model_config(use_turbo_deepep=True), mp, cc)
     # EP<=1 → no A2A at all, DeepEP is a no-op.
     assert deepep.ep_a2a_ms(batch=8, tokens=1024) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# schema resolvers: cudagraph_mode + transfer_backend presets
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cudagraph_mode_presets_resolve():
+    # Unset → no overhead / penalty (legacy behaviour).
+    req = InferenceRequestConfig()
+    assert req.resolved_decode_step_overhead_us() == 0.0
+    assert req.resolved_mixed_batch_penalty() == 0.0
+    # "full" graph → tiny per-step overhead, no mixed penalty.
+    full = InferenceRequestConfig(cudagraph_mode="full")
+    assert full.resolved_decode_step_overhead_us() == 3.0
+    assert full.resolved_mixed_batch_penalty() == 0.0
+    # "piecewise" → moderate overhead + mixed-step penalty.
+    pw = InferenceRequestConfig(cudagraph_mode="piecewise")
+    assert pw.resolved_decode_step_overhead_us() == 8.0
+    assert pw.resolved_mixed_batch_penalty() == 0.15
+    # "none" (eager) → highest per-step overhead.
+    none = InferenceRequestConfig(cudagraph_mode="none")
+    assert none.resolved_decode_step_overhead_us() == 40.0
+
+
+def test_cudagraph_explicit_overrides_preset():
+    req = InferenceRequestConfig(cudagraph_mode="full", decode_step_overhead_us=12.0)
+    # Explicit non-zero low-level knob wins over the preset.
+    assert req.resolved_decode_step_overhead_us() == 12.0
+
+
+def test_transfer_backend_presets_resolve():
+    base = DisaggregationConfig()
+    assert base.resolved_kv_transfer_bw_gbps() is None
+    assert base.resolved_kv_transfer_latency_us() == 0.0
+
+    nixl = DisaggregationConfig(transfer_backend="nixl")
+    assert nixl.resolved_kv_transfer_bw_gbps() == 400.0
+    assert nixl.resolved_kv_transfer_latency_us() == 5.0
+
+    mooncake = DisaggregationConfig(transfer_backend="mooncake")
+    assert mooncake.resolved_kv_transfer_bw_gbps() == 200.0
+
+    # Explicit link knob wins over the preset.
+    override = DisaggregationConfig(transfer_backend="nixl", kv_transfer_bw_gbps=123.0)
+    assert override.resolved_kv_transfer_bw_gbps() == 123.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# preset knobs: agent legality / validation / seed plan / evaluator mapping
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_preset_knobs_legality_defaults():
+    leg = derive_inference_legality(_moe_arch(), _cluster())
+    assert leg.cudagraph_mode == ["none", "piecewise", "full"]
+    assert leg.kv_cache_memory_fraction == [0.8, 0.85, 0.9]
+    assert leg.transfer_backend == ["nixl", "mooncake", "mori"]
+
+
+def test_validate_kv_fraction_range():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    ok, _ = validate_inference(
+        InferenceTrialConfig(tp=2, kv_cache_memory_fraction=0.9), arch, cluster, leg
+    )
+    assert ok
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, kv_cache_memory_fraction=1.5), arch, cluster, leg
+    )
+    assert not bad
+    assert "kv_cache_memory_fraction" in reason
+
+
+def test_validate_transfer_backend_requires_disaggregate():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, transfer_backend="nixl"), arch, cluster, leg
+    )
+    assert not bad
+    assert "disaggregate" in reason
+
+
+def test_validate_cudagraph_mode_membership():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, cudagraph_mode="bogus"), arch, cluster, leg
+    )
+    assert not bad
+    assert "cudagraph_mode" in reason
+
+
+def test_seed_plan_includes_preset_knob_candidates():
+    arch = _moe_arch()
+    # 2 nodes so the disaggregated prefill+decode pools (and thus the
+    # transfer-backend candidate) fit within the GPU budget.
+    cluster = _cluster(num_nodes=2, gpus_per_node=8)
+    plan = build_inference_seed_plan(arch, cluster, OptimizationConfig(), max_candidates=128)
+    assert any(c.cudagraph_mode == "full" for c in plan.candidates)
+    assert any(c.kv_cache_memory_fraction for c in plan.candidates)
+    assert any(c.transfer_backend == "nixl" for c in plan.candidates)
+
+
+def test_kv_cache_memory_fraction_bounds_usable_hbm():
+    mc = _moe_model_config()
+    mp = ModelParallelConfig()
+    full = project_inference_memory(
+        InferenceConfig(
+            model_config=mc,
+            request_config=InferenceRequestConfig(input_seq_len=512, output_seq_len=128),
+            model_parallel_config=mp,
+        ),
+        rank=0,
+        hbm_capacity_gb=192.0,
+        verbose=False,
+    )
+    # A tiny usable fraction starves the engine of headroom: the same workload
+    # that fits in full HBM no longer fits once the fraction is applied.
+    tiny = project_inference_memory(
+        InferenceConfig(
+            model_config=mc,
+            request_config=InferenceRequestConfig(
+                input_seq_len=512, output_seq_len=128, kv_cache_memory_fraction=0.0005
+            ),
+            model_parallel_config=mp,
+        ),
+        rank=0,
+        hbm_capacity_gb=192.0,
+        verbose=False,
+    )
+    assert full.fits is True
+    assert tiny.fits is False
+
+
+def test_build_inference_cmd_emits_preset_knob_flags():
+    from pathlib import Path
+
+    from primus.agents.tuning_agent.evaluator import _build_inference_cmd
+
+    agent_cfg = SimpleNamespace(
+        target_cluster=SimpleNamespace(gpu_arch="mi355x", gpu_clock_mhz=None),
+        optimization=SimpleNamespace(hbm_capacity_gb=192.0),
+    )
+    primus_root = Path("/tmp/primus")
+
+    cmd = _build_inference_cmd(
+        Path("/tmp/w.yaml"),
+        InferenceTrialConfig(
+            tp=2,
+            cudagraph_mode="full",
+            kv_cache_memory_fraction=0.9,
+            disaggregate=True,
+            prefill_tp=2,
+            decode_tp=2,
+            transfer_backend="nixl",
+        ),
+        agent_cfg,
+        primus_root,
+    )
+    assert "--cudagraph-mode" in cmd
+    assert "full" in cmd
+    assert "--kv-cache-memory-fraction" in cmd
+    assert "--transfer-backend" in cmd
+    # transfer-backend must not leak when disaggregation is off.
+    no_disagg = _build_inference_cmd(
+        Path("/tmp/w.yaml"),
+        InferenceTrialConfig(tp=2, cudagraph_mode="none"),
+        agent_cfg,
+        primus_root,
+    )
+    assert "--transfer-backend" not in no_disagg
