@@ -127,11 +127,13 @@ class OptimizationConfig:
     # Serving request profile (only used when mode == "inference").
     #   input_len / output_len: prompt + generation lengths (tokens)
     #   max_concurrency: resident sequences for KV sizing (default: batch)
-    inference: dict[str, Any] = field(default_factory=lambda: {
-        "input_len": 1024,
-        "output_len": 128,
-        "max_concurrency": None,
-    })
+    inference: dict[str, Any] = field(
+        default_factory=lambda: {
+            "input_len": 1024,
+            "output_len": 128,
+            "max_concurrency": None,
+        }
+    )
 
 
 @dataclass

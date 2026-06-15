@@ -3770,8 +3770,7 @@ def launch_projection_from_cli(args, overrides):
     # Store original parallelism before any modifications
     module_config = primus_config.get_module_config("pre_trainer")
     if load_benchmark_path:
-        loaded_payload = _load_artifact(load_benchmark_path)
-        loaded_metadata = loaded_payload.get("metadata", {}) or {}
+        loaded_metadata = _load_artifact(load_benchmark_path).get("metadata", {}) or {}
         reduction_info = _reduction_info_from_artifact_metadata(loaded_metadata, gpus_per_node)
         if is_rank_0:
             print(f"[Primus:Performance Projection] Loading bench artifact: {load_benchmark_path}")
@@ -3782,8 +3781,6 @@ def launch_projection_from_cli(args, overrides):
                 f"(bench/target)"
             )
     else:
-        loaded_payload = None
-        loaded_metadata = {}
         reduction_info = _calculate_single_node_config(
             copy.deepcopy(module_config), gpus_per_node, benchmark_gpus=benchmark_gpus
         )

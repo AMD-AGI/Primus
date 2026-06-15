@@ -4,7 +4,7 @@ Primus includes projection tools that estimate **memory requirements** and **tra
 
 | Mode | Command | What it does |
 |------|---------|--------------|
-| **Memory** | `projection memory` | Estimates per-GPU memory (parameters, optimizer, activations) using analytical formulas |
+| **Memory** | `projection memory` | Estimates per-GPU memory (parameters, optimizer, activations). Runs an OOM-accurate sub-node benchmark by default (`--memory-mode benchmark`), or pure analytical formulas with `--memory-mode simulate` |
 | **Performance** | `projection performance` | Benchmarks layers on 1 node, then projects training time to multi-node clusters |
 
 - **User-facing entry**: `primus-cli … -- projection {memory,performance} [options]`
@@ -23,6 +23,7 @@ This allows you to estimate training performance on larger clusters without actu
 2. [Command Syntax](#command-syntax)
 3. [Memory Projection](#memory-projection)
    - [Overview](#memory-overview)
+   - [Memory Projection Modes](#memory-projection-modes)
    - [Architecture](#memory-architecture)
    - [Parameter Estimation](#parameter-estimation)
    - [Param + Optimizer Memory](#param--optimizer-memory)
@@ -30,6 +31,7 @@ This allows you to estimate training performance on larger clusters without actu
    - [Pipeline Schedule Memory Scaling](#pipeline-schedule-memory-scaling)
    - [Recomputation Support](#recomputation-support)
    - [Memory Formulas Reference](#memory-formulas-reference)
+   - [Benchmark-Based Memory Projection](#benchmark-based-memory-projection)
 4. [Performance Projection](#performance-projection)
    - [Overview](#performance-overview)
    - [Profiling Modes](#profiling-modes)
@@ -49,7 +51,9 @@ This allows you to estimate training performance on larger clusters without actu
 
 ### Memory Projection
 
-Estimate per-GPU memory for a model configuration (no GPU needed for estimation, but the CLI currently requires torch distributed init):
+Estimate per-GPU memory for a model configuration. By default this runs the
+**benchmark-anchored** mode (`--memory-mode benchmark`), which needs a ROCm GPU
+on the host for an OOM-accurate estimate:
 
 ```bash
 export NNODES=1
@@ -57,6 +61,18 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection memory \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
+```
+
+For a **no-GPU** analytical estimate (capacity planning without hardware), add
+`--memory-mode simulate`:
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection memory --memory-mode simulate \
     --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
 ```
 
@@ -113,6 +129,17 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 |--------|------|-------------|
 | `--config` | string | Path to the Primus YAML configuration file (required) |
 
+### Memory-Only Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--memory-mode` | string | `benchmark` (default, OOM-accurate, needs a GPU), `simulate` (pure analytical, no GPU), or `both` (side-by-side comparison) |
+| `--memory-safety-margin` | float | Fraction by which the residual is inflated for the reported **upper bound** (default `0.05`) |
+| `--target-nodes` | int | Target number of nodes to extrapolate the per-rank peak to. Defaults to minimum required by the parallelism config |
+| `--benchmark-gpus` | int | GPUs used for the underlying sub-node bench (`--memory-mode benchmark`). Defaults to `GPUS_PER_NODE` |
+| `--save-benchmark` | string | Write the shared bench artifact (timing + memory) JSON to this path |
+| `--load-benchmark` | string | Project directly from a previously saved bench artifact; skips the bench step |
+
 ### Performance-Only Options
 
 | Option | Type | Description |
@@ -145,13 +172,35 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 <a name="memory-overview"></a>
 ### Overview
 
-The memory projection estimates **per-GPU memory** usage by analytically computing:
+The memory projection estimates **per-GPU memory** usage, decomposed into:
 
 1. **Parameter memory** — model weights stored on this GPU
 2. **Optimizer state memory** — optimizer first/second moments, sharded across DP ranks
 3. **Activation memory** — intermediate tensors stored for the backward pass
 
-It uses a hierarchical profiler system that mirrors the model's module structure, computing each component's contribution bottom-up.
+These components are computed by a hierarchical profiler system that mirrors the model's module structure, computing each contribution bottom-up. The projection runs in two modes (see [Memory Projection Modes](#memory-projection-modes) below): the default **benchmark** mode anchors these components on a measured per-rank peak for an OOM-accurate estimate, while **simulate** mode uses the analytical formulas alone (no GPU). The per-component formulas in this section are the shared backbone of both.
+
+<a name="memory-projection-modes"></a>
+### Memory Projection Modes
+
+Like performance projection, memory projection has a **benchmark** path and a **simulate** path, selected with `--memory-mode`:
+
+| Mode | GPU Required | What it does |
+|------|-------------|--------------|
+| `benchmark` (default) | **Yes** | Runs a sub-node layer benchmark, captures the **real per-rank peak** VRAM (allocated + reserved), and analytically extrapolates it to the target cluster shape. **OOM-accurate.** |
+| `simulate` | **No** | Pure analytical estimate from the formulas in this section. Opt in when the host has no GPU; cluster numbers are analytical, not anchored to a measurement. |
+| `both` | **Yes** | Runs both and prints a side-by-side comparison (per-component deltas, point estimate, upper bound). |
+
+The analytical formulas described in the rest of this section are the **backbone of both modes**: `simulate` uses them directly, while `benchmark` uses them as the *extrapolation model* and corrects them with the measured residual. The benchmark path is documented in [Benchmark-Based Memory Projection](#benchmark-based-memory-projection) below.
+
+The shared bench artifact (timing + memory) can be saved once and reused for both memory and performance projection:
+
+```bash
+# Save a bench artifact, then feed it to both projections.
+... projection memory      --memory-mode benchmark --save-benchmark bench.json --config exp.yaml
+... projection memory      --memory-mode benchmark --load-benchmark bench.json --config exp.yaml
+... projection performance --load-benchmark bench.json --config exp.yaml
+```
 
 <a name="memory-architecture"></a>
 ### Architecture
@@ -467,7 +516,8 @@ Summary of all memory components for one GPU:
 │     = Σ(per-layer act) × PP × VPP_penalty × GA_saving              │
 │     + embedding/output activations (stage-dependent)                 │
 │                                                                      │
-│  5. Transient buffers (not in projection)                           │
+│  5. Transient buffers (analytical mode: not modeled;                │
+│     benchmark mode: captured as the measured residual)              │
 │     - A2A dispatch/combine buffers                                   │
 │     - Communication scratch space                                    │
 │     - PyTorch allocator fragmentation                                │
@@ -477,6 +527,106 @@ Summary of all memory components for one GPU:
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+<a name="benchmark-based-memory-projection"></a>
+### Benchmark-Based Memory Projection
+
+`--memory-mode benchmark` (the default) is **OOM-accurate**: instead of trusting the analytical formulas alone, it measures the **real per-rank peak VRAM** of a small sub-node run and anchors the projection on that measurement. This closes the "transient buffers" blind spot (item 5 in the formulas reference above) — allocator fragmentation, NCCL/RCCL communicator workspaces, kernel scratch, and autograd-graph overhead are all *measured*, not estimated.
+
+#### Why anchor on a measurement
+
+The analytical model systematically **under-counts** at scale because several memory consumers do not appear in the per-component formulas:
+
+- PyTorch caching-allocator pages and fragmentation (reserved ≫ allocated),
+- RCCL/NCCL communicator footprint (grows with world size),
+- DeepEP dispatch/combine buffers for MoE,
+- kernel workspaces and autograd graph retention.
+
+A pure analytical number can therefore say "fits" when the real run OOMs. The benchmark path measures the actual peak on a cheap configuration and extrapolates only the parts that genuinely change with cluster shape.
+
+#### Workflow
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection memory \
+    --memory-mode benchmark \
+    --benchmark-gpus 8 \
+    --target-nodes 16 \
+    --memory-safety-margin 0.05 \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
+```
+
+1. **Bench**: reuses the performance-projection layer bench (`_run_layer_benchmark`) on `--benchmark-gpus` GPUs, reducing parallelism (PP → EP → TP) to fit just as performance projection does. It records, per rank, the peak **allocated** and peak **reserved** VRAM.
+2. **Decompose** the measured peak into a part the analytical model already explains and two measurable residual terms (see below).
+3. **Extrapolate** to the `--target-nodes` shape: everything that scales with cluster shape (parameters, gradients, distributed-optimizer state, activations, PP/VPP/GA factors, DeepEP buffers, communicator cost) is recomputed analytically at the *target* config; the measured residual terms are re-added.
+4. **Report** a **point estimate** and an **upper bound**, plus a FITS / OOM / AT-RISK verdict against per-GPU HBM.
+
+`--load-benchmark <artifact.json>` skips step 1 and projects directly from a previously saved bench (a single bench feeds both memory and performance projection). `--save-benchmark` writes the artifact.
+
+#### The decomposition
+
+Rather than scaling a single bench peak (which would omit costs that are zero on a 1-GPU bench but large at the target), the projection splits the measured peak into well-defined terms:
+
+```
+target_peak ≈ Σ analytical_components(target_cfg)        # recomputed at the TARGET shape
+            + framework_overhead                          # bench-measured, ~invariant
+            + live_tensor_excess                          # bench-measured under-count
+            + safety_margin × (framework_overhead + live_tensor_excess)   # upper bound only
+
+framework_overhead = max(0, bench_peak_reserved
+                            − bench_peak_allocated
+                            − analytical_bench.comm_buffers)
+live_tensor_excess = max(0, bench_peak_allocated − Σ analytical_components(bench_cfg))
+```
+
+- **`framework_overhead`** — the gap between *reserved* and *live* VRAM at the bench peak: allocator pages, RCCL/NCCL buffers, kernel workspaces, autograd graphs. Largely invariant under bench → target scaling. The analytical comm-buffer baseline at the bench world size is subtracted so it is not double-counted against the target's communicator estimate.
+- **`live_tensor_excess`** — any live-tensor bytes the analytical model under-counted at the bench scope. Clamped to zero when the analytical model already over-predicts at bench (common at `num_layers=1`, where embedding/output are replicated).
+
+Splitting the residual into these two terms is more robust than the older single-term `bench_peak − analytical_at_bench`, which collapsed to zero whenever the analytical model was conservative at the small bench scope — hiding the framework-overhead signal entirely.
+
+#### Point estimate vs. upper bound
+
+- **Point estimate** = analytical components at target + the measured residual terms. This is the OOM-accurate expected peak.
+- **Upper bound** = the same, but the residual is inflated by `--memory-safety-margin` (default `0.05`). Use the upper bound for go/no-go fits decisions; use the point estimate for capacity reporting.
+
+#### Example output
+
+```
+====================================================================================================
+[Primus:Memory Projection] benchmark mode — per-rank peak at target shape
+====================================================================================================
+  Activation correction (measured / analytical at bench):
+    dense : ×1.041
+    moe   : ×1.118
+    Activation total before correction: 482.10 GB
+    Activation total after correction:  511.27 GB
+
+  Residual decomposition (anchored on bench measurement):
+    Framework overhead:     6.42 GB  (reserved − allocated − comm_baseline)
+    Live-tensor excess:     2.18 GB  (allocated − analytical_at_bench, clamped ≥ 0)
+    Total residual:         8.60 GB  (added to point; ×(1+margin) for upper)
+    Safety margin on UB:    5.0%
+
+  ─────────────────────────────────────────────────────────────────
+  Point estimate (per rank): 178.94 GB
+  Upper bound    (per rank): 179.37 GB
+  ─────────────────────────────────────────────────────────────────
+
+  Analytical share of point estimate: 95.2%
+  Residual share of point estimate:    4.8%
+
+  VRAM available per GPU: 288.00 GB
+  Headroom (point):       109.06 GB (FITS)
+  Headroom (upper):       108.63 GB (FITS)
+====================================================================================================
+```
+
+With `--memory-mode both`, a side-by-side table shows the simulate vs. benchmark per-component deltas. A small delta (within ~10–20%) means the analytical model and the residual term are well-calibrated; a large positive delta (simulate ≫ benchmark) usually means simulate is over-counting unsharded components, while a large negative delta means the bench captured overhead the analytical model under-estimates.
+
+> The benchmark-based memory projection is what the [Tuning Agent](tuning_agent.md) uses for OOM-accurate feasibility filtering when a GPU is available, so its `tokens/s/GPU` rankings never include configs that would OOM on the real cluster.
 
 ---
 
@@ -891,6 +1041,8 @@ Step 3: Projected Time
 The following is representative output from a Mixtral 8×22B BF16 projection on MI355X (benchmarked on 1 node, projected to 8 nodes).
 
 ### Memory Projection
+
+The component-wise breakdown below is the **`simulate`-mode** output. For the default **benchmark** mode (point estimate, upper bound, FITS/OOM verdict), see the example in [Benchmark-Based Memory Projection](#benchmark-based-memory-projection).
 
 ```
 ====================================================================================================
