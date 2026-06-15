@@ -115,12 +115,12 @@ When `PrimusParser.parse_trainer_module` runs, the effective ordering is:
 
 1. **CLI overrides** (key=value after the main `train` arguments) — highest.  
 2. **`modules.pre_trainer.overrides`** in the experiment YAML.  
-3. **Merged module + model preset**: module preset loaded first, model preset merged in (`merge_namespace` in `parse_trainer_module`).  
+3. **Module preset with model preset additions**: the module preset is loaded first, then the model preset is merged in with `allow_override=False`, so duplicate top-level module keys are preserved while non-duplicate model keys are added (`merge_namespace` in `parse_trainer_module`).
 4. **Preset chains** via `extends:` inside those files — base layers first, specialized layers later, file body last.
 
 A concise mental model:
 
-**CLI overrides > experiment `overrides` > model preset (merged into module) > module preset (including its `extends:` chain) > shared bases such as `module_base.yaml`.**
+**CLI overrides > experiment `overrides` > module preset with model preset additions > each preset's own `extends:` chain > shared bases such as `module_base.yaml`.**
 
 ---
 
@@ -144,7 +144,7 @@ Example experiment: `examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.ya
 1. **Add or reuse a model preset** under `primus/configs/models/<framework>/`, using `extends:` from the closest existing architecture (for example copy `llama3_8B.yaml` and adjust hidden size, layers, tokenizer).  
 2. **Point an experiment YAML at it** — set `modules.pre_trainer.framework`, `config: <module_preset>.yaml`, and `model: <your_model>.yaml`.  
 3. **Set overrides** in the experiment file for run-specific values (batch sizes, paths, `mock_data`, parallelism). Prefer small experiment files that reference presets instead of duplicating hundreds of keys.  
-4. **Validate** with `--export_config` and/or `--dry-run` (see below).  
+4. **Validate** with `--dry-run` and by tracing the referenced experiment, module, and model presets (see below).
 5. **Optional:** add an example under `examples/<backend>/configs/<platform>/` for others to copy.
 
 ---
@@ -153,7 +153,7 @@ Example experiment: `examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.ya
 
 | Technique | What it does |
 | --- | --- |
-| `--export_config PATH` | Writes the **fully merged** Primus config to `PATH` (see `PrimusParser.export` and train parsers in `primus/core/launcher/parser.py`). |
+| `--export_config PATH` | Parsed by the training config parser, but the default core `PrimusRuntime` path does not currently write the resolved YAML. Treat this as legacy/future functionality unless your deployment implements it. |
 | `./runner/primus-cli --dry-run …` | Shows the launcher command without executing (shell layer). |
 | `--debug` | Enables verbose logging for launcher and Python (`PRIMUS_LOG_LEVEL=DEBUG`). |
 | Inspect presets | Open the resolved `extends:` chain under `primus/configs/modules/` and `primus/configs/models/` for the framework you use. |

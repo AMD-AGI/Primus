@@ -23,8 +23,8 @@ Primus/
 │   ├── unit_tests/                # Python unit tests (pytest)
 │   │   ├── backends/
 │   │   ├── cli/
-│   │   ├── config/
-│   │   └── patches/
+│   │   ├── core/                  # config, backend, launcher, patches, runtime, trainer, utils
+│   │   └── megatron/              # Megatron-specific unit tests
 │   ├── trainer/                   # Integration tests (typically need GPU + data)
 │   │   ├── test_megatron_trainer.py
 │   │   ├── test_torchtitan_trainer.py
@@ -91,7 +91,7 @@ python ./tests/run_unit_tests.py --jax
 
 From `.github/workflows/ci.yaml`:
 
-- **`code-lint`:** Python 3.12 on GitHub-hosted runners. Runs autoflake (must produce no output diff), isort `--check-only`, and black `--check` with line length 110.
+- **`code-lint`:** Python 3.12 on GitHub-hosted runners. Runs `pre-commit run --all-files --show-diff-on-failure`, so checks follow `.pre-commit-config.yaml`.
 - **`run-unittest-torch`:** Self-hosted GPU runner. Installs `requirements.txt`, runs `bash ./tests/runner/run_all_tests.sh`, then `pytest tests/unit_tests/` with specific tests deselected (see the workflow file). Trainer steps set `MASTER_PORT`, `DATA_PATH`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` for Megatron and TorchTitan trainer tests.
 - **`run-unittest-jax`:** JAX runner. Installs `requirements-jax.txt`, runs the same shell test script, then `python ./tests/run_unit_tests.py --jax` with CI environment variables (for example `JAX_SKIP_UT=1` and `DATA_PATH` as defined in the workflow).
 

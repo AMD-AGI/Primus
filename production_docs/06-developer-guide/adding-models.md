@@ -211,11 +211,11 @@ You need:
 - TorchTitan can only train models that are **implemented in the TorchTitan codebase**. The YAML under `primus/configs/models/torchtitan/` does **not** define new architectures; it selects and configures existing `*ModelArgs` entries.
 - If a family or flavor is missing in TorchTitan, you cannot enable it with YAML alone — extend TorchTitan first, then add a Primus preset.
 
-### Example: Qwen3 8B preset
+### Example pattern: Qwen3 8B preset
 
-TorchTitan may already define Qwen3 8B in code (for example in `third_party/torchtitan/torchtitan/models/qwen3/__init__.py`). Add a local preset:
+Qwen3 8B already exists in this repository as a TorchTitan preset and example. Use it as a pattern when adding a different TorchTitan model or flavor that is implemented upstream but not yet represented in Primus.
 
-**File:** `primus/configs/models/torchtitan/qwen3_8B.yaml`
+**Existing file:** `primus/configs/models/torchtitan/qwen3_8b.yaml`
 
 ```yaml
 job:
@@ -237,7 +237,7 @@ modules:
   pre_trainer:
     framework: torchtitan
     config: pre_trainer.yaml
-    model: qwen3_8B.yaml
+    model: qwen3_8b.yaml
     overrides:
       training:
         local_batch_size: 4
@@ -251,10 +251,10 @@ modules:
 ```bash
 ./primus-cli direct -- \
   train pretrain \
-  --config examples/torchtitan/configs/MI300X/qwen3_8B-BF16-pretrain.yaml
+  --config examples/torchtitan/configs/MI300X/qwen3_8B-pretrain.yaml
 ```
 
-(Use a path that matches the experiment file you create.)
+For a new model, create a new preset and example path that matches the upstream TorchTitan family/flavor you are adding.
 
 ### TorchTitan checklist
 

@@ -1,6 +1,6 @@
 # Megatron Bridge Backend Configuration Reference
 
-Megatron Bridge integrates [Megatron-Core](https://github.com/NVIDIA/Megatron-LM) training with Hugging Face–centric workflows. In Primus, post-training (supervised fine-tuning, LoRA, and similar) uses the **`megatron_bridge`** framework with module preset `sft_trainer.yaml` and model YAMLs under `primus/configs/models/megatron_bridge/`.
+Megatron Bridge integrates [Megatron-Core](https://github.com/NVIDIA/Megatron-LM) training with Hugging Face–centric workflows. In Primus, the **`megatron_bridge`** framework is used for post-training with module preset `sft_trainer.yaml`, and the repository also ships a pretraining preset at `primus/configs/modules/megatron_bridge/pretrain_trainer.yaml`.
 
 ## Recipe system
 
@@ -14,13 +14,13 @@ At runtime, `load_recipe_config` in `primus/backends/megatron_bridge/config_util
 1. Imports `megatron.bridge.recipes.<recipe>` and calls `<flavor>(**filtered_backend_args)` to build the baseline `ConfigContainer`.
 2. **Deep-merges** Primus `backend_args` (from YAML + CLI) into that dataclass via `_merge_dict_to_dataclass`, so user overrides sit on top of recipe defaults.
 
-You normally specify `recipe`, `flavor`, `hf_path`, and `dataset` in the model YAML; training hyperparameters and parallelism go in module overrides or experiment `modules.post_trainer.overrides`.
+You normally specify `recipe`, `flavor`, `hf_path`, and `dataset` in the model YAML; training hyperparameters and parallelism go in module overrides or experiment module overrides (`modules.post_trainer.overrides` for SFT/post-training, `modules.pre_trainer.overrides` for pretraining examples).
 
 ---
 
 ## 1. Base module parameters
 
-From `primus/configs/modules/megatron_bridge/sft_trainer.yaml` (extends `module_base.yaml`).
+From `primus/configs/modules/megatron_bridge/sft_trainer.yaml` (extends `module_base.yaml`). Pretraining examples use `pretrain_trainer.yaml` instead.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -39,6 +39,8 @@ From `primus/configs/modules/megatron_bridge/sft_trainer.yaml` (extends `module_
 | `trainable` | `true` | See Base module parameters. |
 
 **CLI note:** The user-facing suite is **`posttrain`** (`primus train posttrain --config ...`). The YAML `stage` field selects the Megatron Bridge trainer implementation (`sft`), not the CLI suite name.
+
+For Bridge pretraining, use the normal pretraining suite (`primus train pretrain --config ...`) with experiments that reference `modules.pre_trainer.config: pretrain_trainer.yaml`.
 
 ---
 
@@ -125,7 +127,8 @@ From `sft_trainer.yaml` (defaults shown).
 | `enable_primus_turbo` | `true` | Master flag for Primus-Turbo optimized kernels and paths. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
-| `use_turbo_grouped_mlp` | `false` | Turbo grouped MLP. |
+| `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
+| `use_turbo_grouped_mlp` | `false` | Deprecated alias; prefer `use_turbo_grouped_gemm`. |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary loss handling. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention. |
 | `use_turbo_deepep` | `false` | DeepEP-style expert-parallel integration. |
@@ -162,4 +165,4 @@ Model YAML files (`qwen3_8b.yaml`, `qwen3_32b.yaml`, `llama31_70b.yaml`) supply:
 
 ## Example layouts
 
-Under `examples/megatron_bridge/configs/`, per-GPU directories (for example `MI300X/`, `MI355X/`) contain full experiment YAMLs that set `work_group`, `user_name`, `exp_name`, `workspace`, and `modules.post_trainer` with `framework: megatron_bridge`, `config: sft_trainer.yaml`, `model: <preset>.yaml`, and a rich `overrides` block for parallelism, PEFT, LR, and precision.
+Under `examples/megatron_bridge/configs/`, per-GPU directories (for example `MI300X/`, `MI355X/`) contain full experiment YAMLs that set `work_group`, `user_name`, `exp_name`, `workspace`, and Megatron Bridge modules. Post-training examples use `modules.post_trainer` with `config: sft_trainer.yaml`; MI300X pretraining examples use `modules.pre_trainer` with `config: pretrain_trainer.yaml`. Both patterns set `framework: megatron_bridge`, `model: <preset>.yaml`, and an `overrides` block for parallelism, LR, precision, and related options.

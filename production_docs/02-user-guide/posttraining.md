@@ -33,18 +33,18 @@ From a clone of the Primus repository, the same entrypoint is often invoked as `
 
 ```bash
 # SFT — example: Qwen3 32B on MI355X
-./runner/primus-cli direct train posttrain \
+./runner/primus-cli direct -- train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 
 # LoRA — same model family
-./runner/primus-cli direct train posttrain \
+./runner/primus-cli direct -- train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
 ```
 
 ### Container mode
 
 ```bash
-./runner/primus-cli container --image rocm/primus:latest \
+./runner/primus-cli container --image rocm/primus:v26.2 -- \
   train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 ```
@@ -115,7 +115,7 @@ Paths are relative to `examples/megatron_bridge/configs/`.
 **Example**
 
 ```bash
-./runner/primus-cli direct train posttrain \
+./runner/primus-cli direct -- train posttrain \
   --config ./examples/megatron_bridge/configs/MI300X/qwen3_32b_sft_posttrain.yaml
 ```
 
@@ -135,7 +135,7 @@ Paths are relative to `examples/megatron_bridge/configs/`.
 **Example**
 
 ```bash
-./runner/primus-cli direct train posttrain \
+./runner/primus-cli direct -- train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
 ```
 
@@ -199,7 +199,7 @@ Paths are relative to `examples/megatron_bridge/configs/`.
 
 1. Verify YAML paths and indentation.
 2. Set `PRIMUS_WORKSPACE` and other environment variables expected by your team’s templates.
-3. Confirm checkpoint and data paths in the merged config (use `--export_config` if your CLI supports exporting the resolved config).
+3. Confirm checkpoint and data paths by reviewing the experiment YAML and any presets it references. The current core training runtime parses `--export_config`, but resolved-config export is not implemented on the default `PrimusRuntime` path.
 
 ---
 

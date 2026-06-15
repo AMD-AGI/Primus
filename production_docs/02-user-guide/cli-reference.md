@@ -109,7 +109,7 @@ primus-cli container [options] -- <command>
 
 | Option | Description |
 | --- | --- |
-| `--image NAME` | Image tag (default from config: `rocm/primus:v26.1`). |
+| `--image NAME` | Image tag (default from config: `rocm/primus:v26.2`). |
 | `--volume HOST[:CONTAINER]` | Bind mount (repeatable). |
 | `--env KEY=VALUE` | Pass into the **inner** `primus-cli direct` as `--env` (repeatable). |
 | `--device PATH` | Extra device nodes (repeatable; defaults include GPU/RDMA devices). |
@@ -141,26 +141,25 @@ Launch distributed jobs with `srun` or `sbatch`. The Slurm launcher builds `srun
 ### Syntax
 
 ```text
-primus-cli slurm [--config FILE] [--debug] [--dry-run] [srun|sbatch] [SLURM_FLAGS...] -- <entry> [ENTRY_ARGS...] [-- [PRIMUS_ARGS...]]
+primus-cli slurm [--config FILE] [--debug] [--dry-run] [srun|sbatch] [SLURM_FLAGS...] -- <command>
 ```
 
 | Part | Meaning |
 | --- | --- |
-| First `--` | Separates Slurm launcher flags from the **entry** segment (for example `container -- train pretrain ...`). |
-| Optional second `--` | If you need to separate arguments intended for an outer entry wrapper from the Primus Python CLI, you can insert a second `--` in the entry segment; the exact split depends on how the entry script parses its arguments. |
+| First `--` | Separates Slurm launcher flags from the Primus Python CLI command (for example `train pretrain ...`). |
 | Default launcher | If you omit `srun` and `sbatch`, **`srun` is used** (`LAUNCH_CMD` in `runner/primus-cli-slurm.sh`). |
 
 ### Examples
 
 ```bash
-# Interactive multi-node training (container entry on each node)
-./runner/primus-cli slurm srun -N 4 -p gpu -- container -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+# Interactive multi-node training
+./runner/primus-cli slurm srun -N 4 -p gpu -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 
 # Batch job
-./runner/primus-cli slurm sbatch -N 8 -t 8:00:00 -o train.log -- container -- train pretrain --config exp.yaml
+./runner/primus-cli slurm sbatch -N 8 -t 8:00:00 -o train.log -- train pretrain --config exp.yaml
 ```
 
-On each node, `primus-cli-slurm-entry.sh` sets `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `MASTER_ADDR`, and `MASTER_PORT` from Slurm and **invokes `primus-cli-container.sh`** with matching `--env` injections (see `runner/primus-cli-slurm-entry.sh`). Your Slurm command line should still use the `container -- …` entry pattern so arguments line up with that flow.
+On each node, `primus-cli-slurm-entry.sh` sets `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `MASTER_ADDR`, and `MASTER_PORT` from Slurm and invokes `primus-cli-container.sh` with matching `--env` injections (see `runner/primus-cli-slurm-entry.sh`). Container options such as `--image` should come from `runner/.primus.yaml` or the launcher config file rather than appearing as an inner `container` command after the Slurm separator.
 
 ---
 
@@ -214,10 +213,10 @@ Within a chosen file, nested keys follow normal YAML structure; Slurm and contai
 | Direct pretrain | `./runner/primus-cli direct -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 | Direct GEMM | `./runner/primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096` |
 | Container pretrain | `./runner/primus-cli container --volume /data:/data -- train pretrain --config /data/exp.yaml` |
-| Slurm + container | `./runner/primus-cli slurm srun -N 4 -- container -- train pretrain --config exp.yaml` |
+| Slurm training | `./runner/primus-cli slurm srun -N 4 -- train pretrain --config exp.yaml` |
 | Preflight (fast) | `./runner/primus-cli slurm srun -N 4 -- preflight --host --gpu --network` |
-| Export merged train config | `./runner/primus-cli direct -- train pretrain --config exp.yaml --export_config /tmp/merged.yaml` |
-| Dry-run Slurm | `./runner/primus-cli --dry-run slurm srun -N 2 -- container -- train pretrain --config exp.yaml` |
+| Inspect launch command | `./runner/primus-cli --dry-run direct -- train pretrain --config exp.yaml` |
+| Dry-run Slurm | `./runner/primus-cli --dry-run slurm srun -N 2 -- train pretrain --config exp.yaml` |
 
 ---
 

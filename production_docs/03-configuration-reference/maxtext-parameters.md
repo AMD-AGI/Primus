@@ -61,6 +61,8 @@ From `pre_trainer.yaml` (extends `trainer_base.yaml`).
 
 ## 4. Checkpointing
 
+These are Primus overlay defaults. MaxText also loads upstream `base.yml` at runtime through `base_config: "base.yml"`, where upstream checkpoint defaults may differ. When debugging effective behavior, distinguish the Primus YAML written by the adapter from the upstream MaxText defaults loaded afterward.
+
 
 | Parameter              | Default | Description                                                        |
 | ---------------------- | ------- | ------------------------------------------------------------------ |

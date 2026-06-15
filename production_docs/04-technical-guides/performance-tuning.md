@@ -89,7 +89,8 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 |------|---------|
 | `use_turbo_attention` | Optimized attention kernels. |
 | `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
-| `use_turbo_grouped_mlp` | Optimized grouped MLP (MoE). |
+| `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
+| `use_turbo_grouped_mlp` | Deprecated alias retained in configs; prefer `use_turbo_grouped_gemm`. |
 | `use_turbo_rms_norm` | Optimized RMSNorm. |
 | `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see `docs/backends/megatron/patch-notes.md`). |
 | `use_turbo_deepep` | DeepEP token dispatcher; set with `enable_primus_turbo: true`. |
@@ -143,7 +144,8 @@ Extended Megatron arguments and Turbo-related behavior are summarized in `docs/b
 
 From `primus/configs/models/megatron/language_model.yaml`:
 
-- `cross_entropy_loss_fusion: true` with `cross_entropy_fusion_impl: "te"` for Transformer Engine fused cross entropy when supported.
+- Default: `cross_entropy_loss_fusion: false` with `cross_entropy_fusion_impl: "native"`.
+- To use Transformer Engine fused cross entropy where supported, enable the fusion explicitly and set `cross_entropy_fusion_impl: "te"`.
 
 ---
 
@@ -156,7 +158,7 @@ From `primus/configs/models/megatron/language_model.yaml`:
 | `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
 | `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
 | `recompute_num_layers` | integer | Layers to recompute when using selective/uniform strategies. |
-| `recompute_layer_ids` | list or null | Primus extension: **exact layer IDs** to recompute (`docs/backends/megatron/patch-notes.md`). Use with `recompute_granularity: full` per patch notes. |
+| `recompute_layer_ids` | list or null | Primus extension: per-pipeline-stage layer indices from `0` to `num_layers_per_pp_stage - 1`. Use with `recompute_granularity: full` and supported recompute methods. |
 
 ### TorchTitan
 

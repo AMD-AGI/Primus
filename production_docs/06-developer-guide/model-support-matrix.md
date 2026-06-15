@@ -1,6 +1,6 @@
 # Model Support Matrix
 
-This document summarizes which model families Primus targets per backend, lists **checked-in** model presets and example experiment YAML under the repository, and distinguishes **curated examples** from **theoretical** support (a preset or upstream stack may exist without a matching `examples/` entry).
+This document summarizes which model families Primus targets per backend and lists representative checked-in model presets and example experiment YAML under the repository. It distinguishes **curated examples** from **theoretical** support (a preset or upstream stack may exist without a matching `examples/` entry). Use the filesystem under `primus/configs/models/` and `examples/*/configs/` as the authoritative live inventory.
 
 For how to add presets, see [Adding model configurations](./adding-models.md). Backend parameter references: [Megatron](../03-configuration-reference/megatron-parameters.md), [TorchTitan](../03-configuration-reference/torchtitan-parameters.md), [MaxText](../03-configuration-reference/maxtext-parameters.md), [Megatron Bridge](../03-configuration-reference/megatron-bridge-parameters.md).
 
@@ -13,17 +13,18 @@ The following aligns with the backend overview and the configs present in this t
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
 | **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite) and DeepSeek-V3, Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 MoE, Grok, GPT-OSS, Zebra LLaMA, Mamba, and generic `language_model.yaml` bases. |
-| **TorchTitan** | LLaMA3 family (including 3.1), DeepSeek-V3 (16B and 671B recipes in examples), Qwen3 (0.6B–32B in examples). Additional presets exist under `primus/configs/models/torchtitan/` without a matching example (see table). |
+| **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/google/maxtext). |
-| **Megatron Bridge** | Post-training recipes for Qwen3 (8B / 32B) and LLaMA 3.1 70B (SFT / LoRA examples). |
+| **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
+| **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
-**Interpretation:** “Supported” in upstream code can exceed what this repository ships as YAML. Rows below reference **files that exist** under `primus/configs/models/` and `examples/`.
+**Interpretation:** “Supported” in upstream code can exceed what this repository ships as YAML. Rows below reference representative files that exist under `primus/configs/models/` and `examples/`; they should not be treated as a complete generated inventory.
 
 ---
 
 ## Megatron model configs
 
-Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/` and `examples/megatron/configs/MI355X/`.
+Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -69,7 +70,7 @@ Model presets live in `primus/configs/models/megatron/`. Example experiments tha
 | `qwen2.5_7B.yaml` | `primus/configs/models/megatron/qwen2.5_7B.yaml` | Model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen2.5_72B.yaml` | `primus/configs/models/megatron/qwen2.5_72B.yaml` | Model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen2.5_base.yaml` | `primus/configs/models/megatron/qwen2.5_base.yaml` | Base fragment | — | — |
-| `qwen3_8B.yaml` | `primus/configs/models/megatron/qwen3_8B.yaml` | Model preset | MI355X (`qwen3_8B-BF16-pretrain.yaml`, `qwen3_8B-FP8-pretrain.yaml`); not under MI300X in this repo | BF16, FP8 |
+| `qwen3_8B.yaml` | `primus/configs/models/megatron/qwen3_8B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `zebra_llama_1B.yaml` | `primus/configs/models/megatron/zebra_llama_1B.yaml` | Model preset | MI300X, MI355X | Set in experiment overrides |
@@ -82,7 +83,7 @@ Model presets live in `primus/configs/models/megatron/`. Example experiments tha
 
 ## TorchTitan model configs
 
-Presets: `primus/configs/models/torchtitan/`. Examples: `examples/torchtitan/configs/MI300X/` and `MI355X/`.
+Presets: `primus/configs/models/torchtitan/`. Examples: `examples/torchtitan/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
 | Model name (file) | Preset path | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ------------------------- | ---------------------- |
@@ -103,9 +104,10 @@ Presets: `primus/configs/models/torchtitan/`. Examples: `examples/torchtitan/con
 | `llama3.2_1B.yaml` | `primus/configs/models/torchtitan/llama3.2_1B.yaml` | No example in this repo | — |
 | `llama3.3_70B.yaml` | `primus/configs/models/torchtitan/llama3.3_70B.yaml` | No example in this repo | — |
 | `llama3.3_70B-fp8.yaml` | `primus/configs/models/torchtitan/llama3.3_70B-fp8.yaml` | No example in this repo | — |
-| `qwen3_0.6b.yaml` | `primus/configs/models/torchtitan/qwen3_0.6b.yaml` | MI300X, MI355X | (see experiment) |
-| `qwen3_1.7b.yaml` | `primus/configs/models/torchtitan/qwen3_1.7b.yaml` | MI300X, MI355X | (see experiment) |
-| `qwen3_32b.yaml` | `primus/configs/models/torchtitan/qwen3_32b.yaml` | MI300X, MI355X | (see experiment) |
+| `qwen3_0.6b.yaml` | `primus/configs/models/torchtitan/qwen3_0.6b.yaml` | MI300X, MI325X, MI355X | (see experiment) |
+| `qwen3_1.7b.yaml` | `primus/configs/models/torchtitan/qwen3_1.7b.yaml` | MI300X, MI325X, MI355X | (see experiment) |
+| `qwen3_8b.yaml` | `primus/configs/models/torchtitan/qwen3_8b.yaml` | MI300X, MI325X | (see experiment) |
+| `qwen3_32b.yaml` | `primus/configs/models/torchtitan/qwen3_32b.yaml` | MI300X, MI325X, MI355X | (see experiment) |
 
 **Parallelism:** Controlled by TorchTitan launch configuration and Primus module overrides (see TorchTitan patch notes and [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md)); not embedded in the small `job` / `model` preset alone.
 
@@ -134,17 +136,19 @@ Presets: `primus/configs/models/maxtext/`. Examples: `examples/maxtext/configs/M
 
 ---
 
-## Megatron Bridge model configs (post-training)
+## Megatron Bridge model configs
 
 Presets: `primus/configs/models/megatron_bridge/`. Examples: `examples/megatron_bridge/configs/MI300X/` and `examples/megatron_bridge/configs/MI355X/`.
 
 | Model name (file) | Preset path | Recipe / flavor (from preset) | Example experiment dirs |
 | ----------------- | ----------- | ----------------------------- | ------------------------ |
-| `qwen3_8b.yaml` | `primus/configs/models/megatron_bridge/qwen3_8b.yaml` | `qwen.qwen3` / `qwen3_8b_finetune_config` | MI355X |
+| `qwen3_8b.yaml` | `primus/configs/models/megatron_bridge/qwen3_8b.yaml` | `qwen.qwen3` / `qwen3_8b_finetune_config` | MI300X pretrain, MI355X posttrain |
 | `qwen3_32b.yaml` | `primus/configs/models/megatron_bridge/qwen3_32b.yaml` | `qwen.qwen3` / `qwen3_32b_finetune_config` | MI300X, MI355X |
 | `llama31_70b.yaml` | `primus/configs/models/megatron_bridge/llama31_70b.yaml` | `llama.llama3` / `llama31_70b_finetune_config` | MI355X |
+| `zebra_llama_1B.yaml`, `zebra_llama_3B.yaml`, `zebra_llama_8B.yaml` | `primus/configs/models/megatron_bridge/` | Zebra LLaMA presets | MI300X posttrain |
+| `mamba_370M.yaml` | `primus/configs/models/megatron_bridge/mamba_370M.yaml` | Mamba preset | MI300X posttrain |
 
-Example filenames include `*_sft_posttrain.yaml` and `*_lora_posttrain.yaml`; precision such as `bf16_mixed` is set in experiment `overrides`.
+Example filenames include `*_pretrain.yaml`, `*_sft_posttrain.yaml`, and `*_lora_posttrain.yaml`; precision such as `bf16_mixed` is set in experiment `overrides`.
 
 ---
 
@@ -156,11 +160,11 @@ Curated example layouts under `examples/` use GPU SKU subdirectories. As of this
 | ------- | ---------------------------- | ------------------------------ | ---------------------------- | ----------------------------------- |
 | **MI300X** | Yes | Yes | Yes | Yes |
 | **MI355X** | Yes | Yes | Yes | Yes |
-| **MI325X** | **No** `MI325X/` directory in this repository | **No** | **No** | **No** |
+| **MI325X** | Yes | Yes | No | No |
 
-Megatron and TorchTitan ship parallel MI300X and MI355X experiment sets for many of the same model names. MaxText includes additional MI355X-only examples (for example `llama3.1_405B-pretrain.yaml`). Megatron Bridge MI300X examples target **Qwen3 32B**; **Qwen3 8B** and **LLaMA 3.1 70B** examples appear under MI355X.
+Megatron and TorchTitan ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI300X and MI355X examples, including MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
 
-This does **not** imply MI325X is unsupported by Primus in general—only that this tree does not currently provide `examples/*/configs/MI325X/` paths to copy from.
+Absence of a SKU directory for a given backend does **not** imply the backend cannot run there; it means this tree does not currently provide a checked-in example path to copy from.
 
 ---
 

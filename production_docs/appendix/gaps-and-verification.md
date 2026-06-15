@@ -42,9 +42,9 @@ The root `README.md` states "Apache 2.0 License" but the `LICENSE` file contains
 
 ### MI325X Support
 
-MI325X is mentioned in documentation as supported hardware, but no example configurations exist under `examples/*/configs/MI325X/`. Only MI300X and MI355X directories are present.
+MI325X is mentioned in documentation as supported hardware, and checked-in MI325X examples now exist for Megatron and TorchTitan. MaxText and Megatron Bridge do not currently have `examples/<backend>/configs/MI325X/` directories.
 
-**Action needed**: Clarify MI325X support status. Are MI300X configs expected to work on MI325X? Add MI325X example configs if tested.
+**Action needed**: Clarify support status for backends without MI325X examples, and document whether MI300X/MI355X examples are expected to transfer to MI325X for those backends.
 
 ### GPU-Specific Environment Files
 
@@ -60,12 +60,9 @@ The CLI Architecture document describes an auto-saved experiment snapshot struct
 
 ### Missing Documentation Pages
 
-The existing `docs/README.md` links to pages that do not exist:
+The current stale links are in `docs/cli/README.md`, which references pages that do not exist:
 - `docs/configuration.md`
 - `docs/slurm-container.md`
-- `docs/experiments.md`
-- `docs/advanced.md`
-- `docs/faq.md`
 
 **Action needed**: Either create these pages, remove the links, or redirect to corresponding `production_docs/` pages.
 
@@ -75,7 +72,7 @@ The existing `docs/README.md` links to pages that do not exist:
 
 ### HummingbirdXT Backend Maturity
 
-The HummingbirdXT backend is registered but has minimal configuration (one model preset, one module preset). Documentation coverage is thin.
+The HummingbirdXT backend is registered and includes an adapter, argument builder, post-training trainer, runner hooks, and one checked-in example at `examples/hummingbirdxt/configs/wan22_posttrain.yaml`. Documentation coverage and support boundaries are still thin.
 
 **Action needed**: Document HummingbirdXT capabilities, limitations, and supported workflows if it is user-facing.
 
@@ -114,9 +111,9 @@ A small number of environment variables found in code may not be fully documente
 
 ### Test Coverage
 
-The `tests/README.md` is empty. While testing information is now in `production_docs/06-developer-guide/testing.md`, the in-tree README should at minimum point to the production docs.
+`tests/README.md` now contains a test overview and commands. Remaining work is to keep its directory layout and scope aligned with `production_docs/06-developer-guide/testing.md`.
 
-**Action needed**: Add content to `tests/README.md` and `tools/README.md`.
+**Action needed**: Review whether `tools/README.md` or additional tool-specific docs are needed.
 
 ---
 

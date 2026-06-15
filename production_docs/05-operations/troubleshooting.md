@@ -12,7 +12,7 @@ Use these tools before scaling a job or when a failure is hard to localize.
 |------|---------|
 | `primus-cli --debug` | Enables verbose logging in `primus-cli` for command construction, delegation, and runtime details. |
 | `primus-cli --dry-run` | Prints the commands Primus would run without executing them—useful to verify wrappers, paths, and MPI/launcher wiring. |
-| `primus-cli --export_config <path>` | Writes the **fully merged** YAML after presets, `extends:`, and overrides—use to confirm effective values. |
+| `--export_config <path>` | Parsed by the training config parser, but not written by the current default `PrimusRuntime` path. Treat it as legacy/future functionality unless your deployment has implemented it. |
 | `NCCL_DEBUG=INFO` | Surfaces detailed RCCL/NCCL connection and collective logs (set in the job environment). |
 | `primus-cli direct -- preflight --host --gpu --network` | Fast host, GPU, and network validation. See [Preflight](../02-user-guide/preflight.md). |
 | `PRIMUS_PATCHES=none` | Disables Primus patches to the selected backend to isolate whether a failure is Primus-specific or upstream. |
@@ -21,10 +21,7 @@ Use these tools before scaling a job or when a failure is hard to localize.
 
 ```bash
 # Verbose CLI + dry run (no training executed)
-primus-cli --debug --dry-run train --config path/to/config.yaml
-
-# Export resolved config for inspection
-primus-cli train --config path/to/config.yaml --export_config /tmp/resolved.yaml
+primus-cli --debug --dry-run direct -- train pretrain --config path/to/config.yaml
 
 # Preflight: environment validation only
 primus-cli direct -- preflight --host --gpu --network
@@ -119,8 +116,8 @@ Installation and container-oriented setup are covered in [Installation](../01-ge
 | Unset `${VAR}` | `${VAR}` with no default fails if `VAR` is unset. Use **`${VAR:default}`** or **export** the variable before launch. |
 | Broken `extends:` chain | Confirm every referenced file exists and paths resolve relative to the expected directory. |
 | Wrong parameter name | Cross-check backend docs: [Megatron](../03-configuration-reference/megatron-parameters.md), [TorchTitan](../03-configuration-reference/torchtitan-parameters.md), [MaxText](../03-configuration-reference/maxtext-parameters.md), [Megatron Bridge](../03-configuration-reference/megatron-bridge-parameters.md). |
-| Override not applied | Review merge order: **CLI > experiment overrides > model preset > module preset**. See [Configuration system](../02-user-guide/configuration-system.md). |
-| Effective config unknown | Use **`--export_config`** and **`--dry-run`** together to inspect merged YAML and planned commands. |
+| Override not applied | Review merge order: **CLI > experiment overrides > module preset with model preset additions**; duplicate top-level module keys win over model preset keys. See [Configuration system](../02-user-guide/configuration-system.md). |
+| Effective config unknown | Use **`--dry-run`** to inspect the launch command and manually trace the experiment YAML, module preset, model preset, and overrides. Resolved-config export is not currently written by the default core runtime. |
 
 ---
 

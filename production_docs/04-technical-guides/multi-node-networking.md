@@ -11,7 +11,6 @@ This guide summarizes how Primus configures networking, how **InfiniBand**, **Ro
 | Default NCCL/RCCL and socket setup | `runner/helpers/envs/base_env.sh` |
 | IB HCA detection | `runner/helpers/envs/get_nccl_ib_hca.sh` |
 | Socket / interface detection | `runner/helpers/envs/get_ip_interface.sh` |
-| AINIC environment (legacy script) | `runner/helpers/envs/enable_ainic.sh` |
 | AINIC hook (container/CLI integration) | `runner/helpers/hooks/03_enable_ainic.sh` |
 | AINIC CLI defaults | `runner/use_ainic.yaml` |
 | ANP / `NCCL_NET_PLUGIN` example | `examples/run_pretrain.sh` |
@@ -86,10 +85,9 @@ Primus CLI system defaults for AINIC-oriented runs include:
 
 Adjust **`NCCL_IB_GID_INDEX`** and **`container.options.image`** to match your cluster; comments in `runner/use_ainic.yaml` call this out explicitly.
 
-### Hook vs legacy script
+### AINIC hook
 
-- **`runner/helpers/hooks/03_enable_ainic.sh`** is the supported hook path: it sets ANP/RCCL/MPI home directories, IB QoS, RoCE version, P2P channel counts, GDR flush behavior, `LD_LIBRARY_PATH` (including `libibverbs` and RCCL/ANP/MPI build paths), and related flags. Default `NCCL_IB_FIFO_TC` in the hook is **192** (the legacy `enable_ainic.sh` uses **184** with a comment noting **192** as an alternative—align with your fabric).
-- **`runner/helpers/envs/enable_ainic.sh`** is the older env file; the hook comment notes it as superseded for hook-based workflows.
+**`runner/helpers/hooks/03_enable_ainic.sh`** is the supported hook path: it sets ANP/RCCL/MPI home directories, IB QoS, RoCE version, P2P channel counts, GDR flush behavior, `LD_LIBRARY_PATH` (including `libibverbs` and RCCL/ANP/MPI build paths), and related flags. Default `NCCL_IB_FIFO_TC` in the hook is **192**; align this value with your fabric.
 
 ### RCCL network plugin (ANP)
 
@@ -97,7 +95,7 @@ For ANP-based networking, clusters often set **`NCCL_NET_PLUGIN`** to **`librccl
 
 ### Variables commonly set for AINIC
 
-From `03_enable_ainic.sh` / `enable_ainic.sh` (non-exhaustive):
+From `03_enable_ainic.sh` (non-exhaustive):
 
 | Variable | Purpose |
 |----------|---------|

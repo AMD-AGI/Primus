@@ -26,7 +26,7 @@ Related: [Benchmark suite](./benchmarking.md), [Preflight diagnostics](./preflig
 export NNODES=1
 export HSA_NO_SCRATCH_RECLAIM=1
 
-bash runner/primus-cli direct --script primus/cli/main.py -- \
+./runner/primus-cli direct --script primus/cli/main.py -- \
   projection memory \
   --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
 ```
@@ -59,7 +59,7 @@ Minimum required nodes (derived from parallelism):
 export NNODES=1
 export HSA_NO_SCRATCH_RECLAIM=1
 
-bash runner/primus-cli direct --script primus/cli/main.py -- \
+./runner/primus-cli direct --script primus/cli/main.py -- \
   projection performance \
   --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
 ```
@@ -73,7 +73,7 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 ### Projecting to a specific node count
 
 ```bash
-bash runner/primus-cli direct --script primus/cli/main.py -- \
+./runner/primus-cli direct --script primus/cli/main.py -- \
   projection performance \
   --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
   --target-nodes 4
@@ -90,7 +90,7 @@ export PRIMUS_TP=1
 export PRIMUS_PP=3
 export PRIMUS_EP=8
 
-bash runner/primus-cli direct --script primus/cli/main.py -- \
+./runner/primus-cli direct --script primus/cli/main.py -- \
   projection performance \
   --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
   --target-nodes 6
@@ -113,19 +113,27 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--config` / `--exp` | Path to the Primus YAML configuration (**required**). |
 | `--data_path` | Data directory (default `./data` when included on the parser). |
 | `--backend_path` | Optional Megatron/TorchTitan import path appended to `PYTHONPATH`. |
-| `--export_config` | Write the merged resolved config to a file. |
+| `--export_config` | Accepted by the shared pretrain parser, but the default core runtime does not currently write a resolved YAML file. |
 
 ### Performance-only options
 
 | Option | Description |
 |--------|-------------|
 | `--target-nodes` | Target number of nodes for scaling projection. Defaults to the minimum nodes required by TP/PP/EP/CP and GPUs per node. |
+| `--target-num-nodes` | Alias-style projection override for target node count. |
+| `--target-ep-size` | Override `expert_model_parallel_size` for the projection target. |
 | `--benchmark-gpus` | Use fewer than `GPUS_PER_NODE` GPUs for benchmarking; results are scaled analytically back to a full node. |
 | `--hardware-config` | YAML file with hardware parameters for communication modeling. |
 | `--profiling-mode` | `benchmark` (default, uses GPU), `simulate` (analytical / Origami GEMM + SDPA models, no GPU), or `both` (side-by-side). |
 | `--gemm-backend` | GEMM simulation backend when profiling is simulated (`origami`). |
 | `--gpu-arch` | Target architecture for simulation (for example `mi300x`, `gfx942`, `mi355x`, `gfx950`); can use `PRIMUS_GPU_ARCH`. |
 | `--gpu-clock-mhz` | Override GPU clock in MHz for simulation; can use `PRIMUS_GPU_CLOCK_MHZ`. |
+| `--pipeline-schedule-algorithm` | Pipeline simulation scheduler (`auto`, zero-bubble variants, or `all` for comparison). |
+| `--enable-zero-bubble` | Enable zero-bubble pipeline scheduling for projection. |
+| `--enable-deepep` | Enable DeepEP overlap modeling. |
+| `--sync-free-stage` | Override Sync-Free MoE stage (`0` off; stages `1`-`3` enable additional modeling assumptions). |
+| `--num-virtual-stages-per-pipeline-rank` | Override virtual pipeline stage count for projection. |
+| `--micro-batch-size`, `--global-batch-size` | Override batch sizes for projection without editing the YAML. |
 
 ---
 

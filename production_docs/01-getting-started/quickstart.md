@@ -9,7 +9,7 @@ This guide runs a **small Megatron-LM pretraining example** with **mock data** s
 ## Step 1: Pull the container image
 
 ```bash
-docker pull docker.io/rocm/primus:v26.1
+docker pull docker.io/rocm/primus:v26.2
 ```
 
 ---
@@ -28,7 +28,7 @@ cd Primus
 From the repository root:
 
 ```bash
-./primus-cli container --image rocm/primus:v26.1 -- \
+./primus-cli container --image rocm/primus:v26.2 -- \
   train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
@@ -36,7 +36,7 @@ From the repository root:
 If your config accesses Hugging Face Hub for weights or tokenizers, pass credentials into the container:
 
 ```bash
-./primus-cli container --image rocm/primus:v26.1 \
+./primus-cli container --image rocm/primus:v26.2 \
   --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" -- \
   train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
@@ -64,9 +64,9 @@ Use one experiment file: `examples/megatron/configs/MI300X/llama2_7B-BF16-pretra
 
 | Mode | Example command |
 |------|------------------|
-| **Container** | `./primus-cli container --image rocm/primus:v26.1 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
+| **Container** | `./primus-cli container --image rocm/primus:v26.2 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 | **Direct** | `./primus-cli direct -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
-| **Slurm** | `./primus-cli slurm srun -N <nodes> ... -- container --image rocm/primus:v26.1 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
+| **Slurm** | `./primus-cli slurm srun -N <nodes> ... -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 
 Replace `<nodes>` and Slurm resource flags with values appropriate for your cluster.
 
@@ -83,7 +83,7 @@ primus-cli [global-options] <mode> [mode-args] -- <command> [command-args...]
 Example:
 
 ```text
-primus-cli  container  --image rocm/primus:v26.1  --  train pretrain --config path/to/experiment.yaml
+primus-cli  container  --image rocm/primus:v26.2  --  train pretrain --config path/to/experiment.yaml
             ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
             mode        mode args                     command + args
 ```
@@ -96,7 +96,7 @@ primus-cli  container  --image rocm/primus:v26.1  --  train pretrain --config pa
 |-------|----------|
 | Full CLI flags and subcommands | [CLI reference](../02-user-guide/cli-reference.md) |
 | YAML presets, overrides, and composition | [Configuration system](../02-user-guide/configuration-system.md) |
-| Pretraining workflows and backend notes | [Pretraining workflows](../02-user-guide/pretraining-workflows.md) |
+| Pretraining workflows and backend notes | [Pretraining workflows](../02-user-guide/pretraining.md) |
 | Terminology | [Glossary](./glossary.md) |
 
 Upstream project docs under `docs/` (for example `docs/cli/PRIMUS-CLI-GUIDE.md`) provide additional detail that may overlap with the production doc set.

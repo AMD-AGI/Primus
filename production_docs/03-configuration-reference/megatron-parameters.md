@@ -1,12 +1,12 @@
 # Megatron Backend Configuration Reference
 
-This page lists **every** flat configuration key exposed by Primus when `framework: megatron`. Values are the defaults from the Megatron module and model presets in this repository (merged in YAML `extends` order).
+This page lists the flat configuration keys exposed by Primus when `framework: megatron`. Unless a section says otherwise, values are the defaults from `primus/configs/modules/megatron/trainer_base.yaml` and related model presets. The effective pretraining preset is `pre_trainer.yaml`, which extends `trainer_base.yaml` and overrides several high-impact training defaults.
 
 **Where parameters live.** Set overrides under `modules.pre_trainer.overrides:` in your experiment YAML. Model architecture keys usually come from `models.<role>.overrides:` (or your chosen model preset), but the same names map to Megatron’s argparse namespace either way.
 
 **Presets.**
 
-- Module presets: `primus/configs/modules/megatron/` (the main training bundle is `trainer_base.yaml`, which extends Primus Megatron add-ons).
+- Module presets: `primus/configs/modules/megatron/` (the main pretraining bundle is `pre_trainer.yaml`, which extends `trainer_base.yaml` and Primus Megatron add-ons).
 - Model presets: `primus/configs/models/megatron/` (for example `language_model.yaml`).
 
 **Mapping to Megatron-LM.** Keys are passed through **1:1** to Megatron’s training arguments (same names as `argparse` / `Namespace`). Primus builds that namespace with `MegatronArgBuilder`.
@@ -49,7 +49,7 @@ models:
 
 ## 2. Training and batching
 
-*Source: `primus/configs/modules/megatron/trainer_base.yaml`.*
+*Source: `primus/configs/modules/megatron/trainer_base.yaml`; effective `pre_trainer.yaml` overrides are noted where they differ.*
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -57,7 +57,7 @@ models:
 | `spec` | `null` | Optional trainer spec hook (unused in defaults). |
 | `micro_batch_size` | `2` | Samples per microbatch per data-parallel rank (per forward/backward step before gradient accumulation). |
 | `batch_size` | `null` | Deprecated; use `micro_batch_size` / `global_batch_size`. |
-| `global_batch_size` | `128` | Total batch size across the data-parallel world (before or after splitting, per Megatron semantics). |
+| `global_batch_size` | `128` (`16` in `pre_trainer.yaml`) | Total batch size across the data-parallel world (before or after splitting, per Megatron semantics). |
 | `rampup_batch_size` | `null` | Optional batch-size ramp schedule string / config. |
 | `decrease_batch_size_if_needed` | `false` | Allow shrinking batch if memory is insufficient. |
 | `check_for_nan_in_loss_and_grad` | `true` | Abort on NaNs in loss or gradients. |
@@ -69,15 +69,15 @@ models:
 | `exit_interval` | `null` | Exit after this many iterations (if set). |
 | `onnx_safe` | `null` | ONNX export compatibility tweaks. |
 | `bert_binary_head` | `true` | Use BERT binary classification head when applicable. |
-| `use_flash_attn` | `false` | Prefer FlashAttention kernels when available. |
+| `use_flash_attn` | `false` (`true` in `pre_trainer.yaml`) | Prefer FlashAttention kernels when available. |
 | `seed` | `1234` | RNG seed for reproducibility. |
 | `data_parallel_random_init` | `false` | Random init that varies across data-parallel ranks. |
 | `init_method_xavier_uniform` | `false` | Use Xavier uniform for some weights. |
 | `test_mode` | `false` | Lightweight test path (fewer steps / checks). |
-| `train_iters` | `null` | Total training iterations (mutually exclusive with sample-based stopping in typical setups). |
+| `train_iters` | `null` (`1000` in `pre_trainer.yaml`) | Total training iterations (mutually exclusive with sample-based stopping in typical setups). |
 | `train_samples` | `null` | Total training samples (when using sample-based training). |
-| `eval_iters` | `32` | Validation iterations per eval. |
-| `eval_interval` | `2000` | Run validation every this many iterations. |
+| `eval_iters` | `32` (`0` in `pre_trainer.yaml`) | Validation iterations per eval. |
+| `eval_interval` | `2000` (`1000` in `pre_trainer.yaml`) | Run validation every this many iterations. |
 | `full_validation` | `false` | Run a full pass over validation data. |
 | `multiple_validation_sets` | `false` | Multiple validation datasets / passes. |
 | `skip_train` | `false` | Only run eval / test, no training updates. |
@@ -137,29 +137,29 @@ models:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `optimizer` | `adam` | Optimizer family (`adam`, `sgd`, etc.). |
-| `lr` | `2.5e-4` | Peak learning rate. |
+| `lr` | `2.5e-4` (`2.0e-05` in `pre_trainer.yaml`) | Peak learning rate. |
 | `lr_decay_style` | `cosine` | LR decay schedule (`cosine`, `linear`, `constant`, WSD, etc.). |
 | `lr_decay_iters` | `null` | Decay duration in iterations. |
 | `lr_decay_samples` | `null` | Decay duration in samples. |
 | `lr_warmup_fraction` | `null` | Warmup as a fraction of total train steps. |
-| `lr_warmup_iters` | `0` | Linear warmup steps. |
+| `lr_warmup_iters` | `0` (`40` in `pre_trainer.yaml`) | Linear warmup steps. |
 | `lr_warmup_samples` | `0` | Warmup in samples. |
 | `lr_warmup_init` | `0.0` | LR at the start of warmup. |
-| `min_lr` | `2.5e-5` | Minimum LR after decay. |
+| `min_lr` | `2.5e-5` (`0.0` in `pre_trainer.yaml`) | Minimum LR after decay. |
 | `lr_wsd_decay_style` | `exponential` | Weight-decay schedule style for WSD when used. |
 | `lr_wsd_decay_samples` | `null` | WSD decay window in samples. |
 | `lr_wsd_decay_iters` | `null` | WSD decay window in iterations. |
 | `head_lr_mult` | `1.0` | LR multiplier for attention/head modules when supported. |
-| `weight_decay` | `0.01` | AdamW / L2-style weight decay. |
+| `weight_decay` | `0.01` (`0.0` in `pre_trainer.yaml`) | AdamW / L2-style weight decay. |
 | `start_weight_decay` | `null` | Starting weight decay for schedules. |
 | `end_weight_decay` | `null` | Ending weight decay for schedules. |
 | `weight_decay_incr_style` | `constant` | How weight decay changes between start/end. |
 | `clip_grad` | `1.0` | Global gradient norm clip. |
 | `adam_beta1` | `0.9` | Adam first moment decay. |
-| `adam_beta2` | `0.95` | Adam second moment decay. |
+| `adam_beta2` | `0.95` (`0.999` in `pre_trainer.yaml`) | Adam second moment decay. |
 | `adam_eps` | `1.0e-08` | Adam epsilon. |
 | `sgd_momentum` | `0.9` | SGD momentum when `optimizer` is SGD. |
-| `override_opt_param_scheduler` | `false` | Override optimizer parameter groups’ schedulers. |
+| `override_opt_param_scheduler` | `false` (`true` in `pre_trainer.yaml`) | Override optimizer parameter groups’ schedulers. |
 | `use_checkpoint_opt_param_scheduler` | `false` | Load optimizer scheduler state strictly from checkpoint. |
 | `warmup` | `null` | Alternate warmup specification (legacy / schedule hooks). |
 | `decoupled_lr` | `null` | Decoupled LR for certain param groups. |
@@ -198,7 +198,7 @@ models:
 |-----------|---------|-------------|
 | `overlap_p2p_comm` | `true` | Overlap pipeline P2P with compute. |
 | `distributed_backend` | `nccl` | Process-group backend (`nccl`, `gloo`, …). |
-| `distributed_timeout_minutes` | `10` | Collective timeout. |
+| `distributed_timeout_minutes` | `10` (`60` in `pre_trainer.yaml`) | Collective timeout. |
 | `defer_embedding_wgrad_compute` | `false` | Defer embedding weight gradients. |
 | `wgrad_deferral_limit` | `0` | Max deferred embedding wgrad steps. |
 | `align_grad_reduce` | `true` | Align gradient reductions for efficiency. |
@@ -218,7 +218,7 @@ models:
 | `account_for_loss_in_pipeline_split` | `false` | Account for loss partition in PP. |
 | `empty_unused_memory_level` | `0` | Aggressiveness of `torch.cuda.empty_cache`. |
 | `standalone_embedding_stage` | `false` | Dedicated PP stage for embeddings. |
-| `use_distributed_optimizer` | `false` | Shard optimizer state across data parallel. |
+| `use_distributed_optimizer` | `false` (`true` in `pre_trainer.yaml`) | Shard optimizer state across data parallel. |
 | `use_sharp` | `false` | Use SHARP for collectives when available. |
 | `sharp_enabled_group` | `null` | Which group SHARP applies to (`dp`, `dp_replica`). |
 | `use_custom_fsdp` | `false` | Custom FSDP integration path. |
@@ -293,7 +293,7 @@ models:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `save` | `null` | Path prefix / pattern for checkpoints to write. |
-| `save_interval` | `20000` | Save every N iterations. |
+| `save_interval` | `20000` (`1000` in `pre_trainer.yaml`) | Save every N iterations. |
 | `save_retain_interval` | `null` | Retain checkpoints at this interval. |
 | `no_save_optim` | `null` | Skip optimizer state in checkpoints when truthy. |
 | `no_save_rng` | `null` | Skip RNG state in checkpoints when truthy. |
@@ -351,7 +351,7 @@ models:
 | `data_cache_path` | `null` | On-disk cache for indexed datasets. |
 | `mock_data` | `false` | Use synthetic data (no real files). |
 | `merge_file` | `null` | Merge file for blended datasets. |
-| `seq_length` | `4096` | Training sequence length. |
+| `seq_length` | `4096` (`1024` in `pre_trainer.yaml`) | Training sequence length. |
 | `encoder_seq_length` | `null` | Encoder sequence length (encoder–decoder). |
 | `decoder_seq_length` | `null` | Decoder sequence length. |
 | `retriever_seq_length` | `256` | Sequence length for retriever models. |
@@ -362,7 +362,7 @@ models:
 | `reset_position_ids` | `false` | Reset position IDs at document boundaries. |
 | `reset_attention_mask` | `false` | Reset attention mask at boundaries. |
 | `eod_mask_loss` | `false` | Mask loss at end-of-document tokens. |
-| `dataloader_type` | `null` | Dataloader implementation (`single`, `cyclic`, `external`, …). |
+| `dataloader_type` | `null` (`cyclic` in `pre_trainer.yaml`) | Dataloader implementation (`single`, `cyclic`, `external`, …). |
 | `mmap_bin_files` | `true` | Memory-map `.bin` index files when supported. |
 | `create_attention_mask_in_dataloader` | `true` | Build attention masks in the dataloader. |
 | `num_dataset_builder_threads` | `1` | Threads to build dataset indices. |
@@ -398,7 +398,7 @@ models:
 | `log_avg_reset_interval` | `10` | Reset moving averages periodically. |
 | `log_params_norm` | `false` | Log L2 norms of parameters. |
 | `log_num_zeros_in_grad` | `false` | Log fraction of zero gradients. |
-| `log_throughput` | `false` | Log tokens/sec and timing. |
+| `log_throughput` | `false` (`true` in `pre_trainer.yaml`) | Log tokens/sec and timing. |
 | `log_progress` | `false` | Verbose progress logging. |
 | `timing_log_level` | `0` | Verbosity for timing logs. |
 | `timing_log_option` | `minmax` | Aggregate style for timing (`minmax`, `all`, …). |
@@ -418,7 +418,7 @@ models:
 | `enable_one_logger` | `true` | Enable NVIDIA OneLogger integration. |
 | `one_logger_project` | `megatron-lm` | OneLogger project string. |
 | `one_logger_run_name` | `null` | OneLogger run name. |
-| `log_interval` | `100` | Console log interval in iterations. |
+| `log_interval` | `100` (`1` in `pre_trainer.yaml`) | Console log interval in iterations. |
 | `tensorboard_dir` | `null` | TensorBoard output directory. |
 | `logging_level` | `null` | Python logging level override. |
 | `config_logger_dir` | `""` | Directory for dumped config logs. |
@@ -623,7 +623,8 @@ models:
 | `enable_primus_turbo` | `false` | Master switch for Primus-Turbo integrations. Many sub-features require this plus specific kernels. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
-| `use_turbo_grouped_mlp` | `false` | Turbo grouped MLP / SwiGLU path. |
+| `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
+| `use_turbo_grouped_mlp` | `false` | Deprecated alias; prefer `use_turbo_grouped_gemm`. |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary scores. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention (spacing in YAML is normalized to this key). |
 | `use_turbo_deepep` | `false` | Turbo DeepEP expert communication. |
