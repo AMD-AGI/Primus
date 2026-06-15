@@ -111,7 +111,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboLinear, "parallel linear")
-            if self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
             else TELinear
         )
 
@@ -119,7 +119,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which column parallel linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboColumnParallelLinear, "column parallel linear")
-            if self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
             else TEColumnParallelLinear
         )
 
@@ -127,7 +127,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which row parallel linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboRowParallelLinear, "row parallel linear")
-            if self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
             else TERowParallelLinear
         )
 
@@ -141,7 +141,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             _require_primus_turbo(
                 PrimusTurboLayerNormColumnParallelLinear, "layernorm column parallel linear"
             )
-            if self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
             else TELayerNormColumnParallelLinear
         )
 
@@ -173,7 +173,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
             moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
 
-        use_turbo_grouped_gemm = self.cfg.use_turbo_grouped_gemm or self.cfg.use_turbo_grouped_mlp
+        use_turbo_grouped_gemm = self.cfg.use_turbo_grouped_gemm
         assert not (
             moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm
         ), "moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm are not compatible."
@@ -195,7 +195,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
                 ),
             )
             return _GroupedMLP, GroupedMLPSubmodules
-        elif moe_use_grouped_gemm and moe_use_legacy_grouped_gemm and not self.cfg.use_turbo_grouped_mlp:
+        elif moe_use_grouped_gemm and moe_use_legacy_grouped_gemm and not use_turbo_grouped_gemm:
             # Legacy grouped-GEMM path without PrimusTurbo: Megatron upstream
             # removed the original ``GroupedMLP`` class, but the Primus
             # pipeline scheduler still relies on its grouped-gemm wgrad-split

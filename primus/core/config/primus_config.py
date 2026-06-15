@@ -132,13 +132,24 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
 def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace | None:
     """
     Fetch a single module config from `cfg.modules` by name.
+
+    SFT yamls only declare ``post_trainer``; the train CLI still asks for
+    ``pre_trainer`` (and vice-versa). Both names expand from the same
+    ``sft_trainer.yaml`` with overrides, so swap them when only one of
+    the two is present.
     """
     modules = getattr(cfg, "modules", None) or []
+    alias_map = {"pre_trainer": "post_trainer", "post_trainer": "pre_trainer"}
+    alias = alias_map.get(module_name)
+    fallback: SimpleNamespace | None = None
     for m in modules:
-        if getattr(m, "name", None) == module_name:
+        name = getattr(m, "name", None)
+        if name == module_name:
             return m
+        if alias is not None and name == alias:
+            fallback = m
 
-    return None
+    return fallback
 
 
 def get_module_names(cfg: SimpleNamespace) -> list[str]:

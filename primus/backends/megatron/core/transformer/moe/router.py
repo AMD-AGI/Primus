@@ -90,18 +90,29 @@ class PrimusTopKRouter(TopKRouter):
             scores, routing_map = super().routing(logits, **kwargs)
 
         assert routing_map.dtype == torch.bool, "routing_map should be boolean"
-        # profile for moe
-        if args.moe_router_force_load_balancing:
-            indices = (
-                torch.arange(routing_map.size(0) * self.topk, device=routing_map.device).view(
-                    routing_map.size(0), self.topk
-                )
-                % self.num_experts
-            )
-            row = torch.arange(routing_map.size(0), device=routing_map.device).repeat_interleave(self.topk)
-            col = indices.view(-1)
-            routing_map = torch.zeros_like(routing_map, dtype=torch.bool).index_put_(
-                (row, col), torch.ones(1, device=routing_map.device, dtype=torch.bool)
-            )
 
+        # NOTE on ``moe_router_force_load_balancing``:
+        #
+        # The previous implementation overwrote ``routing_map`` here with a
+        # deterministic ``(token_idx * topk + k) % num_experts`` cycle while
+        # leaving ``scores`` (the sparse top-k routing probabilities from
+        # ``topk_routing_with_score_function``) untouched. Because ``scores``
+        # is non-zero only on the *real* top-k experts, the deterministic
+        # routing_map rarely overlapped with those non-zero positions, so the
+        # MoE combine step multiplied almost every expert output by zero. On
+        # a pretrained MoE checkpoint (e.g. DeepSeek-V2-Lite SFT) this
+        # collapsed the MoE layer output to essentially just the shared
+        # expert path, inflated iter-1 loss by several nats compared to
+        # Megatron-Bridge, and broke Native-vs-Bridge A/B loss comparison.
+        #
+        # The correct (and Bridge-parity) way to do force-load-balancing is
+        # to replace the *logits* with random values BEFORE routing, so that
+        # both ``scores`` and ``routing_map`` are derived from the same
+        # random logits and stay mutually consistent. That replacement is
+        # already done in the upstream ``TopKRouter.forward`` via
+        # ``apply_random_logits(logits)`` (see
+        # third_party/Megatron-LM/megatron/core/transformer/moe/router.py),
+        # so by the time we get here ``logits`` is already random when
+        # ``args.moe_router_force_load_balancing`` is True. There is nothing
+        # extra to do.
         return scores, routing_map
