@@ -320,19 +320,21 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
           pytest --maxfail=1 -s ./tests/unit_tests/ \
-            --cov=primus --cov-report=term-missing:skip-covered --cov-report=xml:coverage.xml \
+            --cov=primus --cov-report=term-missing:skip-covered \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward
-      - name: Upload Primus unit-test coverage
+      - name: Publish unit-test coverage summary
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: primus-unit-coverage
-          path: coverage.xml
-          if-no-files-found: ignore
+        run: |
+          {
+            echo "## Primus unit-test coverage"
+            echo '```'
+            python -m coverage report --format=markdown 2>/dev/null || python -m coverage report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
