@@ -51,7 +51,9 @@ This allows you to estimate training performance on larger clusters without actu
 
 ### Memory Projection
 
-Estimate per-GPU memory for a model configuration (no GPU needed for estimation, but the CLI currently requires torch distributed init):
+Estimate per-GPU memory for a model configuration. By default this runs the
+**benchmark-anchored** mode (`--memory-mode benchmark`), which needs a ROCm GPU
+on the host for an OOM-accurate estimate:
 
 ```bash
 export NNODES=1
@@ -59,6 +61,18 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection memory \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
+```
+
+For a **no-GPU** analytical estimate (capacity planning without hardware), add
+`--memory-mode simulate`:
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection memory --memory-mode simulate \
     --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
 ```
 
@@ -158,13 +172,13 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 <a name="memory-overview"></a>
 ### Overview
 
-The memory projection estimates **per-GPU memory** usage by analytically computing:
+The memory projection estimates **per-GPU memory** usage, decomposed into:
 
 1. **Parameter memory** — model weights stored on this GPU
 2. **Optimizer state memory** — optimizer first/second moments, sharded across DP ranks
 3. **Activation memory** — intermediate tensors stored for the backward pass
 
-It uses a hierarchical profiler system that mirrors the model's module structure, computing each component's contribution bottom-up.
+These components are computed by a hierarchical profiler system that mirrors the model's module structure, computing each contribution bottom-up. The projection runs in two modes (see [Memory Projection Modes](#memory-projection-modes) below): the default **benchmark** mode anchors these components on a measured per-rank peak for an OOM-accurate estimate, while **simulate** mode uses the analytical formulas alone (no GPU). The per-component formulas in this section are the shared backbone of both.
 
 <a name="memory-projection-modes"></a>
 ### Memory Projection Modes
@@ -1027,6 +1041,8 @@ Step 3: Projected Time
 The following is representative output from a Mixtral 8×22B BF16 projection on MI355X (benchmarked on 1 node, projected to 8 nodes).
 
 ### Memory Projection
+
+The component-wise breakdown below is the **`simulate`-mode** output. For the default **benchmark** mode (point estimate, upper bound, FITS/OOM verdict), see the example in [Benchmark-Based Memory Projection](#benchmark-based-memory-projection).
 
 ```
 ====================================================================================================

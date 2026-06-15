@@ -1,8 +1,10 @@
 # Tuning Agent
 
-LLM-driven iterative search for an optimal Primus parallelization
-configuration on a target cluster, using the **Primus Projection** tool
-(memory + simulate + optional benchmark) as an oracle.
+LLM-driven iterative search for an optimal Primus training configuration on a
+target cluster, using the **Primus Projection** tool as an oracle. Projection
+provides two estimates — **memory** and **performance** — each of which runs
+**benchmark-anchored by default** (measure what fits on a sub-node run, scale
+the rest analytically) with a fully analytical **no-GPU `simulate`** fallback.
 
 See [`docs/tuning_agent.md`](../../../docs/tuning_agent.md) — the full
 user/operator guide (modes, configuration, troubleshooting, worked example)
