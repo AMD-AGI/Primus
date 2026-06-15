@@ -1,11 +1,13 @@
 # Tuning Agent
 
 The **Tuning Agent** is an LLM-driven search for a near-optimal Primus
-parallelization configuration on a target GPU cluster, **without running the
-workload at scale**. It drives the [Primus Projection](./projection.md) tool
-(memory + simulate + optional benchmark) as an evaluation oracle and returns
-the configuration that maximizes `tokens/s/GPU` subject to a per-GPU memory
-safety margin.
+**training configuration** — the full parallelism strategy *plus* the coupled
+batching, pipeline-schedule, memory, MoE-communication, and precision knobs —
+on a target GPU cluster, **without running the workload at scale**. It drives
+the [Primus Projection](./projection.md) tool (memory + simulate + optional
+benchmark) as an evaluation oracle and returns the configuration that maximizes
+`tokens/s/GPU` subject to a per-GPU memory safety margin. See
+[Knobs Searched](#knobs-searched) for the full set of levers it tunes.
 
 - **Package**: [`primus/agents/tuning_agent/`](../primus/agents/tuning_agent/)
 - **Entry point**: `python -m primus.agents.tuning_agent`
@@ -21,26 +23,28 @@ features) for the agent.
 
 1. [Why a Tuning Agent](#why-a-tuning-agent)
 2. [How It Works](#how-it-works)
-3. [Installation](#installation)
-4. [LLM Setup](#llm-setup)
-5. [Quickstart](#quickstart)
-6. [Execution Modes](#execution-modes)
-7. [CLI Reference](#cli-reference)
-8. [Target-Cluster YAML](#target-cluster-yaml)
-9. [The Search Loop](#the-search-loop)
-10. [Evaluator and Projection Modes](#evaluator-and-projection-modes)
-11. [Output Artefacts](#output-artefacts)
-12. [Worked Example](#worked-example)
-13. [Troubleshooting](#troubleshooting)
-14. [Limitations](#limitations)
-15. [Design Notes & Future Features](#design-notes--future-features)
+3. [Knobs Searched](#knobs-searched)
+4. [Installation](#installation)
+5. [LLM Setup](#llm-setup)
+6. [Quickstart](#quickstart)
+7. [Execution Modes](#execution-modes)
+8. [CLI Reference](#cli-reference)
+9. [Target-Cluster YAML](#target-cluster-yaml)
+10. [The Search Loop](#the-search-loop)
+11. [Evaluator and Projection Modes](#evaluator-and-projection-modes)
+12. [Output Artefacts](#output-artefacts)
+13. [Worked Example](#worked-example)
+14. [Troubleshooting](#troubleshooting)
+15. [Limitations](#limitations)
+16. [Design Notes & Future Features](#design-notes--future-features)
 
 ---
 
 ## Why a Tuning Agent
 
-Choosing a parallelization configuration for a large training (or inference)
-workload is a combinatorial problem. The configuration is the joint choice of:
+Choosing a training configuration for a large training (or inference) workload
+is a combinatorial problem. The configuration is the joint choice of the
+parallelism dimensions:
 
 - **Data Parallel (DP)** — derived from world size and the other axes,
 - **Tensor Parallel (TP)**,
@@ -53,8 +57,11 @@ workload is a combinatorial problem. The configuration is the joint choice of:
 together with the strongly coupled training knobs that decide how those
 dimensions translate into in-flight work and memory pressure: global batch
 size (**GBS**), micro batch size (**MBS**), activation recomputation
-(`recompute_granularity`, `recompute_num_layers`), and the overlap flags
-(`overlap_grad_reduce`, `overlap_param_gather`).
+(`recompute_granularity`, `recompute_num_layers`), the overlap flags
+(`overlap_grad_reduce`, `overlap_param_gather`), and a set of higher-impact
+levers — FP8 precision, MoE DeepEP / sync-free communication, fused
+cross-entropy, and optimizer-state sharding (distributed optimizer / FSDP2).
+The full set is enumerated in [Knobs Searched](#knobs-searched).
 
 The legal Cartesian product is large, the objective surface is non-convex and
 architecture-specific, and exhaustive evaluation on real hardware is
@@ -95,6 +102,81 @@ The key idea is a separation of concerns: **legality is computed in code**
 (the LLM can never spend budget proposing an obviously illegal config), while
 **strategy is delegated to the LLM** (which axis to push next, when to trade
 recompute for MBS, whether CP helps a given MoE shape).
+
+---
+
+## Knobs Searched
+
+The agent sweeps far more than the five parallelism dimensions. Its trial
+configuration (`TrialConfig` in `legality.py`) carries the full set of knobs
+below; every knob is either **inherited from the workload YAML** (when the
+agent leaves it unset) or **overridden for a trial** and translated into the
+corresponding `projection` flags by the evaluator. Each is legality-checked in
+code before it ever reaches the projection tool.
+
+### Parallelism & batching
+
+| Knob | Legal values | What it controls |
+|------|--------------|------------------|
+| `tp` | divisors of `num_attention_heads` **and** `hidden_size`, ≤ `gpus_per_node` | Tensor parallelism |
+| `pp` | divisors of `num_layers` (plus layout-aware depths 2/4/8/16 for layout workloads, and the workload's own PP) | Pipeline parallelism |
+| `ep` | divisors of `num_experts` (MoE only, else 1) | Expert parallelism |
+| `cp` | dense: divisors of `seq_length` ≤ `gpus_per_node`; MoE: `CP ≤ EP` and `EP % CP == 0` (parallel folding) | Context parallelism |
+| `vpp` | divisors of `num_layers / PP` (≤ 8), plus layout-aware VPP | Virtual pipeline (interleaving) |
+| `mbs` | powers of two ≤ 16 | Micro batch size |
+| `gbs` | multiple of `MBS × DP` | Global batch size |
+| `overlap_grad_reduce` | `true` / `false` | Overlap the DP gradient all-reduce with backward |
+
+### Pipeline schedule
+
+| Knob | Legal values | What it controls |
+|------|--------------|------------------|
+| `pp_schedule` | VPP=1: `auto`, `zerobubble`, `zerobubble-heuristic`, `seaailab-ilp`; VPP=2: `auto`, `zbv-formatted`, `zbv-greedy-half`, `zbv-greedy-min`; other VPP: `auto` | Schedule algorithm (paired with VPP) |
+| `enable_zero_bubble` | `true` / `false` / inherit | Split backward into B + W to fill pipeline bubbles |
+
+### Memory levers
+
+| Knob | Legal values | What it controls |
+|------|--------------|------------------|
+| `recompute_granularity` | `none` / `selective` / `full` | Activation recomputation strategy |
+| `recompute_num_layers` | int (≤ layers per VPP stage) | Layers recomputed per stage under `full` |
+| `cross_entropy_loss_fusion` | `true` / `false` / inherit | Fused cross-entropy — large-vocab memory + compute win |
+| `use_distributed_optimizer` | `true` / `false` / inherit | ZeRO-1 optimizer-state sharding across DP |
+| `use_torch_fsdp2` | `true` / `false` / inherit | FSDP2 sharding (mutually exclusive with `use_distributed_optimizer`) |
+
+### MoE communication — *MoE only, high impact*
+
+| Knob | Legal values | What it controls |
+|------|--------------|------------------|
+| `use_turbo_deepep` | `true` / `false` / inherit | DeepEP dispatch/combine kernels for MoE All-to-All (large MoE-comm win) |
+| `sync_free_stage` | `0` / `1` / `2` / `3` | Sync-free MoE pipelining; stage ≥ 2 auto-enables DeepEP |
+| `target_ep_size` | positive int / inherit | EP override used for All-to-All modeling |
+
+### Precision — *high impact*
+
+| Knob | Legal values | What it controls |
+|------|--------------|------------------|
+| `fp8` | `none` / `hybrid` (also `e4m3`, `delayed`) | FP8 on linear layers — roughly 2× compute on GEMMs |
+
+### Coupling rules enforced in code
+
+Some knobs interact; the validator rejects incoherent combinations before any
+projection call, so the LLM never wastes budget on them:
+
+- `use_torch_fsdp2` and `use_distributed_optimizer` are **mutually exclusive**
+  (FSDP2 already shards the optimizer state).
+- `sync_free_stage ≥ 2` **auto-enables** DeepEP, so `use_turbo_deepep=false`
+  alongside it is contradictory.
+- `use_turbo_deepep`, `sync_free_stage`, and `target_ep_size` are **MoE-only**
+  and rejected on dense workloads.
+- `fp8` combined with MLA attention is steered to a `tensorwise` recipe for
+  container compatibility.
+
+The `optimization.axes` toggles in the target-cluster YAML gate the core
+parallelism / batching / schedule / recompute / overlap axes (set one to
+`false` to pin it to the workload baseline). The remaining Tier-A knobs
+(DeepEP, sync-free, FP8, loss fusion, distributed-optimizer / FSDP2) are
+explored by the LLM proposer whenever they apply to the workload.
 
 ---
 
@@ -496,8 +578,10 @@ These are honest caveats, not future features:
 ### Problem statement (paper-ready)
 
 We address the problem of **automatically selecting a near-optimal
-parallelization configuration for a large-scale distributed training workload
-on a target GPU cluster, without executing the workload at scale**. The
+training configuration — the parallelism strategy plus the coupled batching,
+schedule, memory, MoE-communication, and precision knobs — for a large-scale
+distributed training workload on a target GPU cluster, without executing the
+workload at scale**. The
 configuration space is combinatorial: for each axis only a small set of values
 is *legal* (constrained by divisibility against `num_attention_heads`,
 `num_experts`, `num_layers`, `GBS / (MBS × DP)`; by the minimum-GPU requirement
@@ -546,8 +630,10 @@ analytical predictions.
 3. A **single objective**: maximize `tokens/s/GPU` subject to
    `projected_memory ≤ HBM_capacity × (1 − safety_margin)`.
 4. Agent search over **all** parallelism and coupled axes (TP, PP, EP, CP, MBS,
-   GBS, VPP, pipeline schedule, recompute, overlap flags), restricted by
-   per-architecture legality.
+   GBS, VPP, pipeline schedule, recompute, overlap flags) plus the higher-impact
+   levers (FP8, MoE DeepEP / sync-free, fused cross-entropy,
+   distributed-optimizer / FSDP2) — restricted by per-architecture legality.
+   See [Knobs Searched](#knobs-searched) for the complete list.
 5. Two evaluator paths: a **no-GPU path** (`projection memory` + `projection
    performance --profiling-mode simulate`), always available; and a
    **with-GPU path** that adds benchmark runs for promising candidates and

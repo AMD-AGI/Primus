@@ -46,7 +46,10 @@ from .workload import _find_primus_root, resolve_workload
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="primus.agents.tuning_agent",
-        description="LLM-driven search for an optimal Primus parallelization configuration.",
+        description=(
+            "LLM-driven search for an optimal Primus training configuration "
+            "(parallelism plus batching, schedule, memory, MoE-comm, and precision knobs)."
+        ),
     )
     p.add_argument("--workload", required=True, type=Path, help="Path to a Primus pretrain YAML.")
     p.add_argument("--target-cluster", required=True, type=Path, help="Path to target_cluster.yaml.")
