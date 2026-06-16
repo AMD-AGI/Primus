@@ -243,8 +243,8 @@ stage_mamba() {
     # tilelang (a hard mamba_ssm dep) needs an apache-tvm-ffi that predates the
     # 0.1.12 registry breakage; pin it here.
     ( cd "$SRC_DIR/mamba" \
-        && pip install "apache-tvm-ffi==${TVM_FFI_VERSION}" \
-        && pip install --no-build-isolation . ) || die "mamba build failed"
+        && $PIP install "apache-tvm-ffi==${TVM_FFI_VERSION}" \
+        && $PIP install --no-build-isolation . ) || die "mamba build failed"
     rm -rf "$SRC_DIR/mamba"
 }
 
