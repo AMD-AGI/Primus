@@ -15,8 +15,8 @@ Patches included:
   - gpt_output_layer_patches: Replace GPT ColumnParallelLinear with PrimusTurbo implementation
   - moe_dispatcher_patches: Replace MoE token dispatcher with PrimusTurbo DeepEP implementation
   - rms_norm_patches: Replace RMSNorm with PrimusTurbo implementation
-  - aiter_deepbind_patches: Install the aiter mha RTLD_DEEPBIND isolation hook (gfx942) so the
-    Turbo attention backward binds the pinned aiter::mha_bwd, not TE's stale libmha
+  - aiter_deepbind_patches: Install the aiter mha RTLD_DEEPBIND isolation hook (gfx942/gfx950)
+    so the Turbo attention backward binds the pinned aiter::mha_bwd, not TE's stale libmha
 
 Patch modules are discovered and imported automatically by
 ``primus.backends.megatron.patches``; no explicit imports are required here.

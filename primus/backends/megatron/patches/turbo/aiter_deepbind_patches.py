@@ -5,13 +5,16 @@
 ###############################################################################
 
 """
-gfx942 hd128 backward crash fix via scoped RTLD_DEEPBIND (ROCm/aiter#1332).
+hd128 backward crash fix via scoped RTLD_DEEPBIND (ROCm/aiter#1332).
+
+Affects gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X).
 
 rocm/primus:v26.3's transformer_engine bundles a STALE vendored ``libmha_bwd.so``
 (old aiter f299f579) that, via ``libck_fused_attn.so``'s DT_NEEDED, interposes the
 global symbol ``aiter::mha_bwd`` over the freshly pinned aiter (b5e03ed1) -> Turbo's
-hd128 backward mis-selects the swa variant and launches with gridDim.x=0 -> 8-rank
-SIGABRT. The ``mha_bwd_args`` ABI differs between the two aiter revisions, so a
+hd128 backward mis-selects the swa variant and launches with an invalid grid config
+(gridDim.x=0 on gfx942 / "invalid configuration argument" on gfx950) -> 8-rank crash.
+The ``mha_bwd_args`` ABI differs between the two aiter revisions, so a
 *global* fix (RTLD_GLOBAL preload / .so overwrite) repairs Turbo but breaks the TE
 path (TE's libck calls the stale libmha by the old ABI) -- isolation must be scoped.
 
@@ -20,8 +23,8 @@ honouring ``sys.setdlopenflags()``) and OR in ``RTLD_DEEPBIND`` only for the pin
 aiter mha modules (``module_fmha_v3_bwd`` / ``mha_bwd_bf16_*``), so they bind their
 own fresh ``aiter::mha_bwd`` while TE keeps the stale one. DEEPBIND is scoped to these
 few extensions, leaving torch/c10 untouched. Installed by the ``before_train`` patch
-below, gated on Turbo + gfx942 (TE path never touched); ``before_train`` runs well
-before the first backward that JIT-imports these modules.
+below, gated on Turbo + affected arch (TE path never touched); ``before_train`` runs
+well before the first backward that JIT-imports these modules.
 
 TEMPORARY: delete this file (and its turbo/__init__.py entry) once the base image's
 TE is built against the updated aiter.
@@ -49,14 +52,21 @@ def _enabled() -> bool:
     return os.environ.get(_ENV_SWITCH, "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _is_gfx942() -> bool:
-    """True only on gfx942 (MI300X/MI325X), where the stale-libmha crash reproduces."""
+# GPU arches where the stale-libmha hd128 backward crash reproduces:
+#   gfx942 -> MI300X / MI325X
+#   gfx950 -> MI350X / MI355X
+_AFFECTED_ARCHS = ("gfx942", "gfx950")
+
+
+def _is_affected_arch() -> bool:
+    """True on the arches where the stale-libmha crash reproduces (gfx942 / gfx950)."""
     try:
         import torch
 
         if not torch.cuda.is_available():
             return False
-        return "gfx942" in (torch.cuda.get_device_properties(0).gcnArchName or "")
+        arch = torch.cuda.get_device_properties(0).gcnArchName or ""
+        return any(affected in arch for affected in _AFFECTED_ARCHS)
     except Exception:  # pragma: no cover - defensive, never block training
         return False
 
@@ -105,14 +115,17 @@ def _install_deepbind_import_hook() -> bool:
 
 
 def _can_install_aiter_deepbind(ctx: PatchContext) -> bool:
-    """Install only on gfx942 with the Turbo attention path active."""
+    """Install only on affected arches (gfx942/gfx950) with the Turbo attention path active."""
     args = get_args(ctx)
     if not bool(getattr(args, "use_turbo_attention", False)):
         return False
     if not is_primus_turbo_can_patch(ctx):
         return False
-    if not _is_gfx942():
-        log_rank_0(f"{_LOG_PREFIX} device is not gfx942; aiter DEEPBIND isolation not needed.")
+    if not _is_affected_arch():
+        log_rank_0(
+            f"{_LOG_PREFIX} device is not an affected arch ({', '.join(_AFFECTED_ARCHS)}); "
+            "aiter DEEPBIND isolation not needed."
+        )
         return False
     return True
 
@@ -122,9 +135,10 @@ def _can_install_aiter_deepbind(ctx: PatchContext) -> bool:
     backend="megatron",
     phase="before_train",
     description=(
-        "On gfx942, install the aiter mha RTLD_DEEPBIND import hook so the Turbo attention "
-        "backward binds the pinned aiter::mha_bwd instead of TE's stale vendored libmha. "
-        "Gated on Turbo attention (TE path untouched). Temporary workaround (ROCm/aiter#1332)."
+        "On gfx942/gfx950, install the aiter mha RTLD_DEEPBIND import hook so the Turbo "
+        "attention backward binds the pinned aiter::mha_bwd instead of TE's stale vendored "
+        "libmha. Gated on Turbo attention (TE path untouched). Temporary workaround "
+        "(ROCm/aiter#1332)."
     ),
     condition=_can_install_aiter_deepbind,
 )
