@@ -73,7 +73,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 2. **Clone the repository**
 
     ```bash
-    git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+    git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
     git checkout release/v26.3
