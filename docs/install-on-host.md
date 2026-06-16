@@ -11,7 +11,7 @@ It is derived from the official training `Dockerfile` and installs the same comp
 ## Quick path: automated install scripts
 
 If you just want the environment built for you, use the helper scripts in
-`[tools/installation/](../tools/installation/)`. They automate everything in
+[tools/installation/](../tools/installation/). They automate everything in
 Sections 3 (Python venv) of this guide — venv creation, the ROCm/PyTorch
 wheels, every source-built kernel library, and Primus itself — and provide a
 single `env.sh` to activate the environment before each job. Read the rest of
