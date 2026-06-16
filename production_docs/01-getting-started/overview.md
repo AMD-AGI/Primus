@@ -75,7 +75,7 @@ Backend choice is expressed in experiment YAML and resolved through Primus’s a
 |------|----------------|
 | **GPUs** | AMD Instinct **MI300X**, **MI325X**, **MI355X** |
 | **Platform** | **ROCm** (version **≥ 7.0** recommended) |
-| **Container image (reference)** | `docker.io/rocm/primus:v26.2` |
+| **Container image (reference)** | `docker.io/rocm/primus:v26.3` |
 
 Exact kernel and driver packages should match AMD’s documentation for your GPU SKU and ROCm release.
 

@@ -1,6 +1,6 @@
 # Installation and setup
 
-This guide covers supported platforms, prerequisites, and three deployment patterns: **container (recommended)**, **bare metal**, and **Slurm**.
+This guide covers supported platforms, prerequisites, and deployment patterns: **container (recommended)** and **bare metal** for the environment, plus **multi-node distributed training** (Slurm recommended).
 
 ---
 
@@ -81,40 +81,47 @@ A successful run exercises the GPU stack and Primus CLI wiring without launching
 
 ---
 
-## Bare-metal setup
+## Bare-metal (host) setup
 
-Use bare-metal mode when you manage Python, ROCm, and frameworks directly on the host.
+> **We strongly recommend the [container setup](#container-setup-recommended) above.** The AMD published training Docker image is the tested, reproducible, and best-supported path. Build the full stack on a bare-metal host only when containers are not an option (for example, policy or operational constraints).
 
-### 1. Clone the repository
+### What to expect
 
-```bash
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
-cd Primus
-```
+Reproducing the training environment on the host means building the **same stack the Docker image ships**, mostly from source. This is a **long, build-heavy process**:
 
-### 2. Install Python dependencies
+- Several **source-built kernel libraries** (Flash Attention, TransformerEngine, aiter, Primus-Turbo, grouped_gemm, causal-conv1d, mamba) compiled against ROCm.
+- A **machine with many CPU cores, ample RAM, and tens of GB of free disk**.
+- Expect a **multi-hour first build**.
 
+### What a complete host environment needs
 
-| File                       | Use                                                                       |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `requirements.txt`         | PyTorch-oriented backends (Megatron-LM, TorchTitan, and related tooling). |
-| `requirements-jax.txt`     | JAX / MaxText paths.                                                      |
-| `requirements-torchft.txt` | Optional fault-tolerance extras for Torch-based runs.                     |
+| Layer                   | What it provides                                                                 | How it is installed              |
+| ----------------------- | -------------------------------------------------------------------------------- | -------------------------------- |
+| Kernel / hardware       | AMD GPU driver (amdgpu KMD) and device access (`/dev/kfd`, `/dev/dri`)            | OS / admin (root, one-time)      |
+| OS libraries            | Build toolchain and runtime libs (`g++`, `git`, RDMA, hwloc, etc.)               | `apt` (root, one-time)           |
+| ROCm user-space         | `rocm-sdk-devel` + device wheels — **no system-wide ROCm install required**       | `pip` (TheRock wheels, in venv)  |
+| Deep learning framework | ROCm-enabled PyTorch (`torch`, `torchvision`, `torchaudio`, `apex`)              | `pip` (TheRock wheels, in venv)  |
+| Accelerated kernels     | Flash Attention, TransformerEngine, aiter, Primus-Turbo, grouped_gemm, mamba     | build from source (in venv)      |
+| Multi-node comms        | UCX, OpenMPI, rocSHMEM, AMD AINIC — only for distributed (multi-node) training    | build from source / `apt`        |
+| Primus + Python deps    | Primus, submodules, and training libraries (datasets, transformers, wandb, etc.) | `git` + `pip` (in venv)          |
 
+### General approach
 
-```bash
-pip install -r requirements.txt
-# For JAX / MaxText:
-pip install -r requirements-jax.txt
-# Optional:
-pip install -r requirements-torchft.txt
-```
+1. **System packages (root, one-time):** install the build toolchain and, for multi-node, the RDMA/networking libraries via `apt`. The GPU kernel driver must already be loaded.
+2. **Python virtual environment (no root):** create a venv, then install ROCm and PyTorch from AMD's TheRock multi-arch wheels — this replaces a system ROCm install and keeps everything unprivileged.
+3. **Build the accelerated kernels from source** against the in-venv ROCm and your GPU architecture (`gfx942` for MI300X/MI325X, `gfx950` for MI350X/MI355X).
+4. **Install Primus and its Python dependencies**, then persist the required environment variables (ROCm paths, `NVTE_*` flags) in your venv activation script.
+5. **(Optional) Build the multi-node communication stack** (UCX, OpenMPI, rocSHMEM) only if you need distributed-over-RDMA training.
 
-Representative packages pulled by these files include **loguru**, **wandb**, **pre-commit**, **nltk**, **matplotlib**, **torchao**, **datasets**, **mlflow**, **pyrsmi**, and other helpers declared in the requirement files.
+### Detailed instructions
 
-Ensure your **PyTorch** and **ROCm** builds match AMD’s compatibility matrix for your GPU and driver version.
+Follow the full, step-by-step guide — including exact pinned versions, environment variables, and automated install scripts:
 
-### 3. Run a verification benchmark
+- **[Installing the Primus training environment on a host (no Docker)](https://github.com/AMD-AGI/Primus/blob/dev/update-readme-pip-install/docs/install-on-host.md)**
+
+### Verify
+
+After the build, validate the environment and run a benchmark directly on the host (no container):
 
 ```bash
 ./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
@@ -122,38 +129,117 @@ Ensure your **PyTorch** and **ROCm** builds match AMD’s compatibility matrix f
 
 ---
 
-## Slurm cluster setup
+## Multi-node distributed training (Slurm recommended)
 
-### Baseline
+For training jobs that span **multiple nodes**, we recommend using **[Slurm](https://slurm.schedmd.com/)**. Slurm is a cluster workload manager and job scheduler: it allocates nodes and GPUs, places your job on them, launches one task per node, and injects the topology information (node list, node count, per-node rank) that distributed PyTorch needs. `primus-cli` has a built-in **`slurm` mode** that wraps `srun`/`sbatch` and wires this topology into the training launcher for you.
 
-- Install the same ROCm stack (and optionally the same container image) on **all** nodes that participate in distributed jobs.
-- Shared filesystems for code and experiment outputs are typical; configure according to your site.
+### Cluster baseline
 
-### Environment variables
+Before launching distributed jobs, ensure every participating node has:
 
-Distributed jobs commonly rely on variables such as:
+- The **same software stack** — use the **same container image** on all nodes (recommended), or an identical bare-metal install (see sections above).
+- A **shared filesystem** for code, datasets, checkpoints, and logs (e.g. NFS/Lustre), mounted at the same path on every node.
+- **Working inter-node networking** — for best performance, a high-speed RDMA fabric (InfiniBand / RoCE / AMD AINIC) with RCCL able to select the right interface.
 
+### Setting up Slurm
 
-| Variable        | Role                                    |
-| --------------- | --------------------------------------- |
-| `MASTER_ADDR`   | Hostname or IP of rank 0.               |
-| `NNODES`        | Number of nodes in the job.             |
-| `NODE_RANK`     | Index of this node (0-based).           |
-| `GPUS_PER_NODE` | GPUs visible per node for the launcher. |
+Standing up Slurm itself is a cluster-administration task and is outside Primus's scope. Follow the official documentation:
 
+- [Slurm Quick Start (users)](https://slurm.schedmd.com/quickstart.html)
+- [Slurm Quick Start Administrator Guide (install & configure)](https://slurm.schedmd.com/quickstart_admin.html)
 
-Exact names may vary with your scheduler integration; align with your cluster’s Primus or PyTorch launch scripts.
+Once `sinfo` and `srun` work on your login node, Primus can submit jobs to it. If you don't administer the cluster, your site admin typically provides the partition, account, and reservation names you need.
 
-### Example: Slurm with container mode
+### Launching with `primus-cli slurm`
 
-Two nodes, container image on the worker command line:
+The Slurm wrapper uses a single `--` separator:
+
+- **Before the `--`**: the launcher (`srun` or `sbatch`, default `srun`) and Slurm flags (`-N`, `-p`, `--nodelist`, `--account`, `--qos`, `--reservation`, …).
+- **After the `--`**: the Primus command to run (`train` / `benchmark` / …). It runs inside the container image (see [Selecting the container image](#selecting-the-container-image) below).
 
 ```bash
-./primus-cli slurm srun -N 2 -- \
-  benchmark gemm --M 4096
+cd /path/to/Primus
+
+# Pretrain on 2 nodes via srun
+./primus-cli slurm srun -N 2 \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-Adjust partition, account, GPU GRES, and bind mounts to match your site. For production training, mount datasets, caches, and artifact directories as needed.
+Add the global `--dry-run` flag (before the launcher) to print the exact command without executing it:
+
+```bash
+./primus-cli --dry-run slurm srun -N 2 \
+  -- train pretrain --config <your-config>.yaml
+```
+
+> See `runner/README.md` and the [CLI reference](../02-user-guide/cli-reference.md) for the full set of launcher flags and scenarios.
+
+#### Selecting the container image
+
+The image used for the job is resolved with the following priority (highest first):
+
+1. **`DOCKER_IMAGE` environment variable** — overrides everything else. This is the simplest way to switch images and it propagates to all nodes:
+
+```bash
+export DOCKER_IMAGE=rocm/primus:v26.3
+./primus-cli slurm srun -N 2 \
+  -- train pretrain --config <your-config>.yaml
+```
+
+2. **`--image` CLI flag** — place it immediately after the `--`, before the Primus command (ignored if `DOCKER_IMAGE` is set):
+
+```bash
+./primus-cli slurm srun -N 2 \
+  -- --image rocm/primus:v26.3 train pretrain --config <your-config>.yaml
+```
+
+3. **Config file default** — `container.options.image` in `runner/.primus.yaml` (or your `~/.primus.yaml`), which ships as `rocm/primus:v26.2`.
+
+### Distributed environment variables
+
+Primus launches training with `torchrun`, which needs to know the cluster topology. These are the key variables:
+
+
+| Variable        | Role                                                      | Default     |
+| --------------- | -------------------------------------------------------- | ----------- |
+| `MASTER_ADDR`   | Hostname/IP of rank 0; all ranks rendezvous here.        | `localhost` |
+| `MASTER_PORT`   | Port on the master used for rendezvous.                  | `1234`      |
+| `NNODES`        | Number of nodes in the job.                              | `1`         |
+| `NODE_RANK`     | Index of this node (0-based, unique per node).           | `0`         |
+| `GPUS_PER_NODE` | GPUs (processes) to launch per node.                     | `8`         |
+
+The total number of training processes (world size) is `NNODES × GPUS_PER_NODE`.
+
+**Under Slurm these are derived automatically.** `primus-cli slurm` reads Slurm's own variables and sets the Primus ones for you: `NNODES` from `SLURM_NNODES`, `NODE_RANK` from `SLURM_NODEID`, and `MASTER_ADDR` from the first host in `SLURM_NODELIST` (with `MASTER_PORT` defaulting to `1234`). You normally only set `GPUS_PER_NODE` if your nodes don't have 8 GPUs. You can still override `MASTER_PORT` (e.g. to avoid a port clash) via `--env`.
+
+### Without Slurm: Kubernetes or `parallel-ssh`
+
+Slurm is recommended but not required. The mechanism underneath is simple: **set the same distributed environment variables on every node, point them all at the same `MASTER_ADDR`, give each node a unique `NODE_RANK`, and run the same `primus-cli direct` command on each node.** Any tool that can run a command across nodes works — for example Kubernetes (e.g. a `PyTorchJob` / indexed Job) or `parallel-ssh`/`pdsh`.
+
+For a 2-node job you would run, on the master (rank 0):
+
+```bash
+export NNODES=2 GPUS_PER_NODE=8 NODE_RANK=0 MASTER_ADDR=<node0-host> MASTER_PORT=1234
+./primus-cli direct -- train pretrain --config <your-config>.yaml
+```
+
+and on the worker (rank 1), the same command with `NODE_RANK=1` and the same `MASTER_ADDR`:
+
+```bash
+export NNODES=2 GPUS_PER_NODE=8 NODE_RANK=1 MASTER_ADDR=<node0-host> MASTER_PORT=1234
+./primus-cli direct -- train pretrain --config <your-config>.yaml
+```
+
+With Kubernetes, inject these as container env vars (deriving `NODE_RANK` from the pod's index); with `parallel-ssh`, pass them per host. The training command itself is identical on every node.
+
+### Other important considerations
+
+- **Validate the cluster first.** Run the built-in preflight check across your nodes before a long job: `./primus-cli slurm srun -N <N> -- preflight`.
+- **Networking / RCCL.** On RDMA fabrics, make sure the correct interface is selected (Primus can auto-detect; otherwise set `NCCL_SOCKET_IFNAME` / `NCCL_IB_HCA`). Use `NCCL_DEBUG=INFO` (passed via `--env`) to diagnose hangs at startup.
+- **RDMA limits.** High-performance networking usually needs locked-memory limits raised (`ulimit -l unlimited`) and sometimes hugepages — configured by your admin.
+- **`MASTER_PORT` must be free** on the master node and reachable from all workers; firewalls between nodes will cause rendezvous timeouts.
+- **Hugging Face access.** If your config pulls gated models/tokenizers, export `HF_TOKEN` (and ensure it's propagated to all nodes / into the container).
 
 ---
 
@@ -165,7 +251,7 @@ Adjust partition, account, GPU GRES, and bind mounts to match your site. For pro
 | **ROCm**             | `rocm-smi` shows expected GPUs and no driver errors.                                                    |
 | **Container engine** | `docker run --rm ... rocm/primus:v26.2` (or your site’s GPU test) succeeds.                             |
 | **GEMM benchmark**   | `./primus-cli` **container** or **direct** benchmark completes (see sections above).                    |
-| **Preflight**        | Run preflight diagnostics against your cluster when available (`primus/tools/preflight/` in-repo docs). |
+| **Preflight**        | Run preflight diagnostics: `./primus-cli direct -- preflight` (single node) or `./primus-cli slurm srun -N <N> -- preflight` (cluster).         |
 
 
 If training pulls models or tokenizers from Hugging Face Hub, configure tokens (for example `HF_TOKEN`) in the environment or container flags as required by your config.
