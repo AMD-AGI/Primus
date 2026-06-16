@@ -1689,9 +1689,17 @@ def _launch_v4_attention_bwd(
         # >1 splits the head loop and uses ``tl.atomic_add`` for dKV.
         # The dense-bench sweep showed head-split is essentially neutral on
         # MI355 at H=64 (HBM/atomic-bound, not compute-bound), so default 1.
+        # BUT that result does NOT hold for the MQA/HQ>=128 (V4-Pro) SWA dkv
+        # shape: at HQ=128/HK=1 the HG=1 grid is 1 workgroup/CU (occ=1) with each
+        # program serially grinding all 128 heads -> tail/pipeline-fill bound at
+        # ~54% MFMA duty. HG=2 doubles the grid + fills the idle MFMA cycles ->
+        # measured 1.474 ms vs 2.075 ms (1.41x faster) on gfx950, grad cos
+        # 0.9999999999997. HG=4/8 regress. So default the MQA/HQ>=128 case to 2;
+        # still overridable via PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS.
         num_head_groups = 1
         if HQ > HK:
-            target = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS", "1"))
+            _hg_default = "2" if (HQ >= 64 and HK == 1) else "1"
+            target = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS", _hg_default))
             while target > 1 and HQ % target != 0:
                 target //= 2
             num_head_groups = max(1, target)
@@ -1902,7 +1910,11 @@ def _launch_v4_attention_bwd(
                 # block_m. dKV benefits from BM=64 (fewer programs each loading
                 # a wider Q tile); pool kernel benefits from a smaller BM (more
                 # programs => more parallelism over the head loop).
-                pool_block_m = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_BLOCK_M", str(BLOCK_M)))
+                # R8 sweep (gfx950/MI355X): the pool kernel scales with program
+                # count, so BM=16 (vs the dKV default 32) gives 12-18% on the
+                # full HCA backward (pro 4.709->4.000 ms, cos 1.0). Only the pool
+                # path reads this, so SWA bwd is unaffected. Env-overridable.
+                pool_block_m = int(os.getenv("PRIMUS_V4_ATTN_BWD_POOL_BLOCK_M", "16"))
                 pool_grid = (triton.cdiv(Sq, pool_block_m), B)
                 _v4_attention_bwd_dkv_pool_kernel[pool_grid](
                     q,
