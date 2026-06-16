@@ -33,7 +33,7 @@ export PROFILE=False
 export TURBO_DEEPEEP=True
 export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
-export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_GROUPED_GEMM=${TURBO_GROUPED_GEMM:-False}
 export TURBO_RMS_NORM=${TURBO_RMS_NORM:-False}
 export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 export APPLY_ROPE_FUSION=True
@@ -118,7 +118,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --global_batch_size "$GBS" \
   --use_turbo_attention "$TURBO_ATTENTION" \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
-  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_turbo_grouped_gemm "$TURBO_GROUPED_GEMM" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --pipeline_model_parallel_size "$PRIMUS_PP" \
   --expert_model_parallel_size "$PRIMUS_EP" \

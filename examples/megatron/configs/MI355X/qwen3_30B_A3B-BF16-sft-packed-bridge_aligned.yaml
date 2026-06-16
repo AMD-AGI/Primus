@@ -273,7 +273,7 @@ modules:
       # flag flips.
       enable_primus_turbo: false
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
       use_turbo_rms_norm: false
       # CRITICAL: disable ROCm-DeepEP fast path. This is the dominant
       # source of the Bridge-vs-Native gap on the production yaml --

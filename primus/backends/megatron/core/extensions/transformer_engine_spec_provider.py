@@ -111,7 +111,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboLinear, "parallel linear")
-            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm
             else TELinear
         )
 
@@ -119,7 +119,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which column parallel linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboColumnParallelLinear, "column parallel linear")
-            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm
             else TEColumnParallelLinear
         )
 
@@ -127,7 +127,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which row parallel linear module TE backend uses"""
         return (
             _require_primus_turbo(PrimusTurboRowParallelLinear, "row parallel linear")
-            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm
             else TERowParallelLinear
         )
 
@@ -141,7 +141,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             _require_primus_turbo(
                 PrimusTurboLayerNormColumnParallelLinear, "layernorm column parallel linear"
             )
-            if self.cfg.use_turbo_gemm or self.cfg.use_turbo_parallel_linear
+            if self.cfg.use_turbo_gemm
             else TELayerNormColumnParallelLinear
         )
 

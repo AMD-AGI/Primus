@@ -216,7 +216,6 @@ def _make_patched_forward():
             or getattr(get_args(ctx), "patch_zero_bubble", False)
         )
         and getattr(get_args(ctx), "moe_use_legacy_grouped_gemm", False)
-        and not getattr(get_args(ctx), "use_turbo_grouped_mlp", False)
         and not getattr(get_args(ctx), "use_turbo_grouped_gemm", False)
     ),
 )
