@@ -1,0 +1,128 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B-sft-packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Llama-3 8B SFT — sequence packing experiment
+# =============================================================================
+# Goal: validate the sequence-packing data path on a dense GQA model.
+#
+# Compared with the baseline llama3_8B-BF16-sft.yaml:
+#   * enable_packed_sequences: true  -> each training "sample" is a 2048-token
+#     concatenation of ~25 raw Alpaca samples (~80 tokens each).
+#   * use_packed_attention: false (default) -> attention runs in plain causal
+#     mode across the whole packed sequence (sub-samples can attend to each
+#     other). This is the "implicit multi-turn" packing regime used by
+#     LLaMA-Factory / TRL by default. Loss is still computed only on response
+#     tokens (loss_mask is correct), so the accuracy hit is small while
+#     throughput jumps ~20x.
+#
+# Why not strict per-segment isolation (qkv_format='thd' + cu_seqlens)?
+#   On the current ROCm + aiter image, TransformerEngine's thd attention
+#   kernel hangs / SIGABRTs in the very first forward (rank-7 abort). Until
+#   that backend is fixed we ship the implicit-multi-turn variant; flip
+#   ``use_packed_attention: true`` to re-enable strict isolation once the
+#   backend supports it.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: llama3_8B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: NousResearch/Meta-Llama-3-8B
+      tokenizer_model: NousResearch/Meta-Llama-3-8B
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # KEY: enable sequence packing
+      enable_packed_sequences: true
+      # Keep the strict-isolation thd attention OFF -- ROCm/aiter currently
+      # hangs in TE's thd kernel; see header comment for details.
+      use_packed_attention: false
+
+      wandb_project: "Primus_Llama3_SFT_Packed"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: 20
+      # Each "micro-batch" sample is itself a packed concatenation of multiple
+      # raw samples, so mbs=1 already corresponds to ~25 raw Alpaca samples per
+      # step. Bump to 2 or 4 if memory allows once the packed path is validated.
+      micro_batch_size: 1
+      global_batch_size: 128
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # NOTE: ROCm/RCCL backend in current image lacks reduce_scatter_tensor_coalesced.
+      # Disabling distributed_optimizer avoids the coalesced reduce-scatter path
+      # triggered by Megatron's ParamAndGradBuffer.start_grad_sync. With LoRA
+      # only ~0.88% params are trainable, so ZeRO-1 sharding gives negligible
+      # memory savings anyway.
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false      # depends on distributed_optimizer
+      overlap_param_gather: false     # depends on distributed_optimizer
+      gradient_accumulation_fusion: false
+
+      finetune: true
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+
+      bf16: true
+
+      enable_primus_turbo: true
+      # Keep turbo_attention disabled to mirror the baseline llama3_8B-BF16-sft
+      # config; flipping it on here would make the apples-to-apples comparison
+      # noisy (different attention kernel selection).
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+
+      eval_iters: 10
+
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

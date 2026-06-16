@@ -29,9 +29,10 @@ NODE=$(cat /sys/bus/pci/devices/"${BUS_ID[$LOCAL_RANK]}"/numa_node)
 
 LOG_INFO_NODE_RANK0 "Starting binding local rank ${LOCAL_RANK} to numa_node ${NODE}..."
 
-# If the first argument is a Python entrypoint (e.g. primus/cli/main.py),
-# it may not be executable. In that case, run it via python3.
-if [[ $# -gt 0 && "${1}" == *.py ]]; then
+# If the first argument is a Python entrypoint (e.g. primus/cli/main.py) or a
+# module invocation (e.g. -m primus.cli.main), it is not directly executable.
+# In that case, run it via python3.
+if [[ $# -gt 0 && ( "${1}" == *.py || "${1}" == "-m" ) ]]; then
     set -- python3 "$@"
 fi
 

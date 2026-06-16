@@ -20,6 +20,7 @@ if str(current_dir) not in sys.path:
     sys.path.insert(0, str(current_dir))
 
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     get_node_rank,
     log_error_and_exit,
@@ -67,7 +68,7 @@ def resolve_backend_path(
             path = Path(env_value).resolve()
             log_info(f"{env_var.upper()} found in environment: {path}")
         else:
-            path = primus_path / default_subdir
+            path = default_backend_path(primus_path, Path(default_subdir).name)
             log_info(f"{env_var.upper()} not found, falling back to: {path}")
     return path
 

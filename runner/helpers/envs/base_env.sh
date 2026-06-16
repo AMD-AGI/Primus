@@ -97,19 +97,30 @@ log_exported_vars "Training Cluster Info" \
 PRIMUS_PATH=$(cd "$SCRIPT_DIR/../../.." && pwd)
 export PRIMUS_PATH
 
+# Determine the directory that must be on PYTHONPATH for `import primus` to work.
+# - git checkout: PRIMUS_PATH is the repo root that *contains* the `primus/` package.
+# - pip/site-packages install: PRIMUS_PATH is the `primus` package dir itself, so the
+#   import root is its parent (e.g. .../site-packages).
+if [[ -f "${PRIMUS_PATH}/__init__.py" ]]; then
+    PRIMUS_IMPORT_ROOT="$(cd "${PRIMUS_PATH}/.." && pwd)"
+else
+    PRIMUS_IMPORT_ROOT="${PRIMUS_PATH}"
+fi
+export PRIMUS_IMPORT_ROOT
+
 # Set data paths
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
 if [[ -n "$site_packages" ]]; then
-    export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${site_packages}:${PYTHONPATH:-}"
 else
-    export PYTHONPATH="${PRIMUS_PATH}:${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${PYTHONPATH:-}"
 fi
 
 log_exported_vars "Python Path and Data Paths" \
-    PRIMUS_PATH DATA_PATH HF_HOME PYTHONPATH
+    PRIMUS_PATH PRIMUS_IMPORT_ROOT DATA_PATH HF_HOME PYTHONPATH
 
 # =============================================================================
 # NCCL and Network Configuration
