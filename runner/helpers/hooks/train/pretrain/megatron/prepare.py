@@ -18,6 +18,7 @@ from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from primus.pretrain import setup_backend_path
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     get_node_rank,
     log_error_and_exit,
@@ -160,7 +161,7 @@ def resolve_megatron_path_for_helper(primus_path: Path, backend_path: str | None
         log_info(f"Using backend_path from MEGATRON_PATH environment: {path}")
         return path
 
-    path = primus_path / "third_party" / "Megatron-LM"
+    path = default_backend_path(primus_path, "Megatron-LM")
     log_info(f"No backend_path provided, falling back to: {path}")
     return path
 

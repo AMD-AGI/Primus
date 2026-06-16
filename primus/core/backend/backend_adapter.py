@@ -93,17 +93,24 @@ class BackendAdapter(ABC):
             resolved = _use_path(env_path, env_error)
             return resolved
 
-        # 3) Default: <repo_root>/third_party/<dir_name> must exist.
+        # 3) Default: try the source-tree third_party/<name> first, then the
+        #    deps-sync location used by installed wheels (`primus-cli deps sync`):
+        #    $PRIMUS_THIRDPARTY_DIR or ~/.cache/Primus/third_party.
         dir_name = self.third_party_dir_name or self.framework
-        repo_root = Path(__file__).resolve().parents[3]
-        default_path = repo_root / "third_party" / dir_name
-        default_error = (
+        tp_root = os.getenv("PRIMUS_THIRDPARTY_DIR") or str(Path.home() / ".cache" / "Primus" / "third_party")
+        candidates = [
+            Path(__file__).resolve().parents[3] / "third_party" / dir_name,  # source tree / submodule
+            Path(tp_root) / dir_name,  # primus-cli deps sync
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return _use_path(str(candidate), "")
+        assert False, (
             f"No valid backend path for '{self.framework}'.\n"
-            f"Tried default path: {default_path}\n"
-            f"Hint: Install backend to third_party/{dir_name} or provide a valid --backend_path/BACKEND_PATH."
+            f"Tried: {[str(c) for c in candidates]}\n"
+            f"Hint: run `primus-cli deps sync`, install backend to third_party/{dir_name}, "
+            f"or provide a valid --backend_path/BACKEND_PATH."
         )
-        resolved = _use_path(str(default_path), default_error)
-        return resolved
 
     # ============================================================================
     # Abstract Methods (Must be implemented by subclasses)
