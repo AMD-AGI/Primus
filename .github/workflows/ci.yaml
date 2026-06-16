@@ -311,10 +311,53 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
           pytest --maxfail=1 -s ./tests/unit_tests/ \
+            --cov=primus --cov-report=term-missing:skip-covered \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward
+      - name: Publish unit-test coverage summary
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m coverage json -o coverage.json 2>/dev/null || true
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
+          import json
+          from collections import defaultdict
+
+          rep = json.load(open("coverage.json"))
+
+          def group(p):
+              i = p.find("primus/")
+              seg = (p[i:] if i >= 0 else p).split("/")
+              if len(seg) < 2:
+                  return seg[-1]
+              if seg[1] == "backends" and len(seg) >= 3:
+                  return f"backends/{seg[2]}"
+              if seg[1] == "core" and len(seg) >= 3 and seg[2] == "projection":
+                  return "core/projection"
+              return seg[1]
+
+          agg = defaultdict(lambda: [0, 0])
+          for fpath, info in rep.get("files", {}).items():
+              s = info["summary"]
+              g = agg[group(fpath)]
+              g[0] += s["covered_lines"]
+              g[1] += s["num_statements"]
+
+          t = rep.get("totals", {})
+          tc, tn = t.get("covered_lines", 0), t.get("num_statements", 0)
+          tp = t.get("percent_covered", 0.0)
+
+          print("## Primus unit-test coverage\n")
+          print(f"**Total line coverage: {tp:.1f}%** ({tc:,} / {tn:,} statements)\n")
+          print("| Module | Covered | Stmts | Coverage |")
+          print("|---|--:|--:|--:|")
+          for name, (c, n) in sorted(agg.items(), key=lambda r: -r[1][1]):
+              if n:
+                  print(f"| `{name}` | {c:,} | {n:,} | {100 * c / n:.1f}% |")
+          print(f"| **TOTAL** | **{tc:,}** | **{tn:,}** | **{tp:.1f}%** |")
+          PY
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
