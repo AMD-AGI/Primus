@@ -13,7 +13,7 @@
 #
 # Stages are re-runnable. List them with:  bash setup.sh --list
 
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
