@@ -554,6 +554,16 @@ def _build_inference_cmd(
         cmd += ["--cudagraph-mode", str(cfg.cudagraph_mode)]
     if getattr(cfg, "kv_cache_memory_fraction", None):
         cmd += ["--kv-cache-memory-fraction", str(cfg.kv_cache_memory_fraction)]
+    # Serving dynamics: paged-KV fragmentation + scheduler token budget.
+    if getattr(cfg, "kv_block_size", 0):
+        cmd += ["--kv-block-size", str(cfg.kv_block_size)]
+    if getattr(cfg, "max_num_batched_tokens", 0):
+        cmd += ["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)]
+    # MoE expert-routing imbalance (only emitted for non-default / MoE values).
+    if getattr(cfg, "ep_load_balance", 1.0) and cfg.ep_load_balance != 1.0:
+        cmd += ["--ep-load-balance", str(cfg.ep_load_balance)]
+    if getattr(cfg, "redundant_experts", 0):
+        cmd += ["--redundant-experts", str(cfg.redundant_experts)]
     # Feature A: prefill/decode disaggregation.
     if getattr(cfg, "disaggregate", False):
         cmd += ["--disaggregate"]

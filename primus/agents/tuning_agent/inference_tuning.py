@@ -65,6 +65,13 @@ class InferenceTrialConfig:
     cudagraph_mode: str | None = None
     # fraction of HBM the engine may use (bounds usable HBM + max concurrency)
     kv_cache_memory_fraction: float | None = None
+    # paged-KV block size in tokens (0 = no paging; 16 = vLLM default)
+    kv_block_size: int = 0
+    # scheduler per-step token budget (0 = unlimited)
+    max_num_batched_tokens: int = 0
+    # MoE expert routing imbalance (1.0 = balanced) + redundant-expert mitigation
+    ep_load_balance: float = 1.0
+    redundant_experts: int = 0
     # feature A: prefill/decode disaggregation
     disaggregate: bool = False
     prefill_tp: int | None = None
@@ -136,6 +143,12 @@ class InferenceAxisLegality:
     transfer_backend: list[str] = field(
         default_factory=lambda: ["nixl", "mooncake", "mori"]
     )
+    kv_block_size: list[int] = field(default_factory=lambda: [0, 16, 32])
+    max_num_batched_tokens: list[int] = field(
+        default_factory=lambda: [0, 2048, 8192]
+    )
+    ep_load_balance: list[float] = field(default_factory=lambda: [1.0, 1.2, 1.5])
+    redundant_experts: list[int] = field(default_factory=lambda: [0, 8, 16])
 
     def to_prompt_dict(self) -> dict:
         return {
@@ -151,6 +164,10 @@ class InferenceAxisLegality:
             "cudagraph_mode": self.cudagraph_mode,
             "kv_cache_memory_fraction": self.kv_cache_memory_fraction,
             "transfer_backend": self.transfer_backend,
+            "kv_block_size": self.kv_block_size,
+            "max_num_batched_tokens": self.max_num_batched_tokens,
+            "ep_load_balance": self.ep_load_balance,
+            "redundant_experts": self.redundant_experts,
         }
 
 
@@ -231,6 +248,19 @@ def validate_inference(
             return False, "transfer_backend only applies when disaggregate is set"
         if cfg.transfer_backend not in legality.transfer_backend:
             return False, f"transfer_backend={cfg.transfer_backend} not in {legality.transfer_backend}"
+    if cfg.kv_block_size < 0:
+        return False, f"kv_block_size must be >= 0, got {cfg.kv_block_size}"
+    if cfg.max_num_batched_tokens < 0:
+        return False, f"max_num_batched_tokens must be >= 0, got {cfg.max_num_batched_tokens}"
+    is_moe = bool(getattr(arch, "is_moe", False))
+    if cfg.ep_load_balance < 1.0:
+        return False, f"ep_load_balance must be >= 1.0, got {cfg.ep_load_balance}"
+    if cfg.ep_load_balance != 1.0 and not is_moe:
+        return False, "ep_load_balance is only meaningful for MoE workloads"
+    if cfg.redundant_experts < 0:
+        return False, f"redundant_experts must be >= 0, got {cfg.redundant_experts}"
+    if cfg.redundant_experts > 0 and not is_moe:
+        return False, "redundant_experts is only meaningful for MoE workloads"
 
     replica_gpus = cfg.tp * cfg.pp * (cfg.ep if getattr(arch, "is_moe", False) else 1)
     if replica_gpus > world:
@@ -356,6 +386,11 @@ def build_inference_seed_plan(
     add(mk(batch_size=16, cudagraph_mode="piecewise"))
     # 8c) KV-cache memory fraction (usable HBM → max concurrency).
     add(mk(batch_size=16, kv_cache_memory_fraction=0.9))
+    # 8d) Paged-KV block size (fragmentation → KV bytes / max concurrency).
+    add(mk(batch_size=16, kv_block_size=16))
+    # 8e) Scheduler per-step token budget (caps prefill+decode tokens/step).
+    add(mk(batch_size=16, max_num_batched_tokens=8192))
+    add(mk(batch_size=16, chunked_prefill_size=1024, max_num_batched_tokens=8192))
     # 9) MoE EP sweep — pick the largest TP that still fits with this EP.
     if is_moe:
         for ep in [e for e in leg.ep if e in (1, 2, 4, 8)]:
@@ -371,6 +406,24 @@ def build_inference_seed_plan(
             feasible_tp = [t for t in leg.tp if t * ep_for_deepep <= world]
             tp_deepep = max(feasible_tp) if feasible_tp else 1
             add(mk(tp=tp_deepep, ep=ep_for_deepep, batch_size=16, use_turbo_deepep=True))
+
+    # 9c) MoE expert-routing imbalance (+ redundant-expert mitigation). Only
+    #     meaningful with EP>1, so pair with the largest feasible EP.
+    if is_moe:
+        ep_for_imb = max([e for e in leg.ep if e in (2, 4, 8) and e <= world] or [1])
+        if ep_for_imb > 1:
+            feasible_tp = [t for t in leg.tp if t * ep_for_imb <= world]
+            tp_imb = max(feasible_tp) if feasible_tp else 1
+            add(mk(tp=tp_imb, ep=ep_for_imb, batch_size=16, ep_load_balance=1.3))
+            add(
+                mk(
+                    tp=tp_imb,
+                    ep=ep_for_imb,
+                    batch_size=16,
+                    ep_load_balance=1.3,
+                    redundant_experts=8,
+                )
+            )
 
     # 10) Feature B — custom collective ops. Force alternate algorithms for the
     #     dominant collective (TP AllReduce when TP>1, EP AllToAll for MoE).

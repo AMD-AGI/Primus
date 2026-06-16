@@ -157,6 +157,13 @@ class InferenceRequestConfig:
     # usable HBM for weights + KV + activations and therefore the max concurrent
     # sequences.  ``None`` = use the full HBM capacity (legacy behaviour).
     kv_cache_memory_fraction: Optional[float] = None
+    # Paged-KV block (page) size in tokens.  Real serving engines allocate KV in
+    # fixed-size blocks (vLLM ``block_size``, typically 16), so a sequence's
+    # context is rounded UP to a whole number of blocks — the last partially
+    # filled block still reserves a full block.  This fragmentation inflates the
+    # per-sequence KV footprint and lowers max concurrency.  ``0`` = no paging
+    # (continuous/contiguous allocation, legacy behaviour).
+    kv_block_size: int = 0
 
     # ---- Precision ----
     weight_dtype: str = "bf16"     # weights kept resident (bf16 | fp8 | ...)
@@ -196,6 +203,23 @@ class InferenceRequestConfig:
     # their explicit values (legacy behaviour). An explicit non-zero value of
     # either low-level knob overrides the preset.
     cudagraph_mode: Optional[str] = None
+    # Scheduler per-step token budget (vLLM ``--max-num-batched-tokens``).  The
+    # scheduler caps the total tokens processed in one engine step: a mixed step
+    # carries a prefill chunk plus the decode tokens of every running sequence,
+    # and that sum may not exceed this cap.  Oversized steps are split, raising
+    # the number of prefill steps (and the mixed-step fraction) → higher TPOT /
+    # lower throughput.  ``0`` = unlimited (legacy behaviour).
+    max_num_batched_tokens: int = 0
+    # MoE expert routing imbalance.  On an EP-sharded model the MoE step time is
+    # set by the BUSIEST rank, not the average: ``ep_load_balance`` is the ratio
+    # of the hottest rank's token load to the average (1.0 = perfectly
+    # balanced; 1.3 = the hottest rank does 1.3x the mean).  Inflates the
+    # realized MoE expert-compute (grouped-GEMM) time.
+    ep_load_balance: float = 1.0
+    # Extra replicated expert slots (EPLB / redundant experts) that spread the
+    # hottest experts' tokens and so reduce the realized imbalance above.
+    # ``0`` = no redundancy (legacy behaviour).
+    redundant_experts: int = 0
 
     def resolved_max_context_len(self) -> int:
         if self.max_context_len is not None:
@@ -222,6 +246,27 @@ class InferenceRequestConfig:
         if self.mixed_batch_penalty:
             return float(self.mixed_batch_penalty)
         return _CUDAGRAPH_PRESETS.get(self.cudagraph_mode, (0.0, 0.0))[1]
+
+    def resolved_ep_imbalance(self, num_experts: int = 0) -> float:
+        """Effective MoE expert-compute imbalance multiplier (always >= 1.0).
+
+        ``ep_load_balance`` is the hottest-rank / mean token-load ratio; the MoE
+        step is gated by that busiest rank, so its expert-compute time scales by
+        this factor.  ``redundant_experts`` replicates the hottest expert slots,
+        diluting the surplus the hot rank carries: the excess ``(ratio - 1)`` is
+        shrunk by ``num_experts / (num_experts + redundant_experts)`` (the share
+        of routed mass that still lands on a single, non-replicated slot).
+
+        ``1.0`` (perfectly balanced) is a no-op.  ``num_experts`` is supplied by
+        the caller (it lives on :class:`ModelConfig`, not the request config).
+        """
+        bal = float(self.ep_load_balance or 1.0)
+        if bal <= 1.0:
+            return 1.0
+        red = max(0, int(self.redundant_experts or 0))
+        if num_experts > 0 and red > 0:
+            bal = 1.0 + (bal - 1.0) * num_experts / (num_experts + red)
+        return max(1.0, bal)
 
 
 # CUDA-graph presets → (decode_step_overhead_us, mixed_batch_penalty).

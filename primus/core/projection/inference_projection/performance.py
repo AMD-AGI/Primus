@@ -158,6 +158,12 @@ class InferencePerformanceProjector:
         # (``InferenceCollectiveModel``) applies the same factor internally.
         self._deepep_overlap = deepep_overlap_efficiency(mc)
 
+        # MoE expert-routing imbalance multiplier (>= 1.0).  Real routing is
+        # skewed, so the MoE step is gated by the busiest EP rank rather than
+        # the perfectly-balanced average.  Only meaningful for an EP-sharded MoE
+        # model; a no-op (1.0) otherwise.
+        self._moe_imbalance = self._moe_imbalance_factor()
+
         # Feature B: explicit, knob-driven communication model. When enabled we
         # replace the layer profiler's *implicit* TP-AllReduce / EP-AllToAll
         # cost with this model (delta applied per layer), enabling algorithm
@@ -338,6 +344,21 @@ class InferencePerformanceProjector:
 
     # -- per-pass forward time -------------------------------------------------
 
+    def _moe_imbalance_factor(self) -> float:
+        """MoE expert-compute imbalance multiplier (>= 1.0).
+
+        Only EP-sharded MoE models (``num_experts > 0`` and ``EP > 1``) see
+        routing imbalance; for everything else this is a no-op (1.0).  The
+        magnitude (and the ``redundant_experts`` mitigation) is resolved on the
+        request config, given the model's expert count.
+        """
+        mc = self.cfg.model_config
+        num_experts = int(getattr(mc, "num_experts", 0) or 0)
+        ep = max(1, self.cfg.model_parallel_config.expert_model_parallel_size)
+        if num_experts <= 0 or ep <= 1:
+            return 1.0
+        return self.cfg.request_config.resolved_ep_imbalance(num_experts)
+
     def _forward_times(self, batch: int, q_len: int, phase: str, kv_len: int) -> PhaseForwardTimes:
         lm = self._lm
         lm.set_inference_phase(phase, kv_len)
@@ -359,6 +380,17 @@ class InferencePerformanceProjector:
         builtin_moe_comm = self._builtin_comm_ms("moe", batch, q_len) if has_moe else 0.0
         dense_compute = max(0.0, dense_raw - builtin_dense_comm) if has_dense else 0.0
         moe_compute = max(0.0, moe_raw - builtin_moe_comm) if has_moe else 0.0
+
+        # MoE routing imbalance: the MoE step is gated by the busiest EP rank,
+        # which does ``imbalance``x the average expert work.  Inflate only the
+        # expert-MLP (grouped-GEMM) portion of the layer — attention, router and
+        # communication are unaffected — by charging the extra ``(imbalance-1)``
+        # share of the measured expert-MLP time.  No-op when balanced / non-MoE.
+        if has_moe and self._moe_imbalance > 1.0 and hasattr(moe_p, "get_sub_profiler"):
+            mlp_p = moe_p.get_sub_profiler("mlp")
+            if mlp_p is not None:
+                expert_mlp_ms = mlp_p.measured_forward_time(batch, q_len)
+                moe_compute += expert_mlp_ms * (self._moe_imbalance - 1.0)
 
         comm = CommBreakdown()
         if self._comm is not None:
@@ -531,6 +563,24 @@ class InferencePerformanceProjector:
         else:
             n_chunks = max(1, math.ceil(ISL / chunk))
             chunk_tokens = chunk
+
+        # Scheduler per-step token budget (vLLM ``max_num_batched_tokens``). A
+        # mixed step processes the prefill chunk PLUS the decode tokens of the
+        # other ``C-1`` running sequences; that sum cannot exceed the cap. When
+        # it would, the prefill admitted per step is bounded by the leftover
+        # budget, so the prompt is split into more (smaller) prefill chunks →
+        # more mixed steps → higher TPOT / lower throughput. First-order model:
+        # clamp the effective prefill chunk to ``cap - decode_tokens`` and
+        # recompute the chunk count. ``0`` = unlimited (path unchanged).
+        cap = int(req.max_num_batched_tokens or 0)
+        if cap > 0:
+            decode_tokens_mixed = max(0, C - 1) * int(q_len)
+            # Always make at least one token of prefill progress per step so the
+            # model stays finite even if decode tokens alone saturate the cap.
+            eff_chunk = min(chunk_tokens, max(1, cap - decode_tokens_mixed))
+            if eff_chunk < chunk_tokens:
+                chunk_tokens = eff_chunk
+                n_chunks = max(1, math.ceil(ISL / eff_chunk))
 
         penalty = max(0.0, req.resolved_mixed_batch_penalty())
         ov = self._decode_step_overhead_ms()
