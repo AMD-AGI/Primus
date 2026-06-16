@@ -174,7 +174,7 @@ def test_memory_print_profiler_hierarchy_runs(monkeypatch, capsys):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("NNODES", "1")
     monkeypatch.setenv("GPUS_PER_NODE", "8")
-    from primus.core.projection.memory_projection.projection import (
+    from primus.core.projection.memory_projection.simulate import (
         print_profiler_hierarchy,
     )
 

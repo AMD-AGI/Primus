@@ -1,0 +1,297 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# Recommended invocation::
+#
+#   export PRIMUS_EXP_NAME=deepseek_v2_lite_native_aligned_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml \
+#       bash examples/run_pretrain.sh
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-sft-packed-bridge_aligned-force_lb}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# DeepSeek-V2-Lite SFT — NATIVE-PATH apples-to-apples baseline for the
+# Bridge-vs-Native A/B benchmark (THIS YAML LIVES IN THE 0507 NATIVE PROJECT)
+# =============================================================================
+# Companion config (the Bridge side, lives in the 0509 project):
+#   /home/botahu_qle/Primus_0509/Primus/examples/megatron_bridge/configs/MI355X/
+#       deepseek_v2_lite_lora_posttrain_packed.yaml
+#
+# Container mapping (don't mix these up):
+#   * 0509 + Bridge          -> primus_050 (image 5582e5d7699c)
+#   * 0507 + Native (this)   -> sft_primus_0509 (image ac68ece9ed7d)
+#
+# What this yaml differs from the production deepseek_v2_lite-BF16-sft-packed.yaml in:
+# 1. Shape: (mbs, gbs, seq) flipped (8, 128, 4096) -> (1, 16, 32768).
+#    Per-step token count stays at 524 288 (=1*16*32 768 = 8*128*4096 / 8 DP).
+# 2. Dataset: alpaca -> squad (Bridge ``_peft_common`` hard-codes squad).
+# 3. seed: 1234 (Native default) -> 5678 (Bridge ``_peft_common`` default).
+# 4. Primus Turbo + ROCm-only fused kernels ALL forced OFF (Bridge has no
+#    counterpart on its deepseek PEFT path).
+# 5. eval_iters: 10 -> 0 (20-step benchmark; never trigger validation).
+# 6. profile: aligned to Bridge yaml (start=10, end=11 -> capture iter 11).
+#
+# What this yaml deliberately matches Bridge on (UNCHANGED from packed.yaml):
+# * lr=1e-5, min_lr=0, lr_warmup_iters=50, lr_decay_iters=950 (Bridge's
+#   deepseek_v2_lite_peft_config sets the same values; see
+#   primus/backends/megatron_bridge/recipes/deepseek_v2_lite_peft.py:155-162)
+# * adam_beta1=0.9, adam_beta2=0.95, weight_decay=0.1, adam_eps=1e-8
+# * Parallelism: TP=1, PP=1, EP=8, CP=1, SP=false
+# * BF16, distributed optimiser, grad/param overlap, MLA
+# * train_iters=20, force_load_balancing=COMMENTED OUT (router learning ON)
+# * LoRA dim=32, alpha=32, target=[qkv, proj, fc1, fc2]
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:deepseek_v2_lite}.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: deepseek-ai/DeepSeek-V2-Lite
+      tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+
+      # ---------- Dataset (CHANGED: alpaca -> squad-style) ----------
+      # Bridge ``_peft_common`` hard-codes the SQuAD dataset AND uses the
+      # NV ``process_squad_example`` processor which emits
+      #     "Context: <ctx> Question: <q> Answer: <ans>"
+      # as a single line, with all three fields ``.strip(" ")``-ed and the
+      # GPTSFTDataset default ``prompt_template="{input} {output}"`` joining
+      # input/output with a single space.
+      #
+      # Until this change we mirrored only the dataset name; the
+      # conversation format was still ``alpaca``, which renders multi-line
+      # ``### Instruction / ### Input / ### Response`` blocks plus the
+      # ``Below is an instruction...`` preamble. That meant the LM-loss
+      # absolute numbers between Bridge and Native were not directly
+      # comparable -- different tokens, different sequence lengths, different
+      # loss-mask boundaries.
+      #
+      # We now also mirror the conversation format by selecting
+      # ``squad`` (implemented in primus/backends/megatron/sft/formatters.py
+      # ``SquadFormatter``), which emits the same byte-identical single
+      # line as Bridge's processor. This makes the apples-to-apples LM-loss
+      # comparison meaningful in addition to the wall-clock comparison.
+      sft_dataset_name: "rajpurkar/squad"
+      sft_conversation_format: "squad"
+
+      # Bridge-parity: enable sequence packing + bridge-aligned flags.
+      enable_packed_sequences: true
+      use_packed_attention: true
+      attention_softmax_in_fp32: false
+      ddp_average_in_collective: true
+
+      # Opt-in Bridge-parity mode. On DeepSeek-V2-Lite this flag mostly
+      # affects packing algorithm (Native FFD -> shuffle, same as Bridge's
+      # first_fit_shuffle), NOT inline-BOS layout -- DeepSeek tokenizer
+      # does not auto-prepend BOS in text_to_ids so both modes produce
+      # identical supervised token layout. Turning this on aligns the
+      # iter-1 batch composition with Bridge's parquet ordering.
+      sft_bridge_compat_inline_bos: true
+
+      # MATCH BRIDGE dataset config (insofar as Native Megatron supports it):
+      #   * num_workers: Bridge=1 → Native=1 (Native trainer_base default is 8).
+      #   * dataloader_type: Bridge="batch" is Bridge's own variable-length
+      #     finetuning sampler; Native Megatron only accepts
+      #     {single, cyclic, external}. Set to "cyclic" — the closest
+      #     equivalent in semantics (random sampling, full epoch). Both
+      #     emit one GBS per iteration; both pad inside the packed sequence
+      #     constructor, so the dataloader cadence the trainer sees is
+      #     identical. Wall-clock impact at train_iters=20 is < 0.1 %.
+      num_workers: 1
+      dataloader_type: cyclic
+
+      wandb_project: "Primus_DeepSeek_V2_Lite_SFT_Packed_Bridge_Aligned"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---------- Training schedule (200-step run to mirror llama2 070b A/B) ----------
+      # train_iters=200 + warmup=10 + decay=200 mirrors the llama2_70b
+      # bridge_aligned yaml exactly so DeepSeek-V2-Lite Native vs Bridge
+      # curves can be overlaid the same way. The original 20-step recipe
+      # is preserved in comments.
+      train_iters: 200 ###20
+      micro_batch_size: 1
+      global_batch_size: 32  ##16
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096} ##32768
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096} ##32768
+
+      # ---------- LR / SFT discipline (200-step cosine, matches llama2 yaml) ----------
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 10  ###50
+      lr_decay_iters: 200  ###950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+
+      # Match Bridge ``_peft_common``'s RNGConfig(seed=5678).
+      seed: 5678
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- Parallelism ----------
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # FORCE-LB BENCHMARK VARIANT: force_lb=true forces the MoE router to
+      # output uniform random logits in the forward pass (matches Bridge's
+      # apply_random_logits / our PrimusTopKRouter / RandomSTE). This
+      # eliminates the alltoall straggler and yields a stable benchmark
+      # baseline -- so we can isolate whether the ~13% Bridge-vs-Native
+      # wall-clock gap on DeepSeek is dominated by the straggler
+      # (force_lb=true would close it) or by framework overhead (it would
+      # not). Router does NOT learn under this flag; loss curve is
+      # benchmark-only and should not be used for production SFT.
+      moe_router_force_load_balancing: true
+
+      # =====================================================================
+      # NaN/Inf grad sanitizer for benchmark runs
+      # ---------------------------------------------------------------------
+      # The Bridge-parity force-load-balancing path (random logits ->
+      # full top-k pipeline, see PrimusTopKRouter) is numerically the same
+      # as Megatron-Bridge's apply_random_logits. On bf16 + grouped_gemm +
+      # LoRA + DeepSeek-V2-Lite this occasionally produces a NaN grad in
+      # the backward pass (e.g. iter ~28 in the 200-step run). Megatron's
+      # default check raises a fatal RuntimeError, which kills the run.
+      #
+      # ``sft_sanitize_nan_grads=true`` activates the patch in
+      # primus/backends/megatron/patches/sft_grad_sanitize_patches.py:
+      # NaN/Inf entries in a DDP grad bucket are replaced with 0 *before*
+      # the official NaN check, so the affected iteration becomes a no-op
+      # update and training keeps progressing. We also set
+      # ``check_for_nan_in_loss_and_grad: false`` so the loss-NaN check
+      # (separate from the grad-bucket check we patch) does not fire.
+      #
+      # This applies ONLY to this force_lb benchmark variant. Standard
+      # SFT recipes should leave both flags at their defaults.
+      sft_sanitize_nan_grads: true
+      check_for_nan_in_loss_and_grad: false
+
+      # ZeRO-1 distributed optimizer + comm/comp overlap.
+      # gradient_accumulation_fusion=true matches Bridge default
+      # (Megatron's standard fused-grad epilogue). Native deepseek
+      # production yaml had this off; we flip it on for apples-to-apples.
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      # MLA
+      multi_latent_attention: true
+
+      finetune: true
+      load: null
+      # ====================================================================
+      # FAST-START MODE: pretrained_checkpoint COMMENTED OUT (2026-05-13)
+      # --------------------------------------------------------------------
+      # WHY DISABLED
+      # ------------
+      # Loading the 16B DeepSeek-V2-Lite checkpoint costs minutes each run
+      # and we keep re-launching to iterate on JIT cache / parallelism /
+      # env vars on the 300-series box. We mirror the mi355 reference yaml
+      # ``qwen3_30B_A3B-BF16-sft-packed-bridge_aligned_355.yaml`` which
+      # ships with NO pretrained_checkpoint line at all — base weights
+      # are then random-initialised via ``init_method_std=0.008`` and
+      # LoRA adapters via xavier_init/zero_init.
+      #
+      # WHAT THIS BREAKS
+      # ----------------
+      # LM-loss curve is meaningless: random base weights mean the router
+      # is also random, every expert sees garbage activations, and loss
+      # will hover near log(vocab) for the whole 20-step run. Use this
+      # yaml ONLY for:
+      #   - verifying JIT/Triton/MIOpen cache persistence
+      #   - step-time / TFLOPS / kernel set measurement
+      #   - capturing pytorch-profiler traces for one iteration
+      # For real Bridge-vs-Native loss-curve comparison, uncomment the
+      # line below to restore the real base weights.
+      pretrained_checkpoint: /workspace/megatron_checkpoints/DeepSeek-V2-Lite
+      # ====================================================================
+      # CRITICAL: primus checkpoint_path_patches.py unconditionally
+      # overrides args.save to <exp_root>/checkpoints, so save: null is
+      # silently ignored. To keep 200-step run from filling NFS quota
+      # with mid-training distcp dumps, set save_interval >> train_iters.
+      save: null  # NOTE: ignored by checkpoint_path_patches.py
+      save_interval: 1000000  # >> train_iters so mid-training save never fires
+      eval_interval: 1000000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: log_all
+
+      bf16: true
+
+      # =====================================================================
+      # PRIMUS-TURBO + FUSED-KERNEL FAMILY: ALL FORCED OFF
+      # =====================================================================
+      # Bridge has no Primus Turbo integration on its deepseek PEFT path.
+      # Disabling these on the Native side keeps the kernel set identical
+      # on both sides.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      moe_use_fused_router_with_aux_score: false
+      moe_permute_fusion: false
+      moe_use_legacy_grouped_gemm: false
+
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # MATCH BRIDGE: Bridge recipe sets manual_gc=True / interval=100.
+      # Native default is manual_gc=False / interval=1. Force these on
+      # so the per-step Python GC overhead matches Bridge exactly.
+      manual_gc: true
+      manual_gc_interval: 100
+
+      # MATCH BRIDGE: Bridge yaml explicitly nulls out moe_flex_dispatcher_backend
+      # to skip the NVIDIA-only deepep import path on ROCm. Native default is
+      # "deepep" string (lazy attribute, never invoked because use_turbo_deepep
+      # is false) but the dump diverges between sides. Pin to "null" for parity.
+      moe_flex_dispatcher_backend: null
+
+      # =====================================================================
+      # Profile (aligned to Bridge yaml: capture iter 11 only)
+      # =====================================================================
+      # PyTorch profiler schedule on Native: profile_step_start=10 means
+      # ``schedule(wait=9, warmup=1, active=...)`` so iter 11 is the active
+      # step that ends up in the trace JSON. Same iter as the Bridge yaml.
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+
+      eval_iters: 0
+
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

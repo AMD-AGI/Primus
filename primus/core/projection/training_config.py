@@ -6,6 +6,7 @@
 
 import os
 from dataclasses import dataclass, fields
+from typing import List, Optional
 
 
 @dataclass
@@ -34,6 +35,16 @@ class ModelParallelConfig:
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0
+    # Megatron selective block recompute: global transformer layer indices (0..num_layers-1)
+    recompute_layer_ids: Optional[List[int]] = None
+    # Precision-aware optimizer (Megatron `--use-precision-aware-optimizer`).
+    # When enabled the optimizer state dtypes follow the *_dtype fields below;
+    # the projection's bytes-per-param formula uses these to size the static
+    # block correctly instead of assuming default fp32 main params + fp32 m + fp32 v.
+    use_precision_aware_optimizer: bool = False
+    main_grads_dtype: str = "fp32"  # fp32 | bf16 | fp16
+    exp_avg_dtype: str = "fp32"  # 1st moment dtype (fp32 | bf16 | fp16)
+    exp_avg_sq_dtype: str = "fp32"  # 2nd moment dtype (fp32 | bf16 | fp16)
 
 
 @dataclass
