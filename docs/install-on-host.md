@@ -368,10 +368,10 @@ cd .. && rm -rf causal-conv1d
 
 **mamba:**
 
-```bash
 git clone --branch enable-primus-hybrid-models https://github.com/AndreasKaratzas/mamba.git
 cd mamba
-python setup.py install
+pip install "apache-tvm-ffi==0.1.6"
+pip install --no-build-isolation .
 cd ..
 ```
 
