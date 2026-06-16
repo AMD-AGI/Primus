@@ -35,6 +35,10 @@ _ARG_TO_FIELD = {
     "mixed_batch_penalty": "mixed_batch_penalty",
     "cudagraph_mode": "cudagraph_mode",
     "kv_cache_memory_fraction": "kv_cache_memory_fraction",
+    "kv_block_size": "kv_block_size",
+    "max_num_batched_tokens": "max_num_batched_tokens",
+    "ep_load_balance": "ep_load_balance",
+    "redundant_experts": "redundant_experts",
 }
 
 # Feature B (custom collective ops): CLI arg → ``collective_<field>`` key.
@@ -111,6 +115,14 @@ def _print_performance(inference_config, perf) -> None:
         feats.append(f"cudagraph={req.cudagraph_mode}")
     if req.kv_cache_memory_fraction:
         feats.append(f"kv_mem_frac={req.kv_cache_memory_fraction:.2f}")
+    if req.kv_block_size:
+        feats.append(f"kv_block={req.kv_block_size}")
+    if req.max_num_batched_tokens:
+        feats.append(f"max_batched_tokens={req.max_num_batched_tokens}")
+    if req.ep_load_balance and req.ep_load_balance != 1.0:
+        feats.append(f"ep_load_balance={req.ep_load_balance:.2f}")
+    if req.redundant_experts:
+        feats.append(f"redundant_experts={req.redundant_experts}")
     if feats:
         print(f"  Features: {', '.join(feats)}")
     if perf.is_disaggregated:

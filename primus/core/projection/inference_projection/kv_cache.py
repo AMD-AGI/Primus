@@ -18,6 +18,7 @@ This module sizes that cache analytically, accounting for:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from primus.core.projection.training_config import InferenceConfig, dtype_num_bytes
@@ -89,9 +90,19 @@ def estimate_kv_cache(
     if context_len is None:
         context_len = req.resolved_max_context_len()
 
+    # Paged KV: a sequence's context is allocated in whole blocks (pages), so
+    # round the per-sequence length UP to the next multiple of the block size.
+    # The last partially-filled block still reserves a full block — this is the
+    # internal fragmentation real serving engines (vLLM, SGLang) pay.  ``0``
+    # disables paging (contiguous allocation, legacy behaviour).
+    block = int(req.kv_block_size or 0)
+    alloc_context_len = context_len
+    if block > 0:
+        alloc_context_len = math.ceil(context_len / block) * block
+
     per_token_per_layer = kv_bytes_per_token_per_layer(inference_config)
     per_token = per_token_per_layer * max(1, layers_on_rank)
-    per_sequence = per_token * context_len
+    per_sequence = per_token * alloc_context_len
     total = per_sequence * concurrency
 
     return KVCacheBreakdown(

@@ -493,6 +493,14 @@ def _add_inference_args(parser):
         help="Fraction of HBM the engine may use (vLLM gpu_memory_utilization / "
         "SGLang mem_fraction_static). Bounds usable HBM + max concurrency. Default: full HBM.",
     )
+    parser.add_argument(
+        "--kv-block-size",
+        type=int,
+        default=None,
+        help="Paged-KV block (page) size in tokens (vLLM block_size, e.g. 16). "
+        "Per-sequence context is rounded up to whole blocks, inflating KV bytes "
+        "and lowering max concurrency. Default: 0 (no paging / contiguous).",
+    )
     # ---- Feature B: custom collective ops ----
     coll = parser.add_argument_group("inference collectives (feature B)")
     coll.add_argument(
@@ -540,6 +548,20 @@ def _add_inference_args(parser):
         type=float,
         default=None,
         help="EP AllToAll time multiplier (<1 = fused/overlapped speedup, default 1.0).",
+    )
+    coll.add_argument(
+        "--ep-load-balance",
+        type=float,
+        default=None,
+        help="MoE expert routing imbalance: hottest-rank / mean token-load ratio "
+        "(1.0 = perfectly balanced). Inflates MoE expert-compute time on EP>1. Default 1.0.",
+    )
+    coll.add_argument(
+        "--redundant-experts",
+        type=int,
+        default=None,
+        help="Extra replicated expert slots (EPLB) that reduce realized MoE routing "
+        "imbalance. Default 0.",
     )
     # ---- Feature A: prefill/decode disaggregation ----
     dis = parser.add_argument_group("inference disaggregation (feature A)")
@@ -612,6 +634,14 @@ def _add_inference_args(parser):
         choices=["none", "piecewise", "full"],
         help="CUDA-graph capture preset: 'none' (eager), 'piecewise', or 'full'. "
         "Sets per-step overhead + mixed-batch penalty unless those are given explicitly.",
+    )
+    serv.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=None,
+        help="Scheduler per-step token budget (vLLM --max-num-batched-tokens). Caps "
+        "prefill-chunk + concurrent-decode tokens per step; oversized steps split, "
+        "raising TPOT. Default: 0 (unlimited).",
     )
     # Internal: marks this process as the spawned GPU benchmark worker.
     parser.add_argument(
