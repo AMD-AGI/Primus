@@ -288,8 +288,8 @@ stage_turbo() {
     ( cd "$SRC_DIR/Primus-Turbo" \
         && git checkout "$TURBO_COMMIT" \
         && git submodule update --init --recursive \
-        && pip3 install -r requirements.txt \
-        && pip3 install --no-build-isolation . -v ) || die "Primus-Turbo build failed"
+        && $PIP install -r requirements.txt \
+        && $PIP install --no-build-isolation . -v ) || die "Primus-Turbo build failed"
     rm -rf "$SRC_DIR/Primus-Turbo"
 }
 
