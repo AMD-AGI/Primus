@@ -54,17 +54,25 @@ def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
 
 
 def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
+    sub_profiler_specs = {
+        "embedding": EmbeddingProfiler,
+        "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
+    }
+    # Only build the MoE sub-tree when the model actually has experts. Dense
+    # models (num_experts unset) must neither instantiate nor walk the MoE
+    # branch: the hierarchy printer iterates every sub-profiler unconditionally,
+    # so an always-built MoE tree would be evaluated on dense models. All
+    # compute paths guard MoE access with `is_moe` / `key in sub_profilers`,
+    # so omitting it here is safe.
+    if config.model_config.num_experts:
+        sub_profiler_specs["moe_transformer_layer"] = get_moe_transformer_layer_profiler_spec(config)
+    sub_profiler_specs["final_layernorm"] = LayerNormProfiler
+    sub_profiler_specs["output_layer"] = OutputLayerProfiler
+    sub_profiler_specs["calc_loss"] = LossProfiler
     return ModuleProfilerSpec(
         profiler=LanguageModelProfiler,
         config=config,
-        sub_profiler_specs={
-            "embedding": EmbeddingProfiler,
-            "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
-            "moe_transformer_layer": get_moe_transformer_layer_profiler_spec(config),
-            "final_layernorm": LayerNormProfiler,
-            "output_layer": OutputLayerProfiler,
-            "calc_loss": LossProfiler,
-        },
+        sub_profiler_specs=sub_profiler_specs,
     )
 
 
