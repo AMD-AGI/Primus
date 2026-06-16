@@ -100,6 +100,24 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /opt/uccl; \
     fi
 
+# ---------------------------------------------------------------------------
+# Install fixed origami (rocm-libraries@223648a) over the base image's bundled
+# 0.1.0. The bundled origami's rank_configs() raises
+# `ValueError: vector::reserve` during MoE grouped-gemm kernel selection and
+# crashes training (turbo's _safe_rank_configs only catches RuntimeError).
+# Skipped for JAX. TODO: drop once a base image ships origami with the fix.
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
+    rm -rf /tmp/rocm-libraries && \
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
+    cd /tmp/rocm-libraries && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set shared/origami && \
+    git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b && \
+    (pip uninstall -y origami || true) && \
+    pip install --no-cache-dir ./shared/origami/python && \
+    rm -rf /tmp/rocm-libraries; \
+    fi
+
 # Set the default working directory
 WORKDIR /opt
 
