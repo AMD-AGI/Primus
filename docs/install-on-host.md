@@ -21,10 +21,10 @@ build.
 
 There are two files:
 
-- `**env.sh`** — defines the install location and exports every environment
-variable the build and runtime need (ROCm paths, TransformerEngine/`NVTE_*`
-flags, cache locations, etc.). Source it both during the build and every time
-you use the environment.
+- **env.sh** — defines the install location and exports every environment
+  variable the build and runtime need (ROCm paths, TransformerEngine/`NVTE_*`
+  flags, cache locations, etc.). Source it both during the build and every time
+  you use the environment.
 - `**setup.sh**` — runs the install in re-runnable **stages**. It sources
 `env.sh` automatically.
 
