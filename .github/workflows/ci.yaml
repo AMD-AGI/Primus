@@ -14,12 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: 3974fc246be594d989156dd83e91da618274b0c8 # feat: refine rmsnorm ops (#343)
+  PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
   PRIMUS_TURBO_AITER_COMMIT: b5e03ed191fca11ee423226537ef8d9435e432a6 # Fix dsink bf16 noise in Triton MHA one-kernel backward (#3070)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
-  BASE_IMAGE: docker.io/rocm/primus:v26.2
+  BASE_IMAGE: docker.io/rocm/primus:v26.3
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
 jobs:
@@ -105,7 +105,7 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.2 already includes AINIC under /workspace. Re-enable this
+          # Primus v26.3 already includes AINIC under /workspace. Re-enable this
           # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
@@ -198,9 +198,18 @@ jobs:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
+      # Temporary fix for the gfx942 aiter FMHA v3/CK *backward* kernel crash on known-bad
+      # attention shapes (MHA hd128/hd256, MLA hd128; ROCm/aiter#1332). The
+      # turbo_attn_hd128_te_fallback patch is OFF by default and only reroutes those shapes to
+      # TEDotProductAttention when this is set (other shapes keep Turbo attention). Kept at job
+      # level so every step inherits it -- in particular the multi-GPU "Run Primus Model Tests
+      # -- Megatron-LM" step, whose pretrain UTs (qwen3_5_35B_A3B, deepseek_v2_lite, llama3, ...)
+      # would otherwise SIGABRT on the first backward. Remove together with the patch once the
+      # upstream aiter fix lands.
+      PRIMUS_TURBO_ATTN_HD128_FALLBACK_TE: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
+    runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Clean stale Primus-Turbo checkout
@@ -270,6 +279,21 @@ jobs:
       - name: Install Primus
         run: |
           pip install -r requirements.txt
+      - name: Install fixed origami
+        run: |
+          # rocm/primus:v26.3 bundles origami 0.1.0, whose rank_configs() raises
+          # ValueError: vector::reserve during MoE grouped-gemm kernel selection and
+          # crashes training (turbo's _safe_rank_configs only catches RuntimeError).
+          # Install the fixed origami (rocm-libraries@223648a) over the bundled 0.1.0.
+          # TODO: drop this once a base image ships origami with the fix.
+          rm -rf /tmp/rocm-libraries
+          git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries
+          cd /tmp/rocm-libraries
+          git sparse-checkout init --cone
+          git sparse-checkout set shared/origami
+          git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
+          pip uninstall -y origami || true
+          pip install ./shared/origami/python
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"

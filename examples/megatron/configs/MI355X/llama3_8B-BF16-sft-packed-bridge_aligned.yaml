@@ -1,0 +1,190 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# Recommended invocation::
+#
+#   export PRIMUS_EXP_NAME=llama3_8b_native_aligned_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/llama3_8B-BF16-sft-packed-bridge_aligned.yaml \
+#       bash examples/run_pretrain.sh
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B-sft-packed-bridge_aligned}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Llama-3 8B LoRA SFT — NATIVE-PATH apples-to-apples baseline for the
+# Bridge-vs-Native A/B benchmark (THIS YAML LIVES IN THE 0507 NATIVE PROJECT)
+# =============================================================================
+# Companion config (the Bridge side, lives in the 0509 project):
+#   /home/botahu_qle/Primus_0509/Primus/examples/megatron_bridge/configs/MI355X/
+#       llama3_8b_lora_posttrain_packed.yaml
+#
+# Container mapping (don't mix these up):
+#   * 0509 + Bridge          -> primus_050 (image 5582e5d7699c)
+#   * 0507 + Native (this)   -> sft_primus_0509 (image ac68ece9ed7d)
+#
+# Aligned hyperparameters (must match Bridge llama3_8b PEFT recipe + AB yaml):
+#   * Shape: mbs=1, gbs=128, seq=4096 (per-step tokens = 524 288)
+#   * Parallelism: TP=1, PP=1, EP=1 (dense), CP=1, SP=false
+#   * LoRA dim=32, alpha=32, target=[qkv, proj, fc1, fc2]
+#   * lr=1e-4 (Bridge `_peft_common` default), warmup=50, decay=950
+#   * seed=5678 (Bridge `_peft_common` RNG)
+#   * Dataset: SQuAD with `squad` formatter (byte-identical prompt template)
+#   * train_iters=20, eval skipped
+#   * Primus Turbo + ROCm-only fused-kernels ALL forced OFF (Bridge has none)
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:llama3_8B}.yaml
+
+    overrides:
+      stage: sft
+
+      # Use NousResearch (non-gated) mirror of meta-llama/Meta-Llama-3-8B
+      # to avoid HF_TOKEN dependency. Weights are bit-identical.
+      hf_path: NousResearch/Meta-Llama-3-8B
+      tokenizer_model: NousResearch/Meta-Llama-3-8B
+
+      # SQuAD with `squad` formatter (byte-identical prompt template to Bridge).
+      sft_dataset_name: "rajpurkar/squad"
+      sft_conversation_format: "squad"
+
+      enable_packed_sequences: true
+      use_packed_attention: false
+
+      # MATCH BRIDGE dataset config:
+      #   * Bridge `num_workers=1` (Native default 8)
+      #   * Bridge "batch" sampler is Bridge-internal; Native Megatron only
+      #     accepts {single, cyclic, external}. Use `cyclic` (closest semantic).
+      num_workers: 1
+      dataloader_type: cyclic
+
+      wandb_project: "Primus_Llama3_8B_SFT_Packed_Bridge_Aligned"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---------- Training schedule (aligned with Bridge) ----------
+      # Per-step tokens = 1 * 128 * 4096 = 524 288 (same as DeepSeek-V2-Lite AB
+      # yaml; Qwen3-30B-A3B is 4× larger). Stays within Llama-3 base context
+      # 8 192 so no RoPE scaling is needed.
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 128
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      # ---------- LR / SFT discipline (ALIGNED with Bridge AB yaml override) ----------
+      # Bridge's `_peft_common` default is lr_warmup_iters=50, lr_decay_iters=None
+      # → train_iters. On a 20-iter benchmark Bridge would cap warmup to
+      # decay-1 (config.py:1471-1480 emits a warning) which is a SOFT
+      # behavior we can't reproduce in Native Megatron (its scheduler hard
+      # asserts `lr_warmup_steps < lr_decay_steps`).
+      #
+      # To get an apples-to-apples LR curve at train_iters=20 we explicitly
+      # set warmup=10, decay=20 on BOTH sides (mirror in Bridge AB yaml).
+      # The cosine then ramps to max_lr=1e-4 at iter 10 and decays to min_lr=0
+      # by iter 20 — same shape on both sides.
+      lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 10
+      lr_decay_iters: 20
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1.0e-8
+
+      # Match Bridge `_peft_common`'s RNGConfig(seed=5678).
+      seed: 5678
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- Parallelism (dense model, no EP/CP/SP) ----------
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ---------- Optimizer / DDP ----------
+      # Bridge `_peft_common` sets use_distributed_optimizer=False on
+      # both ddp + optimizer (llama3.py:2254, 2290). Match here.
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: true
+
+      # Bridge llama3_8b_peft_config sets `use_precision_aware_optimizer=False`
+      # + main_grads/main_params/exp_avg/exp_avg_sq dtype = fp32.
+      use_precision_aware_optimizer: false
+
+      apply_rope_fusion: true
+
+      # Bridge-parity flags.
+      attention_softmax_in_fp32: false
+      masked_softmax_fusion: true
+
+      # ---------- Checkpoint ----------
+      finetune: true
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 100
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+
+      bf16: true
+
+      # =====================================================================
+      # PRIMUS-TURBO + FUSED-KERNEL FAMILY: ALL FORCED OFF
+      # =====================================================================
+      # Bridge has no Primus Turbo integration on its llama3 PEFT path.
+      # Disabling these on Native side keeps the kernel set identical.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+
+      # Bridge llama3_8b_peft_config explicitly disables CE fusion:
+      #     cfg.model.cross_entropy_loss_fusion = False
+      #     cfg.model.cross_entropy_fusion_impl = "native"
+      cross_entropy_fusion_impl: "native"
+      cross_entropy_loss_fusion: false
+
+      # MATCH BRIDGE: manual_gc=True / interval=100.
+      manual_gc: true
+      manual_gc_interval: 100
+
+      # =====================================================================
+      # Profile (aligned to Bridge yaml: capture iter 11 only)
+      # =====================================================================
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+
+      eval_iters: 0
+
+      # ---------- LoRA ----------
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

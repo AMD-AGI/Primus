@@ -1,6 +1,8 @@
 # ===== Global =====
 # main control flag
 enable_primus_turbo: false
+# use primus_turbo_fp4_autocast instead of TE fp8_autocast for FP4 (requires enable_primus_turbo)
+use_turbo_fp4_autocast: false
 
 # ===== Attention =====
 # operator switch
@@ -17,7 +19,13 @@ enable_turbo_attention_float8: false
 
 # ===== Parallel Linear =====
 # operator switch
+# deprecated, use use_turbo_gemm instead
 use_turbo_parallel_linear: false
+# use turbo gemm
+use_turbo_gemm: false
+
+# ===== Permute =====
+use_turbo_permute_padding: false
 
 # ===== Grouped MLP =====
 # deprecated, use use_turbo_grouped_gemm instead

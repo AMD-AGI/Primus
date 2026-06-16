@@ -120,7 +120,7 @@ def _make_args(**overrides):
         fp4=False,
         fp8_recipe=None,
         fp4_recipe=None,
-        use_turbo_parallel_linear=False,
+        use_turbo_gemm=False,
         dump_pp_data=False,
         pipeline_model_parallel_size=1,
         turbo_sync_free_moe_stage=0,

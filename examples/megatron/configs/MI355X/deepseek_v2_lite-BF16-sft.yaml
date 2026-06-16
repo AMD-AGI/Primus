@@ -1,0 +1,128 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    # Model to run
+    model: ${PRIMUS_MODEL:deepseek_v2_lite}.yaml
+
+    overrides:
+      # Specify stage to use SFT trainer (required)
+      stage: sft
+
+      hf_path: deepseek-ai/DeepSeek-V2-Lite
+      tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+
+      # SFT-specific configuration
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # Logging
+      wandb_project: "Primus_DeepSeek_V2_Lite_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # Training configuration
+      train_iters: 20
+      # NOTE: mbs=8 triggers a Triton kernel launch error in primus_turbo's
+      # MoE token-permute path on rank with imbalanced expert load
+      # ("SystemError: __reversed__ returned a result with an exception set").
+      # If mbs=4 also crashes, set use_turbo_deepep=false + moe_permute_fusion=false
+      # below to fall back to Megatron's default alltoall dispatcher.
+      micro_batch_size: 4
+      global_batch_size: 128
+
+      # Sequence length
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      # Learning rate (typically lower for fine-tuning)
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      # Loss masking
+      eod_mask_loss: false  # SFT uses custom loss masking
+
+      # Model initialization
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # Parallelism configuration
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # Data parallelism
+      # NOTE: ROCm/RCCL backend in current image lacks reduce_scatter_tensor_coalesced.
+      # Disabling distributed_optimizer avoids the coalesced reduce-scatter path triggered
+      # by Megatron's ParamAndGradBuffer.start_grad_sync. With LoRA only ~0.88% params are
+      # trainable, so ZeRO-1 sharding gives negligible memory savings anyway.
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false      # depends on distributed_optimizer
+      overlap_param_gather: false     # depends on distributed_optimizer
+      gradient_accumulation_fusion: false
+
+      # MLA
+      multi_latent_attention: true
+
+      # Checkpoint configuration
+      finetune: true  # Load pretrained checkpoint
+      load: null  # Path to pretrained checkpoint
+      save: null  # Path to save fine-tuned checkpoint
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # Precision (BF16 mixed precision)
+      bf16: true
+
+      # Turbo optimizations
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: false
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # Validation
+      eval_iters: 10
+
+      # LoRA (Low-Rank Adaptation) configuration
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

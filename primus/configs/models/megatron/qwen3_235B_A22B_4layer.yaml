@@ -1,0 +1,6 @@
+extends:
+  - qwen3_235B_A22B.yaml
+
+# Smoke-test variant of Qwen3-235B-A22B.
+# Keeps the 235B hidden size, attention, and MoE shape, but reduces depth.
+num_layers: 4

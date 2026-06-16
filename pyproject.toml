@@ -1,0 +1,109 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "primus"
+dynamic = ["version"]
+description = "Primus-LM: a flexible, high-performance training framework for large-scale foundation models on AMD GPUs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Advanced Micro Devices, Inc." }]
+keywords = ["primus", "amd", "rocm", "llm", "training", "megatron", "torchtitan"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Runtime dependencies for the published wheel.
+#
+# NOTE: keep these in sync with `requirements.txt`. The pure dev/test tooling
+# (e.g. pre-commit, expecttest, pytest) intentionally lives under the optional
+# `dev` extra instead of being forced onto every install. `torch` is provided
+# by the base ROCm image and is deliberately NOT pinned here.
+dependencies = [
+    "loguru",
+    "wandb",
+    "nltk",
+    "matplotlib",
+    "markdown2",
+    "weasyprint",
+    "tyro",
+    "torchao",
+    "blobfile",
+    "torchdata>=0.8.0",
+    "datasets>=3.6.0",
+    "mlflow==3.4.0",
+    "pyrsmi",
+    "plotext",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit", "expecttest", "pytest"]
+
+[project.scripts]
+# Unified bash launcher (slurm / container / direct). Implemented in runner/.
+primus-cli = "primus_cli:main"
+# Primus Python CLI (train / benchmark / projection / preflight).
+primus = "primus.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/AMD-AGI/Primus"
+Repository = "https://github.com/AMD-AGI/Primus"
+
+[tool.black]
+# Pin the formatting target below py39 on purpose. black >= 23.1 infers its
+# target from `[project].requires-python`, and `>=3.10` would otherwise make it
+# reformat 300+ existing files (e.g. parenthesizing multi-context `with`
+# statements), breaking `code-lint` (pre-commit run --all-files). This affects
+# formatting STYLE only -- not the runtime Python requirement -- and keeps
+# formatting identical to the current main branch.
+line-length = 110
+target-version = ["py38"]
+
+###############################################################################
+# Hatch build configuration
+###############################################################################
+
+[tool.hatch.version]
+# Read __version__ statically from primus/__init__.py (no import side effects).
+path = "primus/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["primus"]
+# _thirdparty.lock is generated at build time (and git-ignored); force-include it
+# so the wheel ships it for `primus-cli deps sync`.
+artifacts = ["primus/_thirdparty.lock"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Ship the whole primus-cli bash toolkit as package data under primus/runner/.
+# The console-script entry point locates and execs runner/primus-cli at runtime.
+"runner" = "primus/runner"
+# Standalone, dependency-free entry-point module for `primus-cli`.
+"primus_cli.py" = "primus_cli.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "primus",
+    "runner",
+    "primus_cli.py",
+    "requirements*.txt",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+# _thirdparty.lock is generated at build time and git-ignored; force it into the
+# sdist too, so `python -m build` (sdist -> wheel) keeps it in the final wheel.
+artifacts = ["primus/_thirdparty.lock"]

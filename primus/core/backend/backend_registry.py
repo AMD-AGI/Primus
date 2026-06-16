@@ -43,7 +43,7 @@ class BackendRegistry:
     _adapters: Dict[str, Type] = {}
 
     # (Backend, Stage) → TrainerClass
-    # _trainer_classes: Dict[tuple, Type] = {}
+    _trainer_classes: Dict[tuple, Type] = {}
 
     # Backend → list of setup hooks
     _setup_hooks: Dict[str, List[Callable]] = {}
@@ -161,6 +161,27 @@ class BackendRegistry:
             log_rank_0("[Primus] Warning: No backends discovered")
 
     # ----------------------------------------------------------------------
+    #  Trainer Class Registration
+    # ----------------------------------------------------------------------
+    @classmethod
+    def register_trainer_class(cls, trainer_cls: Type, backend: str, stage: str = "pretrain"):
+        """Register a trainer class for a backend/stage combination."""
+        cls._trainer_classes[(backend, stage)] = trainer_cls
+
+    @classmethod
+    def get_trainer_class(cls, backend: str, stage: str = "pretrain"):
+        """Get the trainer class for a backend/stage combination."""
+        key = (backend, stage)
+        if key in cls._trainer_classes:
+            return cls._trainer_classes[key]
+        raise ValueError(f"[Primus] No trainer class registered for backend '{backend}' stage '{stage}'.")
+
+    @classmethod
+    def has_trainer_class(cls, backend: str, stage: str = "pretrain") -> bool:
+        """Check if a trainer class is registered for a backend/stage combination."""
+        return (backend, stage) in cls._trainer_classes
+
+    # ----------------------------------------------------------------------
     # Setup Hook Registration
     # ----------------------------------------------------------------------
     @classmethod
@@ -202,5 +223,9 @@ class BackendRegistry:
     def debug_dump(cls):
         print("\n========== Primus BackendRegistry ==========")
         print("Adapters:         ", cls._adapters)
+        print(
+            "Trainer Classes:  ",
+            {f"{b}:{s}": t.__name__ for (b, s), t in cls._trainer_classes.items()},
+        )
         print("Setup Hooks:      ", {k: len(v) for k, v in cls._setup_hooks.items()})
         print("=============================================\n")

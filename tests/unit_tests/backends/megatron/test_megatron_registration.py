@@ -14,13 +14,15 @@ the backend will be unavailable to the runtime.
 Test coverage:
     1. Adapter registration (MegatronAdapter)
     2. Trainer class registration (MegatronPretrainTrainer)
-    3. Integration: get_adapter returns correct instance
+    3. Stage-specific trainer registration (MegatronSFTTrainer)
+    4. Integration: get_adapter returns correct instance
 """
 
 import pytest
 
 from primus.backends.megatron.megatron_adapter import MegatronAdapter
 from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainTrainer
+from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
 from primus.core.backend.backend_registry import BackendRegistry
 
 _SUPPORTS_TRAINER_CLASS_REGISTRY = all(
@@ -79,6 +81,14 @@ class TestMegatronBackendRegistration:
         # Explicit stage should also work
         assert BackendRegistry.has_trainer_class("megatron", stage="pretrain")
 
+        # SFT stage should be registered explicitly.
+        assert BackendRegistry.has_trainer_class("megatron", stage="sft")
+        sft_trainer_cls = BackendRegistry.get_trainer_class("megatron", stage="sft")
+        assert sft_trainer_cls is MegatronSFTTrainer, (
+            f"Expected MegatronSFTTrainer, got {sft_trainer_cls}. "
+            "Check BackendRegistry.register_trainer_class(MegatronSFTTrainer, 'megatron', 'sft')"
+        )
+
     def test_adapter_can_be_instantiated_via_registry(self):
         """Verify that get_adapter returns a working MegatronAdapter instance."""
         # This tests the full integration: registry lookup + instantiation
@@ -136,8 +146,10 @@ class TestMegatronBackendRegistration:
             BackendRegistry._adapters = original_adapters
             BackendRegistry._trainer_classes = original_trainers
 
-        # Adapter should be able to load the registered trainer class
-        trainer_cls = adapter.load_trainer_class()
+        # Adapter should be able to load the registered trainer class.
+        # Mock logging because this integration test does not initialize the global logger.
+        with patch("primus.backends.megatron.megatron_adapter.log_rank_0"):
+            trainer_cls = adapter.load_trainer_class()
         assert (
             trainer_cls is MegatronPretrainTrainer
         ), f"Expected MegatronPretrainTrainer from adapter, got {trainer_cls}"
@@ -217,7 +229,7 @@ class TestMegatronRegistrationFailures:
                 # Mock setup_backend_path to prevent actual path operations
                 from unittest.mock import patch
 
-                with patch.object(BackendRegistry, "_try_load_backend", return_value=False):
+                with patch.object(BackendRegistry, "_load_backend", return_value=None):
                     BackendRegistry.get_adapter("megatron")
         finally:
             # Restore

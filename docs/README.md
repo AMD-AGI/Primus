@@ -25,6 +25,7 @@ Guides for common workflows and features:
 In-depth technical documentation:
 
 - **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
+- **[Native SFT & LoRA Quick Start](./README_NATIVE_SFT_LORA_EN.md)** - Megatron-native SFT/LoRA launch guide (BF16/FP8/FP4), no Megatron-Bridge runtime dependency
 - **[Performance Projection](./projection.md)** - Project training performance and memory to multi-node configurations
 - **[Tuning Agent](./tuning_agent.md)** - LLM-driven search for an optimal training config — parallelism plus batching, schedule, memory, MoE-comm, and precision knobs (drives the projection tool as an oracle)
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)

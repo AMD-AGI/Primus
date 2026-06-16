@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v26.2
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.3
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
@@ -24,7 +24,7 @@ RUN rm -rf /var/lib/apt/lists/*
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 # ENV MPI_HOME=/opt/ompi
-# Use the system OpenMPI prefix from the v26.2 base image.
+# Use the system OpenMPI prefix from the v26.3 base image.
 ENV MPI_HOME=/usr/lib/x86_64-linux-gnu/openmpi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}

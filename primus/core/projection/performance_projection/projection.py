@@ -2572,8 +2572,8 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     # Do not override explicit YAML kernel choices (e.g. legacy grouped GEMM).
     _turbo_candidates = {
         "enable_primus_turbo": True,
-        "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
-        "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
+        "use_turbo_gemm": getattr(cfg, "multi_latent_attention", False),
+        "use_turbo_grouped_gemm": bool(getattr(cfg, "num_experts", 0)),
     }
     if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
         wants_legacy_grouped = bool(getattr(cfg, "moe_use_legacy_grouped_gemm", False))
@@ -2598,7 +2598,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     print(f"  use_torch_fsdp2: {cfg.use_torch_fsdp2}")
     if getattr(cfg, "multi_latent_attention", False):
         print(f"  enable_primus_turbo: {cfg.enable_primus_turbo}")
-        print(f"  use_turbo_parallel_linear: {cfg.use_turbo_parallel_linear}")
+        print(f"  use_turbo_gemm: {cfg.use_turbo_gemm}")
     trainer = MegatronPretrainTrainer(
         module_name="pre_trainer",
         primus_config=primus_config,

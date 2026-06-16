@@ -14,3 +14,4 @@ datasets>=3.6.0
 mlflow==3.4.0
 pyrsmi
 plotext
+hip-python

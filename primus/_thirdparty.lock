@@ -1,0 +1,40 @@
+{
+  "third_party": [
+    {
+      "name": "torchtitan",
+      "path": "third_party/torchtitan",
+      "url": "https://github.com/pytorch/torchtitan.git",
+      "commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021"
+    },
+    {
+      "name": "Megatron-LM",
+      "path": "third_party/Megatron-LM",
+      "url": "https://github.com/NVIDIA/Megatron-LM.git",
+      "commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6"
+    },
+    {
+      "name": "maxtext",
+      "path": "third_party/maxtext",
+      "url": "https://github.com/ROCm/maxtext.git",
+      "commit": "851c0935a4e9c9e4cd0771603e3bdf75a6578ad1"
+    },
+    {
+      "name": "Emerging-Optimizers",
+      "path": "third_party/Emerging-Optimizers",
+      "url": "https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git",
+      "commit": "93d9eb3a6c899b50de73992826451fba3ab6adfb"
+    },
+    {
+      "name": "Megatron-Bridge",
+      "path": "third_party/Megatron-Bridge",
+      "url": "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git",
+      "commit": "9577b1280eaadd60b9d7b0ce6df09ac80e87e323"
+    },
+    {
+      "name": "HummingbirdXT",
+      "path": "third_party/HummingbirdXT",
+      "url": "https://github.com/AMD-AGI/HummingbirdXT.git",
+      "commit": "ed7b7bd0dd03ed084f645c5dda1bc7b333f326f0"
+    }
+  ]
+}

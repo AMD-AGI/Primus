@@ -1,0 +1,288 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# =============================================================================
+# Llama-2 70B LoRA SFT -- NATIVE-PATH apples-to-apples baseline for the MLPerf
+# llama2-70b LoRA recipe (the one that lives in /home/botahu/mlperf_llama2_70b_
+# sft/Primus on the Bridge backend).
+#
+# Purpose:
+#   Run THE SAME PEFT recipe (data, weights, every hyper-parameter) through
+#   sft_primus_0507's NATIVE Megatron-LM backend so the Bridge run and the
+#   Native run can be compared 1:1 on wall-clock, TFLOPS, and step-1 lm-loss.
+#
+# Bridge reference yaml (this file mirrors every knob it sets):
+#   /home/botahu/mlperf_llama2_70b_sft/Primus/
+#       examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml
+#
+# Container mapping (mount the SAME docker volume on both projects):
+#   * mlperf branch (Bridge)   ->  llama2_lora_26_2_primus_upstream
+#         -v mlperf_llama2_data:/data/mlperf_llama2
+#   * sft_primus_0507 (Native) ->  sft_primus_0507_native
+#         -v mlperf_llama2_data:/data/mlperf_llama2
+#   Both see byte-identical:
+#       /data/mlperf_llama2/train.npy        (3901 packed samples)
+#       /data/mlperf_llama2/validation.npy   (173  packed samples)
+#       /data/mlperf_llama2/packed_metadata.jsonl
+#       /data/mlperf_llama2/megatron_checkpoints/Llama-2-70b-hf/
+#                                            (137 GB Megatron dist_ckpt)
+#
+# Recommended invocation::
+#
+#   docker exec sft_primus_0507_native bash -c '
+#     cd /workspace/Primus
+#     export PRIMUS_EXP_NAME=native_llama2_70b_mlperf_aligned_$(date +%Y%m%d_%H%M%S)
+#     export HF_HOME=/workspace/hf_cache
+#     export DATA_PATH=/workspace
+#     export PYTORCH_ALLOC_CONF=expandable_segments:True
+#     export GLOO_SOCKET_IFNAME=lo
+#     export NCCL_SOCKET_IFNAME=lo
+#     EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml \
+#       bash examples/run_pretrain.sh
+#   '
+#
+# Apples-to-apples points (vs Bridge llama2_70b_lora_posttrain.yaml):
+#   * Dataset      : EXACT same train.npy / validation.npy / packed_metadata.jsonl
+#     -- consumed through Native's new MlperfPackedDataset (see
+#        primus/backends/megatron/sft/mlperf_packed_dataset.py).
+#   * Weights      : EXACT same Megatron dist_ckpt under
+#        /data/mlperf_llama2/megatron_checkpoints/Llama-2-70b-hf
+#        (137 GB iter_0000000/__0_0.distcp + __0_1.distcp, common.pt,
+#        metadata.json; written by the Bridge mlperf HF->Megatron conversion
+#        hook in mlperf_llama2_70b_sft).
+#   * Shape        : GBS=8, MBS=1, seq=8192, train_iters=1024
+#   * Optimizer    : Adam(0.9, 0.999, eps=1e-8), wd=0.0001, clip=0.3,
+#                    lr=4e-4, lr_warmup_iters=0, lr_decay_iters=1024,
+#                    cosine, min_lr=0
+#   * Parallelism  : TP=8 PP=1 CP=1 SP=false (same HW adaptation the mlperf
+#                    wrapper applies via CLI override)
+#   * Precision    : BF16 base + FP8 hybrid (E4M3 fwd / E5M2 bwd) on
+#                    linear / fc1 / fc2 / qkv via TE, no_fp8_weight_transpose
+#                    _cache=true (matches Bridge precision_config:
+#                    bf16_with_fp8_hybrid + no_fp8_weight_transpose_cache:true)
+#   * LoRA         : dim=16, alpha=32, dropout=0.1, dropout_position=pre,
+#                    lora_A=xavier, lora_B=zero,
+#                    target_modules=[linear_qkv, linear_proj]
+#                    (Bridge llama2_custom.py L531-545; NOTE: fc1/fc2 are
+#                    deliberately EXCLUDED to mirror mlperf exactly)
+#   * Logging      : log_interval=1 (per-step printing, matches the change
+#                    we just landed in
+#                    /home/botahu/mlperf_llama2_70b_sft/Primus/scripts/
+#                    run_mlperf_lora_official.sh)
+#   * Eval         : eval_interval=48, eval_iters=24
+#   * Misc         : seed=1234, num_workers=1, primus_turbo enabled (Bridge
+#                    yaml enable_primus_turbo:true)
+#
+# Native-side compromises (kept inside the Native schema):
+#   * dataloader_type: cyclic
+#         Bridge uses its variable-length "batch" sampler. Native Megatron's
+#         iterator only accepts {single, cyclic, external}; cyclic is the
+#         closest -- random sampling with full-epoch reshuffle, one GBS per
+#         iter.
+#   * DDP overlap flags forced ON (use_distributed_optimizer +
+#         overlap_grad_reduce + overlap_param_gather + gradient_accumulation
+#         _fusion). Bridge llama2_custom.py L601-607 sets
+#         overlap_grad_reduce=False and overlap_param_gather=False, but at
+#         TP=8 + 70B + LoRA those two reduce-scatter/all-gather collectives
+#         dominate step time -- leaving them off would add ~3-5 s/iter on
+#         our 8x MI300X box and make the wall-clock comparison meaningless.
+#         The compute/CE math is unchanged either way; only async vs sync
+#         collective scheduling differs.
+#   * Activation recompute (block, 8 layers). Bridge yaml relies on
+#         MI355X 288 GB HBM and runs without recompute; on MI300X 192 GB
+#         the peak HBM at TP=8 + LoRA + seq=8192 sits in the 80-90 GB
+#         range without recompute, which leaves enough headroom but pays a
+#         ~5-10% throughput penalty if we keep it. Set recompute_num_layers=0
+#         (effectively off) to mirror Bridge wall-clock when the run is
+#         stable; ship with 8 here to guarantee a clean first-iter on the
+#         MI300X box.
+#   * stable_lora_with_te_op_fuser / use_transformer_engine_op_fuser are
+#         Bridge-only feature flags (live on the Bridge PEFT recipe, not
+#         Megatron-LM args). The Native LoRA wrap goes through
+#         primus/backends/megatron/lora/*, which already keeps adapters
+#         off the TE fuser; nothing extra to set here.
+# =============================================================================
+
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-BF16-sft-packed-mlperf_aligned}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:llama2_70B}.yaml
+
+    overrides:
+      stage: sft
+
+      # ============================================================
+      # Dataset: route to the new MlperfPackedDataset by pointing
+      # sft_dataset_name at the mlperf packed directory. The dispatch
+      # in primus/backends/megatron/sft/dataset.py recognises a dir
+      # that contains train.npy + packed_metadata.jsonl and bypasses
+      # native's HF/jsonl tokenize+pack pipeline.
+      # ============================================================
+      sft_dataset_name: /data/mlperf_llama2
+      sft_conversation_format: squad   # unused on the mlperf dispatch path
+
+      # Native packing pipeline OFF (we already have pre-built packs).
+      # use_packed_attention also OFF: mlperf max_samples_per_bin=1
+      # means each 8192-token pack contains a single supervised sample
+      # already padded, so plain causal attention is functionally
+      # identical to thd varlen and avoids ROCm aiter thd hangs.
+      enable_packed_sequences: false
+      use_packed_attention: false
+      sft_bridge_compat_inline_bos: false
+
+      # mlperf uses NeMo-style batch dataloader; native only supports
+      # {single, cyclic, external}. cyclic is the closest semantic match.
+      num_workers: 1
+      dataloader_type: cyclic
+
+      # ============================================================
+      # Logging cadence (match the mlperf wrapper after our patch).
+      # ============================================================
+      log_interval: 1
+      tensorboard_log_interval: 1
+      wandb_project: null
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ============================================================
+      # Training schedule (BYTE-MATCH bridge llama2_70b_lora_posttrain.yaml)
+      # ============================================================
+      train_iters: 500
+      micro_batch_size: 1
+      global_batch_size: 8
+
+      seq_length: 8192
+      max_position_embeddings: 8192
+
+      eval_interval: 100000  ##48
+      eval_iters: 0   ###24
+
+      # ============================================================
+      # Optimizer (mlperf: Adam(0.9, 0.999, eps=1e-8), wd=0.0001,
+      # clip=0.3, lr=4e-4, warmup=0, decay over full run, cosine, min=0)
+      # ============================================================
+      lr: 4.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 0
+      lr_decay_iters: 500
+      lr_decay_style: cosine
+      weight_decay: 0.0001
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      clip_grad: 0.3
+
+      seed: 1234
+      eod_mask_loss: false
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-05
+
+      # ============================================================
+      # Parallelism: TP=8 to fit 70B on MI300X 192 GB, SP=false to
+      # bypass the FP8+SP Amax-reduction requirement TE imposes.
+      # ============================================================
+      tensor_model_parallel_size: ${PRIMUS_TP:8}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ============================================================
+      # DDP / optimizer: align with Bridge mlperf recipe.
+      # IMPORTANT: fp8_param_gather=true REQUIRES use_distributed_optimizer
+      # =true (Megatron-LM arguments.py:882 asserts this in validate_args).
+      # ============================================================
+      use_distributed_optimizer: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: true
+      use_precision_aware_optimizer: false
+
+      apply_rope_fusion: true
+      masked_softmax_fusion: true
+      attention_softmax_in_fp32: false
+      align_param_gather: false
+
+      # FP8 all-gather of distributed-optimizer param shards -- mirrors
+      # Bridge mlperf (saves ~8.75 GB / GPU on 70B-LoRA TP=8 by holding
+      # the gathered base-weight tensor in FP8 instead of BF16).
+      fp8_param_gather: true
+
+      # ============================================================
+      # Activation recompute (kept ON for MI300X 192 GB headroom).
+      # ============================================================
+      # Match mlperf: no activation recompute.
+      # recompute_granularity: full
+      # recompute_method: block
+      # recompute_num_layers: 8
+
+      # ============================================================
+      # Checkpoint -- consume the EXACT mlperf-converted Megatron
+      # dist_ckpt sitting on the shared docker volume.
+      # ============================================================
+      pretrained_checkpoint: /data/mlperf_llama2/megatron_checkpoints/Llama-2-70b-hf/iter_0000000
+      finetune: true
+      load: null
+      save: null
+      save_interval: 1000000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: log_all
+
+      # ============================================================
+      # Precision: BF16 base + FP8 hybrid recipe.
+      # ============================================================
+      bf16: true
+      fp8: hybrid
+      no_fp8_weight_transpose_cache: true
+
+      # ============================================================
+      # Primus Turbo + fused kernels.
+      # ============================================================
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+
+      # ============================================================
+      # Cross-entropy fusion via TE.
+      # ============================================================
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      check_for_nan_in_loss: false
+
+      manual_gc: false
+
+      # =====================================================================
+      # Profile -- capture iter 10..11 with the built-in PyTorch profiler.
+      # =====================================================================
+      profile: false
+      use_pytorch_profiler: true
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+      record_memory_history: false
+      tensorboard_dir: ${PRIMUS_WORKSPACE:./output}/${PRIMUS_TEAM:amd}/${PRIMUS_USER:root}/${PRIMUS_EXP_NAME:llama2_70B-BF16-sft-packed-mlperf_aligned}/torch_profiler_traces
+
+      # ============================================================
+      # LoRA (mlperf llama2_custom.py L531-545 exact match):
+      # ============================================================
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.1
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj

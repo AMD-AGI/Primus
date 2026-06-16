@@ -41,7 +41,7 @@ def create_args():
     args.micro_batch_size = 1
     args.moe_router_force_load_balancing = False
     args.moe_use_legacy_grouped_gemm = True
-    args.use_turbo_grouped_mlp = True
+    args.use_turbo_grouped_gemm = True
     args.turbo_deepep_num_cu = 32
     args.turbo_deepep_use_comm_stream = False
     return args

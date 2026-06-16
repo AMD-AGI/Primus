@@ -106,6 +106,10 @@ def primus_evaluate(
                         if isinstance(val, tuple) or isinstance(val, list):
                             numerator += val[0]
                             denominator += val[1]
+                        elif isinstance(val, torch.Tensor) and val.numel() == 2:
+                            # [loss, num_tokens] from pretrain_gpt loss_func (Megatron default)
+                            numerator += val[0]
+                            denominator += val[1]
                         else:
                             # legacy behavior. we average over the number of microbatches,
                             # and so the denominator is 1.

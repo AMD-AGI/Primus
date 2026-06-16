@@ -45,6 +45,28 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/backends
 
 Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-run environment optimized for AMD GPUs. This eliminates manual dependency and environment configuration.
 
+### Install as a Python package (pip)
+
+Besides the Docker image, Primus can be installed as a wheel that bundles the `primus-cli` launcher.
+
+```bash
+# Option 1 — install directly from the Git repository (pin a tag, branch, or commit):
+pip install "git+https://github.com/AMD-AGI/Primus.git@v26.2.0rc1"
+
+# Option 2 — install a released wheel from the GitHub Pages index (recommended; pin the version):
+pip install "primus==26.2.0rc1" --extra-index-url https://amd-agi.github.io/Primus/simple/
+```
+
+The wheel ships the `primus-cli` toolkit but not the heavy backend sources. Fetch the backend
+sources pinned for that release (full source, including nested submodules) with:
+
+```bash
+primus-cli deps sync --dir ~/.cache/Primus/third_party
+```
+
+`primus-cli direct` also auto-runs `deps sync` on first use when the sources are missing
+(set `PRIMUS_AUTO_DEPS_SYNC=0` to disable).
+
 ### Prerequisites
 
 - AMD ROCm drivers (version ≥ 7.0 recommended)
@@ -58,7 +80,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 1. **Pull the latest Docker image**
 
     ```bash
-    docker pull docker.io/rocm/primus:v26.2
+    docker pull docker.io/rocm/primus:v26.3
     ```
 
 2. **Clone the repository**
@@ -74,7 +96,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
     # Run training in container
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
-    ./primus-cli container --image rocm/primus:v26.2 \
+    ./primus-cli container --image rocm/primus:v26.3 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```

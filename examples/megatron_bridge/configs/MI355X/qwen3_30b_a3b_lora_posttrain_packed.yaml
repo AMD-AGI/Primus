@@ -1,0 +1,98 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30b_a3b_lora_posttrain_packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen3-30B-A3B LoRA SFT via Megatron-Bridge (WITH packing, force_lb=true)
+# =============================================================================
+# Counterpart of:
+#   examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-sft-packed-ab.yaml
+# (the AB-benchmark variant of the native Primus path) for the
+# bridge-vs-native A/B benchmark.
+#
+# Why force_lb=true is on for both sides:
+#   We want to remove router-imbalance noise from the framework comparison.
+#   With force_lb=true the router output is replaced by uniform random noise
+#   in the forward pass (RandomSTE in moe_utils.py), making token distribution
+#   exactly uniform across experts -- this eliminates DeepEP straggler-bound
+#   alltoall and yields a stable performance baseline. NOTE: this is a
+#   benchmark-only configuration; production SFT should set force_lb=false.
+#
+# Why LoRA target_modules = [linear_qkv, linear_proj] only:
+#   Bridge's qwen3_30b_a3b_finetune_config sets target_modules to
+#   [linear_qkv, linear_proj] by default. The native side's AB variant has
+#   been adjusted to match, so both sides have IDENTICAL LoRA scope and
+#   identical trainable parameter count -- guaranteeing a fair TFLOPS
+#   comparison.
+#
+# Aligned hyperparameters (must match qwen3_30B_A3B-BF16-sft-packed-ab.yaml):
+#   * mbs=8, gbs=512, seq=4096
+#   * TP=1, PP=1, EP=8, CP=1, SP=false
+#   * LoRA dim=32, alpha=32, target=[linear_qkv, linear_proj]
+#   * lr=1e-5, train_iters=20
+#   * force_lb=true
+#   * dataset = rajpurkar/squad
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: sft_trainer.yaml
+
+    model: qwen3_30b_a3b.yaml
+
+    overrides:
+      stderr_sink_level: DEBUG
+
+      # Parallelism (matches native AB yaml exactly)
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # Training
+      train_iters: 20
+      global_batch_size: 512
+      micro_batch_size: 8
+      seq_length: 4096
+      eval_interval: 50
+      save_interval: 100
+
+      # PEFT: bridge default LoRA target [linear_qkv, linear_proj] is what we
+      # want; only need to override dim/alpha. See the `peft:` block at the
+      # bottom of this file (merged into config_container.peft AFTER recipe).
+      peft: lora
+      packed_sequence: true
+
+      # Built-in dataset selection. Routed by get_default_dataset_config():
+      #   "rajpurkar/squad"  -> default_squad_config + process_squad_example  (DEFAULT)
+      #   "tatsu-lab/alpaca" -> default_alpaca_config + process_alpaca_example
+      # Use squad to align with the recipe's default and the native AB yaml.
+      # Requires HF ``datasets`` >= 3.0 in the container (newer squad
+      # metadata uses "List" feature type). If you see "Feature type 'List'
+      # not found", run: pip install --upgrade datasets
+      dataset_name: "rajpurkar/squad"
+
+      # Optimizer (aligned with native SFT lr=1e-5)
+      finetune_lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+
+      # Precision
+      precision_config: bf16_mixed
+
+# Override the LoRA dim/alpha that the recipe hard-codes to 8/16 -- bring
+# them up to 32/32 so trainable_params matches the native side. The
+# target_modules list is left untouched (defaults to [linear_qkv, linear_proj]
+# which is what we want for this AB benchmark).
+peft:
+    dim: 32
+    alpha: 32
+
+# Force the MoE router into uniform-balance mode for the framework comparison.
+# Lives on config_container.model in bridge (`MegatronProvider` is a
+# TransformerConfig subclass with this field).
+model:
+    moe_router_force_load_balancing: true

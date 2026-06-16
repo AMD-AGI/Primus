@@ -1,3 +1,8 @@
+---
+name: primus-projection
+description: Opinionated guide for using Primus Projection to choose parallelism (TP/PP/EP/CP/DP) and pipeline schedules, validate memory fit on target nodes, reason about communication collectives, and explore optimization trade-offs with minimal compute. Use when the user asks how to pick a parallelism strategy or pipeline schedule, whether a model fits in memory, which optimizations such as DeepEP, SyncFree, zero-bubble, FP8, recomputation, or FSDP2 matter most, or how to run primus projection commands. Read-only planning guidance; no large multi-node training runs required.
+---
+
 # Primus Projection Skill
 
 ## Purpose

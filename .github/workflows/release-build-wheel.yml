@@ -1,0 +1,169 @@
+name: Build Wheel and Attach to Release
+
+# Build the Primus wheel (which bundles the primus-cli launcher toolkit) and
+# upload it as a release asset when a GitHub Release is published.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to upload the built wheel to (optional). Leave empty to only produce a build artifact."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  # Needed to trigger the dashboard workflow (workflow_dispatch) so it can
+  # refresh the GitHub Pages pip index after the wheel is attached to the release.
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # third_party submodules are NOT needed: the wheel only ships the
+        # primus package + runner/ toolkit, not the vendored backends.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve target release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Target release tag: '${TAG:-<none>}'"
+
+      - name: Sync package version to release tag
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          tag = os.environ["TAG"].lstrip("v").strip()
+          if not re.fullmatch(r"[0-9]+(\.[0-9]+)*([abrc.]*[0-9]+)*(\.post[0-9]+)?(\.dev[0-9]+)?", tag):
+              print(f"Tag '{tag}' is not a PEP 440 version; keeping __version__ from source.")
+              raise SystemExit(0)
+          init = pathlib.Path("primus/__init__.py")
+          text = init.read_text(encoding="utf-8")
+          new = re.sub(r'__version__\s*=\s*["\'][^"\']*["\']', f'__version__ = "{tag}"', text)
+          init.write_text(new, encoding="utf-8")
+          print(f"Set primus.__version__ = {tag}")
+          PY
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      # The third_party lock (submodule name/url/pinned-commit) is committed at
+      # primus/_thirdparty.lock, so every install path (pip install ., git+, sdist,
+      # wheel) ships it. Regenerate it here and fail if it drifted from the
+      # submodule pins in this checkout -- a submodule bump must not be released
+      # without a matching lock update. (`primus-cli deps sync` later clones the
+      # full sources, incl. nested submodules, from these pins.)
+      - name: Verify third_party lock is up to date
+        run: |
+          python tools/pip_index/gen_thirdparty_lock.py
+          if ! git diff --quiet -- primus/_thirdparty.lock; then
+            echo "::error::primus/_thirdparty.lock is out of date. Run 'python tools/pip_index/gen_thirdparty_lock.py' and commit the result."
+            git --no-pager diff -- primus/_thirdparty.lock
+            exit 1
+          fi
+          echo "OK: primus/_thirdparty.lock matches the submodule pins."
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Verify wheel bundles the primus-cli toolkit
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheels = glob.glob("dist/*.whl")
+          assert wheels, "No wheel produced under dist/"
+          whl = wheels[0]
+          names = set(zipfile.ZipFile(whl).namelist())
+          required = [
+              "primus_cli.py",
+              "primus/cli/main.py",
+              "primus/runner/primus-cli",
+              "primus/runner/lib/common.sh",
+              "primus/runner/primus-cli-direct.sh",
+              "primus/runner/primus-cli-deps.sh",
+              "primus/_thirdparty.lock",
+          ]
+          missing = [r for r in required if r not in names]
+          if missing:
+              print("Wheel is missing required files:")
+              for m in missing:
+                  print(f"  - {m}")
+              sys.exit(1)
+          print(f"OK: {whl} bundles the primus-cli toolkit.")
+          PY
+
+      - name: Smoke test installed primus-cli
+        run: |
+          python -m venv /tmp/primus-smoke
+          # --no-deps: we only exercise the bash launcher here, not the full
+          # training stack, so heavy runtime deps (torch, etc.) are unnecessary.
+          /tmp/primus-smoke/bin/python -m pip install --no-deps dist/*.whl
+          echo "--- primus-cli --help ---"
+          /tmp/primus-smoke/bin/primus-cli --help
+          echo "--- primus-cli --version ---"
+          /tmp/primus-smoke/bin/primus-cli --version
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: primus-dist
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach wheel to release
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          echo "Uploading build artifacts to release ${TAG}"
+          gh release upload "${TAG}" dist/*.whl dist/*.tar.gz --clobber
+
+      # After the wheel is on the release, kick the dashboard workflow so it
+      # regenerates the GitHub Pages PEP 503 index (which links to release
+      # assets). The dashboard is the single Pages deployer, so this never
+      # overwrites the backend-gap dashboard. If org policy blocks GITHUB_TOKEN
+      # from dispatching workflows, replace GH_TOKEN with a PAT secret.
+      - name: Refresh GitHub Pages pip index
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # Wait until the just-uploaded wheel is visible via the Releases API,
+          # so the dashboard's build_pip_index does not read an empty asset list
+          # due to eventual consistency (which produced an empty pip index).
+          echo "Waiting for the release wheel to be visible via the API..."
+          for i in $(seq 1 18); do
+            whl_count=$(gh release view "$TAG" --json assets \
+              --jq '[.assets[] | select(.name | endswith(".whl"))] | length' 2>/dev/null || echo 0)
+            if [ "${whl_count:-0}" -ge 1 ]; then
+              echo "Wheel asset is visible (count=$whl_count)."
+              break
+            fi
+            echo "  not visible yet ($i/18); sleeping 10s..."
+            sleep 10
+          done
+          echo "Triggering 'Deploy Backend Gap Dashboard' to refresh the pip index..."
+          gh workflow run deploy-backend-gap-dashboard.yml --ref main

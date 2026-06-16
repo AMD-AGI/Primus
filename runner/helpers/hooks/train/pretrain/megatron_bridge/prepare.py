@@ -17,6 +17,7 @@ from primus.backends.megatron_bridge.config_utils import (
 )
 from primus.core.launcher.parser import load_primus_config
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     log_error_and_exit,
     log_info,
@@ -49,7 +50,7 @@ def resolve_backend_path(cli_path: Optional[str], primus_path: Path) -> Path:
         log_info(f"MEGATRON_BRIDGE_PATH found in environment: {path}")
         return path
 
-    path = primus_path / "third_party" / "Megatron-Bridge"
+    path = default_backend_path(primus_path, "Megatron-Bridge")
     log_info(f"MEGATRON_BRIDGE_PATH not found, falling back to: {path}")
     return path
 

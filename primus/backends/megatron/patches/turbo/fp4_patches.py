@@ -20,12 +20,17 @@ def _is_fp4_can_patch(ctx: PatchContext) -> bool:
     return fp4 and is_primus_turbo_can_patch(ctx)
 
 
+def _is_fp4_enabled(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    return bool(getattr(args, "fp4", False))
+
+
 @register_patch(
     "megatron.core.enums",
     backend="megatron",
     phase="before_train",
     description="Override Megatron enums to use Primus implementation when fp4 is enabled",
-    condition=_is_fp4_can_patch,
+    condition=_is_fp4_enabled,
 )
 def patch_enums(ctx: PatchContext):
     from megatron.core import enums
@@ -43,7 +48,7 @@ def patch_enums(ctx: PatchContext):
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp4_context to use Primus implementation when fp4 is enabled",
-    condition=_is_fp4_can_patch,
+    condition=_is_fp4_enabled,
 )
 def patch_fp4_context(ctx: PatchContext):
     """

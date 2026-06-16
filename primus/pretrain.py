@@ -97,17 +97,26 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     if env_path:
         candidate_paths.append(env_path)
 
-    # 3) Fallback to source tree under third_party
+    # 3) Fallback: source-tree third_party/<name> first, then the deps-sync
+    #    location used by installed wheels (`primus-cli deps sync`):
+    #    $PRIMUS_THIRDPARTY_DIR or ~/.cache/Primus/third_party.
     fallback_name_map = {
         "megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
         "maxtext": "maxtext",
     }
     mapped_name = fallback_name_map.get(framework, framework)
-    default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
-    if framework == "maxtext" and (default_path / "src").exists():
-        default_path = default_path / "src"
-    candidate_paths.insert(0, str(default_path))
+
+    source_tree_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
+    if framework == "maxtext" and (source_tree_path / "src").exists():
+        source_tree_path = source_tree_path / "src"
+    candidate_paths.insert(0, str(source_tree_path))
+
+    tp_root = os.getenv("PRIMUS_THIRDPARTY_DIR") or str(Path.home() / ".cache" / "Primus" / "third_party")
+    deps_sync_path = Path(tp_root) / mapped_name
+    if framework == "maxtext" and (deps_sync_path / "src").exists():
+        deps_sync_path = deps_sync_path / "src"
+    candidate_paths.append(str(deps_sync_path))
     print(f"[Primus] candidate_paths: {candidate_paths}")
 
     # Normalize & deduplicate
@@ -124,7 +133,11 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
 
     # None of the candidate paths exist
     raise FileNotFoundError(
-        f"[Primus] backend_path not found for framework '{framework}'. " f"Tried paths: {candidate_paths}"
+        f"[Primus] backend_path not found for framework '{framework}'. "
+        f"Tried paths: {candidate_paths}. "
+        f"Hint: run `primus-cli deps sync` to populate the deps-sync dir, "
+        f"install the backend under third_party/{mapped_name}, "
+        f"or provide a valid --backend_path/BACKEND_PATH."
     )
 
 
