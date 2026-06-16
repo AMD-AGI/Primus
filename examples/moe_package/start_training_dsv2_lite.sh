@@ -32,7 +32,7 @@ export CLEAN_DOCKER_CONTAINER=1
 export MBS=8   #12
 export GBS=$((128 * NNODES)) # 96
 export PROFILE=True
-export TURBO_GROUPED_MLP=False
+export TURBO_GROUPED_GEMM=False
 export TURBO_DEEPEEP=True
 export LEGACY_GG=True
 export PRIMUS_DETERMINISTIC=0
@@ -41,7 +41,7 @@ export PRIMUS_DETERMINISTIC=0
 export EXP=examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
-export PRIMUS_EXP_NAME=dsv2_lite-pretrain-mbs_$MBS-gbs_$GBS-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
+export PRIMUS_EXP_NAME=dsv2_lite-pretrain-mbs_$MBS-gbs_$GBS-turbogg_$TURBO_GROUPED_GEMM-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 
@@ -60,7 +60,7 @@ bash ./primus-cli direct -- train pretrain --config "$EXP" \
   --global_batch_size $GBS \
   --seq_length 4096 \
   --max_position_embeddings 4096 \
-  --use_turbo_grouped_mlp $TURBO_GROUPED_MLP \
+  --use_turbo_grouped_gemm $TURBO_GROUPED_GEMM \
   --use_turbo_deepep $TURBO_DEEPEEP \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
   --cross_entropy_fusion_impl "te" \

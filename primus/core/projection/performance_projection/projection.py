@@ -2580,12 +2580,12 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
         for flag, val in _turbo_candidates.items():
             if not val:
                 continue
-            if flag == "use_turbo_grouped_mlp" and wants_legacy_grouped:
+            if flag == "use_turbo_grouped_gemm" and wants_legacy_grouped:
                 if not getattr(cfg, flag, False):
                     print(
                         "[Primus:Performance Projection] Respecting "
                         "moe_use_legacy_grouped_gemm=true: NOT auto-enabling "
-                        "use_turbo_grouped_mlp"
+                        "use_turbo_grouped_gemm"
                     )
                 continue
             if not getattr(cfg, flag, False):

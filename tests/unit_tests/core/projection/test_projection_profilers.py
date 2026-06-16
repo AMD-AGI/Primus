@@ -219,7 +219,7 @@ def test_dense_mlp_simulated_path():
 
 @pytest.mark.parametrize("turbo", [False, True])
 def test_moe_mlp_simulated_path(turbo):
-    cfg = _training_config(moe=True, enable_primus_turbo=turbo, use_turbo_grouped_mlp=turbo)
+    cfg = _training_config(moe=True, enable_primus_turbo=turbo, use_turbo_grouped_gemm=turbo)
     p = MoEMLPProfiler(cfg)
     p.set_gemm_backend(_FakeGemmBackend())
     # routed experts + router + permute + activation overheads -> strictly positive
