@@ -59,7 +59,7 @@ from typing import Optional
 
 import torch
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
+from primus.backends.megatron.core.transformer.v4_attention_kernels import _flydsl, _tilelang
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_csa_attention_bwd import (
     _launch_v4_csa_attention_bwd,
     _launch_v4_csa_attention_pool_bwd,
@@ -274,6 +274,7 @@ def v4_csa_attention(
     training: bool,
     scale: float,
     use_tilelang: bool = False,
+    use_flydsl: bool = False,
 ) -> torch.Tensor:
     """Triton-backed V4 CSA fused attention.
 
@@ -329,6 +330,23 @@ def v4_csa_attention(
             attn_dropout=attn_dropout,
             training=training,
             scale=scale,
+        )
+    # FlyDSL CSA backend hook (forward-only; soft-dep, default off). CSA fwd is
+    # FlyDSL's biggest win (2.79x vs Triton). Short-circuits on enabled=False;
+    # falls back to Triton if the runtime/kernel is unavailable. Inference/eval
+    # path -- training flows through V4CSAAttentionFn below.
+    if _flydsl.should_dispatch("v4_csa_attention_fwd", enabled=use_flydsl):
+        return _flydsl.v4_csa_attention_fwd_flydsl(
+            q,
+            k_local,
+            v_local,
+            gathered,
+            sparse_mask=sparse_mask,
+            sink=sink,
+            swa_window=swa_window,
+            scale=scale,
+            attn_dropout=attn_dropout,
+            training=training,
         )
     return V4CSAAttentionFn.apply(
         q,

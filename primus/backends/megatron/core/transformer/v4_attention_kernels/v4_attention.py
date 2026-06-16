@@ -42,7 +42,7 @@ from typing import Optional
 
 import torch
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
+from primus.backends.megatron.core.transformer.v4_attention_kernels import _flydsl, _tilelang
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_bwd import (
     _launch_v4_attention_bwd,
 )
@@ -188,6 +188,7 @@ def v4_attention(
     scale: float,
     hca_local_seqlen: int = 0,
     use_tilelang: bool = False,
+    use_flydsl: bool = False,
 ) -> torch.Tensor:
     """Triton- or tilelang-backed V4 dense / HCA attention.
 
@@ -255,6 +256,22 @@ def v4_attention(
             swa_window=swa_window,
             attn_dropout=attn_dropout,
             training=training,
+            scale=scale,
+            hca_local_seqlen=hca_local_seqlen,
+        )
+    # FlyDSL backend hook (forward-only; soft-dep, default off). Mirrors the
+    # _tilelang hook: short-circuits on enabled=False so FlyDSL is never
+    # imported on the common path, and falls back to Triton if the runtime
+    # or the kernel is unavailable. Training (autograd) still flows through
+    # V4AttentionFn below; this path is for inference/eval.
+    if _flydsl.should_dispatch("v4_attention_fwd", enabled=use_flydsl):
+        return _flydsl.v4_attention_fwd_flydsl(
+            q,
+            k,
+            v,
+            sink=sink,
+            swa_window=swa_window,
+            additive_mask=additive_mask,
             scale=scale,
             hca_local_seqlen=hca_local_seqlen,
         )
