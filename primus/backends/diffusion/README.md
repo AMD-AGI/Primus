@@ -126,38 +126,30 @@ for debugging.
 ## Launch
 
 Training runs through the Primus CLI (`primus.cli.main train <pretrain|posttrain>`)
-under `torchrun`.
-
-### Single node (e.g. 8 GPUs)
-
-```bash
-torchrun --standalone --nproc_per_node=8 \
-  -m primus.cli.main train pretrain --config /path/to/wan_config.yaml
-```
-
-Post-train examples use `modules.post_trainer` and the posttrain suite:
+under `torchrun`. Single-node and multi-node share **one** launch command: the
+same `torchrun` invocation runs on every node, parameterized by the standard
+rendezvous variables. The defaults below give a single-node 8-GPU run.
 
 ```bash
-torchrun --standalone --nproc_per_node=8 \
-  -m primus.cli.main train posttrain --config /path/to/wan_posttrain_config.yaml
-```
+# distributed knobs (defaults = single node, 8 GPUs)
+export NNODES=${NNODES:-1}
+export NODE_RANK=${NODE_RANK:-0}
+export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+export MASTER_PORT=${MASTER_PORT:-29500}
+export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-### Multi-node
-
-Run the same command on every node, sharing one rendezvous endpoint
-(`MASTER_ADDR`/`MASTER_PORT`) and giving each node a distinct `--node_rank`:
-
-```bash
-# on every node (NNODES total); MASTER_ADDR must be a routable IP of node rank 0
 torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-  --master_addr="$MASTER_ADDR" --master_port=29577 \
-  --nproc_per_node=8 \
+  --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
+  --nproc_per_node="$GPUS_PER_NODE" \
   -m primus.cli.main train pretrain --config /path/to/wan_config.yaml
 ```
 
-The config and CLI are identical to single node; only the `torchrun` rendezvous
-flags change. Total world size is `NNODES * nproc_per_node`.
+- **Single node**: run as-is (the defaults above).
+- **Multi-node**: run the same command on each node with a shared
+  `MASTER_ADDR`/`MASTER_PORT` (a routable IP of node rank 0) and a distinct
+  `NODE_RANK` per node. World size is `NNODES * GPUS_PER_NODE`.
+- **Post-train**: identical command with `train posttrain` and a posttrain config.
 
 Useful runtime knobs:
 
