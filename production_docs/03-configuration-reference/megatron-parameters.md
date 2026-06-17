@@ -301,7 +301,7 @@ models:
 | `load_main_params_from_ckpt` | `false` | Load only main parameters. |
 | `no_load_optim` | `null` | Skip loading optimizer state. |
 | `no_load_rng` | `null` | Skip loading RNG state. |
-| `finetune` | `false` | Finetune mode (do not require full optimizer match). |
+| `finetune` | `false` (`true` in `pre_trainer.yaml`) | Finetune mode (do not require full optimizer match). |
 | `use_checkpoint_args` | `false` | When `true`, restore training args from checkpoint metadata. |
 | `use_mp_args_from_checkpoint_args` | `false` | Restore model-parallel args from checkpoint. |
 | `use_tokenizer_model_from_checkpoint_args` | `true` | Restore tokenizer path from checkpoint args. |
@@ -342,7 +342,7 @@ models:
 |-----------|---------|-------------|
 | `data_path` | `null` | Single blended dataset path / list. |
 | `data_sharding` | `true` | Shard data across ranks. |
-| `split` | `"99,1,0"` | Train/valid/test split ratios as comma string. |
+| `split` | `"99,1,0"` (`null` in `pre_trainer.yaml`) | Train/valid/test split ratios as comma string. |
 | `train_data_path` | `null` | Training data blend. |
 | `valid_data_path` | `null` | Validation data blend. |
 | `test_data_path` | `null` | Test data blend. |
@@ -404,8 +404,8 @@ models:
 | `timing_log_option` | `minmax` | Aggregate style for timing (`minmax`, `all`, …). |
 | `tensorboard_log_interval` | `1` | Steps between TensorBoard scalars. |
 | `tensorboard_queue_size` | `1000` | TensorBoard event queue size. |
-| `log_timers_to_tensorboard` | `false` | Write timer stats to TensorBoard. |
-| `log_batch_size_to_tensorboard` | `false` | Log batch size. |
+| `log_timers_to_tensorboard` | `false` (`true` in `pre_trainer.yaml`) | Write timer stats to TensorBoard. |
+| `log_batch_size_to_tensorboard` | `false` (`true` in `pre_trainer.yaml`) | Log batch size. |
 | `log_learning_rate_to_tensorboard` | `true` | Log LR. |
 | `log_validation_ppl_to_tensorboard` | `false` | Log validation perplexity. |
 | `log_memory_to_tensorboard` | `false` | Log memory usage. |
@@ -622,6 +622,9 @@ models:
 |-----------|---------|-------------|
 | `enable_primus_turbo` | `false` | Master switch for Primus-Turbo integrations. Many sub-features require this plus specific kernels. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
+| `use_sink_attention` | `false` | GPT-OSS-style learned sink attention. |
+| `sink_sliding_window` | `0` | Sliding-window size for sink attention (GPT-OSS uses `128`). |
+| `sink_window_even_layers_only` | `true` | Apply the sliding window only to even layers (GPT-OSS pattern). |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
 | `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
 | `use_turbo_grouped_mlp` | `false` | Deprecated alias; prefer `use_turbo_grouped_gemm`. |
@@ -667,10 +670,19 @@ models:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `patch_primus_pipeline` | `false` | Enable Primus pipeline scheduling patches. |
-| `pp_algorithm` | `"1f1b-interleaved"` | Schedule name (`1f1b`, `1f1b-interleaved`, `zero-bubble`, `zbv-formatted`, `v-half`, `v-min`). |
+| `pp_algorithm` | `"1f1b-interleaved"` | Schedule name (`1f1b`, `1f1b-interleaved`, `zero-bubble`, `zero-bubble-heuristic`, `zbv-formatted`, `v-half`, `v-min`). |
 | `communication_method` | `"async_p2p"` | `async_p2p` or `batch_p2p` PP transfers. |
 | `offload` | `false` | Generic PP activation offload toggle in Primus pipeline. |
 | `offload_ops` | `""` | Comma-separated offload targets (`attn` today; other ops listed in-file are not supported yet). |
+| `pp_max_mem` | `null` | `zero-bubble-heuristic` only: max activation memory per stage (`null` = unlimited). |
+| `pp_cost_f` | `null` | `zero-bubble-heuristic` only: forward cost per stage (scalar or list; `null` = default 1000). |
+| `pp_cost_b` | `null` | `zero-bubble-heuristic` only: backward cost per stage (scalar or list; `null` = default 1000). |
+| `pp_cost_w` | `null` | `zero-bubble-heuristic` only: weight-grad cost per stage (scalar or list; `null` = default 1000). |
+
+`pp_warmup` and `dump_pp_data` are *Primus* helpers defined in `primus_megatron_module.yaml` (not `primus_pipeline.yaml`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
 | `pp_warmup` | `false` | *Primus:* warm-up PP stages to reduce first-iteration latency. |
 | `dump_pp_data` | `false` | *Primus:* dump PP tensors for debugging. |
 

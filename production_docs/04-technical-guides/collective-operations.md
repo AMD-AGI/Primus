@@ -269,13 +269,13 @@ Use results to spot **unexpected drops** (wrong NIC, congestion, fallback to TCP
 Primus **preflight** can aggregate host/GPU/network info:
 
 ```bash
-./primus-cli preflight --network
+./primus-cli direct -- preflight --network
 ```
 
 Combine with GPU checks as needed:
 
 ```bash
-./primus-cli preflight --gpu --network
+./primus-cli direct -- preflight --gpu --network
 ```
 
 Use this to confirm **RCCL/NCCL-related environment** snapshots and **connectivity expectations** before long jobs.

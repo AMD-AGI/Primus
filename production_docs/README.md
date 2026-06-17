@@ -59,9 +59,14 @@ Deep technical topics for advanced users.
 - [Parallelism Configuration](./04-technical-guides/parallelism-configuration.md) -- per-backend parallelism setup and batch size relationships
 - [Collective Operations](./04-technical-guides/collective-operations.md) -- NCCL/RCCL operations and their role in each parallelism strategy
 - [Performance Tuning](./04-technical-guides/performance-tuning.md) -- HipBLASLt, Primus-Turbo, FP8, MoE optimization
+- [MoE Training Deep-Dive](./04-technical-guides/moe-training.md) -- bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
 - [Data Preparation](./04-technical-guides/data-preparation.md) -- tokenization, data formats, mock data
 - [Checkpoint Management](./04-technical-guides/checkpoint-management.md) -- formats, save/load, distributed checkpointing
 - [Multi-Node Networking](./04-technical-guides/multi-node-networking.md) -- InfiniBand, RoCE, AINIC configuration
+- [Profiling & Observability](./04-technical-guides/profiling-and-observability.md) -- Torch profiler, TraceLens, memory snapshots, projection, pp_vis
+- [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) -- TensorBoard, WandB, MLflow setup per backend
+- [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) -- graceful exit, auto-resume, in-process restart, torchft
+- [Determinism & Reproducibility](./04-technical-guides/determinism-and-reproducibility.md) -- deterministic mode, seeds, trade-offs
 
 ### [05 - Operations](./05-operations/)
 
@@ -106,6 +111,11 @@ For contributors and maintainers.
 | Understand parallelism strategies | [Parallelism Strategies](./04-technical-guides/parallelism-strategies.md) |
 | Configure parallelism for my model | [Parallelism Configuration](./04-technical-guides/parallelism-configuration.md) |
 | Tune training performance | [Performance Tuning](./04-technical-guides/performance-tuning.md) |
+| Train a Mixture-of-Experts model | [MoE Training Deep-Dive](./04-technical-guides/moe-training.md) |
+| Profile a training run | [Profiling & Observability](./04-technical-guides/profiling-and-observability.md) |
+| Track experiments (WandB/MLflow/TensorBoard) | [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) |
+| Survive node failures on long runs | [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) |
+| Reproduce results bit-for-bit | [Determinism & Reproducibility](./04-technical-guides/determinism-and-reproducibility.md) |
 | Prepare training data | [Data Preparation](./04-technical-guides/data-preparation.md) |
 | Deploy to a Slurm cluster | [Deployment](./05-operations/deployment.md) |
 | Debug a training failure | [Troubleshooting](./05-operations/troubleshooting.md) |
