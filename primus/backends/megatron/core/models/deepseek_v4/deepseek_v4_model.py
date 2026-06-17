@@ -85,7 +85,43 @@ class DeepseekV4Model(LanguageModule):
         else:
             self.position_embedding_type = position_embedding_type
 
-        if self.pre_process:
+        # Compute ``mtp_process`` (and build the MTP block spec) *before* the
+        # embedding so we can mirror upstream GPTModel: when MTP layers live on
+        # a non-pre_process PP stage, that stage still needs a (tied) copy of
+        # the input embedding. Without this, ``setup_embeddings_and_output_layer``
+        # -> ``shared_embedding_or_output_weight`` asserts because ``self.embedding``
+        # was never created on the MTP stage.
+        #
+        # Plan-2 P16/P17: V4 wires multi-token prediction exclusively via
+        # the spec-based upstream :class:`MultiTokenPredictionBlock`,
+        # built from :func:`get_v4_mtp_block_spec`. The legacy
+        # primus-owned ``DeepseekV4MTPBlock`` (gated by
+        # ``v4_use_custom_mtp_block`` in plan-2 P16) was retired in plan-2
+        # P17; only the spec-based path remains.
+        mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
+        self.mtp_process = False
+        self.mtp_block_spec = None
+        if mtp_num_layers > 0:
+            self.mtp_block_spec = get_v4_mtp_block_spec(
+                self.config,
+                transformer_layer_spec=transformer_layer_spec,
+                vp_stage=vp_stage,
+            )
+            # ``mtp_on_this_rank`` reads ``parallel_state`` and
+            # :class:`MultiTokenPredictionBlock` walks ``pg_collection.cp``;
+            # both require a real distributed init. On CPU smokes (no
+            # ``torch.distributed``) we leave ``self.mtp`` as ``None`` and
+            # surface the spec via ``self.mtp_block_spec`` so callers can
+            # still inspect the MTP wiring (the spec helper itself is fully
+            # CPU-testable).
+            try:
+                self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
+            except (AssertionError, RuntimeError, AttributeError):
+                self.mtp_process = False
+
+        # The embedding is needed on pre_process stages and, when MTP is
+        # enabled, also on MTP-process stages (which keep a tied copy).
+        if self.pre_process or self.mtp_process:
             self.embedding = LanguageModelEmbedding(
                 config=self.config,
                 vocab_size=self.vocab_size,
@@ -118,44 +154,18 @@ class DeepseekV4Model(LanguageModule):
         # waiting for that ``send_forward`` in ``recv_forward``.
 
         # ----- MTP block ---------------------------------------------------
-        # Plan-2 P16/P17: V4 wires multi-token prediction exclusively via
-        # the spec-based upstream :class:`MultiTokenPredictionBlock`,
-        # built from :func:`get_v4_mtp_block_spec`. The legacy
-        # primus-owned ``DeepseekV4MTPBlock`` (gated by
-        # ``v4_use_custom_mtp_block`` in plan-2 P16) was retired in plan-2
-        # P17; only the spec-based path remains.
-        mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
-        self.mtp_process = False
         # NOTE: do NOT pre-assign ``self.mtp = None``. Megatron's
         # ``set_current_microbatch`` (third_party/Megatron-LM/megatron/core/
         # transformer/cuda_graphs.py) probes ``hasattr(model, 'mtp')`` and
         # unconditionally iterates ``model.mtp.layers``. We only create the
         # attribute when MTP is actually live (matching upstream GPTModel).
-
-        if mtp_num_layers > 0:
-            self.mtp_block_spec = get_v4_mtp_block_spec(
-                self.config,
-                transformer_layer_spec=transformer_layer_spec,
+        if self.mtp_process:
+            self.mtp = MultiTokenPredictionBlock(
+                config=self.config,
+                spec=self.mtp_block_spec,
                 vp_stage=vp_stage,
+                pg_collection=self.pg_collection,
             )
-            # ``mtp_on_this_rank`` reads ``parallel_state`` and
-            # :class:`MultiTokenPredictionBlock` walks ``pg_collection.cp``;
-            # both require a real distributed init. On CPU smokes (no
-            # ``torch.distributed``) we leave ``self.mtp`` as ``None`` and
-            # surface the spec via ``self.mtp_block_spec`` so callers can
-            # still inspect the MTP wiring (the spec helper itself is fully
-            # CPU-testable).
-            try:
-                self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
-            except (AssertionError, RuntimeError, AttributeError):
-                self.mtp_process = False
-            if self.mtp_process:
-                self.mtp = MultiTokenPredictionBlock(
-                    config=self.config,
-                    spec=self.mtp_block_spec,
-                    vp_stage=vp_stage,
-                    pg_collection=self.pg_collection,
-                )
 
         if self.post_process:
             if getattr(self.config, "defer_embedding_wgrad_compute", False):
@@ -183,7 +193,7 @@ class DeepseekV4Model(LanguageModule):
                 tp_group=self.pg_collection.tp,
             )
 
-        if self.pre_process or self.post_process:
+        if self.pre_process or self.post_process or self.mtp_process:
             self.setup_embeddings_and_output_layer()
 
     def set_input_tensor(self, input_tensor: Tensor) -> None:
@@ -259,7 +269,12 @@ class DeepseekV4Model(LanguageModule):
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 packed_seq_params=packed_seq_params,
-                embedding=self.embedding if self.pre_process else None,
+                # MTP needs the (tied) word-embedding module to embed the
+                # shifted input_ids. On a dedicated MTP PP stage pre_process is
+                # False, but the stage still owns a tied embedding copy created
+                # in __init__ (gated on ``pre_process or mtp_process``), so pass
+                # whichever embedding module exists on this rank.
+                embedding=getattr(self, "embedding", None),
             )
 
         if not self.post_process:
