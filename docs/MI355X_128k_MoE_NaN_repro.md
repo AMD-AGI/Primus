@@ -34,6 +34,19 @@ reproduce), and any deterministic GEMM arithmetic error.
 > `PYTORCH_NO_CUDA_MEMORY_CACHING=1` produced a hard IMA, pinning it to an OOB
 > access. See [§7.4](#74-offline-single-op-replay-does-not-reproduce) and §8.
 
+> ✅ **Update (2026-06-17): the OOB has now been isolated to one specific
+> hipBLASLt solution and reproduced standalone.** Further drill-down on the **same
+> qwen3 reproduction** pinned the fault to hipBLASLt **solution index `332814`**,
+> which is *both* numerically wrong (`norm_error ≈ 0.07`, all other ~100 solutions
+> ≈ `3e-5`) *and* writes out of bounds past the output. It is selected by the
+> hipBLASLt heuristic only for a narrow `n` range, which is why it looks
+> data-dependent. Two standalone reproducers now exist (a `hipblaslt-bench`
+> one-liner → wrong result, and a VMM guard-page microbenchmark → the exact
+> `Memory access fault … Write access to a read-only page`). This **refines the
+> §7.4/§9 "offline does not reproduce" finding**: the offline replay missed it
+> only because it re-ran the heuristic (picking a *good* solution) into a roomy,
+> exactly-sized buffer. See **[§11](#11-update-isolated-to-a-specific-hipblaslt-solution-standalone-repro)**.
+
 ---
 
 ## 1. Original Symptom (as reported)
@@ -400,6 +413,161 @@ transB=N, m=2048, k=512, variable large n = 5k–13k). Repro recipe: run the
 training config under `PYTORCH_NO_CUDA_MEMORY_CACHING=1 AMD_SERIALIZE_KERNEL=3
 HIP_LAUNCH_BLOCKING=1 HIPBLASLT_LOG_LEVEL=2` and the last logged `rocblaslt_matmul`
 before `HIPBLASLT Error: 6` is the offending call.
+
+---
+
+## 11. Update — Isolated to a specific hipBLASLt solution (standalone repro)
+
+Further drill-down on the **same qwen3 reproduction** (this run: container
+`rocm/primus:v26.3`, ROCm 7.2.1, hipBLASLt `100300` git `c4b2dc9869`) pinned the
+fault all the way down to a **single buggy hipBLASLt solution**. This both confirms
+the OOB root cause of §8 and removes the §9/§10 caveat that "the isolated op does
+not reproduce" — it does, once the offending solution is forced.
+
+### 11.1 Crash and how the faulting rank was identified
+
+Symptom (qwen3 repro run, `PYTORCH_NO_CUDA_MEMORY_CACHING=1`):
+
+```
+Memory access fault by GPU node-3 (Agent handle: 0x172bc4c0) on address
+0x744388610000. Reason: Write access to a read-only page.
+```
+
+- `GPU node-X` is the **HSA/KFD topology node id**, not `LOCAL_RANK`. From
+  `rocminfo`, `Node 3 = Agent 4 = BDFID 1280 = PCI 05:00.0`.
+- With `HIPBLASLT_LOG_MASK=48` (api+bench) and `HIPBLASLT_LOG_FILE=/tmp/hipblaslt_%i.log`,
+  8 per-PID logs were produced. The faulting process is the **one whose virtual
+  address arena contains the fault address**: only PID `4680`'s matmul pointers
+  were `0x7443…`, and `0x744388610000` sits just past its last output buffer
+  `C=D=0x744387040800`. → crashing rank = **PID 4680**.
+
+### 11.2 Exact faulting GEMM (extracted from the bench/api log)
+
+```
+bf16, transA=OP_T, transB=OP_N, in-place C==D, alpha=1 beta=0, computeType=COMPUTE_32F
+A=[R_16BF rows=2048 cols=1024 ld=2048]   → m=1024, k=2048
+B=[R_16BF rows=2048 cols=5407 ld=2048]   → k=2048, n=5407 (dynamic per-expert tokens)
+C=D=[R_16BF rows=1024 cols=5407 ld=1024]  workSpaceSizeInBytes=268435456
+```
+
+(Note: this is the qwen3 MoE expert **`linear_fc1`** grouped GEMM — output width
+`m=1024` matches the first non-finite tensor of §6.2/§7.4 (`...experts.linear_fc1`,
+shape `(~520000, 1024)`), with `k=2048` = hidden and `n=5407` = dynamic per-expert
+tokens. The coarser `m=2048, k=512` descriptor quoted in §8.1 was an earlier
+approximate capture of the same per-expert GEMM family; the precise faulting
+problem is the one above. Same path, same bf16 T/N in-place grouped matmul into
+hipBLASLt, same OOB symptom.)
+
+### 11.3 hipBLASLt-bench: the heuristic picks a numerically WRONG solution
+
+Replaying the exact problem with `hipblaslt-bench` (`--algo_method heuristic
+--requested_solution 1 --workspace 268435456`) selects **solution index `332814`**
+(a split-K / StreamK "SK3" UserArgs kernel,
+`Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x192x128_…`). Validation (`-v`):
+
+| solution_index | norm_error | atol/rtol |
+|---|---|---|
+| **332814** (heuristic top-1) | **0.0726** | **failed** |
+| 335459 (any other) | 3.46e-05 | passes |
+
+`--algo_method all -v` over **all ~100 solutions**: every other solution is
+`≈ 2–5e-5` (correct); **only 332814 is ~2000× off**. So the default hipBLASLt
+heuristic hands back a broken kernel for this shape.
+
+```bash
+# wrong-result repro (no custom code needed):
+hipblaslt-bench --api_method c -m 1024 -n 5407 -k 2048 \
+  --lda 2048 --ldb 2048 --ldc 1024 --ldd 1024 --transA T --transB N \
+  --a_type bf16_r --b_type bf16_r --c_type bf16_r --d_type bf16_r \
+  --compute_type f32_r --alpha 1 --beta 0 \
+  --algo_method index --solution_index 332814 -v
+#  → norm_error≈0.0726, atol/rtol failed   (335459 → ~3.4e-5, passes)
+```
+
+### 11.4 Why it looks data-dependent (and why §7.4 offline missed it)
+
+The heuristic selects a *different* solution per `n`, and only `n≈5407` lands on
+the broken 332814:
+
+| n (per-expert tokens) | heuristic solution | norm_error | verdict |
+|---|---|---|---|
+| **5407** | **332814** | **0.0726** | ✗ broken |
+| 6170 | 332681 | 3.4e-05 | ✓ |
+| 6545 | 332815 | 2.9e-05 | ✓ |
+| 7484 | 332652 | 3.5e-05 | ✓ |
+| 9747 | 332650 | 3.4e-05 | ✓ |
+| 4096 | 333644 | 3.6e-05 | ✓ |
+
+Reducing the workspace (0 / 32 / 128 / 256 MB) does **not** help — `n=5407` still
+selects 332814. This explains the "intermittent / only certain routing" behaviour
+(§1) and why the §7.4 offline `te.GroupedLinear` replay was finite: re-running the
+heuristic on a slightly different captured layout (or buffer) selects a *good*
+solution, and the roomy fresh allocation hides any overshoot.
+
+### 11.5 Standalone reproduction of the *fault* (not just wrong numbers)
+
+`hipblaslt-bench` allocates roomy separate buffers, so 332814's OOB write is
+absorbed → only `norm_error`. To reproduce the **hard fault** in isolation, a
+microbenchmark (`repro_332814.cpp`) forces solution 332814 via
+`hipblaslt_ext::getAlgosFromIndex({332814})` and backs the output `D` with the HIP
+**virtual-memory API**: `D` mapped read-write, immediately followed by a
+**reserved-but-unmapped guard** region.
+
+```
+D base        = 0x75454c600000
+D logical end = 0x75454d08f800   (sizeD = 10.56 MB)
+RW mapped end = 0x75454d090000
+Launching matmul with solution 332814 ...
+Memory access fault by GPU node-2 on address 0x75454d0a0000.
+   Reason: Write access to a read-only page.        ← fault ~64 KB past D end
+```
+
+Decisive A/B with the **same harness/guard**, only the solution changes:
+
+| solution | result | exit |
+|---|---|---|
+| **332814** | `Memory access fault … Write access to a read-only page` | 134 |
+| 335459 | `Synchronized OK (no fault)` | 0 |
+
+This is the missing standalone fault repro and is unambiguous: solution 332814
+writes past the output `D`. (ROCm reports a reserved-unmapped VMM page as
+"read-only", matching the original training message verbatim.) The smaller
+overshoot here (~64 KB, guard placed right after `D`) vs ~21.8 MB in training
+(`fault_addr − C/D base`) is just guard placement — the larger training overshoot
+was absorbed by ~21 MB of neighbouring writable buffers before hitting a read-only
+page.
+
+Build/run inside the container:
+
+```bash
+hipcc -std=c++17 repro_332814.cpp -o repro_332814 \
+  -I/opt/rocm/include -L/opt/rocm/lib -lhipblaslt -lamdhip64
+./repro_332814 332814   # → Memory access fault (write to read-only page)
+./repro_332814 335459   # → Synchronized OK
+```
+
+Source: `repro_332814.cpp` (repo root).
+
+### 11.6 Conclusion & mitigation (refines §8 / §10)
+
+- **Root cause (pinned):** hipBLASLt `100300` (ROCm 7.2.1, gfx950) **solution
+  `332814`** is broken for `bf16, transA=T transB=N, m=1024, k=2048` — it computes
+  wrong values **and** writes out of bounds. The heuristic selects it for a narrow
+  `n` band (observed `n≈5407`), so it surfaces only under imbalanced routing that
+  happens to produce such a per-expert token count. In training the OOB write hits
+  a read-only page → `Memory access fault`; with the caching allocator on it reads
+  stale `~3e38` bytes → sparse NaN (exactly §8's two-symptoms-one-bug picture).
+- **Standalone repro now exists** (both numeric §11.3 and fault §11.5), so a
+  hipBLASLt bug report no longer needs the full training pipeline — attach the
+  `hipblaslt-bench --solution_index 332814 -v` line and `repro_332814.cpp`.
+- **Mitigation:** force hipBLASLt to avoid 332814 via
+  `HIPBLASLT_TUNING_OVERRIDE_FILE` (pin the offending `(T/N, m, k, bf16)` problem
+  to a known-good solution, e.g. 335459); plus the layout-level workarounds in §10
+  (`moe_expert_capacity_factor` / load balancing) to avoid the triggering `n`.
+- **Follow-up:** apply the same `hipblaslt-bench --algo_method all -v` sweep across
+  the other qwen3 per-expert GEMM shapes (the `linear_fc2` down-projection, and the
+  `linear_fc1` over its full `n` range) to enumerate which `(shape, n)` combinations
+  the heuristic maps onto a broken solution.
 
 ---
 
