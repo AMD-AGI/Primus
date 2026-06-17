@@ -268,9 +268,10 @@ Controlled with `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md`):
 Example (from in-repo docs):
 
 ```bash
+export PRIMUS_HIPBLASLT_TUNING=1        # master switch (required; tuning is skipped without it)
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 ---
