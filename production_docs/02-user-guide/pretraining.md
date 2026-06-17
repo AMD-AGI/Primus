@@ -2,6 +2,10 @@
 
 Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge), point `train pretrain` at an **experiment YAML**, and launch with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI Reference](cli-reference.md) and [Configuration System](configuration-system.md).
 
+> **Pretraining has two docs — pick the one that matches your question:**
+> - **Use this doc** to understand the *why*: how backends work, YAML structure and inheritance, parallelism vocabulary, and the full per-backend config inventory.
+> - **Use [Backend Training Recipes](training-recipes.md)** when you already know *what* you want to run and just need the exact, GPU-arch-specific command.
+
 **Related documentation**
 
 | Topic | Location |
@@ -68,6 +72,8 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `grok1-FP8-pretrain.yaml` | `1` | `4` | `8` |
 | `grok2-BF16-pretrain.yaml` | `1` | `4` | `8` |
 | `grok2-FP8-pretrain.yaml` | `1` | `4` | `8` |
+| `llama2_13B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `llama2_13B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `llama2_70B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `llama2_70B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `llama2_7B-BF16-pretrain.yaml` | `1` | `1` | `1` |
@@ -97,14 +103,30 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `mixtral_8x22B_v0.1-FP8-pretrain.yaml` | `1` | `4` | `8` |
 | `mixtral_8x7B_v0.1-BF16-pretrain.yaml` | `1` | `1` | `8` |
 | `mixtral_8x7B_v0.1-FP8-pretrain.yaml` | `1` | `1` | `8` |
+| `qwen2.5_14B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen2.5_14B-FP8-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen2.5_32B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen2.5_32B-FP8-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen2.5_3B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen2.5_3B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen2.5_72B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen2.5_72B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen2.5_7B-BF16-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen2.5_7B-FP8-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_14B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_14B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `qwen3_235B_A22B-BF16-pretrain.yaml` | `1` | `1` | `8` |
 | `qwen3_235B_A22B-FP8-pretrain.yaml` | `1` | `1` | `8` |
 | `qwen3_30B_A3B-BF16-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
 | `qwen3_30B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
+| `qwen3_32B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_32B-FP8-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_4B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_4B-FP8-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_5_35B_A3B-BF16-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
+| `qwen3_5_35B_A3B-FP8-pretrain.yaml` | `${PRIMUS_TP:1}` | `${PRIMUS_PP:1}` | `${PRIMUS_EP:8}` |
+| `qwen3_8B-BF16-pretrain.yaml` | `1` | `1` | `1` |
+| `qwen3_8B-FP8-pretrain.yaml` | `1` | `1` | `1` |
 | `zebra_llama_1B-pretrain.yaml` | `1` | `1` | `1` |
 | `zebra_llama_3B-pretrain.yaml` | `1` | `1` | `1` |
 | `zebra_llama_8B-pretrain.yaml` | `1` | `1` | `1` |
@@ -153,6 +175,8 @@ Some experiments omit an explicit `parallelism:` block; in that case defaults co
 | --- |
 | `deepseek_v3_16b-BF16-pretrain.yaml` |
 | `deepseek_v3_16b-FP8-pretrain.yaml` |
+| `deepseek_v3_236b-BF16-pretrain.yaml` |
+| `deepseek_v3_236b-FP8-pretrain.yaml` |
 | `deepseek_v3_671b-pretrain.yaml` |
 | `llama3.1_405B-BF16-pretrain.yaml` |
 | `llama3.1_405B-FP8-pretrain.yaml` |
@@ -160,9 +184,16 @@ Some experiments omit an explicit `parallelism:` block; in that case defaults co
 | `llama3.1_70B-FP8-pretrain.yaml` |
 | `llama3.1_8B-BF16-pretrain.yaml` |
 | `llama3.1_8B-FP8-pretrain.yaml` |
+| `llama4_17Bx128E-BF16-pretrain.yaml` |
+| `llama4_17Bx128E-FP8-pretrain.yaml` |
+| `llama4_17Bx16E-BF16-pretrain.yaml` |
+| `llama4_17Bx16E-FP8-pretrain.yaml` |
 | `qwen3_0.6B-pretrain.yaml` |
 | `qwen3_1.7B-pretrain.yaml` |
+| `qwen3_14B-pretrain.yaml` |
 | `qwen3_32B-pretrain.yaml` |
+| `qwen3_4B-pretrain.yaml` |
+| `qwen3_8B-pretrain.yaml` |
 
 ---
 

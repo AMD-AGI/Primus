@@ -98,23 +98,23 @@ For each YAML file:
 
 ## CLI overrides (training)
 
-After the main arguments are parsed, unknown tokens are interpreted as **key=value overrides** and deep-merged into the `pre_trainer` module namespace (`parse_args` in `primus/core/launcher/parser.py`, using `parse_cli_overrides`). Overrides must match existing keys in the merged namespace (see `_check_keys_exist`).
+After the main arguments are parsed, unknown tokens are interpreted as **key=value overrides** and deep-merged into the active training module namespace (`module_cfg.params`). The core runtime applies them in `PrimusRuntime._apply_overrides` (`primus/core/runtime/train_runtime.py`) using `parse_cli_overrides` (`primus/core/utils/arg_utils.py`) followed by `deep_merge`. Both `key=value` and `--key value` forms are accepted. Unknown keys are merged in (not rejected) and forwarded to the backend; the stricter key-existence check in `parse_args` / `_check_keys_exist` (`primus/core/launcher/parser.py`) belongs to a legacy path that the `train` subcommand does not exercise.
 
 Example (conceptual):
 
 ```bash
 ./runner/primus-cli direct -- train pretrain --config exp.yaml \
-  train_iters=100 micro_batch_size=2
+  --train_iters 100 --micro_batch_size 2
 ```
 
 ---
 
 ## Merge priority (training config)
 
-When `PrimusParser.parse_trainer_module` runs, the effective ordering is:
+The effective ordering of training parameters is:
 
-1. **CLI overrides** (key=value after the main `train` arguments) — highest.  
-2. **`modules.pre_trainer.overrides`** in the experiment YAML.  
+1. **CLI overrides** (key=value after the main `train` arguments) — highest. Applied last by the runtime (`PrimusRuntime._apply_overrides`), after preset and experiment merging.  
+2. **`modules.pre_trainer.overrides`** in the experiment YAML (applied in `PrimusParser.parse_trainer_module`).  
 3. **Module preset with model preset additions**: the module preset is loaded first, then the model preset is merged in with `allow_override=False`, so duplicate top-level module keys are preserved while non-duplicate model keys are added (`merge_namespace` in `parse_trainer_module`).
 4. **Preset chains** via `extends:` inside those files — base layers first, specialized layers later, file body last.
 

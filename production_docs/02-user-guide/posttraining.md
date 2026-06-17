@@ -29,7 +29,7 @@ General form:
 
 From a clone of the Primus repository, the same entrypoint is often invoked as `./runner/primus-cli`.
 
-### Direct mode (bare metal / local ROCm)
+### Direct mode (bare metal / inside a docker container)
 
 ```bash
 # SFT — example: Qwen3 32B on MI355X
@@ -44,7 +44,7 @@ From a clone of the Primus repository, the same entrypoint is often invoked as `
 ### Container mode
 
 ```bash
-./runner/primus-cli container --image rocm/primus:v26.2 -- \
+./runner/primus-cli container --image rocm/primus:v26.3 -- \
   train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 ```
