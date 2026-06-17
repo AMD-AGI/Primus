@@ -370,9 +370,9 @@ Once these are in place, your backend is fully integrated into the Primus runtim
 For more advanced scenarios (for example installing extra Python packages or configuring backend-specific environment variables at runtime), you can use **train hooks** under `runner/helpers/hooks`.
 
 - **Hook locations for training**:
-  - Global hooks (run for all commands): `runner/helpers/hooks/*.sh` and `runner/helpers/hooks/*.py`
-  - Train-specific hooks (per framework): `runner/helpers/hooks/train/pretrain/<framework>/` and `runner/helpers/hooks/train/posttrain/<framework>/`, where `<framework>` is `megatron`, `torchtitan`, `dummy`, and so on
-- Files in each directory are discovered with `find ... -name "*.sh" -o -name "*.py"` and executed in **lexicographical order** of their filenames.
+  - Global hooks (run for all commands): `runner/helpers/hooks/*.sh` and `runner/helpers/hooks/*.py`. These are discovered with `find ... -maxdepth 1 \( -name "*.sh" -o -name "*.py" \)` and executed in **lexicographical order** of their filenames (see `runner/helpers/execute_hooks.sh`).
+  - Command-specific hooks: `runner/helpers/hooks/train/pretrain/*.sh|*.py` (and `.../posttrain/...`), discovered and ordered the same way. For pretrain, this directory contains the dispatcher `prepare_experiment.sh`.
+  - Per-framework hooks: `runner/helpers/hooks/train/pretrain/<framework>/` and `runner/helpers/hooks/train/posttrain/<framework>/`, where `<framework>` is `megatron`, `torchtitan`, `dummy`, and so on. These are **not** run directly by `execute_hooks`; instead `prepare_experiment.sh` detects the framework from the experiment config, runs that framework folder's `*.sh` files in lexicographical order, and then invokes the framework's `prepare.py` dispatcher.
 
 When you run:
 
@@ -383,10 +383,11 @@ When you run:
 Primus will:
 
 - Call `execute_hooks train pretrain ...`, which:
-  - Runs global hooks under `runner/helpers/hooks/`
-  - Then runs command-specific hooks under `runner/helpers/hooks/train/pretrain/<framework>/`
+  - Runs global hooks under `runner/helpers/hooks/` (lexicographical order)
+  - Then runs command-specific hooks under `runner/helpers/hooks/train/pretrain/`, including `prepare_experiment.sh`
+  - `prepare_experiment.sh` resolves the framework from the config and runs the per-framework hooks under `runner/helpers/hooks/train/pretrain/<framework>/` (its `*.sh` files in lexicographical order, then `prepare.py`)
 
-Each hook script can **emit control lines on stdout** that Primus parses:
+Each hook script can **emit control lines on stdout** that Primus parses (the framework hooks' stdout is captured through `prepare_experiment.sh`):
 
 - **`env.*=value` → environment variables**
 

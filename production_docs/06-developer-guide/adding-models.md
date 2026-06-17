@@ -220,7 +220,7 @@ Qwen3 8B already exists in this repository as a TorchTitan preset and example. U
 ```yaml
 job:
   dump_folder: "./outputs"
-  description: "Qwen3 8B training (TorchTitan)"
+  description: "Qwen 3 8B training"
 
 model:
   name: "qwen3"
