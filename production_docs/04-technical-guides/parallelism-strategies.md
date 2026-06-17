@@ -219,7 +219,7 @@ Lower is better; large **microbatch counts** and better schedules reduce bubble 
 | `pipeline_model_parallel_size` | Number of pipeline stages |
 | `patch_zero_bubble` | Enable Primus/Megatron **zero-bubble** pipeline patches |
 | `patch_primus_pipeline` | Use Primus pipeline implementation for schedule logic |
-| `pp_algorithm` | e.g. `1f1b`, `1f1b-interleaved`, `zero-bubble`, `zbv-formatted`, `v-half`, `v-min` |
+| `pp_algorithm` | e.g. `1f1b`, `1f1b-interleaved`, `zero-bubble`, `zero-bubble-heuristic`, `zbv-formatted`, `v-half`, `v-min` |
 
 See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml` in the repo for defaults.
 

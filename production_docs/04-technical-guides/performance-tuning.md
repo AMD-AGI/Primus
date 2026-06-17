@@ -8,6 +8,8 @@ This guide covers AMD-focused performance work in Primus: HipBLASLt autotuning f
 
 Transformer Engine and GEMM-heavy training benefit from HipBLASLt kernel selection. Primus integrates a **three-stage** workflow controlled by `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md` and `examples/run_pretrain.sh`).
 
+> **Activate tuning first.** The stage variable is only honored when the master switch `PRIMUS_HIPBLASLT_TUNING=1` is set (and `PRIMUS_DETERMINISTIC` is not `1`). Without `PRIMUS_HIPBLASLT_TUNING=1`, both `run_pretrain.sh` and the CLI hook `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` skip tuning entirely and force `TE_HIPBLASLT_TUNING_RUN_COUNT=0` / `TE_HIPBLASLT_TUNING_ALGO_COUNT=0`. Export `PRIMUS_HIPBLASLT_TUNING=1` alongside the stage in every command below.
+
 ### Stage 0 (default)
 
 No tuning:
@@ -21,9 +23,10 @@ export PRIMUS_HIPBLASLT_TUNING_STAGE=0  # default
 Run a **short** training job so shapes are collected during real forward/backward passes. Reduce `train_iters` (or equivalent) for faster shape collection.
 
 ```bash
+export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 Output layout (from `examples/README.md`):
@@ -35,9 +38,10 @@ Output layout (from `examples/README.md`):
 Runs offline tuning from dumped shapes (often 10–30 minutes depending on model and shapes):
 
 ```bash
+export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
-export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 Expected output:
@@ -49,10 +53,11 @@ Expected output:
 Point the runtime at the tuned override file:
 
 ```bash
+export PRIMUS_HIPBLASLT_TUNING=1
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
 export HIPBLASLT_TUNING_OVERRIDE_FILE=/path/to/tune_hipblas_gemm_results.txt
-export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-NNODES=1 bash ./examples/run_slurm_pretrain.sh
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 ### Related environment variables
@@ -95,7 +100,7 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see `docs/backends/megatron/patch-notes.md`). |
 | `use_turbo_deepep` | DeepEP token dispatcher; set with `enable_primus_turbo: true`. |
 | `turbo_deepep_num_cu` | Compute units for DeepEP (patch notes suggest practices such as 64 or 80 for EP8, 32 for EP16–64). |
-| `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`4`; stage `2` recommended for performance per patch notes). |
+| `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`3`; `0` disables, stage `2` recommended for performance per patch notes). See [MoE training deep-dive](./moe-training.md). |
 | `use_turbo_fused_act_with_probs` | Fused activation with probabilities to reduce redundant work. |
 
 ### Feature flags (TorchTitan)

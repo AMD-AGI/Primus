@@ -127,8 +127,7 @@ From `sft_trainer.yaml` (defaults shown).
 | `enable_primus_turbo` | `true` | Master flag for Primus-Turbo optimized kernels and paths. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
-| `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
-| `use_turbo_grouped_mlp` | `false` | Deprecated alias; prefer `use_turbo_grouped_gemm`. |
+| `use_turbo_grouped_mlp` | `false` | Turbo grouped GEMM/MLP flag for MoE paths (the preset ships this key; in the Megatron preset it is a deprecated alias of `use_turbo_grouped_gemm`). |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary loss handling. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention. |
 | `use_turbo_deepep` | `false` | DeepEP-style expert-parallel integration. |
