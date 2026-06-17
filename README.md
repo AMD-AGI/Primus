@@ -1,5 +1,9 @@
 # Primus
 
+[![Primus CLI CI](https://github.com/AMD-AGI/Primus/actions/workflows/ci.yml/badge.svg)](https://github.com/AMD-AGI/Primus/actions/workflows/ci.yml)
+[![Primus-CI-TAS](https://github.com/AMD-AGI/Primus/actions/workflows/ci.yaml/badge.svg)](https://github.com/AMD-AGI/Primus/actions/workflows/ci.yaml)
+[![CodeQL](https://github.com/AMD-AGI/Primus/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AMD-AGI/Primus/security/code-scanning)
+
 **Primus/Primus-LM** is a flexible and high-performance training framework designed for large-scale foundation model training and inference on AMD GPUs. It supports **pretraining**, **posttraining**, and **reinforcement learning** workflows with multiple backends including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [TorchTitan](https://github.com/pytorch/torchtitan), and [JAX MaxText](https://github.com/google/maxtext), alongside ROCm-optimized components.
 
 > **Part of the Primus Ecosystem**: Primus-LM is the training framework layer of the [Primus ecosystem](#-primus-ecosystem), working together with [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) (high-performance operators) and [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) (stability & platform).
