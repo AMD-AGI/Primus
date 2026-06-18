@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "model": "pro",
-  "generated_at": "2026-06-18T14:32:09Z",
+  "generated_at": "2026-06-18T14:54:58Z",
   "provenance": {
     "traces": {
       "0": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_pro_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_pro_cr0_seq4096_ep8]-rank[0].1781792532762897620.pt.trace.json",
@@ -159,7 +159,7 @@
           },
           {
             "module": "attn.norm",
-            "time_us": 633.4,
+            "time_us": 864.558,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -176,18 +176,43 @@
                 "launches": 1
               },
               {
+                "name": "_apply_rope_fwd_kernel",
+                "time_us": 201.761,
+                "launches": 1
+              },
+              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 91.76,
+                "launches": 1
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_fwd_general_kernel<transformer_e",
+                "time_us": 18.079,
                 "launches": 1
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
                 "time_us": 7.439,
                 "launches": 1
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 856.885,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 853.406,
+                "launches": 1
               },
               {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 4.039,
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 3.479,
                 "launches": 1
               }
             ]
@@ -236,7 +261,7 @@
           },
           {
             "module": "attn.core",
-            "time_us": 4333.711,
+            "time_us": 3476.826,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -253,11 +278,6 @@
                 "launches": 1
               },
               {
-                "name": "_v4_attention_fwd_kernel",
-                "time_us": 853.406,
-                "launches": 1
-              },
-              {
                 "name": "_v4_attention_bwd_preprocess_kernel",
                 "time_us": 239.081,
                 "launches": 1
@@ -266,17 +286,12 @@
                 "name": "_hc_compute_tail_bwd_kernel",
                 "time_us": 4.239,
                 "launches": 1
-              },
-              {
-                "name": "_hc_compute_tail_fwd_kernel",
-                "time_us": 3.479,
-                "launches": 1
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 1165.878,
+            "time_us": 934.72,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -298,18 +313,18 @@
                 "launches": 1
               },
               {
-                "name": "_apply_rope_fwd_kernel",
-                "time_us": 201.761,
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_",
+                "time_us": 4.239,
                 "launches": 1
               },
               {
-                "name": "void transformer_engine::normalization::rmsnorm_fwd_general_kernel<transformer_e",
-                "time_us": 18.079,
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
+                "time_us": 4.159,
                 "launches": 1
               },
               {
-                "name": "_apply_rope_fwd_kernel",
-                "time_us": 5.879,
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::sin_kernel_cuda(at",
+                "time_us": 4.119,
                 "launches": 1
               }
             ]
@@ -320,7 +335,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 86248.499,
+            "time_us": 88647.638,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -360,7 +375,7 @@
           },
           {
             "module": "other",
-            "time_us": 22052.909,
+            "time_us": 22096.148,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -400,7 +415,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 68.916,
+            "time_us": 93.115,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -414,6 +429,11 @@
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
                 "time_us": 26.799,
+                "launches": 1
+              },
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 24.199,
                 "launches": 1
               },
               {
@@ -477,7 +497,7 @@
           },
           {
             "module": "other",
-            "time_us": 10567.171,
+            "time_us": 10523.932,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": null,
@@ -517,25 +537,15 @@
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 7016.627,
+            "time_us": 4617.488,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 1592.373,
-                "launches": 1
-              },
-              {
                 "name": "_stack_grouped_weight_bwd_kernel",
                 "time_us": 1386.651,
-                "launches": 1
-              },
-              {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 806.766,
                 "launches": 1
               },
               {
@@ -551,6 +561,16 @@
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 135.2,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 135.08,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 134.761,
                 "launches": 1
               }
             ]
@@ -632,7 +652,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 123.948,
+            "time_us": 99.749,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -641,11 +661,6 @@
               {
                 "name": "_sinkhorn_bwd_kernel",
                 "time_us": 43.719,
-                "launches": 1
-              },
-              {
-                "name": "_sinkhorn_fwd_kernel",
-                "time_us": 24.199,
                 "launches": 1
               },
               {
@@ -666,6 +681,11 @@
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
                 "time_us": 5.159,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::sqrt_kernel_cuda(a",
+                "time_us": 4.679,
                 "launches": 1
               }
             ]
@@ -717,8 +737,33 @@
             ]
           },
           {
+            "module": "attn.core",
+            "time_us": 4220.992,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_csa_attention_pool_sparse_merge_fwd_kernel",
+                "time_us": 3410.387,
+                "launches": 1
+              },
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 806.646,
+                "launches": 1
+              },
+              {
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 3.959,
+                "launches": 1
+              }
+            ]
+          },
+          {
             "module": "attn.norm",
-            "time_us": 654.075,
+            "time_us": 891.392,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -735,23 +780,23 @@
                 "launches": 1
               },
               {
+                "name": "_apply_rope_fwd_kernel",
+                "time_us": 203.001,
+                "launches": 1
+              },
+              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 87.639,
                 "launches": 1
               },
               {
+                "name": "void transformer_engine::normalization::rmsnorm_fwd_general_kernel<transformer_e",
+                "time_us": 18.559,
+                "launches": 1
+              },
+              {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
                 "time_us": 15.359,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 7.479,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 7.239,
                 "launches": 1
               }
             ]
@@ -800,7 +845,7 @@
         "backward": [
           {
             "module": "attn.core",
-            "time_us": 35443.686,
+            "time_us": 31222.694,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -817,16 +862,6 @@
                 "launches": 1
               },
               {
-                "name": "_v4_csa_attention_pool_sparse_merge_fwd_kernel",
-                "time_us": 3410.387,
-                "launches": 1
-              },
-              {
-                "name": "_v4_attention_fwd_kernel",
-                "time_us": 806.646,
-                "launches": 1
-              },
-              {
                 "name": "_v4_csa_attention_pool_segreduce_kernel",
                 "time_us": 549.643,
                 "launches": 1
@@ -834,6 +869,11 @@
               {
                 "name": "_v4_attention_bwd_preprocess_kernel",
                 "time_us": 238.281,
+                "launches": 1
+              },
+              {
+                "name": "_hc_compute_tail_bwd_kernel",
+                "time_us": 3.879,
                 "launches": 1
               }
             ]
@@ -879,46 +919,6 @@
             ]
           },
           {
-            "module": "attn.norm",
-            "time_us": 1277.871,
-            "class": "memory_bound",
-            "flop_class": null,
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 349.762,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 335.282,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 241.961,
-                "launches": 1
-              },
-              {
-                "name": "_apply_rope_fwd_kernel",
-                "time_us": 203.001,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 29.68,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_ker",
-                "time_us": 21.959,
-                "launches": 1
-              }
-            ]
-          },
-          {
             "module": "attn.indexer",
             "time_us": 1099.587,
             "class": "compute_bound",
@@ -957,6 +957,46 @@
                 "launches": 1
               }
             ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 1040.554,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 349.762,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 335.282,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
+                "time_us": 241.961,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 29.68,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_ker",
+                "time_us": 21.959,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 17.679,
+                "launches": 1
+              }
+            ]
           }
         ]
       },
@@ -964,7 +1004,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 85615.075,
+            "time_us": 88016.413,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1004,7 +1044,7 @@
           },
           {
             "module": "other",
-            "time_us": 23424.913,
+            "time_us": 23467.632,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1044,7 +1084,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 69.115,
+            "time_us": 93.194,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1058,6 +1098,11 @@
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
                 "time_us": 26.759,
+                "launches": 1
+              },
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 24.079,
                 "launches": 1
               },
               {
@@ -1121,7 +1166,7 @@
           },
           {
             "module": "other",
-            "time_us": 10549.96,
+            "time_us": 10507.241,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": null,
@@ -1161,25 +1206,15 @@
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 7039.741,
+            "time_us": 4638.403,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 1587.012,
-                "launches": 1
-              },
-              {
                 "name": "_stack_grouped_weight_bwd_kernel",
                 "time_us": 1420.811,
-                "launches": 1
-              },
-              {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 814.326,
                 "launches": 1
               },
               {
@@ -1195,6 +1230,16 @@
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 136.04,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 135.2,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 134.92,
                 "launches": 1
               }
             ]
@@ -1276,7 +1321,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 122.908,
+            "time_us": 98.829,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1285,11 +1330,6 @@
               {
                 "name": "_sinkhorn_bwd_kernel",
                 "time_us": 43.679,
-                "launches": 1
-              },
-              {
-                "name": "_sinkhorn_fwd_kernel",
-                "time_us": 24.079,
                 "launches": 1
               },
               {
@@ -1310,6 +1350,11 @@
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
                 "time_us": 5.119,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
+                "time_us": 4.559,
                 "launches": 1
               }
             ]
@@ -1361,8 +1406,28 @@
             ]
           },
           {
+            "module": "attn.core",
+            "time_us": 1268.208,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 1264.009,
+                "launches": 1
+              },
+              {
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 4.199,
+                "launches": 1
+              }
+            ]
+          },
+          {
             "module": "attn.norm",
-            "time_us": 638.637,
+            "time_us": 878.114,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1379,23 +1444,23 @@
                 "launches": 1
               },
               {
+                "name": "_apply_rope_fwd_kernel",
+                "time_us": 206.04,
+                "launches": 1
+              },
+              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 89.32,
                 "launches": 1
               },
               {
+                "name": "void transformer_engine::normalization::rmsnorm_fwd_general_kernel<transformer_e",
+                "time_us": 18.399,
+                "launches": 1
+              },
+              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
                 "time_us": 7.279,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 4.079,
-                "launches": 1
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 3.039,
                 "launches": 1
               }
             ]
@@ -1474,7 +1539,7 @@
           },
           {
             "module": "attn.core",
-            "time_us": 6369.405,
+            "time_us": 5101.197,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -1488,11 +1553,6 @@
               {
                 "name": "_v4_attention_bwd_dkv_kernel",
                 "time_us": 1774.053,
-                "launches": 1
-              },
-              {
-                "name": "_v4_attention_fwd_kernel",
-                "time_us": 1264.009,
                 "launches": 1
               },
               {
@@ -1514,7 +1574,7 @@
           },
           {
             "module": "attn.norm",
-            "time_us": 1844.874,
+            "time_us": 1605.397,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1541,13 +1601,13 @@
                 "launches": 1
               },
               {
-                "name": "_apply_rope_fwd_kernel",
-                "time_us": 206.04,
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 6.599,
                 "launches": 1
               },
               {
-                "name": "void transformer_engine::normalization::rmsnorm_fwd_general_kernel<transformer_e",
-                "time_us": 18.399,
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_",
+                "time_us": 4.239,
                 "launches": 1
               }
             ]
@@ -1598,7 +1658,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 85704.877,
+            "time_us": 87997.974,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1638,7 +1698,7 @@
           },
           {
             "module": "other",
-            "time_us": 22345.6,
+            "time_us": 22387.999,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1678,7 +1738,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 68.156,
+            "time_us": 92.675,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1692,6 +1752,11 @@
               {
                 "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
                 "time_us": 26.119,
+                "launches": 1
+              },
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 24.519,
                 "launches": 1
               },
               {
@@ -1755,7 +1820,7 @@
           },
           {
             "module": "other",
-            "time_us": 10737.487,
+            "time_us": 10695.088,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": null,
@@ -1795,17 +1860,12 @@
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 6938.304,
+            "time_us": 4645.207,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
-              {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 1580.892,
-                "launches": 1
-              },
               {
                 "name": "_stack_grouped_weight_bwd_kernel",
                 "time_us": 1414.011,
@@ -1817,11 +1877,6 @@
                 "launches": 1
               },
               {
-                "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 712.205,
-                "launches": 1
-              },
-              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 136.8,
                 "launches": 1
@@ -1829,6 +1884,16 @@
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
                 "time_us": 136.24,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 134.72,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 134.64,
                 "launches": 1
               }
             ]
@@ -1910,7 +1975,7 @@
           },
           {
             "module": "moe.router",
-            "time_us": 122.788,
+            "time_us": 98.269,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1919,11 +1984,6 @@
               {
                 "name": "_sinkhorn_bwd_kernel",
                 "time_us": 43.8,
-                "launches": 1
-              },
-              {
-                "name": "_sinkhorn_fwd_kernel",
-                "time_us": 24.519,
                 "launches": 1
               },
               {
@@ -1944,6 +2004,11 @@
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
                 "time_us": 5.039,
+                "launches": 1
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::f",
+                "time_us": 4.359,
                 "launches": 1
               }
             ]

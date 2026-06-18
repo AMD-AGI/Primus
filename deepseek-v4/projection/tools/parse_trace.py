@@ -260,9 +260,18 @@ def parse_trace(path: Path):
         if module == "__dpcomm__":
             dpcomm_us += dur
             continue
-        # backward ops carry a "Fwd thread id" arg (backward-only signal)
-        fwd_tid = _arg(cpu, "Fwd thread id") if cpu else None
-        phase = "backward" if (fwd_tid is not None or "ackward" in cpu_name or "_bwd_" in name) else "forward"
+        # Phase: a kernel-name _fwd_/_bwd_ tag is authoritative (V4 triton
+        # kernels encode it, and dense attention re-runs its _fwd_ kernel inside
+        # backward — whose CPU op carries a "Fwd thread id" — so the name must
+        # win). Otherwise use the backward-only "Fwd thread id" arg / cpu name.
+        ln = name.lower()
+        if "_fwd" in ln and "_bwd" not in ln:
+            phase = "forward"
+        elif "_bwd" in ln:
+            phase = "backward"
+        else:
+            fwd_tid = _arg(cpu, "Fwd thread id") if cpu else None
+            phase = "backward" if (fwd_tid is not None or "ackward" in cpu_name) else "forward"
         dims_key = _dims_key(_arg(cpu, "Input Dims")) if cpu else ""
         key = (phase, module, name, dims_key)
         groups[key].append(dur)
@@ -435,7 +444,7 @@ def main() -> int:
 
     doc = build(args.model, traces)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(doc, indent=2))
+    args.out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"[parse_trace] wrote {args.out} (model={args.model}, crs={sorted(traces)})")
     return 0
 
