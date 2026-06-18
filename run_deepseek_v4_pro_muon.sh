@@ -183,6 +183,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 ./primus-cli direct \
   -- train pretrain --config "$EXP" \
   --backend_path "$BACKEND_PATH" \
+  --manual_gc True \
+  --manual_gc_interval 100 \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
   --train_iters "$TRAIN_ITERS" \
   --lr_warmup_iters 0 \
