@@ -13,8 +13,8 @@ from typing import Any
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 
-class WanArgBuilder:
-    """Build the compact config object consumed by the Wan trainer."""
+class DiffusionArgBuilder:
+    """Build the compact config object consumed by diffusion trainers."""
 
     DEFAULT_DATASET: dict[str, Any] = {
         "name": "wan",
@@ -45,7 +45,7 @@ class WanArgBuilder:
             },
         },
     }
-    DEFAULT_TRAINER: dict[str, Any] = {
+    DEFAULT_WAN_TRAINER: dict[str, Any] = {
         "name": "fsdp2",
         "args": {
             "output_dir": "./output/wan",
@@ -86,6 +86,65 @@ class WanArgBuilder:
             },
         },
     }
+    DEFAULT_FLUX_DATASET: dict[str, Any] = {
+        "name": "flux",
+        "config": {
+            "dataset_type": "precomputed",
+            "dataset_format": "hf_dataset",
+            "dataset_path": "/path/to/flux_precomputed_dataset",
+            "dataset": None,
+            "shuffle": True,
+            "processor_config": {
+                "processor_name": "flux_precomputed",
+                "processor_type": "flux_precomputed",
+                "prompt_dropout_prob": 0.0,
+                "empty_encodings_path": None,
+                "img_size": 256,
+                "skip_low_resolution": True,
+            },
+        },
+    }
+    DEFAULT_FLUX_TRAINER: dict[str, Any] = {
+        "name": "fsdp2",
+        "args": {
+            "output_dir": "./output/flux",
+            "per_device_train_batch_size": 1,
+            "per_device_eval_batch_size": 1,
+            "gradient_accumulation_steps": 1,
+            "gradient_checkpointing": False,
+            "attention_backend": "sdpa",
+            "learning_rate": 2.0e-4,
+            "lr_scheduler_type": "constant",
+            "warmup_steps": 0,
+            "weight_decay": 0.01,
+            "num_train_epochs": 1,
+            "max_steps": 100,
+            "logging_steps": 1,
+            "save_steps": 0,
+            "dataloader_num_workers": 4,
+            "report_to": "none",
+            "run_name": "flux-fsdp2",
+            "bf16": True,
+            "seed": 10007,
+            "optim": "adamw_torch",
+            "adam_beta1": 0.9,
+            "adam_beta2": 0.999,
+            "adam_epsilon": 1.0e-8,
+            "max_grad_norm": 1.0,
+            "fsdp2_wrap_target": "dit",
+            "fsdp_transformer_layer_cls_to_wrap": "DoubleStreamBlock,SingleStreamBlock",
+            "fsdp2_reshard_after_forward": True,
+            "save_strategy": "dit_only",
+            "sp_size": 1,
+            "dp_replicate": 1,
+            "flow_match_scheduler": {
+                "shift": 1,
+                "sigma_min": 0.0,
+                "extra_one_step": False,
+                "num_train_timesteps": 1000,
+            },
+        },
+    }
 
     def __init__(self) -> None:
         self._params: dict[str, Any] = {}
@@ -96,16 +155,16 @@ class WanArgBuilder:
         elif isinstance(params, dict):
             self._params = copy.deepcopy(params)
         else:
-            raise TypeError(f"WanArgBuilder expects dict or SimpleNamespace, got {type(params).__name__}")
+            raise TypeError(f"DiffusionArgBuilder expects dict or SimpleNamespace, got {type(params).__name__}")
 
     def finalize(self) -> SimpleNamespace:
         params = copy.deepcopy(self._params)
         if "model" not in params:
-            raise ValueError("Wan backend config requires a model preset.")
+            raise ValueError("Diffusion backend config requires a model preset.")
         for legacy_section in ("dataset", "trainer"):
             if legacy_section in params:
                 raise ValueError(
-                    f"Wan backend no longer accepts public `{legacy_section}` overrides. "
+                    f"Diffusion backend no longer accepts public `{legacy_section}` overrides. "
                     "Use Primus-style `data`, `training`, `parallelism`, `optimizer`, "
                     "`runtime`, and `metrics` sections instead."
                 )
@@ -138,18 +197,48 @@ class WanArgBuilder:
                 return source[key]
         return None
 
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
+
+    def _model_family(self, params: dict[str, Any]) -> str:
+        model = params.get("model") or {}
+        if not isinstance(model, dict):
+            raise TypeError(f"Diffusion model preset must be a dict, got {type(model).__name__}")
+        name = str(model.get("name", "")).strip().lower()
+        if not name:
+            raise ValueError("Diffusion model preset requires `model.name`.")
+        return name
+
+    def _defaults_for_model(self, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        if model_name == "wan":
+            return self.DEFAULT_DATASET, self.DEFAULT_WAN_TRAINER
+        if model_name == "flux":
+            return self.DEFAULT_FLUX_DATASET, self.DEFAULT_FLUX_TRAINER
+        raise ValueError(f"Unsupported diffusion model name: {model_name!r}")
+
     def _normalize_primus_style_sections(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Translate concise Primus-style Wan sections into trainer arguments.
+        """Translate concise Primus-style sections into trainer arguments.
 
         Public configs use high-level sections such as `training`, `data`,
-        `parallelism`, and `runtime`; internal defaults supply the compact
-        `dataset` and `trainer` objects consumed by the Wan runtime.
+        `parallelism`, and `runtime`; internal defaults supply compact
+        `dataset` and `trainer` objects consumed by the diffusion runtime.
         """
+        model_name = self._model_family(params)
+        default_dataset, default_trainer = self._defaults_for_model(model_name)
 
         normalized = {
             "model": params["model"],
-            "dataset": copy.deepcopy(self.DEFAULT_DATASET),
-            "trainer": copy.deepcopy(self.DEFAULT_TRAINER),
+            "dataset": copy.deepcopy(default_dataset),
+            "trainer": copy.deepcopy(default_trainer),
             "stage": params.get("stage", "pretrain"),
             "primus": params.get("primus", {}),
         }
@@ -171,9 +260,11 @@ class WanArgBuilder:
             ("gradient_accumulation_steps",): ("gradient_accumulation_steps",),
             ("output_dir",): ("output_dir",),
             ("save_steps",): ("save_steps",),
+            ("save_strategy",): ("save_strategy",),
             ("run_name",): ("run_name",),
             ("num_train_epochs",): ("num_train_epochs",),
             ("resume_from_checkpoint",): ("resume_from_checkpoint",),
+            ("dataloader_num_workers",): ("dataloader_num_workers",),
         }
         for source_path, target_path in training_map.items():
             value = self._get_any(training, *source_path)
@@ -188,6 +279,14 @@ class WanArgBuilder:
             ("text_tokenizer",): ("processor_config", "text_tokenizer"),
             ("processor_name",): ("processor_config", "processor_name"),
             ("processor_type",): ("processor_config", "processor_type"),
+            ("dataset_format",): ("dataset_format",),
+            ("dataset_type",): ("dataset_type",),
+            ("dataset",): ("dataset",),
+            ("shuffle",): ("shuffle",),
+            ("empty_encodings_path",): ("processor_config", "empty_encodings_path"),
+            ("prompt_dropout_prob",): ("processor_config", "prompt_dropout_prob"),
+            ("img_size",): ("processor_config", "img_size"),
+            ("skip_low_resolution",): ("processor_config", "skip_low_resolution"),
         }
         for source_path, target_path in data_map.items():
             value = self._get_any(data, *source_path)
@@ -228,10 +327,21 @@ class WanArgBuilder:
             ("attention_backend",): ("attention_backend",),
             ("report_to",): ("report_to",),
             ("seed",): ("seed",),
+            ("bf16",): ("bf16",),
+            ("fp16",): ("fp16",),
+            ("gradient_checkpointing",): ("gradient_checkpointing",),
+            ("fsdp2_reshard_after_forward",): ("fsdp2_reshard_after_forward",),
         }
         for source_path, target_path in runtime_map.items():
             value = self._get_any(runtime, *source_path)
             if value is not None:
+                if target_path in {
+                    ("bf16",),
+                    ("fp16",),
+                    ("gradient_checkpointing",),
+                    ("fsdp2_reshard_after_forward",),
+                }:
+                    value = self._coerce_bool(value)
                 self._set_nested(trainer_args, target_path, value)
 
         log_freq = metrics.get("log_freq")
@@ -249,4 +359,11 @@ class WanArgBuilder:
         if resume_from_checkpoint is not None:
             self._set_nested(trainer_args, ("resume_from_checkpoint",), resume_from_checkpoint)
 
+        if model_name == "flux" and int(trainer_args.get("sp_size", 1)) != 1:
+            raise ValueError("FLUX diffusion training currently requires `parallelism.sp_size: 1`.")
+
         return normalized
+
+
+# Backwards-compatible import path for existing Wan-only callers.
+WanArgBuilder = DiffusionArgBuilder

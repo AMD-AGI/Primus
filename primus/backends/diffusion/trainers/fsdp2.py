@@ -370,6 +370,10 @@ class FSDP2Trainer(BaseWanTrainer):
 
     def save_model(self):
         """Save final model using the configured strategy."""
+        if self.save_strategy in ("none", "skip", "disabled"):
+            if self.rank == 0:
+                logger.info(f"Skipping final checkpoint save (strategy={self.save_strategy})")
+            return
         if self.save_strategy == "dit_only":
             save_path = os.path.join(self.output_dir, "dit_model.safetensors")
             self._save_dit(save_path)
