@@ -440,7 +440,10 @@ class WanModel(nn.Module):
 
         # time embeddings
         if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
+            # [B] -> [B, seq_len]: per-sample timestep broadcast across the sequence.
+            # Must unsqueeze before expand, otherwise the batch dim (B) is wrongly
+            # aligned with seq_len and breaks for batch_size > 1.
+            t = t.unsqueeze(1).expand(t.size(0), seq_len)
         with torch.amp.autocast("cuda", dtype=torch.float32):
             bt = t.size(0)
             t_flat = t.flatten()
