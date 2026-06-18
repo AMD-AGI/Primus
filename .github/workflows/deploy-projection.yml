@@ -1,0 +1,66 @@
+name: Deploy DeepSeek-V4 Projection
+
+# Publishes the DeepSeek-V4 performance-projection site to GitHub Pages from the
+# current development branch (no need to merge to main). The site is served at
+#   https://<user>.github.io/<repo>/deepseek-v4-projection/
+# NOTE: a repo has a single Pages site, so this deployment and the main
+# backend-gap dashboard deployment overwrite each other (last run wins). If the
+# github-pages environment restricts deployment branches, allow this branch in
+# repo Settings -> Environments -> github-pages -> Deployment branches.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/wenx/deepseek-v4
+    paths:
+      - "deepseek-v4/projection/site/**"
+      - ".github/workflows/deploy-projection.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deepseek-v4-projection-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Assemble Pages bundle
+        run: |
+          set -euo pipefail
+          mkdir -p _site/deepseek-v4-projection
+          cp -r deepseek-v4/projection/site/. _site/deepseek-v4-projection/
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8" />
+          <meta http-equiv="refresh" content="0; url=./deepseek-v4-projection/" />
+          <title>DeepSeek-V4 Projection</title>
+          <a href="./deepseek-v4-projection/">DeepSeek-V4 Performance Projection</a>
+          HTML
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

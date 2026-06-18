@@ -1,0 +1,87 @@
+# 02 — Assumptions (single source of truth)
+
+Every assumption baked into the projection. When a projection number looks off,
+start here.
+
+## Optimizer / DP
+
+- **A1.** Production optimizer = **AdamW + distributed optimizer (zero1)**. Muon
+  is out of scope for the projection. (Muon would force `use_distributed_optimizer
+  = False`, a different DP/comm regime.)
+- **A2.** DP communication (param all-gather / grad reduce-scatter) is **fully
+  hidden** behind compute at large GA. We do not add a DP comm term. *(Optimistic;
+  primary calibration target.)*
+- **A3.** The optimizer step is a per-iteration term, **not** multiplied by GA or
+  replicated per PP microbatch. It scales with **per-rank optimizer parameter
+  count** (total params / DP under zero1 sharding) and is treated as
+  memory-bound (read/write params + states).
+
+## Pipeline / parallelism
+
+- **A4.** PP point-to-point comm is **hidden**; only the pipeline **bubble**
+  remains. CP/TP comm not modeled in v1 (TP=1, CP=1 in the V4 release configs).
+- **A5.** Pipeline bubble fraction uses 1F1B: `(PP-1)/GA`; interleaved VPP divides
+  it by the VPP degree: `(PP-1)/(GA*VPP)`.
+- **A6.** Per-stage time is the **sum of the specific cr-type layers** mapped to
+  that stage; the iteration critical path is driven by the **max** (slowest)
+  stage, plus embedding on stage 0 and output/loss on the last stage.
+
+## EP / MoE
+
+- **A7.** EP dispatch/combine has **no overlap** with compute (current stack) and
+  is counted in full, every microbatch.
+- **A8.** No MoE deepep-comm + grouped-gemm overlap; MoE = dispatch + grouped_gemm
+  + combine summed.
+- **A9.** EP is intra-node only (e.g. EP=8 within an 8-GPU node). Cross-node EP is
+  out of scope for v1; if EP spans nodes the dispatch/combine cost model must
+  change (RDMA, different bandwidth).
+- **A10.** MoE per-layer cost is `cr`-independent; the three single-cr traces
+  must agree on it (cross-check). The site uses one MoE breakdown for all layers.
+
+## Trace capture / attribution
+
+- **A11.** One trace per cr (`0`, `4`, `128`), **1 layer**, `seq=4096`,
+  `recompute off`, profiler window iter 6->7 (post warmup/autotune).
+- **A12.** Capture with comm-overlap **off** (`num_layers=1` breaks Megatron's
+  chained param sync, and compute is already clean without overlap). GA=2; clean
+  per-kernel time = `min` over launches grouped by `(module, phase, shape)`,
+  removing residual jitter.
+- **A13.** Kernel -> nn.module attribution uses `with_stack=True`: GPU kernels are
+  linked to their launching CPU op via trace flow events, and the module is read
+  from the CPU op's python call stack. fwd/bwd is determined by the stack
+  (backward frames) and/or `_fwd_`/`_bwd_` in kernel names.
+- **A14.** Only `gemm`, `grouped_gemm`, `attn` kernels get a TFLOPs number; all
+  other kernels are memory-bound (TFLOPs = null) and contribute time only.
+- **A15.** Embedding / output-logits / loss are taken **once** (from any single
+  trace), not triple-counted across the three cr traces.
+
+## Recompute
+
+- **A16.** Traces are captured with recompute **off** (pure fwd, pure bwd). At
+  projection time, a recomputed layer's backward gets `+1 forward` of that layer
+  added back. Recompute selection (#layers / which) is a site control.
+
+## Scope exclusions (v1)
+
+- **A17.** MTP is ignored (Pro paper has MTP depth 1; Primus V4 lacks it). It is a
+  known missing term in the full-model projection.
+- **A18.** No cross-node EP; no TP; no CP comm modeling.
+- **A19.** FP8 / MXFP8 not modeled; BF16 only.
+
+## MI355X -> MI455X scaling
+
+- **A20.** Compute-bound kernels (`gemm`, `grouped_gemm`, `attn`) scale by the
+  **peak-TFLOPs ratio** (BF16) `t_mi355 / t_mi455`.
+- **A21.** Memory-bound kernels (everything else, incl. optimizer) scale by the
+  **HBM-bandwidth ratio** `bw_mi355 / bw_mi455`.
+- **A22.** A single tunable **efficiency factor** (default 1.0) multiplies the
+  scaled compute time to account for MFU differences on new HW (flat peak ratio
+  is optimistic).
+- **A23.** Comm (EP/DP/PP) is not rescaled in v1 (intra-node EP only; DP/PP
+  hidden).
+
+## Validation
+
+- **A24.** Self-consistency: configured to the trace scenario (PP=1, EP=8,
+  measured GA, single node) the model must reproduce the measured single-node
+  iteration time. Multi-node calibration is deferred.

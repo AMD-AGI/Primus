@@ -13,6 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_GAP_DOCS_ROOT = REPO_ROOT / "docs" / "backend-gap"
 WEEKLY_REPORTS_DOCS_ROOT = REPO_ROOT / "docs" / "weekly_reports"
 SITE_SOURCE_ROOT = REPO_ROOT / "tools" / "backend_gap_report" / "site"
+# Standalone DeepSeek-V4 performance-projection site, published as a subpath of
+# the same Pages bundle (served at /<repo>/deepseek-v4-projection/).
+PROJECTION_SITE_ROOT = REPO_ROOT / "deepseek-v4" / "projection" / "site"
+PROJECTION_SITE_SUBDIR = "deepseek-v4-projection"
 SOURCE_DASHBOARD_DATA_DIR = BACKEND_GAP_DOCS_ROOT / "dashboard-data"
 WEEKLY_REPORTS_DASHBOARD_DATA_DIR = WEEKLY_REPORTS_DOCS_ROOT / "dashboard-data"
 METADATA_REPORTS_DIR = SOURCE_DASHBOARD_DATA_DIR / "reports"
@@ -255,6 +259,9 @@ def build_site(output_dir: Path) -> None:
             output_dir / "weekly-reports-data",
         )
     build_pdf_artifacts(output_dir)
+    if PROJECTION_SITE_ROOT.exists():
+        print("[projection] Copy DeepSeek-V4 projection site", flush=True)
+        copy_tree(PROJECTION_SITE_ROOT, output_dir / PROJECTION_SITE_SUBDIR)
     print("[backend-gap] Validate standalone dashboard bundle", flush=True)
     validate_bundle(output_dir)
 

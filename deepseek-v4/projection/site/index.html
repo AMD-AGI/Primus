@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepSeek-V4 Performance Projection</title>
+    <link rel="stylesheet" href="./assets/style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero__inner">
+        <p class="eyebrow">Primus · DeepSeek-V4</p>
+        <h1>Training Performance Projection</h1>
+        <p class="hero__summary">
+          Trace-driven single-layer breakdown on MI355X, scaled to a full-model,
+          multi-GPU projection. Page 1 is measured-MI355X; page 2 scales to MI455X
+          by theoretical hardware ratios.
+        </p>
+        <div class="hero__row">
+          <label class="field field--inline">
+            <span>Model</span>
+            <select id="model-select">
+              <option value="pro">DeepSeek-V4 Pro</option>
+              <option value="flash">DeepSeek-V4 Flash</option>
+            </select>
+          </label>
+          <span id="mock-badge" class="badge badge--warn" hidden>MOCK DATA</span>
+        </div>
+        <nav class="tabs" role="tablist">
+          <button class="tab is-active" data-gpu="MI355X" role="tab">MI355X (measured)</button>
+          <button class="tab" data-gpu="MI455X" role="tab">MI455X (projected)</button>
+        </nav>
+      </div>
+    </header>
+
+    <main class="layout">
+      <div id="error-state" class="state state--error" hidden></div>
+
+      <section class="panel" id="config-panel">
+        <h2>Model configuration</h2>
+        <div id="config-grid" class="kv-grid"></div>
+        <div id="cr-schedule" class="cr-schedule"></div>
+      </section>
+
+      <section class="panel" id="breakdown-panel">
+        <div class="panel__head">
+          <h2>Per-layer breakdown <span id="breakdown-gpu" class="muted"></span></h2>
+          <p class="muted">
+            Forward (left→right) then backward (right→left). Time in µs / one
+            microbatch (seq 4096). TFLOPs shown only for gemm / grouped_gemm / attn.
+          </p>
+        </div>
+        <div id="breakdown-blocks"></div>
+      </section>
+
+      <div class="two-col">
+        <section class="panel" id="controls-panel">
+          <h2>Projection controls</h2>
+          <div id="controls-grid" class="controls-grid"></div>
+        </section>
+
+        <section class="panel panel--accent" id="results-panel">
+          <h2>Projected throughput <span id="results-gpu" class="muted"></span></h2>
+          <div id="results-headline" class="headline"></div>
+          <div id="results-steps" class="steps"></div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <p>
+        Generated from <code>deepseek-v4/projection/</code>. Methodology &amp;
+        assumptions in <code>design/</code>. Numbers are only as good as the input
+        trace; see the assumptions list before citing.
+      </p>
+    </footer>
+
+    <script src="./assets/app.js"></script>
+  </body>
+</html>
