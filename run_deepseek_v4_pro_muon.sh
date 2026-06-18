@@ -106,6 +106,14 @@ export GBS=${GBS:-512}
 
 # ---------- Optimizer: Muon (paper §4.2.2, values for BOTH Flash & Pro) ------
 export OPTIMIZER=${OPTIMIZER:-muon}
+# The Primus Muon path (primus/backends/megatron/core/optimizer/moun.py) needs
+# the emerging_optimizers package, which is NOT bundled in the container. Set
+# PRIMUS_INSTALL_EMERGING_OPTIMIZERS so the in-container install hook
+# (runner/.../01_install_emerging_optimizers.sh) provisions the pinned commit.
+# Gated on a Muon optimizer so an OPTIMIZER=adam A/B run pays nothing.
+if [ "$OPTIMIZER" = "muon" ] || [ "$OPTIMIZER" = "dist_muon" ]; then
+  export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-1}
+fi
 export MUON_MOMENTUM=${MUON_MOMENTUM:-0.95}            # paper momentum 0.95
 # Paper: "rescale the RMS of each update matrix to 0.18 for reutilization of the
 # AdamW learning rate."  With scale_mode=spectral the realized update RMS ≈
