@@ -1,0 +1,18 @@
+model:
+  name: flux
+  config:
+    # Optional: set PRETRAINED_PATH to initialize from existing FLUX DiT weights.
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    config:
+      model_variant: flux-dev
+      trainable_modules: dit
+      guidance: ${FLUX_GUIDANCE:1.0}
+      autoencoder_scale_factor: 0.3611
+      autoencoder_shift_factor: 0.1159
+    # Optional for precomputed data, required for raw image-text data.
+    encoder:
+      t5_encoder: ${T5_ENCODER:}
+      clip_encoder: ${CLIP_ENCODER:}
+      autoencoder: ${VAE_CHECKPOINT:}
+      max_t5_length: ${MAX_T5_LENGTH:256}
+      max_clip_length: 77

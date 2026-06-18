@@ -48,6 +48,8 @@ class DiffusionPretrainTrainer(BaseTrainer):
             if importlib.util.find_spec(package) is None
         ]
         video_backend = (dataset_cfg.get("config", {}) or {}).get("video_backend")
+        if dataset_cfg.get("name") == "flux" and importlib.util.find_spec("datasets") is None:
+            missing.append("datasets")
         if video_backend == "imageio" and importlib.util.find_spec("imageio") is None:
             missing.append("imageio")
         if video_backend == "decord" and importlib.util.find_spec("decord") is None:

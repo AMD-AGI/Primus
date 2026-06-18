@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from primus.backends.diffusion.argument_builder import WanArgBuilder
+from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.modules.module_utils import log_rank_0
 
@@ -42,17 +42,18 @@ class DiffusionAdapter(BackendAdapter):
         return resolved_str
 
     def convert_config(self, params: Any):
-        builder = WanArgBuilder()
+        builder = DiffusionArgBuilder()
         builder.update(params)
-        wan_args = builder.finalize()
+        diffusion_args = builder.finalize()
         # convert_config is also called by the standalone prepare hook, where the
         # Primus logger may not be initialized yet; guard the informational log.
         try:
-            log_rank_0("[Primus:DiffusionAdapter] Converted Primus module params -> Wan args")
+            model_name = getattr(getattr(diffusion_args, "model", {}), "get", lambda *_: None)("name")
+            log_rank_0(f"[Primus:DiffusionAdapter] Converted Primus module params -> {model_name} args")
         except Exception:
             # Standalone prepare hooks may run before the Primus logger is bound.
             pass
-        return wan_args
+        return diffusion_args
 
     def load_trainer_class(self, stage: str = "pretrain"):
         if stage in ("pretrain", "posttrain", "sft"):

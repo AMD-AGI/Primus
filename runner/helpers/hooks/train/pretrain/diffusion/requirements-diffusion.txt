@@ -1,6 +1,9 @@
 einops
+datasets
+huggingface_hub
 loguru
 safetensors
+sentencepiece
 numpy
 pillow
 packaging
