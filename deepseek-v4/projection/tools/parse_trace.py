@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel_module_map import flop_class_from_kernel
+from v4_flops import FB_FMA, layer_fmac, nonlayer_fmac
 
 PRO_COMPRESS = [128, 128] + [4 if i % 2 == 0 else 128 for i in range(2, 60)] + [0]
 FLASH_COMPRESS = [0, 0] + [4 if i % 2 == 0 else 128 for i in range(2, 42)] + [0]
@@ -195,7 +196,7 @@ def _resolve_module(kname: str, cpu_name: str, anc_classes: set[str], flop_class
     return "other"
 
 
-def parse_trace(path: Path):
+def parse_trace(path: Path, ga: int = 2):
     payload = json.loads(path.read_text())
     events = payload.get("traceEvents", [])
 
@@ -204,10 +205,13 @@ def parse_trace(path: Path):
     # interesting python_function intervals per tid: (ts, end, name)
     pf_by_tid: dict[Any, list[tuple[float, float, str]]] = defaultdict(list)
     kernels: list[dict] = []
+    num_steps = 0  # real captured training steps (ProfilerStep events, dur>10ms)
 
     for ev in events:
         cat = (ev.get("cat") or "").lower()
         ph = ev.get("ph")
+        if ph == "X" and ev.get("name", "").startswith("ProfilerStep") and (ev.get("dur") or 0) > 10000:
+            num_steps += 1
         if cat == "cpu_op" and ph == "X":
             ext = _arg(ev, "External id")
             if ext is not None and ext not in cpu_by_extid:
@@ -239,9 +243,13 @@ def parse_trace(path: Path):
                 classes.add(name.split(":", 1)[1].strip().rsplit("_", 1)[0])
         return classes
 
-    # group key -> list of durations (us)
-    groups: dict[tuple[str, str, str, str], list[float]] = defaultdict(list)
-    group_flops: dict[tuple[str, str, str, str], float | None] = {}
+    # Accumulate raw kernel time per (phase, module) over the WHOLE trace, then
+    # divide by the number of captured microbatches (num_steps * GA). min-group
+    # dedup fails for moe grouped-gemm (its input dims change every routing step,
+    # so launches never dedup and would sum across all microbatches); dividing by
+    # the microbatch count gives the correct per-microbatch, per-layer time for
+    # every module uniformly. (overlap is off, so the average == clean time.)
+    agg: dict[tuple[str, str], dict] = {}
     optimizer_us = 0.0
     dpcomm_us = 0.0
 
@@ -261,9 +269,7 @@ def parse_trace(path: Path):
             dpcomm_us += dur
             continue
         # Phase: a kernel-name _fwd_/_bwd_ tag is authoritative (V4 triton
-        # kernels encode it, and dense attention re-runs its _fwd_ kernel inside
-        # backward — whose CPU op carries a "Fwd thread id" — so the name must
-        # win). Otherwise use the backward-only "Fwd thread id" arg / cpu name.
+        # kernels encode it). Otherwise use the backward-only "Fwd thread id".
         ln = name.lower()
         if "_fwd" in ln and "_bwd" not in ln:
             phase = "forward"
@@ -272,18 +278,7 @@ def parse_trace(path: Path):
         else:
             fwd_tid = _arg(cpu, "Fwd thread id") if cpu else None
             phase = "backward" if (fwd_tid is not None or "ackward" in cpu_name) else "forward"
-        dims_key = _dims_key(_arg(cpu, "Input Dims")) if cpu else ""
-        key = (phase, module, name, dims_key)
-        groups[key].append(dur)
-        if key not in group_flops and flop_class == "gemm":
-            group_flops[key] = _gemm_flops(dims_key)
-
-    # collapse: min per group; aggregate to module rows
-    agg: dict[tuple[str, str], dict] = {}
-    for (phase, module, kname, _dims), durs in groups.items():
-        clean = min(durs)
-        flop_class = flop_class_from_kernel(kname)
-        flops = group_flops.get((phase, module, kname, _dims))
+        flops = _gemm_flops(_dims_key(_arg(cpu, "Input Dims"))) if (cpu and flop_class == "gemm") else None
         row = agg.setdefault(
             (phase, module),
             {
@@ -292,31 +287,40 @@ def parse_trace(path: Path):
                 "flops": 0.0,
                 "has_flops": False,
                 "flop_class": None,
-                "kernels": [],
+                "kernels": defaultdict(float),
             },
         )
-        row["time_us"] += clean
+        row["time_us"] += dur
         if flop_class:
             row["flop_class"] = flop_class
         if flops:
             row["flops"] += flops
             row["has_flops"] = True
-        row["kernels"].append({"name": kname[:80], "time_us": round(clean, 3), "launches": 1})
+        row["kernels"][name[:80]] += dur
+
+    num_mb = max(1, num_steps * ga)
+    optimizer_us /= max(1, num_steps)  # optimizer runs once per training iteration
+    dpcomm_us /= num_mb
 
     out = {b: {"forward": {}, "backward": {}} for b in ("attention", "moe", "embedding", "output", "loss")}
     for (phase, module), row in agg.items():
         compute = row["flop_class"] is not None
-        flops = row["flops"] if row["has_flops"] else None
-        time_s = row["time_us"] * 1e-6
+        time_us = row["time_us"] / num_mb
+        flops = (row["flops"] / num_mb) if row["has_flops"] else None
+        time_s = time_us * 1e-6
         tflops = (flops / time_s / 1e12) if (flops and time_s > 0) else None
+        kern = sorted(
+            ({"name": n, "time_us": round(t / num_mb, 3)} for n, t in row["kernels"].items()),
+            key=lambda k: -k["time_us"],
+        )[:6]
         entry = {
             "module": module,
-            "time_us": round(row["time_us"], 3),
+            "time_us": round(time_us, 3),
             "class": "compute_bound" if compute else "memory_bound",
             "flop_class": row["flop_class"],
             "flops": flops,
             "tflops": round(tflops, 1) if tflops else None,
-            "kernels": sorted(row["kernels"], key=lambda k: -k["time_us"])[:6],
+            "kernels": kern,
         }
         bucket = (
             "attention"
@@ -348,11 +352,11 @@ def _fwd_total(buckets: dict) -> float:
     )
 
 
-def build(model: str, traces: dict[str, Path]) -> dict[str, Any]:
+def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
     cfg = MODEL_CONFIGS[model]
     per_cr, opt_us = {}, []
     for cr, path in traces.items():
-        buckets, o, _dp = parse_trace(path)
+        buckets, o, _dp = parse_trace(path, ga)
         per_cr[cr] = buckets
         opt_us.append(o)
 
@@ -375,9 +379,23 @@ def build(model: str, traces: dict[str, Path]) -> dict[str, Any]:
     layers = {cr: {"attention": _lists(b["attention"]), "moe": _lists(b["moe"])} for cr, b in per_cr.items()}
     optimizer_us = round(sum(opt_us) / len(opt_us), 1) if opt_us else None
 
+    # Analytic V4 closed-form FLOPs (ported from Megatron's flops patch) so the
+    # site's TFLOP/s matches a real run. Per layer, per microbatch (B=1), at the
+    # capture seq; Megatron-convention (fwd+bwd, FMA -> x6).
+    cap_seq = 4096
+    analytic_flops = {
+        "per_cr_layer_flops": {
+            cr: sum(layer_fmac(model, int(cr), cap_seq).values()) * FB_FMA for cr in ("0", "4", "128")
+        },
+        "output_flops": nonlayer_fmac(model, cap_seq)["logits"] * FB_FMA,
+        "seq": cap_seq,
+        "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP",
+    }
+
     return {
         "schema_version": 1,
         "model": model,
+        "analytic_flops": analytic_flops,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "provenance": {
             "traces": {cr: str(p) for cr, p in traces.items()},
@@ -424,6 +442,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build projection breakdown JSON from per-cr traces.")
     p.add_argument("--model", required=True, choices=sorted(MODEL_CONFIGS))
     p.add_argument("--trace", action="append", default=[], metavar="cr=PATH")
+    p.add_argument(
+        "--ga", type=int, default=2, help="gradient-accumulation at capture (GBS/(DP*MBS)); default 2"
+    )
     p.add_argument("--out", required=True, type=Path)
     return p.parse_args()
 
@@ -442,7 +463,7 @@ def main() -> int:
         if not path.exists():
             raise SystemExit(f"trace not found for cr={cr}: {path}")
 
-    doc = build(args.model, traces)
+    doc = build(args.model, traces, args.ga)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"[parse_trace] wrote {args.out} (model={args.model}, crs={sorted(traces)})")

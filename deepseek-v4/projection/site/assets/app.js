@@ -51,7 +51,7 @@ function defaultControls(data) {
     pp: isPro ? 8 : 4, vpp: 1, ep: 8, dp: isPro ? 32 : 16, tp: 1, cp: 1,
     mbs: 1, gbs: 512,
     recompute: "full",
-    optEff: 0.7, computeEff: 1.0, bytesPerParam: data.optimizer?.bytes_per_param || 18,
+    optEff: 0.7, computeEff: 1.0, calibFactor: 0.93, bytesPerParam: data.optimizer?.bytes_per_param || 18,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
     peak455: m455.peak_tflops_bf16, bw455: m455.hbm_bandwidth_gbps,
   };
@@ -69,6 +69,7 @@ const CONTROL_DEFS = [
   ["gbs", "Global batch size", "int"],
   ["recompute", "Recompute", "sel"],
   ["bytesPerParam", "Optim bytes/param", "int"],
+  ["calibFactor", "Calibration factor", "f"],
   ["optEff", "Optim efficiency", "f"],
   ["computeEff", "MI455 compute eff", "f"],
   ["peak355", "MI355 peak TFLOPs", "int"],
@@ -199,8 +200,10 @@ function project(data, gpu, c) {
   const critF = Math.max(...Df), critB = Math.max(...Db);
 
   // Step 3: pipeline compute time (us) ; GA = gbs/(dp*mbs)
+  // calibFactor corrects the single-layer-capture -> full-model bias (~0.93,
+  // from the flash 16-layer single-node calibration; see design/06).
   const ga = c.gbs / (c.dp * c.mbs);
-  const pipeUs = (ga + (c.pp - 1) / c.vpp) * (critF + critB);
+  const pipeUs = (ga + (c.pp - 1) / c.vpp) * (critF + critB) * c.calibFactor;
   const bubbleFrac = (c.pp - 1) / c.vpp / (ga + (c.pp - 1) / c.vpp);
 
   // Step 4: optimizer (memory-bound, zero1-sharded over world)
@@ -219,12 +222,19 @@ function project(data, gpu, c) {
   const tokS = tokIter / iterS;
   const tokSgpu = tokS / world;
 
-  // FLOPs/iter (matmul convention)
-  let fMb = 0;
+  // FLOPs/iter — Megatron-convention V4 analytic model FLOPs (independent of
+  // recompute; recompute adds time, not model flops). Falls back to breakdown
+  // gemm flops if analytic_flops is absent.
   const counts = cfg.cr_layer_counts;
-  for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (lt[cr].fFlops + lt[cr].bFlops);
-  fMb += nonLayerFlops(data, "embedding", "forward") + nonLayerFlops(data, "embedding", "backward");
-  fMb += nonLayerFlops(data, "output", "forward") + nonLayerFlops(data, "output", "backward");
+  let fMb = 0;
+  const af = data.analytic_flops;
+  if (af && af.per_cr_layer_flops) {
+    for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (af.per_cr_layer_flops[cr] || 0);
+    fMb += af.output_flops || 0;
+  } else {
+    for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (lt[cr].fFlops + lt[cr].bFlops);
+    fMb += nonLayerFlops(data, "output", "forward") + nonLayerFlops(data, "output", "backward");
+  }
   const flopsIter = fMb * ga * c.dp;
   const tflopsGpu = flopsIter / iterS / world / 1e12;
 
