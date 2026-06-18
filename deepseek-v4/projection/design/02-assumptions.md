@@ -5,9 +5,13 @@ start here.
 
 ## Optimizer / DP
 
-- **A1.** Production optimizer = **AdamW + distributed optimizer (zero1)**. Muon
-  is out of scope for the projection. (Muon would force `use_distributed_optimizer
-  = False`, a different DP/comm regime.)
+- **A1.** Production optimizer modeled = **AdamW + distributed optimizer (zero1)**.
+  Muon is out of scope. NOTE on **capture**: the trace itself is taken with
+  `use_distributed_optimizer=False` (+ fp32 states) because with dist-opt ON the
+  ROCm Kineto profiler drops the compute GPU kernels for pure dense(cr=0)/HCA
+  (cr=128) layers (CSA cr=4 is unaffected). dist-opt does not change the fwd/bwd
+  compute, so this only affects which kernels Kineto records; the optimizer step
+  is modeled analytically regardless (A3).
 - **A2.** DP communication (param all-gather / grad reduce-scatter) is **fully
   hidden** behind compute at large GA. We do not add a DP comm term. *(Optimistic;
   primary calibration target.)*

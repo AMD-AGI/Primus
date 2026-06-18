@@ -10,7 +10,10 @@
 #   * seq_length = 4096            (production per-microbatch token count)
 #   * num_layers = 1              (clean per-layer attribution; fits memory @4096)
 #   * compress_ratios = [CR]      (one cr per trace; CR in {0,4,128})
-#   * optimizer = adam + DISTRIBUTED optimizer (zero1)   (NOT muon)
+#   * optimizer = adam, NON-distributed, fp32 states     (dist-opt ON makes the
+#                                                         ROCm Kineto profiler
+#                                                         drop dense/HCA compute
+#                                                         kernels; NOT muon)
 #   * overlap_grad_reduce/param_gather = False           (num_layers=1 breaks
 #                                                         Megatron's chained
 #                                                         param-sync assert; and
@@ -96,7 +99,13 @@ export GBS=${GBS:-$((2 * DP * MBS))}
 # optimizer-state memory blow-up so seq=4096 fits. The optimizer step itself is
 # modeled separately in the projection (design/04-projection-math.md Step 4).
 export OPTIMIZER=${OPTIMIZER:-adam}
-export USE_DISTRIBUTED_OPTIMIZER=${USE_DISTRIBUTED_OPTIMIZER:-True}
+# CRITICAL: distributed optimizer (zero1) MUST be off. With it on, the ROCm
+# Kineto profiler silently drops the compute GPU kernels for pure dense (cr=0)
+# and HCA (cr=128) layers (only optimizer/comm/elementwise get recorded);
+# turning it off makes every cr's kernels visible. dist-opt has no bearing on
+# the captured fwd/bwd compute, which is what the projection needs (the
+# optimizer step is modeled analytically, design/04 Step 4).
+export USE_DISTRIBUTED_OPTIMIZER=${USE_DISTRIBUTED_OPTIMIZER:-False}
 # Overlap OFF. With num_layers=1, Megatron's chained param-gather sync trips an
 # assertion (param_and_grad_buffer.start_param_sync). More importantly, with
 # overlap off every microbatch's compute is already overlap-free — exactly the
@@ -104,6 +113,14 @@ export USE_DISTRIBUTED_OPTIMIZER=${USE_DISTRIBUTED_OPTIMIZER:-True}
 # jitter. (Production DP comm is assumed hidden in the projection anyway; A2.)
 export PRIMUS_OVERLAP_GRAD_REDUCE=${PRIMUS_OVERLAP_GRAD_REDUCE:-False}
 export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-False}
+# Distributed optimizer (zero1) is the default. The Kineto trace drops the
+# compute GPU kernels for pure dense(cr=0)/HCA(cr=128) layers ONLY when the
+# distributed optimizer is on; turning it off makes all kernels visible (but
+# then precision-aware optimizer must be off too -> fp32 optimizer states).
+DISTOPT_ARGS=(--use_distributed_optimizer "$USE_DISTRIBUTED_OPTIMIZER")
+if [ "$USE_DISTRIBUTED_OPTIMIZER" = "False" ]; then
+  DISTOPT_ARGS+=(--use_precision_aware_optimizer False --main_grads_dtype fp32 --exp_avg_dtype fp32 --exp_avg_sq_dtype fp32)
+fi
 
 # ---------- Perf knobs (production V4 Triton attn + Turbo MoE) --------------
 export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-True}
@@ -186,7 +203,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --mtp_num_layers 0 \
   --mock_data True \
   --optimizer "$OPTIMIZER" \
-  --use_distributed_optimizer "$USE_DISTRIBUTED_OPTIMIZER" \
+  "${DISTOPT_ARGS[@]}" \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \

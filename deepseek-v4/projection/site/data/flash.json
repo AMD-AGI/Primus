@@ -1,0 +1,835 @@
+{
+  "schema_version": 1,
+  "model": "flash",
+  "generated_at": "2026-06-18T11:49:52Z",
+  "provenance": {
+    "mock": true,
+    "note": "MOCK data (P57/P40 order-of-magnitude); replace with parse_trace.py output"
+  },
+  "capture": {
+    "gpu": "MI355X",
+    "seq_length": 4096,
+    "micro_batch_size": 1,
+    "tokens_per_microbatch": 4096,
+    "ep": 8,
+    "ga_for_capture": 2,
+    "optimizer": "adam",
+    "distributed_optimizer": true,
+    "recompute": "off",
+    "measured_iter_time_ms": null
+  },
+  "model_config": {
+    "num_layers": 43,
+    "hidden_size": 4096,
+    "num_attention_heads": 64,
+    "kv_channels": 512,
+    "num_experts": 256,
+    "moe_router_topk": 6,
+    "moe_ffn_hidden_size": 2048,
+    "moe_shared_expert_intermediate_size": 2048,
+    "index_topk": 512,
+    "vocab_size": 129280,
+    "compress_ratios": [
+      0,
+      0,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      0
+    ],
+    "cr_layer_counts": {
+      "0": 3,
+      "4": 20,
+      "128": 20
+    }
+  },
+  "hardware": {
+    "MI355X": {
+      "peak_tflops_bf16": 2500.0,
+      "hbm_bandwidth_gbps": 8000.0
+    },
+    "MI455X": {
+      "peak_tflops_bf16": 10000.0,
+      "hbm_bandwidth_gbps": 19600.0
+    }
+  },
+  "layers": {
+    "0": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 220.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 105600000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 500.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 105000000000.0,
+            "tflops": 210,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 35.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 160.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 75200000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 25.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 440.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 211200000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 2080.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 374400000000.0,
+            "tflops": 180,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 45.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 320.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 150400000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 30.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.router",
+            "time_us": 55.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 820.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 1850.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 795500000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 110.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 210.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 96600000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 990.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.router",
+            "time_us": 75.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 900.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 3700.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 1591000000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 150.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 420.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 193200000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 1050.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      }
+    },
+    "4": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 220.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 105600000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 1430.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 300300000000.0,
+            "tflops": 210,
+            "kernels": []
+          },
+          {
+            "module": "attn.indexer",
+            "time_us": 300.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 90000000000.0,
+            "tflops": 300,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 35.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 160.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 75200000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 25.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 440.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 211200000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 5110.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 919800000000.0,
+            "tflops": 180,
+            "kernels": []
+          },
+          {
+            "module": "attn.indexer",
+            "time_us": 600.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 180000000000.0,
+            "tflops": 300,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 45.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 320.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 150400000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 30.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.router",
+            "time_us": 55.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 820.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 1850.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 795500000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 110.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 210.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 96600000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 990.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.router",
+            "time_us": 75.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 900.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 3700.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 1591000000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 150.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 420.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 193200000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 1050.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      }
+    },
+    "128": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 220.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 105600000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 570.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 119700000000.0,
+            "tflops": 210,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 35.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 160.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 75200000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 25.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.qkv_proj",
+            "time_us": 440.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 211200000000.0,
+            "tflops": 480,
+            "kernels": []
+          },
+          {
+            "module": "attn.core",
+            "time_us": 2810.0,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": 505800000000.0,
+            "tflops": 180,
+            "kernels": []
+          },
+          {
+            "module": "attn.rope",
+            "time_us": 45.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "attn.o_proj",
+            "time_us": 320.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 150400000000.0,
+            "tflops": 470,
+            "kernels": []
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 30.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.router",
+            "time_us": 55.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 820.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 1850.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 795500000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 110.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 210.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 96600000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 990.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.router",
+            "time_us": 75.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 900.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 3700.0,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": 1591000000000.0,
+            "tflops": 430,
+            "kernels": []
+          },
+          {
+            "module": "moe.act",
+            "time_us": 150.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 420.0,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 193200000000.0,
+            "tflops": 460,
+            "kernels": []
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 1050.0,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": []
+          }
+        ]
+      }
+    }
+  },
+  "non_layer": {
+    "embedding": {
+      "forward": [
+        {
+          "module": "embedding",
+          "time_us": 120.0,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": []
+        }
+      ],
+      "backward": [
+        {
+          "module": "embedding",
+          "time_us": 60.0,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": []
+        }
+      ]
+    },
+    "output": {
+      "forward": [
+        {
+          "module": "output",
+          "time_us": 900.0,
+          "class": "compute_bound",
+          "flop_class": "gemm",
+          "flops": 270000000000.0,
+          "tflops": 300,
+          "kernels": []
+        }
+      ],
+      "backward": [
+        {
+          "module": "output",
+          "time_us": 1800.0,
+          "class": "compute_bound",
+          "flop_class": "gemm",
+          "flops": 540000000000.0,
+          "tflops": 300,
+          "kernels": []
+        }
+      ]
+    },
+    "loss": {
+      "forward": [
+        {
+          "module": "loss",
+          "time_us": 80,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": []
+        }
+      ],
+      "backward": [
+        {
+          "module": "loss",
+          "time_us": 60,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": []
+        }
+      ]
+    }
+  },
+  "optimizer": {
+    "type": "adam",
+    "measured_params": 1000000000,
+    "time_us": 850.0,
+    "bytes_per_param": 18,
+    "class": "memory_bound"
+  },
+  "comm": {
+    "ep_dispatch_us": null,
+    "ep_combine_us": null,
+    "note": "EP dispatch/combine included in moe rows; informational"
+  }
+}

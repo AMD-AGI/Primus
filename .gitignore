@@ -12,3 +12,8 @@ output
 experiment
 data
 pp_simulation_result
+
+# Allow the projection site's breakdown JSON (consumed by the static site /
+# GitHub Pages) despite the generic `data` ignore above.
+!deepseek-v4/projection/site/data/
+!deepseek-v4/projection/site/data/*.json
