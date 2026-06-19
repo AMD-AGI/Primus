@@ -84,6 +84,10 @@ table.bd td.rowlab, table.bd th.rowlab { text-align: left; color: var(--muted); 
 
 .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .controls-grid .field--full { grid-column: 1 / -1; }
+/* number inputs have an intrinsic min-width that overflows the 1fr column and
+   overlaps the results panel; force them to fit their grid cell. */
+.controls-grid .field { min-width: 0; }
+.controls-grid input, .controls-grid select { width: 100%; min-width: 0; }
 
 .headline { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 16px; }
 .metric { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; min-width: 150px; }

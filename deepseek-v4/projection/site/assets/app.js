@@ -48,8 +48,9 @@ function defaultControls(data) {
   const m455 = hw.MI455X || { peak_tflops_bf16: 5000, hbm_bandwidth_gbps: 16000 };
   const isPro = data.model === "pro";
   return {
-    pp: isPro ? 8 : 4, vpp: 1, ep: 8, dp: isPro ? 32 : 16, tp: 1, cp: 1,
-    mbs: 1, gbs: 512,
+    world: isPro ? 256 : 32,
+    pp: isPro ? 16 : 4, vpp: 1, ep: 8, tp: 1, cp: 1,
+    mbs: 1, gbs: isPro ? 1024 : 512,
     recompute: "full",
     optEff: 0.7, computeEff: 1.0, calibFactor: 0.93, bytesPerParam: data.optimizer?.bytes_per_param || 18,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
@@ -58,11 +59,11 @@ function defaultControls(data) {
 }
 
 const CONTROL_DEFS = [
-  ["world", "World size (derived)", "ro"],
+  ["world", "World size (GPUs)", "int"],
   ["pp", "PP (pipeline)", "int"],
   ["vpp", "VPP (interleave)", "int"],
   ["ep", "EP (expert)", "int"],
-  ["dp", "DP (data)", "int"],
+  ["dp", "DP (derived)", "ro"],
   ["tp", "TP (tensor)", "int"],
   ["cp", "CP (context)", "int"],
   ["mbs", "Micro batch size", "int"],
@@ -78,11 +79,14 @@ const CONTROL_DEFS = [
   ["bw455", "MI455 HBM GB/s", "int"],
 ];
 
+// DP is derived from the user-set world size: DP = world / (PP*TP*CP). EP is a
+// sub-grouping of DP (EP <= DP) and does not multiply world size.
+const derivedDP = (c) => Math.max(1, Math.floor(c.world / (c.pp * c.tp * c.cp)));
+
 function renderControls() {
   const grid = $("#controls-grid");
   grid.innerHTML = "";
   const c = STATE.controls;
-  const world = c.pp * c.tp * c.cp * c.dp;
   for (const [key, label, kind] of CONTROL_DEFS) {
     const field = el("div", { class: "field" });
     field.append(el("span", {}, label));
@@ -95,7 +99,7 @@ function renderControls() {
         input.append(o);
       }
     } else if (kind === "ro") {
-      input = el("input", { id: `ctl-${key}`, value: world, disabled: "true" });
+      input = el("input", { id: `ctl-${key}`, value: derivedDP(c), disabled: "true" });
     } else {
       input = el("input", { id: `ctl-${key}`, type: "number", value: c[key], step: kind === "f" ? "0.05" : "1" });
     }
@@ -176,6 +180,8 @@ function project(data, gpu, c) {
   const cfg = data.model_config;
   const crs = cfg.compress_ratios;
   const L = crs.length;
+  const dp = derivedDP(c);
+  const world = c.world;
   const lt = {};
   for (const cr of ["0", "4", "128"]) lt[cr] = layerTimes(data, cr, gpu, c);
 
@@ -202,12 +208,11 @@ function project(data, gpu, c) {
   // Step 3: pipeline compute time (us) ; GA = gbs/(dp*mbs)
   // calibFactor corrects the single-layer-capture -> full-model bias (~0.93,
   // from the flash 16-layer single-node calibration; see design/06).
-  const ga = c.gbs / (c.dp * c.mbs);
+  const ga = c.gbs / (dp * c.mbs);
   const pipeUs = (ga + (c.pp - 1) / c.vpp) * (critF + critB) * c.calibFactor;
   const bubbleFrac = (c.pp - 1) / c.vpp / (ga + (c.pp - 1) / c.vpp);
 
   // Step 4: optimizer (memory-bound, zero1-sharded over world)
-  const world = c.pp * c.tp * c.cp * c.dp;
   const totalParams = estimateParams(cfg);
   const perRankParams = totalParams / world;
   const bw = (gpu === "MI355X" ? c.bw355 : c.bw455) * 1e9; // bytes/s
@@ -235,11 +240,11 @@ function project(data, gpu, c) {
     for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (lt[cr].fFlops + lt[cr].bFlops);
     fMb += nonLayerFlops(data, "output", "forward") + nonLayerFlops(data, "output", "backward");
   }
-  const flopsIter = fMb * ga * c.dp;
+  const flopsIter = fMb * ga * dp;
   const tflopsGpu = flopsIter / iterS / world / 1e12;
 
   return {
-    lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, totalParams,
+    lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, dp, totalParams,
     perRankParams, optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
   };
 }
@@ -373,16 +378,16 @@ function renderResults() {
   steps.append(step("Per-layer fwd/bwd (µs, " + (c.recompute === "full" ? "recompute on" : "no recompute") + ")", "", ltDesc));
   steps.append(step("Critical PP stage (µs)", `F ${fmt(p.critF, 0)} + B ${fmt(p.critB, 0)}`,
     `max over ${c.pp} stages; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
-  steps.append(step("GA (microbatches)", fmtInt(p.ga), `GA = GBS ${c.gbs} / (DP ${c.dp} × MBS ${c.mbs})`));
+  steps.append(step("GA (microbatches)", fmtInt(p.ga), `GA = GBS ${c.gbs} / (DP ${p.dp} × MBS ${c.mbs})`));
   steps.append(step("Pipeline compute / iter", `${fmt(p.pipeUs / 1000, 2)} ms`,
     `(GA + (PP−1)/VPP) × (F+B)_crit ; bubble ${fmt(p.bubbleFrac * 100, 1)}%`));
   steps.append(step("Optimizer step / iter", `${fmt(p.optUs / 1000, 2)} ms`,
     `zero1: ${fmtInt(p.perRankParams / 1e6)}M params/rank × ${c.bytesPerParam}B ×2 / HBM-BW / eff ${c.optEff}`));
   steps.append(step("Iteration time", `${fmt(p.iterUs / 1000, 2)} ms`, "pipeline compute + optimizer (DP/PP comm assumed hidden)"));
-  steps.append(step("World size", fmtInt(p.world), `PP ${c.pp} × TP ${c.tp} × CP ${c.cp} × DP ${c.dp}`));
+  steps.append(step("World size", fmtInt(p.world), `PP ${c.pp} × TP ${c.tp} × CP ${c.cp} × DP ${p.dp} (derived); EP ${c.ep} ≤ DP`));
   steps.append(step("Tokens / iter", fmtInt(p.tokIter), `GBS ${c.gbs} × seq ${p.seq}`));
   steps.append(step("tokens/s/GPU", fmtInt(p.tokSgpu), `${fmtInt(p.tokS)} tok/s ÷ ${p.world} GPUs`));
-  steps.append(step("TFLOP/s/GPU", fmt(p.tflopsGpu, 0), "matmul FLOPs (gemm+grouped_gemm+attn) only"));
+  steps.append(step("TFLOP/s/GPU", fmt(p.tflopsGpu, 0), "V4 analytic model FLOPs (Megatron convention)"));
 
   // self-consistency hint
   const cap = d.capture;
@@ -393,10 +398,10 @@ function renderResults() {
 }
 
 function renderAll() {
-  // keep world-size readonly box in sync
+  // keep the derived-DP readonly box in sync
   const w = STATE.controls;
-  const ro = document.getElementById("ctl-world");
-  if (ro) ro.value = w.pp * w.tp * w.cp * w.dp;
+  const roDp = document.getElementById("ctl-dp");
+  if (roDp) roDp.value = derivedDP(w);
   renderConfig();
   renderBreakdown();
   renderResults();
