@@ -23,7 +23,7 @@ modules:
       # hyper parameters
       train_iters: 25
       micro_batch_size: 3
-      global_batch_size: 96
+      global_batch_size: 192
       seq_length: 4096
       max_position_embeddings: 4096
       lr: 1.0e-5
@@ -73,7 +73,7 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
+      use_turbo_attention: true
       use_turbo_grouped_mlp: false
 
 
