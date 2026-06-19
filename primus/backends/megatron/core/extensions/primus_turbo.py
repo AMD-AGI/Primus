@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+import os
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
@@ -658,6 +659,16 @@ class PrimusTurboLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
+            if os.environ.get("PRIMUS_DEBUG_FP8") == "1":
+                _cls = type(self)
+                _seen = _cls.__dict__.get("_dbg_fp8_shapes")
+                if _seen is None:
+                    _seen = set(); _cls._dbg_fp8_shapes = _seen
+                _k = (tuple(input_.shape[-1:]), tuple(weights.shape))
+                if _k not in _seen:
+                    _seen.add(_k)
+                    print(f"[PRIMUS_DEBUG_FP8] {_cls.__name__} fp8 in={tuple(input_.shape)} w={tuple(weights.shape)} gran={quant_config.data().granularity}", flush=True)
+
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
             )
@@ -810,6 +821,16 @@ class PrimusTurboRowParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
+            if os.environ.get("PRIMUS_DEBUG_FP8") == "1":
+                _cls = type(self)
+                _seen = _cls.__dict__.get("_dbg_fp8_shapes")
+                if _seen is None:
+                    _seen = set(); _cls._dbg_fp8_shapes = _seen
+                _k = (tuple(input_.shape[-1:]), tuple(weights.shape))
+                if _k not in _seen:
+                    _seen.add(_k)
+                    print(f"[PRIMUS_DEBUG_FP8] {_cls.__name__} fp8 in={tuple(input_.shape)} w={tuple(weights.shape)} gran={quant_config.data().granularity}", flush=True)
+
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
             )
@@ -954,6 +975,16 @@ class PrimusTurboColumnParallelLinear(TELinear):
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
+
+            if os.environ.get("PRIMUS_DEBUG_FP8") == "1":
+                _cls = type(self)
+                _seen = _cls.__dict__.get("_dbg_fp8_shapes")
+                if _seen is None:
+                    _seen = set(); _cls._dbg_fp8_shapes = _seen
+                _k = (tuple(input_.shape[-1:]), tuple(weights.shape))
+                if _k not in _seen:
+                    _seen.add(_k)
+                    print(f"[PRIMUS_DEBUG_FP8] {_cls.__name__} fp8 in={tuple(input_.shape)} w={tuple(weights.shape)} gran={quant_config.data().granularity}", flush=True)
 
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()

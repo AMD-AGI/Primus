@@ -21,9 +21,25 @@ from primus.modules.module_utils import log_rank_0
     phase="before_train",
     description=(
         "Monkey patch MLA attention to use PrimusMLASelfAttention "
-        "when use_turbo_parallel_linear is enabled."
+        "when use_turbo_parallel_linear is enabled (skipped for DeepSeek-V4)."
     ),
-    condition=lambda ctx: getattr(get_args(ctx), "use_turbo_parallel_linear", False),
+    # Skip for DeepSeek-V4: its DeepseekV4Attention subclasses MLASelfAttention,
+    # and PrimusMLASelfAttention deliberately bypasses MLASelfAttention.__init__
+    # (calls the grandparent), which would break V4's super().__init__ chain if
+    # the base class were swapped. V4 builds DeepseekV4Attention directly and does
+    # not need the padded-fusion MLA path, so this patch must not fire for it.
+    condition=lambda ctx: (
+        getattr(get_args(ctx), "use_turbo_parallel_linear", False)
+        and not any(
+            getattr(get_args(ctx), _f, False)
+            for _f in (
+                "use_v4_triton_attention",
+                "use_v4_triton_csa_attention",
+                "use_v4_tilelang_attention",
+                "use_v4_tilelang_csa_attention",
+            )
+        )
+    ),
 )
 def patch_mla_attention(ctx: PatchContext):
     """

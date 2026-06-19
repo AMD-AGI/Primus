@@ -146,6 +146,12 @@ export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-True}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
+# Phase 1b: route the dense/attention projections (q_down/kv/o_a etc.) through
+# Primus-Turbo linears so they pick up the mxfp8 (CK) path under the fp8 context.
+# Default OFF (attention stays bf16, the validated baseline). Set True to enable
+# fp8 attention/dense projections. Requires TP=1 and fp8_recipe in {tensorwise,
+# blockwise,mxfp8}; the MLA monkey-patch is auto-skipped for V4 (see mla_patches).
+export USE_TURBO_PARALLEL_LINEAR=${USE_TURBO_PARALLEL_LINEAR:-False}
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
@@ -259,6 +265,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --expert_model_parallel_size "$PRIMUS_EP" \
   --num_experts "$PRIMUS_NUM_EXPERTS" \
   --moe_router_topk "$PRIMUS_MOE_TOPK" \
+  --moe_router_force_load_balancing "${MOE_FORCE_LOAD_BALANCE:-False}" \
   --moe_router_enable_expert_bias "$PRIMUS_MOE_ENABLE_EXPERT_BIAS" \
   --moe_ffn_hidden_size "$PRIMUS_MOE_FFN_HIDDEN_SIZE" \
   --index_topk "$PRIMUS_INDEX_TOPK" \
@@ -286,6 +293,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
+  --use_turbo_parallel_linear "$USE_TURBO_PARALLEL_LINEAR" \
   --moe_use_legacy_grouped_gemm False \
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \

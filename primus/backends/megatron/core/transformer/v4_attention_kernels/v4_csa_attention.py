@@ -375,6 +375,7 @@ def v4_csa_attention_from_pool(
     training: bool,
     scale: float,
     use_tilelang: bool = False,
+    use_flydsl: bool = False,  # accepted for call-site parity; no from-pool FlyDSL kernel, Triton path
 ) -> torch.Tensor:
     """Triton-backed CSA attention that gathers sparse keys in-kernel.
 
