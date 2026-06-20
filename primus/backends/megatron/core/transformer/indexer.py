@@ -44,6 +44,7 @@ Phase 4 contract:
 
 from __future__ import annotations
 
+import os
 from typing import Tuple
 
 import torch
@@ -69,6 +70,73 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.inde
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
     is_triton_path_enabled as _indexer_tail_triton_enabled,
 )
+
+# MXFP4 block size (E2M1 data + E8M0 per-32 block scales).
+_MXFP4_BLOCK = 32
+
+
+def _indexer_fp4_enabled() -> bool:
+    """Return True iff ``PRIMUS_INDEXER_FP4 == "1"`` (default-OFF).
+
+    Phase 5 of the DeepSeek-V4 precision alignment: the paper runs the
+    CSA-indexer QK score in FP4 ("`fp8_index`" → FP4 QK in V4). When set,
+    the indexer query ``q_i`` and the compressed key ``K^{IComp}`` are
+    rounded to MXFP4 (E2M1 + E8M0 block-32 scales) before the QK product,
+    modelling the FP4 GEMM operand precision. The per-head weights ``w_i``,
+    the ReLU/sum tail, and top-k stay BF16/FP32 — only the QK is FP4.
+    """
+    return os.environ.get("PRIMUS_INDEXER_FP4", "0") == "1"
+
+
+class _Fp4QkQuant(torch.autograd.Function):
+    """Round the contraction (last) dim of ``x`` to MXFP4 then dequantize.
+
+    Forward returns the FP4-rounded high-precision tensor (so the existing
+    BF16/FP32 einsum sees FP4 operand precision — numerically equivalent to
+    an MXFP4 GEMM that quantizes E2M1+E8M0 and accumulates in FP32).
+    Backward is a straight-through estimator (identity), which is the
+    standard QAT gradient for a quantizer.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        # Lazy import: only needed when PRIMUS_INDEXER_FP4 is on (and keeps
+        # the gfx950-only MXFP4 dependency off the default import path).
+        from primus_turbo.pytorch.core.low_precision import ScalingGranularity
+        from primus_turbo.pytorch.ops.quantization import (
+            dequantize_fp4,
+            quantize_fp4,
+        )
+
+        hd = x.shape[-1]
+        # MXFP4 quant expects a 2D tensor; block runs along the contraction
+        # dim (Hd), i.e. row direction → axis=1.
+        x2d = x.reshape(-1, hd).contiguous()
+        qdata, scale_inv = quantize_fp4(
+            x2d,
+            torch.float4_e2m1fn_x2,
+            ScalingGranularity.MX_BLOCKWISE,
+            block_size=_MXFP4_BLOCK,
+            axis=1,
+        )
+        xdq = dequantize_fp4(
+            qdata,
+            x.dtype,
+            ScalingGranularity.MX_BLOCKWISE,
+            block_size=_MXFP4_BLOCK,
+            axis=1,
+            scale_inv=scale_inv,
+        )
+        return xdq.reshape(x.shape)
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor) -> torch.Tensor:
+        return grad_out
+
+
+def _fp4_qk(x: torch.Tensor) -> torch.Tensor:
+    """MXFP4 fake-quant the QK operand ``x`` (last dim is the contraction)."""
+    return _Fp4QkQuant.apply(x)
 
 
 class Indexer(nn.Module):
@@ -186,6 +254,12 @@ class Indexer(nn.Module):
         #                                    (einsum + tail in one kernel).
         #   else                          → fully eager.
         k_icomp_2d = k_icomp.squeeze(2)
+        # Phase 5: FP4 CSA-indexer QK. Round q_i and K^{IComp} to MXFP4 before
+        # the QK product (all score paths share these operands). w_i and the
+        # ReLU/sum tail stay BF16 — only the QK is FP4, per the paper.
+        if _indexer_fp4_enabled():
+            q_i = _fp4_qk(q_i)
+            k_icomp_2d = _fp4_qk(k_icomp_2d)
         if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,

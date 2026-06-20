@@ -160,6 +160,13 @@ export MOE_EXPERTS_FP4=${MOE_EXPERTS_FP4:-False}
 if [ "$MOE_EXPERTS_FP4" = "True" ]; then
   export PRIMUS_TURBO_GEMM_BACKEND=${PRIMUS_TURBO_GEMM_BACKEND:-FP4:HIPBLASLT}
 fi
+# Phase 5 (paper): CSA-indexer QK score in FP4. Rounds q_i and K^{IComp} to
+# MXFP4 before the QK product (STE backward); w_i + ReLU/sum tail stay BF16.
+# Read directly by the Indexer via PRIMUS_INDEXER_FP4. Default OFF.
+export INDEXER_FP4=${INDEXER_FP4:-False}
+if [ "$INDEXER_FP4" = "True" ]; then
+  export PRIMUS_INDEXER_FP4=1
+fi
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
