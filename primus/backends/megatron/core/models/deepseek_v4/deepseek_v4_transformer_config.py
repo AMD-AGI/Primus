@@ -100,6 +100,12 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     use_v4_triton_attention: bool = False
     use_v4_triton_csa_attention: bool = False
 
+    # ---- Per-module precision (paper recipe): routed experts in MXFP4 while the
+    # rest of the layer runs FP8. Decoupled from the global --fp4/--fp8 recipe
+    # (which are mutually exclusive): with FP8 on, the PrimusTurbo grouped MLP
+    # routes the expert GEMMs through the native FP4 (hipBLASLt) path. Default OFF.
+    moe_experts_fp4: bool = False
+
     # ---- DeepSeek-V4 plan-8 tilelang attention kernels (default OFF) ----
     # Plan-8 P57 close-out 2 (2026-05-15): tilelang is an OPTIONAL
     # dependency.  When the container has tilelang installed at the

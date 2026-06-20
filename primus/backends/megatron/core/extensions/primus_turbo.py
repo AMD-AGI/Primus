@@ -1350,6 +1350,20 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
         self.patch_zero_bubble = args.patch_zero_bubble
         self.patch_primus_pipeline = args.patch_primus_pipeline
+        # Per-module recipe (paper): routed experts in MXFP4 while the rest of the
+        # layer runs FP8. Decided by this flag (not the global recipe), so it works
+        # under a global FP8 context without the mutually-exclusive --fp4/--fp8 flags.
+        self.moe_experts_fp4 = bool(getattr(config, "moe_experts_fp4", False))
+        self._experts_fp4_config = (
+            Float4QuantConfig(
+                format=Format.E2M1_X2,
+                granularity=ScalingGranularity.MX_BLOCKWISE,
+                block_size=32,
+                scale_dtype=ScaleDtype.E8M0,
+            )
+            if self.moe_experts_fp4
+            else None
+        )
 
         if self.config.add_bias_linear:
             raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
@@ -1417,18 +1431,16 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         w2 = self._stack_grouped_linear_weight(self.linear_fc2)
         tokens_per_expert = tokens_per_expert.to(w1.device)
 
-        use_grouped_gemm_low_precision = (
-            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
-            and not self.disable_turbo_grouped_mlp_low_precision
-        )
-        # MXFP4 experts: no fused grouped FP4 gemm exists, so use a per-group
-        # native FP4 (hipBLASLt) loop (_grouped_gemm_fp4_per_group). fp8 takes
-        # priority if both somehow enabled.
-        use_grouped_gemm_fp4 = (
-            not use_grouped_gemm_low_precision
-            and PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
-            and not self.disable_turbo_grouped_mlp_low_precision
-        )
+        _low_prec = not self.disable_turbo_grouped_mlp_low_precision
+        _fp8_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+        _fp4_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+        # Experts go MXFP4 either with a global FP4 recipe, or — the paper's
+        # per-module recipe — when moe_experts_fp4 is set while the layer runs FP8
+        # (experts FP4 / everything-else FP8). No fused grouped FP4 gemm exists,
+        # so _grouped_gemm_fp4_per_group loops the native FP4 (hipBLASLt) dense gemm.
+        use_grouped_gemm_fp4 = _low_prec and (_fp4_on or (self.moe_experts_fp4 and _fp8_on))
+        # FP8 experts only when not going FP4.
+        use_grouped_gemm_low_precision = _low_prec and _fp8_on and not use_grouped_gemm_fp4
         probs_for_activation = permuted_probs.unsqueeze(-1)
 
         if permuted_local_hidden_states.nelement() != 0:
@@ -1442,13 +1454,17 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
                     config=quant_config.data(),
                 )
             elif use_grouped_gemm_fp4:
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                fp4_config = (
+                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
+                    if _fp4_on
+                    else self._experts_fp4_config
+                )
                 fc1_output = _grouped_gemm_fp4_per_group(
                     permuted_local_hidden_states,
                     w1,
                     tokens_per_expert,
                     permuted_local_hidden_states.dtype,
-                    quant_config.data(),
+                    fp4_config,
                 )
             else:
                 fc1_output = pt.ops.grouped_gemm(
@@ -1485,13 +1501,17 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
                     config=quant_config.data(),
                 )
             elif use_grouped_gemm_fp4:
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                fp4_config = (
+                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
+                    if _fp4_on
+                    else self._experts_fp4_config
+                )
                 output = _grouped_gemm_fp4_per_group(
                     intermediate_parallel,
                     w2,
                     tokens_per_expert,
                     intermediate_parallel.dtype,
-                    quant_config.data(),
+                    fp4_config,
                 )
             else:
                 output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)

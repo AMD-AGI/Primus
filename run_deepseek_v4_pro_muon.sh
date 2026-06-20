@@ -152,6 +152,14 @@ export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
 # fp8 attention/dense projections. Requires TP=1 and fp8_recipe in {tensorwise,
 # blockwise,mxfp8}; the MLA monkey-patch is auto-skipped for V4 (see mla_patches).
 export USE_TURBO_PARALLEL_LINEAR=${USE_TURBO_PARALLEL_LINEAR:-False}
+# Per-module recipe (paper): routed experts in MXFP4 while the rest of the layer
+# stays FP8. Works under the global FP8 recipe (no --fp4/--fp8 conflict): the
+# PrimusTurbo grouped MLP routes expert GEMMs through native FP4 (hipBLASLt).
+# Default OFF. When on, force the hipBLASLt FP4 backend (no AITER).
+export MOE_EXPERTS_FP4=${MOE_EXPERTS_FP4:-False}
+if [ "$MOE_EXPERTS_FP4" = "True" ]; then
+  export PRIMUS_TURBO_GEMM_BACKEND=${PRIMUS_TURBO_GEMM_BACKEND:-FP4:HIPBLASLT}
+fi
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
@@ -294,6 +302,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
   --use_turbo_parallel_linear "$USE_TURBO_PARALLEL_LINEAR" \
+  --moe_experts_fp4 "$MOE_EXPERTS_FP4" \
   --moe_use_legacy_grouped_gemm False \
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \
