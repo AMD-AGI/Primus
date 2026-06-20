@@ -980,6 +980,13 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         is the 0-based global layer index (matches the function's ``layer_no``
         contract / ``is_first_last_bf16_layer`` gating).
         """
+        # FP4 (mxfp4) path: enter the Primus-Turbo fp4 autocast so is_turbo_fp4_enabled()
+        # is set for the layer (drives the grouped-MLP MXFP4 expert path and the
+        # fp4 turbo linears). fp4 and fp8 are mutually exclusive (global recipe).
+        if getattr(self.config, "fp4", None):
+            from megatron.core import fp4_utils
+
+            return fp4_utils.get_fp4_context(self.config, global_idx)
         if not self.config.fp8:
             return nullcontext()
         from megatron.core import fp8_utils

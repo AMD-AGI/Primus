@@ -1285,6 +1285,40 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         return out, None
 
 
+_FP4_TOKEN_PAD = 16
+
+
+def _grouped_gemm_fp4_per_group(a, b, group_lens, out_dtype, config):
+    """Per-group native MXFP4 grouped GEMM (drop-in for grouped_gemm_fp8, trans_b=False).
+
+    There is no fused grouped FP4 gemm, so loop the dense FP4 training gemm
+    (``pt.ops.gemm_fp4`` / FP4GemmMXFunction, hipBLASLt backend) over experts.
+    ``a``:[M,K], ``b``:[G,K,N] -> ``out``:[M,N] with out_g = a_g @ b_g.
+    The FP4 hipBLASLt path is NT-only (so b_g[K,N] is transposed to [N,K] and
+    trans_b=True) and needs the token dim a multiple of 16 (zero-pad, slice back).
+    fwd+dgrad+wgrad come from the gemm_fp4 autograd.
+    """
+    G, K, N = b.shape
+    gl = [int(x) for x in group_lens.tolist()]
+    offs = [0]
+    for m in gl:
+        offs.append(offs[-1] + m)
+    outs = []
+    for g in range(G):
+        m = gl[g]
+        if m == 0:
+            outs.append(a.new_zeros((0, N), dtype=out_dtype))
+            continue
+        a_g = a[offs[g]:offs[g] + m]
+        mp = (m + _FP4_TOKEN_PAD - 1) // _FP4_TOKEN_PAD * _FP4_TOKEN_PAD
+        if mp != m:
+            a_g = torch.cat([a_g, a_g.new_zeros((mp - m, K))], dim=0)
+        w = b[g].transpose(0, 1).contiguous()  # [K,N] -> [N,K] for NT
+        o = pt.ops.gemm_fp4(a_g.contiguous(), w, False, True, out_dtype, config)
+        outs.append(o[:m])
+    return torch.cat(outs, dim=0)
+
+
 class PrimusTurboGroupedMLP(TEGroupedMLP):
     """
     Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
@@ -1387,6 +1421,14 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
             PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
             and not self.disable_turbo_grouped_mlp_low_precision
         )
+        # MXFP4 experts: no fused grouped FP4 gemm exists, so use a per-group
+        # native FP4 (hipBLASLt) loop (_grouped_gemm_fp4_per_group). fp8 takes
+        # priority if both somehow enabled.
+        use_grouped_gemm_fp4 = (
+            not use_grouped_gemm_low_precision
+            and PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+            and not self.disable_turbo_grouped_mlp_low_precision
+        )
         probs_for_activation = permuted_probs.unsqueeze(-1)
 
         if permuted_local_hidden_states.nelement() != 0:
@@ -1398,6 +1440,15 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
+                )
+            elif use_grouped_gemm_fp4:
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                fc1_output = _grouped_gemm_fp4_per_group(
+                    permuted_local_hidden_states,
+                    w1,
+                    tokens_per_expert,
+                    permuted_local_hidden_states.dtype,
+                    quant_config.data(),
                 )
             else:
                 fc1_output = pt.ops.grouped_gemm(
@@ -1432,6 +1483,15 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
+                )
+            elif use_grouped_gemm_fp4:
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                output = _grouped_gemm_fp4_per_group(
+                    intermediate_parallel,
+                    w2,
+                    tokens_per_expert,
+                    intermediate_parallel.dtype,
+                    quant_config.data(),
                 )
             else:
                 output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
