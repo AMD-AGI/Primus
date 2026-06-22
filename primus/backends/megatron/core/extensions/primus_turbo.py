@@ -897,7 +897,7 @@ class PrimusTurboLinear(TELinear):
                         axis=-1,
                     )
 
-                    if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
+                    if not self.disable_parameter_transpose_cache:
                         self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
                             weight,
                             dest_dtype=weight_dtype,
@@ -1099,7 +1099,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         axis=-1,
                     )
 
-                    if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
+                    if not self.disable_parameter_transpose_cache:
                         self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
                             weight,
                             dest_dtype=weight_dtype,
@@ -1294,7 +1294,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         axis=-1,
                     )
 
-                    if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
+                    if not self.disable_parameter_transpose_cache:
                         self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
                             weight,
                             dest_dtype=weight_dtype,
@@ -1502,7 +1502,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         axis=-1,
                     )
 
-                    if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
+                    if not self.disable_parameter_transpose_cache:
                         self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
                             weight,
                             dest_dtype=weight_dtype,
@@ -1754,7 +1754,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     axis=-1,
                 )
 
-                if quant_config.current_scaling() or not self.disable_parameter_transpose_cache:
+                if not self.disable_parameter_transpose_cache:
                     self.quantized_weight_t_buffer = PrimusTurboQuantizedTensor.quantize(
                         weights,
                         dest_dtype=weight_dtype,
