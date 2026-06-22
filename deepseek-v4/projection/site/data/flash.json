@@ -11,7 +11,7 @@
     "seq": 4096,
     "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP"
   },
-  "generated_at": "2026-06-22T15:07:42Z",
+  "generated_at": "2026-06-22T17:52:01Z",
   "provenance": {
     "traces": {
       "0": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1781793844365290266.pt.trace.json",
@@ -29,7 +29,7 @@
     "ep": 8,
     "ga_for_capture": 2,
     "optimizer": "adam",
-    "distributed_optimizer": true,
+    "distributed_optimizer": false,
     "recompute": "off",
     "measured_iter_time_ms": null
   },
@@ -93,7 +93,8 @@
       "0": 3,
       "4": 20,
       "128": 20
-    }
+    },
+    "total_params": 283810725888
   },
   "hardware": {
     "MI355X": {

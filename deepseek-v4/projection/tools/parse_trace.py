@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel_module_map import flop_class_from_kernel
-from v4_flops import FB_FMA, layer_fmac, nonlayer_fmac
+from v4_flops import FB_FMA, layer_fmac, model_total_params, nonlayer_fmac
 
 PRO_COMPRESS = [128, 128] + [4 if i % 2 == 0 else 128 for i in range(2, 60)] + [0]
 FLASH_COMPRESS = [0, 0] + [4 if i % 2 == 0 else 128 for i in range(2, 42)] + [0]
@@ -439,11 +439,15 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
             "ep": 8,
             "ga_for_capture": 2,
             "optimizer": "adam",
-            "distributed_optimizer": True,
+            "distributed_optimizer": False,
             "recompute": "off",
             "measured_iter_time_ms": None,
         },
-        "model_config": {**cfg, "cr_layer_counts": cr_layer_counts(cfg["compress_ratios"])},
+        "model_config": {
+            **cfg,
+            "cr_layer_counts": cr_layer_counts(cfg["compress_ratios"]),
+            "total_params": model_total_params(model, cfg["num_layers"]),
+        },
         "hardware": DEFAULT_HARDWARE,
         "layers": layers,
         "non_layer": {k: _lists(src[k]) for k in ("embedding", "output", "loss")},

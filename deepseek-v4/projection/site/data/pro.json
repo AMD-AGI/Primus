@@ -11,7 +11,7 @@
     "seq": 4096,
     "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP"
   },
-  "generated_at": "2026-06-18T22:42:06Z",
+  "generated_at": "2026-06-22T17:51:57Z",
   "provenance": {
     "traces": {
       "0": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_pro_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_pro_cr0_seq4096_ep8]-rank[0].1781792532762897620.pt.trace.json",
@@ -29,7 +29,7 @@
     "ep": 8,
     "ga_for_capture": 2,
     "optimizer": "adam",
-    "distributed_optimizer": true,
+    "distributed_optimizer": false,
     "recompute": "off",
     "measured_iter_time_ms": null
   },
@@ -111,7 +111,8 @@
       "0": 1,
       "4": 29,
       "128": 31
-    }
+    },
+    "total_params": 1571740581888
   },
   "hardware": {
     "MI355X": {
@@ -127,6 +128,40 @@
     "0": {
       "attention": {
         "forward": [
+          {
+            "module": "other",
+            "time_us": 50996.046,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 38789.717
+              },
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3024.544
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 1906.817
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1630.312
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1333.78
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 726.343
+              }
+            ]
+          },
           {
             "module": "attn.proj",
             "time_us": 5781.21,
@@ -216,6 +251,40 @@
         ],
         "backward": [
           {
+            "module": "other",
+            "time_us": 6366.322,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1366.235
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1341.008
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
+                "time_us": 641.61
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 374.819
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 249.76
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 245.856
+              }
+            ]
+          },
+          {
             "module": "attn.proj",
             "time_us": 5907.367,
             "class": "compute_bound",
@@ -251,7 +320,7 @@
           },
           {
             "module": "attn.core",
-            "time_us": 1753.652,
+            "time_us": 1753.653,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -314,42 +383,8 @@
       "moe": {
         "forward": [
           {
-            "module": "other",
-            "time_us": 51419.929,
-            "class": "compute_bound",
-            "flop_class": "grouped_gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 38789.717
-              },
-              {
-                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 3024.544
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 1906.817
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 1630.312
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 1333.78
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 726.343
-              }
-            ]
-          },
-          {
             "module": "moe.grouped_gemm",
-            "time_us": 8396.151,
+            "time_us": 8820.034,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -362,6 +397,10 @@
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
                 "time_us": 1208.776
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 423.883
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
@@ -409,40 +448,6 @@
           }
         ],
         "backward": [
-          {
-            "module": "other",
-            "time_us": 6909.128,
-            "class": "compute_bound",
-            "flop_class": "gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 1366.235
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 1341.008
-              },
-              {
-                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
-                "time_us": 641.61
-              },
-              {
-                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
-                "time_us": 374.819
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 249.76
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 245.856
-              }
-            ]
-          },
           {
             "module": "moe.grouped_gemm",
             "time_us": 1339.59,
@@ -497,7 +502,7 @@
           },
           {
             "module": "moe.dispatch",
-            "time_us": 872.041,
+            "time_us": 872.042,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -595,6 +600,40 @@
     "4": {
       "attention": {
         "forward": [
+          {
+            "module": "other",
+            "time_us": 15510.655,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3023.79
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 2337.985
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 2222.28
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1645.297
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1337.91
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 993.69
+              }
+            ]
+          },
           {
             "module": "attn.proj",
             "time_us": 5935.704,
@@ -752,6 +791,40 @@
             ]
           },
           {
+            "module": "other",
+            "time_us": 6382.919,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1378.227
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1339.041
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
+                "time_us": 641.36
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 378.692
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 249.123
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 244.986
+              }
+            ]
+          },
+          {
             "module": "attn.proj",
             "time_us": 5958.409,
             "class": "compute_bound",
@@ -788,10 +861,10 @@
           {
             "module": "attn.indexer",
             "time_us": 685.779,
-            "class": "compute_bound",
-            "flop_class": "gemm",
-            "flops": 119453777920.0,
-            "tflops": 174.2,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
             "kernels": [
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
@@ -858,42 +931,8 @@
       "moe": {
         "forward": [
           {
-            "module": "other",
-            "time_us": 15935.935,
-            "class": "compute_bound",
-            "flop_class": "grouped_gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 3023.79
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 2337.985
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 2222.28
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 1645.297
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 1337.91
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 993.69
-              }
-            ]
-          },
-          {
             "module": "moe.grouped_gemm",
-            "time_us": 8340.605,
+            "time_us": 8765.885,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -906,6 +945,10 @@
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
                 "time_us": 1206.016
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 425.279
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
@@ -953,40 +996,6 @@
           }
         ],
         "backward": [
-          {
-            "module": "other",
-            "time_us": 6929.231,
-            "class": "compute_bound",
-            "flop_class": "gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 1378.227
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 1339.041
-              },
-              {
-                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
-                "time_us": 641.36
-              },
-              {
-                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
-                "time_us": 378.692
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 249.123
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 244.986
-              }
-            ]
-          },
           {
             "module": "moe.grouped_gemm",
             "time_us": 1356.649,
@@ -1140,6 +1149,40 @@
       "attention": {
         "forward": [
           {
+            "module": "other",
+            "time_us": 14536.037,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3030.941
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 2201.218
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 1924.649
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1658.726
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1335.873
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 730.665
+              }
+            ]
+          },
+          {
             "module": "attn.proj",
             "time_us": 5909.199,
             "class": "compute_bound",
@@ -1201,7 +1244,7 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 156.11
+                "time_us": 156.111
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
@@ -1245,6 +1288,40 @@
           }
         ],
         "backward": [
+          {
+            "module": "other",
+            "time_us": 6422.7,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1371.851
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1340.061
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
+                "time_us": 641.923
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 377.102
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 252.67
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 245.85
+              }
+            ]
+          },
           {
             "module": "attn.proj",
             "time_us": 5933.939,
@@ -1346,10 +1423,10 @@
           {
             "module": "attn.indexer",
             "time_us": 118.727,
-            "class": "compute_bound",
-            "flop_class": "gemm",
-            "flops": 60129542144.0,
-            "tflops": 506.5,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
             "kernels": [
               {
                 "name": "void at::native::(anonymous namespace)::cunn_SpatialSoftMaxForward<float, float,",
@@ -1382,42 +1459,8 @@
       "moe": {
         "forward": [
           {
-            "module": "other",
-            "time_us": 14959.627,
-            "class": "compute_bound",
-            "flop_class": "grouped_gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 3030.941
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 2201.217
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 1924.65
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 1658.726
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 1335.873
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 730.665
-              }
-            ]
-          },
-          {
             "module": "moe.grouped_gemm",
-            "time_us": 8293.985,
+            "time_us": 8717.575,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1430,6 +1473,10 @@
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
                 "time_us": 1151.912
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 423.59
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
@@ -1477,40 +1524,6 @@
           }
         ],
         "backward": [
-          {
-            "module": "other",
-            "time_us": 6970.923,
-            "class": "compute_bound",
-            "flop_class": "gemm",
-            "flops": null,
-            "tflops": null,
-            "kernels": [
-              {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 1371.851
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 1340.061
-              },
-              {
-                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
-                "time_us": 641.923
-              },
-              {
-                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
-                "time_us": 377.102
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 252.67
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 245.85
-              }
-            ]
-          },
           {
             "module": "moe.grouped_gemm",
             "time_us": 1359.113,
@@ -1752,7 +1765,30 @@
     },
     "loss": {
       "forward": [],
-      "backward": []
+      "backward": [
+        {
+          "module": "loss",
+          "time_us": 546.313,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": [
+            {
+              "name": "cross_entropy_kernel",
+              "time_us": 222.888
+            },
+            {
+              "name": "element_mul_kernel",
+              "time_us": 195.848
+            },
+            {
+              "name": "online_softmax_kernel",
+              "time_us": 127.577
+            }
+          ]
+        }
+      ]
     }
   },
   "optimizer": {

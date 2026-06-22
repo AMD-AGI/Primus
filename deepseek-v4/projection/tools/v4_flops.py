@@ -145,6 +145,28 @@ def nonlayer_fmac(model: str, seq: int) -> dict[str, float]:
     return {"logits": seq * p["hidden"] * p["vocab"]}
 
 
+def model_total_params(model: str, num_layers: int) -> int:
+    """Approximate total parameter count (for optimizer-step sizing). Uses the
+    same V4 MLA low-rank attention shapes as the FLOPs formula (q/o LoRA + single
+    latent KV) instead of the crude 4*h^2, plus MoE experts + shared + router and
+    the tied-free embedding/output."""
+    p = MODEL_PARAMS[model]
+    n_d = p["heads"] * p["head_dim"]
+    attn = (
+        p["hidden"] * p["q_lora"]
+        + p["q_lora"] * n_d
+        + p["hidden"] * p["head_dim"]
+        + n_d * p["o_lora"]
+        + p["o_groups"] * p["o_lora"] * p["hidden"]
+    )
+    moe = (
+        p["experts"] * SWIGLU * p["hidden"] * p["moe_ffn"]
+        + SWIGLU * p["hidden"] * p["shared_ffn"]
+        + p["hidden"] * p["experts"]
+    )
+    return int(num_layers * (attn + moe) + 2 * p["vocab"] * p["hidden"])
+
+
 # Map analytic components to projection module names (per layer).
 def module_flops(model: str, cr: int, seq: int) -> dict[str, float]:
     """Megatron-convention FLOPs (×FB_FMA) per module, per layer, batch_size=1."""

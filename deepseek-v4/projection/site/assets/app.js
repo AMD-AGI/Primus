@@ -164,12 +164,12 @@ function nonLayerFlops(data, which, phase) {
 // Param estimate (Step 4)
 // ---------------------------------------------------------------------------
 function estimateParams(cfg) {
+  // Prefer the exact V4 count emitted by parse_trace (MLA low-rank attention +
+  // MoE + tied-free embedding/output). Fall back to a crude estimate.
+  if (cfg.total_params) return cfg.total_params;
   const h = cfg.hidden_size, exp = cfg.num_experts, mff = cfg.moe_ffn_hidden_size;
   const sff = cfg.moe_shared_expert_intermediate_size || mff, V = cfg.vocab_size, L = cfg.num_layers;
-  const attn = 4 * h * h;
-  const experts = exp * 3 * h * mff;
-  const shared = 3 * h * sff;
-  const perLayer = attn + experts + shared;
+  const perLayer = 4 * h * h + exp * 3 * h * mff + 3 * h * sff;
   return L * perLayer + 2 * V * h;
 }
 
@@ -317,7 +317,7 @@ function breakdownBlock(title, fwdList, bwdList) {
   table.append(timeRow);
 
   const tfRow = el("tr");
-  tfRow.append(el("td", { class: "rowlab" }, "TFLOP/s"));
+  tfRow.append(el("td", { class: "rowlab" }, "TFLOP/s (kernel)"));
   cols.forEach((col, i) => {
     const tf = rowTflops(col.r, col.t);
     tfRow.append(el("td", { class: i === dividerIdx ? "divider" : "" }, tf ? fmt(tf, 0) : "—"));

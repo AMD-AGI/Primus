@@ -47,7 +47,9 @@
           <h2>Per-layer breakdown <span id="breakdown-gpu" class="muted"></span></h2>
           <p class="muted">
             Forward (left→right) then backward (right→left). Time in µs / one
-            microbatch (seq 4096). TFLOPs shown only for gemm / grouped_gemm / attn.
+            microbatch (seq 4096). The TFLOP/s row is per-kernel <em>achieved</em>
+            (gemm / grouped_gemm / attn only); the headline TFLOP/s/GPU below uses
+            the V4 analytic model FLOPs instead.
           </p>
         </div>
         <div id="breakdown-blocks"></div>
@@ -57,6 +59,12 @@
         <section class="panel" id="controls-panel">
           <h2>Projection controls</h2>
           <div id="controls-grid" class="controls-grid"></div>
+          <p class="muted">
+            DP is derived from World size / (PP·TP·CP); EP is a sub-group of DP.
+            Note: the captured MoE dispatch/combine is intra-node EP=8 and is not
+            re-modeled for other EP values; sequence length is fixed at the
+            capture value (4096).
+          </p>
         </section>
 
         <section class="panel panel--accent" id="results-panel">
