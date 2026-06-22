@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - dev/wenx/deepseek-v4
+      - dev/tas/deepseek-v4
     paths:
       - "deepseek-v4/projection/site/**"
       - ".github/workflows/deploy-projection.yml"
