@@ -144,13 +144,21 @@ def _resolve_module(kname: str, cpu_name: str, anc_classes: set[str], flop_class
         return "__optimizer__"
     if "nccl" in low:
         return "__dpcomm__"
+    if "cross_entropy" in low or "online_softmax" in low:
+        return "loss"
     if "deep_ep" in n or "deepep" in low:
         return "moe.combine" if "combine" in low else "moe.dispatch"
     if "_v4_csa" in n or "_v4_attention" in n or "_hc_" in n:
         return "attn.core"
     if "_sinkhorn" in n or "_v4_router" in n:
         return "moe.router"
-    if "GroupedGemm" in n or "_grouped" in n or "group_gemm" in low or "grouped_variable" in n:
+    if (
+        "GroupedGemm" in n
+        or "_grouped" in n
+        or "group_gemm" in low
+        or "grouped_gemm" in low
+        or "grouped_variable" in n
+    ):
         return "moe.grouped_gemm"
 
     # 2) cpu-op (autograd Function / aten) name rules — needed for backward
@@ -162,7 +170,7 @@ def _resolve_module(kname: str, cpu_name: str, anc_classes: set[str], flop_class
         return "moe.router"
     if "RMSNorm" in cn or "LayerNorm" in cn or "layer_norm" in cn.lower():
         return "attn.norm"
-    if "cross_entropy" in cn.lower() or "nll_loss" in cn.lower():
+    if "crossentropy" in cn.lower() or "cross_entropy" in cn.lower() or "nll_loss" in cn.lower():
         return "loss"
     if "embedding" in cn.lower():
         return "output" if flop_class == "gemm" else "embedding"
@@ -243,13 +251,23 @@ def parse_trace(path: Path, ga: int = 2):
                 classes.add(name.split(":", 1)[1].strip().rsplit("_", 1)[0])
         return classes
 
-    # Accumulate raw kernel time per (phase, module) over the WHOLE trace, then
-    # divide by the number of captured microbatches (num_steps * GA). min-group
-    # dedup fails for moe grouped-gemm (its input dims change every routing step,
-    # so launches never dedup and would sum across all microbatches); dividing by
-    # the microbatch count gives the correct per-microbatch, per-layer time for
-    # every module uniformly. (overlap is off, so the average == clean time.)
-    agg: dict[tuple[str, str], dict] = {}
+    # Per-microbatch time = (sum of all launches over the whole profiler window)
+    # / num_mb, where num_mb = num_steps * GA. We keep the SUM (not a min over
+    # launches): the single-layer capture serializes each layer's work, and the
+    # measured flash-16L anchor (design/06) shows this serial per-layer time is
+    # the right estimate (calibFactor ~0.93 against 6665 ms). A min-over-launches
+    # rule would assume the scalar control-flow stalls (e.g. the Indexer top-k
+    # device syncs) are fully hidden in the full model; the anchor refutes that
+    # (it would need calibFactor ~1.3), so they are kept as real per-layer cost.
+    #
+    # Subgroups are keyed by (kernel, input-dims) only so we can (a) classify a
+    # row as compute_bound iff FLOP-classed kernels dominate its time (>50%) --
+    # a stray flop-classed kernel can no longer flip a memory-bound aggregate --
+    # and (b) sum dim-derived GEMM FLOPs correctly.
+    num_mb = max(1, num_steps * ga)
+
+    # (phase, module) -> { (kernel_name, dims_key): {"durs": [...], "flop_class", "flop_per_launch"} }
+    groups: dict[tuple[str, str], dict] = defaultdict(dict)
     optimizer_us = 0.0
     dpcomm_us = 0.0
 
@@ -278,59 +296,66 @@ def parse_trace(path: Path, ga: int = 2):
         else:
             fwd_tid = _arg(cpu, "Fwd thread id") if cpu else None
             phase = "backward" if (fwd_tid is not None or "ackward" in cpu_name) else "forward"
-        flops = _gemm_flops(_dims_key(_arg(cpu, "Input Dims"))) if (cpu and flop_class == "gemm") else None
-        row = agg.setdefault(
-            (phase, module),
-            {
-                "module": module,
-                "time_us": 0.0,
-                "flops": 0.0,
-                "has_flops": False,
-                "flop_class": None,
-                "kernels": defaultdict(float),
-            },
+        dims_key = _dims_key(_arg(cpu, "Input Dims")) if cpu else ""
+        flop_per_launch = _gemm_flops(dims_key) if (cpu and flop_class == "gemm") else None
+        sub = groups[(phase, module)].setdefault(
+            (name, dims_key),
+            {"durs": [], "flop_class": flop_class, "flop_per_launch": flop_per_launch},
         )
-        row["time_us"] += dur
-        if flop_class:
-            row["flop_class"] = flop_class
-        if flops:
-            row["flops"] += flops
-            row["has_flops"] = True
-        row["kernels"][name[:80]] += dur
+        sub["durs"].append(dur)
 
-    num_mb = max(1, num_steps * ga)
     optimizer_us /= max(1, num_steps)  # optimizer runs once per training iteration
     dpcomm_us /= num_mb
 
     out = {b: {"forward": {}, "backward": {}} for b in ("attention", "moe", "embedding", "output", "loss")}
-    for (phase, module), row in agg.items():
-        compute = row["flop_class"] is not None
-        time_us = row["time_us"] / num_mb
-        flops = (row["flops"] / num_mb) if row["has_flops"] else None
+    for (phase, module), subs in groups.items():
+        time_us = 0.0
+        compute_us = 0.0
+        flops = 0.0
+        has_flops = False
+        kern: dict[str, float] = defaultdict(float)
+        class_time: dict[str, float] = defaultdict(float)
+        for (name, _dims), sub in subs.items():
+            n = len(sub["durs"])
+            per_mb = sum(sub["durs"]) / num_mb
+            time_us += per_mb
+            kern[name[:80]] += per_mb
+            if sub["flop_class"]:
+                compute_us += per_mb
+                class_time[sub["flop_class"]] += per_mb
+            if sub["flop_per_launch"]:
+                flops += sub["flop_per_launch"] * n / num_mb
+                has_flops = True
+        compute = compute_us > 0.5 * time_us if time_us > 0 else False
+        flop_class = max(class_time, key=class_time.get) if (compute and class_time) else None
+        flops_out = flops if (compute and has_flops) else None
         time_s = time_us * 1e-6
-        tflops = (flops / time_s / 1e12) if (flops and time_s > 0) else None
-        kern = sorted(
-            ({"name": n, "time_us": round(t / num_mb, 3)} for n, t in row["kernels"].items()),
+        tflops = (flops_out / time_s / 1e12) if (flops_out and time_s > 0) else None
+        kern_list = sorted(
+            ({"name": n, "time_us": round(t, 3)} for n, t in kern.items()),
             key=lambda k: -k["time_us"],
         )[:6]
         entry = {
             "module": module,
             "time_us": round(time_us, 3),
             "class": "compute_bound" if compute else "memory_bound",
-            "flop_class": row["flop_class"],
-            "flops": flops,
+            "flop_class": flop_class,
+            "flops": flops_out,
             "tflops": round(tflops, 1) if tflops else None,
-            "kernels": kern,
+            "kernels": kern_list,
         }
-        bucket = (
-            "attention"
-            if module.startswith("attn.")
-            else (
-                "moe"
-                if module.startswith("moe.") or module == "other"
-                else module if module in ("embedding", "output", "loss") else "moe"
-            )
-        )
+        # Logical bucket. attn.* and the unattributed `other` (dominated by the
+        # attention-side hyper-connection mixer / Indexer scalar ops) go to the
+        # attention bucket; this keeps the MoE bucket strictly the cr-independent
+        # router/dispatch/grouped_gemm/combine/shared_expert set (A10).
+        if module.startswith("attn.") or module == "other":
+            bucket = "attention"
+        elif module.startswith("moe."):
+            bucket = "moe"
+        elif module in ("embedding", "output", "loss"):
+            bucket = module
+        else:
+            bucket = "moe"
         out[bucket][phase][module] = entry
     return out, optimizer_us, dpcomm_us
 
