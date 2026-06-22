@@ -52,7 +52,7 @@ function defaultControls(data) {
     pp: isPro ? 16 : 4, vpp: 1, ep: 8, tp: 1, cp: 1,
     mbs: 1, gbs: isPro ? 1024 : 512,
     recompute: "full",
-    optEff: 0.7, computeEff: 1.0, calibFactor: 0.93, bytesPerParam: data.optimizer?.bytes_per_param || 18,
+    optEff: 0.7, computeEff: 1.0, calibFactor: 0.91, bytesPerParam: data.optimizer?.bytes_per_param || 18,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
     peak455: m455.peak_tflops_bf16, bw455: m455.hbm_bandwidth_gbps,
   };

@@ -11,12 +11,12 @@
     "seq": 4096,
     "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP"
   },
-  "generated_at": "2026-06-22T17:52:01Z",
+  "generated_at": "2026-06-22T17:41:01Z",
   "provenance": {
     "traces": {
-      "0": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1781793844365290266.pt.trace.json",
-      "4": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_flash_cr4_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr4_seq4096_ep8]-rank[0].1781793915830474166.pt.trace.json",
-      "128": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_flash_cr128_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr128_seq4096_ep8]-rank[0].1781793986369245582.pt.trace.json"
+      "0": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1782149271209635673.pt.trace.json",
+      "4": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr4_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr4_seq4096_ep8]-rank[0].1782148745954636194.pt.trace.json",
+      "128": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr128_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr128_seq4096_ep8]-rank[0].1782149357925690324.pt.trace.json"
     },
     "graphed_crs_estimated_from_cr4": [],
     "note": "cr in graphed_crs_estimated_from_cr4 were CUDA-graph/stream-captured (compute not visible in trace); their breakdown is copied from cr=4 as an estimate. Re-run those cr with graph capture disabled for exact numbers."
@@ -112,75 +112,75 @@
         "forward": [
           {
             "module": "other",
-            "time_us": 12248.881,
+            "time_us": 6977.726,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 6205.904
-              },
-              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 1238.199
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 888.763
+                "time_us": 1255.515
               },
               {
                 "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 881.949
+                "time_us": 897.244
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 881.515
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 881.067
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 729.853
+                "time_us": 746.936
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
-                "time_us": 334.154
+                "time_us": 341.962
               }
             ]
           },
           {
             "module": "attn.proj",
-            "time_us": 2842.14,
+            "time_us": 2797.584,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 3149821640704.0,
-            "tflops": 1108.3,
+            "tflops": 1125.9,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 1831.423
+                "time_us": 1783.792
               },
               {
                 "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 305.708
+                "time_us": 306.172
               },
               {
                 "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
-                "time_us": 146.949
+                "time_us": 145.373
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 123.477
+                "time_us": 122.031
               },
               {
                 "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 107.127
+                "time_us": 106.597
               },
               {
                 "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 103.299
+                "time_us": 106.263
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 232.169,
+            "time_us": 237.042,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -188,33 +188,33 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 79.625
+                "time_us": 83.298
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 61.657
+                "time_us": 62.797
               },
               {
                 "name": "_apply_rope_fwd_kernel",
-                "time_us": 51.876
+                "time_us": 52.313
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 24.203
+                "time_us": 24.16
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 7.539
+                "time_us": 7.516
               },
               {
                 "name": "void transformer_engine::normalization::rmsnorm_fwd_tuned_kernel<transformer_eng",
-                "time_us": 7.269
+                "time_us": 6.959
               }
             ]
           },
           {
             "module": "attn.core",
-            "time_us": 214.547,
+            "time_us": 213.574,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -222,11 +222,11 @@
             "kernels": [
               {
                 "name": "_v4_attention_fwd_kernel",
-                "time_us": 210.268
+                "time_us": 209.635
               },
               {
                 "name": "_hc_compute_tail_fwd_kernel",
-                "time_us": 4.279
+                "time_us": 3.939
               }
             ]
           }
@@ -234,75 +234,75 @@
         "backward": [
           {
             "module": "attn.proj",
-            "time_us": 3301.954,
+            "time_us": 3227.069,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 174483046400.0,
-            "tflops": 52.8,
+            "tflops": 54.1,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
-                "time_us": 2784.718
+                "time_us": 2713.086
               },
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 271.331
+                "time_us": 260.835
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 102.684
+                "time_us": 104.141
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 56.792
+                "time_us": 56.9
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 38.54
+                "time_us": 36.157
               },
               {
-                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDSB1_AF",
-                "time_us": 22.17
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 29.943
               }
             ]
           },
           {
             "module": "other",
-            "time_us": 2572.507,
+            "time_us": 2109.701,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 513.383
-              },
-              {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 460.535
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 150.513
+                "time_us": 488.376
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 144.822
+                "time_us": 151.499
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 147.21
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 133.345
+                "time_us": 133.515
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 110.173
+                "time_us": 112.703
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFunctor<floa",
+                "time_us": 107.214
               }
             ]
           },
           {
             "module": "attn.core",
-            "time_us": 923.912,
+            "time_us": 919.753,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -310,25 +310,25 @@
             "kernels": [
               {
                 "name": "_v4_attention_bwd_dkv_kernel",
-                "time_us": 446.07
+                "time_us": 437.837
               },
               {
                 "name": "_v4_attention_bwd_dq_kernel",
-                "time_us": 392.639
+                "time_us": 394.517
               },
               {
                 "name": "_v4_attention_bwd_preprocess_kernel",
-                "time_us": 81.027
+                "time_us": 83.214
               },
               {
                 "name": "_hc_compute_tail_bwd_kernel",
-                "time_us": 4.176
+                "time_us": 4.186
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 253.807,
+            "time_us": 258.987,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -336,27 +336,27 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 90.984
+                "time_us": 93.8
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 83.87
+                "time_us": 85.294
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 62.003
+                "time_us": 63.337
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 4.269
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 4.259
+                "time_us": 4.162
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::sin_kernel_cuda(at",
-                "time_us": 4.179
+                "time_us": 4.139
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
+                "time_us": 4.106
               }
             ]
           }
@@ -366,7 +366,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 2882.942,
+            "time_us": 2876.507,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -374,33 +374,33 @@
             "kernels": [
               {
                 "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
-                "time_us": 2432.514
+                "time_us": 2415.625
               },
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 297.775
+                "time_us": 308.935
               },
               {
                 "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
-                "time_us": 115.8
+                "time_us": 115.553
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 24.463
+                "time_us": 24.733
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
-                "time_us": 8.201
+                "time_us": 7.818
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
-                "time_us": 4.189
+                "time_us": 3.842
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 55.887,
+            "time_us": 47.987,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -408,23 +408,23 @@
             "kernels": [
               {
                 "name": "_sinkhorn_fwd_kernel",
-                "time_us": 25.356
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
-                "time_us": 14.43
+                "time_us": 24.829
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 10.909
+                "time_us": 10.252
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
+                "time_us": 8.02
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 3.533
+                "time_us": 3.543
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 1.659
+                "time_us": 1.343
               }
             ]
           }
@@ -432,51 +432,51 @@
         "backward": [
           {
             "module": "moe.combine",
-            "time_us": 1399.813,
+            "time_us": 620.377,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
-                "time_us": 937.017
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024>(hip_bfloat",
+                "time_us": 470.08
               },
               {
-                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
-                "time_us": 462.796
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 150.297
               }
             ]
           },
           {
             "module": "moe.dispatch",
-            "time_us": 618.803,
+            "time_us": 606.25,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
-                "time_us": 454.753
-              },
-              {
-                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
-                "time_us": 72.124
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024>(HIP_vector_type<int, 4u",
+                "time_us": 455.047
               },
               {
                 "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
-                "time_us": 72.07
+                "time_us": 111.084
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
+                "time_us": 20.566
               },
               {
                 "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
-                "time_us": 19.856
+                "time_us": 19.553
               }
             ]
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 493.722,
+            "time_us": 511.084,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -484,63 +484,63 @@
             "kernels": [
               {
                 "name": "_stack_grouped_weight_bwd_kernel",
-                "time_us": 315.732
+                "time_us": 327.882
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 85.883
+                "time_us": 88.64
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 28.966
+                "time_us": 29.89
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 21.546
+                "time_us": 22.62
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 21.283
+                "time_us": 21.476
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 15.7
+                "time_us": 15.72
               }
             ]
           },
           {
             "module": "moe.shared_expert",
-            "time_us": 112.898,
+            "time_us": 112.521,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 68719476736.0,
-            "tflops": 608.7,
+            "tflops": 610.7,
             "kernels": [
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 78.803
+                "time_us": 78.11
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 21.012
+                "time_us": 21.219
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 5.43
+                "time_us": 5.396
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 4.33
+                "time_us": 4.426
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 3.323
+                "time_us": 3.369
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 74.124,
+            "time_us": 71.248,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -548,27 +548,27 @@
             "kernels": [
               {
                 "name": "_sinkhorn_bwd_kernel",
-                "time_us": 45.009
+                "time_us": 44.476
               },
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
-                "time_us": 7.895
+                "time_us": 6.869
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 5.506
+                "time_us": 4.652
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<long, at::native::fu",
-                "time_us": 4.106
+                "time_us": 4.603
               },
               {
                 "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<a",
-                "time_us": 3.056
+                "time_us": 3.05
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::f",
-                "time_us": 2.803
+                "time_us": 2.376
               }
             ]
           }
@@ -580,75 +580,75 @@
         "forward": [
           {
             "module": "other",
-            "time_us": 21200.442,
+            "time_us": 26890.347,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 14406.365
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymo",
+                "time_us": 19292.33
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 1273.595
+                "time_us": 1295.177
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 1067.113
+                "time_us": 1102.882
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 911.084
+                "time_us": 906.352
               },
               {
                 "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 879.542
+                "time_us": 894.834
               },
               {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
-                "time_us": 460.817
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 754.642
               }
             ]
           },
           {
             "module": "attn.proj",
-            "time_us": 2941.845,
+            "time_us": 2882.571,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 3218541117440.0,
-            "tflops": 1094.1,
+            "tflops": 1116.6,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 1878.745
+                "time_us": 1819.353
               },
               {
                 "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 304.695
+                "time_us": 305.419
               },
               {
                 "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
-                "time_us": 147.533
+                "time_us": 144.986
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 123.097
-              },
-              {
-                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 107.477
+                "time_us": 122.254
               },
               {
                 "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 103.519
+                "time_us": 106.44
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 106.05
               }
             ]
           },
           {
             "module": "attn.core",
-            "time_us": 714.981,
+            "time_us": 713.905,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -656,21 +656,21 @@
             "kernels": [
               {
                 "name": "_v4_csa_attention_pool_sparse_merge_fwd_kernel",
-                "time_us": 503.914
+                "time_us": 503.845
               },
               {
                 "name": "_v4_attention_fwd_kernel",
-                "time_us": 206.748
+                "time_us": 206.032
               },
               {
                 "name": "_hc_compute_tail_fwd_kernel",
-                "time_us": 4.319
+                "time_us": 4.029
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 254.552,
+            "time_us": 259.005,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -678,33 +678,33 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 91.8
+                "time_us": 92.574
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 61.593
+                "time_us": 63.18
               },
               {
                 "name": "_apply_rope_fwd_kernel",
-                "time_us": 53.336
+                "time_us": 55.569
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 24.246
+                "time_us": 24.28
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 11.029
+                "time_us": 11.242
               },
               {
                 "name": "void transformer_engine::normalization::rmsnorm_fwd_tuned_kernel<transformer_eng",
-                "time_us": 7.129
+                "time_us": 7.196
               }
             ]
           },
           {
             "module": "attn.indexer",
-            "time_us": 179.339,
+            "time_us": 178.229,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -712,27 +712,27 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 81.147
+                "time_us": 84.07
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 37.819
+                "time_us": 36.993
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::AbsFunctor<c10::BF",
-                "time_us": 18.082
+                "time_us": 17.858
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::float8_copy_kernel",
-                "time_us": 11.379
+                "time_us": 10.686
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 10.328
+                "time_us": 9.508
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 8.045
+                "time_us": 7.031
               }
             ]
           }
@@ -740,7 +740,7 @@
         "backward": [
           {
             "module": "attn.core",
-            "time_us": 6856.22,
+            "time_us": 6885.908,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -748,97 +748,97 @@
             "kernels": [
               {
                 "name": "_v4_attention_bwd_kernel",
-                "time_us": 5178.018
+                "time_us": 5194.447
               },
               {
                 "name": "_v4_csa_attention_pool_sparse_bwd_partial_kernel",
-                "time_us": 1364.931
+                "time_us": 1369.16
               },
               {
                 "name": "_v4_csa_attention_pool_segreduce_kernel",
-                "time_us": 230.185
+                "time_us": 238.882
               },
               {
                 "name": "_v4_attention_bwd_preprocess_kernel",
-                "time_us": 78.897
+                "time_us": 79.314
               },
               {
                 "name": "_hc_compute_tail_bwd_kernel",
-                "time_us": 4.189
+                "time_us": 4.106
               }
             ]
           },
           {
             "module": "attn.proj",
-            "time_us": 3276.174,
+            "time_us": 3210.421,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 174483046400.0,
-            "tflops": 53.3,
+            "tflops": 54.3,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
-                "time_us": 2765.131
+                "time_us": 2691.996
               },
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 268.694
+                "time_us": 266.672
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 101.014
+                "time_us": 101.041
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 56.233
+                "time_us": 57.19
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 37.543
+                "time_us": 36.907
               },
               {
-                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDSB1_AF",
-                "time_us": 21.99
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 30.46
               }
             ]
           },
           {
             "module": "other",
-            "time_us": 2593.312,
+            "time_us": 2124.981,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 518.069
-              },
-              {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 468.765
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 148.989
+                "time_us": 493.853
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 145.495
+                "time_us": 150.829
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 148.676
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 133.822
+                "time_us": 133.879
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 110.646
+                "time_us": 114.076
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFunctor<floa",
+                "time_us": 106.767
               }
             ]
           },
           {
             "module": "attn.indexer",
-            "time_us": 622.655,
+            "time_us": 619.69,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -846,33 +846,33 @@
             "kernels": [
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 154.133
+                "time_us": 152.083
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB1_AFC",
-                "time_us": 96.503
+                "time_us": 86.043
               },
               {
                 "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::n",
-                "time_us": 66.022
+                "time_us": 68.023
               },
               {
-                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x128x128_MI16x16x1_SN_LDSB1_AF",
-                "time_us": 44.943
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 61.763
               },
               {
                 "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymo",
-                "time_us": 42.156
+                "time_us": 39.573
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x128_MI16x16x1_SN_LDSB1_AFC",
-                "time_us": 23.849
+                "time_us": 31.899
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 310.559,
+            "time_us": 317.733,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -880,27 +880,27 @@
             "kernels": [
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 107.056
+                "time_us": 108.233
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 89.503
+                "time_us": 92.917
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 61.66
+                "time_us": 64.33
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_ker",
-                "time_us": 22.449
+                "time_us": 22.636
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 6.332
+                "time_us": 6.285
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 6.152
+                "time_us": 5.738
               }
             ]
           }
@@ -910,7 +910,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 2887.082,
+            "time_us": 2869.901,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -918,33 +918,33 @@
             "kernels": [
               {
                 "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
-                "time_us": 2436.857
+                "time_us": 2410.635
               },
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 295.392
+                "time_us": 305.939
               },
               {
                 "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
-                "time_us": 117.143
+                "time_us": 114.644
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 25.293
+                "time_us": 26.583
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
-                "time_us": 8.245
+                "time_us": 8.025
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
-                "time_us": 4.152
+                "time_us": 4.076
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 54.947,
+            "time_us": 47.87,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -952,23 +952,23 @@
             "kernels": [
               {
                 "name": "_sinkhorn_fwd_kernel",
-                "time_us": 25.276
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
-                "time_us": 14.103
+                "time_us": 24.839
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 10.496
+                "time_us": 10.072
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
+                "time_us": 8.086
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 3.5
+                "time_us": 3.57
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 1.573
+                "time_us": 1.303
               }
             ]
           }
@@ -976,51 +976,51 @@
         "backward": [
           {
             "module": "moe.combine",
-            "time_us": 1375.809,
+            "time_us": 688.315,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
-                "time_us": 913.226
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024>(hip_bfloat",
+                "time_us": 467.771
               },
               {
-                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
-                "time_us": 462.583
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 220.545
               }
             ]
           },
           {
             "module": "moe.dispatch",
-            "time_us": 567.176,
+            "time_us": 679.335,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
-                "time_us": 451.366
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024>(HIP_vector_type<int, 4u",
+                "time_us": 453.817
               },
               {
                 "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
-                "time_us": 80.144
-              },
-              {
-                "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
-                "time_us": 20.083
+                "time_us": 178.088
               },
               {
                 "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
-                "time_us": 15.583
+                "time_us": 27.653
+              },
+              {
+                "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
+                "time_us": 19.776
               }
             ]
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 489.055,
+            "time_us": 487.9,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1028,63 +1028,63 @@
             "kernels": [
               {
                 "name": "_stack_grouped_weight_bwd_kernel",
-                "time_us": 311.161
+                "time_us": 308.679
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 85.576
+                "time_us": 86.43
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 29.016
+                "time_us": 28.903
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 21.916
+                "time_us": 21.893
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 21.21
+                "time_us": 21.493
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 15.55
+                "time_us": 15.78
               }
             ]
           },
           {
             "module": "moe.shared_expert",
-            "time_us": 113.441,
+            "time_us": 112.854,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 68719476736.0,
-            "tflops": 605.8,
+            "tflops": 608.9,
             "kernels": [
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 78.956
+                "time_us": 78.307
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 21.366
+                "time_us": 21.372
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 5.413
+                "time_us": 5.393
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 4.33
+                "time_us": 4.353
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 3.376
+                "time_us": 3.429
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 73.291,
+            "time_us": 71.044,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1092,27 +1092,27 @@
             "kernels": [
               {
                 "name": "_sinkhorn_bwd_kernel",
-                "time_us": 44.879
+                "time_us": 44.726
               },
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
-                "time_us": 7.539
+                "time_us": 6.905
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 5.049
+                "time_us": 4.696
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<long, at::native::fu",
-                "time_us": 4.206
+                "time_us": 4.213
               },
               {
                 "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<a",
-                "time_us": 3.173
+                "time_us": 3.083
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::f",
-                "time_us": 2.626
+                "time_us": 2.38
               }
             ]
           }
@@ -1124,7 +1124,7 @@
         "forward": [
           {
             "module": "other",
-            "time_us": 7004.265,
+            "time_us": 7106.777,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1132,67 +1132,67 @@
             "kernels": [
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 1258.976
+                "time_us": 1279.006
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 912.576
+                "time_us": 905.048
               },
               {
                 "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
-                "time_us": 881.028
+                "time_us": 900.44
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 860.059
+                "time_us": 891.868
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-                "time_us": 734.728
+                "time_us": 759.74
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
-                "time_us": 330.874
+                "time_us": 346.078
               }
             ]
           },
           {
             "module": "attn.proj",
-            "time_us": 2935.125,
+            "time_us": 2865.993,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 3184181379072.0,
-            "tflops": 1084.9,
+            "tflops": 1111.0,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 1855.703
+                "time_us": 1790.855
               },
               {
                 "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 305.312
+                "time_us": 304.992
               },
               {
                 "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
-                "time_us": 147.799
+                "time_us": 144.849
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 123.094
+                "time_us": 122.418
               },
               {
                 "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 107.097
+                "time_us": 106.241
               },
               {
                 "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 104.07
+                "time_us": 106.113
               }
             ]
           },
           {
             "module": "attn.core",
-            "time_us": 326.791,
+            "time_us": 327.905,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -1200,17 +1200,17 @@
             "kernels": [
               {
                 "name": "_v4_attention_fwd_kernel",
-                "time_us": 322.539
+                "time_us": 323.406
               },
               {
                 "name": "_hc_compute_tail_fwd_kernel",
-                "time_us": 4.252
+                "time_us": 4.499
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 248.505,
+            "time_us": 253.122,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1218,33 +1218,33 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 84.717
+                "time_us": 86.567
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 61.84
+                "time_us": 63.153
               },
               {
                 "name": "_apply_rope_fwd_kernel",
-                "time_us": 56.866
+                "time_us": 57.872
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 24.006
+                "time_us": 23.98
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 9.802
+                "time_us": 9.715
               },
               {
                 "name": "void transformer_engine::normalization::rmsnorm_fwd_tuned_kernel<transformer_eng",
-                "time_us": 7.146
+                "time_us": 7.256
               }
             ]
           },
           {
             "module": "attn.indexer",
-            "time_us": 8.668,
+            "time_us": 8.795,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1252,11 +1252,11 @@
             "kernels": [
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 4.472
+                "time_us": 4.436
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 4.196
+                "time_us": 4.359
               }
             ]
           }
@@ -1264,75 +1264,75 @@
         "backward": [
           {
             "module": "attn.proj",
-            "time_us": 3274.737,
+            "time_us": 3222.049,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 174483046400.0,
-            "tflops": 53.3,
+            "tflops": 54.2,
             "kernels": [
               {
                 "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
-                "time_us": 2764.571
+                "time_us": 2699.575
               },
               {
                 "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 265.725
+                "time_us": 262.638
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 102.677
+                "time_us": 108.811
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 55.579
+                "time_us": 56.606
               },
               {
                 "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
-                "time_us": 37.94
+                "time_us": 36.38
               },
               {
-                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x64x64_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 22.29
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 31.55
               }
             ]
           },
           {
             "module": "other",
-            "time_us": 2617.406,
+            "time_us": 2164.088,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
-                "time_us": 514.089
-              },
-              {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-                "time_us": 467.105
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 148.916
+                "time_us": 493.93
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 148.652
+                "time_us": 152.206
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 147.81
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 133.119
+                "time_us": 133.642
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 108.193
+                "time_us": 112.49
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFunctor<floa",
+                "time_us": 107.301
               }
             ]
           },
           {
             "module": "attn.core",
-            "time_us": 1350.705,
+            "time_us": 1333.44,
             "class": "compute_bound",
             "flop_class": "attn",
             "flops": null,
@@ -1340,29 +1340,29 @@
             "kernels": [
               {
                 "name": "_v4_attention_bwd_dq_kernel",
-                "time_us": 486.87
+                "time_us": 486.324
               },
               {
                 "name": "_v4_attention_bwd_dkv_kernel",
-                "time_us": 457.39
+                "time_us": 448.724
               },
               {
                 "name": "_v4_attention_bwd_dkv_pool_mha_kernel",
-                "time_us": 318.246
+                "time_us": 313.569
               },
               {
                 "name": "_v4_attention_bwd_preprocess_kernel",
-                "time_us": 84.007
+                "time_us": 80.704
               },
               {
                 "name": "_hc_compute_tail_bwd_kernel",
-                "time_us": 4.192
+                "time_us": 4.119
               }
             ]
           },
           {
             "module": "attn.norm",
-            "time_us": 605.674,
+            "time_us": 598.458,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1370,33 +1370,33 @@
             "kernels": [
               {
                 "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymo",
-                "time_us": 334.998
+                "time_us": 322.669
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 90.78
+                "time_us": 94.427
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 86.657
+                "time_us": 87.17
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 61.983
-              },
-              {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 6.145
+                "time_us": 63.077
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 5.842
+                "time_us": 6.019
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
+                "time_us": 6.009
               }
             ]
           },
           {
             "module": "attn.indexer",
-            "time_us": 108.101,
+            "time_us": 107.492,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1404,27 +1404,27 @@
             "kernels": [
               {
                 "name": "void at::native::(anonymous namespace)::cunn_SpatialSoftMaxForward<float, float,",
-                "time_us": 43.283
+                "time_us": 43.017
               },
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x64x64_MI16x16x1_SN_LDSB1_AFC1",
-                "time_us": 40.973
+                "time_us": 40.393
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 5.886
+                "time_us": 5.909
               },
               {
                 "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::n",
-                "time_us": 5.316
+                "time_us": 5.543
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 2.493
+                "time_us": 2.443
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
-                "time_us": 2.336
+                "time_us": 2.353
               }
             ]
           }
@@ -1434,7 +1434,7 @@
         "forward": [
           {
             "module": "moe.grouped_gemm",
-            "time_us": 2882.008,
+            "time_us": 2872.623,
             "class": "compute_bound",
             "flop_class": "grouped_gemm",
             "flops": null,
@@ -1442,33 +1442,33 @@
             "kernels": [
               {
                 "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
-                "time_us": 2428.31
+                "time_us": 2408.911
               },
               {
                 "name": "_stack_grouped_weight_fwd_kernel",
-                "time_us": 300.521
+                "time_us": 312.572
               },
               {
                 "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
-                "time_us": 117.196
+                "time_us": 113.277
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
-                "time_us": 23.84
+                "time_us": 25.726
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
-                "time_us": 7.998
+                "time_us": 8.081
               },
               {
                 "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
-                "time_us": 4.142
+                "time_us": 4.056
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 55.434,
+            "time_us": 55.984,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1476,23 +1476,23 @@
             "kernels": [
               {
                 "name": "_sinkhorn_fwd_kernel",
-                "time_us": 25.393
+                "time_us": 25.606
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
-                "time_us": 14.28
+                "time_us": 14.203
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
-                "time_us": 10.682
+                "time_us": 10.482
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
-                "time_us": 3.5
+                "time_us": 4.093
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-                "time_us": 1.579
+                "time_us": 1.599
               }
             ]
           }
@@ -1500,51 +1500,51 @@
         "backward": [
           {
             "module": "moe.combine",
-            "time_us": 1273.128,
+            "time_us": 653.521,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
-                "time_us": 810.992
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024>(hip_bfloat",
+                "time_us": 460.577
               },
               {
-                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
-                "time_us": 462.136
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 192.944
               }
             ]
           },
           {
             "module": "moe.dispatch",
-            "time_us": 845.998,
+            "time_us": 535.863,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
             "tflops": null,
             "kernels": [
               {
-                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
-                "time_us": 455.869
-              },
-              {
-                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
-                "time_us": 215.298
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024>(HIP_vector_type<int, 4u",
+                "time_us": 450.94
               },
               {
                 "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
-                "time_us": 154.151
+                "time_us": 60.447
               },
               {
                 "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
-                "time_us": 20.68
+                "time_us": 20.186
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
+                "time_us": 4.29
               }
             ]
           },
           {
             "module": "moe.grouped_gemm",
-            "time_us": 473.065,
+            "time_us": 492.827,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1552,63 +1552,63 @@
             "kernels": [
               {
                 "name": "_stack_grouped_weight_bwd_kernel",
-                "time_us": 292.828
+                "time_us": 309.245
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 86.733
+                "time_us": 88.707
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 29.836
+                "time_us": 30.373
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 21.963
+                "time_us": 22.426
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 21.296
+                "time_us": 21.713
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 15.416
+                "time_us": 15.546
               }
             ]
           },
           {
             "module": "moe.shared_expert",
-            "time_us": 112.897,
+            "time_us": 112.514,
             "class": "compute_bound",
             "flop_class": "gemm",
             "flops": 68719476736.0,
-            "tflops": 608.7,
+            "tflops": 610.8,
             "kernels": [
               {
                 "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-                "time_us": 78.523
+                "time_us": 77.993
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
-                "time_us": 21.096
+                "time_us": 21.266
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
-                "time_us": 5.443
+                "time_us": 5.43
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
-                "time_us": 4.376
+                "time_us": 4.356
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
-                "time_us": 3.46
+                "time_us": 3.47
               }
             ]
           },
           {
             "module": "moe.router",
-            "time_us": 73.574,
+            "time_us": 72.341,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1616,27 +1616,27 @@
             "kernels": [
               {
                 "name": "_sinkhorn_bwd_kernel",
-                "time_us": 44.973
+                "time_us": 44.606
               },
               {
                 "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
-                "time_us": 7.512
+                "time_us": 7.482
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
-                "time_us": 5.326
+                "time_us": 4.886
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<long, at::native::fu",
-                "time_us": 4.346
+                "time_us": 4.17
               },
               {
                 "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<a",
-                "time_us": 2.976
+                "time_us": 2.923
               },
               {
                 "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::f",
-                "time_us": 2.656
+                "time_us": 2.573
               }
             ]
           }
@@ -1649,7 +1649,7 @@
       "forward": [
         {
           "module": "embedding",
-          "time_us": 8.229,
+          "time_us": 7.84,
           "class": "memory_bound",
           "flop_class": null,
           "flops": null,
@@ -1657,7 +1657,7 @@
           "kernels": [
             {
               "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, lo",
-              "time_us": 8.229
+              "time_us": 7.84
             }
           ]
         }
@@ -1665,7 +1665,7 @@
       "backward": [
         {
           "module": "embedding",
-          "time_us": 88.911,
+          "time_us": 86.591,
           "class": "memory_bound",
           "flop_class": null,
           "flops": null,
@@ -1673,27 +1673,27 @@
           "kernels": [
             {
               "name": "void at::native::(anonymous namespace)::compute_grad_weight<c10::BFloat16, long>",
-              "time_us": 34.727
-            },
-            {
-              "name": "void at::native::(anonymous namespace)::sum_and_scatter<c10::BFloat16, long>(lon",
-              "time_us": 22.716
+              "time_us": 33.993
             },
             {
               "name": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002",
-              "time_us": 21.437
+              "time_us": 21.41
+            },
+            {
+              "name": "void at::native::(anonymous namespace)::sum_and_scatter<c10::BFloat16, long>(lon",
+              "time_us": 21.21
             },
             {
               "name": "void rocprim::ROCPRIM_400200_NS::detail::init_lookback_scan_state_kernel<rocprim",
-              "time_us": 3.952
+              "time_us": 3.929
             },
             {
               "name": "void at::native::(anonymous namespace)::krn_partial_segment_offset<long>(long*, ",
-              "time_us": 2.066
+              "time_us": 2.08
             },
             {
               "name": "void at::native::(anonymous namespace)::krn_partials_per_segment<long>(long*, lo",
-              "time_us": 2.029
+              "time_us": 2.023
             }
           ]
         }
@@ -1703,15 +1703,15 @@
       "forward": [
         {
           "module": "output",
-          "time_us": 1603.856,
+          "time_us": 1529.095,
           "class": "compute_bound",
           "flop_class": "gemm",
           "flops": 2171105968128.0,
-          "tflops": 1353.7,
+          "tflops": 1419.9,
           "kernels": [
             {
               "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
-              "time_us": 1603.856
+              "time_us": 1529.095
             }
           ]
         }
@@ -1719,15 +1719,15 @@
       "backward": [
         {
           "module": "output",
-          "time_us": 24.207,
+          "time_us": 24.84,
           "class": "compute_bound",
           "flop_class": "gemm",
           "flops": 268435456.0,
-          "tflops": 11.1,
+          "tflops": 10.8,
           "kernels": [
             {
               "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB1_AFC1_AF",
-              "time_us": 24.207
+              "time_us": 24.84
             }
           ]
         }
@@ -1738,7 +1738,7 @@
       "backward": [
         {
           "module": "loss",
-          "time_us": 596.633,
+          "time_us": 565.694,
           "class": "memory_bound",
           "flop_class": null,
           "flops": null,
@@ -1746,15 +1746,15 @@
           "kernels": [
             {
               "name": "cross_entropy_kernel",
-              "time_us": 253.851
+              "time_us": 235.982
             },
             {
               "name": "element_mul_kernel",
-              "time_us": 193.371
+              "time_us": 197.392
             },
             {
               "name": "online_softmax_kernel",
-              "time_us": 149.411
+              "time_us": 132.321
             }
           ]
         }
@@ -1764,7 +1764,7 @@
   "optimizer": {
     "type": "adam",
     "measured_params": null,
-    "time_us": 14497.3,
+    "time_us": 18459.0,
     "bytes_per_param": 18,
     "class": "memory_bound",
     "note": "measured one-layer optimizer-step kernel time on this rank; the site scales by per-rank params"

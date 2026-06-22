@@ -149,11 +149,22 @@ if [ "$USE_TURBO_DEEPEP" = "True" ]; then
 fi
 
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
-# Wider profiler window (active 3 steps) so at least one full training iteration
-# (fwd+bwd+opt) is captured cleanly; min-grouping in the parser then picks the
-# clean step. A narrow 1-step window occasionally aligned to the optimizer tail
-# only (cr0/cr128), missing the compute kernels.
-export TRAIN_ITERS=${TRAIN_ITERS:-12}
+# Disable the loss NaN/Inf validation (check_for_nan_in_loss_and_grad). Its
+# torch.isnan/isinf checks in loss_func force a device->host sync once per
+# microbatch; in a 1-layer capture (nothing to overlap) the profiler bills that
+# sync wait as a multi-ms "stall" kernel under the loss/rerun frames, which then
+# pollutes per-layer attribution and gets multiplied by the layer count in the
+# projection. It is a per-step validation cost, not per-layer compute, so we
+# turn it off for a clean capture (the projection models it separately if needed).
+# Profiler window must land in the STEADY state: the first ~9 iters are warm-up
+# (kernel autotune / hipBLASLt + Triton compilation) and have noisy, inflated
+# per-iter times (and inflated comm-kernel durations as ranks desync on the
+# autotuning rank); from ~iter 10 onward the iteration time is stable. Default
+# to a late, multi-step window so the captured steps are clean; all three are
+# env-overridable.
+export TRAIN_ITERS=${TRAIN_ITERS:-22}
+export PROFILE_STEP_START=${PROFILE_STEP_START:-16}
+export PROFILE_STEP_END=${PROFILE_STEP_END:-19}
 
 # ---------- Profiler: trace with python stacks for kernel->module ----------
 export PROFILE=True
@@ -218,6 +229,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --fp8 null \
   --fp8_recipe null \
   --recompute_num_layers 0 \
+  --check_for_nan_in_loss_and_grad False \
   --overlap_grad_reduce "$PRIMUS_OVERLAP_GRAD_REDUCE" \
   --overlap_param_gather "$PRIMUS_OVERLAP_PARAM_GATHER" \
   --disable_last_saving True \
@@ -226,6 +238,6 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --profile True \
   --use_pytorch_profiler True \
   "${PROFILER_ACTIVITY_ARGS[@]}" \
-  --profile_step_start 6 \
-  --profile_step_end 9 \
+  --profile_step_start "$PROFILE_STEP_START" \
+  --profile_step_end "$PROFILE_STEP_END" \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"
