@@ -27,7 +27,7 @@ OMIT_MODULES = {"tools", "platforms"}
 
 def classify(path: str):
     """Return (section, module_name) for a covered file, or None to skip it."""
-    seg = (path[path.find("primus/"):] if "primus/" in path else path).split("/")
+    seg = (path[path.find("primus/") :] if "primus/" in path else path).split("/")
     if seg[-1] == "__init__.py":
         return None
     if len(seg) < 2:
