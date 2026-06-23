@@ -7,8 +7,10 @@
 from primus.backends.megatron.megatron_adapter import MegatronAdapter
 from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainTrainer
 from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
+from primus.backends.megatron.mlperf import MLPerfMegatronPretrainTrainer
 from primus.core.backend.backend_registry import BackendRegistry
 
 BackendRegistry.register_adapter("megatron", MegatronAdapter)
 BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 BackendRegistry.register_trainer_class(MegatronSFTTrainer, "megatron", "sft")
+BackendRegistry.register_trainer_class(MLPerfMegatronPretrainTrainer, "megatron", "mlperf_pretrain")
