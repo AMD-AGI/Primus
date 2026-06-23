@@ -12,8 +12,10 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from primus.backends.diffusion.models.flux.train_pipeline import (
+    FluxFlowMatchTrainPipeline,
+)
 from primus.backends.diffusion.models.interface import GenAIModel
-from primus.backends.diffusion.models.flux.train_pipeline import FluxFlowMatchTrainPipeline
 
 
 @dataclass
@@ -66,7 +68,9 @@ class FluxForTraining(GenAIModel, nn.Module):
         return next(self.parameters()).dtype
 
     def freeze_except(self):
-        mode = (self.trainable_modules or getattr(self.model_config, "trainable_modules", None) or "dit").lower()
+        mode = (
+            self.trainable_modules or getattr(self.model_config, "trainable_modules", None) or "dit"
+        ).lower()
 
         def freeze(module: nn.Module):
             for param in module.parameters():

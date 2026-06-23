@@ -40,8 +40,7 @@ def pack_latents(x: Tensor) -> Tensor:
     bsz, channels, latent_height, latent_width = x.shape
     if latent_height % PATCH_HEIGHT != 0 or latent_width % PATCH_WIDTH != 0:
         raise ValueError(
-            "FLUX latents must have height and width divisible by 2, "
-            f"got shape={tuple(x.shape)}"
+            "FLUX latents must have height and width divisible by 2, " f"got shape={tuple(x.shape)}"
         )
     height = latent_height // PATCH_HEIGHT
     width = latent_width // PATCH_WIDTH

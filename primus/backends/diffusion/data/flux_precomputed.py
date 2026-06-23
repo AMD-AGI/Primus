@@ -10,8 +10,8 @@ import io
 import json
 import math
 import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -239,7 +239,9 @@ class FluxPrecomputedProcessor:
             collated[key] = torch.stack([_to_tensor(sample[key]) for sample in batch], dim=0)
         return collated
 
-    def prepare_batch(self, *, batch: Any, device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    def prepare_batch(
+        self, *, batch: Any, device: torch.device, dtype: torch.dtype
+    ) -> dict[str, torch.Tensor]:
         tensors = self._collate_raw(batch)
         for key, value in tensors.items():
             tensors[key] = value.to(device=device, dtype=dtype, non_blocking=True)
@@ -295,7 +297,9 @@ class FluxRawImageTextProcessor:
         if isinstance(batch, dict):
             batch = [batch]
         if not isinstance(batch, Sequence) or not batch:
-            raise ValueError(f"FLUX raw prepare_batch expected non-empty sequence, got {type(batch).__name__}")
+            raise ValueError(
+                f"FLUX raw prepare_batch expected non-empty sequence, got {type(batch).__name__}"
+            )
 
         images: list[torch.Tensor] = []
         prompts: list[str] = []

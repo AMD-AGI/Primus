@@ -140,7 +140,9 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             dataset_name = dataset_cfg.get("dataset")
             dataset_format = str(dataset_cfg.get("dataset_format", "webdataset")).lower()
             if dataset_name == "cc12m-test" and _is_placeholder(dataset_cfg.get("dataset_path")):
-                _fail("FLUX raw dataset `cc12m-test` requires `dataset_path` to point at local webdataset tars")
+                _fail(
+                    "FLUX raw dataset `cc12m-test` requires `dataset_path` to point at local webdataset tars"
+                )
             elif dataset_name == "cc12m-wds":
                 if _is_placeholder(dataset_cfg.get("dataset_path")):
                     _log("FLUX raw image-text dataset: pixparse/cc12m-wds (Hugging Face dataset)")
@@ -162,7 +164,9 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
                 empty_dir = processor_cfg.get("empty_encodings_path")
                 _require_path(empty_dir, "FLUX empty encodings directory", kind="dir")
                 _require_path(str(Path(empty_dir) / "t5_empty.npy"), "FLUX empty T5 encoding", kind="file")
-                _require_path(str(Path(empty_dir) / "clip_empty.npy"), "FLUX empty CLIP encoding", kind="file")
+                _require_path(
+                    str(Path(empty_dir) / "clip_empty.npy"), "FLUX empty CLIP encoding", kind="file"
+                )
         else:
             _fail(f"unsupported FLUX dataset_type: {dataset_type!r}")
         _require_optional_path(

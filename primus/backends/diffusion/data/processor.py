@@ -47,7 +47,9 @@ class WanVideoDataProcessor:
 
         from transformers import AutoTokenizer
 
-        from primus.backends.diffusion.data.processing_wanvideo import WanVideoProcessor as WanVideoModelProcessor
+        from primus.backends.diffusion.data.processing_wanvideo import (
+            WanVideoProcessor as WanVideoModelProcessor,
+        )
 
         wanvideo_kwargs = self.config.get("extra_kwargs", {})
         max_text_length = self.config.get("max_text_length")

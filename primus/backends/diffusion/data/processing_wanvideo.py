@@ -4,10 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import warnings
-from typing import Any, Dict, List, Optional, Union, Tuple
-
 import os
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
 from PIL import Image
@@ -82,14 +81,14 @@ class WanVideoImageProcessor(BaseImageProcessor):
             width, height = image.size
             target_width = size["width"]
             target_height = size["height"]
-            
+
             scale = max(target_width / width, target_height / height)
             new_width = round(width * scale)
             new_height = round(height * scale)
-            
-            from torchvision.transforms import functional as F
+
             from torchvision.transforms import InterpolationMode
-            
+            from torchvision.transforms import functional as F
+
             # DiffSynth uses torchvision.transforms.resize with BILINEAR
             # We must use F.resize to match exactly (antialias behavior etc)
             image = F.resize(image, (new_height, new_width), interpolation=InterpolationMode.BILINEAR)
@@ -277,26 +276,26 @@ class WanVideoImageProcessor(BaseImageProcessor):
 
         # Temporal Handling (Interpolate or Truncate)
         if num_frames is not None:
-             current_frames = processed_images.shape[1]
-             if current_frames > num_frames:
-                 logger.info(f"Truncating video frames from {current_frames} to {num_frames}")
-                 processed_images = processed_images[:, :num_frames, ...]
-             elif current_frames < num_frames:
-                 logger.info(f"Interpolating video frames from {current_frames} to {num_frames}")
-                 # Interpolate requires (B, C, T, H, W) or (B, C, H, W) - we have (B, T, H, W, C)
-                 # Permute to (B, C, T, H, W) for interpolate
-                 vid_tensor = torch.from_numpy(processed_images).permute(0, 4, 1, 2, 3)
-                 
-                 # Interpolate
-                 vid_tensor = torch.nn.functional.interpolate(
-                     vid_tensor, 
-                     size=(num_frames, vid_tensor.shape[3], vid_tensor.shape[4]), 
-                     mode='trilinear', 
-                     align_corners=False
-                 )
-                 
-                 # Permute back to (B, T, H, W, C) and convert to numpy
-                 processed_images = vid_tensor.permute(0, 2, 3, 4, 1).numpy()
+            current_frames = processed_images.shape[1]
+            if current_frames > num_frames:
+                logger.info(f"Truncating video frames from {current_frames} to {num_frames}")
+                processed_images = processed_images[:, :num_frames, ...]
+            elif current_frames < num_frames:
+                logger.info(f"Interpolating video frames from {current_frames} to {num_frames}")
+                # Interpolate requires (B, C, T, H, W) or (B, C, H, W) - we have (B, T, H, W, C)
+                # Permute to (B, C, T, H, W) for interpolate
+                vid_tensor = torch.from_numpy(processed_images).permute(0, 4, 1, 2, 3)
+
+                # Interpolate
+                vid_tensor = torch.nn.functional.interpolate(
+                    vid_tensor,
+                    size=(num_frames, vid_tensor.shape[3], vid_tensor.shape[4]),
+                    mode="trilinear",
+                    align_corners=False,
+                )
+
+                # Permute back to (B, T, H, W, C) and convert to numpy
+                processed_images = vid_tensor.permute(0, 2, 3, 4, 1).numpy()
 
         # Convert to tensor if requested
         if return_tensors == "pt":

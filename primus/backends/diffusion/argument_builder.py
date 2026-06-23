@@ -155,7 +155,9 @@ class DiffusionArgBuilder:
         elif isinstance(params, dict):
             self._params = copy.deepcopy(params)
         else:
-            raise TypeError(f"DiffusionArgBuilder expects dict or SimpleNamespace, got {type(params).__name__}")
+            raise TypeError(
+                f"DiffusionArgBuilder expects dict or SimpleNamespace, got {type(params).__name__}"
+            )
 
     def finalize(self) -> SimpleNamespace:
         params = copy.deepcopy(self._params)

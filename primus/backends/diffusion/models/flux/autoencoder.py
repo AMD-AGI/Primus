@@ -283,7 +283,9 @@ def load_autoencoder(
         if missing:
             raise ValueError(f"FLUX autoencoder checkpoint missing {len(missing)} keys; first={missing[:3]}")
         if unexpected:
-            raise ValueError(f"FLUX autoencoder checkpoint has {len(unexpected)} unexpected keys; first={unexpected[:3]}")
+            raise ValueError(
+                f"FLUX autoencoder checkpoint has {len(unexpected)} unexpected keys; first={unexpected[:3]}"
+            )
     return ae.to(dtype=dtype)
 
 
@@ -304,7 +306,9 @@ def _resolve_checkpoint_path(path_or_repo_file: str, *, default_filename: str) -
         repo_id = path_or_repo_file
         filename = default_filename
     else:
-        raise FileNotFoundError(f"FLUX checkpoint not found locally and is not a HF repo path: {path_or_repo_file}")
+        raise FileNotFoundError(
+            f"FLUX checkpoint not found locally and is not a HF repo path: {path_or_repo_file}"
+        )
 
     from huggingface_hub import hf_hub_download
 
