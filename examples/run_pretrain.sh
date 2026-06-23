@@ -292,8 +292,11 @@ LOG_INFO ""
 
 # ----------------- AMD-specific GPU optimizations -----------------
 
-# Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput
-export HSA_ENABLE_SDMA=1
+# Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput.
+# ${:-} guarded so a caller can set HSA_ENABLE_SDMA=0 to route copies through
+# blit/compute kernels instead — workaround for hosts where an SDMA H2D copy
+# intermittently never signals completion (hangs in BusyWaitSignal).
+export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 
 # Prevent scratch memory from being reclaimed to stabilize large memory usage patterns (e.g., KV cache, MoE experts)
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs

@@ -241,6 +241,54 @@ def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _v4_o_a_fp8_enabled(config) -> bool:
+    """Whether to run the grouped-O ``o_a`` down-projection in MXFP8.
+
+    ``o_a`` is a per-group (batched) matmul done as a manual einsum on
+    ``linear_o_a.weight``, so it bypasses the fp8 linear path and stays bf16.
+    When PRIMUS_V4_FP8_ATTN_PROJ is set (and TP=1, where the surrounding
+    projections are already routed to fp8) and the layer is in turbo-fp8, run
+    it as per-group fp8 GEMMs instead. Default off.
+    """
+    if os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", "0") != "1":
+        return False
+    if getattr(config, "tensor_model_parallel_size", 1) != 1:
+        return False
+    try:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager as _M,
+        )
+
+        return _M.is_turbo_fp8_enabled()
+    except Exception:
+        return False
+
+
+def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor:
+    """Fused MXFP8 grouped-O ``o_a`` down-projection (replaces the bf16 einsum).
+
+    ``attn_g`` [B,S,G,d], ``wo_a_w`` [G,r,d] -> [B,S,G,r]. The G groups are an
+    independent batched matmul ``[B*S,d] @ [d,r]`` per group; we run them as a
+    SINGLE ``grouped_gemm_fp8`` (one fused Triton launch) instead of a per-group
+    ``gemm_fp8`` loop (G launches + G× quant). Stack tokens group-major into
+    ``[G*B*S, d]`` with ``group_lens=[B*S]*G``; weight ``[G,d,r]`` (trans_b=False).
+    d=(H*head_dim)/G and B*S are multiples of 32, so the MX block scale is clean.
+    """
+    import primus_turbo.pytorch as pt
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboLowPrecisionGlobalStateManager as _M,
+    )
+
+    cfg = _M.get_turbo_quant_config().data()
+    B, S, G, d = attn_g.shape
+    r = wo_a_w.shape[1]
+    a = attn_g.permute(2, 0, 1, 3).reshape(G * B * S, d).contiguous()  # [G*BS, d], group-major
+    b = wo_a_w.transpose(1, 2).contiguous()  # [G, d, r]  (K=d, N=r, trans_b=False)
+    group_lens = torch.full((G,), B * S, dtype=torch.int64, device=a.device)
+    out = pt.ops.grouped_gemm_fp8(a, b, group_lens, trans_b=False, config=cfg)  # [G*BS, r]
+    return out.reshape(G, B, S, r).permute(1, 2, 0, 3)  # [B, S, G, r]
+
+
 def _coerce_optional_bool_flag(value: object, *, field_name: str) -> bool:
     """Coerce a possibly-stringified yaml flag to a clean ``bool``.
 
@@ -1090,7 +1138,10 @@ class DeepseekV4Attention(MLASelfAttention):
             o = o.view(B, S, G * self.o_lora_rank)
         else:
             wo_a_w = weight.view(G, self.o_lora_rank, (H * Dh) // G)
-            o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w)
+            if _v4_o_a_fp8_enabled(self.config):
+                o = _fp8_grouped_o_a(attn_g, wo_a_w)  # per-group MXFP8
+            else:
+                o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w)
             o = o.flatten(2)
         return _projection_forward(self.linear_o_b, o)
 

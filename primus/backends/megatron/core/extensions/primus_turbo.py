@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+import os
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
@@ -48,6 +49,21 @@ from primus_turbo.pytorch.core.low_precision import (
 from torch import Tensor
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
+
+# MXFP8 weight pre-quantization (cache the fp8 weight once per optimizer step
+# instead of re-quantizing every microbatch + recompute forward). Optional —
+# guarded so older primus_turbo builds without it fall back to per-forward quant.
+try:
+    from primus_turbo.triton.quantization.mxfp8_quant_kernels import (
+        MXFP8WeightPrequant,
+        prequant_mxfp8_weights,
+    )
+
+    _HAS_MXFP8_PREQUANT = True
+except Exception:  # pragma: no cover - depends on primus_turbo version
+    MXFP8WeightPrequant = None
+    prequant_mxfp8_weights = None
+    _HAS_MXFP8_PREQUANT = False
 
 from primus.backends.megatron.core.extensions._triton.stack_grouped_weight import (
     stack_grouped_weight,
@@ -101,6 +117,20 @@ def use_split_wgrad_op():
     elif args.patch_zero_bubble and args.enable_zero_bubble:
         return True
     return False
+
+
+def _dbg_fp8_first_seen(module, input_, weights, quant_config):
+    """Print each fp8 GEMM (in/weight) shape once per class, gated by PRIMUS_DEBUG_FP8=1."""
+    if os.environ.get("PRIMUS_DEBUG_FP8") != "1":
+        return
+    cls = type(module)
+    seen = cls.__dict__.get("_dbg_fp8_shapes")
+    if seen is None:
+        seen = set(); cls._dbg_fp8_shapes = seen
+    k = (tuple(input_.shape[-1:]), tuple(weights.shape))
+    if k not in seen:
+        seen.add(k)
+        print(f"[PRIMUS_DEBUG_FP8] {cls.__name__} fp8 in={tuple(input_.shape)} w={tuple(weights.shape)} gran={quant_config.data().granularity}", flush=True)
 
 
 class PrimusTurboQuantConfig:
@@ -658,6 +688,8 @@ class PrimusTurboLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
+            _dbg_fp8_first_seen(self, input_, weights, quant_config)
+
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
             )
@@ -810,6 +842,8 @@ class PrimusTurboRowParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
+            _dbg_fp8_first_seen(self, input_, weights, quant_config)
+
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
             )
@@ -954,6 +988,8 @@ class PrimusTurboColumnParallelLinear(TELinear):
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
+
+            _dbg_fp8_first_seen(self, input_, weights, quant_config)
 
             out = fp8_gemm(
                 input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
@@ -1254,6 +1290,40 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         return out, None
 
 
+_FP4_TOKEN_PAD = 16
+
+
+def _grouped_gemm_fp4_per_group(a, b, group_lens, out_dtype, config):
+    """Per-group native MXFP4 grouped GEMM (drop-in for grouped_gemm_fp8, trans_b=False).
+
+    There is no fused grouped FP4 gemm, so loop the dense FP4 training gemm
+    (``pt.ops.gemm_fp4`` / FP4GemmMXFunction, hipBLASLt backend) over experts.
+    ``a``:[M,K], ``b``:[G,K,N] -> ``out``:[M,N] with out_g = a_g @ b_g.
+    The FP4 hipBLASLt path is NT-only (so b_g[K,N] is transposed to [N,K] and
+    trans_b=True) and needs the token dim a multiple of 16 (zero-pad, slice back).
+    fwd+dgrad+wgrad come from the gemm_fp4 autograd.
+    """
+    G, K, N = b.shape
+    gl = [int(x) for x in group_lens.tolist()]
+    offs = [0]
+    for m in gl:
+        offs.append(offs[-1] + m)
+    outs = []
+    for g in range(G):
+        m = gl[g]
+        if m == 0:
+            outs.append(a.new_zeros((0, N), dtype=out_dtype))
+            continue
+        a_g = a[offs[g]:offs[g] + m]
+        mp = (m + _FP4_TOKEN_PAD - 1) // _FP4_TOKEN_PAD * _FP4_TOKEN_PAD
+        if mp != m:
+            a_g = torch.cat([a_g, a_g.new_zeros((mp - m, K))], dim=0)
+        w = b[g].transpose(0, 1).contiguous()  # [K,N] -> [N,K] for NT
+        o = pt.ops.gemm_fp4(a_g.contiguous(), w, False, True, out_dtype, config)
+        outs.append(o[:m])
+    return torch.cat(outs, dim=0)
+
+
 class PrimusTurboGroupedMLP(TEGroupedMLP):
     """
     Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
@@ -1285,6 +1355,38 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
         self.patch_zero_bubble = args.patch_zero_bubble
         self.patch_primus_pipeline = args.patch_primus_pipeline
+        # Per-module recipe (paper): routed experts in MXFP4 while the rest of the
+        # layer runs FP8. Decided by this flag (not the global recipe), so it works
+        # under a global FP8 context without the mutually-exclusive --fp4/--fp8 flags.
+        self.moe_experts_fp4 = bool(getattr(config, "moe_experts_fp4", False))
+        # MXFP8 weight caching: expert weights only change at optimizer.step, so
+        # re-quantizing them on every microbatch + recompute forward (the large
+        # _mxfp8_quant_weight_fwd kernel) is redundant. When enabled, prequant the
+        # stacked weight once per step and reuse the fp8 buffers (a fresh bf16 is
+        # still threaded each call so wgrad flows to the per-expert leaves).
+        # Default off (extra ~2 bytes/param resident); enable per run.
+        self._cache_mxfp8_weight = (
+            _HAS_MXFP8_PREQUANT and os.environ.get("PRIMUS_TURBO_CACHE_MXFP8_WEIGHT", "0") == "1"
+        )
+        self._w1_mx_cache = None  # (b_fp8_fwd, b_scale_fwd, b_fp8_dgrad, b_scale_dgrad)
+        self._w2_mx_cache = None
+        # Re-quantize the cached fp8 weight on the first microbatch of each step.
+        # MegatronModule.set_is_first_microbatch() (called by the schedule each
+        # step when config.fp8 is set) flips this to True on every submodule that
+        # has the attribute; we clear it after the forward consumes the weights —
+        # the same contract TE's GroupedLinear fp8 weight cache uses (exact,
+        # sync-free, no value heuristic).
+        self.is_first_microbatch = True
+        self._experts_fp4_config = (
+            Float4QuantConfig(
+                format=Format.E2M1_X2,
+                granularity=ScalingGranularity.MX_BLOCKWISE,
+                block_size=32,
+                scale_dtype=ScaleDtype.E8M0,
+            )
+            if self.moe_experts_fp4
+            else None
+        )
 
         if self.config.add_bias_linear:
             raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
@@ -1325,6 +1427,29 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
         return stack_grouped_weight(weights)
 
+    def _mxfp8_weight_arg(self, module, w_bf16, cache_attr, quant_config_data):
+        """GEMM ``b`` arg with the MXFP8 weight quantization cached per optimizer step.
+
+        The expert weight is constant within a step, so its fp8 buffers are
+        quantized once and reused. Rebuild MXFP8WeightPrequant with a *fresh*
+        differentiable ``w_bf16`` each call (wgrad must flow to the per-expert
+        leaves) over the *cached* fp8 fwd/dgrad buffers; caching the whole
+        container would point grad at a stale graph. MX_BLOCKWISE only.
+        Invalidated once per step via ``is_first_microbatch`` (set at the first
+        microbatch, cleared in ``forward``); ``cache is None`` covers first fwd.
+        """
+        if not self._cache_mxfp8_weight:
+            return w_bf16
+        if quant_config_data.granularity != ScalingGranularity.MX_BLOCKWISE:
+            return w_bf16
+        cache = getattr(self, cache_attr)
+        if self.is_first_microbatch or cache is None:
+            prq = prequant_mxfp8_weights(w_bf16.detach())
+            cache = (prq.b_fp8_fwd, prq.b_scale_fwd, prq.b_fp8_dgrad, prq.b_scale_dgrad)
+            setattr(self, cache_attr, cache)
+        # Fresh differentiable bf16 + cached fp8 buffers.
+        return MXFP8WeightPrequant(w_bf16, cache[0], cache[1], cache[2], cache[3])
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -1352,21 +1477,43 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         w2 = self._stack_grouped_linear_weight(self.linear_fc2)
         tokens_per_expert = tokens_per_expert.to(w1.device)
 
-        use_grouped_gemm_low_precision = (
-            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
-            and not self.disable_turbo_grouped_mlp_low_precision
-        )
+        _low_prec = not self.disable_turbo_grouped_mlp_low_precision
+        _fp8_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+        _fp4_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+        # Experts go MXFP4 either with a global FP4 recipe, or — the paper's
+        # per-module recipe — when moe_experts_fp4 is set while the layer runs FP8
+        # (experts FP4 / everything-else FP8). No fused grouped FP4 gemm exists,
+        # so _grouped_gemm_fp4_per_group loops the native FP4 (hipBLASLt) dense gemm.
+        use_grouped_gemm_fp4 = _low_prec and (_fp4_on or (self.moe_experts_fp4 and _fp8_on))
+        # FP8 experts only when not going FP4.
+        use_grouped_gemm_low_precision = _low_prec and _fp8_on and not use_grouped_gemm_fp4
         probs_for_activation = permuted_probs.unsqueeze(-1)
 
         if permuted_local_hidden_states.nelement() != 0:
             if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                w1_arg = self._mxfp8_weight_arg(
+                    self.linear_fc1, w1, "_w1_mx_cache", quant_config.data()
+                )
                 fc1_output = pt.ops.grouped_gemm_fp8(
                     permuted_local_hidden_states,
-                    w1,
+                    w1_arg,
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
+                )
+            elif use_grouped_gemm_fp4:
+                fp4_config = (
+                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
+                    if _fp4_on
+                    else self._experts_fp4_config
+                )
+                fc1_output = _grouped_gemm_fp4_per_group(
+                    permuted_local_hidden_states,
+                    w1,
+                    tokens_per_expert,
+                    permuted_local_hidden_states.dtype,
+                    fp4_config,
                 )
             else:
                 fc1_output = pt.ops.grouped_gemm(
@@ -1395,12 +1542,32 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
 
             if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                w2_arg = self._mxfp8_weight_arg(
+                    self.linear_fc2, w2, "_w2_mx_cache", quant_config.data()
+                )
+                # Both expert weights have now been (re)quantized for this step;
+                # clear so the remaining microbatches + recompute reuse the cache
+                # until set_is_first_microbatch() flips it again next step.
+                self.is_first_microbatch = False
                 output = pt.ops.grouped_gemm_fp8(
                     intermediate_parallel,
-                    w2,
+                    w2_arg,
                     tokens_per_expert,
                     trans_b=False,
                     config=quant_config.data(),
+                )
+            elif use_grouped_gemm_fp4:
+                fp4_config = (
+                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
+                    if _fp4_on
+                    else self._experts_fp4_config
+                )
+                output = _grouped_gemm_fp4_per_group(
+                    intermediate_parallel,
+                    w2,
+                    tokens_per_expert,
+                    intermediate_parallel.dtype,
+                    fp4_config,
                 )
             else:
                 output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)

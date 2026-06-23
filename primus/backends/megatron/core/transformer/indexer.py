@@ -45,6 +45,7 @@ Phase 4 contract:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Tuple
 
 import torch
@@ -106,6 +107,76 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.inde
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
     is_triton_path_enabled as _indexer_tail_triton_enabled,
 )
+
+# MXFP4 block size (E2M1 data + E8M0 per-32 block scales).
+_MXFP4_BLOCK = 32
+
+
+def _indexer_fp4_enabled() -> bool:
+    """True iff PRIMUS_INDEXER_FP4 == "1" (default off): run the CSA-indexer QK in MXFP4."""
+    return os.environ.get("PRIMUS_INDEXER_FP4", "0") == "1"
+
+
+def _fp4_qk_gemm(q_i: torch.Tensor, k_icomp: torch.Tensor) -> torch.Tensor:
+    """Real MXFP4 indexer QK: per-batch [S*H,Hd] @ [P,Hd]^T (NT, trans_b) -> [B,S,H,P].
+
+    hipBLASLt FP4 needs K=Hd%128, M,N%16; force PRIMUS_TURBO_GEMM_BACKEND=FP4:HIPBLASLT.
+    """
+    import primus_turbo.pytorch as pt
+    from primus_turbo.pytorch.core.low_precision import (
+        Format,
+        Float4QuantConfig,
+        ScaleDtype,
+        ScalingGranularity,
+    )
+
+    cfg = Float4QuantConfig(
+        format=Format.E2M1_X2,
+        granularity=ScalingGranularity.MX_BLOCKWISE,
+        block_size=_MXFP4_BLOCK,
+        scale_dtype=ScaleDtype.E8M0,
+    )
+    B, S, H, Hd = q_i.shape
+    P = k_icomp.shape[1]
+    outs = []
+    for b in range(B):
+        a = q_i[b].reshape(S * H, Hd).contiguous()  # [S*H, Hd]
+        bk = k_icomp[b].contiguous()  # [P, Hd]
+        o = pt.ops.gemm_fp4(a, bk, trans_b=True, config=cfg)  # [S*H, P]
+        outs.append(o.view(1, S, H, P))
+    return torch.cat(outs, dim=0)
+
+
+def _indexer_fp8_proj_enabled() -> bool:
+    """Run the indexer projections (w_dq/w_iuq/w_w) in MXFP8 (default off).
+
+    Reuses the attention-proj flag PRIMUS_V4_FP8_ATTN_PROJ; only fires inside
+    turbo-fp8. The linears are duplicated (no TP shard), so fp8 is safe at any TP.
+    """
+    if os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", "0") != "1":
+        return False
+    try:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager as _M,
+        )
+
+        return _M.is_turbo_fp8_enabled()
+    except Exception:
+        return False
+
+
+def _fp8_linear(lin: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+    """MXFP8 apply of an ``nn.Linear`` (weight [out,in], no bias): y = x @ Wᵀ."""
+    import primus_turbo.pytorch as pt
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboLowPrecisionGlobalStateManager as _M,
+    )
+
+    cfg = _M.get_turbo_quant_config().data()
+    orig = x.shape
+    x2 = x.reshape(-1, orig[-1]).contiguous()
+    out = pt.ops.gemm_fp8(x2, lin.weight, trans_b=True, config=cfg)  # [*, out]
+    return out.reshape(*orig[:-1], out.shape[-1])
 
 
 class Indexer(nn.Module):
@@ -219,9 +290,13 @@ class Indexer(nn.Module):
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
         # 2) Per-head query and per-head weight.
-        q_q = self.w_dq(hidden)  # [B, S, dq_rank]
-        q_i = self.w_iuq(q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
-        w_i = self.w_w(hidden)  # [B, S, H]
+        # Indexer projections: FP8 (paper / NVIDIA backend.linear) when enabled,
+        # else the bf16 nn.Linear. No TP gather/scatter (duplicated linears).
+        # FP8 (paper / NVIDIA backend.linear) when enabled, else the bf16 nn.Linear.
+        proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
+        q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
+        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
+        w_i = proj(self.w_w, hidden)  # [B, S, H]
 
         # 3) Score I_{t,s} = Σ_h w_i[t,h] * ReLU(q_i[t,h] · k_icomp[s])
         #    q_i [B,S,H,Hd] · k_icomp[B,P,Hd] → relu[B,S,H,P]; w_i[B,S,H,1] → sum over H
@@ -235,18 +310,25 @@ class Indexer(nn.Module):
         #   else                          → fully eager.
         k_icomp_2d = k_icomp.squeeze(2)
 
-        # FP8 (E4M3) QK path: fake-quantize the query / compressed-key
-        # activations BEFORE the scoring einsum so every dispatch path
-        # (full-fuse Triton, post-einsum-tail Triton, eager) consumes the
-        # FP8-rounded values. The ReLU + per-head weight + sum + causal mask +
-        # top-k stay in the activation dtype (BF16 index-score path). ``w_i``
-        # (per-head score weights) is left in BF16 — it is not part of the QK
-        # GEMM the report quantizes.
-        if self.use_fp8_qk:
+        # Indexer QK precision (both default OFF -> BF16 QK). FP8 (E4M3) fake-
+        # quantizes the operands before the normal score dispatch; FP4 (below)
+        # is a dedicated real-GEMM branch and takes precedence when both are set.
+        # The ReLU + per-head weight (``w_i``) + sum + causal mask + top-k stay
+        # in the activation dtype — only the QK operands are quantized.
+        if self.use_fp8_qk and not _indexer_fp4_enabled():
             q_i = fake_quantize_fp8_e4m3(q_i)
             k_icomp_2d = fake_quantize_fp8_e4m3(k_icomp_2d)
 
-        if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
+        # Phase 5: FP4 CSA-indexer QK. Real MXFP4 GEMM for the QK product (paper
+        # §2.3.4/§5.2.1: "QK multiplied entirely in FP4"), then the eager
+        # ReLU/weight/sum tail (w_i + tail stay BF16/FP32 — only the QK is FP4).
+        if _indexer_fp4_enabled():
+            dot = _fp4_qk_gemm(q_i, k_icomp_2d)  # [B, S, H, P], real FP4 matmul
+            relu = F.relu(dot)
+            scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]
+            mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
+            scores = scores + mask.unsqueeze(0)  # [B, S, P]
+        elif _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,
                 k_icomp_2d,
