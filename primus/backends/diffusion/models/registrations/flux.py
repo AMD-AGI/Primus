@@ -14,9 +14,12 @@ import torch
 from safetensors.torch import load_file as safe_load_file
 
 from primus.backends.diffusion.models.flux.adapter import FluxForTraining
-from primus.backends.diffusion.models.flux.autoencoder import AutoEncoderParams, load_autoencoder
-from primus.backends.diffusion.models.flux.configuration_flux import FluxTrainingConfig
+from primus.backends.diffusion.models.flux.autoencoder import (
+    AutoEncoderParams,
+    load_autoencoder,
+)
 from primus.backends.diffusion.models.flux.conditioner import HFEmbedder
+from primus.backends.diffusion.models.flux.configuration_flux import FluxTrainingConfig
 from primus.backends.diffusion.models.flux.model import Flux, flux_1_dev_params
 from primus.backends.diffusion.models.flux.train_pipeline import (
     FluxFlowMatchTrainPipeline,

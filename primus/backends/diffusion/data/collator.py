@@ -19,7 +19,9 @@ class VisionCollator:
     def pad_sequence(self, input_ids, batch_first, padding_value):
         if self.processor.tokenizer.padding_side == "left":
             input_ids = [torch.flip(_input_ids, [0]) for _input_ids in input_ids]
-        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=batch_first, padding_value=padding_value)
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids, batch_first=batch_first, padding_value=padding_value
+        )
         if self.processor.tokenizer.padding_side == "left":
             input_ids = torch.flip(input_ids, [1])
         return input_ids

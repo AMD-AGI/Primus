@@ -72,7 +72,9 @@ class Flux(nn.Module):
         self.in_channels = params.in_channels
         self.out_channels = params.out_channels
         if params.hidden_size % params.num_heads != 0:
-            raise ValueError(f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}")
+            raise ValueError(
+                f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
+            )
         pe_dim = params.hidden_size // params.num_heads
         if sum(params.axes_dim) != pe_dim:
             raise ValueError(f"Got axes_dim={params.axes_dim}, expected sum={pe_dim}")
@@ -84,7 +86,9 @@ class Flux(nn.Module):
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
         self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
-        self.guidance_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
+        self.guidance_in = (
+            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
+        )
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
         self.double_blocks = nn.ModuleList(
             [

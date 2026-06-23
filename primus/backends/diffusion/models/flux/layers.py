@@ -170,7 +170,9 @@ class DoubleStreamBlock(nn.Module):
 
 
 class SingleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, qk_scale: float | None = None):
+    def __init__(
+        self, hidden_size: int, num_heads: int, mlp_ratio: float = 4.0, qk_scale: float | None = None
+    ):
         super().__init__()
         self.hidden_dim = hidden_size
         self.num_heads = num_heads

@@ -123,7 +123,9 @@ def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
 def test_flux_raw_processor_prepares_images_and_prompts():
     from PIL import Image
 
-    processor = FluxRawImageTextProcessor({"img_size": 8, "prompt_dropout_prob": 1.0, "skip_low_resolution": False})
+    processor = FluxRawImageTextProcessor(
+        {"img_size": 8, "prompt_dropout_prob": 1.0, "skip_low_resolution": False}
+    )
     image = Image.fromarray(np.full((6, 10, 3), 127, dtype=np.uint8))
 
     out = processor.prepare_batch(
