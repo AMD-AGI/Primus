@@ -360,24 +360,28 @@ jobs:
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
-      - name: Publish coverage comparison (unit vs unit+E2E)
+      - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
         run: |
           # Don't instrument coverage's own helper processes here.
           unset COVERAGE_PROCESS_START
-          # 1) Merge the per-rank E2E data files (COVERAGE_FILE=.coverage_e2e).
+          # Merge per-rank E2E data, then line-merge unit + E2E into one dataset.
+          # The JSON is consumed by the coverage-summary job (no per-job summary).
           python -m coverage combine 2>/dev/null || true
-          # 2) Line-merge unit + E2E into one dataset (can't add two percentages).
           COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage combine --keep \
             "$GITHUB_WORKSPACE/.coverage.unit" "$GITHUB_WORKSPACE/.coverage_e2e" 2>/dev/null || true
           COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage json -o coverage_combined.json 2>/dev/null || true
-          # Two-column comparison when E2E data exists, else fall back to unit-only.
-          if [ -s coverage_combined.json ]; then
-            python tools/ci/coverage_summary.py coverage_unit.json "Unit vs Unit+E2E (torch)" coverage_combined.json >> "$GITHUB_STEP_SUMMARY" || true
-          else
-            python tools/ci/coverage_summary.py coverage_unit.json "Unit tests (torch)" >> "$GITHUB_STEP_SUMMARY" || true
-          fi
+      - name: Upload torch coverage json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-torch
+          path: |
+            coverage_unit.json
+            coverage_combined.json
+          if-no-files-found: ignore
       - name: Clean
         if: always()
         run: |
@@ -491,16 +495,22 @@ jobs:
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
           JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
-      - name: Publish MaxText E2E coverage summary
+      - name: Build jax coverage json (MaxText E2E)
         if: always()
         continue-on-error: true
         run: |
           unset COVERAGE_PROCESS_START
+          # The JSON is consumed by the coverage-summary job (no per-job summary).
           python -m coverage combine 2>/dev/null || true
           python -m coverage json -o coverage_maxtext_e2e.json 2>/dev/null || true
-          if [ -s coverage_maxtext_e2e.json ]; then
-            python tools/ci/coverage_summary.py coverage_maxtext_e2e.json "MaxText E2E training (executed, not asserted)" >> "$GITHUB_STEP_SUMMARY" || true
-          fi
+      - name: Upload jax coverage json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-jax
+          path: coverage_maxtext_e2e.json
+          if-no-files-found: ignore
       - name: Clean
         if: always()
         run: |
@@ -509,3 +519,30 @@ jobs:
           # Remove E2E coverage artifacts + the injection .pth (persistent runner).
           rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coveragerc_e2e" coverage_maxtext_e2e.json || true
           SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true
+
+  coverage-summary:
+    # Combine the torch and jax coverage JSON artifacts into one unit-vs-E2E
+    # table. Uses module-level JSON (not coverage data), so no cross-runner path
+    # mapping is needed: torch (megatron/torchtitan) and jax (maxtext) E2E cover
+    # near-disjoint modules and are merged per module by max covered lines.
+    needs: [run-unittest-torch, run-unittest-jax]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: cov-artifacts
+      - name: Render combined coverage summary
+        continue-on-error: true
+        run: |
+          unit=$(find cov-artifacts -name coverage_unit.json | head -1)
+          torch=$(find cov-artifacts -name coverage_combined.json | head -1)
+          jax=$(find cov-artifacts -name coverage_maxtext_e2e.json | head -1)
+          if [ -n "$unit" ]; then
+            python tools/ci/coverage_summary.py "$unit" "Unit vs Unit+E2E (torch + jax)" $torch $jax >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No unit coverage artifact found; skipping combined summary." >> "$GITHUB_STEP_SUMMARY"
+          fi

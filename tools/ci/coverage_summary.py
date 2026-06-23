@@ -6,11 +6,14 @@
 
 """Render coverage.py JSON as a compact Markdown table for the CI run summary.
 
-Modes:
-  1 report  -> single "Coverage" column (e.g. JAX MaxText E2E).
-  2 reports -> "Unit" vs "Unit+E2E" columns. The 2nd report must come from
-               `coverage combine` of the unit + E2E data (line-level merge);
-               two summary percentages cannot simply be added.
+Modes (by number of report arguments):
+  1 report   -> single "Coverage" column (e.g. JAX MaxText E2E).
+  2+ reports -> "Unit" vs "Unit+E2E". The 1st is unit; the rest are E2E reports,
+                merged per module by taking the max covered lines. Each E2E
+                report should be a `coverage combine` of unit + that job's E2E
+                data (line-level). Taking the max across jobs avoids double
+                counting and lets torch (megatron/torchtitan) and jax (maxtext)
+                E2E - which cover near-disjoint modules - share one table.
 
 Layout: top-level groups (core, backends, modules, agents, cli, pretrain.py, ...)
 are bold rows at the same level, sorted by coverage. core/ and backends/ also
@@ -74,13 +77,15 @@ def _aggregate(report: dict):
     return agg
 
 
-def render(primary: dict, title: str, secondary: dict = None) -> str:
+def render(primary: dict, title: str, secondaries: list = None) -> str:
     pa = _aggregate(primary)
-    sa = _aggregate(secondary) if secondary is not None else None
-    two = sa is not None
+    sas = [_aggregate(s) for s in (secondaries or [])]
+    two = bool(sas)
 
     def e2e_cov(group, key):
-        return sa.get(group, {}).get(key, [0])[0] if two else 0
+        # Merge E2E reports by max covered lines (jobs cover near-disjoint
+        # modules, so max avoids double counting the shared core code).
+        return max((sa.get(group, {}).get(key, [0])[0] for sa in sas), default=0) if two else 0
 
     def row(label, cov, stmts, e2e, bold=False):
         if two:
@@ -112,11 +117,22 @@ def render(primary: dict, title: str, secondary: dict = None) -> str:
     te = sum(group_totals(g)[2] for g in groups) if two else 0
     excl = ", ".join(sorted(OMIT_MODULES))
 
+    # coverage's own totals over every primus file (nothing excluded), for context.
+    p_all = primary.get("totals", {}).get("percent_covered", 0.0)
+    s_all = (
+        max((s.get("totals", {}).get("percent_covered", 0.0) for s in secondaries), default=0.0)
+        if two
+        else 0.0
+    )
+
     out = ["## Primus coverage - %s\n" % title]
     if two:
         out.append(
             "**Unit %.1f%% -> Unit+E2E %.1f%%** (%s statements; excludes %s)\n"
             % (_pct(tc, tn), _pct(te, tn), format(tn, ","), excl)
+        )
+        out.append(
+            "_Including all modules (nothing excluded): Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
         )
         out += ["| Module | Stmts | Unit | Unit+E2E |", "|---|--:|--:|--:|"]
     else:
@@ -148,8 +164,8 @@ def _load(path: str) -> dict:
 def main() -> int:
     primary = _load(sys.argv[1])
     title = sys.argv[2] if len(sys.argv) > 2 else "tests"
-    secondary = _load(sys.argv[3]) if len(sys.argv) > 3 else None
-    print(render(primary, title, secondary))
+    secondaries = [_load(p) for p in sys.argv[3:]]
+    print(render(primary, title, secondaries or None))
     return 0
 
 
