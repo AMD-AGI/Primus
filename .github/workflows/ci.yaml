@@ -378,6 +378,10 @@ jobs:
           path: test-reports/
           if-no-files-found: warn
           retention-days: 14
+      - name: Write test summary
+        if: always()
+        run: |
+          python tools/ci/junit_summary.py --title torch test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
@@ -525,6 +529,10 @@ jobs:
           path: test-reports/
           if-no-files-found: warn
           retention-days: 14
+      - name: Write test summary
+        if: always()
+        run: |
+          python tools/ci/junit_summary.py --title jax test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build jax coverage json (MaxText E2E)
         if: always()
         continue-on-error: true
