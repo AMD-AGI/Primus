@@ -651,6 +651,20 @@ class DeepseekV4Attention(MLASelfAttention):
         )
         if self._use_v4_tilelang_csa_attention and self.compress_ratio != 4:
             self._use_v4_tilelang_csa_attention = False
+        # FlyDSL backend flags (forward-only, soft-dep; same compress-ratio
+        # gating as the tilelang flags above).
+        self._use_v4_flydsl_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_flydsl_attention", False),
+            field_name="use_v4_flydsl_attention",
+        )
+        if self._use_v4_flydsl_attention and self.compress_ratio not in (0, 128):
+            self._use_v4_flydsl_attention = False
+        self._use_v4_flydsl_csa_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_flydsl_csa_attention", False),
+            field_name="use_v4_flydsl_csa_attention",
+        )
+        if self._use_v4_flydsl_csa_attention and self.compress_ratio != 4:
+            self._use_v4_flydsl_csa_attention = False
 
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
@@ -995,6 +1009,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 scale=self._attention_scale(),
                 hca_local_seqlen=int(hca_local_seqlen),
                 use_tilelang=self._use_v4_tilelang_attention,
+                use_flydsl=self._use_v4_flydsl_attention,
             )
             ev_e.record()
             torch.cuda.synchronize()
@@ -1012,6 +1027,7 @@ class DeepseekV4Attention(MLASelfAttention):
             scale=self._attention_scale(),
             hca_local_seqlen=int(hca_local_seqlen),
             use_tilelang=self._use_v4_tilelang_attention,
+            use_flydsl=self._use_v4_flydsl_attention,
         )
 
     def _attention_forward_via_core(
@@ -1211,6 +1227,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 training=self.training,
                 scale=self._attention_scale(),
                 use_tilelang=self._use_v4_tilelang_csa_attention,
+                use_flydsl=self._use_v4_flydsl_csa_attention,
             )
 
         # 3) Eager fallback gathers per-query pool slices: [B, S, K, Dh].
