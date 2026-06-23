@@ -78,14 +78,33 @@ def _require_optional_path(path: str | None, description: str, *, kind: str = "a
     _require_path(path, description, kind=kind)
 
 
+def _looks_like_local_path(value: str) -> bool:
+    if value.startswith(("/", "./", "../", "~")):
+        return True
+    parts = value.split("/")
+    return len(parts) == 2 and parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
+
+
+def _looks_like_hf_reference(value: str) -> bool:
+    if _looks_like_local_path(value):
+        return False
+    parts = value.split("/")
+    return len(parts) >= 2 and all(part for part in parts[:2])
+
+
 def _validate_local_or_hf_id(value: str | None, description: str) -> None:
     if _is_placeholder(value):
         _fail(f"{description} is not configured: {value!r}")
-    path = Path(str(value)).expanduser()
+    value = str(value)
+    path = Path(value).expanduser()
     if path.exists():
         _log(f"{description}: {path}")
+    elif _looks_like_local_path(value):
+        _fail(f"{description} path not found: {path}")
+    elif _looks_like_hf_reference(value):
+        _log(f"{description}: {value} (assuming Hugging Face reference)")
     else:
-        _log(f"{description}: {value} (assuming Hugging Face model id)")
+        _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
 
 
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
@@ -121,10 +140,14 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             dataset_name = dataset_cfg.get("dataset")
             dataset_format = str(dataset_cfg.get("dataset_format", "webdataset")).lower()
             if dataset_name == "cc12m-test" and _is_placeholder(dataset_cfg.get("dataset_path")):
-                default_path = "/mnt/shared/zirui/code/torchtitan-main/tests/assets/cc12m_test"
-                _require_path(default_path, "FLUX raw image-text dataset cc12m-test", kind="dir")
-            elif dataset_name == "cc12m-wds" and _is_placeholder(dataset_cfg.get("dataset_path")):
-                _log("FLUX raw image-text dataset: pixparse/cc12m-wds (Hugging Face dataset)")
+                _fail("FLUX raw dataset `cc12m-test` requires `dataset_path` to point at local webdataset tars")
+            elif dataset_name == "cc12m-wds":
+                if _is_placeholder(dataset_cfg.get("dataset_path")):
+                    _log("FLUX raw image-text dataset: pixparse/cc12m-wds (Hugging Face dataset)")
+                else:
+                    _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
+            elif dataset_format == "hf_repo":
+                _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
             else:
                 kind = "file" if dataset_format == "jsonl" else "dir"
                 _require_path(dataset_cfg.get("dataset_path"), "FLUX raw image-text dataset", kind=kind)

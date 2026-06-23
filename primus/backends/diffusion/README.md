@@ -91,16 +91,15 @@ model:
 `autoencoder` accepts either a local safetensors path or `repo_id/filename`;
 for example `black-forest-labs/FLUX.1-dev/ae.safetensors`.
 
-The precomputed MLPerf data on this machine is:
+The shipped precomputed example expects these paths through environment
+variables:
 
 ```text
-/mnt/vast/zirui/data/
-  cc12m_preprocessed/     # train, precomputed text + VAE mean/logvar
-  coco_preprocessed/      # validation-style precomputed data
-  empty_encodings/        # t5_empty.npy, clip_empty.npy
+DATASET_PATH=/path/to/cc12m_preprocessed
+EMPTY_ENCODINGS_PATH=/path/to/empty_encodings
 ```
 
-The shipped FLUX precomputed example uses these paths by default:
+The example config is:
 
 ```text
 examples/diffusion/configs/MI355X/flux.1_dev_t2i-pretrain.yaml
@@ -125,12 +124,12 @@ data:
   dataset: cc12m-wds    # maps to Hugging Face dataset pixparse/cc12m-wds
 ```
 
-Do not use full `cc12m-wds` as the default smoke test; it is large. The raw FLUX
-example defaults to `cc12m-test`, which maps to TorchTitan's small test tar:
+Do not use full `cc12m-wds` as the default smoke test; it is large. For
+`cc12m-test`, pass a local webdataset directory explicitly:
 
 ```text
-/mnt/shared/zirui/code/torchtitan-main/tests/assets/cc12m_test/
-  cc12m-train-0000.tar
+DATASET=cc12m-test
+DATASET_PATH=/path/to/cc12m_test
 ```
 
 The raw FLUX example is:
