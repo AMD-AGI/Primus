@@ -31,8 +31,11 @@ export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1"
-export GLOO_SOCKET_IFNAME=fenic
-export NCCL_SOCKET_IFNAME=fenic
+# "fenic" is the cluster NIC; honor inherited values so a non-cluster / direct
+# run (e.g. local single-node smoke) can point these at a real interface
+# (e.g. lo) — otherwise gloo aborts with "Unable to find address for: fenic".
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-fenic}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-fenic}
 export NCCL_IB_GID_INDEX=1
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
@@ -187,8 +190,11 @@ if { [ "$USE_V4_TRITON_ATTENTION" = "True" ] || [ "$USE_V4_TRITON_CSA_ATTENTION"
 fi
 
 if [ "$PRECISION_TYPE" = "FP8" ]; then
-  export FP8=${FP8:-hybrid}
-  export FP8_RECIPE=${FP8_RECIPE:-delayed}
+  # Default to the paper's ue8m0 microscaling (e4m3 + mxfp8); honor explicit
+  # FP8 / FP8_RECIPE overrides. Sentinel-aware because "null" is non-empty, so
+  # a plain ${FP8:-...} would keep the off-sentinel instead of defaulting.
+  [ "$FP8" = "null" ] && export FP8=e4m3
+  [ "$FP8_RECIPE" = "null" ] && export FP8_RECIPE=mxfp8
 fi
 
 # ---------- MXFP8 + FP8 param-gather (Muon path; Megatron #4987 analogue) ----
@@ -234,10 +240,20 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 
 export PRIMUS_EXIT_FAST=1
 
-./primus-cli slurm -N "$NNODES" \
-  ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
-  ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
-  -- --image "${DOCKER_IMAGE}" --clean -- --numa \
+# Launcher: slurm (default, multi-node cluster) or direct (single-node, already
+# inside the container — e.g. local smoke on one box). PRIMUS_LAUNCHER=direct
+# drops the SLURM/srun + docker-image wrap that 'direct' doesn't use.
+export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-slurm}
+if [ "$PRIMUS_LAUNCHER" = "direct" ]; then
+  LAUNCHER_ARGS=(direct)
+else
+  LAUNCHER_ARGS=(slurm -N "$NNODES")
+  [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
+  [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
+  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa)
+fi
+
+./primus-cli "${LAUNCHER_ARGS[@]}" \
   -- train pretrain --config "$EXP" \
   --manual_gc True \
   --manual_gc_interval 100 \

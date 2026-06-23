@@ -242,6 +242,17 @@ export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 #   path.  Set PRIMUS_V4_ROUTER_TRITON=0 to revert to the eager body.
 export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 
+# ---------- Precision: FP8 training (paper ue8m0 microscaling) --------------
+# V4-Flash trains in FP8 by default. PRECISION_TYPE=FP8 makes run_deepseek_v4.sh
+# emit --fp8 e4m3 --fp8_recipe mxfp8 (mxfp8 = the paper's ue8m0 microscaling,
+# E8M0 block scale, native on MI355X/CDNA4). The FP4 expert / FP4-Indexer path
+# is not yet wired in the Primus V4 integration ("Phase 2"), so experts run FP8
+# here (FP8-everywhere) rather than FP4 — the closest supported step. FP8 is
+# outlier-sensitive, hence the clamped SwiGLU (swiglu_limit) in the EXP yaml.
+# A/B back to BF16 with PRECISION_TYPE=BF16; override the recipe via FP8_RECIPE.
+export PRECISION_TYPE=${PRECISION_TYPE:-FP8}
+export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-FP8-pretrain.yaml}
+
 # ---------- Profile OFF in the proxy smoke runner ---------------------------
 # This script is the steady-state perf / smoke runner — kineto profiling
 # stays OFF to avoid contaminating the iter timer with profiler-collection

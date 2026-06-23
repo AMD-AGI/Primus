@@ -13,6 +13,7 @@ This module only defines DeepSeek-native runtime specs.
 import importlib
 import importlib.util
 import logging
+import os
 from typing import List, Optional, Tuple
 
 from megatron.core.transformer.enums import AttnMaskType
@@ -220,6 +221,19 @@ def _default_init_method(_weight) -> None:
     return None
 
 
+def _v4_fp8_attn_proj(config: "DeepSeekV4TransformerConfig") -> bool:
+    """FP8-ify the attention projections (q-up / o-proj) that otherwise fall
+    back to bf16 because the TE/Turbo fp8 linear rejects gather_output /
+    scatter-input. Only safe at TP=1, where gather/scatter are no-ops — so
+    we keep the bf16 gather/scatter native path for TP>1. Opt-in via
+    PRIMUS_V4_FP8_ATTN_PROJ=1.
+    """
+    return (
+        os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", "0") == "1"
+        and getattr(config, "tensor_model_parallel_size", 1) == 1
+    )
+
+
 def _build_linear_projection_spec(
     *,
     config: DeepSeekV4TransformerConfig,
@@ -279,7 +293,15 @@ def _build_column_parallel_spec(
     gather-then-shard variant for full sharded heads is tracked in P14
     once the grouped-O TP plan lands.
     """
-    if gather_output:
+    # FP8 attention projections (paper recipe): the TE/Turbo fp8 column linear
+    # rejects gather_output=True, so q-up normally falls back to bf16 native.
+    # But at TP=1 the gather is a no-op, so we can route q-up through the fp8
+    # turbo linear (gather_output=False ≡ True) to capture it in mxfp8.
+    # Gated by PRIMUS_V4_FP8_ATTN_PROJ=1 and only when TP==1. Default off.
+    if gather_output and _v4_fp8_attn_proj(config):
+        module_cls = provider.column_parallel_linear()
+        gather_output = False
+    elif gather_output:
         module_cls = provider.column_parallel_linear_with_gather_output()
     else:
         module_cls = provider.column_parallel_linear()
@@ -324,7 +346,14 @@ def _build_row_parallel_spec(
     ``provider.row_parallel_linear_with_scatter_input()``; the
     standard TE path stays for ``input_is_parallel=True``.
     """
-    if not input_is_parallel:
+    # FP8 attention projections: the TE/Turbo fp8 row linear rejects
+    # input_is_parallel=False, so o-proj normally falls back to bf16 native.
+    # At TP=1 the scatter is a no-op, so route through the fp8 turbo linear
+    # (input_is_parallel=True ≡ False). Gated by PRIMUS_V4_FP8_ATTN_PROJ + TP==1.
+    if not input_is_parallel and _v4_fp8_attn_proj(config):
+        module_cls = provider.row_parallel_linear()
+        input_is_parallel = True
+    elif not input_is_parallel:
         module_cls = provider.row_parallel_linear_with_scatter_input()
     else:
         module_cls = provider.row_parallel_linear()

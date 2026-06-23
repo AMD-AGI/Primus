@@ -39,7 +39,13 @@
 #   PRIMUS_TOTAL_LAYERS=4 PRIMUS_SEQ_LENGTH=512 GBS=8 \
 #       ./run_deepseek_v4_pro_muon.sh                              # cheap validation
 #   OPTIMIZER=adam ./run_deepseek_v4_pro_muon.sh                   # A/B vs AdamW
+#   PRECISION_TYPE=BF16 ./run_deepseek_v4_pro_muon.sh             # A/B vs BF16 (fp8 is default-on)
 #   PROFILE=True DISABLE_TENSORBOARD=False ...                     # capture 1-step trace
+#
+# Precision: FP8 training is ON by default (FP8=e4m3, FP8_RECIPE=tensorwise).
+# Paper recipe is ue8m0/mxfp8 but it's not runnable on this gfx950 build (see the
+# "FP8 training" block below); tensorwise gives the paper's fp8 layout on the
+# weight GEMMs. PRECISION_TYPE=BF16 to A/B back to bf16.
 ###############################################################################
 set -euo pipefail
 set -x
@@ -52,7 +58,7 @@ export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 # ---------- Model: DeepSeek-V4 Pro -----------------------------------------
 export PRIMUS_MODEL=${PRIMUS_MODEL:-deepseek_v4_pro}
-export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
+export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-FP8-pretrain.yaml}
 
 # ---------- Pro production widths (paper §4.2.1) ----------------------------
 export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-384}
@@ -120,6 +126,13 @@ export MUON_MOMENTUM=${MUON_MOMENTUM:-0.95}            # paper momentum 0.95
 # extra_scale_factor (orth_grad RMS≈1/√max(m,n), times spectral scale √max(m,n)),
 # so 0.18 maps directly here.  Megatron default is 1.0 (≈5.5× too large vs paper).
 export MUON_EXTRA_SCALE_FACTOR=${MUON_EXTRA_SCALE_FACTOR:-0.18}
+# Newton-Schulz hardening knobs (matter for mxfp8, where NS can diverge on the
+# quant-noised gradient). num_ns_steps = NS iterations (more = better convergence
+# on ill-conditioned input); fp32_matmul_prec = precision of the NS matmuls
+# ("medium" = tf32-ish, "high" = full fp32 — full precision keeps a near-σ=1
+# input from being pushed past the quintic's stable region by rounding error).
+export MUON_NUM_NS_STEPS=${MUON_NUM_NS_STEPS:-5}
+export MUON_FP32_MATMUL_PREC=${MUON_FP32_MATMUL_PREC:-medium}
 # NOTE: muon_weight_decay is yaml-only (trainer_base.yaml=0.01); paper=0.1.
 # No CLI flag, so it stays 0.01 here unless overridden in an EXP yaml.
 # Muon hard requirements (Megatron arguments.py:1422):
@@ -141,12 +154,112 @@ export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-True}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
+# Primus Sync-Free MoE (eliminates the DeepEP host busy-wait on the variable
+# per-expert token counts): 0=off, 1=fused router/permute, 2=+no CPU busy-wait
+# (turbo deepep + grouped mlp), 3=fully sync-free (+fused act). Stage >=2 needs
+# use_turbo_grouped_mlp=True. Auto-enables the required sub-flags. Default 0.
+export TURBO_SYNC_FREE_MOE_STAGE=${TURBO_SYNC_FREE_MOE_STAGE:-0}
+# Phase 1b: route the dense/attention projections (q_down/kv/o_a etc.) through
+# Primus-Turbo linears so they pick up the mxfp8 (CK) path under the fp8 context.
+# Default OFF (attention stays bf16, the validated baseline). Set True to enable
+# fp8 attention/dense projections. Requires TP=1 and fp8_recipe in {tensorwise,
+# blockwise,mxfp8}; the MLA monkey-patch is auto-skipped for V4 (see mla_patches).
+export USE_TURBO_PARALLEL_LINEAR=${USE_TURBO_PARALLEL_LINEAR:-False}
+# Per-module recipe (paper): routed experts in MXFP4 while the rest of the layer
+# stays FP8. Works under the global FP8 recipe (no --fp4/--fp8 conflict): the
+# PrimusTurbo grouped MLP routes expert GEMMs through native FP4 (hipBLASLt).
+# Default OFF. When on, force the hipBLASLt FP4 backend (no AITER).
+export MOE_EXPERTS_FP4=${MOE_EXPERTS_FP4:-False}
+if [ "$MOE_EXPERTS_FP4" = "True" ]; then
+  export PRIMUS_TURBO_GEMM_BACKEND=${PRIMUS_TURBO_GEMM_BACKEND:-FP4:HIPBLASLT}
+fi
+# Phase 5 (paper): CSA-indexer QK score in FP4. Rounds q_i and K^{IComp} to
+# MXFP4 before the QK product (STE backward); w_i + ReLU/sum tail stay BF16.
+# Read directly by the Indexer via PRIMUS_INDEXER_FP4. Default OFF.
+export INDEXER_FP4=${INDEXER_FP4:-False}
+if [ "$INDEXER_FP4" = "True" ]; then
+  export PRIMUS_INDEXER_FP4=1
+  # The indexer QK now runs a REAL MXFP4 gemm (pt.ops.gemm_fp4) — force the
+  # hipBLASLt FP4 backend (no AITER), same as the MXFP4 expert path.
+  export PRIMUS_TURBO_GEMM_BACKEND=${PRIMUS_TURBO_GEMM_BACKEND:-FP4:HIPBLASLT}
+fi
+# MXFP8 expert-weight caching: expert weights are constant within an optimizer
+# step, so re-quantizing them every microbatch + recompute forward (the large
+# _mxfp8_quant_weight_fwd kernel) is redundant. When on, PrimusTurboGroupedMLP
+# prequantizes once per step and reuses the fp8 buffers (loss-neutral, faster).
+# Costs extra bytes/param resident — watch HBM at depth. Only affects the
+# mxfp8 (MX_BLOCKWISE) grouped path. Default OFF.
+export CACHE_MXFP8_WEIGHT=${CACHE_MXFP8_WEIGHT:-False}
+if [ "$CACHE_MXFP8_WEIGHT" = "True" ]; then
+  export PRIMUS_TURBO_CACHE_MXFP8_WEIGHT=1
+fi
+# FP8 attention projections (paper recipe): route q-up / o-proj through the fp8
+# turbo linear instead of the bf16 gather/scatter native path. Only valid at
+# TP=1 (gather/scatter are no-ops there); for TP>1 the turbo linear rejects
+# gather_output/scatter-input and it stays bf16. Default OFF.
+export V4_FP8_ATTN_PROJ=${V4_FP8_ATTN_PROJ:-False}
+if [ "$V4_FP8_ATTN_PROJ" = "True" ]; then
+  export PRIMUS_V4_FP8_ATTN_PROJ=1
+fi
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
 export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
 export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
+
+# ---------- FP8 training (paper §4.x quantization / techblog §9.6) ----------
+# Paper recipe: "FP4 + FP8 Mixed" — MoE experts + CSA-Indexer QK in FP4 (MXFP4),
+# EVERYTHING ELSE in FP8, all with the **ue8m0** microscaling scale format.
+# On this stack the ue8m0 path is `fp8_recipe=mxfp8` → TE MXFP8BlockScaling →
+# Primus-Turbo MX_BLOCKWISE granularity with scale_dtype=E8M0 (fp8_utils.py:148),
+# i.e. the paper's exact scaling format, native on MI355X/CDNA4.
+#
+# Integration gap vs the paper (NOT config — Primus V4 TODO, develop techblog
+# item 10 "Phase 2 FP4/FP8 Mixed"): the FP4 expert / FP4-Indexer path is not yet
+# wired in V4, so experts run at FP8 here (FP8 everywhere) rather than FP4. This
+# is the closest supported step toward the paper recipe. FP8 is highly outlier-
+# sensitive, which is why the paper pairs it with clamped SwiGLU (swiglu_limit,
+# already on above via PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=True).
+# Precision toggle — shared interface with run_deepseek_v4.sh / the flash proxy:
+#   PRECISION_TYPE=FP8 (default) -> e4m3 + tensorwise; BF16 -> fp8 off.
+# FP8 / FP8_RECIPE still override directly (e.g. FP8_RECIPE=blockwise, or FP8=null).
+export PRECISION_TYPE=${PRECISION_TYPE:-FP8}
+if [ "$PRECISION_TYPE" = "FP8" ]; then
+  export FP8=${FP8:-e4m3}                      # forward fp8 format (paper E4M3); "hybrid" = E4M3 fwd / E5M2 bwd
+  # Paper recipe is ue8m0 microscaling (mxfp8), but mxfp8 is NOT runnable on this
+  # gfx950 build (turbo grouped-GEMM has no MX path; TE ROCm MXFP8 needs K%128==0,
+  # V4 has a K=224 proj). `tensorwise` is the working recipe — paper fp8 layout,
+  # non-ue8m0 scale. (other: blockwise [TE-ROCm unsupported] / delayed)
+  export FP8_RECIPE=${FP8_RECIPE:-tensorwise}
+  # mxfp8 (paper ue8m0) + Muon: TRAINS, but shows a transient early-training
+  # grad-norm spike. Earlier 8-iter runs only caught the spike and mislabelled it
+  # a divergence; a 40-iter run shows it SELF-HEALS and the loss descends cleanly.
+  #   What's happening: mxfp8 quant noise ill-conditions the gradient early (random
+  #   init), so Muon's Newton-Schulz update norm spikes for ~10-20 iters, then
+  #   settles as the model organizes. RAW grads stay ~0.99 throughout; only the
+  #   NS-orthogonalized UPDATE norm spikes (Muon-specific: Adam@same-config is flat).
+  #   It is NOT a kernel bug (both MX GEMMs ~4% correct on REAL E2E inputs via
+  #   capture-replay; error zero-mean).
+  #   FIX (verified, L4/64-expert/GBS512/seq128, 40 iters):
+  #     no warmup  -> loss 12->0.80, grad-norm peak ~2.4e5 (settles to ~35)
+  #     warmup=10  -> loss 12->0.44, grad-norm peak ~2.1e4 (12x lower), no NaN
+  #   So LR warmup tames the transient AND improves the loss — and it is what the
+  #   paper does. We therefore AUTO-ENABLE warmup for mxfp8 (default 10; override
+  #   LR_WARMUP_ITERS). Two more NS-hardening knobs are exposed if needed:
+  #   MUON_NUM_NS_STEPS (more iters) and MUON_FP32_MATMUL_PREC=high. tensorwise
+  #   stays the conservative default (smooth per-tensor scale, no transient).
+  #   NOTE: validated at reduced depth/width; full 61-layer/384-expert is a
+  #   separate multi-GPU confirmation.
+  if [ "$FP8_RECIPE" = "mxfp8" ]; then
+    export LR_WARMUP_ITERS=${LR_WARMUP_ITERS:-10}
+    echo "[INFO] FP8_RECIPE=mxfp8 + Muon: expect a transient early grad-norm spike" >&2
+    echo "       (self-heals; LR warmup auto-set to ${LR_WARMUP_ITERS} to damp it)." >&2
+  fi
+else
+  export FP8=${FP8:-null}                  # PRECISION_TYPE=BF16 -> disable fp8
+  export FP8_RECIPE=${FP8_RECIPE:-null}
+fi
 
 TURBO_DEEPEP_CLI_ARGS=()
 if [ "$USE_TURBO_DEEPEP" = "True" ]; then
@@ -187,7 +300,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --manual_gc_interval 100 \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
   --train_iters "$TRAIN_ITERS" \
-  --lr_warmup_iters 0 \
+  --lr_warmup_iters "${LR_WARMUP_ITERS:-0}" \
   --lr_decay_iters "$TRAIN_ITERS" \
   --micro_batch_size "$MBS" \
   --global_batch_size "$GBS" \
@@ -203,6 +316,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --expert_model_parallel_size "$PRIMUS_EP" \
   --num_experts "$PRIMUS_NUM_EXPERTS" \
   --moe_router_topk "$PRIMUS_MOE_TOPK" \
+  --moe_router_force_load_balancing "${MOE_FORCE_LOAD_BALANCE:-False}" \
   --moe_router_enable_expert_bias "$PRIMUS_MOE_ENABLE_EXPERT_BIAS" \
   --moe_ffn_hidden_size "$PRIMUS_MOE_FFN_HIDDEN_SIZE" \
   --index_topk "$PRIMUS_INDEX_TOPK" \
@@ -213,6 +327,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --optimizer "$OPTIMIZER" \
   --muon_momentum "$MUON_MOMENTUM" \
   --muon_extra_scale_factor "$MUON_EXTRA_SCALE_FACTOR" \
+  --muon_num_ns_steps "$MUON_NUM_NS_STEPS" \
+  --muon_fp32_matmul_prec "$MUON_FP32_MATMUL_PREC" \
   --use_distributed_optimizer "$USE_DISTRIBUTED_OPTIMIZER" \
   --use_precision_aware_optimizer "$USE_PRECISION_AWARE_OPTIMIZER" \
   --main_grads_dtype fp32 \
@@ -226,11 +342,14 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
+  --turbo_sync_free_moe_stage "$TURBO_SYNC_FREE_MOE_STAGE" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
+  --use_turbo_parallel_linear "$USE_TURBO_PARALLEL_LINEAR" \
+  --moe_experts_fp4 "$MOE_EXPERTS_FP4" \
   --moe_use_legacy_grouped_gemm False \
-  --fp8 null \
-  --fp8_recipe null \
+  --fp8 "$FP8" \
+  --fp8_recipe "$FP8_RECIPE" \
   --recompute_num_layers 1 \
   --recompute_granularity full \
   --recompute_method uniform \

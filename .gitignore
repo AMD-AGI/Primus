@@ -17,3 +17,7 @@ pp_simulation_result
 # GitHub Pages) despite the generic `data` ignore above.
 !deepseek-v4/projection/site/data/
 !deepseek-v4/projection/site/data/*.json
+
+*.log
+*.nohup
+*.zip
