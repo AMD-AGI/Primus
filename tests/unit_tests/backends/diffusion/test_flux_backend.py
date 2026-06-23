@@ -63,8 +63,11 @@ def test_flux_argument_builder_maps_raw_dataset_type():
 
 
 def test_flux_raw_dataset_name_defaults():
-    path, fmt = FluxRawImageTextDataset._resolve_dataset("cc12m-test", None, "webdataset")
-    assert path.endswith("torchtitan-main/tests/assets/cc12m_test")
+    with pytest.raises(ValueError, match="cc12m-test.*dataset_path"):
+        FluxRawImageTextDataset._resolve_dataset("cc12m-test", None, "webdataset")
+
+    path, fmt = FluxRawImageTextDataset._resolve_dataset("cc12m-test", "/tmp/cc12m_test", "webdataset")
+    assert path == "/tmp/cc12m_test"
     assert fmt == "webdataset"
 
     path, fmt = FluxRawImageTextDataset._resolve_dataset("cc12m-wds", None, "webdataset")

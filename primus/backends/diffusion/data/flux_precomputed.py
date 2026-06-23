@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from __future__ import annotations
 
 import io
@@ -124,10 +130,9 @@ class FluxRawImageTextDataset(Dataset):
         dataset_format: str,
     ) -> tuple[str, str]:
         if dataset_name == "cc12m-test":
-            return (
-                dataset_path or "/mnt/shared/zirui/code/torchtitan-main/tests/assets/cc12m_test",
-                "webdataset",
-            )
+            if not dataset_path:
+                raise ValueError("FLUX raw dataset `cc12m-test` requires `dataset_path` to be set.")
+            return dataset_path, "webdataset"
         if dataset_name == "cc12m-wds":
             return dataset_path or "pixparse/cc12m-wds", "hf_repo"
         if not dataset_path:

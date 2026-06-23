@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+#
 # Adapted from Black Forest Labs FLUX official implementation.
 
 from __future__ import annotations
@@ -285,8 +291,12 @@ def _resolve_checkpoint_path(path_or_repo_file: str, *, default_filename: str) -
     path = Path(path_or_repo_file).expanduser()
     if path.exists():
         return str(path)
+    if path_or_repo_file.startswith(("/", "./", "../", "~")):
+        raise FileNotFoundError(f"FLUX checkpoint path not found: {path}")
 
     parts = path_or_repo_file.split("/")
+    if len(parts) == 2 and parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt")):
+        raise FileNotFoundError(f"FLUX checkpoint path not found: {path}")
     if len(parts) >= 3:
         repo_id = "/".join(parts[:2])
         filename = "/".join(parts[2:])

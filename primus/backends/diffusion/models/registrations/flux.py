@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from __future__ import annotations
 
 import glob
@@ -67,7 +73,11 @@ def _candidate_weight_files(path: str) -> list[str]:
 
 
 def _resolve_hf_checkpoint(path_or_repo_file: str, *, default_filename: str) -> str | None:
+    if path_or_repo_file.startswith(("/", "./", "../", "~")):
+        return None
     parts = path_or_repo_file.split("/")
+    if len(parts) == 2 and parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt")):
+        return None
     if len(parts) < 2:
         return None
     if len(parts) >= 3:
