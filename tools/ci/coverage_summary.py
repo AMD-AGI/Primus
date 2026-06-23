@@ -15,11 +15,13 @@ Modes (by number of report arguments):
                 counting and lets torch (megatron/torchtitan) and jax (maxtext)
                 E2E - which cover near-disjoint modules - share one table.
 
-Layout: top-level groups (core, backends, modules, agents, cli, pretrain.py, ...)
-are bold rows at the same level, sorted by coverage. core/ and backends/ also
-get indented sub-rows per area, sorted by coverage. __init__.py is dropped;
-tools/ and platforms/ are excluded (ops tooling / env abstraction, not
-unit-testable). runner/ is bash, covered by the tests/runner/ shell tests.
+Layout: top-level groups (core, backends, modules, agents, cli, ...) are bold
+rows at the same level, sorted by coverage. core/ and backends/ also get
+indented sub-rows per area, sorted by coverage. __init__.py is dropped;
+tools/, platforms/ and the top-level pretrain.py entrypoint are excluded (ops
+tooling / env abstraction / thin CLI glue, exercised by E2E and shell tests
+rather than unit tests). runner/ is bash, covered by the tests/runner/ shell
+tests.
 
 Single-report mode reflects what a partial run (e.g. MaxText E2E) actually
 executed: modules with zero covered lines are hidden and the total is computed
@@ -32,9 +34,9 @@ import json
 import sys
 from collections import defaultdict
 
-OMIT_MODULES = {"tools", "platforms"}
+OMIT_MODULES = {"tools", "platforms", "pretrain.py"}
 # Top-level groups whose sub-packages are shown as indented detail rows; every
-# other group (modules, agents, cli, pretrain.py, ...) is a single bold row.
+# other group (modules, agents, cli, ...) is a single bold row.
 DETAILED_GROUPS = ("core", "backends")
 
 

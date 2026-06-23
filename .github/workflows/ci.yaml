@@ -13,6 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Default to read-only. No job uses GITHUB_TOKEN for writes (Docker Hub push
+# uses a dedicated PAT secret), so this is behavior-neutral. Jobs that need
+# more must opt in at the job level.
+permissions:
+  contents: read
+
 env:
   PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
   PRIMUS_TURBO_AITER_COMMIT: b5e03ed191fca11ee423226537ef8d9435e432a6 # Fix dsink bf16 noise in Triton MHA one-kernel backward (#3070)
@@ -31,10 +37,10 @@ jobs:
     steps:
       - run: echo "🎉 Begin Primus Python Lint."
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: git config --global --add safe.directory /github/workspace
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Display Python version
@@ -53,7 +59,7 @@ jobs:
         python-version: ["3.12"]
     steps:
       - run: echo "🎉 Begin Build Primus Docker Image."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -208,7 +214,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
@@ -256,7 +262,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -310,8 +316,10 @@ jobs:
           # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
           pytest --maxfail=1 -s ./tests/unit_tests/ \
             --cov=primus --cov-report=term-missing:skip-covered \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
@@ -349,7 +357,8 @@ jobs:
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           GPU_ARCHS=gfx942 \
-          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
+          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
       - name: Run Primus Model Tests -- TorchTitan
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
@@ -359,7 +368,16 @@ jobs:
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
+          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: torch-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
@@ -375,7 +393,7 @@ jobs:
       - name: Upload torch coverage json
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-torch
           path: |
@@ -405,7 +423,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           path: Primus-Turbo
@@ -439,7 +457,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Torch installation causes segfault, so we skip it and actually not install turbo. Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -492,9 +510,21 @@ jobs:
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          # run_unit_tests.py shells out to pytest; PYTEST_ADDOPTS injects the
+          # JUnit report without having to touch the wrapper script.
+          export PYTEST_ADDOPTS="--junitxml=${GITHUB_WORKSPACE}/test-reports/maxtext-e2e.xml"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
           JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jax-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Build jax coverage json (MaxText E2E)
         if: always()
         continue-on-error: true
@@ -506,7 +536,7 @@ jobs:
       - name: Upload jax coverage json
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-jax
           path: coverage_maxtext_e2e.json
@@ -529,9 +559,9 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Download coverage artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           path: cov-artifacts
