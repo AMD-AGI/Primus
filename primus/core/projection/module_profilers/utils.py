@@ -55,11 +55,57 @@ def _get_fp8_context_for_benchmark(transformer_config):
     return _FP8ContextFactory(transformer_config)
 
 
+def v4_module_inputs(module, batch_size, seq_len, hidden_size, hc_mult, kind):
+    """Build DeepSeek-V4-aware benchmark inputs, or None for non-V4 modules.
+
+    The generic harness feeds stock-attention inputs ``(hidden[S,B,D],
+    bool attention_mask)``, but the V4 modules have different signatures:
+
+    * ``DeepseekV4Attention.forward(hidden[B,S,D], position_ids[B,S])`` —
+      both positional; needs integer position_ids (not a bool mask).
+    * ``DeepseekV4HybridLayer.forward(hidden[B,S,K,D], attention_mask=None,
+      *, position_ids[B,S])`` — K=hc_mult parallel mHC streams, and
+      position_ids is keyword-only.
+
+    Returns ``(input_shapes, forward_kwargs)`` or ``None``.
+    """
+    cls = type(module).__name__
+    if kind == "attention" and "DeepseekV4Attention" in cls:
+        return (
+            [(batch_size, seq_len, hidden_size), ((batch_size, seq_len), torch.int64)],
+            None,
+        )
+    if kind == "layer" and "DeepseekV4HybridLayer" in cls:
+        k = max(1, int(hc_mult or 1))
+        ishapes = (
+            [(batch_size, seq_len, k, hidden_size)]
+            if k > 1
+            else [(batch_size, seq_len, hidden_size)]
+        )
+        # position_ids for RoPE; token_ids required by hash-routed MoE layers
+        # (ignored by non-hash layers). Both keyword-only on the V4 layer forward.
+        return (
+            ishapes,
+            {
+                "position_ids": ((batch_size, seq_len), torch.int64),
+                "token_ids": ((batch_size, seq_len), torch.int64),
+            },
+        )
+    if kind == "moe" and "DeepseekV4MoE" in cls:
+        # forward(hidden[B,S,D], *, token_ids[B,S]) -> [B,S,D]
+        return (
+            [(batch_size, seq_len, hidden_size)],
+            {"token_ids": ((batch_size, seq_len), torch.int64)},
+        )
+    return None
+
+
 def benchmark_layer(
     layer_module: torch.nn.Module,
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,  # Match typical microbatch count
     transformer_config=None,  # Optional: pass config to enable FP8 context
+    forward_kwargs=None,  # Optional: dict name -> shape/(shape,dtype) passed as keywords
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
@@ -110,6 +156,7 @@ def benchmark_layer(
             )
 
     inputs = [create_input(spec) for spec in input_shapes]
+    kwargs = {name: create_input(spec) for name, spec in (forward_kwargs or {}).items()}
 
     # ===========================================================================
     # Get FP8 context - CRITICAL for accurate FP8 timing!
@@ -126,7 +173,7 @@ def benchmark_layer(
 
     with fp8_context:
         for _ in range(num_warmup):
-            outputs = layer_module(*inputs)
+            outputs = layer_module(*inputs, **kwargs)
             if not isinstance(outputs, (tuple, list)):
                 outputs = (outputs,)
 
@@ -160,7 +207,7 @@ def benchmark_layer(
 
     with fp8_context:
         for _ in range(num_iterations):
-            outputs = layer_module(*inputs)
+            outputs = layer_module(*inputs, **kwargs)
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -184,7 +231,7 @@ def benchmark_layer(
             forward_end = torch.cuda.Event(enable_timing=True)
 
             forward_start.record()
-            outputs = layer_module(*inputs)
+            outputs = layer_module(*inputs, **kwargs)
             forward_end.record()
 
             # --- Backward pass ---
@@ -221,6 +268,7 @@ def benchmark_moe_layer_decomposed(
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,
     transformer_config=None,
+    forward_kwargs=None,  # Optional: dict name -> shape/(shape,dtype) passed as keywords
 ) -> tuple[float, float, int, float, float]:
     """
     Benchmark an MoE layer with decomposed A2A timing.
@@ -273,6 +321,7 @@ def benchmark_moe_layer_decomposed(
             )
 
     inputs = [create_input(spec) for spec in input_shapes]
+    kwargs = {name: create_input(spec) for name, spec in (forward_kwargs or {}).items()}
     fp8_context = _get_fp8_context_for_benchmark(transformer_config)
 
     # =========================================================================
@@ -284,7 +333,7 @@ def benchmark_moe_layer_decomposed(
 
     with fp8_context:
         for _ in range(num_warmup):
-            outputs = moe_module(*inputs)
+            outputs = moe_module(*inputs, **kwargs)
             if not isinstance(outputs, (tuple, list)):
                 outputs = (outputs,)
 
@@ -316,7 +365,7 @@ def benchmark_moe_layer_decomposed(
 
     with fp8_context:
         for _ in range(num_iterations):
-            outputs = moe_module(*inputs)
+            outputs = moe_module(*inputs, **kwargs)
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -372,7 +421,7 @@ def benchmark_moe_layer_decomposed(
                 forward_end = torch.cuda.Event(enable_timing=True)
 
                 forward_start.record()
-                outputs = moe_module(*inputs)
+                outputs = moe_module(*inputs, **kwargs)
                 forward_end.record()
 
                 # --- Backward pass ---

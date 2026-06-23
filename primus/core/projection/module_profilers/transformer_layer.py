@@ -19,7 +19,7 @@ from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
-from .utils import benchmark_layer
+from .utils import benchmark_layer, v4_module_inputs
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
@@ -315,11 +315,27 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             else:
                 # Get TransformerConfig from the layer module itself (has fp8 setting)
                 transformer_config = getattr(self.layer_module, "config", None)
-                self._cached_results = benchmark_layer(
-                    self.layer_module,
-                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
-                    transformer_config=transformer_config,
-                )
+                hidden = self.config.model_config.hidden_size
+                hc_mult = getattr(transformer_config, "hc_mult", 1)
+                # DeepSeek-V4 hybrid layer needs K-stream input [B,S,K,D] and a
+                # keyword position_ids; feed V4-aware inputs so the real V4 layer
+                # (mHC + V4 attention) is benchmarked. Non-V4 layers use the stock
+                # [S,B,D] input.
+                v4 = v4_module_inputs(self.layer_module, batch_size, seq_len, hidden, hc_mult, "layer")
+                if v4 is not None:
+                    ishapes, fkwargs = v4
+                    self._cached_results = benchmark_layer(
+                        self.layer_module,
+                        ishapes,
+                        transformer_config=transformer_config,
+                        forward_kwargs=fkwargs,
+                    )
+                else:
+                    self._cached_results = benchmark_layer(
+                        self.layer_module,
+                        [(seq_len, batch_size, hidden)],
+                        transformer_config=transformer_config,
+                    )
             self._cache_key = cache_key
         return self._cached_results
 
@@ -443,11 +459,27 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             else:
                 # Get TransformerConfig from the layer module itself (has fp8 setting)
                 transformer_config = getattr(self.layer_module, "config", None)
-                self._cached_results = benchmark_layer(
-                    self.layer_module,
-                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
-                    transformer_config=transformer_config,
-                )
+                hidden = self.config.model_config.hidden_size
+                hc_mult = getattr(transformer_config, "hc_mult", 1)
+                # DeepSeek-V4 hybrid layer needs K-stream input [B,S,K,D] and a
+                # keyword position_ids; feed V4-aware inputs so the real V4 layer
+                # (mHC + V4 attention) is benchmarked. Non-V4 layers use the stock
+                # [S,B,D] input.
+                v4 = v4_module_inputs(self.layer_module, batch_size, seq_len, hidden, hc_mult, "layer")
+                if v4 is not None:
+                    ishapes, fkwargs = v4
+                    self._cached_results = benchmark_layer(
+                        self.layer_module,
+                        ishapes,
+                        transformer_config=transformer_config,
+                        forward_kwargs=fkwargs,
+                    )
+                else:
+                    self._cached_results = benchmark_layer(
+                        self.layer_module,
+                        [(seq_len, batch_size, hidden)],
+                        transformer_config=transformer_config,
+                    )
             self._cache_key = cache_key
         return self._cached_results
 
