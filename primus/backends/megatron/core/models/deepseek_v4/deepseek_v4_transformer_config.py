@@ -155,6 +155,10 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     #                         > use_v4_triton_csa_attention > eager
     use_v4_tilelang_attention: bool = False
     use_v4_tilelang_csa_attention: bool = False
+    # FlyDSL backend (gfx950/MI355X). Forward-only, soft-dependency; falls back
+    # to Triton when the FlyDSL runtime is absent.
+    use_v4_flydsl_attention: bool = False
+    use_v4_flydsl_csa_attention: bool = False
 
     # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
     # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-

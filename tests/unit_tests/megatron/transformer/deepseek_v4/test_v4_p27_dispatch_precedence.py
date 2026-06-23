@@ -113,6 +113,11 @@ def _make_bare_attn(
     attn._use_v4_triton_csa_attention = bool(use_v4_triton_csa_attention)
     attn._use_v4_tilelang_attention = bool(use_v4_tilelang_attention)
     attn._use_v4_tilelang_csa_attention = bool(use_v4_tilelang_csa_attention)
+    # FlyDSL backend flags (forward-only, soft-dep). The bare object skips
+    # __init__, so set them explicitly; these precedence tests never enable
+    # FlyDSL, so default OFF (matches the Triton/eager dispatch under test).
+    attn._use_v4_flydsl_attention = False
+    attn._use_v4_flydsl_csa_attention = False
     return attn
 
 

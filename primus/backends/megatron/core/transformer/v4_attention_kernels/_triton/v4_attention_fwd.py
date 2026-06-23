@@ -414,7 +414,11 @@ def _launch_v4_attention_fwd(
     # Env-overridable so future shape regressions can fall back without
     # rebuilding. The defaults are the per-shape winner from the R2
     # sweep (`p57/r2_sweep_local.sh`).
-    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", "64"))
+    # gfx950/MI355X: the HCA fwd path wins at BLOCK_M=128 (cos ~1.0), but pure
+    # SWA fwd regresses at 128 (wants 64). Gate on the same
+    # ``hca_local_seqlen`` discriminator used for the stage default below.
+    _default_block_m_fwd = "128" if hca_local_seqlen else "64"
+    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", _default_block_m_fwd))
     BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_N", "16"))
     NUM_WARPS_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_WARPS", "8"))
     _default_stages_fwd = "1" if hca_local_seqlen else "2"
