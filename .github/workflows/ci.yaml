@@ -45,6 +45,20 @@ jobs:
       - name: Run pre-commit (all hooks, all files)
         run: pre-commit run --all-files --show-diff-on-failure
 
+  # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
+  # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@e58c696e52cac8e62d61cc21fda89565d71505d7 # v4.3.1
+        with:
+          fail-on-severity: high
+          warn-only: true
+
   build-docker:
     needs: [code-lint]
     runs-on: build-docker
