@@ -96,7 +96,7 @@ modules:
 
       enable_primus_turbo: false
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
       use_turbo_rms_norm: false
 
 

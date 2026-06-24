@@ -109,7 +109,7 @@ modules:
       # config; flipping it on here would make the apples-to-apples comparison
       # noisy (different attention kernel selection).
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
 
       eval_iters: 10
 

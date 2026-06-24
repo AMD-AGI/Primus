@@ -20,9 +20,7 @@ def _use_legacy_grouped_gemm(ctx: PatchContext) -> bool:
     return bool(
         getattr(args, "moe_grouped_gemm", False)
         and getattr(args, "moe_use_legacy_grouped_gemm", False)
-        and not (
-            getattr(args, "use_turbo_grouped_gemm", False) or getattr(args, "use_turbo_grouped_mlp", False)
-        )
+        and not getattr(args, "use_turbo_grouped_gemm", False)
     )
 
 

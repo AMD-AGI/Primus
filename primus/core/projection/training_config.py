@@ -80,7 +80,7 @@ class ModelConfig:
 
     # Primus Turbo flags — used to select the grouped-GEMM performance model
     enable_primus_turbo: bool = False
-    use_turbo_grouped_mlp: bool = False
+    use_turbo_grouped_gemm: bool = False
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
 
