@@ -23,7 +23,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
@@ -52,7 +52,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -233,7 +233,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
@@ -262,7 +262,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -396,7 +396,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
@@ -427,7 +427,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -514,7 +514,7 @@ jobs:
     #runs-on: [primus-lm-bench-multinode-p8hz7]
     #steps:
       #- run: echo "🎉 Begin Primus Benchmark."
-      #- uses: actions/checkout@v4
+      #- uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         #with:
           #submodules: recursive
       #- name: Show Environment Info
