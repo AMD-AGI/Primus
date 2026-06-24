@@ -16,12 +16,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
 source "$SCRIPT_DIR/env.sh"
 
 log()  { echo -e "\n\033[1;36m[setup] $*\033[0m"; }
 die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
-reload_env() { source "$SCRIPT_DIR/env.sh"; }  # shellcheck disable=SC1091
+reload_env() { bash "$SCRIPT_DIR/env.sh"; }
 
 # ---- pinned versions / commits (from the Dockerfile) ----
 PYTORCH_VERSION="2.12.0+rocm7.14.0a20260608"
