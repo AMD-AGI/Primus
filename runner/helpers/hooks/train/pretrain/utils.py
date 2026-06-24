@@ -11,7 +11,6 @@ from pathlib import Path
 
 import yaml
 
-
 # ---------- Logging ----------
 # Numeric severity used to honor PRIMUS_LOG_LEVEL (shared with runner/lib/common.sh).
 _LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
