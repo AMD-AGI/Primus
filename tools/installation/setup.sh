@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/env.sh"
 
 log()  { echo -e "\n\033[1;36m[setup] $*\033[0m"; }
 die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
-reload_env() { source "$SCRIPT_DIR/env.sh"; }
+reload_env() { source "$SCRIPT_DIR/env.sh"; }  # shellcheck disable=SC1091
 
 # ---- pinned versions / commits (from the Dockerfile) ----
 PYTORCH_VERSION="2.12.0+rocm7.14.0a20260608"
@@ -320,8 +320,6 @@ stage_torchrec() {
 
 DEFAULT_STAGES=(venv torch flash_attn te torchtune torchao pydeps \
                 grouped_gemm causal_conv1d mamba primus aiter turbo boto manifest)
-
-ALL_STAGES=("${DEFAULT_STAGES[@]}" torchrec)
 
 run_stage() { local s="$1"; local fn="stage_$s"; declare -F "$fn" >/dev/null || die "unknown stage: $s"; "$fn"; }
 

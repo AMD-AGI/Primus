@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.10, ROCm via pip rocm-sdk-devel)
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh

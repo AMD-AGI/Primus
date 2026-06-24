@@ -124,7 +124,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
 
 1. **Install Primus as a Python package**
 
-    It is recommended to install Primus and other dependencies in a virtual environment. 
+    It is recommended to install Primus and other dependencies in a virtual environment.
 
     ```bash
     # Create a virtual environment
@@ -132,7 +132,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
     source primus-env/bin/activate
     # Install Primus
     pip install "primus==26.3.1" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
-    
+
     ```
 
     >**Note**: this will only install the Primus CLI in your virtual environment under the `site-packages` directory, without other dependencies. The third party submodules will be downloaded on the first run. The complete dependencies and training software stack is provided in the AMD published training Docker images. You can use `primus-cli` to launch the training in container from any directory.
