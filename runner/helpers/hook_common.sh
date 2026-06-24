@@ -9,7 +9,7 @@
 ###############################################################################
 
 if [[ -n "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
-    return 0 2>/dev/null || true
+    return 0
 fi
 
 _hook_common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
