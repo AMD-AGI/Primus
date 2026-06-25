@@ -20,8 +20,9 @@
 #                                                         with overlap off every
 #                                                         microbatch's compute is
 #                                                         already clean)
-#   * GA = 2  => GBS = 2 * DP * MBS                       (min-grouping removes
-#                                                         residual jitter)
+#   * GA = 2  => GBS = 2 * DP * MBS                       (parser averages the
+#                                                         steady profiler window
+#                                                         per microbatch)
 #   * recompute = OFF             (capture pure fwd / pure bwd)
 #   * profiler ON, with_stack=True, window iter 6 -> 7   (kernel -> nn.module)
 #
@@ -89,8 +90,9 @@ export MBS=${MBS:-1}
 # DP = world/(TP*PP). On one 8-GPU node with TP=PP=1 => DP=8.
 export DP=${DP:-8}
 # GA = 2 so the schedule is F1 B1 F2 B2: the clean (overlap-free) forward is F2
-# and the clean backward is B1. The parser takes the per-kernel min over the two
-# launches, recovering the overlap-free time (design/01-overview.md).
+# and the clean backward is B1. The parser averages the steady profiler window
+# per microbatch, keeping scalar control-flow stalls that survive full-model
+# calibration.
 export GBS=${GBS:-$((2 * DP * MBS))}
 
 # ---------- Optimizer: adam + distributed optimizer (zero1) ----------------
@@ -109,8 +111,8 @@ export USE_DISTRIBUTED_OPTIMIZER=${USE_DISTRIBUTED_OPTIMIZER:-False}
 # Overlap OFF. With num_layers=1, Megatron's chained param-gather sync trips an
 # assertion (param_and_grad_buffer.start_param_sync). More importantly, with
 # overlap off every microbatch's compute is already overlap-free — exactly the
-# clean per-kernel time we want; GA=2 + min-grouping then only removes residual
-# jitter. (Production DP comm is assumed hidden in the projection anyway; A2.)
+# clean per-kernel time we want; the parser averages the steady profiler window
+# per microbatch. (Production DP comm is assumed hidden in the projection anyway; A2.)
 export PRIMUS_OVERLAP_GRAD_REDUCE=${PRIMUS_OVERLAP_GRAD_REDUCE:-False}
 export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-False}
 # Distributed optimizer (zero1) is the default. The Kineto trace drops the
@@ -129,10 +131,20 @@ export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
+export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-True}
 export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
 export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
-export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
+export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-True}
 export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
+export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
+export PRIMUS_V4_CSA_BWD_SEGREDUCE=${PRIMUS_V4_CSA_BWD_SEGREDUCE:-1}
+export PRIMUS_STACK_GROUPED_WEIGHT_TRITON=${PRIMUS_STACK_GROUPED_WEIGHT_TRITON:-1}
+export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
+export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
+export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
+export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-1}
+export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
+export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 
 TURBO_DEEPEP_CLI_ARGS=()
 if [ "$USE_TURBO_DEEPEP" = "True" ]; then
@@ -219,6 +231,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
   --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
   --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \

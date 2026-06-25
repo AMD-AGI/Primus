@@ -73,10 +73,11 @@ We capture with the distributed optimizer's comm overlap **off**. Two reasons:
   vast majority of microbatches are clean anyway, and the projection assumes DP
   comm is hidden (A2), so there is no need to measure the contaminated overlap.
 
-GA=2 (two microbatches) plus **grouping kernels by `(module, phase, shape)` and
-taking the per-group `min`** then removes residual run-to-run jitter and one-off
-warm-up effects, yielding a stable clean time per kernel. Calls-per-microbatch =
-launches / GA.
+GA=2 (two microbatches) plus a late steady profiler window lets the parser
+compute per-microbatch time as `sum(kernel_durations) / num_microbatches`.
+This keeps scalar control-flow stalls (for example Indexer top-k syncs) that the
+full-model calibration shows are real per-layer costs, while avoiding warm-up
+and autotune iterations.
 
 ## Non-overlap assumptions in the current stack
 

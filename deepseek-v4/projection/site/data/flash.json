@@ -19,7 +19,7 @@
     "seq": 4096,
     "note": "per-layer and MTP (B=1) Megatron-convention FLOPs at capture seq; site multiplies by GA x DP"
   },
-  "generated_at": "2026-06-22T17:41:01Z",
+  "generated_at": "2026-06-25T12:18:45Z",
   "provenance": {
     "traces": {
       "0": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1782149271209635673.pt.trace.json",
@@ -124,7 +124,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 6977.726,
             "class": "memory_bound",
             "flop_class": null,
@@ -280,8 +280,8 @@
             ]
           },
           {
-            "module": "other",
-            "time_us": 2109.701,
+            "module": "attn.misc",
+            "time_us": 2057.571,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -341,7 +341,7 @@
           },
           {
             "module": "attn.norm",
-            "time_us": 258.987,
+            "time_us": 311.117,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -360,16 +360,16 @@
                 "time_us": 63.337
               },
               {
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 52.13
+              },
+              {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
                 "time_us": 4.162
               },
               {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::sin_kernel_cuda(at",
                 "time_us": 4.139
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 4.106
               }
             ]
           }
@@ -592,7 +592,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 26890.347,
             "class": "memory_bound",
             "flop_class": null,
@@ -816,8 +816,8 @@
             ]
           },
           {
-            "module": "other",
-            "time_us": 2124.981,
+            "module": "attn.misc",
+            "time_us": 2070.519,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -885,7 +885,7 @@
           },
           {
             "module": "attn.norm",
-            "time_us": 317.733,
+            "time_us": 372.195,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -904,16 +904,16 @@
                 "time_us": 64.33
               },
               {
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 54.462
+              },
+              {
                 "name": "void at::native::vectorized_elementwise_kernel<4, at::native::compare_scalar_ker",
                 "time_us": 22.636
               },
               {
                 "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
                 "time_us": 6.285
-              },
-              {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 5.738
               }
             ]
           }
@@ -1136,7 +1136,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 7106.777,
             "class": "memory_bound",
             "flop_class": null,
@@ -1310,8 +1310,8 @@
             ]
           },
           {
-            "module": "other",
-            "time_us": 2164.088,
+            "module": "attn.misc",
+            "time_us": 2105.442,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1375,7 +1375,7 @@
           },
           {
             "module": "attn.norm",
-            "time_us": 598.458,
+            "time_us": 657.103,
             "class": "memory_bound",
             "flop_class": null,
             "flops": null,
@@ -1398,12 +1398,12 @@
                 "time_us": 63.077
               },
               {
-                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
-                "time_us": 6.019
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 58.646
               },
               {
-                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
-                "time_us": 6.009
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::cos_kernel_cuda(at",
+                "time_us": 6.019
               }
             ]
           },

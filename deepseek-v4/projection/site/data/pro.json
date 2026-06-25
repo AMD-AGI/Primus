@@ -142,7 +142,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 50996.046,
             "class": "memory_bound",
             "flop_class": null,
@@ -264,7 +264,7 @@
         ],
         "backward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 6366.322,
             "class": "memory_bound",
             "flop_class": null,
@@ -614,7 +614,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 15510.655,
             "class": "memory_bound",
             "flop_class": null,
@@ -804,7 +804,7 @@
             ]
           },
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 6382.919,
             "class": "memory_bound",
             "flop_class": null,
@@ -1162,7 +1162,7 @@
       "attention": {
         "forward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 14536.037,
             "class": "memory_bound",
             "flop_class": null,
@@ -1302,7 +1302,7 @@
         ],
         "backward": [
           {
-            "module": "other",
+            "module": "attn.misc",
             "time_us": 6422.7,
             "class": "memory_bound",
             "flop_class": null,

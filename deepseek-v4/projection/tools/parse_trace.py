@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kernel_module_map import flop_class_from_kernel
+from kernel_module_map import flop_class_from_kernel, module_from_kernel
 from v4_flops import FB_FMA, layer_fmac, model_total_params, mtp_flops, nonlayer_fmac
 
 PRO_COMPRESS = [128, 128] + [4 if i % 2 == 0 else 128 for i in range(2, 60)] + [0]
@@ -145,6 +145,15 @@ def _resolve_module(kname: str, cpu_name: str, anc_classes: set[str], flop_class
     def has(*xs: str) -> bool:
         return any(any(x in a for a in anc_classes) for x in xs)
 
+    def coarse(module: str) -> str:
+        if module in ("attn.qkv_proj", "attn.o_proj"):
+            return "attn.proj"
+        if module in ("attn.rope",):
+            return "attn.norm"
+        if module == "moe.act":
+            return "moe.grouped_gemm"
+        return module
+
     # 1) kernel-name rules (most reliable; present for fwd and bwd)
     if "multi_tensor_apply" in n or "fusedadam" in low or "adamw" in low:
         return "__optimizer__"
@@ -207,7 +216,8 @@ def _resolve_module(kname: str, cpu_name: str, anc_classes: set[str], flop_class
         return "attn.proj" if flop_class == "gemm" else "attn.norm"
     if has("Embedding"):
         return "output" if flop_class == "gemm" else "embedding"
-    return "other"
+    fallback = coarse(module_from_kernel(kname))
+    return fallback if fallback != "other" else "attn.misc"
 
 
 def parse_trace(path: Path, ga: int = 2):
@@ -350,11 +360,12 @@ def parse_trace(path: Path, ga: int = 2):
             "tflops": round(tflops, 1) if tflops else None,
             "kernels": kern_list,
         }
-        # Logical bucket. attn.* and the unattributed `other` (dominated by the
-        # attention-side hyper-connection mixer / Indexer scalar ops) go to the
-        # attention bucket; this keeps the MoE bucket strictly the cr-independent
-        # router/dispatch/grouped_gemm/combine/shared_expert set (A10).
-        if module.startswith("attn.") or module == "other":
+        # Logical bucket. Unattributed scalar kernels are labelled `attn.misc`
+        # by _resolve_module because the V4 traces show they are dominated by
+        # attention-side hyper-connection / Indexer control-flow work; this keeps
+        # the MoE bucket strictly the cr-independent router/dispatch/grouped_gemm
+        # /combine/shared_expert set (A10).
+        if module.startswith("attn."):
             bucket = "attention"
         elif module.startswith("moe."):
             bucket = "moe"
