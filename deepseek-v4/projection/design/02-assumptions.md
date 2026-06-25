@@ -67,10 +67,17 @@ start here.
   projection time, a recomputed layer's backward gets `+1 forward` of that layer
   added back. Recompute selection (#layers / which) is a site control.
 
+## MTP
+
+- **A17.** MTP is modeled analytically when `mtp_num_layers > 0`. Each MTP
+  depth uses `mtp_compress_ratios` (default cr=4, matching the current Flash
+  Megatron FLOPs anchor), plus the per-depth `eh_proj`, extra logits/loss, and
+  HyperHead FLOPs. Timing is an approximation: the MTP inner layer reuses the
+  measured layer time for that cr, while `eh_proj` is scaled from output-GEMM
+  throughput. A dedicated MTP trace remains the next calibration step.
+
 ## Scope exclusions (v1)
 
-- **A17.** MTP is ignored (Pro paper has MTP depth 1; Primus V4 lacks it). It is a
-  known missing term in the full-model projection.
 - **A18.** No cross-node EP; no TP; no CP comm modeling.
 - **A19.** FP8 / MXFP8 not modeled; BF16 only.
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 FB_FMA = 6  # _FORWARD_BACKWARD_FACTOR(3) * _FMA_FACTOR(2)
 SWIGLU = 3  # gate+up+down collapsed expansion factor
+DEFAULT_MTP_LAYERS = {"pro": 1, "flash": 1}
 
 # Per-model architecture params (from primus/configs/models/megatron/*.yaml +
 # deepseek_v4_base.yaml). Shared: index_head_dim=128, index_n_heads=64,
@@ -126,6 +127,16 @@ def _hc_mixer(s, p):
     return 2 * s * n_d * ((2 + hc) * hc)
 
 
+def _hc_head(s, p, mtp_num_layers):
+    hc = SHARED["hc_mult"]
+    n_d = hc * p["hidden"]
+    return (1 + mtp_num_layers) * s * n_d * hc
+
+
+def _mtp_eh_proj(s, p, mtp_num_layers):
+    return mtp_num_layers * s * (2 * p["hidden"]) * p["hidden"]
+
+
 def layer_fmac(model: str, cr: int, seq: int) -> dict[str, float]:
     """Per-layer FMAC components (batch_size=1) for one cr layer."""
     p = MODEL_PARAMS[model]
@@ -140,16 +151,36 @@ def layer_fmac(model: str, cr: int, seq: int) -> dict[str, float]:
     }
 
 
-def nonlayer_fmac(model: str, seq: int) -> dict[str, float]:
+def nonlayer_fmac(model: str, seq: int, mtp_num_layers: int = 0) -> dict[str, float]:
     p = MODEL_PARAMS[model]
-    return {"logits": seq * p["hidden"] * p["vocab"]}
+    return {"logits": (1 + mtp_num_layers) * seq * p["hidden"] * p["vocab"]}
 
 
-def model_total_params(model: str, num_layers: int) -> int:
+def mtp_fmac(model: str, seq: int, mtp_num_layers: int = 1, mtp_cr: int = 4) -> dict[str, float]:
+    """Extra FMAC components for MTP depths, batch_size=1.
+
+    V4 MTP reuses a full V4 inner layer per depth; the current Flash Megatron
+    FLOPs anchor reports a CSA-style MTP inner layer (cr=4).
+    """
+    if mtp_num_layers <= 0:
+        return {"inner_layer": 0, "eh_proj": 0, "extra_logits": 0, "hc_head": _hc_head(seq, MODEL_PARAMS[model], 0)}
+    p = MODEL_PARAMS[model]
+    inner = sum(layer_fmac(model, mtp_cr, seq).values()) * mtp_num_layers
+    main_logits = seq * p["hidden"] * p["vocab"]
+    return {
+        "inner_layer": inner,
+        "eh_proj": _mtp_eh_proj(seq, p, mtp_num_layers),
+        "extra_logits": main_logits * mtp_num_layers,
+        "hc_head": _hc_head(seq, p, mtp_num_layers),
+    }
+
+
+def model_total_params(model: str, num_layers: int, mtp_num_layers: int = 0) -> int:
     """Approximate total parameter count (for optimizer-step sizing). Uses the
     same V4 MLA low-rank attention shapes as the FLOPs formula (q/o LoRA + single
     latent KV) instead of the crude 4*h^2, plus MoE experts + shared + router and
-    the tied-free embedding/output."""
+    the tied-free embedding/output. MTP adds one full V4 inner layer plus the
+    2H->H eh_proj per depth; logits reuse the output layer weights."""
     p = MODEL_PARAMS[model]
     n_d = p["heads"] * p["head_dim"]
     attn = (
@@ -164,7 +195,7 @@ def model_total_params(model: str, num_layers: int) -> int:
         + SWIGLU * p["hidden"] * p["shared_ffn"]
         + p["hidden"] * p["experts"]
     )
-    return int(num_layers * (attn + moe) + 2 * p["vocab"] * p["hidden"])
+    return int((num_layers + mtp_num_layers) * (attn + moe) + mtp_num_layers * 2 * p["hidden"] * p["hidden"] + 2 * p["vocab"] * p["hidden"])
 
 
 # Map analytic components to projection module names (per layer).
@@ -182,6 +213,11 @@ def module_flops(model: str, cr: int, seq: int) -> dict[str, float]:
 
 def output_flops(model: str, seq: int) -> float:
     return nonlayer_fmac(model, seq)["logits"] * FB_FMA
+
+
+def mtp_flops(model: str, seq: int, mtp_num_layers: int = 1, mtp_cr: int = 4) -> dict[str, float]:
+    f = mtp_fmac(model, seq, mtp_num_layers, mtp_cr)
+    return {k: v * FB_FMA for k, v in f.items()}
 
 
 def _self_test() -> None:

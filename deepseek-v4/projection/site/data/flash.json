@@ -8,8 +8,16 @@
       "128": 29596695134208
     },
     "output_flops": 13013750906880,
+    "mtp": {
+      "num_layers": 1,
+      "compress_ratio": 4,
+      "inner_layer_flops": 36583482851328,
+      "eh_proj_flops": 824633720832,
+      "extra_logits_flops": 13013750906880,
+      "hc_head_flops": 3221225472
+    },
     "seq": 4096,
-    "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP"
+    "note": "per-layer and MTP (B=1) Megatron-convention FLOPs at capture seq; site multiplies by GA x DP"
   },
   "generated_at": "2026-06-22T17:41:01Z",
   "provenance": {
@@ -44,6 +52,10 @@
     "moe_shared_expert_intermediate_size": 2048,
     "index_topk": 512,
     "vocab_size": 129280,
+    "mtp_num_layers": 1,
+    "mtp_compress_ratios": [
+      4
+    ],
     "compress_ratios": [
       0,
       0,
@@ -94,7 +106,7 @@
       "4": 20,
       "128": 20
     },
-    "total_params": 283810725888
+    "total_params": 290419900416
   },
   "hardware": {
     "MI355X": {
@@ -1767,7 +1779,7 @@
     "time_us": 18459.0,
     "bytes_per_param": 30,
     "class": "memory_bound",
-    "note": "measured one-layer optimizer-step kernel time on this rank; the site scales by per-rank params"
+    "note": "Adam mixed-precision step traffic in bytes/param; measured one-layer optimizer-step kernel time is a sanity reference"
   },
   "comm": {
     "ep_dispatch_us": null,

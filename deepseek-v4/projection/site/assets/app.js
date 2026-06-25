@@ -162,6 +162,31 @@ function nonLayerFlops(data, which, phase) {
   return bd ? sumFlops(bd[phase]) : 0;
 }
 
+function mtpTimes(data, gpu, c, lt) {
+  const cfg = data.model_config;
+  const depth = cfg.mtp_num_layers || 0;
+  if (!depth) return { fwd: 0, bwd: 0, ehUs: 0 };
+
+  const cr = String((cfg.mtp_compress_ratios && cfg.mtp_compress_ratios[0]) || 0);
+  const inner = lt[cr] || lt["0"];
+  const outF = nonLayer(data, "output", "forward", gpu, c) + nonLayer(data, "loss", "forward", gpu, c);
+  const outB = nonLayer(data, "output", "backward", gpu, c) + nonLayer(data, "loss", "backward", gpu, c);
+
+  // No MTP trace row exists yet. Approximate eh_proj as GEMM-like work scaled
+  // from the measured output projection time, then split fwd/bwd as 1:2.
+  const af = data.analytic_flops || {};
+  const mtp = af.mtp || {};
+  const outFlops = af.output_flops || 0;
+  const outUs = outF + outB;
+  const ehUs = outFlops > 0 ? outUs * ((mtp.eh_proj_flops || 0) / outFlops) : 0;
+
+  return {
+    fwd: depth * (inner.fwd + outF) + ehUs / 3,
+    bwd: depth * (inner.bwd + outB) + (2 * ehUs) / 3,
+    ehUs,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Param estimate (Step 4)
 // ---------------------------------------------------------------------------
@@ -221,6 +246,9 @@ function project(data, gpu, c) {
   const last = c.pp - 1;
   Df[last] += nonLayer(data, "output", "forward", gpu, c) + nonLayer(data, "loss", "forward", gpu, c);
   Db[last] += nonLayer(data, "output", "backward", gpu, c) + nonLayer(data, "loss", "backward", gpu, c);
+  const mtp = mtpTimes(data, gpu, c, lt);
+  Df[last] += mtp.fwd;
+  Db[last] += mtp.bwd;
 
   const critF = Math.max(...Df), critB = Math.max(...Db);
 
@@ -256,6 +284,12 @@ function project(data, gpu, c) {
   if (af && af.per_cr_layer_flops) {
     for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (af.per_cr_layer_flops[cr] || 0);
     fMb += af.output_flops || 0;
+    if (af.mtp) {
+      fMb += (af.mtp.inner_layer_flops || 0)
+        + (af.mtp.eh_proj_flops || 0)
+        + (af.mtp.extra_logits_flops || 0)
+        + (af.mtp.hc_head_flops || 0);
+    }
   } else {
     for (const cr of ["0", "4", "128"]) fMb += (counts[cr] || 0) * (lt[cr].fFlops + lt[cr].bFlops);
     fMb += nonLayerFlops(data, "output", "forward") + nonLayerFlops(data, "output", "backward");
@@ -266,7 +300,7 @@ function project(data, gpu, c) {
   return {
     lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, dp, totalParams,
     localModelParams: optParams.localModelParams, perRankParams, measuredOptUs: optParams.measuredUs,
-    optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
+    mtp, optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
   };
 }
 
@@ -287,6 +321,7 @@ function renderConfig() {
     ["MoE FFN", cfg.moe_ffn_hidden_size],
     ["Index top-k", cfg.index_topk],
     ["Vocab", cfg.vocab_size],
+    ["MTP depths", cfg.mtp_num_layers || 0],
     ["Capture seq", STATE.data.capture.seq_length],
     ["cr=0 layers", cfg.cr_layer_counts["0"]],
     ["cr=4 layers", cfg.cr_layer_counts["4"]],
@@ -399,6 +434,10 @@ function renderResults() {
   steps.append(step("Per-layer fwd/bwd (µs, " + (c.recompute === "full" ? "recompute on" : "no recompute") + ")", "", ltDesc));
   steps.append(step("Critical PP stage (µs)", `F ${fmt(p.critF, 0)} + B ${fmt(p.critB, 0)}`,
     `max over ${c.pp} stages; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
+  if ((d.model_config.mtp_num_layers || 0) > 0) {
+    steps.append(step("MTP on last stage", `F ${fmt(p.mtp.fwd, 0)} + B ${fmt(p.mtp.bwd, 0)} µs`,
+      `${d.model_config.mtp_num_layers} depth(s), inner cr=${(d.model_config.mtp_compress_ratios || [0])[0]}, eh_proj estimated from output GEMM throughput`));
+  }
   steps.append(step("GA (microbatches)", fmtInt(p.ga), `GA = GBS ${c.gbs} / (DP ${p.dp} × MBS ${c.mbs})`));
   steps.append(step("Pipeline compute / iter", `${fmt(p.pipeUs / 1000, 2)} ms`,
     `(GA + (PP−1)/VPP) × (F+B)_crit ; bubble ${fmt(p.bubbleFrac * 100, 1)}%`));

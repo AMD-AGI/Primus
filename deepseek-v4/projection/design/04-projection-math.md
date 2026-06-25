@@ -27,6 +27,18 @@ out_fwd = T(output, forward) + T(loss, forward)
 out_bwd = T(output, backward) + T(loss, backward)
 ```
 
+MTP (if `mtp_num_layers > 0`, A17):
+```
+mtp_inner_fwd = layer_fwd[mtp_cr] ; mtp_inner_bwd = layer_bwd[mtp_cr]
+mtp_out_fwd   = out_fwd          ; mtp_out_bwd   = out_bwd
+mtp_eh_time   ≈ output_time * (mtp_eh_proj_flops / output_flops)
+
+mtp_fwd = mtp_num_layers * (mtp_inner_fwd + mtp_out_fwd) + mtp_eh_time / 3
+mtp_bwd = mtp_num_layers * (mtp_inner_bwd + mtp_out_bwd) + 2 * mtp_eh_time / 3
+```
+The current Flash Megatron FLOPs anchor uses `mtp_cr=4`; a future dedicated MTP
+trace can replace the `eh_proj` and inner-layer approximation.
+
 ## Step 1 — recompute (A16)
 
 If a layer is recomputed, its backward replays one forward:
@@ -51,6 +63,7 @@ Add non-layer parts to their devices:
 ```
 Df[0]      += emb_fwd ;  Db[0]      += emb_bwd
 Df[PP-1]   += out_fwd ;  Db[PP-1]   += out_bwd
+Df[PP-1]   += mtp_fwd ;  Db[PP-1]   += mtp_bwd
 ```
 Critical device:
 ```
@@ -106,6 +119,7 @@ TFLOP/s/GPU (matmul-flops convention, A14): per-microbatch model compute FLOPs
 ```
 F_mb = Σ_cr n[cr] * (flops_fwd[cr] + flops_bwd[cr]) + nonlayer_flops
        where flops_*[cr] = Σ_module (module.flops or 0) over the cr breakdown
+       + mtp_inner + mtp_eh_proj + mtp_extra_logits + mtp_hc_head
 flops_per_iter   = F_mb * GA * DP            (all microbatches, all DP replicas)
 TFLOP_s_per_gpu  = flops_per_iter / iter_time / world_size / 1e12
 ```

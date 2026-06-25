@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel_module_map import flop_class_from_kernel
-from v4_flops import FB_FMA, layer_fmac, model_total_params, nonlayer_fmac
+from v4_flops import FB_FMA, layer_fmac, model_total_params, mtp_flops, nonlayer_fmac
 
 PRO_COMPRESS = [128, 128] + [4 if i % 2 == 0 else 128 for i in range(2, 60)] + [0]
 FLASH_COMPRESS = [0, 0] + [4 if i % 2 == 0 else 128 for i in range(2, 42)] + [0]
@@ -48,6 +48,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "moe_shared_expert_intermediate_size": 3072,
         "index_topk": 1024,
         "vocab_size": 129280,
+        "mtp_num_layers": 1,
+        "mtp_compress_ratios": [4],
         "compress_ratios": PRO_COMPRESS,
     },
     "flash": {
@@ -61,6 +63,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "moe_shared_expert_intermediate_size": 2048,
         "index_topk": 512,
         "vocab_size": 129280,
+        "mtp_num_layers": 1,
+        "mtp_compress_ratios": [4],
         "compress_ratios": FLASH_COMPRESS,
     },
 }
@@ -408,13 +412,24 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
     # site's TFLOP/s matches a real run. Per layer, per microbatch (B=1), at the
     # capture seq; Megatron-convention (fwd+bwd, FMA -> x6).
     cap_seq = 4096
+    mtp_num_layers = int(cfg.get("mtp_num_layers", 0) or 0)
+    mtp_cr = int((cfg.get("mtp_compress_ratios") or [0])[0])
+    mtp = mtp_flops(model, cap_seq, mtp_num_layers, mtp_cr)
     analytic_flops = {
         "per_cr_layer_flops": {
             cr: sum(layer_fmac(model, int(cr), cap_seq).values()) * FB_FMA for cr in ("0", "4", "128")
         },
         "output_flops": nonlayer_fmac(model, cap_seq)["logits"] * FB_FMA,
+        "mtp": {
+            "num_layers": mtp_num_layers,
+            "compress_ratio": mtp_cr,
+            "inner_layer_flops": mtp["inner_layer"],
+            "eh_proj_flops": mtp["eh_proj"],
+            "extra_logits_flops": mtp["extra_logits"],
+            "hc_head_flops": mtp["hc_head"],
+        },
         "seq": cap_seq,
-        "note": "per-layer (B=1) Megatron-convention FLOPs at capture seq; site multiplies by cr_layer_counts x GA x DP",
+        "note": "per-layer and MTP (B=1) Megatron-convention FLOPs at capture seq; site multiplies by GA x DP",
     }
 
     return {
@@ -446,7 +461,7 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
         "model_config": {
             **cfg,
             "cr_layer_counts": cr_layer_counts(cfg["compress_ratios"]),
-            "total_params": model_total_params(model, cfg["num_layers"]),
+            "total_params": model_total_params(model, cfg["num_layers"], mtp_num_layers),
         },
         "hardware": DEFAULT_HARDWARE,
         "layers": layers,
