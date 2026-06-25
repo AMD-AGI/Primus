@@ -50,6 +50,7 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "vocab_size": 129280,
         "mtp_num_layers": 1,
         "mtp_compress_ratios": [4],
+        "pipeline_layout": "",
         "compress_ratios": PRO_COMPRESS,
     },
     "flash": {
@@ -65,6 +66,7 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "vocab_size": 129280,
         "mtp_num_layers": 1,
         "mtp_compress_ratios": [4],
+        "pipeline_layout": "Et*10|t*11|t*11|t*11mL",
         "compress_ratios": FLASH_COMPRESS,
     },
 }

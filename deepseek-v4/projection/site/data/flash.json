@@ -56,6 +56,7 @@
     "mtp_compress_ratios": [
       4
     ],
+    "pipeline_layout": "Et*10|t*11|t*11|t*11mL",
     "compress_ratios": [
       0,
       0,

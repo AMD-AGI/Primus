@@ -52,8 +52,10 @@ function defaultControls(data) {
   return {
     world: isPro ? 256 : 32,
     pp: isPro ? 16 : 4, vpp: 1, ep: 8, tp: 1, cp: 1,
-    mbs: 1, gbs: isPro ? 1024 : 512,
-    recompute: "full",
+    mbs: 1, gbs: isPro ? 1024 : 256,
+    recompute: isPro ? "full" : "first-n",
+    recomputeLayers: isPro ? 0 : 3,
+    ppLayout: data.model_config?.pipeline_layout || "",
     optEff: 0.7, computeEff: 1.0, calibFactor: 0.91, bytesPerParam: optBytes,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
     peak455: m455.peak_tflops_bf16, bw455: m455.hbm_bandwidth_gbps,
@@ -71,6 +73,8 @@ const CONTROL_DEFS = [
   ["mbs", "Micro batch size", "int"],
   ["gbs", "Global batch size", "int"],
   ["recompute", "Recompute", "sel"],
+  ["recomputeLayers", "Recompute layers", "int"],
+  ["ppLayout", "PP layout", "txt"],
   ["bytesPerParam", "Optim bytes/param", "int"],
   ["calibFactor", "Calibration factor", "f"],
   ["optEff", "Optim efficiency", "f"],
@@ -95,13 +99,15 @@ function renderControls() {
     let input;
     if (kind === "sel") {
       input = el("select", { id: `ctl-${key}` });
-      for (const opt of ["none", "full"]) {
+      for (const opt of ["none", "full", "first-n"]) {
         const o = el("option", { value: opt }, opt);
         if (c[key] === opt) o.selected = true;
         input.append(o);
       }
     } else if (kind === "ro") {
       input = el("input", { id: `ctl-${key}`, value: derivedDP(c), disabled: "true" });
+    } else if (kind === "txt") {
+      input = el("input", { id: `ctl-${key}`, type: "text", value: c[key] || "" });
     } else {
       input = el("input", { id: `ctl-${key}`, type: "number", value: c[key], step: kind === "f" ? "0.05" : "1" });
     }
@@ -146,11 +152,33 @@ function layerTimes(data, cr, gpu, c) {
   let bwd = sumTime(aB, gpu, c) + sumTime(mB, gpu, c);
   let fFlops = sumFlops(aF) + sumFlops(mF);
   let bFlops = sumFlops(aB) + sumFlops(mB);
-  if (c.recompute === "full") {
-    bwd += fwd;        // replay one forward (Step 1)
-    bFlops += fFlops;
-  }
   return { fwd, bwd, fFlops, bFlops };
+}
+
+function parsePipelineLayout(layout, numLayers, chunks) {
+  if (!layout) return null;
+  const normalized = String(layout).trim().replace(/^['"]|['"]$/g, "");
+  if (!normalized) return null;
+  const specs = normalized.split("|").map((x) => x.trim()).filter(Boolean);
+  if (specs.length !== chunks) return null;
+  let nextLayer = 0;
+  const out = [];
+  for (const spec of specs) {
+    const layers = [];
+    const clean = spec.split(",", 1)[0];
+    for (const m of clean.matchAll(/[tT](?:\*(\d+))?/g)) {
+      const n = m[1] ? Number(m[1]) : 1;
+      for (let i = 0; i < n && nextLayer < numLayers; i++) layers.push(nextLayer++);
+    }
+    out.push(layers);
+  }
+  return nextLayer === numLayers ? out : null;
+}
+
+function recomputeLayer(c, stageOrdinal) {
+  if (c.recompute === "full") return true;
+  if (c.recompute === "first-n") return stageOrdinal < Math.max(0, c.recomputeLayers || 0);
+  return false;
 }
 
 function nonLayer(data, which, phase, gpu, c) {
@@ -169,6 +197,7 @@ function mtpTimes(data, gpu, c, lt) {
 
   const cr = String((cfg.mtp_compress_ratios && cfg.mtp_compress_ratios[0]) || 0);
   const inner = lt[cr] || lt["0"];
+  const innerBwd = inner.bwd + (c.recompute === "full" ? inner.fwd : 0);
   const outF = nonLayer(data, "output", "forward", gpu, c) + nonLayer(data, "loss", "forward", gpu, c);
   const outB = nonLayer(data, "output", "backward", gpu, c) + nonLayer(data, "loss", "backward", gpu, c);
 
@@ -182,7 +211,7 @@ function mtpTimes(data, gpu, c, lt) {
 
   return {
     fwd: depth * (inner.fwd + outF) + ehUs / 3,
-    bwd: depth * (inner.bwd + outB) + (2 * ehUs) / 3,
+    bwd: depth * (innerBwd + outB) + (2 * ehUs) / 3,
     ehUs,
   };
 }
@@ -233,12 +262,27 @@ function project(data, gpu, c) {
   const C = c.pp * c.vpp;
   const perChunk = Math.ceil(L / C);
   const Df = new Array(c.pp).fill(0), Db = new Array(c.pp).fill(0);
-  for (let i = 0; i < L; i++) {
-    const chunk = Math.floor(i / perChunk);
-    const dev = chunk % c.pp;
-    const t = lt[String(crs[i])] || { fwd: 0, bwd: 0 };
-    Df[dev] += t.fwd;
-    Db[dev] += t.bwd;
+  const layoutStages = parsePipelineLayout(c.ppLayout, L, C);
+  const stageOrdinals = new Array(c.pp).fill(0);
+  if (layoutStages) {
+    layoutStages.forEach((layers, chunk) => {
+      const dev = chunk % c.pp;
+      for (const i of layers) {
+        const t = lt[String(crs[i])] || { fwd: 0, bwd: 0 };
+        const recompute = recomputeLayer(c, stageOrdinals[dev]++);
+        Df[dev] += t.fwd;
+        Db[dev] += t.bwd + (recompute ? t.fwd : 0);
+      }
+    });
+  } else {
+    for (let i = 0; i < L; i++) {
+      const chunk = Math.floor(i / perChunk);
+      const dev = chunk % c.pp;
+      const t = lt[String(crs[i])] || { fwd: 0, bwd: 0 };
+      const recompute = recomputeLayer(c, stageOrdinals[dev]++);
+      Df[dev] += t.fwd;
+      Db[dev] += t.bwd + (recompute ? t.fwd : 0);
+    }
   }
   // non-layer parts on first / last device
   Df[0] += nonLayer(data, "embedding", "forward", gpu, c);
@@ -299,6 +343,7 @@ function project(data, gpu, c) {
 
   return {
     lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, dp, totalParams,
+    layoutApplied: Boolean(layoutStages),
     localModelParams: optParams.localModelParams, perRankParams, measuredOptUs: optParams.measuredUs,
     mtp, optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
   };
@@ -431,9 +476,10 @@ function renderResults() {
   steps.innerHTML = "";
   const ltDesc = ["0", "4", "128"].map((cr) =>
     `cr${cr}: F ${fmt(p.lt[cr].fwd, 0)} / B ${fmt(p.lt[cr].bwd, 0)} µs`).join("  ·  ");
-  steps.append(step("Per-layer fwd/bwd (µs, " + (c.recompute === "full" ? "recompute on" : "no recompute") + ")", "", ltDesc));
+  const recomputeDesc = c.recompute === "first-n" ? `first ${c.recomputeLayers} layers/stage` : (c.recompute === "full" ? "recompute on" : "no recompute");
+  steps.append(step("Per-layer fwd/bwd (µs, " + recomputeDesc + ")", "", ltDesc));
   steps.append(step("Critical PP stage (µs)", `F ${fmt(p.critF, 0)} + B ${fmt(p.critB, 0)}`,
-    `max over ${c.pp} stages; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
+    `max over ${c.pp} stages; layout ${p.layoutApplied ? "applied" : "balanced fallback"}; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
   if ((d.model_config.mtp_num_layers || 0) > 0) {
     steps.append(step("MTP on last stage", `F ${fmt(p.mtp.fwd, 0)} + B ${fmt(p.mtp.bwd, 0)} µs`,
       `${d.model_config.mtp_num_layers} depth(s), inner cr=${(d.model_config.mtp_compress_ratios || [0])[0]}, eh_proj estimated from output GEMM throughput`));

@@ -45,16 +45,19 @@ If a layer is recomputed, its backward replays one forward:
 ```
 layer_bwd_eff[cr] = layer_bwd[cr] + recompute_factor[cr] * layer_fwd[cr]
 ```
-`recompute_factor` ∈ {0,1} per cr (site control: none / full / selective). v1
-exposes none | full; full sets it to 1 for all cr.
+`recompute_factor` ∈ {0,1} per layer. The site exposes `none`, `full`, and
+`first-n`; `first-n` adds one forward replay to the first N decoder layers owned
+by each physical PP stage, matching the common Megatron
+`recompute_num_layers=N` block pattern.
 
 ## Step 2 — map layers to PP stages / VPP chunks (A6)
 
-Inputs: `PP`, `VPP`. Total model chunks `C = PP * VPP`, layers per chunk
-`Lc = num_layers / C` (assume divisible; otherwise distribute remainder to the
-first chunks). Build the ordered layer list from `compress_ratios`, slice it into
-`C` contiguous chunks (Megatron interleaved assigns chunk `k` to device
-`k mod PP`). For device `d`:
+Inputs: `PP`, `VPP`, optional `pipeline_layout`. Total model chunks
+`C = PP * VPP`. If `pipeline_layout` is provided, parse Megatron-style `t` /
+`t*N` stage specs (for example `Et*10|t*11|t*11|t*11mL`) and assign virtual
+chunk `k` to device `k mod PP`. Otherwise build the ordered layer list from
+`compress_ratios`, slice it into `C` contiguous chunks, and use the same
+`k mod PP` mapping. For device `d`:
 ```
 Df[d] = Σ_{chunks on d} Σ_{layer in chunk} layer_fwd[cr(layer)]
 Db[d] = Σ_{chunks on d} Σ_{layer in chunk} layer_bwd_eff[cr(layer)]
