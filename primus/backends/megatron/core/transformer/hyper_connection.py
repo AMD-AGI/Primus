@@ -55,6 +55,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+    hc_expand_triton,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+    is_triton_kernel_supported as _hc_expand_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+    is_triton_path_enabled as _hc_expand_enabled,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
     hc_glue_compute_tail_triton,
 )
@@ -377,6 +386,9 @@ class HyperMixer(nn.Module):
 
         Returns ``[..., K, D]``.
         """
+        # Triton-fused expand; falls back to eager for unsupported configs.
+        if _hc_expand_enabled() and _hc_expand_supported(x, post, comb):
+            return hc_expand_triton(x, out, post, comb)
         # post[..., K] * out[..., D] -> [..., K, D]
         write = post.unsqueeze(-1) * out.unsqueeze(-2)
         # comb[..., K, K] @ x[..., K, D] -> [..., K, D]

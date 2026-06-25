@@ -307,7 +307,17 @@ def _pick_block(s: int, p: int, h: int, hd: int) -> tuple[int, int]:
     if hd >= 256:
         block_s = 16
         block_p = 32
-    return min(block_s, triton.next_power_of_2(max(1, s))), min(block_p, triton.next_power_of_2(max(1, p)))
+    # Floor both tiles to 16: BLOCK_S / BLOCK_P are the M / N dims of the
+    # ``tl.dot(q_tile, k_tile.T)`` in the FWD/BWD score kernels, so they
+    # must be >= the gfx1250 WMMA minimum. For tiny S / P (e.g. unit-test
+    # shapes), ``next_power_of_2(s|p)`` can drop below 16 and the dot fails
+    # to select a matrix-core intrinsic ("no matching matrix core intrinsic
+    # for wmma version 3 ... [0, 0, K]"). Surplus rows/cols are masked by
+    # ``s_mask`` / ``p_mask`` inside the kernels, so a 16-wide tile over a
+    # smaller S / P is safe.
+    block_s = max(16, min(block_s, triton.next_power_of_2(max(1, s))))
+    block_p = max(16, min(block_p, triton.next_power_of_2(max(1, p))))
+    return block_s, block_p
 
 
 # ---------------------------------------------------------------------------
