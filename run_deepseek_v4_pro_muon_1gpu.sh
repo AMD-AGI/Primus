@@ -219,12 +219,28 @@ export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
 export USE_TURBO_PARALLEL_LINEAR=${USE_TURBO_PARALLEL_LINEAR:-False}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
 export PRIMUS_STACK_GROUPED_WEIGHT_TRITON=${PRIMUS_STACK_GROUPED_WEIGHT_TRITON:-0}
-export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-0}
-export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-0}
-export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-0}
+# RoPE Triton: default ON. Trace (2026-06-25, L3) attributed 960 kernels / 513 tiny
+# (<5us) / 38.6 ms to the eager rotary-embedding path — a launch-bound fusion target.
+export PRIMUS_ROPE_TRITON=${PRIMUS_ROPE_TRITON:-1}
+# Sinkhorn Triton fused FWD/BWD: default ON. The eager Sinkhorn-Knopp loop
+# (n_iters=20) launches ~18,600 tiny sum/add/div kernels per step (5,616 on the
+# fwd side alone); the Triton path emits exactly 1 fwd + 1 bwd kernel per call.
+# Measured 2026-06-25 (0612, L3, FP8): total GPU events 80,962 -> 62,340, sinkhorn
+# GPU kernels 5,616 -> 48, warm step ~2,890 -> ~2,797 ms (+3.2%), 0 NaN / loss
+# bit-identical. Falls back to eager when the shape/device is unsupported. Set =0 to A/B.
+export PRIMUS_SINKHORN_TRITON=${PRIMUS_SINKHORN_TRITON:-1}
+# HyperConnection mHC Triton: default ON. The mHC HyperMixer glue (pre/post/comb
+# projections + scales), separate from the already-fused HC-expand and sinkhorn.
+# Trace (2026-06-25, L3): 1,320 kernels / 872 tiny (<5us) / 52 ms — top remaining
+# launch-bound target after sinkhorn.
+export PRIMUS_HC_TRITON=${PRIMUS_HC_TRITON:-1}
+# CSA indexer Triton: kept OFF — inert at L3 (compress_ratios [128,128,0] has NO CSA
+# layer, so the indexer never runs). Enable only with a CSA layer (>=4 layers).
 export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-0}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
-export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-0}
+# V4 MoE router Triton: default ON. Trace (2026-06-25, L3): 432 kernels / 208 tiny /
+# 5.3 ms — marginal, but launch-bound and correctness-neutral.
+export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 
 export ENABLE_PRIMUS_TURBO=False
 if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "$USE_TURBO_DEEPEP" = "True" ] || [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
