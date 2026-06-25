@@ -11,12 +11,15 @@ on:
         description: "Existing release tag to upload the built wheel to (optional). Leave empty to only produce a build artifact."
         required: false
         default: ""
+      allow_clobber:
+        description: "Overwrite existing release assets with the same name (use only for intentional re-uploads)."
+        required: false
+        type: boolean
+        default: false
 
+# Default to read-only; the build-wheel job opts into the writes it needs.
 permissions:
-  contents: write
-  # Needed to trigger the dashboard workflow (workflow_dispatch) so it can
-  # refresh the GitHub Pages pip index after the wheel is attached to the release.
-  actions: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,14 +28,22 @@ concurrency:
 jobs:
   build-wheel:
     runs-on: ubuntu-latest
+    permissions:
+      # Upload assets to the GitHub Release.
+      contents: write
+      # Dispatch the dashboard workflow to refresh the pip index.
+      actions: write
+      # Keyless signing for build provenance attestation.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         # third_party submodules are NOT needed: the wheel only ships the
         # primus package + runner/ toolkit, not the vendored backends.
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -124,8 +135,28 @@ jobs:
           echo "--- primus-cli --version ---"
           /tmp/primus-smoke/bin/primus-cli --version
 
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: dist/
+          format: spdx-json
+          artifact-name: primus-sbom.spdx.json
+          output-file: dist/primus-sbom.spdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: "dist/*.whl, dist/*.tar.gz"
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: primus-dist
           path: dist/*
@@ -136,9 +167,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
+          # `release` events never clobber; manual dispatch may opt in.
+          ALLOW_CLOBBER: ${{ github.event.inputs.allow_clobber }}
         run: |
+          CLOBBER=""
+          if [[ "${ALLOW_CLOBBER}" == "true" ]]; then
+            echo "allow_clobber=true: existing assets with the same name will be overwritten."
+            CLOBBER="--clobber"
+          fi
           echo "Uploading build artifacts to release ${TAG}"
-          gh release upload "${TAG}" dist/*.whl dist/*.tar.gz --clobber
+          gh release upload "${TAG}" \
+            dist/*.whl dist/*.tar.gz dist/SHA256SUMS dist/primus-sbom.spdx.json \
+            ${CLOBBER}
 
       # After the wheel is on the release, kick the dashboard workflow so it
       # regenerates the GitHub Pages PEP 503 index (which links to release
