@@ -1,4 +1,4 @@
-torchft-nightly==2025.12.16
+torchft-nightly==2026.6.25
 fastmcp==2.14.0
 opentelemetry-sdk==1.37.0
 opentelemetry-exporter-otlp-proto-common==1.37.0
