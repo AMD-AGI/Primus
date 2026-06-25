@@ -39,12 +39,14 @@ except ImportError:
 
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
+    PrimusTurboColumnParallelGroupedLinear,
     PrimusTurboColumnParallelLinear,
-    PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
+    PrimusTurboRowParallelGroupedLinear,
     PrimusTurboRowParallelLinear,
 )
+from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
 from primus.backends.megatron.training.global_vars import get_primus_args
 
 
@@ -162,25 +164,27 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # and prefer TEGroupedMLP by default.
             moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
 
-        if (
-            moe_use_grouped_gemm
-            and TEColumnParallelGroupedLinear is not None
-            and not moe_use_legacy_grouped_gemm
-        ):
-            _GroupedMLP = (
-                PrimusTurboGroupedMLP if getattr(self.cfg, "use_turbo_grouped_mlp", False) else TEGroupedMLP
+        use_turbo_grouped_mlp = getattr(self.cfg, "use_turbo_grouped_mlp", False)
+        if moe_use_grouped_gemm and not moe_use_legacy_grouped_gemm:
+            _GroupedMLP = PrimusGroupedMLP if use_turbo_grouped_mlp else TEGroupedMLP
+            GroupedMLPSubmodules = TEGroupedMLPSubmodules(
+                linear_fc1=(
+                    PrimusTurboColumnParallelGroupedLinear
+                    if use_turbo_grouped_mlp
+                    else TEColumnParallelGroupedLinear
+                ),
+                linear_fc2=(
+                    PrimusTurboRowParallelGroupedLinear
+                    if use_turbo_grouped_mlp
+                    else TERowParallelGroupedLinear
+                ),
             )
-            # TODO: need to update primus_turbo to support TEColumnParallelGroupedLinear?
-            return _GroupedMLP, TEGroupedMLPSubmodules(
-                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
-            )
+            return _GroupedMLP, GroupedMLPSubmodules
         elif moe_use_grouped_gemm:
             warnings.warn(
                 "The legacy GroupedMLP was removed from this Megatron version; "
                 "Primus is using its local compatibility implementation."
             )
-            if getattr(self.cfg, "use_turbo_grouped_mlp", False):
-                raise NotImplementedError("PrimusTurbo does not support Legacy GroupedMLP")
             return GroupedMLP, None
         else:
             if not is_te_min_version("1.7.0.dev0"):

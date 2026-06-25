@@ -3,38 +3,66 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-import os
-from contextlib import contextmanager
-from typing import Callable, List, Optional, Tuple
+import gc
+from contextlib import contextmanager, nullcontext
+from typing import Callable, Iterable, List, Optional, Tuple, Union
 
-import primus_turbo.pytorch as pt
+import primus_turbo.pytorch as primus_turbo_torch
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import transformer_engine as te
-from megatron.core import tensor_parallel
-from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
+from megatron.core.enums import Fp4Recipe, Fp8Recipe
+from megatron.core.extensions.transformer_engine import (
+    TEColumnParallelLinear,
+    TEGroupedLinear,
+    TELayerNormColumnParallelLinear,
+    TELinear,
+    TEQuantizationParams,
+    TEQuantizationRecipe,
+    TERowParallelLinear,
+    condition_init_method,
+)
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.tensor_parallel.layers import (
-    ColumnParallelLinear,
-    _initialize_affine_weight_cpu,
-)
 from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
-from megatron.core.utils import divide, get_tensor_model_parallel_group_if_none
+from megatron.core.utils import get_pg_size
 from megatron.training.global_vars import get_args
+
+# QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
+# quantization paths (added in PR #735).  Older primus_turbo 0.2.0 builds shipped
+# in the rocm/primus v26.2 / v26.3 containers do not export them yet.  Keep the
+# module importable so the BF16 turbo attention / linear paths still work, and only
+# fail (with a clear AttributeError on None) if an FP8 quantization path is hit.
+try:
+    from primus_turbo.pytorch.core import QuantizedTensor as PrimusTurboQuantizedTensor
+    from primus_turbo.pytorch.core import (
+        QuantizedTensorPair as PrimusTurboQuantizedTensorPair,
+    )
+except (ImportError, ModuleNotFoundError):
+    PrimusTurboQuantizedTensor = None
+    PrimusTurboQuantizedTensorPair = None
+
+# ScalingRecipe was renamed to MXScalingRecipe in primus_turbo 0.2.0; keep a fallback
+# alias so the module imports against both old and new builds.
+try:
+    from primus_turbo.pytorch.core.low_precision import ScalingRecipe
+except (ImportError, ModuleNotFoundError):
+    from primus_turbo.pytorch.core.low_precision import MXScalingRecipe as ScalingRecipe
+
+try:
+    from primus_turbo.pytorch.core.quantized_tensor import create_quantized_weight
+except (ImportError, ModuleNotFoundError):
+    create_quantized_weight = None
+
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -45,30 +73,171 @@ from primus_turbo.pytorch.core.low_precision import (
     check_fp8_support,
     check_mxfp4_support,
     check_mxfp8_support,
+    float4_e2m1fn_x2,
+    float8_e4m3,
 )
 from torch import Tensor
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
 
-# MXFP8 weight pre-quantization (cache the fp8 weight once per optimizer step
-# instead of re-quantizing every microbatch + recompute forward). Optional —
-# guarded so older primus_turbo builds without it fall back to per-forward quant.
-try:
-    from primus_turbo.triton.quantization.mxfp8_quant_kernels import (
-        MXFP8WeightPrequant,
-        prequant_mxfp8_weights,
+from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+
+_dummy_wgrads = {}
+
+
+def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape.
+
+    Supports arbitrary rank (2D for plain Linear weights, 3D for stacked
+    grouped-linear weights ``(num_gemms, out_features, in_features)``, etc.).
+    Tensors are cached by ``(shape, dtype)`` so each distinct weight layout
+    only allocates one persistent buffer that gets reused across steps.
+    """
+    global _dummy_wgrads
+    key = (tuple(shape), dtype)
+    if key not in _dummy_wgrads:
+        _dummy_wgrads[key] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[key].fill_(0)
+    return _dummy_wgrads[key].detach()
+
+
+def _bridge_weight_grad(
+    x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: PrimusTurboQuantizedTensorPair
+):
+    """Bridge quantized weight gradient to the original weight's ``main_grad``.
+
+    Must be called **before** the gemm so that in the backward pass the gemm
+    backward fires first (producing the real weight gradient) and then
+    ``_WeightGradBridge.backward`` receives it, writes it into
+    ``weight.main_grad``, and emits a dummy wgrad so that ``weight``'s
+    AccumulateGrad / DDP ``register_grad_ready`` hook fires in the correct
+    order.
+
+    """
+
+    class _WeightGradBridge(torch.autograd.Function):
+
+        @staticmethod
+        def forward(ctx, x, weight, quantized_weight, quantized_weight_trans):
+            ctx.save_for_backward(weight)
+            return x, quantized_weight, quantized_weight_trans
+
+        @staticmethod
+        def backward(ctx, grad_x, grad_quantized_weight, grad_quantized_weight_trans):
+            (weight,) = ctx.saved_tensors
+            assert hasattr(weight, "main_grad"), "weight.main_grad should be set before backward pass."
+            assert hasattr(
+                weight, "grad_added_to_main_grad"
+            ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
+
+            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding quantized weight gradient to main grad twice.
+            weight.main_grad.add_(grad_quantized_weight)
+            weight.grad_added_to_main_grad = True
+
+            return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None, None
+
+    assert isinstance(
+        weight_buffer, PrimusTurboQuantizedTensorPair
+    ), "weight_buffer must be a PrimusTurboQuantizedTensorPair"
+    assert weight_buffer.data_rowwise is not None, "weight_buffer.data_rowwise must not be None"
+
+    x, quantized_weight, quantized_weight_trans = _WeightGradBridge.apply(
+        x, weight, weight_buffer.data_rowwise, weight_buffer.data_colwise
     )
 
-    _HAS_MXFP8_PREQUANT = True
-except Exception:  # pragma: no cover - depends on primus_turbo version
-    MXFP8WeightPrequant = None
-    prequant_mxfp8_weights = None
-    _HAS_MXFP8_PREQUANT = False
+    # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
+    return x, PrimusTurboQuantizedTensorPair(
+        data_rowwise=quantized_weight, data_colwise=quantized_weight_trans
+    )
 
-from primus.backends.megatron.core.extensions._triton.stack_grouped_weight import (
-    stack_grouped_weight,
-)
-from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+
+def _maybe_create_quantized_weight_buffers(
+    weight: torch.Tensor,
+    dest_dtype: torch.dtype,
+    quant_config: "PrimusTurboQuantConfig",
+    disable_parameter_transpose_cache: bool,
+):
+    """Quantize ``weight`` into a rowwise buffer plus an optional transposed
+    (colwise) buffer, returning ``(rowwise, colwise_or_None)``.
+
+    Prefers primus_turbo's ``create_quantized_weight`` helper, which picks the
+    scaling recipe from the quant config and handles per-granularity transpose.
+    Falls back to a manual rowwise/colwise quantize on older primus_turbo builds
+    that do not export ``create_quantized_weight`` yet.
+    """
+    quant_config_internal = quant_config.data()
+    need_cache_colwise = not disable_parameter_transpose_cache
+
+    if create_quantized_weight is not None:
+        return create_quantized_weight(
+            weight,
+            dest_dtype,
+            quant_config_internal,
+            need_cache_colwise=need_cache_colwise,
+        )
+
+    # TODO(ruibin): Remove this fallback path once create_quantized_weight is
+    # always available in the shipped primus_turbo build.
+    def _weight_scaling_recipe(quant_config: Union[Float4QuantConfig, Float8QuantConfig]) -> ScalingRecipe:
+        if isinstance(quant_config, Float4QuantConfig):
+            weight_scaling_recipe = ScalingRecipe(
+                use_2d_block=True,
+                shuffle_scale=quant_config.use_preshuffle,
+                shuffle_out=quant_config.use_preshuffle,
+            )
+
+        if isinstance(quant_config, Float8QuantConfig):
+            if quant_config.granularity in [ScalingGranularity.BLOCKWISE, ScalingGranularity.MX_BLOCKWISE]:
+                weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
+            else:
+                weight_scaling_recipe = ScalingRecipe()
+
+        return weight_scaling_recipe
+
+    quantized_weight_rowwise = PrimusTurboQuantizedTensor.quantize(
+        weight,
+        dest_dtype=dest_dtype,
+        granularity=quant_config.granularity,
+        block_size=quant_config.block_size,
+        scaling_recipe=_weight_scaling_recipe(quant_config),
+        axis=-1,
+    )
+
+    quantized_weight_colwise = None
+    if need_cache_colwise:
+        granularity = quant_config.granularity
+        if granularity == ScalingGranularity.TENSORWISE:
+            quantized_weight_colwise = quantized_weight_rowwise.transpose(-2, -1)
+        elif granularity == ScalingGranularity.ROWWISE:
+            # NOTE: rowwise quantization not support transpose, so we need to quantize the transposed weight manually.
+            quantized_weight_colwise = PrimusTurboQuantizedTensor.quantize(
+                weight.transpose(-2, -1),
+                dest_dtype=dest_dtype,
+                granularity=quant_config.granularity,
+                block_size=quant_config.block_size,
+                scaling_recipe=_weight_scaling_recipe(quant_config),
+                axis=-2,
+            )
+        elif granularity in [ScalingGranularity.BLOCKWISE, ScalingGranularity.MX_BLOCKWISE]:
+            quantized_weight_colwise = PrimusTurboQuantizedTensor.quantize(
+                weight,
+                dest_dtype=dest_dtype,
+                granularity=quant_config.granularity,
+                block_size=quant_config.block_size,
+                scaling_recipe=_weight_scaling_recipe(quant_config),
+                # axis=-2 means quant weight along axis 2 which will get a transposed quantized weight.
+                axis=-2,
+            )
+        else:
+            raise ValueError(f"Unsupported granularity: {granularity}")
+
+    return quantized_weight_rowwise, quantized_weight_colwise
 
 
 def _call_fp8_autocast_enter(
@@ -104,8 +273,17 @@ def _call_fp8_autocast_exit(enabled: bool, *, _graph: bool) -> None:
     exit_fn(enabled, _graph=_graph)
 
 
-def use_split_wgrad_op():
+def _is_fp4_or_fp8_enabled():
+    return (
+        PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+        or PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+    )
+
+
+def _use_split_wgrad_op():
     args = get_args()
+
+    enable_split_wgrad_op = False
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
         "zero-bubble-heuristic",
@@ -113,24 +291,17 @@ def use_split_wgrad_op():
         "v-half",
         "v-min",
     ]:
-        return True
+        enable_split_wgrad_op = True
+
     elif args.patch_zero_bubble and args.enable_zero_bubble:
-        return True
-    return False
+        enable_split_wgrad_op = True
 
+    if enable_split_wgrad_op:
+        assert (
+            not _is_fp4_or_fp8_enabled()
+        ), "split wgrad op is not supported when turbo fp8 or fp4 is enabled."
 
-def _dbg_fp8_first_seen(module, input_, weights, quant_config):
-    """Print each fp8 GEMM (in/weight) shape once per class, gated by PRIMUS_DEBUG_FP8=1."""
-    if os.environ.get("PRIMUS_DEBUG_FP8") != "1":
-        return
-    cls = type(module)
-    seen = cls.__dict__.get("_dbg_fp8_shapes")
-    if seen is None:
-        seen = set(); cls._dbg_fp8_shapes = seen
-    k = (tuple(input_.shape[-1:]), tuple(weights.shape))
-    if k not in seen:
-        seen.add(k)
-        print(f"[PRIMUS_DEBUG_FP8] {cls.__name__} fp8 in={tuple(input_.shape)} w={tuple(weights.shape)} gran={quant_config.data().granularity}", flush=True)
+    return enable_split_wgrad_op
 
 
 class PrimusTurboQuantConfig:
@@ -362,6 +533,91 @@ def primus_turbo_fp4_autocast(
         _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
+def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
+    if FP8GlobalStateManager.is_fp8_enabled():
+        if not qrecipe.override_quantized_autocast:
+            return nullcontext()
+    else:
+        if not qrecipe.override_nonquantized_autocast:
+            return nullcontext()
+
+    if qrecipe.fp8_quantization_recipe is None and qrecipe.fp4_quantization_recipe is None:
+        # Force BF16 for this layer and override autocast
+        return primus_turbo_fp8_autocast(enabled=False, enabled_turbo=False)
+    else:
+        if (
+            qrecipe.fp8_quantization_recipe == Fp8Recipe.custom
+            or qrecipe.fp4_quantization_recipe == Fp4Recipe.custom
+        ):
+            assert qrecipe.custom_recipe_factory is not None
+            assert False, "Custom recipe is not supported for Primus-Turbo"
+
+        elif qrecipe.fp8_quantization_recipe is not None:
+            from primus.backends.megatron.core.fp8_utils import (
+                MXFP8_SCALING_BLOCK_SIZE,
+                SCALING_BLOCK_SIZE,
+            )
+
+            if qrecipe.fp8_format == "e4m3":
+                fp8_format = Format.E4M3
+            elif qrecipe.fp8_format == "hybrid":
+                fp8_format = Format.HYBRID
+            else:
+                raise ValueError(f"Unhandled fp8_format {qrecipe.fp8_format}")
+
+            if qrecipe.fp8_quantization_recipe == Fp8Recipe.tensorwise:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.TENSORWISE, format=fp8_format
+                )
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.blockwise:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.BLOCKWISE, format=fp8_format, block_size=SCALING_BLOCK_SIZE
+                )
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.mxfp8:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=fp8_format,
+                    block_size=MXFP8_SCALING_BLOCK_SIZE,
+                    scale_dtype=ScaleDtype.E8M0,
+                )
+            else:
+                raise ValueError(f"Unhandled fp8 recipe: {qrecipe.fp8_quantization_recipe}")
+
+            return primus_turbo_fp8_autocast(
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
+            )
+        else:
+            # Fp4 configured.
+            if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
+                assert False, "NVFP4 is not supported for Primus-Turbo"
+            elif qrecipe.fp4_quantization_recipe == Fp4Recipe.mxfp4:
+                from primus.backends.megatron.core.fp4_utils import (
+                    MXFP4_SCALING_BLOCK_SIZE,
+                )
+
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=Format.E2M1_X2,
+                    block_size=MXFP4_SCALING_BLOCK_SIZE,
+                    scale_dtype=ScaleDtype.E8M0,
+                )
+            else:
+                raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp4_quantization_recipe}")
+
+            return primus_turbo_fp4_autocast(
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
+            )
+
+
+def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, training: bool):
+    if qparams is None:
+        return nullcontext()
+    elif not training and qparams.evaluation_recipe is not None:
+        return _get_fp8_autocast_for_quant_recipe(qparams.evaluation_recipe)
+    else:
+        return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -426,6 +682,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             )
             _use_sink_attention = False
 
+        # set deterministic flag
+        self.deterministic_mode = args.deterministic_mode
+
         # Store for later use after super().__init__()
         self._init_sink_attention = _use_sink_attention
         self._num_heads_for_sinks = self.config.num_attention_heads
@@ -433,15 +692,15 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self.offload = args.offload and "attn" in args.offload_ops
         if args.enable_turbo_attention_float8:
             self.attn = (
-                pt.ops.flash_attn_fp8_usp_func
+                primus_turbo_torch.ops.flash_attn_fp8_usp_func
                 if self.config.context_parallel_size > 1
-                else pt.ops.flash_attn_fp8_func
+                else primus_turbo_torch.ops.flash_attn_fp8_func
             )
         else:
             self.attn = (
-                pt.ops.flash_attn_usp_func
+                primus_turbo_torch.ops.flash_attn_usp_func
                 if self.config.context_parallel_size > 1
-                else pt.ops.flash_attn_func
+                else primus_turbo_torch.ops.flash_attn_func
             )
         if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
@@ -518,8 +777,6 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
-        SUPPORTED_QKV_FORMATS = "sbhd"
-
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -527,11 +784,6 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         )
 
         qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
-        assert (
-            qkv_format in SUPPORTED_QKV_FORMATS
-        ), f"qkv_format only support {SUPPORTED_QKV_FORMATS}, but got {qkv_format}"
-        # NOTE(ruibin): The layout of q, k and v is (S, B, H, D). But attn accept the shape of qkv is (B, S, H, D).
-        query, key, value = [x.permute(1, 0, 2, 3) for x in (query, key, value)]
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -553,7 +805,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         sink_tensor = None
         window_size = (-1, -1)
 
-        if self.use_sink_attention and self.sinks is not None:
+        use_sink_attn = self.use_sink_attention and self.sinks is not None
+
+        if use_sink_attn:
             sink_tensor = self.sinks
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
@@ -565,10 +819,27 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                         window_size = (self.sink_sliding_window, 0)
                 else:
                     window_size = (self.sink_sliding_window, 0)
+
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
+
+        # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
+        # and let torch allocator can release the original tensor.
+        if torch.is_grad_enabled():
+            query = query.contiguous() if query.requires_grad else query
+            key = key.contiguous() if key.requires_grad else key
+            value = value.contiguous() if value.requires_grad else value
+
+        if qkv_format == "sbhd":
+            query = query.permute(1, 0, 2, 3)
+            key = key.permute(1, 0, 2, 3)
+            value = value.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            query = query.permute(0, 2, 1, 3)
+            key = key.permute(0, 2, 1, 3)
+            value = value.permute(0, 2, 1, 3)
 
         o = self.attn(
             query,
@@ -580,15 +851,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             window_size=window_size,
             bias=None,
             alibi_slopes=None,
-            deterministic=False,
+            deterministic=self.deterministic_mode,
             return_lse=False,
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
             **self.attn_kwargs,
         )
 
-        # NOTE(ruibin): The output of attn is BSHD. Use permute to convert the layout to SBHD.
-        o = o.permute(1, 0, 2, 3).contiguous()
+        if qkv_format == "sbhd":
+            o = o.permute(1, 0, 2, 3)
+        elif qkv_format == "bhsd":
+            o = o.permute(0, 2, 1, 3)
+
         o = o.view(o.shape[0], o.shape[1], -1)
 
         return o
@@ -615,43 +889,30 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        if parallel_mode != "duplicated":
-            raise ValueError(f"{__class__.__name__} only support `parallel_mode=duplicated`. ")
-
-        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
-
-        if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
-        else:
-            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
-                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
-            )
-
         args = get_args()
-        self.offload = args.offload and "basic_gemm" in args.offload_ops
+        self.offload = args.offload and "parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
         super().__init__(
             input_size=input_size,
             output_size=output_size,
-            parallel_mode="row",
+            parallel_mode=parallel_mode,
             config=config,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
             bias=bias,
             skip_bias_add=skip_bias_add,
-            skip_weight_param_allocation=False,
-            # We don't currently use this for row parallel layers # pylint: disable=line-too-long
-            is_expert=is_expert,
+            skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
-            symmetric_ar_type=config.symmetric_ar_type,
+            is_expert=is_expert,
+            symmetric_ar_type=symmetric_ar_type,
             tp_group=tp_group,
         )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboLinear only supports tensor parallel size = 1"
+
+        self.register_buffer("quantized_weight_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 1, bias not sharded"""
@@ -664,57 +925,114 @@ class PrimusTurboLinear(TELinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
-        input_: torch.Tensor,
+        x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
-        # weights = [getattr(self, name) for name in self.weight_names]
-        # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
-        weights = self._parameters["weight"]
+        weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-        original_shape = input_.size()
-        if not input_.is_contiguous():
-            input_ = input_.contiguous()
-        input_ = input_.view(-1, original_shape[-1])
+        original_shape = x.size()
+        if not x.is_contiguous():
+            x = x.contiguous()
+        x = x.view(-1, original_shape[-1])
 
         if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"linear_input", input_)
+            OFFLOAD_BUFFER.add_offload_tensor(f"linear_input", x)
 
-        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+        if _use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
 
-            _dbg_fp8_first_seen(self, input_, weights, quant_config)
-
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.mxfp4_scaling():
-                fp4_gemm = pt.ops.gemm_fp4
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp4_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            out = gemm_with_weight_gradient_store(x, weight, bias=None)
         else:
-            out = self.gemm(input_, weights)
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp8_scaling()
+                    or quant_config.current_scaling()
+                    or quant_config.block_scaling()
+                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float8_e4m3,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp8(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+                if is_first_microbatch:
+                    need_cache_colwise = not self.disable_parameter_transpose_cache
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight, float4_e2m1fn_x2, quant_config, need_cache_colwise=need_cache_colwise
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp4(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            else:
+                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
         out = out.view(original_shape[0], original_shape[1], -1)
-        if self.te_return_bias:
-            return out, bias_tensor
+
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
+
         return out, None
 
 
-class PrimusTurboRowParallelLinear(TELinear):
+class PrimusTurboRowParallelLinear(TERowParallelLinear):
     """
     Wrapper for the Transformer-Engine's `Linear` layer but specialized similar
     to megatron's `RowParallelLinear` layer.
@@ -741,67 +1059,24 @@ class PrimusTurboRowParallelLinear(TELinear):
         self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
-        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
-
-        if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
-        else:
-            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
-                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
-            )
-
         super().__init__(
             input_size=input_size,
             output_size=output_size,
-            parallel_mode="row",
             config=config,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
             bias=bias,
+            input_is_parallel=input_is_parallel,
             skip_bias_add=skip_bias_add,
-            skip_weight_param_allocation=False,
-            # We don't currently use this for row parallel layers # pylint: disable=line-too-long
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
-            symmetric_ar_type=config.symmetric_ar_type,
             tp_group=tp_group,
         )
 
-        # Manual weight initialization when use_cpu_initialization=True
-        if config.use_cpu_initialization:
-            world_size = get_tensor_model_parallel_world_size()
-            rank = get_tensor_model_parallel_rank()
-            input_size_per_partition = divide(input_size, world_size)
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboRowParallelLinear only supports tensor parallel size = 1"
 
-            self.master_weight = _initialize_affine_weight_cpu(
-                self.weight,
-                output_size,
-                input_size,
-                input_size_per_partition,
-                1,  # partition_dim (row parallel partitions along input dimension)
-                init_method=condition_init_method(config, init_method),
-                stride=1,
-                return_master_weight=False,
-                params_dtype=config.params_dtype,
-                rank=rank,
-                world_size=world_size,
-                skip_set_tensor_parallel_attributes=True,
-            )
-
-            # Bias initialization
-            if bias:
-                with torch.no_grad():
-                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-                    bias_tensor.zero_()
-                # Set allreduce attribute for distributed training
-                for bias_name in self.bias_names:
-                    bias_param = getattr(self, bias_name)
-                    setattr(bias_param, "allreduce", True)
+        self.register_buffer("quantized_weight_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 1, bias not sharded"""
@@ -814,61 +1089,121 @@ class PrimusTurboRowParallelLinear(TELinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
-        input_: torch.Tensor,
+        x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
-        # weights = [getattr(self, name) for name in self.weight_names]
-        # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
-        weights = self._parameters["weight"]
+        weight = self._parameters["weight"]
+
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-        original_shape = input_.size()
-        if not input_.is_contiguous():
-            input_ = input_.contiguous()
+        original_shape = x.size()
+        if not x.is_contiguous():
+            x = x.contiguous()
 
         if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", input_)
+            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", x)
 
-        input_ = input_.view(-1, original_shape[-1])
+        x = x.view(-1, original_shape[-1])
 
         if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", input_)
+            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", x)
 
-        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+        if _use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
 
-            _dbg_fp8_first_seen(self, input_, weights, quant_config)
-
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.mxfp4_scaling():
-                fp4_gemm = pt.ops.gemm_fp4
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp4_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            out = gemm_with_weight_gradient_store(x, weight, bias=None)
         else:
-            out = self.gemm(input_, weights)
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp8_scaling()
+                    or quant_config.current_scaling()
+                    or quant_config.block_scaling()
+                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float8_e4m3,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp8(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float4_e2m1fn_x2,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp4(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            else:
+                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
         out = out.view(original_shape[0], original_shape[1], -1)
-        if self.te_return_bias:
-            return out, bias_tensor
+
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
+
         return out, None
 
 
-class PrimusTurboColumnParallelLinear(TELinear):
+class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
     def __init__(
         self,
         input_size: int,
@@ -885,72 +1220,30 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
-        if gather_output:
-            raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
-        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
-
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
-        if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
-        else:
-            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
-                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
-            )
-
         super().__init__(
             input_size=input_size,
             output_size=output_size,
-            parallel_mode="column",
             config=config,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            init_method=init_method,
+            gather_output=gather_output,
             bias=bias,
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
-            symmetric_ar_type=config.symmetric_ar_type,
             tp_group=tp_group,
+            stride=stride,
         )
 
-        # Manual weight initialization when use_cpu_initialization=True
-        if config.use_cpu_initialization:
-            world_size = get_tensor_model_parallel_world_size()
-            rank = get_tensor_model_parallel_rank()
-            output_size_per_partition = divide(output_size, world_size)
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboColumnParallelLinear only supports tensor parallel size = 1"
 
-            _ = _initialize_affine_weight_cpu(
-                self.weight,
-                output_size,
-                input_size,
-                output_size_per_partition,
-                0,  # partition_dim (column parallel partitions along output dimension)
-                init_method=condition_init_method(config, init_method),
-                stride=1,
-                return_master_weight=False,
-                params_dtype=config.params_dtype,
-                rank=rank,
-                world_size=world_size,
-                skip_set_tensor_parallel_attributes=True,
-            )
-
-            # Bias initialization
-            if bias:
-                with torch.no_grad():
-                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-                    bias_tensor.zero_()
-                # Set allreduce attribute for distributed training
-                for bias_name in self.bias_names:
-                    bias_param = getattr(self, bias_name)
-                    setattr(bias_param, "allreduce", True)
+        self.register_buffer("quantized_weight_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
@@ -965,160 +1258,116 @@ class PrimusTurboColumnParallelLinear(TELinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
-        input_: torch.Tensor,
+        x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
-        # weights = [getattr(self, name) for name in self.weight_names]
-        # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
-        weights = self._parameters["weight"]
+        weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-        original_shape = input_.size()
-        if not input_.is_contiguous():
-            input_ = input_.contiguous()
-        input_ = input_.view(-1, original_shape[-1])
+        original_shape = x.size()
+        if not x.is_contiguous():
+            x = x.contiguous()
+        x = x.view(-1, original_shape[-1])
 
         if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_input", input_)
+            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_input", x)
 
-        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+        if _use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
 
-            _dbg_fp8_first_seen(self, input_, weights, quant_config)
-
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.mxfp4_scaling():
-                fp4_gemm = pt.ops.gemm_fp4
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp4_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            out = gemm_with_weight_gradient_store(x, weight, bias=None)
         else:
-            out = self.gemm(input_, weights)
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp8_scaling()
+                    or quant_config.current_scaling()
+                    or quant_config.block_scaling()
+                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float8_e4m3,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp8(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float4_e2m1fn_x2,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                x, quantized_weight = _bridge_weight_grad(
+                    x,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp4(
+                    x,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            else:
+                out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
         out = out.view(original_shape[0], original_shape[1], -1)
-        if self.te_return_bias:
-            return out, bias_tensor
+
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
+
         return out, None
 
 
-class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
-    """
-    Wrapper for the Transformer-Engine's `Linear` layer but specialized similar
-    to megatron's `ColumnParallelLinear` layer.
-    """
-
-    def __init__(
-        self,
-        input_size,
-        output_size,
-        *,
-        config: ModelParallelConfig,
-        init_method: Callable,
-        bias=True,
-        gather_output=False,
-        stride=1,
-        keep_master_weight_for_test=False,
-        skip_bias_add=False,
-        skip_weight_param_allocation: bool = False,
-        embedding_activation_buffer: Optional[List[torch.Tensor]] = None,
-        grad_output_buffer: Optional[List[torch.Tensor]] = None,
-        is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
-        disable_grad_reduce: bool = False,
-        tp_group: Optional[torch.distributed.ProcessGroup] = None,
-    ):
-        args = get_args()
-        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
-        assert not self.offload, "gemm offload still have some problems"
-
-        if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
-        else:
-            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
-                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
-            )
-
-        super().__init__(
-            input_size,
-            output_size,
-            config=config,
-            init_method=init_method,
-            bias=bias,
-            gather_output=gather_output,
-            stride=stride,
-            keep_master_weight_for_test=keep_master_weight_for_test,
-            skip_bias_add=skip_bias_add,
-            skip_weight_param_allocation=skip_weight_param_allocation,
-            embedding_activation_buffer=embedding_activation_buffer,
-            grad_output_buffer=grad_output_buffer,
-            is_expert=is_expert,
-            tp_comm_buffer_name=tp_comm_buffer_name,
-            disable_grad_reduce=disable_grad_reduce,
-            tp_group=tp_group,
-        )
-
-    def forward(
-        self,
-        input_: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        runtime_gather_output: Optional[bool] = None,
-    ):
-        if weight is None:
-            weight = self.weight
-        bias_tensor = self.bias if not self.skip_bias_add else None
-
-        original_shape = input_.size()
-        if not input_.is_contiguous():
-            input_ = input_.contiguous()
-        input_ = input_.view(-1, original_shape[-1])
-
-        if self.offload:
-            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_torch_input", input_)
-
-        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp8_gemm(
-                input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.mxfp4_scaling():
-                fp4_gemm = pt.ops.gemm_fp4
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp4_gemm(
-                input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        else:
-            out = self.gemm(input_, weight)
-        out = out.view(original_shape[0], original_shape[1], -1)
-
-        return out, bias_tensor
-
-
-class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
+class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
     """
     Wrapper for the Transformer-Engine's `LayerNormLinear` layer that combines
     layernorm and linear layers
@@ -1138,94 +1387,32 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
-        stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
+        stride: int = 1,
     ):
         args = get_args()
-        self.config = config
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
-        if gather_output:
-            raise ValueError("Primus Turbo linear layers do not support gather_output = True")
-
-        if is_expert:
-            raise ValueError("Primus Turbo linear layers do not yet support MoE")
-
-        if skip_weight_param_allocation:
-            raise ValueError("Primus Turbo linear layers do not support skip_weight_param_allocation")
-
-        # TODO: For backward compatibility, remove in v0.15.
-        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
-
-        # TE returns a zero length Tensor when bias=False and
-        # return_bias=True, but we prefer None.  So in that case we
-        # tell TE to not return the bias, and return None
-        # ourselves. This way our forward always returns two values
-        # and we don't have to deal with the zero length Tensor.
-        self.te_return_bias = skip_bias_add and bias
-
-        if use_split_wgrad_op():
-
-            from .zbpp_gemm import gemm_with_weight_gradient_store
-
-            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
-        else:
-            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
-                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
-            )
-
         super().__init__(
-            in_features=input_size,
-            out_features=output_size,
-            eps=self.config.layernorm_epsilon,
-            sequence_parallel=self.config.sequence_parallel,
-            fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
-            tp_group=tp_group if torch.distributed.is_initialized() else None,
-            tp_size=self.config.tensor_model_parallel_size,
-            get_rng_state_tracker=None,
-            init_method=(
-                condition_init_method(config, init_method)
-                if not config.use_cpu_initialization
-                else lambda w: None
-            ),
+            input_size,
+            output_size,
+            config=config,
+            init_method=init_method,
+            gather_output=gather_output,
             bias=bias,
-            normalization=self.config.normalization,
-            return_bias=self.te_return_bias,
-            parallel_mode="column",
-            return_layernorm_output=False,
-            zero_centered_gamma=self.config.layernorm_zero_centered_gamma,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
+            stride=stride,
         )
 
-        # Manual weight initialization when use_cpu_initialization=True
-        if config.use_cpu_initialization:
-            world_size = get_tensor_model_parallel_world_size()
-            rank = get_tensor_model_parallel_rank()
-            output_size_per_partition = divide(output_size, world_size)
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboLayerNormColumnParallelLinear only supports tensor parallel size = 1"
 
-            _ = _initialize_affine_weight_cpu(
-                self.weight,
-                output_size,
-                input_size,
-                output_size_per_partition,
-                0,  # partition_dim (column parallel partitions along output dimension)
-                init_method=condition_init_method(config, init_method),
-                stride=1,
-                return_master_weight=False,
-                params_dtype=config.params_dtype,
-                rank=rank,
-                world_size=world_size,
-                skip_set_tensor_parallel_attributes=True,
-            )
-
-            # Bias initialization
-            if bias:
-                with torch.no_grad():
-                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-                    bias_tensor.zero_()
-                # Set allreduce attribute for distributed training
-                for bias_name in self.bias_names:
-                    bias_param = getattr(self, bias_name)
-                    setattr(bias_param, "allreduce", True)
+        self.register_buffer("quantized_weight_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
@@ -1241,364 +1428,386 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         )
 
     def forward(self, x):
-        """Forward."""
+        _is_first_microbatch = self.is_first_microbatch
 
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(self, x, is_first_microbatch: bool = False):
+        """Forward."""
         if self.config.normalization == "LayerNorm":
             norm_out = torch.nn.functional.layer_norm(
                 x, [x.size(-1)], self.layer_norm_weight, self.layer_norm_bias, self.eps
             )
         elif self.config.normalization == "RMSNorm":
-            norm_out = torch.nn.functional.rms_norm(x, [x.size(-1)], self.layer_norm_weight, self.eps)
-        # weights = [getattr(self, name) for name in self.weight_names]
-        # weights = torch.cat(weights, dim=0)
-        weights = self._parameters["weight"]
+            from primus_turbo.pytorch.ops.normalization import rmsnorm
+
+            norm_out = rmsnorm(x, self.layer_norm_weight, self.eps)
+        else:
+            assert False, "Not support normalization type."
+
+        weight = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = None
+
         original_shape = x.size()
         if not norm_out.is_contiguous():
             norm_out = norm_out.contiguous()
         inp = norm_out.view(-1, original_shape[-1])
 
-        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+        if _use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
 
-            out = fp8_gemm(
-                inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
-        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.mxfp4_scaling():
-                fp4_gemm = pt.ops.gemm_fp4
-            else:
-                raise ValueError("Not support quant config.")
-
-            out = fp4_gemm(
-                inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            out = gemm_with_weight_gradient_store(inp, weight, bias=None)
         else:
-            out = self.gemm(inp, weights)
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert (
+                    quant_config.mxfp8_scaling()
+                    or quant_config.current_scaling()
+                    or quant_config.block_scaling()
+                ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float8_e4m3,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                inp, quantized_weight = _bridge_weight_grad(
+                    inp,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp8(
+                    inp,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+                if is_first_microbatch:
+                    (
+                        self.quantized_weight_buffer,
+                        self.quantized_weight_t_buffer,
+                    ) = _maybe_create_quantized_weight_buffers(
+                        weight,
+                        float4_e2m1fn_x2,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                    )
+
+                inp, quantized_weight = _bridge_weight_grad(
+                    inp,
+                    weight,
+                    PrimusTurboQuantizedTensorPair(
+                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    ),
+                )
+                out = primus_turbo_torch.ops.gemm_fp4(
+                    inp,
+                    quantized_weight,
+                    trans_a=False,
+                    trans_b=True,
+                    out_dtype=None,
+                    config=quant_config.data(),
+                )
+            else:
+                out = primus_turbo_torch.ops.gemm(inp, weight, trans_a=False, trans_b=True, out_dtype=None)
 
         out = out.view(original_shape[0], original_shape[1], -1)
-        if self.te_return_bias:
-            return out, bias_tensor
+
         if self.use_bias:
-            return out + bias_tensor, None
+            out = out + bias_tensor
+
         return out, None
 
 
-_FP4_TOKEN_PAD = 16
+def fused_bias_act_with_probs(
+    intermediate_parallel: torch.Tensor,
+    bias_parallel: torch.Tensor,
+    permuted_probs: torch.Tensor,
+    tokens_per_experts: torch.Tensor,
+    activation_func: str,
+):
+    assert intermediate_parallel.ndim == 2
+    assert permuted_probs.ndim == 1
+    assert tokens_per_experts.device == intermediate_parallel.device
+
+    # TODO(ruibin): fuse bias addition with activation function
+    if bias_parallel is not None:
+        intermediate_parallel = intermediate_parallel + bias_parallel
+
+    num_tokens = intermediate_parallel.shape[0]
+    row_mask = primus_turbo_torch.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+
+    # TODO(ruibin): support more activation functions
+    if activation_func == "silu":
+        fused_act_with_probs = primus_turbo_torch.ops.swiglu_with_probs
+    elif activation_func == "gelu":
+        fused_act_with_probs = primus_turbo_torch.ops.geglu_with_probs
+    else:
+        raise ValueError(f"Activation function {activation_func} is not supported.")
+
+    return fused_act_with_probs(intermediate_parallel, permuted_probs, row_mask)
 
 
-def _grouped_gemm_fp4_per_group(a, b, group_lens, out_dtype, config):
-    """Per-group native MXFP4 grouped GEMM (drop-in for grouped_gemm_fp8, trans_b=False).
-
-    There is no fused grouped FP4 gemm, so loop the dense FP4 training gemm
-    (``pt.ops.gemm_fp4`` / FP4GemmMXFunction, hipBLASLt backend) over experts.
-    ``a``:[M,K], ``b``:[G,K,N] -> ``out``:[M,N] with out_g = a_g @ b_g.
-    The FP4 hipBLASLt path is NT-only (so b_g[K,N] is transposed to [N,K] and
-    trans_b=True) and needs the token dim a multiple of 16 (zero-pad, slice back).
-    fwd+dgrad+wgrad come from the gemm_fp4 autograd.
+class PrimusTurboGroupedLinear(TEGroupedLinear):
     """
-    G, K, N = b.shape
-    gl = [int(x) for x in group_lens.tolist()]
-    offs = [0]
-    for m in gl:
-        offs.append(offs[-1] + m)
-    outs = []
-    for g in range(G):
-        m = gl[g]
-        if m == 0:
-            outs.append(a.new_zeros((0, N), dtype=out_dtype))
-            continue
-        a_g = a[offs[g]:offs[g] + m]
-        mp = (m + _FP4_TOKEN_PAD - 1) // _FP4_TOKEN_PAD * _FP4_TOKEN_PAD
-        if mp != m:
-            a_g = torch.cat([a_g, a_g.new_zeros((mp - m, K))], dim=0)
-        w = b[g].transpose(0, 1).contiguous()  # [K,N] -> [N,K] for NT
-        o = pt.ops.gemm_fp4(a_g.contiguous(), w, False, True, out_dtype, config)
-        outs.append(o[:m])
-    return torch.cat(outs, dim=0)
-
-
-class PrimusTurboGroupedMLP(TEGroupedMLP):
-    """
-    Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
-
-    Megatron removed the old ``GroupedMLP`` implementation, but DeepEP sync-free
-    stage 2/3 still relies on the turbo grouped-gemm token-count contract. Keep
-    TEGroupedMLP-style parameter initialization/checkpoint layout while executing
-    the expert MLP with PrimusTurbo grouped-gemm kernels.
+    Wrapper for the PrimusTurbo `grouped_gemm` ops.
     """
 
     def __init__(
         self,
-        num_local_experts: int,
-        config: TransformerConfig,
-        submodules,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         args = get_args()
-        self.offload = args.offload and "grouped_linear" in args.offload_ops
-        assert not self.offload, "grouped_linear offload is not supported in PrimusTurboGroupedMLP"
+        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         super().__init__(
-            num_local_experts=num_local_experts,
+            num_gemms,
+            input_size,
+            output_size,
+            parallel_mode=parallel_mode,
             config=config,
-            submodules=submodules,
+            init_method=init_method,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
         )
-        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
-        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
-        self.patch_zero_bubble = args.patch_zero_bubble
-        self.patch_primus_pipeline = args.patch_primus_pipeline
-        # Per-module recipe (paper): routed experts in MXFP4 while the rest of the
-        # layer runs FP8. Decided by this flag (not the global recipe), so it works
-        # under a global FP8 context without the mutually-exclusive --fp4/--fp8 flags.
-        self.moe_experts_fp4 = bool(getattr(config, "moe_experts_fp4", False))
-        # MXFP8 weight caching: expert weights only change at optimizer.step, so
-        # re-quantizing them on every microbatch + recompute forward (the large
-        # _mxfp8_quant_weight_fwd kernel) is redundant. When enabled, prequant the
-        # stacked weight once per step and reuse the fp8 buffers (a fresh bf16 is
-        # still threaded each call so wgrad flows to the per-expert leaves).
-        # Default off (extra ~2 bytes/param resident); enable per run.
-        self._cache_mxfp8_weight = (
-            _HAS_MXFP8_PREQUANT and os.environ.get("PRIMUS_TURBO_CACHE_MXFP8_WEIGHT", "0") == "1"
-        )
-        self._w1_mx_cache = None  # (b_fp8_fwd, b_scale_fwd, b_fp8_dgrad, b_scale_dgrad)
-        self._w2_mx_cache = None
-        # Re-quantize the cached fp8 weight on the first microbatch of each step.
-        # MegatronModule.set_is_first_microbatch() (called by the schedule each
-        # step when config.fp8 is set) flips this to True on every submodule that
-        # has the attribute; we clear it after the forward consumes the weights —
-        # the same contract TE's GroupedLinear fp8 weight cache uses (exact,
-        # sync-free, no value heuristic).
-        self.is_first_microbatch = True
-        self._experts_fp4_config = (
-            Float4QuantConfig(
-                format=Format.E2M1_X2,
-                granularity=ScalingGranularity.MX_BLOCKWISE,
-                block_size=32,
-                scale_dtype=ScaleDtype.E8M0,
-            )
-            if self.moe_experts_fp4
-            else None
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboGroupedLinear only supports tensor parallel size = 1"
+
+        w0 = self.weight0
+        buffer = torch.empty(
+            self.num_gemms,
+            self.out_features,
+            self.in_features,
+            device=w0.device,
+            dtype=w0.dtype,
         )
 
-        if self.config.add_bias_linear:
-            raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
+        with torch.no_grad():
+            for i in range(self.num_gemms):
+                weight = getattr(self, f"weight{i}")
+                buffer[i].copy_(weight)
 
-        if self.use_turbo_fused_act_with_probs:
-            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+            weights = buffer.clone()
 
-            if self.config.activation_func == F.silu:
-                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
-            elif self.config.activation_func == F.gelu:
-                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
-            else:
-                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+        self.register_parameter("weights", torch.nn.Parameter(weights))
 
-            def _activation_func_with_probs(x, probs, tokens_per_experts):
-                assert x.ndim == 2
-                assert probs.ndim == 1
-                num_tokens = x.shape[0]
-                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
-                return turbo_fused_act_with_probs(x, probs, row_mask)
+        # Capture the per-expert weights' extra attributes BEFORE deleting them.
+        saved_weight_attrs = [dict(getattr(self, f"weight{i}").__dict__) for i in range(self.num_gemms)]
 
-            self.activation_func_with_probs = _activation_func_with_probs
+        # All experts share the same routing/parallel markers, so weight0's are
+        # representative for the consolidated parameter.
+        for attr_name, attr_val in saved_weight_attrs[0].items():
+            setattr(self.weights, attr_name, attr_val)
 
-    def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
-        """Stack per-expert ``weight{i}`` tensors into a contiguous ``[E, N, K]``
-        buffer for grouped-GEMM consumption.
+        # Free the per-expert weight{i} Parameters now that their data has been
+        # consolidated into self.weights.
+        for i in range(self.num_gemms):
+            name = f"weight{i}"
+            if name in self._parameters:
+                del self._parameters[name]
+        del buffer
 
-        Plan-6 P34 routes this through the
-        :mod:`primus.backends.megatron.core.extensions._triton.stack_grouped_weight`
-        Triton kernel by default — it collapses the eager
-        ``torch.stack + transpose(1, 2) + contiguous`` chain (two full
-        passes over the per-expert weight data, ~289.6 ms / 32 calls in
-        the plan-5 P32 final EP=8 trace) into a single ``[K, N] -> [N, K]``
-        tile-transpose with fused stacking.  Set
-        ``PRIMUS_STACK_GROUPED_WEIGHT_TRITON=0`` to fall back to the
-        eager chain (kept for A/B testing and as the G37 reference path).
-        """
-        weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
-        return stack_grouped_weight(weights)
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    def _mxfp8_weight_arg(self, module, w_bf16, cache_attr, quant_config_data):
-        """GEMM ``b`` arg with the MXFP8 weight quantization cached per optimizer step.
+        # Re-expose each expert's slice as a zero-copy weight{i} Parameter view
+        # of self.weights, so existing code paths and checkpoints that look up
+        # weight{i} by name keep working without allocating a new buffer.
+        # ``requires_grad=False`` is required: self.weights is the canonical
+        # trainable Parameter and these views share its storage, so leaving
+        # them trainable would make the optimizer (and DDP) update / sync the
+        # same memory twice.  ``.detach()`` strips the view's autograd graph
+        # so each Parameter ends up as a leaf with ``_base is None`` (which is
+        # what Megatron's distributed-optimizer param-bucket re-mapping
+        # expects), while still aliasing the same underlying storage.
+        # We also restore each weight{i}'s saved extra attributes so checkpoint /
+        # state-dict code that inspects them keeps seeing the right markers.
+        for i in range(self.num_gemms):
+            weight_i = torch.nn.Parameter(self.weights[i].detach(), requires_grad=False)
+            for attr_name, attr_val in saved_weight_attrs[i].items():
+                setattr(weight_i, attr_name, attr_val)
+            self.register_parameter(f"weight{i}", weight_i)
 
-        The expert weight is constant within a step, so its fp8 buffers are
-        quantized once and reused. Rebuild MXFP8WeightPrequant with a *fresh*
-        differentiable ``w_bf16`` each call (wgrad must flow to the per-expert
-        leaves) over the *cached* fp8 fwd/dgrad buffers; caching the whole
-        container would point grad at a stale graph. MX_BLOCKWISE only.
-        Invalidated once per step via ``is_first_microbatch`` (set at the first
-        microbatch, cleared in ``forward``); ``cache is None`` covers first fwd.
-        """
-        if not self._cache_mxfp8_weight:
-            return w_bf16
-        if quant_config_data.granularity != ScalingGranularity.MX_BLOCKWISE:
-            return w_bf16
-        cache = getattr(self, cache_attr)
-        if self.is_first_microbatch or cache is None:
-            prq = prequant_mxfp8_weights(w_bf16.detach())
-            cache = (prq.b_fp8_fwd, prq.b_scale_fwd, prq.b_fp8_dgrad, prq.b_scale_dgrad)
-            setattr(self, cache_attr, cache)
-        # Fresh differentiable bf16 + cached fp8 buffers.
-        return MXFP8WeightPrequant(w_bf16, cache[0], cache[1], cache[2], cache[3])
+        self.register_buffer("quantized_weight_buffer", None, persistent=False)
+        self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
-    def forward(
+    def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, m_splits, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
-        permuted_local_hidden_states: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        permuted_probs: torch.Tensor,
-        routing_map: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
+        m_splits: torch.Tensor,
+        is_first_microbatch: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
-        del routing_map
+        weights = self.weights
+        # NOTE: keep x and m_splits on the same device
+        m_splits = m_splits.to(x.device)
 
-        if self.activation_recompute:
-            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-
-        if self.config.moe_apply_probs_on_input:
+        if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             assert (
-                self.config.moe_router_topk == 1
-            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
-            original_dtype = permuted_local_hidden_states.dtype
-            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
-            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
-            # Probs already applied, so reset to 1.
-            permuted_probs = torch.ones_like(permuted_probs)
+                quant_config.mxfp8_scaling() or quant_config.current_scaling() or quant_config.block_scaling()
+            ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-        w1 = self._stack_grouped_linear_weight(self.linear_fc1)
-        w2 = self._stack_grouped_linear_weight(self.linear_fc2)
-        tokens_per_expert = tokens_per_expert.to(w1.device)
-
-        _low_prec = not self.disable_turbo_grouped_mlp_low_precision
-        _fp8_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
-        _fp4_on = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
-        # Experts go MXFP4 either with a global FP4 recipe, or — the paper's
-        # per-module recipe — when moe_experts_fp4 is set while the layer runs FP8
-        # (experts FP4 / everything-else FP8). No fused grouped FP4 gemm exists,
-        # so _grouped_gemm_fp4_per_group loops the native FP4 (hipBLASLt) dense gemm.
-        use_grouped_gemm_fp4 = _low_prec and (_fp4_on or (self.moe_experts_fp4 and _fp8_on))
-        # FP8 experts only when not going FP4.
-        use_grouped_gemm_low_precision = _low_prec and _fp8_on and not use_grouped_gemm_fp4
-        probs_for_activation = permuted_probs.unsqueeze(-1)
-
-        if permuted_local_hidden_states.nelement() != 0:
-            if use_grouped_gemm_low_precision:
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                w1_arg = self._mxfp8_weight_arg(
-                    self.linear_fc1, w1, "_w1_mx_cache", quant_config.data()
-                )
-                fc1_output = pt.ops.grouped_gemm_fp8(
-                    permuted_local_hidden_states,
-                    w1_arg,
-                    tokens_per_expert,
-                    trans_b=False,
-                    config=quant_config.data(),
-                )
-            elif use_grouped_gemm_fp4:
-                fp4_config = (
-                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
-                    if _fp4_on
-                    else self._experts_fp4_config
-                )
-                fc1_output = _grouped_gemm_fp4_per_group(
-                    permuted_local_hidden_states,
-                    w1,
-                    tokens_per_expert,
-                    permuted_local_hidden_states.dtype,
-                    fp4_config,
-                )
-            else:
-                fc1_output = pt.ops.grouped_gemm(
-                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+            if is_first_microbatch:
+                (
+                    self.quantized_weight_buffer,
+                    self.quantized_weight_t_buffer,
+                ) = _maybe_create_quantized_weight_buffers(
+                    weights,
+                    float8_e4m3,
+                    quant_config,
+                    disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                 )
 
-            if self.activation_recompute:
-                if self.use_turbo_fused_act_with_probs:
-                    intermediate_parallel = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs,
-                        fc1_output,
-                        permuted_probs,
-                        tokens_per_expert,
-                    )
-                else:
-                    intermediate_parallel = self.activation_checkpoint.checkpoint(
-                        self.bias_act_func, fc1_output, None, probs_for_activation
-                    )
-            else:
-                if self.use_turbo_fused_act_with_probs:
-                    intermediate_parallel = self.activation_func_with_probs(
-                        fc1_output, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    intermediate_parallel = self.bias_act_func(fc1_output, None, probs_for_activation)
+            x, quantized_weights = _bridge_weight_grad(
+                x,
+                weights,
+                PrimusTurboQuantizedTensorPair(
+                    data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                ),
+            )
 
-            if use_grouped_gemm_low_precision:
-                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                w2_arg = self._mxfp8_weight_arg(
-                    self.linear_fc2, w2, "_w2_mx_cache", quant_config.data()
-                )
-                # Both expert weights have now been (re)quantized for this step;
-                # clear so the remaining microbatches + recompute reuse the cache
-                # until set_is_first_microbatch() flips it again next step.
-                self.is_first_microbatch = False
-                output = pt.ops.grouped_gemm_fp8(
-                    intermediate_parallel,
-                    w2_arg,
-                    tokens_per_expert,
-                    trans_b=False,
-                    config=quant_config.data(),
-                )
-            elif use_grouped_gemm_fp4:
-                fp4_config = (
-                    PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data()
-                    if _fp4_on
-                    else self._experts_fp4_config
-                )
-                output = _grouped_gemm_fp4_per_group(
-                    intermediate_parallel,
-                    w2,
-                    tokens_per_expert,
-                    intermediate_parallel.dtype,
-                    fp4_config,
-                )
-            else:
-                output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+            out = primus_turbo_torch.ops.grouped_gemm_fp8(
+                x,
+                quantized_weights,
+                m_splits,
+                trans_b=True,
+                config=quant_config.data(),
+            )
+        elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+            assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
-            # Keep a gradient path for expert weights even when no local token is routed here.
-            assert (
-                not self.patch_zero_bubble and not self.patch_primus_pipeline
-            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
-            w1_flat = w1.view(self.config.hidden_size, -1)
-            w2_flat = w2.view(-1, self.config.hidden_size)
-            hidden = torch.matmul(permuted_local_hidden_states, w1_flat)
-            if self.activation_recompute:
-                if self.use_turbo_fused_act_with_probs:
-                    hidden = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, hidden, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    hidden = self.activation_checkpoint.checkpoint(
-                        self.bias_act_func, hidden, None, probs_for_activation
-                    )
-            else:
-                if self.use_turbo_fused_act_with_probs:
-                    hidden = self.activation_func_with_probs(hidden, permuted_probs, tokens_per_expert)
-                else:
-                    hidden = self.bias_act_func(hidden, None, probs_for_activation)
-            output = torch.matmul(hidden, w2_flat)
+            out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
-        if self.activation_recompute:
-            self.activation_checkpoint.discard_output_and_register_recompute(output)
+        return out, None
 
-        return output, None
+
+class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
+    """
+    Wrapper for the PrimusTurboGroupedLinear layer but specialized
+    to column-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="column",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports tensor parallel size = 1"
+
+
+class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
+    """
+    Wrapper for the PrimusTurboGroupedLinear layer but specialized
+    to row-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="row",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+        tp_size = get_pg_size(self._tp_group)
+        assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports tensor parallel size = 1"
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
@@ -1647,7 +1856,19 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
-        self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
+        pad_multiple = 0
+        if args.use_turbo_permute_padding:
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                pad_multiple = (
+                    32
+                    if PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().mxfp8_scaling()
+                    else 16
+                )
+            elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
+                pad_multiple = 32
+
+        use_turbo_grouped_mlp = args.use_turbo_grouped_mlp
+        self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
             ep_group=self.ep_group,
@@ -1655,11 +1876,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             tp_ep_group=self.tp_ep_group,
             expert_capacity_factor=config.moe_expert_capacity_factor,
             permute_fusion=config.moe_permute_fusion,
+            pad_multiple=pad_multiple,
             permute_max_token_num=permute_max_token_num,
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp,
+            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_mlp,
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
@@ -1802,16 +2024,22 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
 
 
 class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
-    def __init__(self, *args, **kwargs):
-        assert "device" in kwargs
-        assert "dtype" in kwargs or "params_dtype" in kwargs, "device and dtype must be provided"
-        super().__init__(*args, **kwargs)
-        self.rms_norm_func = pt.modules.RMSNorm(
-            normalized_shape=kwargs["hidden_size"],
-            eps=self.eps,
-            device=kwargs["device"],
-            dtype=kwargs["dtype"] if "dtype" in kwargs else kwargs["params_dtype"],
+    def __init__(
+        self,
+        normalized_shape: Union[Iterable[int], int, None] = None,
+        eps: float = 1e-5,
+        sequence_parallel: Optional[bool] = None,  # legacy
+        params_dtype: Optional[torch.dtype] = None,  # deprecated
+        zero_centered_gamma: bool = False,
+        hidden_size: Optional[int] = None,  # deprecated
+        **kwargs,
+    ):
+
+        super().__init__(
+            normalized_shape, eps, sequence_parallel, params_dtype, zero_centered_gamma, hidden_size, **kwargs
         )
 
     def forward(self, x):
-        return self.rms_norm_func(x)
+        from primus_turbo.pytorch.ops.normalization import rmsnorm
+
+        return rmsnorm(x, self.weight, self.eps)

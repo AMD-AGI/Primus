@@ -427,18 +427,24 @@ def _get_sync_free_moe_options(stage: int) -> dict:
         raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
 
     sync_free_moe = {
-        1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
+        1: {
+            "moe_use_fused_router_with_aux_score": True,
+            "moe_permute_fusion": True,
+            "use_turbo_permute_padding": True,
+        },
         2: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
+            "use_turbo_permute_padding": True,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
+            "use_turbo_permute_padding": True,
             "use_turbo_fused_act_with_probs": True,
         },
     }
