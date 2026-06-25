@@ -585,6 +585,7 @@ def moe_unpermute(
     restore_shape: Optional[torch.Size] = None,
     map_type: str = "mask",
     probs: Optional[torch.Tensor] = None,
+    pad_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -608,6 +609,11 @@ def moe_unpermute(
         Options are: 'mask', 'index'.
     probs: torch.Tensor, default = None
         Renamed to merging_probs. Keep for backward compatibility.
+    pad_offsets: torch.Tensor, default = None
+        Accepted for API compatibility with upstream TE >= 2.12.0
+        ``moe_unpermute`` (Megatron passes it when ``is_te_min_version("2.12.0")``).
+        This ROCm/Triton mask-map path does not pad during permutation, so the
+        argument is ignored.
     """
     if probs is not None:
         if merging_probs is not None:
