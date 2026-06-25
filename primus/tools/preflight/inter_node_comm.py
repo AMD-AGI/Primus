@@ -6,7 +6,6 @@
 
 import time
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
@@ -162,6 +161,8 @@ def run_inter_node_comm(args):
 
                 if not args.plot:
                     continue
+
+                import matplotlib.pyplot as plt
 
                 log(f"=======Plot IntraNode {case_name} Bandwidth=======")
                 with open(args.markdown_file, "a", encoding="utf-8") as f:

@@ -6,7 +6,6 @@
 
 import time
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
@@ -86,6 +85,8 @@ def run_square_gemm(args):
 
         if not args.plot:
             return
+
+        import matplotlib.pyplot as plt
 
         log("=======Plot Square GEMM TFLOPS=======")
         with open(args.markdown_file, "a", encoding="utf-8") as f:

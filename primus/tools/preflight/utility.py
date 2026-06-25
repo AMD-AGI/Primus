@@ -8,10 +8,8 @@ import os
 import socket
 from pathlib import Path
 
-import markdown2
 import torch
 import torch.distributed as dist
-from weasyprint import HTML
 
 from primus.tools.preflight.global_vars import RANK, WORLD_SIZE
 
@@ -70,6 +68,9 @@ def extract_first_middle_last(lst):
 
 
 def md_to_pdf(md_path, pdf_path):
+    import markdown2
+    from weasyprint import HTML
+
     with open(md_path, "r", encoding="utf-8") as f:
         markdown_text = f.read()
 
