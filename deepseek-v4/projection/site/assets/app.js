@@ -47,12 +47,14 @@ function defaultControls(data) {
   const m355 = hw.MI355X || { peak_tflops_bf16: 2500, hbm_bandwidth_gbps: 8000 };
   const m455 = hw.MI455X || { peak_tflops_bf16: 5000, hbm_bandwidth_gbps: 16000 };
   const isPro = data.model === "pro";
+  const optBytes = data.optimizer?.bytes_per_param && data.optimizer.bytes_per_param !== 18
+    ? data.optimizer.bytes_per_param : 30;
   return {
     world: isPro ? 256 : 32,
     pp: isPro ? 16 : 4, vpp: 1, ep: 8, tp: 1, cp: 1,
     mbs: 1, gbs: isPro ? 1024 : 512,
     recompute: "full",
-    optEff: 0.7, computeEff: 1.0, calibFactor: 0.91, bytesPerParam: data.optimizer?.bytes_per_param || 18,
+    optEff: 0.7, computeEff: 1.0, calibFactor: 0.91, bytesPerParam: optBytes,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
     peak455: m455.peak_tflops_bf16, bw455: m455.hbm_bandwidth_gbps,
   };
@@ -173,6 +175,23 @@ function estimateParams(cfg) {
   return L * perLayer + 2 * V * h;
 }
 
+function estimateOptimizerParams(data, c, dp) {
+  const cfg = data.model_config;
+  const totalParams = estimateParams(cfg);
+  const pp = Math.max(1, c.pp);
+  const tp = Math.max(1, c.tp);
+  const dpSize = Math.max(1, dp);
+
+  // total_params is a full-model count. CP does not shard weights; EP is already
+  // represented in the full expert count and cancels out with the DP replica
+  // count for ZeRO-1 optimizer sharding, so the average rank owns total/(PP*TP)
+  // model params and updates total/(PP*TP*DP) params per optimizer step.
+  const localModelParams = totalParams / (pp * tp);
+  const perRankParams = localModelParams / dpSize;
+  const measuredUs = data.optimizer?.time_us ?? null;
+  return { totalParams, localModelParams, perRankParams, measuredUs };
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline mapping + projection (Steps 2-5)
 // ---------------------------------------------------------------------------
@@ -212,11 +231,12 @@ function project(data, gpu, c) {
   const pipeUs = (ga + (c.pp - 1) / c.vpp) * (critF + critB) * c.calibFactor;
   const bubbleFrac = (c.pp - 1) / c.vpp / (ga + (c.pp - 1) / c.vpp);
 
-  // Step 4: optimizer (memory-bound, zero1-sharded over world)
-  const totalParams = estimateParams(cfg);
-  const perRankParams = totalParams / world;
+  // Step 4: optimizer (memory-bound, zero1-sharded over DP; CP does not shard params)
+  const optParams = estimateOptimizerParams(data, c, dp);
+  const totalParams = optParams.totalParams;
+  const perRankParams = optParams.perRankParams;
   const bw = (gpu === "MI355X" ? c.bw355 : c.bw455) * 1e9; // bytes/s
-  const optTimeS = (perRankParams * c.bytesPerParam * 2) / bw / c.optEff;
+  const optTimeS = (perRankParams * c.bytesPerParam) / bw / c.optEff;
   const optUs = optTimeS * 1e6;
 
   // Step 5: totals
@@ -245,7 +265,8 @@ function project(data, gpu, c) {
 
   return {
     lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, dp, totalParams,
-    perRankParams, optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
+    localModelParams: optParams.localModelParams, perRankParams, measuredOptUs: optParams.measuredUs,
+    optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
   };
 }
 
@@ -381,8 +402,11 @@ function renderResults() {
   steps.append(step("GA (microbatches)", fmtInt(p.ga), `GA = GBS ${c.gbs} / (DP ${p.dp} × MBS ${c.mbs})`));
   steps.append(step("Pipeline compute / iter", `${fmt(p.pipeUs / 1000, 2)} ms`,
     `(GA + (PP−1)/VPP) × (F+B)_crit ; bubble ${fmt(p.bubbleFrac * 100, 1)}%`));
+  const optHint = p.measuredOptUs
+    ? `; one-layer trace optimizer ref ${fmt(p.measuredOptUs / 1000, 2)} ms`
+    : "";
   steps.append(step("Optimizer step / iter", `${fmt(p.optUs / 1000, 2)} ms`,
-    `zero1: ${fmtInt(p.perRankParams / 1e6)}M params/rank × ${c.bytesPerParam}B ×2 / HBM-BW / eff ${c.optEff}`));
+    `zero1: ${fmtInt(p.perRankParams / 1e6)}M optim params/rank (${fmtInt(p.localModelParams / 1e6)}M local model params) × ${c.bytesPerParam}B / HBM-BW / eff ${c.optEff}${optHint}`));
   steps.append(step("Iteration time", `${fmt(p.iterUs / 1000, 2)} ms`, "pipeline compute + optimizer (DP/PP comm assumed hidden)"));
   steps.append(step("World size", fmtInt(p.world), `PP ${c.pp} × TP ${c.tp} × CP ${c.cp} × DP ${p.dp} (derived); EP ${c.ep} ≤ DP`));
   steps.append(step("Tokens / iter", fmtInt(p.tokIter), `GBS ${c.gbs} × seq ${p.seq}`));

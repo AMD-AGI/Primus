@@ -17,8 +17,10 @@ start here.
   primary calibration target.)*
 - **A3.** The optimizer step is a per-iteration term, **not** multiplied by GA or
   replicated per PP microbatch. It scales with **per-rank optimizer parameter
-  count** (total params / DP under zero1 sharding) and is treated as
-  memory-bound (read/write params + states).
+  count**: full-model params are first averaged over PP/TP ownership, then
+  sharded over DP under ZeRO-1. CP does not shard parameters. The modeled Adam
+  traffic uses the full mixed-precision read/write cost per parameter and is
+  treated as memory-bound.
 
 ## Pipeline / parallelism
 

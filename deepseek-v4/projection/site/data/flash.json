@@ -1765,7 +1765,7 @@
     "type": "adam",
     "measured_params": null,
     "time_us": 18459.0,
-    "bytes_per_param": 18,
+    "bytes_per_param": 30,
     "class": "memory_bound",
     "note": "measured one-layer optimizer-step kernel time on this rank; the site scales by per-rank params"
   },

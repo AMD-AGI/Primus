@@ -455,9 +455,9 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
             "type": "adam",
             "measured_params": None,
             "time_us": optimizer_us,
-            "bytes_per_param": 18,
+            "bytes_per_param": 30,
             "class": "memory_bound",
-            "note": "measured one-layer optimizer-step kernel time on this rank; the site scales by per-rank params",
+            "note": "Adam mixed-precision step traffic in bytes/param; measured one-layer optimizer-step kernel time is a sanity reference",
         },
         "comm": {
             "ep_dispatch_us": None,

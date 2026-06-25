@@ -77,15 +77,19 @@ pipe_compute = (GA + (PP - 1) / VPP) * (Df_crit + Db_crit)
 
 Per-iteration, once, zero1-sharded, memory-bound:
 ```
-per_rank_opt_params = total_params / DP
-opt_bytes           = per_rank_opt_params * bytes_per_param * rw_factor
+local_model_params  = total_params / (PP * TP)
+per_rank_opt_params = local_model_params / DP
+opt_bytes           = per_rank_opt_params * bytes_per_param
 opt_time            = opt_bytes / hbm_bandwidth / opt_efficiency
 ```
-`total_params` is computed from `model_config` (dense + expert params; experts
-are EP-sharded so per-rank expert params = experts/EP). `bytes_per_param`,
-`rw_factor` (read+write ≈ 2), `opt_efficiency` are tunable; the measured
-`optimizer.time_us` is used to calibrate `opt_time_per_param` for the MI355X
-page and as a sanity check.
+`total_params` is computed from `model_config` for the full model (dense +
+expert params + untied embedding/output). PP/TP determine the average local
+model-parameter ownership; CP does not shard parameters. EP is represented in
+the full expert count and cancels with the data-replica count for ZeRO-1
+optimizer sharding, so the average optimizer shard is `total/(PP*TP*DP)`.
+`bytes_per_param` is the full Adam mixed-precision step traffic (default 30B:
+reads + writes), and `opt_efficiency` is tunable. The measured
+`optimizer.time_us` carried in the JSON is displayed as a sanity reference.
 
 ## Step 5 — totals (A2/A4: DP & PP comm hidden)
 
