@@ -10,29 +10,29 @@ export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-512}
 export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'"[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]"'}
 export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
 
-# export NNODES=8
-# export PRIMUS_TP=${PRIMUS_TP:-1}
-# export PRIMUS_PP=${PRIMUS_PP:-8}
-# export PRIMUS_EP=${PRIMUS_EP:-8}
-# export PRIMUS_RECOMPUTE_LAYERS=0
-# if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-#   export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4mL"'
-# else
-#   export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4L"'
-# fi
+export NNODES=${NNODES:-8}
 
-export NNODES=4
-export PRIMUS_TP=${PRIMUS_TP:-1}
-export PRIMUS_PP=${PRIMUS_PP:-4}
-export PRIMUS_EP=${PRIMUS_EP:-8}
-export PRIMUS_RECOMPUTE_LAYERS=3
-if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-  export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11mL"'
-else
-  export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11L"'
+if [ "$NNODES" -eq 8 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-8}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=0
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4mL"'
+    else
+      export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4L"'
+    fi
+elif [ "$NNODES" -eq 4 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-4}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=3
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11mL"'
+    else
+      export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11L"'
+    fi
 fi
-
-export SLURM_NODELIST=${SLURM_NODELIST:-"smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33"}
 
 export MBS=${MBS:-1}
 export GBS=${GBS:-$((64 * NNODES * MBS))}
