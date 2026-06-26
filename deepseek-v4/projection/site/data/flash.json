@@ -22,9 +22,9 @@
   "generated_at": "2026-06-25T12:18:45Z",
   "provenance": {
     "traces": {
-      "0": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1782149271209635673.pt.trace.json",
-      "4": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr4_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr4_seq4096_ep8]-rank[0].1782148745954636194.pt.trace.json",
-      "128": "/apps/tas/lihuzhan/code/2026_0617__primus_dsv4/Primus/output/amd/lihuzhan-projection/projection_flash_cr128_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr128_seq4096_ep8]-rank[0].1782149357925690324.pt.trace.json"
+      "0": "/apps/tas/0_public/data/traces/dsv4_projection/projection_flash_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr0_seq4096_ep8]-rank[0].1782149271209635673.pt.trace.json",
+      "4": "/apps/tas/0_public/data/traces/dsv4_projection/projection_flash_cr4_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr4_seq4096_ep8]-rank[0].1782148745954636194.pt.trace.json",
+      "128": "/apps/tas/0_public/data/traces/dsv4_projection/projection_flash_cr128_seq4096_ep8/tensorboard/primus-megatron-exp[projection_flash_cr128_seq4096_ep8]-rank[0].1782149357925690324.pt.trace.json"
     },
     "graphed_crs_estimated_from_cr4": [],
     "note": "cr in graphed_crs_estimated_from_cr4 were CUDA-graph/stream-captured (compute not visible in trace); their breakdown is copied from cr=4 as an estimate. Re-run those cr with graph capture disabled for exact numbers."
