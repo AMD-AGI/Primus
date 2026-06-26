@@ -1,31 +1,16 @@
 version: 2
+# Version updates for GitHub Actions only; CVEs are handled by Dependabot
+# security updates (enabled repo-wide).
 updates:
-  # Keep GitHub Actions versions current (and surface SHA updates).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "github-actions"
-
-  # Python runtime dependencies.
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "python"
-
-  # Base images used by the CI Docker build context.
-  - package-ecosystem: "docker"
-    directory: "/.github/workflows/docker"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "docker"
