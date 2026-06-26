@@ -239,6 +239,7 @@ jobs:
       - run: echo "Begin AITER + Primus-Turbo Install."
       - name: Install AITER
         run: |
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           echo "✅ [Uninstall old aiter] started at: $(date)"
           pip3 uninstall aiter amd-aiter -y || true
           rm -rf /tmp/aiter || true
@@ -255,6 +256,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Build aiter] ended at: $(date)"
           echo "⏱️ [Build aiter] Total elapsed time: ${elapsed} seconds"
+          echo -e "Build aiter\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
       - name: Install Primus-Turbo
         run: |
           rm -rf /tmp/Primus-Turbo || true
@@ -270,6 +272,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Pip install requirements] ended at: $(date)"
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          echo -e "primus-turbo: pip install requirements\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
           pip3 install --no-build-isolation -e . -v
@@ -277,6 +280,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+          echo -e "primus-turbo: build/install\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
       - run: echo "🎉 Begin Primus Unit Test."
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -418,6 +422,10 @@ jobs:
         if: always()
         run: |
           python tools/ci/junit_summary.py --title torch test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Write runtime summary
+        if: always()
+        run: |
+          python tools/ci/runtime_summary.py --title torch "$RUNNER_TEMP/runtime.tsv" >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
@@ -482,6 +490,7 @@ jobs:
           echo "Primus-Turbo dir: /tmp/Primus-Turbo"
           git config --global --add safe.directory /tmp/Primus-Turbo
           cd /tmp/Primus-Turbo
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           start_time=$(date +%s)
           echo "✅ [Pip install requirements] started at: $(date)"
           mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
@@ -490,6 +499,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Pip install requirements] ended at: $(date)"
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          echo -e "pip install/upgrade\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
           end_time=$(date +%s)
@@ -569,6 +579,10 @@ jobs:
         if: always()
         run: |
           python tools/ci/junit_summary.py --title jax test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Write runtime summary
+        if: always()
+        run: |
+          python tools/ci/runtime_summary.py --title jax "$RUNNER_TEMP/runtime.tsv" >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build jax coverage json (MaxText E2E)
         if: always()
         continue-on-error: true
