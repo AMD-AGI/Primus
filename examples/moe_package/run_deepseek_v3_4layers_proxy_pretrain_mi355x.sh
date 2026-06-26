@@ -44,7 +44,7 @@ export PROFILE=False
 export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
-export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-True}
+export TURBO_GROUPED_GEMM=${TURBO_GROUPED_GEMM:-True}
 export PRIMUS_DETERMINISTIC=0
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
 
@@ -59,7 +59,7 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-$(date +%Y%m%d)"
 export PRIMUS_USER
-export PRIMUS_EXP_NAME=debug_4layers-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP
+export PRIMUS_EXP_NAME=debug_4layers-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_GEMM
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
@@ -70,7 +70,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
-  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_turbo_grouped_gemm "$TURBO_GROUPED_GEMM" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --pipeline_model_parallel_size $PRIMUS_PP \
   --expert_model_parallel_size $PRIMUS_EP \

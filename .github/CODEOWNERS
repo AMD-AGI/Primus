@@ -1,2 +1,48 @@
+# CODEOWNERS for Primus
+#
+# Order matters: the LAST matching pattern takes precedence. The broad
+# fallback stays first so high-risk paths below can override it with
+# dedicated reviewers. See:
+# https://docs.github.com/articles/about-code-owners
 
-* @Xiaoming-AMD @wenxie-amd @limou102
+# ---------------------------------------------------------------------------
+# Default fallback owners (everything not matched by a more specific rule)
+# ---------------------------------------------------------------------------
+*                               @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# CI/CD and automation — highest-risk, require explicit review
+# ---------------------------------------------------------------------------
+/.github/                       @Xiaoming-AMD @wenxie-amd @limou102
+/.github/workflows/             @Xiaoming-AMD @wenxie-amd @limou102
+/.github/CODEOWNERS             @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# Release
+# ---------------------------------------------------------------------------
+/.github/workflows/release-build-wheel.yml   @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# Docker images / build inputs (CI + release Dockerfiles)
+# ---------------------------------------------------------------------------
+/.github/workflows/docker/          @Xiaoming-AMD @wenxie-amd @limou102
+/.github/workflows/docker-release/  @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# Dependencies & packaging
+# ---------------------------------------------------------------------------
+/pyproject.toml                 @Xiaoming-AMD @wenxie-amd @limou102
+/requirements.txt               @Xiaoming-AMD @wenxie-amd @limou102
+/requirements-jax.txt           @Xiaoming-AMD @wenxie-amd @limou102
+/requirements-torchft.txt       @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# Core framework & GPU/runtime backends
+# ---------------------------------------------------------------------------
+/primus/core/                   @Xiaoming-AMD @wenxie-amd @limou102
+/primus/backends/               @Xiaoming-AMD @wenxie-amd @limou102
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+/tests/                         @Xiaoming-AMD @wenxie-amd @limou102

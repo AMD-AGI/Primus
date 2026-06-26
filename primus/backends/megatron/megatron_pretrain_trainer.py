@@ -52,10 +52,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
             log_rank_0("Using GPT model provider and training components")
 
-        # Upstream pretrain entrypoints set this in their __main__ blocks, but Primus imports the
-        # provider directly and calls pretrain() programmatically. Without restoring this flag,
-        # only TP rank 0 enters dataset construction while the core dataset builder still issues
-        # distributed barriers, which deadlocks for TP>1.
+        # Configure training components
         train_valid_test_datasets_provider.is_distributed = True
 
         # Handle Megatron version differences (v0.12.0 vs newer with inprocess_restart)
@@ -85,6 +82,34 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         else:
             model_provider = get_model_provider()
         log_rank_0(f"-model_provider: {model_provider}")
+
+        # Patch Megatron's get_forward_backward_func to support dump_pp_data
+        import megatron.core.pipeline_parallel as mpp
+        import megatron.training.training as mt_training
+
+        orig_get_forward_backward_func = mpp.get_forward_backward_func
+
+        def patched_get_forward_backward_func(*args, **kwargs):
+            func = orig_get_forward_backward_func(*args, **kwargs)
+            from megatron.training import get_args as get_megatron_args
+
+            try:
+                m_args = get_megatron_args()
+                if getattr(m_args, "dump_pp_data", False):
+                    from primus.modules.trainer.megatron.utils import (
+                        schedule_wrapper,
+                        set_dump_pp_data_patch,
+                    )
+
+                    set_dump_pp_data_patch()
+                    return schedule_wrapper(func)
+            except Exception as e:
+                log_rank_0(f"[Primus] Warning: failed to apply dump_pp_data patch: {e}")
+            return func
+
+        mpp.get_forward_backward_func = patched_get_forward_backward_func
+        if hasattr(mt_training, "get_forward_backward_func"):
+            mt_training.get_forward_backward_func = patched_get_forward_backward_func
 
         wrapped_pretrain(
             train_valid_test_datasets_provider,

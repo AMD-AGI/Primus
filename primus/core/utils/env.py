@@ -5,8 +5,37 @@
 ###############################################################################
 
 import os
+import sys
 
 from primus.core.utils import constant_vars as const
+
+
+def flush_before_hard_exit() -> None:
+    """Persist buffered output and coverage data before an ``os._exit()``.
+
+    ``os._exit()`` (fast shutdown) bypasses ``atexit`` and buffer flushing, so
+    flush manually first:
+    - stdout/stderr, so final log lines are not lost;
+    - coverage.py data when subprocess coverage is active (CI), so a
+      hard-exiting process still contributes its line coverage.
+    Both are best-effort and never raise.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:  # pragma: no cover
+        pass
+
+    # os._exit bypasses atexit, which is how coverage.py writes its data.
+    if os.environ.get("COVERAGE_PROCESS_START"):
+        try:
+            import coverage
+
+            cov = coverage.Coverage.current()
+            if cov is not None:
+                cov.save()
+        except Exception:  # pragma: no cover
+            pass
 
 
 def get_torchrun_env():

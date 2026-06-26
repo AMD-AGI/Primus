@@ -1,0 +1,29 @@
+# Llama3 8B LoRA SFT Configuration for MI355X
+# Parameter-efficient fine-tuning using LoRA
+
+extends:
+  - llama3_8B-BF16-sft.yaml
+
+# Enable LoRA for parameter-efficient fine-tuning
+lora:
+  enabled: true
+  dim: 32              # Low-rank dimension (smaller = fewer params)
+  alpha: 32            # Scaling factor (typically = dim)
+  dropout: 0.05        # Dropout for regularization
+  target_modules:      # Modules to apply LoRA
+    - linear_qkv
+    - linear_proj
+    - linear_fc1
+    - linear_fc2
+
+# LoRA typically uses higher learning rate
+lr: 2.0e-4
+min_lr: 2.0e-5
+
+# Can use larger batch size with LoRA (fewer trainable params)
+micro_batch_size: 2
+global_batch_size: 256
+
+# Training iterations (LoRA often needs fewer iterations)
+train_iters: 500
+lr_warmup_iters: 20

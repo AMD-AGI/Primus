@@ -18,10 +18,24 @@
   --danger-soft: #fbe4e6;
   --shadow-soft: 0 6px 24px rgba(18, 27, 43, 0.06);
   --radius: 16px;
+  /* System-font type system (no web-font downloads): a native serif for the
+     editorial display headings, native sans for body/UI, native mono for the
+     hard data (SHAs, gaps). */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Hoefler Text",
+    Georgia, "Times New Roman", serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, "Cascadia Code",
+    Consolas, "Liberation Mono", monospace;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Make the `hidden` attribute reliable even on elements that set `display`
+   via a class (grid/flex), so JS-driven visibility toggles work. */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -31,10 +45,22 @@ body {
 }
 
 body {
-  font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--font-body);
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Editorial display face for the headline moments; refined grotesque elsewhere. */
+.hero h1,
+.section-heading h2,
+.featured-panel__header h2,
+.panel__header h2 {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-weight: 600;
 }
 
 a {
@@ -47,19 +73,37 @@ a:hover {
 }
 
 code {
-  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--surface-muted);
   padding: 0.08rem 0.4rem;
   border-radius: 6px;
   border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+/* Long, unbreakable tokens (commit SHAs, dotted module paths, bilingual
+   prose) must never overflow their column. Grid/flex children also need
+   min-width: 0 so they can shrink below their intrinsic content width. */
+.findings-list,
+.compact-list,
+.chip-list,
+.recommendation-list,
+.weekly-card__meta,
+.backend-card__scope,
+.section-heading p {
+  overflow-wrap: anywhere;
 }
 
 /* ---------- Hero ---------- */
 .hero {
-  background: linear-gradient(180deg, #0c1b3d 0%, #132d6b 100%);
+  position: relative;
+  background:
+    radial-gradient(125% 145% at 88% -15%, rgba(86, 132, 255, 0.32), transparent 58%),
+    linear-gradient(180deg, #0b1734 0%, #132d6b 100%);
   color: #ffffff;
-  padding: 3rem clamp(1.25rem, 4vw, 4rem) 2rem;
+  padding: 3.25rem clamp(1.25rem, 4vw, 4rem) 2.6rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .hero__inner {
@@ -80,7 +124,7 @@ code {
 .hero h1 {
   margin: 0;
   max-width: 52rem;
-  font-size: clamp(1.9rem, 3.2vw, 2.8rem);
+  font-size: clamp(2.2rem, 4vw, 3.5rem);
   line-height: 1.15;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -181,8 +225,52 @@ code {
   gap: 1.5rem;
 }
 
+.section--lead {
+  margin-top: -0.25rem;
+}
+
 .section[hidden] {
   display: none;
+}
+
+.section-heading {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 56rem;
+}
+
+.section-heading--split {
+  max-width: none;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+}
+
+.section-heading__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-size: clamp(1.55rem, 2.4vw, 2.1rem);
+  letter-spacing: -0.02em;
+}
+
+.section-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.section-heading__meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
 }
 
 .panel {
@@ -193,6 +281,10 @@ code {
   padding: 1.4rem 1.5rem;
   display: grid;
   gap: 1rem;
+}
+
+.panel--quiet {
+  box-shadow: none;
 }
 
 .panel__header h2 {
@@ -222,6 +314,7 @@ code {
   box-shadow: var(--shadow-soft);
   display: grid;
   gap: 0.35rem;
+  min-width: 0;
 }
 
 .stat-tile__label {
@@ -253,6 +346,8 @@ code {
   display: grid;
   gap: 1.25rem;
   border-top: 3px solid var(--accent);
+  container-type: inline-size;
+  container-name: featured;
 }
 
 .featured-panel__header {
@@ -324,7 +419,7 @@ code {
 
 .featured-panel__grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -335,10 +430,62 @@ code {
   padding: 1rem 1.1rem;
   display: grid;
   gap: 0.6rem;
+  min-width: 0;
 }
 
 .featured-panel__card--wide {
   grid-column: 1 / -1;
+}
+
+.compact-facts {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.compact-fact {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  min-width: 0;
+}
+
+.compact-fact__label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.compact-fact__value {
+  color: var(--text);
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+
+.compact-fact--success .compact-fact__value {
+  color: var(--success);
+}
+
+.compact-fact--warning .compact-fact__value {
+  color: var(--warning);
+}
+
+.compact-fact--danger .compact-fact__value {
+  color: var(--danger);
+}
+
+.artifact-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.artifact-list .artifact-link {
+  justify-content: space-between;
+  width: 100%;
 }
 
 .featured-panel__card h3 {
@@ -391,6 +538,7 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .recommendation-list__row span.label {
@@ -505,10 +653,46 @@ code {
   font-size: 0.9rem;
 }
 
-/* ---------- Weekly report card list ---------- */
+/* ---------- Cadence tag (weekly / monthly) ---------- */
+.cadence-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.28rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  border: 1px solid rgba(31, 76, 199, 0.2);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.cadence-tag--sm {
+  padding: 0.16rem 0.55rem;
+  font-size: 0.66rem;
+}
+
+.cadence-tag[data-cadence="monthly"] {
+  background: #ece8fb;
+  color: #4b2fb0;
+  border-color: rgba(75, 47, 176, 0.25);
+}
+
+/* ---------- Engineering report card list ---------- */
 .card-list {
   display: grid;
   gap: 0.85rem;
+}
+
+.weekly-card__id-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .weekly-card {
@@ -518,6 +702,7 @@ code {
   display: grid;
   gap: 0.6rem;
   background: var(--surface);
+  min-width: 0;
 }
 
 .weekly-card__header {
@@ -566,7 +751,169 @@ code {
   flex-wrap: wrap;
 }
 
-/* ---------- Backend gap report cards (reuse & modernize) ---------- */
+/* ---------- Backend deep dives ---------- */
+.backend-deep-dive-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+  gap: 1rem;
+}
+
+.backend-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  padding: 1.35rem;
+  display: grid;
+  gap: 1.1rem;
+  container-type: inline-size;
+  container-name: backend-card;
+}
+
+.backend-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.backend-card__title-group {
+  min-width: 0;
+}
+
+.backend-card__eyebrow {
+  margin: 0 0 0.35rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.backend-card__title-group h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.backend-card__scope {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.93rem;
+  line-height: 1.5;
+}
+
+.commit-gap-badge {
+  flex: 0 0 auto;
+  min-width: 6.2rem;
+  border-radius: 14px;
+  padding: 0.65rem 0.75rem;
+  display: grid;
+  gap: 0.1rem;
+  text-align: right;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.commit-gap-badge strong {
+  font-size: 1.35rem;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.commit-gap-badge span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+
+.commit-gap-badge--success strong {
+  color: var(--success);
+}
+
+.commit-gap-badge--warning strong {
+  color: var(--warning);
+}
+
+.commit-gap-badge--danger strong {
+  color: var(--danger);
+}
+
+.backend-card__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.backend-card__focus {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.backend-card__focus h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.backend-card__insights {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.backend-card__insight {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  padding: 0.85rem 0.95rem;
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.backend-card__insight h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.compact-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.compact-list li::marker {
+  color: var(--accent);
+}
+
+.backend-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+
+.backend-card__meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---------- Legacy backend report cards (kept for generated record compatibility) ---------- */
 #reports-panel {
   padding: 1.4rem 1.5rem;
 }
@@ -767,9 +1114,46 @@ code {
   line-height: 1.6;
 }
 
+/* ---------- Motion ---------- */
+/* One orchestrated, restrained page-load reveal with a small stagger. Fully
+   disabled for users who prefer reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .hero__content {
+    animation: reveal-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .layout > .section {
+    animation: reveal-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .layout > .section:nth-child(1) {
+    animation-delay: 0.05s;
+  }
+
+  .layout > .section:nth-child(2) {
+    animation-delay: 0.12s;
+  }
+
+  .layout > .section:nth-child(3) {
+    animation-delay: 0.19s;
+  }
+}
+
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ---------- Responsive ---------- */
+/* Layout-level breakpoints follow the viewport width. */
 @media (max-width: 900px) {
-  .featured-panel__grid {
+  .section-heading--split {
     grid-template-columns: 1fr;
   }
 
@@ -779,11 +1163,52 @@ code {
 }
 
 @media (max-width: 640px) {
+  .backend-card__header {
+    display: grid;
+  }
+
+  .commit-gap-badge {
+    text-align: left;
+    width: 100%;
+  }
+
   .field--search {
     grid-column: span 1;
   }
 
   .hero {
     padding: 2rem 1.25rem 1.5rem;
+  }
+}
+
+/* Card-internal layout follows each card's OWN width via container queries,
+   so columns reflow correctly when cards sit side by side or the page is
+   zoomed in — independent of the viewport width. This is the key fix for the
+   cramped, overflowing multi-column cards reported on zoom. */
+@container featured (max-width: 30rem) {
+  .featured-panel__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@container backend-card (max-width: 40rem) {
+  .backend-card__insights {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container backend-card (max-width: 24rem) {
+  .backend-card__insights,
+  .backend-card__facts {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Honor users who prefer larger text / zoom: never trap content in a
+   horizontal scroll. */
+@media (max-width: 520px) {
+  .featured-panel__header {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
