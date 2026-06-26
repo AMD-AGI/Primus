@@ -63,38 +63,55 @@ function defaultControls(data) {
 }
 
 const CONTROL_DEFS = [
-  ["world", "World size (GPUs)", "int"],
-  ["pp", "PP (pipeline)", "int"],
-  ["vpp", "VPP (interleave)", "int"],
-  ["ep", "EP (expert)", "int"],
-  ["dp", "DP (derived)", "ro"],
-  ["tp", "TP (tensor)", "int"],
-  ["cp", "CP (context)", "int"],
-  ["mbs", "Micro batch size", "int"],
-  ["gbs", "Global batch size", "int"],
-  ["recompute", "Recompute", "sel"],
-  ["recomputeLayers", "Recompute layers", "int"],
-  ["ppLayout", "PP layout", "txt"],
-  ["bytesPerParam", "Optim bytes/param", "int"],
-  ["calibFactor", "Calibration factor", "f"],
-  ["optEff", "Optim efficiency", "f"],
-  ["computeEff", "MI455 compute eff", "f"],
-  ["peak355", "MI355 peak TFLOPs", "int"],
-  ["bw355", "MI355 HBM GB/s", "int"],
-  ["peak455", "MI455 peak TFLOPs", "int"],
-  ["bw455", "MI455 HBM GB/s", "int"],
+  { key: "world", label: "World size (GPUs)", kind: "int" },
+  { key: "pp", label: "PP (pipeline)", kind: "int" },
+  { key: "vpp", label: "VPP (interleave)", kind: "int" },
+  { key: "ep", label: "EP (expert)", kind: "int" },
+  { key: "dp", label: "DP (derived)", kind: "ro" },
+  { key: "tp", label: "TP (tensor)", kind: "int" },
+  { key: "cp", label: "CP (context)", kind: "int" },
+  { key: "mbs", label: "Micro batch size", kind: "int" },
+  { key: "gbs", label: "Global batch size", kind: "int" },
+  { key: "recompute", label: "Recompute", kind: "sel" },
+  { key: "recomputeLayers", label: "Recompute layers", kind: "int" },
+  { key: "ppLayout", label: "PP layout", kind: "txt", full: true },
+  { key: "bytesPerParam", label: "Optim bytes/param", kind: "int" },
+  { key: "calibFactor", label: "Calibration factor", kind: "f" },
+  { key: "optEff", label: "Optim efficiency", kind: "f" },
+  { key: "computeEff", label: "MI455 compute eff", kind: "f" },
+  { key: "peak355", label: "MI355 peak TFLOPs", kind: "int" },
+  { key: "bw355", label: "MI355 HBM GB/s", kind: "int" },
+  { key: "peak455", label: "MI455 peak TFLOPs", kind: "int" },
+  { key: "bw455", label: "MI455 HBM GB/s", kind: "int" },
 ];
 
 // DP is derived from the user-set world size: DP = world / (PP*TP*CP). EP is a
 // sub-grouping of DP (EP <= DP) and does not multiply world size.
-const derivedDP = (c) => Math.max(1, Math.floor(c.world / (c.pp * c.tp * c.cp)));
+const derivedDP = (c) => {
+  const denom = c.pp * c.tp * c.cp;
+  if (!Number.isFinite(denom) || denom <= 0 || !Number.isFinite(c.world)) return NaN;
+  return c.world / denom;
+};
+
+function parseControlValue(input, kind) {
+  if (kind === "sel" || kind === "txt") return input.value;
+  if (kind === "int") return input.value.trim() === "" ? NaN : Number(input.value);
+  if (kind === "f") return input.value.trim() === "" ? NaN : Number(input.value);
+  return input.value;
+}
+
+const isPositiveInt = (x) => Number.isInteger(x) && x > 0;
+const isNonNegativeInt = (x) => Number.isInteger(x) && x >= 0;
+const isPositiveNumber = (x) => Number.isFinite(x) && x > 0;
 
 function renderControls() {
   const grid = $("#controls-grid");
   grid.innerHTML = "";
   const c = STATE.controls;
-  for (const [key, label, kind] of CONTROL_DEFS) {
+  for (const def of CONTROL_DEFS) {
+    const { key, label, kind } = def;
     const field = el("div", { class: "field" });
+    if (def.full) field.classList.add("field--full");
     field.append(el("span", {}, label));
     let input;
     if (kind === "sel") {
@@ -105,7 +122,8 @@ function renderControls() {
         input.append(o);
       }
     } else if (kind === "ro") {
-      input = el("input", { id: `ctl-${key}`, value: derivedDP(c), disabled: "true" });
+      const dp = derivedDP(c);
+      input = el("input", { id: `ctl-${key}`, value: Number.isFinite(dp) ? dp : "—", disabled: "true" });
     } else if (kind === "txt") {
       input = el("input", { id: `ctl-${key}`, type: "text", value: c[key] || "" });
     } else {
@@ -113,8 +131,7 @@ function renderControls() {
     }
     if (kind !== "ro") {
       input.addEventListener("change", () => {
-        const v = kind === "sel" ? input.value : Number(input.value);
-        c[key] = v;
+        c[key] = parseControlValue(input, kind);
         renderAll();
       });
     }
@@ -155,30 +172,105 @@ function layerTimes(data, cr, gpu, c) {
   return { fwd, bwd, fFlops, bFlops };
 }
 
+function expandLayoutRepeats(layout) {
+  let out = layout;
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/\(([^()]+)\)\*(\d+)/g, (_m, body, count) => body.repeat(Number(count)));
+  } while (out !== prev);
+  return out;
+}
+
 function parsePipelineLayout(layout, numLayers, chunks) {
-  if (!layout) return null;
-  const normalized = String(layout).trim().replace(/^['"]|['"]$/g, "");
-  if (!normalized) return null;
+  const raw = String(layout ?? "").trim();
+  if (!raw) return { ok: true, stages: null, counts: [], normalized: "", message: "empty layout; using balanced fallback" };
+  const normalized = expandLayoutRepeats(raw.replace(/^['"]|['"]$/g, ""));
+  if (/[()]/.test(normalized)) {
+    return { ok: false, stages: null, counts: [], normalized, message: "unsupported nested or malformed repeat expression" };
+  }
   const specs = normalized.split("|").map((x) => x.trim()).filter(Boolean);
-  if (specs.length !== chunks) return null;
+  if (specs.length !== chunks) {
+    return {
+      ok: false,
+      stages: null,
+      counts: specs.map((spec) => [...spec.matchAll(/[tT](?:\*(\d+))?/g)].reduce((a, m) => a + Number(m[1] || 1), 0)),
+      normalized,
+      message: `layout has ${specs.length} stages, expected PP*VPP=${chunks}`,
+    };
+  }
   let nextLayer = 0;
   const out = [];
+  const counts = [];
   for (const spec of specs) {
     const layers = [];
-    const clean = spec.split(",", 1)[0];
-    for (const m of clean.matchAll(/[tT](?:\*(\d+))?/g)) {
+    for (const m of spec.matchAll(/[tT](?:\*(\d+))?/g)) {
       const n = m[1] ? Number(m[1]) : 1;
       for (let i = 0; i < n && nextLayer < numLayers; i++) layers.push(nextLayer++);
     }
+    counts.push(layers.length);
     out.push(layers);
   }
-  return nextLayer === numLayers ? out : null;
+  if (nextLayer !== numLayers) {
+    return {
+      ok: false,
+      stages: null,
+      counts,
+      normalized,
+      message: `layout maps ${nextLayer} decoder layers, expected ${numLayers}`,
+    };
+  }
+  return { ok: true, stages: out, counts, normalized, message: "layout applied" };
 }
 
 function recomputeLayer(c, stageOrdinal) {
   if (c.recompute === "full") return true;
   if (c.recompute === "first-n") return stageOrdinal < Math.max(0, c.recomputeLayers || 0);
   return false;
+}
+
+function validateControls(data, c, gpu = STATE.gpu) {
+  const errors = [];
+  const warnings = [];
+  const ints = ["world", "pp", "vpp", "ep", "tp", "cp", "mbs", "gbs", "bytesPerParam", "peak355", "bw355", "peak455", "bw455"];
+  for (const key of ints) {
+    if (!isPositiveInt(c[key])) errors.push(`${key} must be a positive integer.`);
+  }
+  if (!isNonNegativeInt(c.recomputeLayers)) errors.push("recomputeLayers must be a non-negative integer.");
+  for (const key of ["calibFactor", "optEff", "computeEff"]) {
+    if (!isPositiveNumber(c[key])) errors.push(`${key} must be a positive number.`);
+  }
+  if (!["none", "full", "first-n"].includes(c.recompute)) errors.push(`unsupported recompute mode: ${c.recompute}`);
+
+  const denom = c.pp * c.tp * c.cp;
+  const dp = derivedDP(c);
+  if (isPositiveInt(c.world) && isPositiveInt(denom) && c.world % denom !== 0) {
+    errors.push(`world must be divisible by PP*TP*CP (${denom}); got world=${c.world}.`);
+  }
+  if (Number.isFinite(dp) && isPositiveInt(c.gbs) && isPositiveInt(c.mbs) && !Number.isInteger(c.gbs / (dp * c.mbs))) {
+    errors.push(`GA must be an integer: GBS / (DP*MBS) = ${c.gbs} / (${dp}*${c.mbs}).`);
+  }
+  if (Number.isFinite(dp) && isPositiveInt(c.ep) && c.ep > dp) {
+    errors.push(`EP must be <= DP; got EP=${c.ep}, DP=${dp}.`);
+  }
+
+  const chunks = c.pp * c.vpp;
+  const layout = parsePipelineLayout(c.ppLayout, data.model_config.compress_ratios.length, chunks);
+  if (!layout.ok) errors.push(`PP layout invalid: ${layout.message}.`);
+
+  const captureEp = data.capture?.ep;
+  if (captureEp && c.ep !== captureEp) {
+    warnings.push(`EP=${c.ep} is only partially modeled; traces captured EP=${captureEp}, so MoE dispatch/combine are not re-estimated.`);
+  } else {
+    warnings.push(`EP is a consistency control only; captured MoE dispatch/combine are reused from EP=${captureEp || 8}.`);
+  }
+  if (c.tp !== 1 || c.cp !== 1) {
+    warnings.push("TP/CP values affect derived DP/GA/optimizer only; TP/CP layer compute and communication are not re-modeled.");
+  }
+  if (gpu === "MI355X") warnings.push("MI455 peak/bandwidth/compute-eff controls affect only the MI455X tab.");
+  warnings.push(`Sequence length is fixed at captured seq=${data.capture.seq_length}; changing seq is not currently exposed.`);
+
+  return { errors, warnings, layout, dp };
 }
 
 function nonLayer(data, which, phase, gpu, c) {
@@ -249,11 +341,12 @@ function estimateOptimizerParams(data, c, dp) {
 // ---------------------------------------------------------------------------
 // Pipeline mapping + projection (Steps 2-5)
 // ---------------------------------------------------------------------------
-function project(data, gpu, c) {
+function project(data, gpu, c, validation = validateControls(data, c, gpu)) {
+  if (validation.errors.length) return null;
   const cfg = data.model_config;
   const crs = cfg.compress_ratios;
   const L = crs.length;
-  const dp = derivedDP(c);
+  const dp = validation.dp;
   const world = c.world;
   const lt = {};
   for (const cr of ["0", "4", "128"]) lt[cr] = layerTimes(data, cr, gpu, c);
@@ -262,7 +355,8 @@ function project(data, gpu, c) {
   const C = c.pp * c.vpp;
   const perChunk = Math.ceil(L / C);
   const Df = new Array(c.pp).fill(0), Db = new Array(c.pp).fill(0);
-  const layoutStages = parsePipelineLayout(c.ppLayout, L, C);
+  const layoutInfo = validation.layout;
+  const layoutStages = layoutInfo.ok ? layoutInfo.stages : null;
   const stageOrdinals = new Array(c.pp).fill(0);
   if (layoutStages) {
     layoutStages.forEach((layers, chunk) => {
@@ -344,6 +438,8 @@ function project(data, gpu, c) {
   return {
     lt, Df, Db, critF, critB, ga, pipeUs, bubbleFrac, world, dp, totalParams,
     layoutApplied: Boolean(layoutStages),
+    layoutCounts: layoutInfo.counts,
+    layoutMessage: layoutInfo.message,
     localModelParams: optParams.localModelParams, perRankParams, measuredOptUs: optParams.measuredUs,
     mtp, optUs, iterUs, tokIter, tokS, tokSgpu, flopsIter, tflopsGpu, seq,
   };
@@ -430,6 +526,33 @@ function breakdownBlock(title, fwdList, bwdList) {
   return block;
 }
 
+function renderValidation(validation) {
+  const host = $("#validation-panel");
+  if (!host) return;
+  host.innerHTML = "";
+  if (!validation.errors.length && !validation.warnings.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  if (validation.errors.length) {
+    const box = el("div", { class: "validation validation--error" });
+    box.append(el("b", {}, "Errors"));
+    const ul = el("ul");
+    for (const msg of validation.errors) ul.append(el("li", {}, msg));
+    box.append(ul);
+    host.append(box);
+  }
+  if (validation.warnings.length) {
+    const box = el("div", { class: "validation validation--warn" });
+    box.append(el("b", {}, "Warnings"));
+    const ul = el("ul");
+    for (const msg of validation.warnings) ul.append(el("li", {}, msg));
+    box.append(ul);
+    host.append(box);
+  }
+}
+
 function renderBreakdown() {
   $("#breakdown-gpu").textContent = `· ${STATE.gpu}`;
   const host = $("#breakdown-blocks");
@@ -455,13 +578,20 @@ function step(label, value, sub) {
   return s;
 }
 
-function renderResults() {
+function renderResults(validation) {
   const c = STATE.controls, gpu = STATE.gpu, d = STATE.data;
   $("#results-gpu").textContent = `· ${gpu}`;
-  const p = project(d, gpu, c);
+  const p = project(d, gpu, c, validation);
 
   const head = $("#results-headline");
   head.innerHTML = "";
+  const steps = $("#results-steps");
+  steps.innerHTML = "";
+  if (!p) {
+    head.append(el("div", { class: "metric metric--error" }, el("b", {}, "Projection blocked"), el("span", {}, "Invalid controls")));
+    steps.append(step("Fix validation errors", "", "Projection is not recomputed while errors are present."));
+    return;
+  }
   const mk = (label, val, primary) => {
     const m = el("div", { class: "metric" + (primary ? " metric--primary" : "") });
     m.append(el("b", {}, label), el("span", {}, val));
@@ -472,19 +602,17 @@ function renderResults() {
   head.append(mk("Iteration time", `${fmt(p.iterUs / 1000, 1)} ms`));
   head.append(mk("Pipeline bubble", `${fmt(p.bubbleFrac * 100, 1)} %`));
 
-  const steps = $("#results-steps");
-  steps.innerHTML = "";
   const ltDesc = ["0", "4", "128"].map((cr) =>
     `cr${cr}: F ${fmt(p.lt[cr].fwd, 0)} / B ${fmt(p.lt[cr].bwd, 0)} µs`).join("  ·  ");
   const recomputeDesc = c.recompute === "first-n" ? `first ${c.recomputeLayers} layers/stage` : (c.recompute === "full" ? "recompute on" : "no recompute");
   steps.append(step("Per-layer fwd/bwd (µs, " + recomputeDesc + ")", "", ltDesc));
   steps.append(step("Critical PP stage (µs)", `F ${fmt(p.critF, 0)} + B ${fmt(p.critB, 0)}`,
-    `max over ${c.pp} stages; layout ${p.layoutApplied ? "applied" : "balanced fallback"}; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
+    `max over ${c.pp} stages; layout ${p.layoutApplied ? "applied" : "balanced fallback"} (${p.layoutMessage}); counts=[${p.layoutCounts.join(", ")}]; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
   if ((d.model_config.mtp_num_layers || 0) > 0) {
     steps.append(step("MTP on last stage", `F ${fmt(p.mtp.fwd, 0)} + B ${fmt(p.mtp.bwd, 0)} µs`,
       `${d.model_config.mtp_num_layers} depth(s), inner cr=${(d.model_config.mtp_compress_ratios || [0])[0]}, eh_proj estimated from output GEMM throughput`));
   }
-  steps.append(step("GA (microbatches)", fmtInt(p.ga), `GA = GBS ${c.gbs} / (DP ${p.dp} × MBS ${c.mbs})`));
+  steps.append(step("GA (microbatches)", fmt(p.ga, 0), `GA = GBS ${c.gbs} / (DP ${p.dp} × MBS ${c.mbs})`));
   steps.append(step("Pipeline compute / iter", `${fmt(p.pipeUs / 1000, 2)} ms`,
     `(GA + (PP−1)/VPP) × (F+B)_crit ; bubble ${fmt(p.bubbleFrac * 100, 1)}%`));
   const optHint = p.measuredOptUs
@@ -507,13 +635,15 @@ function renderResults() {
 }
 
 function renderAll() {
+  const validation = validateControls(STATE.data, STATE.controls, STATE.gpu);
   // keep the derived-DP readonly box in sync
   const w = STATE.controls;
   const roDp = document.getElementById("ctl-dp");
-  if (roDp) roDp.value = derivedDP(w);
+  if (roDp) roDp.value = Number.isFinite(validation.dp) ? validation.dp : "—";
+  renderValidation(validation);
   renderConfig();
   renderBreakdown();
-  renderResults();
+  renderResults(validation);
 }
 
 // ---------------------------------------------------------------------------
@@ -534,22 +664,32 @@ async function init(model) {
   }
 }
 
-$("#model-select").addEventListener("change", (e) => {
-  const m = e.target.value;
-  const u = new URL(location);
-  u.searchParams.set("model", m);
-  history.replaceState(null, "", u);
-  init(m);
-});
+globalThis.DSV4Projection = {
+  defaultControls,
+  derivedDP,
+  expandLayoutRepeats,
+  parsePipelineLayout,
+  validateControls,
+  project,
+};
 
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
-    tab.classList.add("is-active");
-    STATE.gpu = tab.dataset.gpu;
-    renderBreakdown();
-    renderResults();
+if (typeof document !== "undefined") {
+  $("#model-select").addEventListener("change", (e) => {
+    const m = e.target.value;
+    const u = new URL(location);
+    u.searchParams.set("model", m);
+    history.replaceState(null, "", u);
+    init(m);
   });
-});
 
-init(modelFromQuery());
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
+      tab.classList.add("is-active");
+      STATE.gpu = tab.dataset.gpu;
+      renderAll();
+    });
+  });
+
+  init(modelFromQuery());
+}

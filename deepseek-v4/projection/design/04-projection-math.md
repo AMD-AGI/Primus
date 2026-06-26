@@ -57,7 +57,9 @@ Inputs: `PP`, `VPP`, optional `pipeline_layout`. Total model chunks
 `t*N` stage specs (for example `Et*10|t*11|t*11|t*11mL`) and assign virtual
 chunk `k` to device `k mod PP`. Otherwise build the ordered layer list from
 `compress_ratios`, slice it into `C` contiguous chunks, and use the same
-`k mod PP` mapping. For device `d`:
+`k mod PP` mapping. The UI validates that an explicit layout has exactly
+`PP*VPP` stages and exactly `num_layers` decoder layers; invalid layouts block
+projection instead of silently falling back. For device `d`:
 ```
 Df[d] = Σ_{chunks on d} Σ_{layer in chunk} layer_fwd[cr(layer)]
 Db[d] = Σ_{chunks on d} Σ_{layer in chunk} layer_bwd_eff[cr(layer)]

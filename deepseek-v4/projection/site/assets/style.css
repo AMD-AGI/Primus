@@ -89,12 +89,26 @@ table.bd td.rowlab, table.bd th.rowlab { text-align: left; color: var(--muted); 
 .controls-grid .field { min-width: 0; }
 .controls-grid input, .controls-grid select { width: 100%; min-width: 0; }
 
+.validation {
+  margin-top: 10px;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 12px;
+}
+.validation + .validation { margin-top: 8px; }
+.validation b { display: block; margin-bottom: 4px; }
+.validation ul { margin: 0; padding-left: 18px; }
+.validation--error { background: #3a1c1c; border: 1px solid #6b2d2d; color: #ffb4b4; }
+.validation--warn { background: #352913; border: 1px solid #6a4d1c; color: #ffd28a; }
+
 .headline { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 16px; }
 .metric { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; min-width: 150px; }
 .metric b { display: block; font-size: 12px; color: var(--muted); }
 .metric span { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .metric.metric--primary { border-color: var(--accent-2); }
 .metric.metric--primary span { color: var(--accent-2); }
+.metric.metric--error { border-color: #6b2d2d; }
+.metric.metric--error span { color: #ffb4b4; font-size: 18px; }
 
 .steps { display: flex; flex-direction: column; gap: 8px; }
 .step { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 13px; }
