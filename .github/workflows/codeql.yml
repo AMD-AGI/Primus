@@ -1,0 +1,44 @@
+name: CodeQL
+
+# Static security analysis for the Python codebase. Results show up under
+# Security -> Code scanning. Kept off the heavy GPU PR path: it only runs on
+# pushes to main, on PRs that touch Python (or this workflow), on a weekly
+# schedule, and on manual dispatch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.py"
+      - ".github/workflows/codeql.yml"
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload results to the code-scanning dashboard.
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          languages: python
+          # Default + security-extended would be louder; start with the default
+          # query suite during burn-in and broaden later if useful.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          category: "/language:python"
