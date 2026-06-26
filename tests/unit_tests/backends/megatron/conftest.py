@@ -12,11 +12,23 @@ components that require distributed setup.
 """
 
 import os
-import random
+import socket
 
 import pytest
 import torch
 import torch.distributed as dist
+
+
+def _find_free_port() -> int:
+    """Ask the kernel for a free TCP port on localhost.
+
+    Binding to port 0 lets the OS pick a port that is guaranteed free at this
+    instant, which avoids the EADDRINUSE failures seen when guessing a random
+    port out of a fixed range that overlaps the ephemeral port range.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 @pytest.fixture(scope="function")
@@ -45,10 +57,12 @@ def init_parallel_state():
 
     # Initialize torch.distributed if not already initialized
     if not dist.is_initialized():
-        # Use dynamic port to avoid conflicts with other running tests
-        port = random.randint(29500, 39500)
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", str(port))
+        # Use a kernel-assigned free port to avoid conflicts with other running
+        # tests. Set MASTER_PORT explicitly (not setdefault) so a stale value
+        # left in the environment cannot diverge from the port we actually use.
+        port = _find_free_port()
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
 
         dist.init_process_group(
             backend="nccl" if torch.cuda.is_available() else "gloo",

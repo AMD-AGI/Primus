@@ -13,6 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Default to read-only. No job uses GITHUB_TOKEN for writes (Docker Hub push
+# uses a dedicated PAT secret), so this is behavior-neutral. Jobs that need
+# more must opt in at the job level.
+permissions:
+  contents: read
+
 env:
   PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
   PRIMUS_TURBO_AITER_COMMIT: b5e03ed191fca11ee423226537ef8d9435e432a6 # Fix dsink bf16 noise in Triton MHA one-kernel backward (#3070)
@@ -31,10 +37,10 @@ jobs:
     steps:
       - run: echo "🎉 Begin Primus Python Lint."
       - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: git config --global --add safe.directory /github/workspace
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Display Python version
@@ -45,6 +51,20 @@ jobs:
       - name: Run pre-commit (all hooks, all files)
         run: pre-commit run --all-files --show-diff-on-failure
 
+  # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
+  # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@e58c696e52cac8e62d61cc21fda89565d71505d7 # v4.3.1
+        with:
+          fail-on-severity: high
+          warn-only: true
+
   build-docker:
     needs: [code-lint]
     runs-on: build-docker
@@ -53,7 +73,7 @@ jobs:
         python-version: ["3.12"]
     steps:
       - run: echo "🎉 Begin Build Primus Docker Image."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -208,7 +228,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
@@ -256,7 +276,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -310,54 +330,37 @@ jobs:
           # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
           pytest --maxfail=1 -s ./tests/unit_tests/ \
             --cov=primus --cov-report=term-missing:skip-covered \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward
-      - name: Publish unit-test coverage summary
+      - name: Snapshot unit-test coverage
         if: always()
         continue-on-error: true
         run: |
-          python -m coverage json -o coverage.json 2>/dev/null || true
-          python - <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
-          import json
-          from collections import defaultdict
-
-          rep = json.load(open("coverage.json"))
-
-          def group(p):
-              i = p.find("primus/")
-              seg = (p[i:] if i >= 0 else p).split("/")
-              if len(seg) < 2:
-                  return seg[-1]
-              if seg[1] == "backends" and len(seg) >= 3:
-                  return f"backends/{seg[2]}"
-              if seg[1] == "core" and len(seg) >= 3 and seg[2] == "projection":
-                  return "core/projection"
-              return seg[1]
-
-          agg = defaultdict(lambda: [0, 0])
-          for fpath, info in rep.get("files", {}).items():
-              s = info["summary"]
-              g = agg[group(fpath)]
-              g[0] += s["covered_lines"]
-              g[1] += s["num_statements"]
-
-          t = rep.get("totals", {})
-          tc, tn = t.get("covered_lines", 0), t.get("num_statements", 0)
-          tp = t.get("percent_covered", 0.0)
-
-          print("## Primus unit-test coverage\n")
-          print(f"**Total line coverage: {tp:.1f}%** ({tc:,} / {tn:,} statements)\n")
-          print("| Module | Covered | Stmts | Coverage |")
-          print("|---|--:|--:|--:|")
-          for name, (c, n) in sorted(agg.items(), key=lambda r: -r[1][1]):
-              if n:
-                  print(f"| `{name}` | {c:,} | {n:,} | {100 * c / n:.1f}% |")
-          print(f"| **TOTAL** | **{tc:,}** | **{tn:,}** | **{tp:.1f}%** |")
-          PY
+          # Keep the unit data for the final unit-vs-E2E comparison table
+          # (.coverage.unit is fed to `coverage combine` after the E2E steps).
+          python -m coverage json -o coverage_unit.json 2>/dev/null || true
+          cp .coverage "$GITHUB_WORKSPACE/.coverage.unit" 2>/dev/null || true
+      - name: Setup E2E training coverage
+        if: always()
+        continue-on-error: true
+        run: |
+          # Record coverage of the training subprocesses (primus-cli -> torchrun
+          # -> python). A .pth makes every new interpreter call
+          # coverage.process_startup(); COVERAGE_PROCESS_START points it at the rc
+          # and COVERAGE_FILE keeps E2E data separate from the unit .coverage.
+          # parallel=true -> one data file per rank; sigterm=true captures ranks
+          # killed on teardown. These env vars are inherited by the E2E steps.
+          SP=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
+          echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
+          echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
@@ -368,7 +371,8 @@ jobs:
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           GPU_ARCHS=gfx942 \
-          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
+          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
       - name: Run Primus Model Tests -- TorchTitan
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
@@ -378,11 +382,51 @@ jobs:
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
+          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: torch-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Write test summary
+        if: always()
+        run: |
+          python tools/ci/junit_summary.py --title torch test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Build torch coverage json (unit + E2E)
+        if: always()
+        continue-on-error: true
+        run: |
+          # Don't instrument coverage's own helper processes here.
+          unset COVERAGE_PROCESS_START
+          # Merge per-rank E2E data, then line-merge unit + E2E into one dataset.
+          # The JSON is consumed by the coverage-summary job (no per-job summary).
+          python -m coverage combine 2>/dev/null || true
+          COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage combine --keep \
+            "$GITHUB_WORKSPACE/.coverage.unit" "$GITHUB_WORKSPACE/.coverage_e2e" 2>/dev/null || true
+          COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage json -o coverage_combined.json 2>/dev/null || true
+      - name: Upload torch coverage json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-torch
+          path: |
+            coverage_unit.json
+            coverage_combined.json
+          if-no-files-found: ignore
       - name: Clean
+        if: always()
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
           rm -rf ${PRIMUS_WORKDIR}/Primus
+          # Remove E2E coverage artifacts and, importantly, the subprocess
+          # injection .pth so it never leaks into later jobs on this persistent runner.
+          rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_all" "${GITHUB_WORKSPACE}/.coveragerc_e2e" coverage_unit.json coverage_combined.json || true
+          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true
 
   run-unittest-jax:
     env:
@@ -397,7 +441,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           path: Primus-Turbo
@@ -431,7 +475,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Torch installation causes segfault, so we skip it and actually not install turbo. Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -464,6 +508,19 @@ jobs:
         run: |
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
+      - name: Setup MaxText E2E coverage
+        if: always()
+        continue-on-error: true
+        run: |
+          # Instrument the MaxText (JAX) training subprocesses so their coverage
+          # of primus/ (notably backends/maxtext) is recorded. Same mechanism as
+          # the torch job: a .pth runs coverage.process_startup() in every child.
+          pip install coverage >/dev/null 2>&1 || true
+          SP=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
+          echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
+          echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
@@ -471,10 +528,73 @@ jobs:
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          # run_unit_tests.py shells out to pytest; PYTEST_ADDOPTS injects the
+          # JUnit report without having to touch the wrapper script.
+          export PYTEST_ADDOPTS="--junitxml=${GITHUB_WORKSPACE}/test-reports/maxtext-e2e.xml"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
           JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jax-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Write test summary
+        if: always()
+        run: |
+          python tools/ci/junit_summary.py --title jax test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Build jax coverage json (MaxText E2E)
+        if: always()
+        continue-on-error: true
+        run: |
+          unset COVERAGE_PROCESS_START
+          # The JSON is consumed by the coverage-summary job (no per-job summary).
+          python -m coverage combine 2>/dev/null || true
+          python -m coverage json -o coverage_maxtext_e2e.json 2>/dev/null || true
+      - name: Upload jax coverage json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-jax
+          path: coverage_maxtext_e2e.json
+          if-no-files-found: ignore
       - name: Clean
+        if: always()
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
           rm -rf ${PRIMUS_WORKDIR}/Primus
+          # Remove E2E coverage artifacts + the injection .pth (persistent runner).
+          rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coveragerc_e2e" coverage_maxtext_e2e.json || true
+          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true
+
+  coverage-summary:
+    # Combine the torch and jax coverage JSON artifacts into one unit-vs-E2E
+    # table. Uses module-level JSON (not coverage data), so no cross-runner path
+    # mapping is needed: torch (megatron/torchtitan) and jax (maxtext) E2E cover
+    # near-disjoint modules and are merged per module by max covered lines.
+    needs: [run-unittest-torch, run-unittest-jax]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          path: cov-artifacts
+      - name: Render combined coverage summary
+        continue-on-error: true
+        run: |
+          unit=$(find cov-artifacts -name coverage_unit.json | head -1)
+          torch=$(find cov-artifacts -name coverage_combined.json | head -1)
+          jax=$(find cov-artifacts -name coverage_maxtext_e2e.json | head -1)
+          if [ -n "$unit" ]; then
+            python tools/ci/coverage_summary.py "$unit" "Unit vs Unit+E2E (torch + jax)" $torch $jax >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No unit coverage artifact found; skipping combined summary." >> "$GITHUB_STEP_SUMMARY"
+          fi

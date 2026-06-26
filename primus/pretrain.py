@@ -13,6 +13,15 @@ from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import add_pretrain_parser, load_primus_config
 
 
+def _info_enabled() -> bool:
+    """True when PRIMUS_LOG_LEVEL permits INFO-level chatter (DEBUG/INFO).
+
+    Mirrors the level gating in runner/lib/common.sh so informational prints are
+    silenced when the user sets PRIMUS_LOG_LEVEL=WARN/ERROR.
+    """
+    return os.environ.get("PRIMUS_LOG_LEVEL", "INFO").upper() in ("DEBUG", "INFO")
+
+
 # Lazy backend loader
 def load_backend_trainer(framework: str):
     if framework == "megatron":
@@ -117,7 +126,8 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     if framework == "maxtext" and (deps_sync_path / "src").exists():
         deps_sync_path = deps_sync_path / "src"
     candidate_paths.append(str(deps_sync_path))
-    print(f"[Primus] candidate_paths: {candidate_paths}")
+    if verbose and _info_enabled():
+        print(f"[Primus] candidate_paths: {candidate_paths}")
 
     # Normalize & deduplicate
     candidate_paths = list(dict.fromkeys(os.path.normpath(os.path.abspath(p)) for p in candidate_paths))
@@ -127,7 +137,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
         if os.path.exists(path):
             if path not in sys.path:
                 sys.path.insert(0, path)
-                if verbose:
+                if verbose and _info_enabled():
                     print(f"[Primus] sys.path.insert: {path}")
             return path  # Return the first valid path
 

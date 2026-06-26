@@ -65,7 +65,9 @@ def build_megatron_helper(bridge_path: Path):
         return
 
     log_info(f"Building Megatron dataset C++ helper in {dataset_cpp_dir}")
-    ret = subprocess.run(["make"], cwd=dataset_cpp_dir)
+    # `-s` silences make's "Nothing to be done"/recipe echo on no-op rebuilds;
+    # real compiler errors still surface and are handled below.
+    ret = subprocess.run(["make", "-s"], cwd=dataset_cpp_dir)
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ dataset helper failed.")
     log_info("Megatron C++ dataset helper built successfully")
