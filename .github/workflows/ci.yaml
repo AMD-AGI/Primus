@@ -337,7 +337,21 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
           mkdir -p "${GITHUB_WORKSPACE}/test-reports"
-          pytest --maxfail=1 -s ./tests/unit_tests/ \
+          # Component-aware selection on PRs; full suite on push/release/dispatch.
+          # Fail-safe: any failure to compute the diff falls back to the full suite.
+          TARGETS="./tests/unit_tests/"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base_sha}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              sel="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py)"
+              [[ -n "${sel}" ]] && TARGETS="${sel}"
+            fi
+          fi
+          echo "Selected unit-test targets: ${TARGETS}"
+          # shellcheck disable=SC2086 # intentional word-splitting of multiple paths
+          pytest --maxfail=1 -s ${TARGETS} \
             --cov=primus --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
