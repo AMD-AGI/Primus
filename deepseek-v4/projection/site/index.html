@@ -16,22 +16,25 @@
           multi-GPU projection. Page 1 is measured-MI355X; page 2 scales to MI455X
           by theoretical hardware ratios.
         </p>
-        <div class="hero__row">
-          <label class="field field--inline">
-            <span>Model</span>
-            <select id="model-select">
-              <option value="pro">DeepSeek-V4 Pro</option>
-              <option value="flash">DeepSeek-V4 Flash</option>
-            </select>
-          </label>
-          <span id="mock-badge" class="badge badge--warn" hidden>MOCK DATA</span>
-        </div>
+      </div>
+    </header>
+
+    <div class="switcher" id="switcher">
+      <div class="switcher__inner">
+        <label class="field field--inline">
+          <span>Model</span>
+          <select id="model-select">
+            <option value="pro">DeepSeek-V4 Pro</option>
+            <option value="flash">DeepSeek-V4 Flash</option>
+          </select>
+        </label>
+        <span id="mock-badge" class="badge badge--warn" hidden>MOCK DATA</span>
         <nav class="tabs" role="tablist">
           <button class="tab is-active" data-gpu="MI355X" role="tab">MI355X (measured)</button>
           <button class="tab" data-gpu="MI455X" role="tab">MI455X (projected)</button>
         </nav>
       </div>
-    </header>
+    </div>
 
     <main class="layout">
       <div id="error-state" class="state state--error" hidden></div>

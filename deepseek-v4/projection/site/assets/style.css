@@ -40,6 +40,28 @@ body {
 }
 .tab.is-active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
+/* Sticky switcher bar: model select + GPU tabs stay pinned to the top so the
+   user can switch without scrolling back up. */
+.switcher {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(15, 18, 24, .9);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.switcher__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.switcher .tabs { margin-left: auto; }
+.switcher .tab { border-radius: 8px; }
+
 .layout { padding-top: 22px; padding-bottom: 60px; display: flex; flex-direction: column; gap: 18px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
 .panel--accent { border-color: #2d4f7a; }
