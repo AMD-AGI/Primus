@@ -50,6 +50,8 @@ jobs:
         run: pip install pre-commit
       - name: Run pre-commit (all hooks, all files)
         run: pre-commit run --all-files --show-diff-on-failure
+      - name: Check version/commit pin consistency
+        run: python tools/ci/check_version_consistency.py
 
   # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
   # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
