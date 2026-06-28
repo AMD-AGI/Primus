@@ -1,0 +1,107 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 535M with FP8 Configuration (Testing/Development)
+#
+# This is a minimal Flux variant with FP8 enabled, designed for:
+#   - Quick validation of FP8 functionality
+#   - Testing FP8 integration before scaling to 12B
+#   - Debugging FP8-related issues
+#   - Development and experimentation
+#
+# Target Hardware:
+#   - Single AMD MI300X GPU with ROCm 6.0+
+#   - Requires Transformer Engine 2.1.0+ with ROCm backend
+#
+# Use cases:
+#   - Validating FP8 setup and configuration
+#   - Quick iteration during FP8 feature development
+#   - Testing FP8 numerical stability
+#   - Verifying Transformer Engine compatibility
+
+extends:
+  - flux_535m.yaml
+
+# ==============================================================================
+# FP8 Configuration (Same as flux_12b_fp8.yaml)
+# ==============================================================================
+
+# Enable FP8 precision for training
+fp8: "e4m3"  # Use E4M3 format for all FP8 tensors
+
+# FP8 Recipe: Controls scaling strategy
+fp8_recipe: "delayed"  # Delayed scaling for numerical stability (recommended)
+
+# Scaling Factor Configuration
+fp8_margin: 0  # Margin for scaling factor computation
+fp8_amax_history_len: 1024  # History window length for delayed scaling
+fp8_amax_compute_algo: "most_recent"  # Algorithm for amax computation
+
+# FP8 Gradient Configuration
+fp8_wgrad: true  # Enable FP8 for weight gradients
+
+# Attention Precision (keep in higher precision for stability)
+fp8_dot_product_attention: false  # Keep dot product attention in BF16/FP32
+fp8_multi_head_attention: false   # Keep multi-head attention in BF16/FP32
+
+# ==============================================================================
+# Optimization Adjustments for FP8
+# ==============================================================================
+
+# Gradient clipping
+clip_grad: 1.0
+
+# ==============================================================================
+# Hardware Requirements (FP8)
+# ==============================================================================
+
+# Training with FP8:
+#   - Minimum: 1x MI300X 192GB
+#   - Memory: ~5-7GB per GPU (vs ~10-15GB BF16)
+#   - Training time: Minutes (vs hours for 12B)
+
+# Inference with FP8:
+#   - Minimum: 1x MI300X 192GB
+#   - Memory: ~2-3GB for model weights + activations
+
+# ==============================================================================
+# Training Recommendations for FP8
+# ==============================================================================
+
+# Suggested Training Config (testing):
+#   micro_batch_size: 4 (vs 2 for BF16)
+#   global_batch_size: 32
+#   learning_rate: 1.0e-4
+#   weight_decay: 0.01
+#   warmup_steps: 100
+#   total_steps: 1000 (for quick validation)
+
+# Parallelism Strategy:
+#   - Data Parallel (DP): 1 (single GPU testing)
+#   - Tensor Parallel (TP): 1 (not needed for 535M)
+#   - Pipeline Parallel (PP): 1
+#   - Sequence Parallel (SP): false
+
+# ==============================================================================
+# Testing Strategy
+# ==============================================================================
+
+# Use this config to verify:
+#   1. FP8 forward pass works without NaN/Inf
+#   2. FP8 backward pass computes gradients correctly
+#   3. Training loop runs stable for multiple iterations
+#   4. Memory usage is reduced as expected
+#   5. Training speed improvement is measurable
+
+# Run tests with:
+#   pytest tests/unit_tests/backends/megatron/diffusion/test_flux_fp8_context.py -v
+
+# ==============================================================================
+# Troubleshooting
+# ==============================================================================
+
+# Same troubleshooting steps as flux_12b_fp8.yaml:
+#   - Increase fp8_amax_history_len if unstable
+#   - Set fp8_wgrad: false if gradient issues
+#   - Adjust fp8_margin if scaling problems
+#   - Use fp8_amax_compute_algo: "max" for more conservative scaling
