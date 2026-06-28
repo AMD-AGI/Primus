@@ -1,0 +1,81 @@
+# Metadataset Configuration for Mixed Training
+#
+# Metadataset combines multiple datasets with different weights.
+# This is useful for:
+#   - Mixing pre-encoded and raw datasets
+#   - Combining multiple data sources
+#   - Creating train/val splits from different datasets
+#
+# This file can be used directly or referenced in training configs:
+#   data:
+#     dataset_path: /path/to/metadataset.yaml
+
+# ============================================================================
+# Path Configuration
+# ============================================================================
+# Dataset paths should point to directories on mounted volumes for persistence.
+# Default Docker mount: /workspace/Primus/data/ (persists to host)
+#
+# Adjust paths below to match your dataset locations.
+# All paths should be absolute and point to prepared datasets.
+# ============================================================================
+
+# Use Energon's Metadataset class
+__module__: megatron.energon
+__class__: Metadataset
+
+splits:
+  # Training split with mixed data sources
+  train:
+    datasets:
+      # 80% pre-encoded data (faster training)
+      - weight: 0.8
+        path: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/diffusion_preencoded/
+        # This dataset should have: subflavors: {encoding: preencoded}
+
+      # 20% raw data (flexibility for new data)
+      - weight: 0.2
+        path: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/diffusion_raw/
+        # This dataset should have: subflavors: {encoding: raw}
+
+  # Validation split (typically all pre-encoded for speed)
+  val:
+    datasets:
+      - weight: 1.0
+        path: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/diffusion_preencoded_val/
+        # This dataset should have: subflavors: {encoding: preencoded}
+
+# Global settings applied to all datasets
+shuffle_buffer_size: 1000
+max_samples_per_sequence: 100
+
+# ============================================================================
+# Usage Notes
+# ============================================================================
+#
+# Each dataset path should point to a directory containing:
+#   1. WebDataset tar files (*.tar)
+#   2. Energon index (.nv-meta/ directory)
+#   3. Local dataset.yaml with correct subflavors
+#
+# Example structure (with default Docker mount):
+#   /workspace/Primus/data/diffusion_preencoded/
+#   ├── dataset.yaml          (with subflavors: {encoding: preencoded})
+#   ├── train-*.tar
+#   └── .nv-meta/
+#
+#   /workspace/Primus/data/diffusion_raw/
+#   ├── dataset.yaml          (with subflavors: {encoding: raw})
+#   ├── train-*.tar
+#   └── .nv-meta/
+#
+# Dataset weights:
+#   - Weights are relative, not absolute (0.8 + 0.2 = 1.0)
+#   - Higher weight = more samples from that dataset
+#   - Weights can sum to any positive number
+#
+# For more information, see:
+#   - primus/configs/data/megatron/diffusion/README.md
+#   - examples/megatron/diffusion/README.md
+#   - docs/backends/megatron/diffusion/energon_integration.md
+#
