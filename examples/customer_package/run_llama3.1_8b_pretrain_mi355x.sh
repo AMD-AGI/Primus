@@ -169,7 +169,7 @@ bash ./examples/run_slurm_pretrain.sh \
     --cp_comm_type "$CP_COMM_TYPE" \
     --mock_data True \
     --optimizer "$OPTIMIZER" \
-    --torch_profiler_use_gzip False \
+    --torch_profiler_use_gzip True \
     "${VPP_ARGS[@]}" \
     "${FEATURE_ARGS[@]}" \
     "${RECOMPUTE_ARGS[@]}" \

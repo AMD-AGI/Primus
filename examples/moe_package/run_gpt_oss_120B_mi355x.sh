@@ -233,7 +233,7 @@ bash ./examples/run_slurm_pretrain.sh \
     --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
     --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
-    --torch_profiler_use_gzip False \
+    --torch_profiler_use_gzip True \
     "${MLA_ARGS[@]}" \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
