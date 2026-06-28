@@ -148,6 +148,10 @@ class RoPECache(nn.Module):
         # YaRN's m_scale; exposed for the caller to multiply attention scale.
         self.attn_scale: float = _yarn_attn_scale(self.yarn_factor)
 
+        # Memo of (cos, sin) tables keyed by (n, device) for arange(n) positions;
+        # see forward_arange. Not a buffer (recomputable, device-keyed).
+        self._arange_cache: dict = {}
+
     def forward(self, position_ids: torch.Tensor) -> tuple:
         """Return (cos, sin) for the given positions.
 
@@ -162,6 +166,26 @@ class RoPECache(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         return cos, sin
+
+    def forward_arange(self, n: int, device) -> tuple:
+        """``(cos, sin)`` for positions ``torch.arange(n)`` -- cached.
+
+        Equivalent to ``self.forward(torch.arange(n, device=device))``, but
+        memoised by ``(n, device)``. The compressed-branch RoPE is always
+        evaluated at the deterministic positions ``arange(P)``
+        (``P = S // compress_ratio``, fixed per run), so the table is identical
+        every forward; caching it skips the ``arange -> outer-product ->
+        cos/sin`` recompute each step (and per compressed layer). Set
+        ``PRIMUS_COMPRESS_ROPE_CACHE=0`` to disable the cache.
+        """
+        if os.environ.get("PRIMUS_COMPRESS_ROPE_CACHE", "1") == "0":
+            return self.forward(torch.arange(n, device=device))
+        key = (int(n), str(device))
+        hit = self._arange_cache.get(key)
+        if hit is None:
+            hit = self.forward(torch.arange(n, device=device))
+            self._arange_cache[key] = hit
+        return hit
 
 
 # ---------------------------------------------------------------------------

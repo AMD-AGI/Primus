@@ -28,6 +28,7 @@ P4.4 will consume the output).
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -138,13 +139,26 @@ class Compressor(nn.Module):
             score = self._overlap_transform(score)  # [B, N, 2*ratio, head_dim]
         # else: kv / score already at [B, N, ratio, head_dim]
 
-        # APE adds a per-window-slot bias to the score (broadcast over B, N).
-        score = score + self.ape  # [B, N, win, head_dim]
+        # Per-window-softmax pool: APE bias + softmax over the window axis (dim=2)
+        # + weighted sum -- each compressed token is a softmax-weighted average of
+        # its window members. The forward burst (add + cast + softmax + cast + mul
+        # + reduce) is fused into one Triton launch on CUDA fp16/bf16/fp32 inputs;
+        # PRIMUS_COMPRESS_POOL_TRITON=0 (or non-CUDA / unsupported dtype) falls back
+        # to eager.
+        if os.environ.get("PRIMUS_COMPRESS_POOL_TRITON", "1") != "0" and kv.is_cuda and kv.dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ):
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.compressor_pool import (
+                fused_softmax_weighted_pool,
+            )
 
-        # Softmax over the per-window axis (dim=2). Each compressed token is
-        # a weighted average of its window members.
-        weights = F.softmax(score.float(), dim=2).to(kv.dtype)
-        pooled = (kv * weights).sum(dim=2)  # [B, N, head_dim]
+            pooled = fused_softmax_weighted_pool(kv, score, self.ape)  # [B, N, head_dim]
+        else:
+            score = score + self.ape  # [B, N, win, head_dim]
+            weights = F.softmax(score.float(), dim=2).to(kv.dtype)
+            pooled = (kv * weights).sum(dim=2)  # [B, N, head_dim]
 
         pooled = self.kv_norm(pooled)
         return pooled

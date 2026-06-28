@@ -1179,9 +1179,10 @@ class DeepseekV4Attention(MLASelfAttention):
         pooled = self.compressor(hidden)  # [B, P, head_dim]
         B, P = pooled.shape[0], pooled.shape[1]
 
-        # Compress-base partial RoPE on compressed indices [0..P).
-        comp_pos = torch.arange(P, device=device)
-        cos, sin = self.rope.compress_rope(comp_pos)
+        # Compress-base partial RoPE on compressed indices [0..P). Positions are
+        # the deterministic arange(P), so use the cached table instead of
+        # rebuilding arange -> outer -> cos/sin every forward.
+        cos, sin = self.rope.compress_rope.forward_arange(P, device)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)
