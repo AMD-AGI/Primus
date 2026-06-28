@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -13,7 +13,12 @@ to inject additional information into Megatron training logs:
     - ROCm/HIP memory stats.
     - Running average elapsed time per iteration (ms).
     - Running average throughput per GPU (TFLOP/s/GPU).
-    - Running average token throughput per GPU (tokens/s/GPU).
+    - Running average token throughput per GPU (tokens/s/GPU) (language models only).
+    - Diffusion-specific metrics (diffusion models only):
+      * Images per GPU (images/s/GPU): instant/average
+      * Latency per image (ms): instant
+      * Image resolution: height x width
+      * Average timestep
 
 Design:
     - We first parse Megatron's original ``log_string`` into a structured
@@ -33,6 +38,40 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils import logger as primus_logger
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 from primus.modules.module_utils import log_rank_0, warning_rank_0
+
+
+def _is_diffusion_model(args: Any, module_config: Any = None) -> bool:
+    """
+    Detect if this is a diffusion model training run.
+
+    Checks:
+    1. model_type == 'diffusion_model' (from args/params)
+    2. trainer_class contains 'Flux' or 'Diffusion' (from module_config)
+
+    Args:
+        args: Megatron args (module_config.params)
+        module_config: Full module config (for trainer_class access)
+
+    Returns:
+        True if diffusion model, False otherwise
+    """
+    # Check model_type from args
+    model_type = getattr(args, "model_type", None)
+    if model_type == "diffusion_model":
+        return True
+
+    # Check trainer_class from module_config (preferred source)
+    if module_config:
+        trainer_class = getattr(module_config, "trainer_class", None)
+        if trainer_class and ("Flux" in str(trainer_class) or "Diffusion" in str(trainer_class)):
+            return True
+
+    # Fallback: check trainer_class in args (shouldn't be there if in reserved_keys)
+    trainer_class = getattr(args, "trainer_class", None)
+    if trainer_class and ("Flux" in str(trainer_class) or "Diffusion" in str(trainer_class)):
+        return True
+
+    return False
 
 
 @dataclass
@@ -250,15 +289,20 @@ class MemoryStatsExtension:
 
                 # When pipeline parallelism (PP) is enabled, memory usage can vary across ranks.
                 # Therefore, we report the maximum ROCm memory usage across all ranks.
-                r_used_tensor = torch.tensor([r_used], device="cuda", dtype=torch.int64)
-                world_size = torch.distributed.get_world_size()
-                gathered_r_used = [torch.zeros_like(r_used_tensor) for _ in range(world_size)]
-                torch.distributed.all_gather(gathered_r_used, r_used_tensor)
+                # Use constant-size all_reduce(MAX) instead of O(world_size) all_gather:
+                # one reduce for the max value, a second to recover the owning rank
+                # (the rank tensor is masked to -1 on non-max ranks). On ties the
+                # highest such rank wins (vs. the lowest under the previous all_gather).
+                max_used_tensor = torch.tensor([r_used], device="cuda", dtype=torch.int64)
+                torch.distributed.all_reduce(max_used_tensor, op=torch.distributed.ReduceOp.MAX)
+                max_r_used = max_used_tensor.item()
 
-                total_r_used = [t.item() for t in gathered_r_used]
-                log_rank_0(f"total_r_used: {[round(r_used / 1024 ** 3, 2) for r_used in total_r_used]}")
-                max_r_used = max(total_r_used)
-                max_rank = total_r_used.index(max_r_used)
+                my_rank = torch.distributed.get_rank()
+                rank_tensor = torch.tensor(
+                    [my_rank if r_used == max_r_used else -1], device="cuda", dtype=torch.int64
+                )
+                torch.distributed.all_reduce(rank_tensor, op=torch.distributed.ReduceOp.MAX)
+                max_rank = rank_tensor.item()
 
                 rocm_mem_str = (
                     f" | rocm mem usage/free/total/usage_ratio: "
@@ -388,6 +432,38 @@ class ThroughputAverageExtension:
             f"log_avg_reset_interval: {self._log_avg_reset_interval}"
         )
 
+    def _inject_tflops(self, parsed: TrainingLogInfo) -> None:
+        """
+        Shared TFLOP throughput logic (extracted for reuse by diffusion extension).
+
+        Updates the throughput segment with running-average TFLOP throughput.
+
+        Args:
+            parsed: Parsed training log information
+        """
+        if parsed.throughput_tflops is not None:
+            tflops_value = parsed.throughput_tflops
+            iteration = parsed.iteration
+
+            # Handle warmup & sliding window logic for TFLOPs.
+            if iteration is not None and (
+                iteration == self._log_avg_skip_iterations + 1
+                or len(self._recent_tflop_throughputs) >= self._log_avg_reset_interval
+            ):
+                self._recent_tflop_throughputs.clear()
+
+            # Only accumulate after skip window.
+            if iteration is None or iteration > self._log_avg_skip_iterations:
+                self._recent_tflop_throughputs.append(tflops_value)
+
+            if self._recent_tflop_throughputs:
+                avg_tflops = sum(self._recent_tflop_throughputs) / len(self._recent_tflop_throughputs)
+                idx = parsed.throughput_index
+                if idx is not None and 0 <= idx < len(parsed.segments):
+                    parsed.segments[idx] = (
+                        f"throughput per GPU (TFLOP/s/GPU): {tflops_value:.1f}/{avg_tflops:.1f}"
+                    )
+
     def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
         """
         Update ``parsed`` with running-average TFLOP and token throughput.
@@ -406,27 +482,7 @@ class ThroughputAverageExtension:
             iteration = parsed.iteration
 
             # ---------------- TFLOPs ----------------
-            if parsed.throughput_tflops is not None:
-                tflops_value = parsed.throughput_tflops
-
-                # Handle warmup & sliding window logic for TFLOPs.
-                if iteration is not None and (
-                    iteration == self._log_avg_skip_iterations + 1
-                    or len(self._recent_tflop_throughputs) >= self._log_avg_reset_interval
-                ):
-                    self._recent_tflop_throughputs.clear()
-
-                # Only accumulate after skip window.
-                if iteration is None or iteration > self._log_avg_skip_iterations:
-                    self._recent_tflop_throughputs.append(tflops_value)
-
-                if self._recent_tflop_throughputs:
-                    avg_tflops = sum(self._recent_tflop_throughputs) / len(self._recent_tflop_throughputs)
-                    idx = parsed.throughput_index
-                    if idx is not None and 0 <= idx < len(parsed.segments):
-                        parsed.segments[idx] = (
-                            f"throughput per GPU (TFLOP/s/GPU): " f"{tflops_value:.1f}/{avg_tflops:.1f}"
-                        )
+            self._inject_tflops(parsed)
 
             # ---------------- Tokens/s ----------------
             if parsed.elapsed_ms is None:
@@ -485,6 +541,219 @@ class ThroughputAverageExtension:
             return log_string
 
 
+class DiffusionThroughputAverageExtension(ThroughputAverageExtension):
+    """
+    Helper extension for diffusion models: TFLOP throughput only, no tokens.
+
+    Inherits from ThroughputAverageExtension to reuse TFLOP logic.
+    Skips token throughput calculation entirely (diffusion models use images, not tokens).
+
+    Semantics mirror ThroughputAverageExtension:
+        - Ignore the first `log_avg_skip_iterations` iterations for averaging.
+        - Maintain a sliding window up to `log_avg_reset_interval` entries.
+    """
+
+    def __init__(self, args: Any):
+        super().__init__(args)
+        log_rank_0(
+            f"[Patch:megatron.training_log] DiffusionThroughputAverageExtension initialized "
+            f"(TFLOP only, no tokens)"
+        )
+
+    def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
+        """
+        Update ``parsed`` with running-average TFLOP throughput only.
+
+        For diffusion models: TFLOPs only, no token throughput.
+        """
+        try:
+            # If no parsed info is provided, keep the original string unchanged.
+            if parsed is None:
+                return log_string
+
+            # Only inject TFLOP throughput (no tokens for diffusion models)
+            self._inject_tflops(parsed)
+
+            # String result is ignored by the main patch when parsed is provided.
+            return log_string
+        except Exception:
+            # Any parsing / numeric issues should not break logging.
+            return log_string
+
+
+class DiffusionMetricsExtension:
+    """
+    Helper extension to compute and inject diffusion-specific metrics
+    (images per second per GPU and latency per image) into Megatron training logs.
+
+    This extension only activates for diffusion models (model_type == 'diffusion_model').
+    For language models, it early-returns without modifying logs.
+
+    Semantics mirror ThroughputAverageExtension:
+        - Ignore the first `log_avg_skip_iterations` iterations for averaging.
+        - Maintain a sliding window up to `log_avg_reset_interval` entries.
+    """
+
+    def __init__(self, args: Any, module_config: Any = None, runtime_state: Any = None):
+        self._args = args
+        # Store module_config reference for diffusion detection
+        # (We only access trainer_class from it, which is a top-level attribute, not the nested params)
+        self._module_config = module_config
+        self._runtime_state = runtime_state
+        # Cache world_size once at construction time
+        self._world_size = getattr(args, "world_size", None)
+        # Track image throughput statistics across calls
+        self._recent_image_throughputs: list[float] = []
+        # We follow the same warmup/reset semantics as ThroughputAverageExtension:
+        #   - Ignore the first `log_avg_skip_iterations` iterations for averaging
+        #   - Maintain a sliding window of size `log_avg_reset_interval`
+        self._log_avg_skip_iterations: int = int(getattr(args, "log_avg_skip_iterations", 0))
+        self._log_avg_reset_interval: int = int(getattr(args, "log_avg_reset_interval", 1000))
+
+    def _calculate_image_metrics(self, parsed: TrainingLogInfo) -> Optional[tuple[float, float]]:
+        """
+        Calculate image throughput metrics from parsed log info.
+
+        Args:
+            parsed: Parsed training log information
+
+        Returns:
+            Tuple of (images_per_second, latency_per_image_ms) or None if calculation fails
+        """
+        if parsed.elapsed_ms is None or parsed.global_batch_size is None or self._world_size is None:
+            return None
+
+        batch_size = int(parsed.global_batch_size)
+        elapsed_ms = float(parsed.elapsed_ms)
+        elapsed_s = elapsed_ms / 1000.0
+
+        if elapsed_s <= 0:
+            return None
+
+        # Calculate images per second per GPU
+        images_per_second = batch_size / elapsed_s / self._world_size
+
+        # Calculate latency per image (in milliseconds)
+        latency_per_image_ms = elapsed_ms / batch_size
+
+        return (images_per_second, latency_per_image_ms)
+
+    def _format_diffusion_metrics(
+        self, images_per_second: float, latency_per_image_ms: float, avg_images: float
+    ) -> list[str]:
+        """
+        Format diffusion metrics as log segments.
+
+        Args:
+            images_per_second: Current images per second per GPU
+            latency_per_image_ms: Current latency per image in milliseconds
+            avg_images: Average images per second per GPU
+
+        Returns:
+            List of metric strings to append to log segments
+        """
+        metrics = []
+
+        # Add images per GPU metrics (no trailing |, render function adds it)
+        images_metric = f"images per GPU (images/s/GPU): {images_per_second:.2f}/" f"{avg_images:.2f}"
+        metrics.append(images_metric)
+
+        # Add latency per image metric (no trailing |, render function adds it)
+        latency_metric = f"latency per image (ms): {latency_per_image_ms:.1f}"
+        metrics.append(latency_metric)
+
+        # Get metrics from runtime_state (required, no fallback)
+        last_metrics = None
+        if self._runtime_state:
+            last_metrics = self._runtime_state.last_metrics
+        else:
+            # Defensive: log warning but don't break logging
+            log_rank_0(
+                "[DiffusionMetricsExtension] WARNING: runtime_state not available, skipping diffusion metrics"
+            )
+            return metrics  # Return existing metrics without adding diffusion-specific ones
+
+        if last_metrics:
+            if "image_height" in last_metrics and "image_width" in last_metrics:
+                resolution_metric = (
+                    f"image resolution: "
+                    f"{int(last_metrics['image_height'])}x{int(last_metrics['image_width'])}"
+                )
+                metrics.append(resolution_metric)
+            if "avg_timestep" in last_metrics:
+                timestep_metric = f"avg timestep: {last_metrics['avg_timestep']:.1f}"
+                metrics.append(timestep_metric)
+
+            # Wall-clock step timer (from wall_clock_timer_patch)
+            if "wall_clock_step_ms" in last_metrics and self._world_size:
+                wc_ms = float(last_metrics["wall_clock_step_ms"])
+                metrics.append(f"wall clock (ms): {wc_ms:.1f}")
+                gbs = getattr(self._args, "global_batch_size", None)
+                if gbs and wc_ms > 0:
+                    wc_img_per_s = int(gbs) / (wc_ms / 1000.0) / self._world_size
+                    metrics.append(f"wall clock img/s/GPU: {wc_img_per_s:.2f}")
+
+        return metrics
+
+    def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
+        """
+        Update ``parsed`` with images per second and latency per image metrics.
+
+        Only activates for diffusion models (model_type == 'diffusion_model').
+        For other models, early-returns without modification.
+
+        Metrics:
+            - images per GPU (images/s/GPU): instant/average
+            - latency per image (ms): instant
+        """
+        try:
+            # If no parsed info is provided, keep the original string unchanged
+            if parsed is None:
+                return log_string
+
+            # Early return for non-diffusion models
+            if not _is_diffusion_model(self._args, self._module_config):
+                return log_string
+
+            # Calculate image metrics
+            metrics_result = self._calculate_image_metrics(parsed)
+            if metrics_result is None:
+                return log_string
+
+            images_per_second, latency_per_image_ms = metrics_result
+            iteration = parsed.iteration
+
+            # Handle warmup & sliding window logic for images
+            if iteration is not None and (
+                iteration == self._log_avg_skip_iterations + 1
+                or len(self._recent_image_throughputs) >= self._log_avg_reset_interval
+            ):
+                self._recent_image_throughputs.clear()
+
+            # Only accumulate after skip window
+            if iteration is None or iteration > self._log_avg_skip_iterations:
+                self._recent_image_throughputs.append(images_per_second)
+
+            if self._recent_image_throughputs:
+                avg_images = sum(self._recent_image_throughputs) / len(self._recent_image_throughputs)
+
+                # Format and append metrics
+                metrics = self._format_diffusion_metrics(images_per_second, latency_per_image_ms, avg_images)
+                parsed.segments.extend(metrics)
+
+            # String result is ignored by the main patch when parsed is provided.
+            return log_string
+        except Exception as e:
+            # Log the exception to help debug, but don't break training
+            iteration = parsed.iteration if parsed else None
+            log_rank_0(
+                f"[Patch:megatron.training_log] DiffusionMetricsExtension ERROR "
+                f"(iteration={iteration}): {type(e).__name__}: {e}"
+            )
+            # Any parsing / numeric issues should not break logging.
+            return log_string
+
+
 @register_patch(
     "megatron.training_log.unified_patch",
     backend="megatron",
@@ -510,6 +779,9 @@ def patch_training_log_unified(ctx: PatchContext):
         # Get unified Megatron args (module_config.params) from context.
         config = get_args(ctx)
 
+        # Get runtime_state from context
+        runtime_state = ctx.extra.get("runtime_state")
+
         # Check whether we should enable ROCm stats / throughput logging.
         use_rocm_mem = bool(getattr(config, "use_rocm_mem_info", False))
         rocm_iters = getattr(config, "use_rocm_mem_info_iters", [])
@@ -532,14 +804,25 @@ def patch_training_log_unified(ctx: PatchContext):
         if getattr(original_training_log, "_primus_training_log_print_rank_wrapper", False):
             return
 
-        # Create helper extensions only when stat injection is enabled so they
-        # keep state (ROCm cache, avg windows) across all training_log
-        # invocations. In forwarding-only mode they are not needed.
-        mem_ext = elapsed_ext = throughput_ext = None
-        if enable_rocm_stats:
-            mem_ext = MemoryStatsExtension(config)
-            elapsed_ext = ElapsedAverageExtension(config)
+        # Create helper extensions once so they keep state (ROCm cache, avg windows)
+        # across all training_log invocations.
+        # Get module_config from context to pass to diffusion extensions
+        # (needed to access trainer_class which is in reserved_keys, not in params)
+        module_config = ctx.extra.get("module_config")
+
+        # Detect if this is a diffusion model to instantiate the correct throughput extension
+        is_diffusion = _is_diffusion_model(config, module_config)
+
+        mem_ext = MemoryStatsExtension(config)
+        elapsed_ext = ElapsedAverageExtension(config)
+        # Use diffusion-specific throughput extension if this is a diffusion model
+        if is_diffusion:
+            throughput_ext = DiffusionThroughputAverageExtension(config)
+        else:
             throughput_ext = ThroughputAverageExtension(config)
+        diffusion_ext = DiffusionMetricsExtension(
+            config, module_config=module_config, runtime_state=runtime_state
+        )
         call_count = 0
         # Capture the original ``print_rank_last`` so we can delegate actual
         # printing back to Megatron after mutating the log string.
@@ -570,12 +853,12 @@ def patch_training_log_unified(ctx: PatchContext):
                     # Parse the original log string once and share across extensions.
                     parsed = parse_training_log_line(log_string)
 
-                    # Inject memory statistics, elapsed avg, throughput, and token
-                    # throughput by mutating the parsed structure. These calls ignore
-                    # their string return value when `parsed` is provided.
+                    # Inject memory statistics, elapsed avg, throughput, and diffusion
+                    # metrics by mutating the parsed structure.
                     mem_ext.inject(log_string, call_count, parsed)
                     elapsed_ext.inject(log_string, parsed)
                     throughput_ext.inject(log_string, parsed)
+                    diffusion_ext.inject(log_string, parsed)
 
                     # Render the final line from the parsed structure.
                     updated = render_training_log_line(parsed)
