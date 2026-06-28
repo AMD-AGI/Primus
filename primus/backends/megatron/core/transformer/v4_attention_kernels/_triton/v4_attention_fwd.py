@@ -414,15 +414,16 @@ def _launch_v4_attention_fwd(
     # Env-overridable so future shape regressions can fall back without
     # rebuilding. The defaults are the per-shape winner from the R2
     # sweep (`p57/r2_sweep_local.sh`).
-    # gfx950/MI355X: the HCA fwd path wins at BLOCK_M=128 (cos ~1.0), but pure
-    # SWA fwd regresses at 128 (wants 64). Gate on the same
-    # ``hca_local_seqlen`` discriminator used for the stage default below.
-    _default_block_m_fwd = "128" if hca_local_seqlen else "64"
-    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", _default_block_m_fwd))
-    BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_N", "16"))
-    NUM_WARPS_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_WARPS", "8"))
-    _default_stages_fwd = "1" if hca_local_seqlen else "2"
-    NUM_STAGES_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_STAGES", _default_stages_fwd))
+    # Arch-aware defaults (see ._v4_attn_tuning); env knobs still override.
+    # gfx950/MI355X: HCA fwd wins at BLOCK_M=128, pure SWA wants 64 (regresses at 128).
+    # gfx1250: SWA wins at BM=128/BN=32/W4/S1 (+62-70% vs gfx950; ab_sweep/opt7c).
+    from ._v4_attn_tuning import fwd_attn_defaults
+
+    _bm, _bn, _w, _s = fwd_attn_defaults(is_hca=bool(hca_local_seqlen))
+    BLOCK_M = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_M", str(_bm)))
+    BLOCK_N = int(os.getenv("PRIMUS_V4_ATTN_FWD_BLOCK_N", str(_bn)))
+    NUM_WARPS_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_WARPS", str(_w)))
+    NUM_STAGES_FWD = int(os.getenv("PRIMUS_V4_ATTN_FWD_STAGES", str(_s)))
     BLOCK_DMODEL = D  # head_dim must be a power of 2 for tl.dot
 
     grid = (triton.cdiv(Sq, BLOCK_M), B * HQ)

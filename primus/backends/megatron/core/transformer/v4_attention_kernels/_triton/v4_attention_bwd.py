@@ -1697,7 +1697,11 @@ def _launch_v4_attention_bwd(
         # overridable via PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS.
         num_head_groups = 1
         if HQ > HK:
-            _hg_default = "2" if (HQ >= 64 and HK == 1) else "1"
+            # Arch-aware (see ._v4_attn_tuning): gfx1250 wants HG=32 (+37-53%, ab_sweep/opt7b),
+            # gfx950 wants 2. Env knob still overrides.
+            from ._v4_attn_tuning import bwd_dkv_head_groups_default
+
+            _hg_default = str(bwd_dkv_head_groups_default(HQ, HK))
             target = int(os.getenv("PRIMUS_V4_ATTN_BWD_DKV_HEAD_GROUPS", _hg_default))
             while target > 1 and HQ % target != 0:
                 target //= 2
