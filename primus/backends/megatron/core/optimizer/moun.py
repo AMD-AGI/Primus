@@ -3,6 +3,7 @@
 """Megatron muon optimizer wrapper to handle tensor-parallel."""
 
 import logging
+import os
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 import torch
@@ -198,6 +199,22 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             # on the 3-D param indexes [E, N, K]; drop the leading expert axis for the
             # per-slice call (None under TP=1).
             slice_pdim = None if partition_dim is None or partition_dim == 0 else partition_dim - 1
+            if slice_pdim is None and os.environ.get("PRIMUS_MUON_BATCHED_NS", "1") != "0":
+                # Non-partitioned (TP=1) experts: orthogonalize ALL experts in a
+                # single batched Newton-Schulz instead of an E-long Python loop.
+                # emerging_optimizers>=0.4.0a0 ``newton_schulz`` accepts 3-D
+                # ``[E, N, K]`` natively (``batched_newton_schulz_step`` via
+                # ``torch.baddbmm``), so one call replaces E per-expert calls,
+                # folding E rounds of Python op-dispatch and the per-expert GEMM
+                # launches into one batched launch. ``scaled_orthogonalize_fn`` keys
+                # its scale on ``grad.size(-2)/(-1)`` (= N, K, shared across experts),
+                # so the single scalar applies to the whole batch -- numerically
+                # equivalent to the per-slice loop below.
+                #
+                # Partitioned experts (TP>1) keep the loop: the batched +
+                # ``partition_dim`` path is not exercised here. Set
+                # ``PRIMUS_MUON_BATCHED_NS=0`` to force the per-expert loop.
+                return self.scaled_orthogonalize_fn(grad, tp_group, None)
             return torch.stack(
                 [
                     self.scaled_orthogonalize_fn(grad[e], tp_group, slice_pdim)
