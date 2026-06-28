@@ -1756,18 +1756,42 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             # reduce-scatter (TP=1 / DP=1 / EP=1), since grad_b=None skips the reduce.
             # Needs a turbo wheel carrying fused_grouped_wgrad (else falls back).
             _wgrad_ctx = contextlib.nullcontext()
-            if (
-                os.environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
-                and getattr(weights, "main_grad", None) is not None
-                and weights.main_grad.dim() == 3
-            ):
+            _fwg_dbg = os.environ.get("PRIMUS_TURBO_FUSE_WGRAD_DEBUG") == "1" and getattr(type(self), "_fwg_logn", 0) < 10
+            _fwg_flag = os.environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
+            _mg = getattr(weights, "main_grad", None)
+            if _fwg_flag and _mg is not None and _mg.dim() == 3:
                 try:
-                    from primus_turbo.pytorch.ops.grouped_gemm_fp8 import fused_grouped_wgrad
+                    from primus_turbo.pytorch.ops.grouped_gemm_fp8 import (
+                        _expert_main_grad_view,
+                        fused_grouped_wgrad,
+                    )
 
-                    _mg = weights.main_grad
-                    _wgrad_ctx = fused_grouped_wgrad([_MainGradShim(_mg[i]) for i in range(_mg.shape[0])])
-                except ImportError:
-                    pass  # turbo wheel without the fused path -> eager bridge add_
+                    _shims = [_MainGradShim(_mg[i]) for i in range(_mg.shape[0])]
+                    if _fwg_dbg:
+                        import sys
+
+                        _v = _expert_main_grad_view(_shims)
+                        print(
+                            f"[OPT-1] gate PASS shape={tuple(_mg.shape)} contig={_mg.is_contiguous()} "
+                            f"stride={_mg.stride()} view={'OK' if _v is not None else 'REJECTED'}",
+                            file=sys.stderr, flush=True,
+                        )
+                        type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
+                    _wgrad_ctx = fused_grouped_wgrad(_shims)
+                except ImportError as _e:
+                    if _fwg_dbg:
+                        import sys
+
+                        print(f"[OPT-1] ImportError: {_e}", file=sys.stderr, flush=True)
+                        type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
+            elif _fwg_dbg:
+                import sys
+
+                print(
+                    f"[OPT-1] gate FAIL flag={_fwg_flag} main_grad={'None' if _mg is None else f'dim={_mg.dim()}'}",
+                    file=sys.stderr, flush=True,
+                )
+                type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
 
             with _wgrad_ctx:
                 out = primus_turbo_torch.ops.grouped_gemm_fp8(
