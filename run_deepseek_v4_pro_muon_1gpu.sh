@@ -108,6 +108,11 @@ fi
 
 # ---------- REQUIRED gfx1250 RCCL AVG->SUM workaround -----------------------
 export PYTHONPATH="$SCRIPT_DIR/rccl_avg_workaround:${PYTHONPATH:-}"
+# Real primus_turbo imports flydsl at import time; put FLYDSL_PKG_DIR on PYTHONPATH.
+export FLYDSL_PKG_DIR=${FLYDSL_PKG_DIR:-}
+if [ -n "$FLYDSL_PKG_DIR" ] && [ -d "$FLYDSL_PKG_DIR/flydsl" ]; then
+    export PYTHONPATH="$FLYDSL_PKG_DIR:$PYTHONPATH"
+fi
 
 # SDMA OFF on this host (run 3 debugging, 2026-06-10): an SDMA H2D copy
 # intermittently never signals completion — py-spy --native showed the trainer
@@ -394,11 +399,14 @@ PROXY_OVERRIDES="\
     --profile $PROFILE \
     --use_pytorch_profiler $PROFILE \
     --profile_step_start $PROFILE_STEP_START \
-    --profile_step_end $PROFILE_STEP_END"
+    --profile_step_end $PROFILE_STEP_END \
+    --torch_profiler_use_gzip True"
 
 ENV_ARGS=()
 for v in DOCKER_IMAGE NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK NVTE_FUSED_ATTN_AOTRITON \
+         PRIMUS_TURBO_GEMM_BACKEND PRIMUS_TURBO_GROUPED_GEMM_BACKEND TURBO_WHEEL_DIR FLYDSL_PKG_DIR \
          NVTE_FLASH_ATTN NVTE_USE_CK_GEMM NVTE_ROCM_ENABLE_MXFP8 PRIMUS_FP8_DISABLE_TURBO PYTHONPATH HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM \
+         TORCH_COMPILE_DISABLE TORCHINDUCTOR_COMPILE_THREADS \
          HIP_LAUNCH_BLOCKING AMD_SERIALIZE_KERNEL AMD_SERIALIZE_COPY \
          AMD_LOG_LEVEL AMD_LOG_MASK MASTER_PORT TORCH_NCCL_HIGH_PRIORITY \
          NCCL_IB_DISABLE NCCL_P2P_DISABLE NCCL_IB_HCA NCCL_SOCKET_IFNAME \
@@ -419,6 +427,8 @@ done
 VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 [[ -d "$TE_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TE_WHEEL_DIR":"$TE_WHEEL_DIR")
 [[ -d "$TE_DIR" ]] && VOLUME_ARGS+=(-v "$TE_DIR":"$TE_DIR")
+[[ -n "${TURBO_WHEEL_DIR:-}" && -d "$TURBO_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TURBO_WHEEL_DIR":"$TURBO_WHEEL_DIR")
+[[ -n "${FLYDSL_PKG_DIR:-}" && -d "$FLYDSL_PKG_DIR/flydsl" ]] && VOLUME_ARGS+=(-v "$FLYDSL_PKG_DIR":"$FLYDSL_PKG_DIR")
 # Opt-in tuned hipBLASLt: mount the built library at the same path and pass the
 # loader env into the container (only when enabled, to keep stock runs untouched).
 if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
@@ -441,7 +451,12 @@ TE_INSTALL_PREFIX="\
         echo '[TE] WARNING: no TE wheel found at ${TE_WHEEL_DIR}; run will likely fail'; \
     fi && \
     echo '[deps] installing Primus requirements' && \
-    pip install --quiet -r requirements.txt && "
+    pip install --quiet -r requirements.txt && \
+    if [ -n \"${TURBO_WHEEL_DIR:-}\" ] && ls ${TURBO_WHEEL_DIR}/primus_turbo-*.whl >/dev/null 2>&1; then \
+        echo '[turbo] installing real primus_turbo wheel from ${TURBO_WHEEL_DIR}' && \
+        pip install --quiet --force-reinstall --no-deps ${TURBO_WHEEL_DIR}/primus_turbo-*.whl && \
+        python -c 'import primus_turbo, primus_turbo.pytorch as _; print(\"[turbo] primus_turbo\", primus_turbo.__version__, \"imported OK\")'; \
+    fi && "
 
 docker run --rm \
     "${ENV_ARGS[@]}" \
