@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -137,9 +137,21 @@ def primus_evaluate(
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
 
-        # Compute final average loss across all eval iterations
+        # DP all-reduce for tuple-path (validation) metrics so that every
+        # rank sees the same globally-averaged loss.  Scalar/legacy metrics
+        # are NOT all-reduced, matching upstream Megatron's evaluate().
         total_loss_dict = {}
         if is_pipeline_stage_containing_loss():
+            from megatron.core import mpu
+
+            dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
+            for key in total_loss_numerators.keys():
+                num = total_loss_numerators[key]
+                den = total_loss_denominators[key]
+                if isinstance(num, torch.Tensor) and isinstance(den, torch.Tensor):
+                    torch.distributed.all_reduce(num, group=dp_group)
+                    torch.distributed.all_reduce(den, group=dp_group)
+
             for key in total_loss_numerators.keys():
                 # Reduce numerator/denominator across data-parallel ranks so the
                 # validation loss is a TRUE global average, identical on every rank.
