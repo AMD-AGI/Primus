@@ -191,6 +191,21 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
             # Because -1 is a valid index for ndarray, we decided to not overload it.
             partition_dim = None
 
+        if grad.dim() == 3:
+            # Consolidated grouped-expert weight [E, N, K]: Muon orthogonalizes 2-D
+            # matrices, so orthogonalize each expert's [N, K] slice independently
+            # (matches the per-expert weight{i} path on other branches). partition_dim
+            # on the 3-D param indexes [E, N, K]; drop the leading expert axis for the
+            # per-slice call (None under TP=1).
+            slice_pdim = None if partition_dim is None or partition_dim == 0 else partition_dim - 1
+            return torch.stack(
+                [
+                    self.scaled_orthogonalize_fn(grad[e], tp_group, slice_pdim)
+                    for e in range(grad.shape[0])
+                ],
+                dim=0,
+            )
+
         if self.split_qkv and self.is_qkv_fn(p):  # type: ignore[misc]
             # split grouped attention parameters (e.g., QKV, GQA, etc.)
             grad_shape = grad.shape
