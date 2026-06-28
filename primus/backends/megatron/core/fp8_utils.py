@@ -73,14 +73,19 @@ if HAVE_TE and HAVE_TURBO:
         return format_mapping[te_format]
 
     def get_fp8_recipe(config: TransformerConfig):
-        """Return fp8 recipe.
+        """Return fp8 recipe (Primus Turbo + TE variant).
 
         Arguments:
             config (TransformerConfig): Configuration object.
 
         Returns:
-            FP8 recipe: Transformer Engine FP8 recipe.
-            FP8 None reason: reason why the fp8 recipe is None.
+            Tuple of (fp8_recipe, fp8_recipe_none_reason):
+                - fp8_recipe: Transformer Engine FP8 recipe, or None.
+                - fp8_recipe_none_reason: reason why the fp8 recipe is None.
+
+        Note:
+            This variant (HAVE_TE + HAVE_TURBO) returns a tuple. The TE-only
+            variant returns a single recipe value.
         """
         if config.fp8 == "e4m3":
             fp8_format = transformer_engine.common.recipe.Format.E4M3
