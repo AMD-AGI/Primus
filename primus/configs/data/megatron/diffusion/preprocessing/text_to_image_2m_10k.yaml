@@ -1,0 +1,93 @@
+# Text-to-Image-2M 10K Subset Configuration
+#
+# This config uses the 10K high-resolution subset (1024x1024) from the
+# text-to-image-2M dataset, perfect for fine-tuning Flux models.
+#
+# Dataset: https://huggingface.co/datasets/jackyhate/text-to-image-2M
+# Subset: data_1024_10K (exactly 10,000 samples at 1024x1024 resolution)
+#
+# ============================================================================
+# Quick Start (Recommended - Single Command)
+# ============================================================================
+# Prepare and finalize dataset in one command:
+#
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/text_to_image_2m_10k.yaml
+#
+# Finalization (dataset.yaml + energon prepare) runs automatically.
+# To skip it, pass --no-finalize.
+#
+# Processing time: ~30-60 minutes on 8 GPUs
+# Output size: ~50-80 GB (pre-encoded tensors)
+# ============================================================================
+
+# ============================================================================
+# Source Configuration (HuggingFace with data_files)
+# ============================================================================
+source:
+  type: huggingface
+  hf_dataset: jackyhate/text-to-image-2M
+  hf_split: train
+  hf_data_files: data_1024_10K/*.tar  # Load only the 10K subset
+
+# ============================================================================
+# Data Format Configuration
+# ============================================================================
+# This dataset stores images as 'jpg' files and captions in JSON format.
+# Specify how to extract image and caption from dataset samples.
+data_format:
+  image_key: jpg                  # Images are stored in 'jpg' field
+  caption_key: json.prompt        # Captions are in JSON at 'prompt' key (NOT 'caption')
+
+  # Alternative: specify multiple fallback keys (tried in order)
+  # image_keys: ['image', 'jpg']
+  # caption_keys: ['prompt', 'json.prompt', 'caption', 'json.caption']
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/text2img_10k_encoded
+  shard_size: 1000
+  max_samples: null
+  compress: false
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  model_path: black-forest-labs/FLUX.1-dev
+  vae_path: null
+  t5_path: null
+  clip_path: null
+  precision: bf16
+  device: cuda
+  batch_size: 8
+
+# ============================================================================
+# Image Preprocessing
+# ============================================================================
+image:
+  image_size: 1024
+  center_crop: false
+
+# ============================================================================
+# Authentication
+# ============================================================================
+auth:
+  hf_token_file: ""  # Public dataset, no token needed
+
+# ============================================================================
+# Dataset Information
+# ============================================================================
+# Name: Text-to-Image-2M (10K subset)
+# Size: 10,000 high-resolution images
+# Resolution: 1024x1024
+# Content: Complex scenes with rich, detailed annotations
+# License: MIT
+# Use case: Fine-tuning Flux diffusion models
+#
+# Full command example:
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/text_to_image_2m_10k.yaml
+# ============================================================================
