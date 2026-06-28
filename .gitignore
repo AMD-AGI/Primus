@@ -11,5 +11,5 @@ local/
 .gitmodules
 output
 experiment
-data
+/data/*
 pp_simulation_result
