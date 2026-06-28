@@ -1308,7 +1308,9 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
 
             self.activation_func_with_probs = _activation_func_with_probs
 
-    def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
+    def _stack_grouped_linear_weight(
+        self, module: torch.nn.Module, mxfp8_nt: bool = False
+    ) -> torch.Tensor:
         """Stack per-expert ``weight{i}`` tensors into a contiguous ``[E, N, K]``
         buffer for grouped-GEMM consumption.
 
@@ -1323,6 +1325,16 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         eager chain (kept for A/B testing and as the G37 reference path).
         """
         weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
+        if mxfp8_nt:
+            # mxfp8 grouped GEMM is NT-only: it wants b=[E, N, K] (out, in) with the
+            # contraction dim K contiguous (1x32 E8M0 block-scales run along K). The
+            # per-expert weights are already [N, K], so a plain stack yields [E, N, K]
+            # directly. This avoids the stack->[E,K,N]->transpose-back->[E,N,K]
+            # .contiguous() round-trip (a redundant permute): the
+            # shared helper transposes to the BF16/trans_b=False layout and the mxfp8
+            # path used to undo it every micro-batch. torch.stack is autograd-correct
+            # (grad splits back to each weight{i}).
+            return torch.stack(weights, dim=0)
         return stack_grouped_weight(weights)
 
     def forward(
@@ -1348,26 +1360,48 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        w1 = self._stack_grouped_linear_weight(self.linear_fc1)
-        w2 = self._stack_grouped_linear_weight(self.linear_fc2)
-        tokens_per_expert = tokens_per_expert.to(w1.device)
-
         use_grouped_gemm_low_precision = (
             PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
             and not self.disable_turbo_grouped_mlp_low_precision
         )
+        # Decide the mxfp8 NT layout BEFORE stacking so the weights are built straight
+        # into b=[E, N, K] and we skip the per-micro-batch transpose-back .contiguous().
+        _mx_active = False
+        if use_grouped_gemm_low_precision:
+            _mx_active = (
+                PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config().data().granularity
+                == ScalingGranularity.MX_BLOCKWISE
+            )
+
+        w1 = self._stack_grouped_linear_weight(self.linear_fc1, mxfp8_nt=_mx_active)
+        w2 = self._stack_grouped_linear_weight(self.linear_fc2, mxfp8_nt=_mx_active)
+        tokens_per_expert = tokens_per_expert.to(w1.device)
+
+        # Opt-in fused wgrad->main_grad accumulation (mirrors TE fuse_wgrad_accumulation):
+        # accumulate the mxfp8 expert wgrad straight into each expert's fp32 main_grad,
+        # removing the per-micro-batch .grad->main_grad add_ swarm. mxfp8-only; default off.
+        from primus_turbo.pytorch.ops.grouped_gemm_fp8 import fused_grouped_wgrad
+        _fuse_wgrad = _mx_active and __import__("os").environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
+        _fc1_w = [getattr(self.linear_fc1, f"weight{i}") for i in range(self.num_local_experts)] if _fuse_wgrad else None
+        _fc2_w = [getattr(self.linear_fc2, f"weight{i}") for i in range(self.num_local_experts)] if _fuse_wgrad else None
+
         probs_for_activation = permuted_probs.unsqueeze(-1)
 
         if permuted_local_hidden_states.nelement() != 0:
             if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                fc1_output = pt.ops.grouped_gemm_fp8(
-                    permuted_local_hidden_states,
-                    w1,
-                    tokens_per_expert,
-                    trans_b=False,
-                    config=quant_config.data(),
-                )
+                # MXFP8 grouped GEMM is NT-only (trans_b=True, b=[E, N, K]). For mxfp8 the
+                # weight is already stacked into [E, N, K] (see _stack_grouped_linear_weight),
+                # so pass it straight through -- no transpose-back .contiguous().
+                _mx_fc1 = quant_config.data().granularity == ScalingGranularity.MX_BLOCKWISE
+                with fused_grouped_wgrad(_fc1_w):
+                    fc1_output = pt.ops.grouped_gemm_fp8(
+                        permuted_local_hidden_states,
+                        w1,
+                        tokens_per_expert,
+                        trans_b=True if _mx_fc1 else False,
+                        config=quant_config.data(),
+                    )
             else:
                 fc1_output = pt.ops.grouped_gemm(
                     permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
@@ -1395,13 +1429,17 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
 
             if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                output = pt.ops.grouped_gemm_fp8(
-                    intermediate_parallel,
-                    w2,
-                    tokens_per_expert,
-                    trans_b=False,
-                    config=quant_config.data(),
-                )
+                # MXFP8 grouped GEMM is NT-only (trans_b=True, b=[E, N, K]); w2 is already
+                # stacked into [E, N, K] for mxfp8, so pass it straight through.
+                _mx_fc2 = quant_config.data().granularity == ScalingGranularity.MX_BLOCKWISE
+                with fused_grouped_wgrad(_fc2_w):
+                    output = pt.ops.grouped_gemm_fp8(
+                        intermediate_parallel,
+                        w2,
+                        tokens_per_expert,
+                        trans_b=True if _mx_fc2 else False,
+                        config=quant_config.data(),
+                    )
             else:
                 output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
         else:
@@ -1409,6 +1447,10 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
             assert (
                 not self.patch_zero_bubble and not self.patch_primus_pipeline
             ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
+            if _mx_active:
+                # mxfp8 stacked w as [E, N, K]; restore [E, K, N] for the legacy flat views.
+                w1 = w1.transpose(-1, -2).contiguous()
+                w2 = w2.transpose(-1, -2).contiguous()
             w1_flat = w1.view(self.config.hidden_size, -1)
             w2_flat = w2.view(-1, self.config.hidden_size)
             hidden = torch.matmul(permuted_local_hidden_states, w1_flat)
