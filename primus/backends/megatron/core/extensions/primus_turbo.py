@@ -5,6 +5,8 @@
 ###############################################################################
 import gc
 from contextlib import contextmanager, nullcontext
+import contextlib
+import os
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import primus_turbo.pytorch as primus_turbo_torch
@@ -107,6 +109,25 @@ def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tenso
     return _dummy_wgrads[key].detach()
 
 
+class _MainGradShim:
+    """Per-expert handle for primus_turbo's ``fused_grouped_wgrad`` over a
+    *consolidated* ``[E, N, K]`` grouped-expert weight (OPT-1).
+
+    ``PrimusTurboGroupedLinear`` keeps one consolidated weight with a single
+    ``main_grad`` block, but ``fused_grouped_wgrad`` / ``_expert_main_grad_view``
+    expect a list of per-expert handles, each exposing a 2-D ``main_grad`` and a
+    ``grad_added_to_main_grad`` flag. These shims point at the contiguous 2-D
+    slices ``main_grad[i]`` of the consolidated block, so the grouped GEMM
+    backward accumulates each expert's wgrad straight into the right slice.
+    """
+
+    __slots__ = ("main_grad", "grad_added_to_main_grad")
+
+    def __init__(self, main_grad_slice: torch.Tensor) -> None:
+        self.main_grad = main_grad_slice
+        self.grad_added_to_main_grad = False
+
+
 def _bridge_weight_grad(
     x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: PrimusTurboQuantizedTensorPair
 ):
@@ -136,9 +157,16 @@ def _bridge_weight_grad(
                 weight, "grad_added_to_main_grad"
             ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
 
-            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding quantized weight gradient to main grad twice.
-            weight.main_grad.add_(grad_quantized_weight)
-            weight.grad_added_to_main_grad = True
+            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding the
+            # quantized weight gradient to main_grad twice.
+            if grad_quantized_weight is None:
+                # OPT-1 fused path: the grouped GEMM backward already accumulated the
+                # expert wgrad straight into main_grad (under fused_grouped_wgrad) and
+                # returned grad_b=None, so there is nothing to add here -- just flag it.
+                weight.grad_added_to_main_grad = True
+            else:
+                weight.main_grad.add_(grad_quantized_weight)
+                weight.grad_added_to_main_grad = True
 
             return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None, None
 
@@ -1719,13 +1747,36 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 ),
             )
 
-            out = primus_turbo_torch.ops.grouped_gemm_fp8(
-                x,
-                quantized_weights,
-                m_splits,
-                trans_b=True,
-                config=quant_config.data(),
-            )
+            # OPT-1 (opt-in, single-GPU): accumulate the expert wgrad straight into
+            # main_grad in the grouped GEMM backward (beta=1 ACCUMULATE) instead of
+            # GEMM-wgrad -> _WeightGradBridge.main_grad.add_(). Per-expert shims point
+            # at the consolidated [E,N,K] main_grad slices; the grouped backward
+            # accumulates into them and returns grad_b=None, then the bridge backward
+            # just flags grad_added. ONLY safe with no gradient all-reduce /
+            # reduce-scatter (TP=1 / DP=1 / EP=1), since grad_b=None skips the reduce.
+            # Needs a turbo wheel carrying fused_grouped_wgrad (else falls back).
+            _wgrad_ctx = contextlib.nullcontext()
+            if (
+                os.environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
+                and getattr(weights, "main_grad", None) is not None
+                and weights.main_grad.dim() == 3
+            ):
+                try:
+                    from primus_turbo.pytorch.ops.grouped_gemm_fp8 import fused_grouped_wgrad
+
+                    _mg = weights.main_grad
+                    _wgrad_ctx = fused_grouped_wgrad([_MainGradShim(_mg[i]) for i in range(_mg.shape[0])])
+                except ImportError:
+                    pass  # turbo wheel without the fused path -> eager bridge add_
+
+            with _wgrad_ctx:
+                out = primus_turbo_torch.ops.grouped_gemm_fp8(
+                    x,
+                    quantized_weights,
+                    m_splits,
+                    trans_b=True,
+                    config=quant_config.data(),
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
