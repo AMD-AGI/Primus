@@ -15,3 +15,7 @@ mlflow==3.4.0
 pyrsmi
 plotext
 hip-python
+megatron-energon==7.3.2
+webdataset==1.0.2
+tqdm==4.67.3
+pyarrow==21.0.0
