@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -59,27 +59,40 @@ def patch_torch_fsdp(ctx: PatchContext):
         f"[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP "
         f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
     )
-    # Megatron Core 0.16 may pass new kwargs (e.g., force_all_reduce) into
-    # model_chunk.finish_grad_sync(). Keep FSDP2 path forward-compatible by
-    from megatron.core.distributed import data_parallel_base
 
-    original_start_grad_sync = data_parallel_base._BaseDataParallel.start_grad_sync
-    original_finish_grad_sync = data_parallel_base._BaseDataParallel.finish_grad_sync
+    # Patch get_data_parallel_group_if_dtensor to handle 2D HSDP meshes.
+    # The upstream implementation calls tensor.device_mesh.get_group() without mesh_dim,
+    # which fails for 2D meshes. For HSDP (dp_replicate, dp_shard), we return the
+    # shard group (innermost dim) since that's where parameters are actually sharded;
+    # replicas have identical gradients so we must not all-reduce across them.
+    import megatron.core.optimizer.clip_grads as clip_grads_module
+    import megatron.core.utils as mcore_utils
+    from megatron.training import utils as training_utils
 
-    if not getattr(original_start_grad_sync, "_primus_grad_sync_compat", False):
+    try:
+        from torch.distributed._tensor import DTensor
 
-        def _patched_start_grad_sync(self, *unused, **unused_kwargs):
-            return original_start_grad_sync(self, *unused)
+        HAVE_DTENSOR = True
+    except ImportError:
+        HAVE_DTENSOR = False
 
-        def _patched_finish_grad_sync(self, *unused, **unused_kwargs):
-            return original_finish_grad_sync(self)
+    def _get_data_parallel_group_if_dtensor(tensor, data_parallel_group=None):
+        if HAVE_DTENSOR and isinstance(tensor, DTensor):
+            mesh = tensor.device_mesh
+            if mesh.ndim > 1:
+                current_group = mesh.get_group(mesh_dim=-1)
+            else:
+                current_group = mesh.get_group()
+            if data_parallel_group is not None and current_group != data_parallel_group:
+                raise RuntimeError("DTensor mesh group does not match the expected data_parallel_group")
+            return current_group
+        return None
 
-        setattr(_patched_start_grad_sync, "_primus_grad_sync_compat", True)
-        setattr(_patched_finish_grad_sync, "_primus_grad_sync_compat", True)
-        data_parallel_base._BaseDataParallel.start_grad_sync = _patched_start_grad_sync
-        data_parallel_base._BaseDataParallel.finish_grad_sync = _patched_finish_grad_sync
-
-        log_rank_0(
-            "[Patch:megatron.fsdp.torch_fsdp2]   Patched _BaseDataParallel "
-            "start_grad_sync/finish_grad_sync to accept extra kwargs "
-        )
+    mcore_utils.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
+    clip_grads_module.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
+    if hasattr(training_utils, "get_data_parallel_group_if_dtensor"):
+        training_utils.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
+    log_rank_0(
+        "[Patch:megatron.fsdp.torch_fsdp2]   Patched get_data_parallel_group_if_dtensor "
+        "for 2D HSDP mesh support"
+    )
