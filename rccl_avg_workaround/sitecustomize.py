@@ -117,6 +117,51 @@ def _install_primus_turbo_stub():
           file=sys.stderr, flush=True)
 
 
+def _install_flydsl_repairs():
+    """FlyDSL cold-compile repairs (from mi450/gfx1250_smoke/flydsl_env.py),
+    needed when the real primus_turbo is installed (it imports flydsl kernels at
+    import time). No-op when flydsl is not importable (non-turbo runs)."""
+    import importlib.util
+    if importlib.util.find_spec("flydsl") is None:
+        return
+    import inspect
+
+    def _clean_getfile(object):
+        if inspect.ismodule(object):
+            if getattr(object, "__file__", None):
+                return object.__file__
+            raise TypeError(f"{object!r} is a built-in module")
+        if inspect.isclass(object):
+            if hasattr(object, "__module__"):
+                module = sys.modules.get(object.__module__)
+                if getattr(module, "__file__", None):
+                    return module.__file__
+                if object.__module__ == "builtins":
+                    raise OSError("source not available")
+            raise TypeError(f"{object!r} is a built-in class")
+        if inspect.ismethod(object):
+            object = object.__func__
+        if inspect.isfunction(object):
+            object = object.__code__
+        if inspect.istraceback(object):
+            object = object.tb_frame
+        if inspect.isframe(object):
+            object = object.f_code
+        if inspect.iscode(object):
+            return object.co_filename
+        raise TypeError(f"unsupported object {type(object).__name__}")
+
+    inspect.getfile = _clean_getfile
+    sys.setrecursionlimit(20000)
+    try:
+        import flydsl.compiler.jit_function as jf
+        jf._collect_dependency_sources = lambda *a, **k: []
+    except Exception as e:  # noqa: BLE001
+        print(f"[flydsl_repairs] dep-walk stub skipped: {e}", file=sys.stderr, flush=True)
+    print("[flydsl_repairs] applied (clean inspect.getfile + dep-walk stub + recursionlimit)",
+          file=sys.stderr, flush=True)
+
+
 # Only patch the actual training worker. Importing torch here is heavy, so we
 # must NOT do it for pip/offload-arch/build helper invocations (they stall and
 # block setup). Gate on the training entrypoint appearing in argv.
@@ -126,11 +171,21 @@ def _is_training_worker():
 
 
 if _is_training_worker():
-    try:
-        _install_rccl_avg_workaround()
-    except Exception as e:  # noqa: BLE001
-        print(f"[rccl_avg_workaround] install FAILED: {e}", file=sys.stderr, flush=True)
+    # RCCL AVG->SUM rewrite: needed on builds where all_reduce(op=AVG) hangs.
+    # Believed fixed on rocm7.14; set PRIMUS_RCCL_AVG_WORKAROUND=0 to disable there.
+    import os as _os
+    if _os.environ.get("PRIMUS_RCCL_AVG_WORKAROUND", "1") != "0":
+        try:
+            _install_rccl_avg_workaround()
+        except Exception as e:  # noqa: BLE001
+            print(f"[rccl_avg_workaround] install FAILED: {e}", file=sys.stderr, flush=True)
+    else:
+        print("[rccl_avg_workaround] disabled via PRIMUS_RCCL_AVG_WORKAROUND=0", file=sys.stderr, flush=True)
     try:
         _install_primus_turbo_stub()
     except Exception as e:  # noqa: BLE001
         print(f"[primus_turbo_stub] install FAILED: {e}", file=sys.stderr, flush=True)
+    try:
+        _install_flydsl_repairs()
+    except Exception as e:  # noqa: BLE001
+        print(f"[flydsl_repairs] install FAILED: {e}", file=sys.stderr, flush=True)
