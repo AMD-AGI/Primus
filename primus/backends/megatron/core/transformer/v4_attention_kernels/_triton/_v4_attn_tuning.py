@@ -48,11 +48,17 @@ def fwd_attn_defaults(is_hca: bool):
 
 
 def bwd_dkv_head_groups_default(hq: int, hk: int) -> int:
-    """dKV head-split groups for the V4 attention BWD (MQA/HQ>=64, HK==1).
+    """dKV head-split groups for the V4 attention BWD -- ONLY the MQA (HQ>=64, HK==1) path.
 
-    gfx1250 sweep (``ab_sweep/opt7b``): ``HG=32`` is **+37-53%** on the attn bwd vs the gfx950
-    default of ``2`` (the kernel even notes "HG=4/8 regress" -- true on gfx950, inverted on
-    gfx1250). The caller still clamps to a divisor of ``hq`` and honours the env override.
+    gfx1250 sweep (``ab_sweep/opt7b``, MQA): ``HG=32`` is +37-53% vs the gfx950 default ``2``
+    (the kernel notes "HG=4/8 regress" -- true on gfx950, inverted on gfx1250).
+
+    NOTE: the current DeepSeek-V4-Pro attention runs **MHA at the kernel level** -- the
+    single-latent KV is expanded to all H heads (deepseek_v4_attention.py), so HK==HQ and the
+    caller's ``if HQ > HK`` guard means this function is **not reached** there (HG stays 1).
+    The MHA bwd is already gfx950-optimal on gfx1250 (``ab_sweep/opt7e`` -- every alt config
+    regresses), so there is no bwd retune for V4-Pro; this default only matters for a true-MQA
+    config. The real gfx1250 attention win is the FWD (see ``fwd_attn_defaults``).
     """
     if not (hq >= 64 and hk == 1):
         return 1
