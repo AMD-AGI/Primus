@@ -78,8 +78,16 @@ class Compressor(nn.Module):
         self.coff = 2 if self.overlap else 1
 
         proj_out = self.coff * head_dim
-        self.wkv = nn.Linear(hidden_size, proj_out, bias=False)
-        self.wgate = nn.Linear(hidden_size, proj_out, bias=False)
+        self._proj_out = proj_out
+        # Fuse the kv + gate projections into ONE [hidden -> 2*proj_out] GEMM
+        # (default-on): ~1.5x on the projection and one launch instead of two.
+        # PRIMUS_COMPRESS_FUSE_PROJ=0 restores the two separate linears.
+        self._fuse_proj = os.environ.get("PRIMUS_COMPRESS_FUSE_PROJ", "1") != "0"
+        if self._fuse_proj:
+            self.wkv_gate = nn.Linear(hidden_size, 2 * proj_out, bias=False)
+        else:
+            self.wkv = nn.Linear(hidden_size, proj_out, bias=False)
+            self.wgate = nn.Linear(hidden_size, proj_out, bias=False)
 
         # Learnable absolute position embedding (APE) added on top of the
         # softmax score. After overlap, the effective window length is
@@ -90,6 +98,21 @@ class Compressor(nn.Module):
         nn.init.normal_(self.ape, std=0.02)
 
         self.kv_norm = LocalRMSNorm(head_dim, eps=rmsnorm_eps)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Bridge checkpoints across the fused/unfused projection layouts.
+
+        Old checkpoints store ``wkv.weight`` + ``wgate.weight``; the fused path
+        wants ``wkv_gate.weight`` = ``cat([wkv, wgate])`` (and vice-versa). Remap
+        in-place so either layout loads under either runtime setting.
+        """
+        wkv_k, wgate_k, fused_k = prefix + "wkv.weight", prefix + "wgate.weight", prefix + "wkv_gate.weight"
+        if self._fuse_proj and wkv_k in state_dict and fused_k not in state_dict:
+            state_dict[fused_k] = torch.cat([state_dict.pop(wkv_k), state_dict.pop(wgate_k)], dim=0)
+        elif (not self._fuse_proj) and fused_k in state_dict and wkv_k not in state_dict:
+            w = state_dict.pop(fused_k)
+            state_dict[wkv_k], state_dict[wgate_k] = w[: self._proj_out], w[self._proj_out :]
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     # ------------------------------------------------------------------
     # internals
@@ -128,8 +151,11 @@ class Compressor(nn.Module):
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         """Pool ``hidden[B, S, D]`` to ``[B, S/ratio, head_dim]``."""
-        kv_proj = self.wkv(hidden)  # [B, S, coff*head_dim]
-        score_proj = self.wgate(hidden)  # [B, S, coff*head_dim]
+        if self._fuse_proj:
+            kv_proj, score_proj = self.wkv_gate(hidden).split(self._proj_out, dim=-1)
+        else:
+            kv_proj = self.wkv(hidden)  # [B, S, coff*head_dim]
+            score_proj = self.wgate(hidden)  # [B, S, coff*head_dim]
 
         kv = self._reshape_into_windows(kv_proj)  # [B, N, ratio, coff*head_dim]
         score = self._reshape_into_windows(score_proj)  # [B, N, ratio, coff*head_dim]
@@ -145,10 +171,15 @@ class Compressor(nn.Module):
         # + reduce) is fused into one Triton launch on CUDA fp16/bf16/fp32 inputs;
         # PRIMUS_COMPRESS_POOL_TRITON=0 (or non-CUDA / unsupported dtype) falls back
         # to eager.
-        if os.environ.get("PRIMUS_COMPRESS_POOL_TRITON", "1") != "0" and kv.is_cuda and kv.dtype in (
-            torch.float16,
-            torch.bfloat16,
-            torch.float32,
+        if (
+            os.environ.get("PRIMUS_COMPRESS_POOL_TRITON", "1") != "0"
+            and kv.is_cuda
+            and kv.dtype
+            in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+            )
         ):
             from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.compressor_pool import (
                 fused_softmax_weighted_pool,
