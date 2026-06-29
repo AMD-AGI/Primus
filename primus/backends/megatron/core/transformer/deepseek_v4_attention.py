@@ -275,6 +275,7 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
     d=(H*head_dim)/G and B*S are multiples of 32, so the MX block scale is clean.
     """
     import primus_turbo.pytorch as pt
+
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboLowPrecisionGlobalStateManager as _M,
     )
@@ -1216,10 +1217,33 @@ class DeepseekV4Attention(MLASelfAttention):
         # Move heads dim to dim=1: [B, H, P, head_dim].
         pool_bh = pool_h.transpose(1, 2)
 
-        t = torch.arange(S, device=device).unsqueeze(1)  # [S, 1]
-        s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1  # [1, P]
-        extra_mask = torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
+        extra_mask = self._hca_extra_mask_cached(S, P, device, dtype)
         return pool_bh, pool_bh, extra_mask  # K = V = compressed pool
+
+    def _hca_extra_mask_cached(self, S: int, P: int, device, dtype):
+        """HCA additive causal mask ``[S, P]``, cached (data-independent).
+
+        Pool slot ``s`` is visible to query ``t`` iff ``(s+1)*ratio - 1 <= t``;
+        the mask depends only on ``(S, P, compress_ratio, dtype)`` — all fixed
+        per run — so build it once instead of rebuilding arange + where every
+        compressed-layer forward. Bit-identical. PRIMUS_COMPRESS_MASK_CACHE=0
+        forces the eager rebuild.
+        """
+        if os.environ.get("PRIMUS_COMPRESS_MASK_CACHE", "1") == "0":
+            t = torch.arange(S, device=device).unsqueeze(1)
+            s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1
+            return torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
+        cache = getattr(self, "_hca_mask_cache", None)
+        if cache is None:
+            cache = self._hca_mask_cache = {}
+        key = (S, P, device, dtype)
+        m = cache.get(key)
+        if m is None:
+            t = torch.arange(S, device=device).unsqueeze(1)  # [S, 1]
+            s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1  # [1, P]
+            m = torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
+            cache[key] = m
+        return m
 
     def _csa_forward(
         self,

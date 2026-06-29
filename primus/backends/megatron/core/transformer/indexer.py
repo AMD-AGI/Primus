@@ -63,6 +63,7 @@ def _is_rank0() -> bool:
         pass
     return True
 
+
 from primus.backends.megatron.core.transformer.compressor import Compressor
 
 # E4M3 finite max magnitude (float8_e4m3fn): largest representable value.
@@ -89,6 +90,8 @@ def fake_quantize_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
     x_scaled = torch.clamp(x * scale, -_FP8_E4M3_MAX, _FP8_E4M3_MAX)
     x_fp8 = x_scaled.to(torch.float8_e4m3fn)
     return x_fp8.to(orig_dtype) / scale
+
+
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
     indexer_score_triton,
 )
@@ -124,8 +127,8 @@ def _fp4_qk_gemm(q_i: torch.Tensor, k_icomp: torch.Tensor) -> torch.Tensor:
     """
     import primus_turbo.pytorch as pt
     from primus_turbo.pytorch.core.low_precision import (
-        Format,
         Float4QuantConfig,
+        Format,
         ScaleDtype,
         ScalingGranularity,
     )
@@ -168,6 +171,7 @@ def _indexer_fp8_proj_enabled() -> bool:
 def _fp8_linear(lin: nn.Linear, x: torch.Tensor) -> torch.Tensor:
     """MXFP8 apply of an ``nn.Linear`` (weight [out,in], no bias): y = x @ Wᵀ."""
     import primus_turbo.pytorch as pt
+
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboLowPrecisionGlobalStateManager as _M,
     )
@@ -225,12 +229,20 @@ class Indexer(nn.Module):
                 "BF16 index-score + top-k preserved)."
             )
 
-        # W^{DQ}: low-rank query down-projection.
-        self.w_dq = nn.Linear(hidden_size, self.dq_rank, bias=False)
+        # W^{DQ} (hidden->dq_rank) and W^w (hidden->n_heads) both consume `hidden`,
+        # so fuse them into ONE GEMM (default-on); split the output. W^{IUQ} stays
+        # separate (it consumes q_q, sequentially). PRIMUS_INDEXER_FUSE_PROJ=0 keeps
+        # the two separate linears.
+        self._fuse_qw_proj = os.environ.get("PRIMUS_INDEXER_FUSE_PROJ", "1") != "0"
+        if self._fuse_qw_proj:
+            self.w_dq_w = nn.Linear(hidden_size, self.dq_rank + index_n_heads, bias=False)
+        else:
+            # W^{DQ}: low-rank query down-projection.
+            self.w_dq = nn.Linear(hidden_size, self.dq_rank, bias=False)
+            # W^w_h: per-head scalar weight.
+            self.w_w = nn.Linear(hidden_size, index_n_heads, bias=False)
         # W^{IUQ}_h: per-head up-projection from dq_rank → index_head_dim.
         self.w_iuq = nn.Linear(self.dq_rank, index_n_heads * index_head_dim, bias=False)
-        # W^w_h: per-head scalar weight.
-        self.w_w = nn.Linear(hidden_size, index_n_heads, bias=False)
 
         # Mini-Compressor producing K^{IComp}.
         self.indexer_compressor = Compressor(
@@ -238,6 +250,21 @@ class Indexer(nn.Module):
             head_dim=index_head_dim,
             ratio=compress_ratio,
         )
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Bridge checkpoints across the fused/unfused (w_dq, w_w) projection.
+
+        Old checkpoints store ``w_dq.weight`` + ``w_w.weight``; the fused path wants
+        ``w_dq_w.weight`` = ``cat([w_dq, w_w])`` (and vice-versa). Remap in-place so
+        either layout loads under either runtime setting.
+        """
+        dq_k, w_k, fused_k = prefix + "w_dq.weight", prefix + "w_w.weight", prefix + "w_dq_w.weight"
+        if self._fuse_qw_proj and dq_k in state_dict and fused_k not in state_dict:
+            state_dict[fused_k] = torch.cat([state_dict.pop(dq_k), state_dict.pop(w_k)], dim=0)
+        elif (not self._fuse_qw_proj) and fused_k in state_dict and dq_k not in state_dict:
+            w = state_dict.pop(fused_k)
+            state_dict[dq_k], state_dict[w_k] = w[: self.dq_rank], w[self.dq_rank :]
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     # ------------------------------------------------------------------
 
@@ -255,10 +282,24 @@ class Indexer(nn.Module):
         a query at raw token ``t`` may attend to ``s`` iff its window
         end ``(s+1)*ratio - 1 <= t``.
         """
+        # The mask depends only on (n_queries, n_pool, compress_ratio, dtype) — all
+        # fixed per run — so cache it instead of rebuilding arange + where every
+        # call. PRIMUS_INDEXER_MASK_CACHE=0 forces the eager rebuild.
+        use_cache = os.environ.get("PRIMUS_INDEXER_MASK_CACHE", "1") != "0"
+        if use_cache:
+            cache = getattr(self, "_causal_mask_cache", None)
+            if cache is None:
+                cache = self._causal_mask_cache = {}
+            key = (n_queries, n_pool, device, dtype)
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
         t_idx = torch.arange(n_queries, device=device).unsqueeze(1)  # [t, 1]
         s_end = (torch.arange(n_pool, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1  # [1, s]
         allowed = s_end <= t_idx  # [t, s] bool
         mask = torch.where(allowed, 0.0, float("-inf")).to(dtype)
+        if use_cache:
+            cache[key] = mask
         return mask
 
     # ------------------------------------------------------------------
@@ -294,9 +335,14 @@ class Indexer(nn.Module):
         # else the bf16 nn.Linear. No TP gather/scatter (duplicated linears).
         # FP8 (paper / NVIDIA backend.linear) when enabled, else the bf16 nn.Linear.
         proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
-        q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
+        if self._fuse_qw_proj:
+            dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + H] in one GEMM
+            q_q = dqw[..., : self.dq_rank]  # [B, S, dq_rank]
+            w_i = dqw[..., self.dq_rank :]  # [B, S, H]
+        else:
+            q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
+            w_i = proj(self.w_w, hidden)  # [B, S, H]
         q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
-        w_i = proj(self.w_w, hidden)  # [B, S, H]
 
         # 3) Score I_{t,s} = Σ_h w_i[t,h] * ReLU(q_i[t,h] · k_icomp[s])
         #    q_i [B,S,H,Hd] · k_icomp[B,P,Hd] → relu[B,S,H,P]; w_i[B,S,H,1] → sum over H

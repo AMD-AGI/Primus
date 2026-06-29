@@ -21,3 +21,4 @@ pp_simulation_result
 *.log
 *.nohup
 *.zip
+.triton_cache_shared/

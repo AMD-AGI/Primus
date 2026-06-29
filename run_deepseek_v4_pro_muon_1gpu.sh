@@ -406,7 +406,8 @@ ENV_ARGS=()
 for v in DOCKER_IMAGE NVTE_FUSED_ATTN NVTE_FUSED_ATTN_CK NVTE_FUSED_ATTN_AOTRITON \
          PRIMUS_TURBO_GEMM_BACKEND PRIMUS_TURBO_GROUPED_GEMM_BACKEND TURBO_WHEEL_DIR FLYDSL_PKG_DIR \
          NVTE_FLASH_ATTN NVTE_USE_CK_GEMM NVTE_ROCM_ENABLE_MXFP8 PRIMUS_FP8_DISABLE_TURBO PYTHONPATH HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM \
-         TORCH_COMPILE_DISABLE TORCHINDUCTOR_COMPILE_THREADS \
+         TORCH_COMPILE_DISABLE TORCHINDUCTOR_COMPILE_THREADS TRITON_CACHE_DIR \
+         HSA_SIGNAL_ABORT_TIMEOUT HSA_ENABLE_INTERRUPT \
          HIP_LAUNCH_BLOCKING AMD_SERIALIZE_KERNEL AMD_SERIALIZE_COPY \
          AMD_LOG_LEVEL AMD_LOG_MASK MASTER_PORT TORCH_NCCL_HIGH_PRIORITY \
          NCCL_IB_DISABLE NCCL_P2P_DISABLE NCCL_IB_HCA NCCL_SOCKET_IFNAME \
@@ -426,11 +427,26 @@ done
 # (argparse last-wins), for dimension bisects etc.
 [[ -n "${EXTRA_CLI:-}" ]] && ENV_ARGS+=("--env" "EXTRA_CLI")
 
+# Persistent Triton compile cache. The --rm container makes TRITON_CACHE_DIR
+# ephemeral, so every run recompiles ALL kernels from scratch (the slow CPU-bound
+# LLVM step that dominates iteration 1, esp. under this node's MCE storm). Mount a
+# host dir so compiled kernels (hsaco) are reused across runs -> iter-1 of every
+# later run with the same shapes skips the cold compile. Triton keys cache entries
+# by kernel-source + arch + constexpr hash, so a wheel/arch/shape change auto-
+# invalidates (safe to keep warm). Disable with PRIMUS_TRITON_CACHE_DIR="".
+export PRIMUS_TRITON_CACHE_DIR=${PRIMUS_TRITON_CACHE_DIR:-$PRIMUS_PATH/.triton_cache_shared}
+if [ -n "$PRIMUS_TRITON_CACHE_DIR" ]; then
+    mkdir -p "$PRIMUS_TRITON_CACHE_DIR"
+    export TRITON_CACHE_DIR="$PRIMUS_TRITON_CACHE_DIR"
+    echo "[triton] persistent compile cache: $TRITON_CACHE_DIR ($(find "$TRITON_CACHE_DIR" -maxdepth 1 -type d 2>/dev/null | wc -l) entries)"
+fi
+
 VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 [[ -d "$TE_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TE_WHEEL_DIR":"$TE_WHEEL_DIR")
 [[ -d "$TE_DIR" ]] && VOLUME_ARGS+=(-v "$TE_DIR":"$TE_DIR")
 [[ -n "${TURBO_WHEEL_DIR:-}" && -d "$TURBO_WHEEL_DIR" ]] && VOLUME_ARGS+=(-v "$TURBO_WHEEL_DIR":"$TURBO_WHEEL_DIR")
 [[ -n "${FLYDSL_PKG_DIR:-}" && -d "$FLYDSL_PKG_DIR/flydsl" ]] && VOLUME_ARGS+=(-v "$FLYDSL_PKG_DIR":"$FLYDSL_PKG_DIR")
+[[ -n "${TRITON_CACHE_DIR:-}" ]] && VOLUME_ARGS+=(-v "$TRITON_CACHE_DIR":"$TRITON_CACHE_DIR")
 # Opt-in tuned hipBLASLt: mount the built library at the same path and pass the
 # loader env into the container (only when enabled, to keep stock runs untouched).
 if [ "$PRIMUS_TUNED_HIPBLASLT" = "1" ]; then
