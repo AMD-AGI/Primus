@@ -16,7 +16,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
+      train_iters: 10
       micro_batch_size: 1
       global_batch_size: 16
 
@@ -73,7 +73,7 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: true
+      use_turbo_attention: false
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"

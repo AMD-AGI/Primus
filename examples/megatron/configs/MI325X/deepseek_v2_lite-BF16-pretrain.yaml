@@ -21,7 +21,7 @@ modules:
       log_avg_reset_interval: 50
 
       # hyper parameters
-      train_iters: 50
+      train_iters: 25
       micro_batch_size: 10
       global_batch_size: 80
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
@@ -52,7 +52,7 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false
       # MLA
       multi_latent_attention: false
 

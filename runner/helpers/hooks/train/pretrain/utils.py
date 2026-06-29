@@ -11,8 +11,15 @@ from pathlib import Path
 
 import yaml
 
-
 # ---------- Logging ----------
+# Numeric severity used to honor PRIMUS_LOG_LEVEL (shared with runner/lib/common.sh).
+_LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+
+
+def _current_log_level() -> int:
+    return _LOG_LEVELS.get(os.environ.get("PRIMUS_LOG_LEVEL", "INFO").upper(), 20)
+
+
 def get_node_rank() -> int:
     return int(os.environ.get("NODE_RANK", "0"))
 
@@ -21,8 +28,13 @@ def get_hostname():
     return socket.gethostname()
 
 
+def log_debug(msg):
+    if get_node_rank() == 0 and _current_log_level() <= _LOG_LEVELS["DEBUG"]:
+        print(f"[NODE-{get_node_rank()}({get_hostname()})] [DEBUG] {msg}", file=sys.stderr)
+
+
 def log_info(msg):
-    if get_node_rank() == 0:
+    if get_node_rank() == 0 and _current_log_level() <= _LOG_LEVELS["INFO"]:
         print(f"[NODE-{get_node_rank()}({get_hostname()})] [INFO] {msg}", file=sys.stderr)
 
 

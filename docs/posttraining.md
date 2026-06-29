@@ -447,6 +447,6 @@ recompute_num_layers: 1       # Number of layers to recompute
 
 ---
 
-**Need help?** Open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).
+**Need help?** Open an issue on [GitHub](https://github.com/AMD-AGI/Primus/issues).
 
 **Start fine-tuning with Primus! 🚀**

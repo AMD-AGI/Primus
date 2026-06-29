@@ -33,7 +33,7 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
@@ -179,7 +179,9 @@ def build_megatron_helper(megatron_path: Path):
     dataset_cpp_dir = megatron_path / "megatron/core/datasets"
     log_info(f"Building Megatron dataset helper in {dataset_cpp_dir}")
 
-    ret = subprocess.run(["make"], cwd=dataset_cpp_dir)
+    # `-s` silences make's "Nothing to be done"/recipe echo on no-op rebuilds;
+    # real compiler errors still surface and are handled below.
+    ret = subprocess.run(["make", "-s"], cwd=dataset_cpp_dir)
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ helper failed.")
 

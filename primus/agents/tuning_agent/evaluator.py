@@ -224,7 +224,7 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig, out_dir: Path, 
         overrides["fp8"] = cfg.fp8
 
     # Multi-Latent-Attention models (DeepSeek V2/V3, Kimi-K2, Qwen-V2) auto-
-    # enable ``use_turbo_gemm`` inside Primus's projection. Two
+    # enable ``use_turbo_gemm `` inside Primus's projection. Two
     # things go wrong on the v26.2 container ``primus_turbo==0.2.0``:
     #   * The default ``fp8_recipe: delayed`` is incompatible with that path
     #     (``primus/modules/trainer/megatron/utils.py:464`` asserts).
