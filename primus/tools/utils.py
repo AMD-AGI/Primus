@@ -98,8 +98,11 @@ try:
         return gathered
 
     def is_rank_0() -> bool:
-        if not dist.is_initialized():
-            raise RuntimeError("Distributed not initialized, cannot determine rank.")
+        # Single-process (no torchrun) is rank 0 by definition. This mirrors the
+        # world==1 fallback in gather_records so the benchmark tools can run
+        # standalone on a single GPU without initializing a process group.
+        if not (dist.is_available() and dist.is_initialized()):
+            return True
         return dist.get_rank() == 0
 
     def get_local_rank() -> int:
