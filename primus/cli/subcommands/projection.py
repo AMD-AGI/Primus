@@ -550,6 +550,20 @@ def _add_inference_args(parser):
         help="EP AllToAll time multiplier (<1 = fused/overlapped speedup, default 1.0).",
     )
     coll.add_argument(
+        "--quick-reduce",
+        action="store_true",
+        default=False,
+        help="ROCm 'quick reduce': low-latency quantized all-reduce for small "
+        "messages (extra TP AllReduce speedup).",
+    )
+    coll.add_argument(
+        "--fuse-rmsnorm-allreduce",
+        action="store_true",
+        default=False,
+        help="Fused RMSNorm + AllReduce: hides part of the TP all-reduce latency "
+        "behind the norm (extra TP AllReduce speedup).",
+    )
+    coll.add_argument(
         "--ep-load-balance",
         type=float,
         default=None,
@@ -642,6 +656,63 @@ def _add_inference_args(parser):
         help="Scheduler per-step token budget (vLLM --max-num-batched-tokens). Caps "
         "prefill-chunk + concurrent-decode tokens per step; oversized steps split, "
         "raising TPOT. Default: 0 (unlimited).",
+    )
+    # ---- Offered load / request rate (open-loop arrivals) ----
+    serv.add_argument(
+        "--request-rate",
+        type=float,
+        default=None,
+        help="Offered load in requests/sec (open-loop). Adds a first-order queueing "
+        "delay to TTFT as load approaches the engine's max sustainable rate. "
+        "Default: 0 (closed-loop, no queue).",
+    )
+    serv.add_argument(
+        "--arrival-model",
+        type=str,
+        default=None,
+        choices=["closed", "poisson", "deterministic"],
+        help="Arrival process for --request-rate: 'closed' (no queue; default), "
+        "'poisson' (M/M/1 waiting time), or 'deterministic' (lighter queueing).",
+    )
+    # ---- Kernel backend + fused ops + sparse attention + expert precision ----
+    kern = parser.add_argument_group("inference kernel backend & ops")
+    kern.add_argument(
+        "--attention-backend",
+        type=str,
+        default=None,
+        choices=["aiter", "triton", "ck", "hip"],
+        help="Attention kernel library (ROCm). Representative compute multiplier "
+        "vs the Triton baseline. Default: engine default (1.0).",
+    )
+    kern.add_argument(
+        "--sparse-attention-topk",
+        type=int,
+        default=None,
+        help="Native sparse attention (DeepSeek V3.2/V4 NSA) top-k KV tokens per "
+        "query. Attention scales toward topk/context for long contexts. "
+        "Default: 0 (dense).",
+    )
+    kern.add_argument(
+        "--moe-expert-dtype",
+        type=str,
+        default=None,
+        choices=["bf16", "fp8", "mxfp4"],
+        help="Expert grouped-GEMM compute precision (separate from --weight-dtype). "
+        "Models the expert-MLP speedup of low-precision expert kernels.",
+    )
+    kern.add_argument(
+        "--fused-kernels",
+        action="store_true",
+        default=False,
+        help="Fused elementwise kernels (RMSNorm / RoPE / quant / KV-store+quant) "
+        "that cut per-decode-step launch overhead.",
+    )
+    kern.add_argument(
+        "--speculative-draft-cost-factor",
+        type=float,
+        default=None,
+        help="Draft-model forward cost per proposed draft token, as a fraction of "
+        "one target decode step. Default: 0 (ignore draft cost).",
     )
     # Internal: marks this process as the spawned GPU benchmark worker.
     parser.add_argument(

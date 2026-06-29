@@ -25,7 +25,9 @@ from primus.agents.tuning_agent.config import (  # noqa: E402
 from primus.agents.tuning_agent.inference_tuning import (  # noqa: E402
     InferenceTrialConfig,
     build_inference_seed_plan,
+    default_inference_trial,
     derive_inference_legality,
+    inference_trial_from_dict,
     validate_inference,
 )
 from primus.agents.tuning_agent.workload import ArchitectureRecord  # noqa: E402
@@ -675,3 +677,446 @@ def test_build_inference_cmd_emits_serving_knob_flags():
     assert "--max-num-batched-tokens" not in plain
     assert "--ep-load-balance" not in plain
     assert "--redundant-experts" not in plain
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# new serving knobs: schema resolvers (request_config / collective_config)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_attention_backend_multiplier_presets():
+    assert InferenceRequestConfig().resolved_attention_backend_multiplier() == 1.0
+    assert InferenceRequestConfig(attention_backend="aiter").resolved_attention_backend_multiplier() == 0.85
+    assert InferenceRequestConfig(attention_backend="ck").resolved_attention_backend_multiplier() == 0.90
+    assert InferenceRequestConfig(attention_backend="triton").resolved_attention_backend_multiplier() == 1.0
+    assert InferenceRequestConfig(attention_backend="hip").resolved_attention_backend_multiplier() == 1.10
+    # Unknown backend → no-op.
+    assert InferenceRequestConfig(attention_backend="bogus").resolved_attention_backend_multiplier() == 1.0
+
+
+def test_sparse_attention_scale():
+    # Dense (topk=0) → no scaling regardless of context.
+    assert InferenceRequestConfig().resolved_sparse_attention_scale(8192) == 1.0
+    # Short context (<= topk) → no scaling.
+    assert InferenceRequestConfig(sparse_attention_topk=2048).resolved_sparse_attention_scale(1024) == 1.0
+    # Long context → scales toward topk/context.
+    s = InferenceRequestConfig(sparse_attention_topk=2048).resolved_sparse_attention_scale(8192)
+    assert s == pytest.approx(2048.0 / 8192.0)
+    # Very long context floors out (projections + indexer don't shrink).
+    assert InferenceRequestConfig(sparse_attention_topk=64).resolved_sparse_attention_scale(100000) == 0.15
+
+
+def test_moe_expert_dtype_speedup():
+    assert InferenceRequestConfig().resolved_moe_expert_dtype_speedup() == 1.0
+    assert InferenceRequestConfig(moe_expert_dtype="bf16").resolved_moe_expert_dtype_speedup() == 1.0
+    assert InferenceRequestConfig(moe_expert_dtype="fp8").resolved_moe_expert_dtype_speedup() == 0.55
+    assert InferenceRequestConfig(moe_expert_dtype="mxfp4").resolved_moe_expert_dtype_speedup() == 0.35
+
+
+def test_fused_kernels_cut_step_overhead():
+    # No fusion → preset overhead unchanged.
+    pw = InferenceRequestConfig(cudagraph_mode="piecewise")
+    assert pw.resolved_decode_step_overhead_us() == 8.0
+    # Fused kernels cut the per-step launch overhead by 30%.
+    fused = InferenceRequestConfig(cudagraph_mode="piecewise", fused_kernels=True)
+    assert fused.resolved_decode_step_overhead_us() == pytest.approx(8.0 * 0.7)
+    # Also applies on top of an explicit overhead.
+    explicit = InferenceRequestConfig(decode_step_overhead_us=20.0, fused_kernels=True)
+    assert explicit.resolved_decode_step_overhead_us() == pytest.approx(20.0 * 0.7)
+
+
+def test_quick_reduce_and_fused_rmsnorm_speed_up_tp_allreduce():
+    mp = ModelParallelConfig(tensor_model_parallel_size=2)
+    base = InferenceCollectiveModel(_moe_model_config(), mp, InferenceCollectiveConfig())
+    quick = InferenceCollectiveModel(
+        _moe_model_config(), mp, InferenceCollectiveConfig(quick_reduce=True)
+    )
+    fused = InferenceCollectiveModel(
+        _moe_model_config(), mp, InferenceCollectiveConfig(fuse_rmsnorm_allreduce=True)
+    )
+    both = InferenceCollectiveModel(
+        _moe_model_config(),
+        mp,
+        InferenceCollectiveConfig(quick_reduce=True, fuse_rmsnorm_allreduce=True),
+    )
+    ar = base.tp_allreduce_ms(batch=8, tokens=1024)
+    assert ar > 0.0
+    assert quick.tp_allreduce_ms(8, 1024) == pytest.approx(ar * 0.6)
+    assert fused.tp_allreduce_ms(8, 1024) == pytest.approx(ar * 0.8)
+    assert both.tp_allreduce_ms(8, 1024) == pytest.approx(ar * 0.6 * 0.8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# new serving knobs: performance-model effects (simulation path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_attention_backend_scales_attention_compute():
+    def total(backend):
+        proj = InferencePerformanceProjector(
+            _moe_inference_config(
+                input_seq_len=512, output_seq_len=128, attention_backend=backend
+            ),
+            args=_moe_sim_args(),
+        )
+        return proj._forward_times(8, 1, "decode", 600).total_ms
+
+    base = total(None)
+    aiter = total("aiter")
+    hip = total("hip")
+    # aiter shaves attention time; hip inflates it (proves non-zero attention).
+    assert aiter < base < hip
+
+
+def test_sparse_attention_reduces_decode_attention():
+    def total(topk):
+        proj = InferencePerformanceProjector(
+            _moe_inference_config(
+                input_seq_len=512, output_seq_len=128, sparse_attention_topk=topk
+            ),
+            args=_moe_sim_args(),
+        )
+        return proj._forward_times(8, 1, "decode", 8192).total_ms
+
+    dense = total(0)
+    sparse = total(512)
+    assert sparse < dense
+
+
+def test_moe_expert_dtype_speeds_up_moe_layer():
+    def moe_ms(dtype):
+        proj = InferencePerformanceProjector(
+            _moe_inference_config(
+                input_seq_len=512, output_seq_len=128, moe_expert_dtype=dtype
+            ),
+            args=_moe_sim_args(),
+        )
+        return proj._forward_times(8, 1, "decode", 600).moe_layer_ms
+
+    assert moe_ms("fp8") < moe_ms(None)
+    assert moe_ms("mxfp4") < moe_ms("fp8")
+
+
+def test_speculative_draft_cost_raises_decode_step():
+    def step(dcf):
+        proj = InferencePerformanceProjector(
+            _moe_inference_config(
+                input_seq_len=512, output_seq_len=128,
+                speculative_num_tokens=4, speculative_acceptance_rate=0.7,
+                speculative_draft_cost_factor=dcf,
+            ),
+            args=_moe_sim_args(),
+        )
+        return proj._decode_step_latency_ms(8, 600, q_len=4)
+
+    assert step(0.0) < step(0.3)
+
+
+def test_request_rate_queueing_adds_to_ttft():
+    proj = InferencePerformanceProjector(
+        _moe_inference_config(
+            input_seq_len=512, output_seq_len=100,
+            request_rate=5.0, arrival_model="poisson",
+        ),
+        args=_moe_sim_args(),
+    )
+    # mu = 1000/100 = 10 req/s, rho = 0.5 → Wq = 0.5/0.5 * (1000/10) = 100 ms.
+    q = proj._request_rate_queueing(1000.0, 100, ttft_ms=50.0, request_latency_ms=200.0)
+    assert q["utilization"] == pytest.approx(0.5)
+    assert q["queue_wait_ms"] == pytest.approx(100.0)
+    assert q["ttft_with_queue_ms"] == pytest.approx(150.0)
+    assert q["saturated"] == 0.0
+    # Deterministic arrivals → ~half the wait.
+    proj_d = InferencePerformanceProjector(
+        _moe_inference_config(
+            input_seq_len=512, output_seq_len=100,
+            request_rate=5.0, arrival_model="deterministic",
+        ),
+        args=_moe_sim_args(),
+    )
+    assert proj_d._request_rate_queueing(1000.0, 100, 50.0, 200.0)["queue_wait_ms"] == pytest.approx(50.0)
+
+
+def test_request_rate_saturation_flags():
+    proj = InferencePerformanceProjector(
+        _moe_inference_config(
+            input_seq_len=512, output_seq_len=100,
+            request_rate=20.0, arrival_model="poisson",
+        ),
+        args=_moe_sim_args(),
+    )
+    # Offered 20 > sustainable 10 → saturated, large finite penalty.
+    q = proj._request_rate_queueing(1000.0, 100, 50.0, 200.0)
+    assert q["saturated"] == 1.0
+    assert q["queue_wait_ms"] > 0.0
+
+
+def test_request_rate_closed_loop_is_noop():
+    proj = InferencePerformanceProjector(
+        _moe_inference_config(input_seq_len=512, output_seq_len=100),
+        args=_moe_sim_args(),
+    )
+    assert proj._request_rate_queueing(1000.0, 100, 50.0, 200.0) == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# new serving knobs: agent legality / validation / seed / evaluator mapping
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_new_knob_legality_defaults():
+    leg = derive_inference_legality(_moe_arch(), _cluster())
+    assert leg.arrival_model == ["closed", "poisson", "deterministic"]
+    assert leg.attention_backend == ["aiter", "triton", "ck", "hip"]
+    assert leg.sparse_attention_topk == [0, 512, 2048]
+    assert leg.moe_expert_dtype == ["bf16", "fp8", "mxfp4"]
+
+
+def test_validate_request_rate_rules():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    ok, _ = validate_inference(
+        InferenceTrialConfig(tp=2, request_rate=8.0, arrival_model="poisson"),
+        arch, cluster, leg,
+    )
+    assert ok
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, request_rate=8.0, arrival_model="closed"),
+        arch, cluster, leg,
+    )
+    assert not bad and "request_rate" in reason
+
+
+def test_validate_moe_expert_dtype_moe_only():
+    moe, dense, cluster = _moe_arch(), _dense_arch(), _cluster()
+    leg_moe = derive_inference_legality(moe, cluster)
+    leg_dense = derive_inference_legality(dense, cluster)
+    ok, reason = validate_inference(
+        InferenceTrialConfig(tp=2, ep=2, moe_expert_dtype="mxfp4"), moe, cluster, leg_moe
+    )
+    assert ok, reason
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, moe_expert_dtype="mxfp4"), dense, cluster, leg_dense
+    )
+    assert not bad and "MoE" in reason
+
+
+def test_validate_collective_ops_require_tp():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=1, quick_reduce=True), arch, cluster, leg
+    )
+    assert not bad and "quick_reduce" in reason
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=1, fuse_rmsnorm_allreduce=True), arch, cluster, leg
+    )
+    assert not bad and "fuse_rmsnorm_allreduce" in reason
+
+
+def test_validate_draft_cost_requires_speculative():
+    arch, cluster = _moe_arch(), _cluster()
+    leg = derive_inference_legality(arch, cluster)
+    bad, reason = validate_inference(
+        InferenceTrialConfig(tp=2, speculative_draft_cost_factor=0.2), arch, cluster, leg
+    )
+    assert not bad and "speculative" in reason
+
+
+def test_seed_plan_includes_new_knob_candidates():
+    arch = _moe_arch()
+    cluster = _cluster(num_nodes=1, gpus_per_node=8)
+    plan = build_inference_seed_plan(arch, cluster, OptimizationConfig(), max_candidates=256)
+    assert any(c.attention_backend == "aiter" for c in plan.candidates)
+    assert any(c.moe_expert_dtype == "mxfp4" for c in plan.candidates)
+    assert any(c.fused_kernels for c in plan.candidates)
+    assert any(c.speculative_draft_cost_factor > 0 for c in plan.candidates)
+    assert any(c.request_rate > 0 and c.arrival_model == "poisson" for c in plan.candidates)
+
+
+def test_build_inference_cmd_emits_new_knob_flags():
+    from pathlib import Path
+
+    from primus.agents.tuning_agent.evaluator import _build_inference_cmd
+
+    agent_cfg = SimpleNamespace(
+        target_cluster=SimpleNamespace(gpu_arch="mi355x", gpu_clock_mhz=None),
+        optimization=SimpleNamespace(hbm_capacity_gb=192.0),
+    )
+    primus_root = Path("/tmp/primus")
+
+    cmd = _build_inference_cmd(
+        Path("/tmp/w.yaml"),
+        InferenceTrialConfig(
+            tp=2, ep=2,
+            request_rate=8.0, arrival_model="poisson",
+            attention_backend="aiter", sparse_attention_topk=2048,
+            moe_expert_dtype="mxfp4", fused_kernels=True,
+            speculative_num_tokens=4, speculative_acceptance_rate=0.7,
+            speculative_draft_cost_factor=0.2,
+            quick_reduce=True, fuse_rmsnorm_allreduce=True,
+        ),
+        agent_cfg,
+        primus_root,
+    )
+    assert "--request-rate" in cmd and "--arrival-model" in cmd
+    assert "--attention-backend" in cmd and "aiter" in cmd
+    assert "--sparse-attention-topk" in cmd and "2048" in cmd
+    assert "--moe-expert-dtype" in cmd and "mxfp4" in cmd
+    assert "--fused-kernels" in cmd
+    assert "--speculative-draft-cost-factor" in cmd
+    assert "--quick-reduce" in cmd
+    assert "--fuse-rmsnorm-allreduce" in cmd
+
+    plain = _build_inference_cmd(
+        Path("/tmp/w.yaml"), InferenceTrialConfig(tp=2, ep=2), agent_cfg, primus_root
+    )
+    assert "--request-rate" not in plain
+    assert "--attention-backend" not in plain
+    assert "--moe-expert-dtype" not in plain
+    assert "--fused-kernels" not in plain
+    assert "--quick-reduce" not in plain
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM agent plumbing: partial-proposal → full profile-anchored trial
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_default_inference_trial_profile_anchored():
+    arch, cluster = _moe_arch(), _cluster(num_nodes=1, gpus_per_node=8)
+    leg = derive_inference_legality(arch, cluster)
+    base = default_inference_trial(arch, cluster, OptimizationConfig())
+    # Largest legal TP that fits the 8-GPU budget; batch 1; bf16; profile lens.
+    assert base.tp == max(t for t in leg.tp if t <= 8)
+    assert base.batch_size == 1
+    assert base.weight_dtype == "bf16" and base.kv_cache_dtype == "bf16"
+    assert base.input_len == 1024 and base.output_len == 128
+    # The baseline itself must be legal so the agent can always anchor on it.
+    ok, reason = validate_inference(base, arch, cluster, leg)
+    assert ok, reason
+
+
+def test_inference_trial_from_dict_overlays_only_given_keys():
+    arch, cluster = _moe_arch(), _cluster(num_nodes=1, gpus_per_node=8)
+    base = default_inference_trial(arch, cluster, OptimizationConfig())
+    cfg = inference_trial_from_dict(
+        {
+            "batch_size": 16,
+            "request_rate": 8.0,
+            "arrival_model": "poisson",
+            "attention_backend": "aiter",
+            "moe_expert_dtype": "mxfp4",
+            "sparse_attention_topk": 2048,
+            "fused_kernels": True,
+        },
+        arch,
+        cluster,
+        OptimizationConfig(),
+    )
+    # Given keys overlaid …
+    assert cfg.batch_size == 16
+    assert cfg.request_rate == 8.0 and cfg.arrival_model == "poisson"
+    assert cfg.attention_backend == "aiter"
+    assert cfg.moe_expert_dtype == "mxfp4"
+    assert cfg.sparse_attention_topk == 2048
+    assert cfg.fused_kernels is True
+    # … everything else inherits the profile baseline.
+    assert cfg.tp == base.tp and cfg.pp == base.pp and cfg.ep == base.ep
+    assert cfg.input_len == base.input_len and cfg.output_len == base.output_len
+    assert cfg.weight_dtype == "bf16"
+
+
+def test_inference_trial_from_dict_partial_proposal_is_legal():
+    # A partial proposal that only changes a couple of the *new* knobs should
+    # still produce a fully-legal config (the rest filled from the baseline).
+    arch, cluster = _moe_arch(), _cluster(num_nodes=1, gpus_per_node=8)
+    leg = derive_inference_legality(arch, cluster)
+    cfg = inference_trial_from_dict(
+        {"tp": 2, "ep": 2, "batch_size": 16, "moe_expert_dtype": "fp8"},
+        arch, cluster, OptimizationConfig(),
+    )
+    ok, reason = validate_inference(cfg, arch, cluster, leg)
+    assert ok, reason
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM agent module (requires dspy): proposal keys + tool belt evaluate path
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_inference_agent_exposes_new_knobs_to_llm():
+    pytest.importorskip("dspy")
+    from primus.agents.tuning_agent.inference_agent import _PROPOSAL_KEYS
+
+    # The new serving knobs must be in the proposal-key list the LLM is shown,
+    # otherwise the agent would never search them.
+    for key in (
+        "request_rate",
+        "arrival_model",
+        "attention_backend",
+        "sparse_attention_topk",
+        "moe_expert_dtype",
+        "fused_kernels",
+        "quick_reduce",
+        "fuse_rmsnorm_allreduce",
+        "speculative_draft_cost_factor",
+    ):
+        assert key in _PROPOSAL_KEYS
+
+
+def test_inference_agent_evaluate_tool_searches_new_knobs(tmp_path):
+    pytest.importorskip("dspy")
+    import json as _json
+
+    from primus.agents.tuning_agent.evaluator import Evaluator
+    from primus.agents.tuning_agent.history import History
+    from primus.agents.tuning_agent.inference_agent import build_inference_tools
+    from primus.agents.tuning_agent.scratchpad import Scratchpad
+
+    arch, cluster = _moe_arch(), _cluster(num_nodes=1, gpus_per_node=8)
+    leg = derive_inference_legality(arch, cluster)
+    agent_cfg = SimpleNamespace(
+        out_dir=tmp_path,
+        target_cluster=cluster,
+        extra_prompt="",
+        benchmark_host=SimpleNamespace(has_gpu=False),
+        optimization=SimpleNamespace(
+            budget=SimpleNamespace(max_perf_calls=10, max_rounds=1, max_rlm_iterations=5),
+            hbm_capacity_gb=192.0,
+            memory_safety_margin=0.05,
+            inference={},
+            objective="decode_throughput_tps_per_gpu",
+        ),
+    )
+    history = History.load(tmp_path / "inf.jsonl")
+    evaluator = Evaluator(agent_cfg, arch, tmp_path, mode="dry")
+    tools = build_inference_tools(
+        agent_cfg, arch, leg, history, evaluator, Scratchpad(tmp_path / "sp.txt"),
+        session_log=[], objective="decode_throughput_tps_per_gpu", quiet=True,
+    )
+    by_name = {t.__name__: t for t in tools}
+
+    # The LLM can propose a partial config that flips the new knobs.
+    out = _json.loads(
+        by_name["evaluate_inference"](
+            _json.dumps({"tp": 2, "ep": 2, "batch_size": 16, "moe_expert_dtype": "mxfp4",
+                         "attention_backend": "aiter"})
+        )
+    )
+    assert out["legal"] is True
+    assert out["score"] is not None
+    assert out["config"]["moe_expert_dtype"] == "mxfp4"
+    assert out["config"]["attention_backend"] == "aiter"
+    assert len(history.trials) == 1
+
+    # Legal axes shown to the LLM include the new knobs, incl. the boolean
+    # optimization toggles so LLM-driven search can actually explore them.
+    axes = _json.loads(by_name["get_legal_axes"]())
+    assert "attention_backend" in axes and "moe_expert_dtype" in axes
+    assert "sparse_attention_topk" in axes
+    for toggle in ("fused_kernels", "quick_reduce", "fuse_rmsnorm_allreduce"):
+        assert toggle in axes, f"{toggle} missing from LLM search axes"
+    # Budget tracking is wired.
+    budget = _json.loads(by_name["get_budget_status"]())
+    assert budget["eval_used"] == 1 and budget["eval_max"] == 10

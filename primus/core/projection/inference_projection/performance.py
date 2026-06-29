@@ -164,6 +164,13 @@ class InferencePerformanceProjector:
         # model; a no-op (1.0) otherwise.
         self._moe_imbalance = self._moe_imbalance_factor()
 
+        # Kernel-backend (AITER/Triton/CK/HIP) attention multiplier, native
+        # sparse-attention selection, and MoE expert-dtype (mxfp4/fp8/bf16)
+        # compute speedup.  All affect the *simulation* path only (the measured
+        # path bundles these into the whole-model step).  Defaults are no-ops.
+        self._attn_backend_mult = inference_config.request_config.resolved_attention_backend_multiplier()
+        self._moe_expert_speedup = inference_config.request_config.resolved_moe_expert_dtype_speedup()
+
         # Feature B: explicit, knob-driven communication model. When enabled we
         # replace the layer profiler's *implicit* TP-AllReduce / EP-AllToAll
         # cost with this model (delta applied per layer), enabling algorithm
@@ -381,16 +388,42 @@ class InferencePerformanceProjector:
         dense_compute = max(0.0, dense_raw - builtin_dense_comm) if has_dense else 0.0
         moe_compute = max(0.0, moe_raw - builtin_moe_comm) if has_moe else 0.0
 
-        # MoE routing imbalance: the MoE step is gated by the busiest EP rank,
-        # which does ``imbalance``x the average expert work.  Inflate only the
-        # expert-MLP (grouped-GEMM) portion of the layer — attention, router and
-        # communication are unaffected — by charging the extra ``(imbalance-1)``
-        # share of the measured expert-MLP time.  No-op when balanced / non-MoE.
-        if has_moe and self._moe_imbalance > 1.0 and hasattr(moe_p, "get_sub_profiler"):
+        # MoE expert-MLP (grouped-GEMM) adjustments — applied only to the
+        # expert-MLP portion of the layer (attention, router and comm are
+        # unaffected):
+        #   * routing imbalance (>= 1.0): the MoE step is gated by the busiest
+        #     EP rank, which does ``imbalance``x the average expert work;
+        #   * expert dtype speedup (<= 1.0): low-precision expert kernels
+        #     (mxfp4 / fp8) run the grouped-GEMM faster.
+        # These compose multiplicatively. No-op when balanced + bf16 / non-MoE.
+        if (
+            has_moe
+            and (self._moe_imbalance > 1.0 or self._moe_expert_speedup != 1.0)
+            and hasattr(moe_p, "get_sub_profiler")
+        ):
             mlp_p = moe_p.get_sub_profiler("mlp")
             if mlp_p is not None:
                 expert_mlp_ms = mlp_p.measured_forward_time(batch, q_len)
-                moe_compute += expert_mlp_ms * (self._moe_imbalance - 1.0)
+                new_expert = expert_mlp_ms * self._moe_imbalance * self._moe_expert_speedup
+                moe_compute += new_expert - expert_mlp_ms
+
+        # Kernel-backend (attention library) + native-sparse-attention: adjust
+        # only the attention sub-profiler's compute.  ``attn_mult`` scales the
+        # whole attention forward (Triton baseline = 1.0); ``sparse_scale``
+        # shrinks attention toward ``topk/context`` for long contexts (NSA).
+        sparse_scale = self.cfg.request_config.resolved_sparse_attention_scale(kv_len)
+        if self._attn_backend_mult != 1.0 or sparse_scale != 1.0:
+            factor = self._attn_backend_mult * sparse_scale
+            if has_dense:
+                ad = dense_p.get_sub_profiler("self_attention") if hasattr(dense_p, "get_sub_profiler") else None
+                if ad is not None:
+                    a = ad.measured_forward_time(batch, q_len)
+                    dense_compute = max(0.0, dense_compute + a * (factor - 1.0))
+            if has_moe:
+                am = moe_p.get_sub_profiler("self_attention") if hasattr(moe_p, "get_sub_profiler") else None
+                if am is not None:
+                    a = am.measured_forward_time(batch, q_len)
+                    moe_compute = max(0.0, moe_compute + a * (factor - 1.0))
 
         comm = CommBreakdown()
         if self._comm is not None:
@@ -481,16 +514,31 @@ class InferencePerformanceProjector:
         """Fixed per-step host/launch overhead (CUDA-graph-reducible)."""
         return max(0.0, self.cfg.request_config.resolved_decode_step_overhead_us()) / 1000.0
 
+    def _draft_overhead_ms(self, per_token_step_ms: float) -> float:
+        """Speculative draft-model forward cost added to a verify step.
+
+        The draft runs ``speculative_num_tokens`` times per verify step; each
+        draft pass costs ``speculative_draft_cost_factor`` of one target decode
+        token.  ``0`` for either knob is a no-op (legacy behaviour that only
+        credited the accepted-token speedup).
+        """
+        req = self.cfg.request_config
+        spec_k = int(req.speculative_num_tokens or 0)
+        dcf = float(req.speculative_draft_cost_factor or 0.0)
+        if spec_k > 0 and dcf > 0.0:
+            return dcf * spec_k * max(0.0, per_token_step_ms)
+        return 0.0
+
     def _decode_step_latency_ms(self, batch: int, kv_len: int, q_len: int = 1) -> float:
         # Benchmark-based: use the measured decode step directly (memory-bound,
         # ~flat in context over a generation, so no simulator context-scaling).
         if self._measured_mode:
-            step = self._measured_decode_step_ms(batch)
-            if q_len > 1:
-                step *= q_len  # speculative decode verifies q_len tokens/step
-            return step + self._decode_step_overhead_ms()
+            per_token = self._measured_decode_step_ms(batch)
+            step = per_token * q_len if q_len > 1 else per_token  # verify q_len tokens/step
+            return step + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
         ft = self._forward_times(batch, q_len, "decode", kv_len)
-        return ft.total_ms + self._decode_step_overhead_ms()
+        per_token = ft.total_ms / max(1, q_len)
+        return ft.total_ms + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
 
     def decode_total_ms(self, batch: int, input_len: int, output_len: int) -> float:
         """Integrate per-token decode latency over the growing KV cache.
@@ -589,7 +637,8 @@ class InferencePerformanceProjector:
             # Benchmark-based: measured decode is ~flat in context, so the pure
             # and mixed steps are constant across the generation window.
             spec = q_len if q_len > 1 else 1
-            t_pure = self._measured_decode_step_ms(C) * spec + ov
+            draft = self._draft_overhead_ms(self._measured_decode_step_ms(C))
+            t_pure = self._measured_decode_step_ms(C) * spec + draft + ov
             prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
             dec_piece = self._measured_decode_step_ms(max(1, C - 1)) * spec
             t_mixed = (prefill_piece + dec_piece) * (1.0 + penalty) + ov
@@ -602,7 +651,8 @@ class InferencePerformanceProjector:
             for i in range(n_samples):
                 frac = i / (n_samples - 1) if n_samples > 1 else 0.0
                 ctx = int(ctx_lo + frac * (ctx_hi - ctx_lo))
-                t_pure = self._forward_times(C, q_len, "decode", ctx).total_ms + ov
+                pure_fwd = self._forward_times(C, q_len, "decode", ctx).total_ms
+                t_pure = pure_fwd + self._draft_overhead_ms(pure_fwd / max(1, q_len)) + ov
                 prefill_piece = self._forward_times(1, chunk_tokens, "prefill", min(ctx, ISL)).total_ms
                 dec_piece = self._forward_times(max(1, C - 1), q_len, "decode", ctx).total_ms
                 t_mixed = (prefill_piece + dec_piece) * (1.0 + penalty) + ov
@@ -636,6 +686,54 @@ class InferencePerformanceProjector:
             "tpot_pollution_pct": pollution_pct,
             "concurrency": float(C),
         }
+
+    def _request_rate_queueing(
+        self, system_decode_tps: float, output_len: int, ttft_ms: float, request_latency_ms: float
+    ) -> Dict[str, float]:
+        """First-order open-loop queueing delay for a given offered load.
+
+        Closed-loop (``request_rate == 0`` or ``arrival_model == "closed"``) is
+        the legacy behaviour and returns ``{}`` (no adjustment).  Otherwise the
+        engine sustains a finite request-completion rate ``mu`` (decode-bound:
+        ``system_decode_tps / OSL``); the offered rate ``lambda`` gives a
+        utilization ``rho = lambda / mu`` and a queue-wait that is added to TTFT
+        and end-to-end latency:
+
+          * poisson      → M/M/1: ``Wq = rho/(1-rho) * (1/mu)``
+          * deterministic→ ~D/M/1: roughly half the M/M/1 wait
+
+        At/above saturation (``rho >= 1``) the queue is unbounded; we report a
+        large finite penalty + a ``saturated`` flag so the agent ranks it last.
+        """
+        req = self.cfg.request_config
+        rate = float(req.request_rate or 0.0)
+        model = (req.arrival_model or "closed").lower()
+        osl = max(1, output_len)
+        if rate <= 0.0 or model == "closed":
+            return {}
+        mu = system_decode_tps / osl if system_decode_tps > 0 else 0.0
+        if mu <= 0.0:
+            return {}
+        rho = rate / mu
+        ts_ms = 1000.0 / mu  # mean service time per request
+        out: Dict[str, float] = {
+            "offered_request_rate": rate,
+            "max_sustainable_request_rate": mu,
+            "utilization": rho,
+        }
+        if rho >= 1.0:
+            out["saturated"] = 1.0
+            wq_ms = ts_ms * 1000.0  # large but finite penalty
+        else:
+            out["saturated"] = 0.0
+            wq_ms = rho / (1.0 - rho) * ts_ms
+            if model == "deterministic":
+                wq_ms *= 0.5
+            wq_ms = min(wq_ms, ts_ms * 1000.0)
+        out["queue_wait_ms"] = wq_ms
+        out["ttft_with_queue_ms"] = ttft_ms + wq_ms
+        out["request_latency_with_queue_ms"] = request_latency_ms + wq_ms
+        return out
 
     def _use_continuous_batching(self, concurrency: int, output_len: int) -> bool:
         model = (self.cfg.request_config.serving_model or "continuous").lower()
@@ -722,6 +820,16 @@ class InferencePerformanceProjector:
         request_latency = ttft + decode_total
         decode_tps_per_gpu = decode_tps / replica_gpus if replica_gpus else 0.0
         prefill_tps = (batch * input_len * 1000.0 / ttft) if ttft > 0 else 0.0
+
+        # Offered-load queueing (open-loop). Adjusts TTFT + e2e latency only;
+        # decode throughput / TPOT are steady-state and unaffected. No-op unless
+        # a request rate is set. Computed from compute-TTFT (prefill_tps above
+        # uses the pre-queue TTFT, which is correct).
+        q = self._request_rate_queueing(decode_tps, output_len, ttft, request_latency)
+        if q:
+            ttft = q["ttft_with_queue_ms"]
+            request_latency = q["request_latency_with_queue_ms"]
+            extras.update(q)
 
         extras.update(self._comm_extras(batch, input_len, output_len))
         if self.is_benchmark_calibrated:
