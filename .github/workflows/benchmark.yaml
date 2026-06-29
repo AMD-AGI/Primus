@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
+          repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
@@ -240,7 +240,7 @@ jobs:
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
+          repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
@@ -403,7 +403,7 @@ jobs:
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
+          repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}

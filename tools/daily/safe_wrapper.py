@@ -55,7 +55,7 @@ class SafeWrapper:
             f"cd /tmp/Primus-Turbo &&  git checkout {self.PRIMUS_TURBO_COMMIT}",
             f"MAX_JOBS=128 pip install --cache-dir={self.PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt",
             f"pip3 install --no-build-isolation -e . -v",
-            f"cd && git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git && cd Primus && pip install -r requirements.txt",
+            f"cd && git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git && cd Primus && pip install -r requirements.txt",
         ]
         for config in args.config.split(","):
             path = Path(config)

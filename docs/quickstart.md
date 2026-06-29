@@ -24,7 +24,7 @@ rocm-smi && docker --version
 docker pull docker.io/rocm/primus:v26.3
 
 # Clone repository
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 ```
 
@@ -93,7 +93,7 @@ primus-cli [options] <mode> [mode-args] -- [command]
 
 **Need Help?**
 - [FAQ](./faq.md) - Common questions
-- [GitHub Issues](https://github.com/AMD-AIG-AIMA/Primus/issues) - Report bugs
+- [GitHub Issues](https://github.com/AMD-AGI/Primus/issues) - Report bugs
 
 ---
 
