@@ -264,7 +264,11 @@ class MLPerfMegatronPretrainTrainer(MegatronPretrainTrainer):
 
             if not skipped_iter and loss_dict and not self._warmup_active:
                 optimizer = _get_arg(args, kwargs, 3, "optimizer")
-                self._on_train_step_end(loss_dict, optimizer)
+                # Upstream passes the real loop iteration as the 8th positional
+                # (index 7) / ``iteration`` kwarg of train_step. ``args.iteration``
+                # is NOT updated until after train_step returns, so use this.
+                iteration = _get_arg(args, kwargs, 7, "iteration")
+                self._on_train_step_end(loss_dict, optimizer, iteration)
 
             if self.rpd and self.mllogger._get_rank() == 0 and self.profile_segment == "train_step":
                 self.rpd.stop()
@@ -361,12 +365,16 @@ class MLPerfMegatronPretrainTrainer(MegatronPretrainTrainer):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _on_train_step_end(self, loss_dict, optimizer):
+    def _on_train_step_end(self, loss_dict, optimizer, iteration=None):
         from megatron.training import get_args
         from mlperf_logging.mllog import constants
 
         args = get_args()
-        iteration = args.iteration
+        # Prefer the iteration passed into train_step (real loop counter); fall
+        # back to args.iteration only if it was not provided. args.iteration is
+        # stale during train_step, which made ``% freq`` true every step.
+        if iteration is None:
+            iteration = args.iteration
         consumed_samples = args.consumed_train_samples
 
         if self.train_loss_log_freq <= 0 or iteration % self.train_loss_log_freq != 0:
