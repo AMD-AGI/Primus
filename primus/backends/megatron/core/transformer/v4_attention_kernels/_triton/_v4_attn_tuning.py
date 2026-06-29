@@ -35,13 +35,13 @@ def is_gfx1250() -> bool:
 def fwd_attn_defaults(is_hca: bool):
     """``(BLOCK_M, BLOCK_N, NUM_WARPS, NUM_STAGES)`` for the V4 attention FWD kernel.
 
-    gfx1250 SWA (``ab_sweep/opt7c``): ``BM=128, BN=32, W=4, S=1`` is **+62-70%** vs the
-    gfx950/MI355X winner ``BM=64, BN=16, W=8, S=2``. The HCA (cr=128) fwd shape is not yet
-    swept on gfx1250, so it keeps the gfx950 winner (``BM=128, BN=16, W=8, S=1``).
+    gfx1250: ``BM=128, BN=32, W=4, S=1`` wins **both** shapes -- SWA **+62-70%** vs the gfx950
+    winner ``BM=64/BN=16/W=8/S=2`` (``ab_sweep/opt7c``), and HCA (cr=128) **+15-21%** vs the
+    gfx950 HCA winner ``BM=128/BN=16/W=8/S=1`` (``ab_sweep/opt7d``).
     """
-    if is_gfx1250() and not is_hca:
+    if is_gfx1250():
         return 128, 32, 4, 1
-    # gfx950 / MI355X (and gfx1250-HCA until swept) -- historical R2-sweep winners.
+    # gfx950 / MI355X -- historical R2-sweep winners (shape-dependent BLOCK_M / stages).
     if is_hca:
         return 128, 16, 8, 1
     return 64, 16, 8, 2
