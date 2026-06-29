@@ -3,10 +3,10 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-import gc
-from contextlib import contextmanager, nullcontext
 import contextlib
+import gc
 import os
+from contextlib import contextmanager, nullcontext
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import primus_turbo.pytorch as primus_turbo_torch
@@ -1756,7 +1756,10 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             # reduce-scatter (TP=1 / DP=1 / EP=1), since grad_b=None skips the reduce.
             # Needs a turbo wheel carrying fused_grouped_wgrad (else falls back).
             _wgrad_ctx = contextlib.nullcontext()
-            _fwg_dbg = os.environ.get("PRIMUS_TURBO_FUSE_WGRAD_DEBUG") == "1" and getattr(type(self), "_fwg_logn", 0) < 10
+            _fwg_dbg = (
+                os.environ.get("PRIMUS_TURBO_FUSE_WGRAD_DEBUG") == "1"
+                and getattr(type(self), "_fwg_logn", 0) < 10
+            )
             _fwg_flag = os.environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
             _mg = getattr(weights, "main_grad", None)
             if _fwg_flag and _mg is not None and _mg.dim() == 3:
@@ -1774,7 +1777,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                         print(
                             f"[OPT-1] gate PASS shape={tuple(_mg.shape)} contig={_mg.is_contiguous()} "
                             f"stride={_mg.stride()} view={'OK' if _v is not None else 'REJECTED'}",
-                            file=sys.stderr, flush=True,
+                            file=sys.stderr,
+                            flush=True,
                         )
                         type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
                     _wgrad_ctx = fused_grouped_wgrad(_shims)
@@ -1789,7 +1793,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
                 print(
                     f"[OPT-1] gate FAIL flag={_fwg_flag} main_grad={'None' if _mg is None else f'dim={_mg.dim()}'}",
-                    file=sys.stderr, flush=True,
+                    file=sys.stderr,
+                    flush=True,
                 )
                 type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
 
@@ -1932,7 +1937,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
         pad_multiple = 0
-        if args.use_turbo_permute_padding:
+        if args.moe_router_padding_for_quantization:
             if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                 pad_multiple = (
                     32

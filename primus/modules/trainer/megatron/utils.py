@@ -422,7 +422,9 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
             json.dump(config_dict, f, indent=2)
 
 
-def _get_sync_free_moe_options(stage: int) -> dict:
+def _get_sync_free_moe_options(args) -> dict:
+    stage = args.turbo_sync_free_moe_stage
+
     if stage > 3 or stage < 0:
         raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
 
@@ -430,21 +432,21 @@ def _get_sync_free_moe_options(stage: int) -> dict:
         1: {
             "moe_use_fused_router_with_aux_score": True,
             "moe_permute_fusion": True,
-            "use_turbo_permute_padding": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
         },
         2: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
-            "use_turbo_permute_padding": True,
+            "use_turbo_grouped_gemm": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
-            "use_turbo_permute_padding": True,
+            "use_turbo_grouped_gemm": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
             "use_turbo_fused_act_with_probs": True,
         },
     }
@@ -505,7 +507,7 @@ def validate_args_on_rocm(args):
             raise ValueError(
                 "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `use_turbo_grouped_mlp=True`"
             )
-        options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+        options = _get_sync_free_moe_options(args)
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )

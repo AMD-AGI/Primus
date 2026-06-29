@@ -14,26 +14,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
 from megatron.training.global_vars import get_args
 
-_GFX1250_PAD_SKIP = None
-
-
-def _gfx1250_skip_expert_pad() -> bool:
-    """gfx1250 mxfp8: zero-padding the permuted expert tokens (``quantization_padding``)
-    creates all-zero 32-elem quant blocks that trip a gfx1250 mxfp8 Triton quant bug
-    (block amax==0 -> ZERO_AMAX_TO_ONE scale, garbage fp8 -> ``x_max=0 -> out_inf`` ->
-    iter-1 NaN). ``grouped_gemm_fp8`` handles unpadded tokens, so skip the padding on
-    gfx1250. Cached; other archs (e.g. MI355X) keep the padding (CPU-sync optimization).
-    """
-    global _GFX1250_PAD_SKIP
-    if _GFX1250_PAD_SKIP is None:
-        try:
-            from primus_turbo.pytorch.core.utils import is_gfx1250
-
-            _GFX1250_PAD_SKIP = bool(is_gfx1250())
-        except Exception:  # noqa: BLE001
-            _GFX1250_PAD_SKIP = False
-    return _GFX1250_PAD_SKIP
-
 
 class PrimusGroupedMLP(TEGroupedMLP):
     """An efficient implementation of the Experts layer using TE's GroupedLinear.
@@ -59,7 +39,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
-        self.use_turbo_permute_padding = args.use_turbo_permute_padding
+        self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
 
     def bias_act_func_with_mask(
         self,
@@ -114,11 +94,11 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        if not _gfx1250_skip_expert_pad() and not self.use_turbo_permute_padding and (self.config.fp8 or self.config.fp4):
-            # NOTE: When use_turbo_permute_padding is true the token is padded. So we can skip the padding here to reduce cpu sync.
+        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+            # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
             actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+            permuted_local_hidden_states, tokens_per_expert_cpu = self.quantization_padding(
                 permuted_local_hidden_states, tokens_per_expert_cpu
             )
             permuted_probs, _ = self.quantization_padding(
@@ -175,7 +155,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         output = self._apply_bias(output, output_bias, tokens_per_expert.tolist(), permuted_probs)
 
         # upad and concat the output
-        if not _gfx1250_skip_expert_pad() and not self.use_turbo_permute_padding and (self.config.fp8 or self.config.fp4):
+        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None
