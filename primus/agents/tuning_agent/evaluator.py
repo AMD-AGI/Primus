@@ -564,6 +564,26 @@ def _build_inference_cmd(
         cmd += ["--ep-load-balance", str(cfg.ep_load_balance)]
     if getattr(cfg, "redundant_experts", 0):
         cmd += ["--redundant-experts", str(cfg.redundant_experts)]
+    # Offered load (open-loop arrivals) — only when a non-closed rate is set.
+    if getattr(cfg, "request_rate", 0.0) and getattr(cfg, "arrival_model", "closed") != "closed":
+        cmd += ["--request-rate", str(cfg.request_rate)]
+        cmd += ["--arrival-model", str(cfg.arrival_model)]
+    # Kernel backend + native sparse attention + expert precision + fused ops.
+    if getattr(cfg, "attention_backend", None):
+        cmd += ["--attention-backend", str(cfg.attention_backend)]
+    if getattr(cfg, "sparse_attention_topk", 0):
+        cmd += ["--sparse-attention-topk", str(cfg.sparse_attention_topk)]
+    if getattr(cfg, "moe_expert_dtype", None):
+        cmd += ["--moe-expert-dtype", str(cfg.moe_expert_dtype)]
+    if getattr(cfg, "fused_kernels", False):
+        cmd += ["--fused-kernels"]
+    if getattr(cfg, "speculative_draft_cost_factor", 0.0):
+        cmd += ["--speculative-draft-cost-factor", str(cfg.speculative_draft_cost_factor)]
+    # Custom collective ops (extra TP-AllReduce speedups).
+    if getattr(cfg, "quick_reduce", False):
+        cmd += ["--quick-reduce"]
+    if getattr(cfg, "fuse_rmsnorm_allreduce", False):
+        cmd += ["--fuse-rmsnorm-allreduce"]
     # Feature A: prefill/decode disaggregation.
     if getattr(cfg, "disaggregate", False):
         cmd += ["--disaggregate"]
@@ -727,6 +747,9 @@ class Evaluator:
             return result
 
         if self.mode == "dry":
+            # Count the call so the perf-budget gate is enforced even in dry
+            # loop-testing mode (otherwise the RLM could evaluate unbounded).
+            self.n_simulate_calls += 1
             # Synthesise plausible serving metrics for loop testing.
             result.ttft_ms = 50.0 + cfg.input_len * 0.01
             result.itl_ms = 10.0 + cfg.tp * 2.0

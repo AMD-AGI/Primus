@@ -43,6 +43,20 @@ from .scratchpad import Scratchpad
 from .workload import _find_primus_root, resolve_workload
 
 
+class _NS:
+    """Tiny read-only attribute view over a dict (missing keys → None).
+
+    Lets the report block address ``best.config`` / ``best.result`` fields via
+    attribute access regardless of whether the best trial came from the seed
+    sweep or the LLM agent (both are stored as plain dicts in the history)."""
+
+    def __init__(self, d: dict):
+        self._d = d or {}
+
+    def __getattr__(self, name: str):
+        return self._d.get(name)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="primus.agents.tuning_agent",
@@ -97,8 +111,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _run_inference(args, agent_cfg, arch, primus_root) -> int:
-    """Inference / serving tuning loop (deterministic seed sweep over the
-    serving search space, scored by the configured objective)."""
+    """Inference / serving tuning loop.
+
+    Two stages (mirrors the training path):
+      1. Deterministic seed sweep over the serving search space (warm start).
+      2. LLM-driven RLM search that continues from the warm-started incumbent
+         (skipped by ``--seed-only`` / ``--no-agent`` / when dspy is missing).
+    """
+    import traceback
+
     from .inference_tuning import (
         build_inference_seed_plan,
         derive_inference_legality,
@@ -113,7 +134,9 @@ def _run_inference(args, agent_cfg, arch, primus_root) -> int:
 
     agent_cfg.out_dir.mkdir(parents=True, exist_ok=True)
     history_path = agent_cfg.out_dir / "inference_trials.jsonl"
+    scratchpad_path = agent_cfg.out_dir / "inference_scratchpad.txt"
     history = History.load(history_path)
+    scratchpad = Scratchpad(scratchpad_path)
     eval_mode = "dry" if args.dry_run else args.mode
     evaluator = Evaluator(agent_cfg, arch, primus_root, mode=eval_mode)
 
@@ -123,39 +146,76 @@ def _run_inference(args, agent_cfg, arch, primus_root) -> int:
           f"batch={leg.batch_size} kv_dtype={leg.kv_cache_dtype} "
           f"weight_dtype={leg.weight_dtype}")
 
-    plan = build_inference_seed_plan(
-        arch, agent_cfg.target_cluster, agent_cfg.optimization,
-        max_candidates=args.seed_budget,
-    )
-    print(f"\n[tuning-agent] {plan.rationale}")
+    # ── 1. seed sweep (warm start) ───────────────────────────────────────
+    if args.agent_only:
+        print(f"\n[tuning-agent] --agent-only: skipping seeds ({len(history.trials)} trials loaded)")
+    else:
+        plan = build_inference_seed_plan(
+            arch, agent_cfg.target_cluster, agent_cfg.optimization,
+            max_candidates=args.seed_budget,
+        )
+        print(f"\n[tuning-agent] seed plan: {plan.rationale}")
+        for cfg in plan.candidates:
+            sig = cfg.signature()
+            if history.already_evaluated(cfg.as_dict()):
+                print(f"    [seed] skip (already evaluated): {sig}")
+                continue
+            idx = len(history.trials)
+            tag = (f"inf_{idx:03d}_tp{cfg.tp}_pp{cfg.pp}_ep{cfg.ep}"
+                   f"_bs{cfg.batch_size}_{cfg.weight_dtype}_kv{cfg.kv_cache_dtype}")
+            r = evaluator.evaluate_inference(cfg, tag)
+            history.add(cfg.as_dict(), r, notes="inference[seed]")
+            if not r.legal:
+                print(f"    [inf #{idx}] REJECT: {r.reason}")
+                continue
+            print(f"    [inf #{idx}] OK ttft={r.ttft_ms}ms itl={r.itl_ms}ms "
+                  f"dec_tps/gpu={r.decode_throughput_tps_per_gpu} "
+                  f"mem={r.memory_per_gpu_gb}GB maxconc={r.max_concurrent_sequences} cfg={sig}")
 
+    # ── 2. LLM agent stage ───────────────────────────────────────────────
+    if not (args.seed_only or args.no_agent):
+        try:
+            from .inference_agent import run_inference_agent
+        except ImportError as e:
+            print(
+                f"[tuning-agent] WARNING: cannot import inference agent ({e}); "
+                f"skipping LLM stage. Install dspy + python-dotenv to enable.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                summary = run_inference_agent(
+                    agent_cfg=agent_cfg,
+                    arch=arch,
+                    history=history,
+                    evaluator=evaluator,
+                    scratchpad=scratchpad,
+                    workspace=agent_cfg.out_dir,
+                    objective=objective,
+                )
+                (agent_cfg.out_dir / "inference_summary.json").write_text(
+                    json.dumps(summary, indent=2, default=str)
+                )
+            except Exception as e:
+                print(f"[tuning-agent] inference agent stage failed: {e}", file=sys.stderr)
+                traceback.print_exc()
+
+    # ── final report: best legal trial for the objective ─────────────────
     best = None
     best_score = None
-    for cfg in plan.candidates:
-        sig = cfg.signature()
-        if history.already_evaluated(cfg.as_dict()):
-            print(f"    [seed] skip (already evaluated): {sig}")
+    for t in history.trials:
+        if not t.result.get("legal"):
             continue
-        idx = len(history.trials)
-        tag = (f"inf_{idx:03d}_tp{cfg.tp}_pp{cfg.pp}_ep{cfg.ep}"
-               f"_bs{cfg.batch_size}_{cfg.weight_dtype}_kv{cfg.kv_cache_dtype}")
-        r = evaluator.evaluate_inference(cfg, tag)
-        history.add(cfg.as_dict(), r, notes="inference[seed]")
-        if not r.legal:
-            print(f"    [inf #{idx}] REJECT: {r.reason}")
-            continue
-        sc = score_result(r.as_dict(), objective)
-        print(f"    [inf #{idx}] OK ttft={r.ttft_ms}ms itl={r.itl_ms}ms "
-              f"dec_tps/gpu={r.decode_throughput_tps_per_gpu} "
-              f"mem={r.memory_per_gpu_gb}GB maxconc={r.max_concurrent_sequences} cfg={sig}")
+        sc = score_result(t.result, objective)
         if sc is not None and (best_score is None or sc > best_score):
-            best_score, best = sc, (cfg, r)
+            best_score, best = sc, t
 
     if best is None:
         print("\n[tuning-agent] no legal serving config found.")
         return 1
 
-    cfg, r = best
+    cfg = _NS(best.config)
+    r = _NS(best.result)
     print("\n=== BEST SERVING CONFIGURATION ===")
     print(f"  objective: {objective} ({direction})")
     print(f"  TP={cfg.tp} PP={cfg.pp} EP={cfg.ep} CP={cfg.cp}")
@@ -175,8 +235,8 @@ def _run_inference(args, agent_cfg, arch, primus_root) -> int:
     summary = {
         "mode": "inference",
         "objective": objective,
-        "best_config": cfg.as_dict(),
-        "best_result": r.as_dict(),
+        "best_config": best.config,
+        "best_result": best.result,
         "trials_total": len(history.trials),
     }
     (agent_cfg.out_dir / "inference_summary.json").write_text(

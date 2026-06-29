@@ -221,6 +221,54 @@ class InferenceRequestConfig:
     # ``0`` = no redundancy (legacy behaviour).
     redundant_experts: int = 0
 
+    # ---- Offered load / request rate (open-loop arrivals) ----
+    # Offered load in requests/sec. ``0`` keeps the legacy *closed-loop* model
+    # (a fixed resident ``concurrency`` with no arrival queue). When > 0 (and
+    # ``arrival_model`` != "closed") a first-order queueing-delay term is added
+    # to TTFT: the engine sustains a finite request-completion rate, and offered
+    # load approaching that rate inflates waiting time (the latency–throughput
+    # knee). This is the primary latency/throughput trade-off knob.
+    request_rate: float = 0.0
+    # Arrival process for ``request_rate``: "closed" (no queue; legacy),
+    # "poisson" (M/M/1-style waiting time), or "deterministic" (D/M/1-ish,
+    # lighter queueing). Only consulted when ``request_rate`` > 0.
+    arrival_model: str = "closed"
+
+    # ---- Kernel backend selection (ROCm) ----
+    # Selectable attention/kernel library. Best choice is shape/recipe
+    # dependent on ROCm; modelled as a representative multiplier on attention
+    # compute time (simulation path only). ``None`` = engine default (= triton
+    # baseline, 1.0). Values: aiter | triton | ck | hip.
+    attention_backend: Optional[str] = None
+
+    # ---- Native sparse attention (DeepSeek V3.2 / V4 NSA) ----
+    # Number of KV tokens each query attends to under native sparse attention
+    # (NSA + indexer top-k selection). ``0`` = dense attention (legacy). When
+    # > 0 and the context exceeds it, attention compute/KV-read scales toward
+    # ``topk / context`` (plus a small indexer overhead), making long-context
+    # attention roughly constant in context length.
+    sparse_attention_topk: int = 0
+
+    # ---- MoE expert compute precision ----
+    # Expert grouped-GEMM compute dtype (separate from ``weight_dtype`` which
+    # sizes resident weights). Models the expert-MLP speedup of low-precision
+    # expert kernels: mxfp4 | fp8 | bf16. ``None`` = follow bf16 (no speedup).
+    moe_expert_dtype: Optional[str] = None
+
+    # ---- Speculative decoding draft cost ----
+    # Draft-model forward cost per proposed draft token, as a fraction of one
+    # target decode step. The draft runs ``speculative_num_tokens`` times per
+    # verify step; this charges that extra compute (``0`` = ignore the draft
+    # cost, the legacy behaviour that only credited the accepted-token speedup).
+    speculative_draft_cost_factor: float = 0.0
+
+    # ---- Fused custom ops (RMSNorm / RoPE / quant / KV-store+quant) ----
+    # Fused elementwise kernels mainly cut per-step kernel-launch overhead.
+    # When set, the resolved per-decode-step launch overhead is reduced by
+    # ``_FUSED_KERNEL_OVERHEAD_FACTOR`` (representative). No-op when there is no
+    # per-step overhead to cut (e.g. full CUDA graph already amortises it).
+    fused_kernels: bool = False
+
     def resolved_max_context_len(self) -> int:
         if self.max_context_len is not None:
             return int(self.max_context_len)
@@ -236,10 +284,16 @@ class InferenceRequestConfig:
 
         An explicit non-zero ``decode_step_overhead_us`` always wins; otherwise
         the ``cudagraph_mode`` preset (if any) supplies a representative value.
+        Fused elementwise kernels (``fused_kernels``) further cut whatever
+        launch overhead remains.
         """
         if self.decode_step_overhead_us:
-            return float(self.decode_step_overhead_us)
-        return _CUDAGRAPH_PRESETS.get(self.cudagraph_mode, (0.0, 0.0))[0]
+            base = float(self.decode_step_overhead_us)
+        else:
+            base = _CUDAGRAPH_PRESETS.get(self.cudagraph_mode, (0.0, 0.0))[0]
+        if self.fused_kernels:
+            base *= _FUSED_KERNEL_OVERHEAD_FACTOR
+        return base
 
     def resolved_mixed_batch_penalty(self) -> float:
         """Mixed-step penalty fraction, honoring the cudagraph preset."""
@@ -267,6 +321,63 @@ class InferenceRequestConfig:
         if num_experts > 0 and red > 0:
             bal = 1.0 + (bal - 1.0) * num_experts / (num_experts + red)
         return max(1.0, bal)
+
+    def resolved_attention_backend_multiplier(self) -> float:
+        """Attention-compute time multiplier for the selected kernel backend.
+
+        ``None`` / unknown → 1.0 (no change). Representative ROCm ratios
+        relative to the Triton baseline; override by measuring (benchmark mode)
+        for a real number.
+        """
+        if not self.attention_backend:
+            return 1.0
+        return _ATTENTION_BACKEND_PRESETS.get(str(self.attention_backend).lower(), 1.0)
+
+    def resolved_sparse_attention_scale(self, context_len: int) -> float:
+        """Fraction of dense attention cost under NSA top-k selection.
+
+        Dense (``sparse_attention_topk == 0``) or short context (≤ topk) → 1.0.
+        Otherwise attention work scales toward ``topk / context`` with a small
+        floor (projections + indexer that do not shrink with the KV window).
+        """
+        topk = int(self.sparse_attention_topk or 0)
+        if topk <= 0 or context_len <= topk:
+            return 1.0
+        return max(_SPARSE_ATTENTION_FLOOR, float(topk) / float(max(1, context_len)))
+
+    def resolved_moe_expert_dtype_speedup(self) -> float:
+        """Expert grouped-GEMM compute multiplier for the expert dtype.
+
+        ``None`` / bf16 → 1.0. fp8 ≈ 0.55 (~2x), mxfp4 ≈ 0.35; representative,
+        override via benchmark calibration for a measured number.
+        """
+        if not self.moe_expert_dtype:
+            return 1.0
+        return _MOE_EXPERT_DTYPE_SPEEDUP.get(str(self.moe_expert_dtype).lower(), 1.0)
+
+
+# Representative attention-backend compute multipliers (relative to Triton).
+_ATTENTION_BACKEND_PRESETS = {
+    "aiter": 0.85,
+    "ck": 0.90,
+    "triton": 1.0,
+    "hip": 1.10,
+}
+
+# Floor on the sparse-attention scale (projections + indexer don't shrink).
+_SPARSE_ATTENTION_FLOOR = 0.15
+
+# Representative expert grouped-GEMM compute multipliers by expert dtype.
+_MOE_EXPERT_DTYPE_SPEEDUP = {
+    "bf16": 1.0,
+    "fp8": 0.55,
+    "fp8_e4m3": 0.55,
+    "mxfp4": 0.35,
+    "fp4": 0.35,
+}
+
+# Fused elementwise kernels cut per-step launch overhead by this factor.
+_FUSED_KERNEL_OVERHEAD_FACTOR = 0.7
 
 
 # CUDA-graph presets → (decode_step_overhead_us, mixed_batch_penalty).
@@ -305,6 +416,14 @@ class InferenceCollectiveConfig:
     # (<1.0 = faster, models kernel fusion / better algorithms). 1.0 = none.
     tp_allreduce_efficiency: float = 1.0
     ep_a2a_efficiency: float = 1.0
+    # ROCm "quick reduce": low-latency quantized all-reduce for small messages.
+    # When set, applies an extra speedup multiplier to the TP AllReduce time
+    # (models the small-message latency win). ``False`` = standard all-reduce.
+    quick_reduce: bool = False
+    # Fused RMSNorm + AllReduce: communication–computation fusion that hides
+    # part of the TP all-reduce latency behind the norm. When set, applies an
+    # extra speedup multiplier to the TP AllReduce time. ``False`` = unfused.
+    fuse_rmsnorm_allreduce: bool = False
     # Whether to charge pipeline-stage P2P (send/recv) latency. Only nonzero
     # when pipeline_model_parallel_size > 1.
     include_pp_p2p: bool = True

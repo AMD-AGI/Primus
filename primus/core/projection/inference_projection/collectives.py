@@ -39,6 +39,10 @@ from primus.core.projection.training_config import (
 
 _PROTOCOLS = ("simple", "ll", "ll64", "ll128")
 
+# Representative extra TP-AllReduce speedups for custom collective ops.
+_QUICK_REDUCE_SPEEDUP = 0.6        # ROCm low-latency quantized AR (small msgs).
+_FUSED_RMSNORM_AR_SPEEDUP = 0.8    # RMSNorm+AR fusion hides part of the AR.
+
 
 def deepep_overlap_efficiency(model_config) -> float:
     """Fraction of EP All-to-All hidden behind compute under DeepEP/SyncFree.
@@ -189,8 +193,15 @@ class InferenceCollectiveModel:
                 raw = _min_over_protocols(cm.RingAllreduce, self._args, msg, self.tp, ["tp"])
             # Forced algorithms must carry the same fixed overhead as ``auto``.
             us = raw + _allreduce_overhead_us(self._args, msg, self.tp)
+        # Custom-op speedups: quick-reduce (small-message quantized AR) and
+        # fused RMSNorm+AllReduce both shave the exposed TP-AR time.
+        eff = float(self.cc.tp_allreduce_efficiency)
+        if getattr(self.cc, "quick_reduce", False):
+            eff *= _QUICK_REDUCE_SPEEDUP
+        if getattr(self.cc, "fuse_rmsnorm_allreduce", False):
+            eff *= _FUSED_RMSNORM_AR_SPEEDUP
         # 2 AllReduces per layer in forward.
-        return 2.0 * (us / 1000.0) * float(self.cc.tp_allreduce_efficiency)
+        return 2.0 * (us / 1000.0) * eff
 
     # -- EP AllToAll -----------------------------------------------------------
 

@@ -79,6 +79,22 @@ class InferenceTrialConfig:
     decode_replicas: int = 1
     # KV-transfer engine preset for disaggregation: nixl | mooncake | mori
     transfer_backend: str | None = None
+    # offered load (open-loop): request rate + arrival process
+    request_rate: float = 0.0
+    arrival_model: str = "closed"  # closed | poisson | deterministic
+    # kernel backend (ROCm attention library): aiter | triton | ck | hip
+    attention_backend: str | None = None
+    # native sparse attention (DeepSeek V3.2/V4 NSA) top-k KV (0 = dense)
+    sparse_attention_topk: int = 0
+    # MoE expert compute precision (mxfp4 | fp8 | bf16); MoE-only
+    moe_expert_dtype: str | None = None
+    # fused elementwise kernels (RMSNorm/RoPE/quant/KV-store) cut step overhead
+    fused_kernels: bool = False
+    # speculative draft-model forward cost per draft token (fraction of a step)
+    speculative_draft_cost_factor: float = 0.0
+    # custom collective ops (TP>1): quick-reduce + fused RMSNorm+AllReduce
+    quick_reduce: bool = False
+    fuse_rmsnorm_allreduce: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -149,6 +165,21 @@ class InferenceAxisLegality:
     )
     ep_load_balance: list[float] = field(default_factory=lambda: [1.0, 1.2, 1.5])
     redundant_experts: list[int] = field(default_factory=lambda: [0, 8, 16])
+    arrival_model: list[str] = field(
+        default_factory=lambda: ["closed", "poisson", "deterministic"]
+    )
+    attention_backend: list[str] = field(
+        default_factory=lambda: ["aiter", "triton", "ck", "hip"]
+    )
+    sparse_attention_topk: list[int] = field(default_factory=lambda: [0, 512, 2048])
+    moe_expert_dtype: list[str] = field(
+        default_factory=lambda: ["bf16", "fp8", "mxfp4"]
+    )
+    # fused elementwise kernels (always available)
+    fused_kernels: list[bool] = field(default_factory=lambda: [False, True])
+    # TP-collective optimizations (only meaningful when TP>1)
+    quick_reduce: list[bool] = field(default_factory=lambda: [False])
+    fuse_rmsnorm_allreduce: list[bool] = field(default_factory=lambda: [False])
 
     def to_prompt_dict(self) -> dict:
         return {
@@ -168,6 +199,13 @@ class InferenceAxisLegality:
             "max_num_batched_tokens": self.max_num_batched_tokens,
             "ep_load_balance": self.ep_load_balance,
             "redundant_experts": self.redundant_experts,
+            "arrival_model": self.arrival_model,
+            "attention_backend": self.attention_backend,
+            "sparse_attention_topk": self.sparse_attention_topk,
+            "moe_expert_dtype": self.moe_expert_dtype,
+            "fused_kernels": self.fused_kernels,
+            "quick_reduce": self.quick_reduce,
+            "fuse_rmsnorm_allreduce": self.fuse_rmsnorm_allreduce,
         }
 
 
@@ -199,6 +237,10 @@ def derive_inference_legality(
     # on/off choice only when the workload is MoE.
     use_turbo_deepep = [False, True] if is_moe else [False]
 
+    # quick-reduce + fused RMSNorm/AllReduce are TP-collective optimizations;
+    # only offer the on/off choice when TP can exceed 1.
+    tp_collective = [False, True] if max(tp) > 1 else [False]
+
     return InferenceAxisLegality(
         tp=tp, pp=pp, ep=ep, cp=cp,
         batch_size=batch_size,
@@ -207,6 +249,8 @@ def derive_inference_legality(
         chunked_prefill_size=chunked_prefill_size,
         speculative_num_tokens=speculative_num_tokens,
         use_turbo_deepep=use_turbo_deepep,
+        quick_reduce=tp_collective,
+        fuse_rmsnorm_allreduce=tp_collective,
     )
 
 
@@ -261,6 +305,35 @@ def validate_inference(
         return False, f"redundant_experts must be >= 0, got {cfg.redundant_experts}"
     if cfg.redundant_experts > 0 and not is_moe:
         return False, "redundant_experts is only meaningful for MoE workloads"
+    # Offered load / request rate.
+    if cfg.request_rate < 0:
+        return False, f"request_rate must be >= 0, got {cfg.request_rate}"
+    if cfg.arrival_model not in legality.arrival_model:
+        return False, f"arrival_model={cfg.arrival_model} not in {legality.arrival_model}"
+    if cfg.request_rate > 0 and cfg.arrival_model == "closed":
+        return False, "request_rate>0 requires arrival_model in {poisson, deterministic}"
+    # Kernel backend (attention library).
+    if cfg.attention_backend is not None and cfg.attention_backend not in legality.attention_backend:
+        return False, f"attention_backend={cfg.attention_backend} not in {legality.attention_backend}"
+    # Native sparse attention.
+    if cfg.sparse_attention_topk < 0:
+        return False, f"sparse_attention_topk must be >= 0, got {cfg.sparse_attention_topk}"
+    # MoE expert compute precision (MoE-only).
+    if cfg.moe_expert_dtype is not None:
+        if cfg.moe_expert_dtype not in legality.moe_expert_dtype:
+            return False, f"moe_expert_dtype={cfg.moe_expert_dtype} not in {legality.moe_expert_dtype}"
+        if not is_moe:
+            return False, "moe_expert_dtype is only meaningful for MoE workloads"
+    # Speculative draft cost requires speculative decoding to be on.
+    if cfg.speculative_draft_cost_factor < 0:
+        return False, "speculative_draft_cost_factor must be >= 0"
+    if cfg.speculative_draft_cost_factor > 0 and cfg.speculative_num_tokens <= 0:
+        return False, "speculative_draft_cost_factor requires speculative_num_tokens>0"
+    # Custom collective ops only matter when TP>1.
+    if cfg.quick_reduce and cfg.tp <= 1:
+        return False, "quick_reduce requires TP>1"
+    if cfg.fuse_rmsnorm_allreduce and cfg.tp <= 1:
+        return False, "fuse_rmsnorm_allreduce requires TP>1"
 
     replica_gpus = cfg.tp * cfg.pp * (cfg.ep if getattr(arch, "is_moe", False) else 1)
     if replica_gpus > world:
@@ -308,6 +381,47 @@ def _profile_from_opt(opt: OptimizationConfig) -> dict:
         "output_len": int(inf.get("output_len", 128)),
         "max_concurrency": inf.get("max_concurrency"),
     }
+
+
+def default_inference_trial(
+    arch: ArchitectureRecord, cluster: TargetCluster, opt: OptimizationConfig
+) -> "InferenceTrialConfig":
+    """Profile-anchored baseline trial — the same defaults the seed sweep starts
+    from (largest intra-budget TP, batch 1, bf16, request profile from opt).
+
+    Used to fill in fields a (partial) LLM proposal leaves unspecified, so the
+    agent can name just the knob it wants to change.
+    """
+    leg = derive_inference_legality(arch, cluster)
+    profile = _profile_from_opt(opt)
+    world = cluster.num_nodes * cluster.gpus_per_node
+    base_tp = max((t for t in leg.tp if t <= world), default=1)
+    return InferenceTrialConfig(
+        tp=base_tp,
+        pp=1,
+        ep=1,
+        cp=1,
+        batch_size=1,
+        input_len=profile["input_len"],
+        output_len=profile["output_len"],
+        max_concurrency=profile["max_concurrency"],
+        weight_dtype="bf16",
+        kv_cache_dtype="bf16",
+    )
+
+
+def inference_trial_from_dict(
+    d: dict,
+    arch: ArchitectureRecord,
+    cluster: TargetCluster,
+    opt: OptimizationConfig,
+) -> "InferenceTrialConfig":
+    """Overlay a (possibly partial) proposal dict onto the profile baseline."""
+    base = default_inference_trial(arch, cluster, opt)
+    for k in base.as_dict():
+        if k in d and d[k] is not None:
+            setattr(base, k, d[k])
+    return base
 
 
 def build_inference_seed_plan(
@@ -469,6 +583,38 @@ def build_inference_seed_plan(
                 transfer_backend="nixl",
             )
         )
+
+    # 12) Kernel backend (ROCm attention library) — shape-dependent best pick.
+    add(mk(batch_size=16, attention_backend="aiter"))
+    add(mk(batch_size=16, attention_backend="ck"))
+    # 13) Native sparse attention (NSA top-k) — pays off for long contexts.
+    if in_len + out_len >= 4096:
+        add(mk(batch_size=16, sparse_attention_topk=2048))
+    # 14) Fused elementwise kernels — cut per-step launch overhead (pair with a
+    #     capture mode that still has overhead to amortise).
+    add(mk(batch_size=16, cudagraph_mode="piecewise", fused_kernels=True))
+    # 15) Speculative decoding with an explicit draft-model cost charged.
+    add(
+        mk(
+            batch_size=16,
+            speculative_num_tokens=4,
+            speculative_acceptance_rate=0.7,
+            speculative_draft_cost_factor=0.2,
+        )
+    )
+    # 16) MoE expert compute precision (mxfp4 / fp8 expert grouped-GEMM).
+    if is_moe:
+        ep_for_dtype = max([e for e in leg.ep if e in (2, 4, 8) and e <= world] or [1])
+        feasible_tp = [t for t in leg.tp if t * ep_for_dtype <= world]
+        tp_dtype = max(feasible_tp) if feasible_tp else 1
+        add(mk(tp=tp_dtype, ep=ep_for_dtype, batch_size=16, moe_expert_dtype="fp8"))
+        add(mk(tp=tp_dtype, ep=ep_for_dtype, batch_size=16, moe_expert_dtype="mxfp4"))
+    # 17) Custom collective ops (TP>1): quick-reduce + fused RMSNorm+AllReduce.
+    if base_tp > 1:
+        add(mk(batch_size=16, quick_reduce=True))
+        add(mk(batch_size=16, fuse_rmsnorm_allreduce=True))
+    # 18) Offered-load probe — a Poisson arrival rate to expose the queueing knee.
+    add(mk(batch_size=16, request_rate=8.0, arrival_model="poisson"))
 
     cands = cands[:max_candidates]
     return InferenceSeedPlan(

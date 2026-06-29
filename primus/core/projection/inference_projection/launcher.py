@@ -39,6 +39,12 @@ _ARG_TO_FIELD = {
     "max_num_batched_tokens": "max_num_batched_tokens",
     "ep_load_balance": "ep_load_balance",
     "redundant_experts": "redundant_experts",
+    "request_rate": "request_rate",
+    "arrival_model": "arrival_model",
+    "attention_backend": "attention_backend",
+    "sparse_attention_topk": "sparse_attention_topk",
+    "moe_expert_dtype": "moe_expert_dtype",
+    "speculative_draft_cost_factor": "speculative_draft_cost_factor",
 }
 
 # Feature B (custom collective ops): CLI arg → ``collective_<field>`` key.
@@ -85,6 +91,14 @@ def _collect_inference_overrides(args) -> Dict[str, object]:
     # --disaggregate flag → disagg_enabled.
     if getattr(args, "disaggregate", False):
         overrides["disagg_enabled"] = True
+    # store_true serving flags: only override when actually set, so they never
+    # clobber a value carried by a YAML ``inference:`` block.
+    if getattr(args, "fused_kernels", False):
+        overrides["fused_kernels"] = True
+    if getattr(args, "quick_reduce", False):
+        overrides["collective_quick_reduce"] = True
+    if getattr(args, "fuse_rmsnorm_allreduce", False):
+        overrides["collective_fuse_rmsnorm_allreduce"] = True
     return overrides
 
 
@@ -123,6 +137,23 @@ def _print_performance(inference_config, perf) -> None:
         feats.append(f"ep_load_balance={req.ep_load_balance:.2f}")
     if req.redundant_experts:
         feats.append(f"redundant_experts={req.redundant_experts}")
+    if getattr(req, "attention_backend", None):
+        feats.append(f"attn_backend={req.attention_backend}")
+    if getattr(req, "sparse_attention_topk", 0):
+        feats.append(f"sparse_attn_topk={req.sparse_attention_topk}")
+    if getattr(req, "moe_expert_dtype", None):
+        feats.append(f"moe_expert_dtype={req.moe_expert_dtype}")
+    if getattr(req, "fused_kernels", False):
+        feats.append("fused_kernels")
+    if getattr(req, "speculative_draft_cost_factor", 0.0):
+        feats.append(f"draft_cost={req.speculative_draft_cost_factor:.2f}")
+    if getattr(req, "request_rate", 0.0) and (req.arrival_model or "closed") != "closed":
+        feats.append(f"request_rate={req.request_rate:g}/s({req.arrival_model})")
+    cc = inference_config.collective_config
+    if getattr(cc, "quick_reduce", False):
+        feats.append("quick_reduce")
+    if getattr(cc, "fuse_rmsnorm_allreduce", False):
+        feats.append("fused_rmsnorm_ar")
     if feats:
         print(f"  Features: {', '.join(feats)}")
     if perf.is_disaggregated:
@@ -155,6 +186,14 @@ def _print_performance(inference_config, perf) -> None:
     else:
         print(f"  Decode step latency (batch):     {perf.decode_step_latency_ms:.2f} ms")
     print(f"  End-to-end request latency:      {perf.request_latency_ms:.2f} ms")
+    if "offered_request_rate" in perf.extras:
+        sat = " [SATURATED]" if perf.extras.get("saturated") else ""
+        print(
+            f"  Offered load:                    {perf.extras['offered_request_rate']:g} req/s "
+            f"(max sustainable {perf.extras.get('max_sustainable_request_rate', 0.0):.2f} req/s, "
+            f"utilization {perf.extras.get('utilization', 0.0) * 100:.0f}%){sat}"
+        )
+        print(f"  Queue wait (in TTFT):            {perf.extras.get('queue_wait_ms', 0.0):.2f} ms")
     print("-" * 100)
     print(f"  Per-request decode throughput:   {perf.per_request_decode_tps:.1f} tok/s")
     print(f"  Aggregate decode throughput:     {perf.decode_throughput_tps:.1f} tok/s")
