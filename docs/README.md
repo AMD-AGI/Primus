@@ -67,4 +67,4 @@ Get help and find answers:
 
 ---
 
-**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).
+**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AGI/Primus/issues).
