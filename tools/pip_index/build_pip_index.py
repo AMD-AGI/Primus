@@ -21,7 +21,7 @@ Layout produced under ``--output-dir`` (typically ``<site>/simple``)::
 Usage::
 
     python3 tools/pip_index/build_pip_index.py \
-        --repo AMD-AIG-AIMA/Primus \
+        --repo AMD-AGI/Primus \
         --package primus \
         --requires-python ">=3.10" \
         --output-dir /tmp/site/simple
@@ -138,7 +138,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build a PEP 503 'simple' index for GitHub Release artifacts."
     )
-    parser.add_argument("--repo", required=True, help="owner/repo, e.g. AMD-AIG-AIMA/Primus")
+    parser.add_argument("--repo", required=True, help="owner/repo, e.g. AMD-AGI/Primus")
     parser.add_argument("--package", default="primus", help="Project name (default: primus)")
     parser.add_argument("--output-dir", required=True, help="Output dir for the simple/ index root")
     parser.add_argument(
