@@ -33,8 +33,8 @@ def patch_train(ctx: PatchContext) -> None:
     """
     log_rank_0("[Patch:maxtext.train] Patching MaxText train module...")
 
-    import MaxText.train as orig_train
-    from MaxText import pyconfig
+    import maxtext.trainers.pre_train.train as orig_train
+    from maxtext.configs import pyconfig
 
     _upstream_initialize = orig_train.initialize
 

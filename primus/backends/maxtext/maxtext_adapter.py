@@ -109,10 +109,10 @@ class MaxTextAdapter(BackendAdapter):
         MaxText typically doesn't have a version number, so we return a placeholder.
         """
         try:
-            import MaxText
+            import maxtext
 
-            if hasattr(MaxText, "__version__"):
-                return MaxText.__version__
+            if hasattr(maxtext, "__version__"):
+                return maxtext.__version__
         except Exception as exec:
             warning_rank_0(f"MaxTextAdapter: Failed to detect MaxText version: {exec}")
 

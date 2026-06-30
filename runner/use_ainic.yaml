@@ -26,7 +26,7 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/jax-training:maxtext-v26.1"
+    image: "rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0"
 
     # Single-value options
     ipc: "host"

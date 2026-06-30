@@ -32,7 +32,7 @@ def patch_maxtext_logger(ctx: PatchContext) -> None:
     log_rank_0("[Patch:maxtext.logger] Patching MaxText logger...")
 
     try:
-        import MaxText.max_logging as maxtext_logging
+        import maxtext.utils.max_logging as maxtext_logging
 
         if hasattr(maxtext_logging, "log"):
             maxtext_logging.log = primus_logger.info

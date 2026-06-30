@@ -33,10 +33,10 @@ class MaxTextPretrainTrainer(BaseModule):
     def init(self, *init_args, **kwargs):
         import functools
 
-        from MaxText import pyconfig
-        from MaxText.train import initialize
+        from maxtext.configs import pyconfig
+        from maxtext.trainers.pre_train.train import initialize
 
-        argv = ["MaxText.train", self.pre_trainer_cfg_path]
+        argv = ["maxtext.trainers.pre_train.train", self.pre_trainer_cfg_path]
         log_rank_0(f"init MaxText with argv {argv}")
 
         if self.override_model_args:
@@ -54,7 +54,7 @@ class MaxTextPretrainTrainer(BaseModule):
     def run(self, *args, **kwargs):
         log_rank_0(f"MaxText Pre-Trainer: begin training...")
 
-        from MaxText.train import run
+        from maxtext.trainers.pre_train.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
         log_rank_0("MaxText Pre-Trainer: after training is done")
@@ -119,7 +119,7 @@ class MaxTextPretrainTrainer(BaseModule):
         from primus.core.utils.logger import _logger as primus_logger
 
         try:
-            import MaxText.max_logging as maxtext_logging
+            import maxtext.utils.max_logging as maxtext_logging
 
             if hasattr(maxtext_logging, "log"):
                 maxtext_logging.log = primus_logger.info

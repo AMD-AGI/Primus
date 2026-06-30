@@ -72,7 +72,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
-        from MaxText.train import initialize
+        from maxtext.trainers.pre_train.train import initialize
 
         from primus.backends.maxtext.argument_builder import (
             export_params_to_yaml,
@@ -85,7 +85,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         yaml_path = export_params_to_yaml(params_dict)
         try:
-            argv = ["MaxText.train", yaml_path]
+            argv = ["maxtext.trainers.pre_train.train", yaml_path]
             self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
         finally:
             try:
@@ -170,7 +170,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         log_rank_0("Executing MaxText pretrain...")
 
-        from MaxText.train import run
+        from maxtext.trainers.pre_train.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
 
