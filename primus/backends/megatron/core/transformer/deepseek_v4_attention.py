@@ -87,6 +87,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     v4_attention,
     v4_csa_attention_from_pool,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_gluon import (
+    v4_csa_attention_gluon_from_pool,
+)
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
@@ -715,6 +718,21 @@ class DeepseekV4Attention(MLASelfAttention):
         if self._use_v4_flydsl_csa_attention and self.compress_ratio != 4:
             self._use_v4_flydsl_csa_attention = False
 
+        # Gluon sparse-MLA backend flags (fwd + bwd; gfx950). Same
+        # compress-ratio gating as the tilelang / flydsl flags above.
+        self._use_v4_gluon_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_gluon_attention", False),
+            field_name="use_v4_gluon_attention",
+        )
+        if self._use_v4_gluon_attention and self.compress_ratio not in (0, 128):
+            self._use_v4_gluon_attention = False
+        self._use_v4_gluon_csa_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_gluon_csa_attention", False),
+            field_name="use_v4_gluon_csa_attention",
+        )
+        if self._use_v4_gluon_csa_attention and self.compress_ratio != 4:
+            self._use_v4_gluon_csa_attention = False
+
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
         if submodules.core_attention is not None and self.compress_ratio == 0:
@@ -1287,6 +1305,23 @@ class DeepseekV4Attention(MLASelfAttention):
 
         # 2) Indexer top-K per query.
         topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
+
+        # Gluon sparse-MLA backend (gfx950): consumes pool + topk like the
+        # Triton pool path; adapts to the gluon kernel internally (zero rope
+        # pad + [local ++ pool] buffer). Numerically == eager_v4_csa_attention.
+        if self._use_v4_gluon_csa_attention:
+            return v4_csa_attention_gluon_from_pool(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
 
         # Plan-5 P31 dispatch: Triton path consumes pool + topk directly
         # and avoids materialising [B, S, K, Dh] gathered tensors.

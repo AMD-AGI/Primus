@@ -32,6 +32,9 @@ def sparse_mla_bwd_v4_gluon(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_
         scale = 1.0 / (d_qk**0.5)
     if kv.dim() == 2:
         kv = kv.unsqueeze(1)
+    # num_kv may exceed total_tokens (V4 [local ++ compressed-pool] buffer):
+    # dKV is accumulated per KV-token, so size it by kv rows, not query tokens.
+    num_kv = kv.shape[0]
 
     has_sink = attn_sink is not None
     if has_sink:
@@ -61,7 +64,7 @@ def sparse_mla_bwd_v4_gluon(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_
     dq = torch.empty_like(q)
     chunk_dS = torch.empty(total_tokens, num_heads, R_CHUNK, dtype=torch.bfloat16, device=q.device)
     chunk_P = torch.empty(total_tokens, num_heads, R_CHUNK, dtype=torch.bfloat16, device=q.device)
-    dkv_acc = torch.zeros(total_tokens, d_qk, dtype=torch.float32, device=q.device)
+    dkv_acc = torch.zeros(num_kv, d_qk, dtype=torch.float32, device=q.device)
     interm = torch.empty(total_tokens, R_CHUNK, d_qk, dtype=torch.bfloat16, device=q.device)
 
     # ---- pad topk to R_CHUNK multiple ----
@@ -73,7 +76,7 @@ def sparse_mla_bwd_v4_gluon(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_
         topk_padded = topk_indices
 
     all_csr = [
-        _build_inverted_topk_slice(topk_padded[:, rs : rs + R_CHUNK], rs, R_CHUNK)
+        _build_inverted_topk_slice(topk_padded[:, rs : rs + R_CHUNK], rs, R_CHUNK, num_kv=num_kv)
         for rs in range(0, topk, R_CHUNK)
     ]
 
@@ -139,9 +142,10 @@ def sparse_mla_bwd_v4_gluon(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_
             num_warps=4,
         )
 
-        # Triton gather (CSR inverted-topk reduce interm -> dkv_acc)
+        # Triton gather (CSR inverted-topk reduce interm -> dkv_acc).
+        # Grid is over KV tokens (num_kv), which may exceed query tokens.
         inv_ptr, inv_data = all_csr[chunk_idx]
-        _bwd_dkv_gather_acc[(total_tokens,)](
+        _bwd_dkv_gather_acc[(num_kv,)](
             interm,
             inv_ptr,
             inv_data,

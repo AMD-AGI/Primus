@@ -580,7 +580,11 @@ def sparse_mla_fwd_v4_gluon(q, kv, topk_indices, attn_sink=None, kv_lora_rank=51
 
     if kv.dim() == 2:
         kv = kv.unsqueeze(1)
-    assert kv.shape[0] == total_tokens and kv.shape[-1] == d_qk
+    # kv may hold MORE rows than there are query tokens (V4 feeds a
+    # [local ++ compressed-pool] buffer, so num_kv = S + P > total_tokens).
+    # The kernel only dereferences kv via topk indices (stride_kv_t), so any
+    # num_kv >= max(topk_index)+1 is valid.
+    assert kv.shape[0] >= total_tokens and kv.shape[-1] == d_qk
 
     has_sink = attn_sink is not None
     if has_sink:

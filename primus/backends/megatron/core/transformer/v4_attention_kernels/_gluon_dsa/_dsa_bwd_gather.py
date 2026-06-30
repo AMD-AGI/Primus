@@ -172,7 +172,7 @@ def _build_inverted_topk(topk_indices):
     return inv_ptr, inv_data
 
 
-def _build_inverted_topk_slice(topk_indices_slice, r_start, R_CHUNK):
+def _build_inverted_topk_slice(topk_indices_slice, r_start, R_CHUNK, num_kv=None):
     """
     Build CSR-style inverted index for a topk slice, excluding invalid (-1) entries.
 
@@ -181,12 +181,17 @@ def _build_inverted_topk_slice(topk_indices_slice, r_start, R_CHUNK):
           May contain -1 for padding (when actual chunk < R_CHUNK at the last chunk).
         r_start:  int — first rank index in this slice (unused, for documentation)
         R_CHUNK:  int — number of ranks in this slice (constexpr width)
+        num_kv:   int or None — number of KV tokens. When the KV buffer holds
+          MORE rows than query tokens (V4 [local ++ pool], num_kv = S + P), pass
+          it so ``inv_ptr`` has length ``num_kv + 1`` even if the last KV tokens
+          are referenced by no query. Defaults to ``T`` (query tokens).
 
     Returns:
-        inv_ptr:  [T+1] int32 — row pointers (kv_token -> range in inv_data)
+        inv_ptr:  [num_kv+1] int32 — row pointers (kv_token -> range in inv_data)
         inv_data: [valid_entries] int32 — flat indices q*R_CHUNK+local_r, sorted by KV token
     """
     T, RC = topk_indices_slice.shape
+    n_kv = T if num_kv is None else int(num_kv)
     flat_kv = topk_indices_slice.reshape(-1).long()  # [T*R_CHUNK]; -1 marks invalid
 
     # Sort ALL entries by KV token. argsort returns the flat positions (q*RC+r) in
@@ -195,9 +200,9 @@ def _build_inverted_topk_slice(topk_indices_slice, r_start, R_CHUNK):
     # + per-element `scatter_add` + extra `index` gathers of the previous version
     # (all slow torch ops, especially on gfx1250 where they dominated the bwd).
     inv_data = torch.argsort(flat_kv, stable=True).to(torch.int32)  # [T*R_CHUNK]
-    # bincount of (kv+1): bin 0 = #invalid, bins 1..T = per-KV counts.
-    counts = torch.bincount(flat_kv + 1, minlength=T + 1)  # [T+1]
-    inv_ptr = torch.cumsum(counts, dim=0).to(torch.int32)  # [T+1]; inv_ptr[0]=#invalid
+    # bincount of (kv+1): bin 0 = #invalid, bins 1..num_kv = per-KV counts.
+    counts = torch.bincount(flat_kv + 1, minlength=n_kv + 1)  # [num_kv+1]
+    inv_ptr = torch.cumsum(counts, dim=0).to(torch.int32)  # [num_kv+1]; inv_ptr[0]=#invalid
 
     return inv_ptr, inv_data
 

@@ -154,6 +154,11 @@ fi
 export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
 export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
 
+# Gluon sparse-MLA backend (gfx950). CSA (cr==4) takes precedence over the
+# Triton CSA path in DeepseekV4Attention._csa_forward when enabled. Default OFF.
+export USE_V4_GLUON_ATTENTION=${USE_V4_GLUON_ATTENTION:-False}
+export USE_V4_GLUON_CSA_ATTENTION=${USE_V4_GLUON_CSA_ATTENTION:-False}
+
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
 # in-container config regardless of env propagation.
@@ -287,6 +292,8 @@ fi
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
   --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_gluon_attention "$USE_V4_GLUON_ATTENTION" \
+  --use_v4_gluon_csa_attention "$USE_V4_GLUON_CSA_ATTENTION" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
   --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
   --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \

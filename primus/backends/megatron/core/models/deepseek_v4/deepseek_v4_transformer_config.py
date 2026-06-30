@@ -159,6 +159,14 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # to Triton when the FlyDSL runtime is absent.
     use_v4_flydsl_attention: bool = False
     use_v4_flydsl_csa_attention: bool = False
+    # Gluon (hardware-controlled Triton) sparse-MLA backend, ported from
+    # ROCm/aiter PR #2922 (gfx950 / MI355X). fwd + bwd. The V4 latent (512,
+    # rope baked in-place) is fed as the gluon "lora" with a zero rope pad
+    # (the kernel requires D_ROPE > 0); the kv buffer is [local ++ pool] and
+    # topk = [SWA window ++ pool top-k]. ``_csa`` flag routes the CSA layers
+    # (cr=4); ``use_v4_gluon_attention`` reserved for the cr=0/128 layers.
+    use_v4_gluon_attention: bool = False
+    use_v4_gluon_csa_attention: bool = False
 
     # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
     # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-
