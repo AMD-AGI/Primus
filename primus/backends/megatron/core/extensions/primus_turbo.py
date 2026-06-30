@@ -1910,7 +1910,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
         pad_multiple = 0
-        if args.use_turbo_permute_padding:
+        if args.moe_router_padding_for_quantization:
             if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                 pad_multiple = (
                     32
