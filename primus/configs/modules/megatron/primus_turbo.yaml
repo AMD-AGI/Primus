@@ -4,6 +4,20 @@ enable_primus_turbo: false
 # use primus_turbo_fp4_autocast instead of TE fp8_autocast for FP4 (requires enable_primus_turbo)
 use_turbo_fp4_autocast: false
 
+# ===== MXFP4 Weight De-oscillation =====
+# Snap weight elements whose MXFP4-quantized value oscillates while the fp32
+# master barely moves (improves MXFP4 training convergence). Requires
+# fp4 + use_turbo_fp4_autocast + use_distributed_optimizer.
+weight_deosc: false
+# optimizer steps per observe/reset window
+weight_deosc_period: 200
+# DistRatio threshold (dist_w_qdq / dist_w) above which an element is snapped
+weight_deosc_ratio: 4.0
+# global optimizer step at which de-oscillation tracking starts
+weight_deosc_start_step: 0
+# log a summary every N periods (0 disables logging)
+weight_deosc_log_freq: 0
+
 # ===== Attention =====
 # operator switch
 use_turbo_attention: false
