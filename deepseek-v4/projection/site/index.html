@@ -54,6 +54,11 @@
             (gemm / grouped_gemm / attn only); the headline TFLOP/s/GPU below uses
             the V4 analytic model FLOPs instead.
           </p>
+          <p id="breakdown-manual-note" class="muted manual-note" hidden>
+            Manual layer-timing mode is active — the projected iteration time is
+            driven by the values you set in “Manual per-layer”; the per-module
+            tables below are shown for reference only.
+          </p>
         </div>
         <div id="breakdown-blocks"></div>
       </section>
@@ -61,6 +66,14 @@
       <div class="two-col">
         <section class="panel" id="controls-panel">
           <h2>Projection controls</h2>
+          <div class="mode-switch" id="mode-switch">
+            <span class="mode-switch__label">Layer timing</span>
+            <div class="mode-switch__tabs" role="tablist">
+              <button class="mode-tab is-active" data-mode="trace" role="tab">Trace-derived</button>
+              <button class="mode-tab" data-mode="manual" role="tab">Manual per-layer</button>
+            </div>
+          </div>
+          <div id="manual-grid" class="manual-grid" hidden></div>
           <div id="controls-grid" class="controls-grid"></div>
           <div id="validation-panel" hidden></div>
           <p class="muted">

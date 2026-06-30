@@ -104,6 +104,34 @@ table.bd td.rowlab, table.bd th.rowlab { text-align: left; color: var(--muted); 
 .divider { border-left: 2px solid var(--accent) !important; }
 .phase-tag { font-size: 10px; color: var(--accent-2); }
 
+/* Layer-timing mode switch (trace vs manual), styled like the GPU tabs. */
+.mode-switch { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.mode-switch__label { font-size: 12px; color: var(--muted); }
+.mode-switch__tabs { display: flex; gap: 6px; }
+.mode-tab {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: 6px 12px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.mode-tab.is-active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+.manual-grid { margin-bottom: 14px; }
+.manual-grid__hint { margin: 0 0 10px; }
+.manual-rows { display: flex; flex-direction: column; gap: 8px; }
+.manual-row {
+  display: grid; grid-template-columns: 92px 1fr 1fr; gap: 10px; align-items: end;
+}
+.manual-row__lab { font-size: 12px; padding-bottom: 8px; }
+.cr-tag {
+  display: inline-block; padding: 3px 7px; border-radius: 6px; color: #e6eaf2;
+  font-variant-numeric: tabular-nums; align-self: center; padding-bottom: 3px;
+}
+.manual-row .cr-tag { margin-bottom: 0; }
+.manual-row .field { min-width: 0; }
+.manual-row input { width: 100%; min-width: 0; }
+
+#breakdown-panel.is-muted #breakdown-blocks { opacity: .5; }
+.manual-note { margin: 8px 0 0; color: var(--warn); }
+
 .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .controls-grid .field--full { grid-column: 1 / -1; }
 /* number inputs have an intrinsic min-width that overflows the 1fr column and

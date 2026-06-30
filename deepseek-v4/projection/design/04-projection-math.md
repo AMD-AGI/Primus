@@ -39,6 +39,37 @@ mtp_bwd = mtp_num_layers * (mtp_inner_bwd + mtp_out_bwd) + 2 * mtp_eh_time / 3
 The current Flash Megatron FLOPs anchor uses `mtp_cr=4`; a future dedicated MTP
 trace can replace the `eh_proj` and inner-layer approximation.
 
+## Step 0b — manual layer-time mode (optional, UI-only)
+
+The site exposes a **layer-timing mode** toggle in the controls panel:
+
+- `trace` (default): `layer_fwd/bwd[cr]` come from the breakdown JSON exactly as
+  in Step 0.
+- `manual`: the user types `layer_fwd[cr]` / `layer_bwd[cr]` directly (one
+  fwd/bwd pair per `cr ∈ {0,4,128}`, in µs) and those values replace the
+  trace-derived per-layer times. This is a what-if calculator: you supply the
+  per-layer cost and the site reuses Steps 1-5 unchanged to derive the full-model
+  iteration time, bubble, optimizer, tokens/s and TFLOP/s.
+
+Rules baked into the implementation:
+
+- **Granularity is per-`cr`** (same as the data model — `cr` only changes
+  attention, the MoE block is shared), not per physical layer. The `cr` schedule,
+  PP/VPP layout and recompute still expand these per-cr times to the full model.
+- **Per-GPU storage.** A hand-entered time already targets one GPU, so manual
+  values are stored separately for MI355X and MI455X and the
+  MI355→MI455 scaling (Step 6) is **bypassed** in manual mode. Switching the GPU
+  tab edits that GPU's own set.
+- **Prefill from trace.** Entering manual mode (or switching GPU within it)
+  seeds any unset field with the current trace-derived value, so toggling never
+  changes the result until you actually edit a number. Unset/blank fields keep
+  falling back to trace.
+- **Time only, FLOPs stay analytic.** Manual input overrides time but not FLOPs;
+  `TFLOP/s/GPU` continues to use the V4 analytic model FLOPs (Step 5), so it
+  stays meaningful.
+- **Scope.** Manual covers the three per-cr decoder layers only. Non-layer parts
+  (embedding / output / loss) and MTP keep using the trace breakdown.
+
 ## Step 1 — recompute (A16)
 
 If a layer is recomputed, its backward replays one forward:

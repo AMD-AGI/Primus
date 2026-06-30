@@ -59,8 +59,26 @@ function defaultControls(data) {
     optEff: 0.7, computeEff: 1.0, calibFactor: 0.91, bytesPerParam: optBytes,
     peak355: m355.peak_tflops_bf16, bw355: m355.hbm_bandwidth_gbps,
     peak455: m455.peak_tflops_bf16, bw455: m455.hbm_bandwidth_gbps,
+    // Modeling mode: "trace" (derive per-layer fwd/bwd from the breakdown JSON)
+    // or "manual" (user types per-cr fwd/bwd directly). Manual values are stored
+    // per GPU because a hand-entered time already targets a specific GPU, so the
+    // MI355->MI455 scaling is bypassed in manual mode.
+    modelMode: "trace",
+    man: {
+      MI355X: emptyManual(),
+      MI455X: emptyManual(),
+    },
   };
 }
+
+// Per-cr manual fwd/bwd holders (µs). null = "not set yet" -> falls back to the
+// trace-derived value, so toggling into manual mode never changes the result
+// until the user actually edits a field.
+function emptyManual() {
+  return { f0: null, b0: null, f4: null, b4: null, f128: null, b128: null };
+}
+
+const MANUAL_CR_KEYS = { "0": ["f0", "b0"], "4": ["f4", "b4"], "128": ["f128", "b128"] };
 
 const CONTROL_DEFS = [
   { key: "world", label: "World size (GPUs)", kind: "int" },
@@ -140,6 +158,64 @@ function renderControls() {
   }
 }
 
+// Prefill the active GPU's manual fields from the trace-derived times so that
+// switching into manual mode (or switching GPU while in manual mode) starts from
+// the current baseline instead of empty boxes. Already-set fields are kept.
+function prefillManual(gpu) {
+  const c = STATE.controls;
+  const m = c.man[gpu];
+  for (const cr of ["0", "4", "128"]) {
+    const [fk, bk] = MANUAL_CR_KEYS[cr];
+    const t = layerTimes(STATE.data, cr, gpu, c);
+    if (!isPositiveNumber(m[fk])) m[fk] = Math.round(t.fwd);
+    if (!isPositiveNumber(m[bk])) m[bk] = Math.round(t.bwd);
+  }
+}
+
+function renderModeSwitch() {
+  document.querySelectorAll(".mode-tab").forEach((t) => {
+    t.classList.toggle("is-active", t.dataset.mode === STATE.controls.modelMode);
+  });
+}
+
+function renderManualGrid() {
+  const host = $("#manual-grid");
+  if (!host) return;
+  host.hidden = STATE.controls.modelMode !== "manual";
+  host.innerHTML = "";
+  if (host.hidden) return;
+  const c = STATE.controls, gpu = STATE.gpu;
+  const counts = STATE.data.model_config.cr_layer_counts || {};
+  host.append(el("p", { class: "muted manual-grid__hint" },
+    `Per-layer fwd/bwd (µs) for ${gpu}. Set values override the trace; placeholders show the current trace baseline. Non-layer parts (embedding / output / loss) and MTP still come from the trace breakdown.`));
+  const rows = el("div", { class: "manual-rows" });
+  for (const cr of ["0", "4", "128"]) {
+    const [fk, bk] = MANUAL_CR_KEYS[cr];
+    const m = c.man[gpu];
+    const t = layerTimes(STATE.data, cr, gpu, c);
+    const row = el("div", { class: "manual-row" });
+    row.append(el("span", { class: `manual-row__lab cr-tag cr-${cr}` }, `cr=${cr} ×${counts[cr] || 0}`));
+    for (const [label, key, traceVal] of [["fwd", fk, t.fwd], ["bwd", bk, t.bwd]]) {
+      const field = el("div", { class: "field" });
+      field.append(el("span", {}, `${label} µs`));
+      const input = el("input", {
+        id: `man-${gpu}-${key}`, type: "number", step: "1", min: "0",
+        placeholder: String(Math.round(traceVal)),
+      });
+      if (isPositiveNumber(m[key])) input.value = m[key];
+      input.addEventListener("change", () => {
+        const v = input.value.trim();
+        m[key] = v === "" ? null : Number(v);
+        renderAll();
+      });
+      field.append(input);
+      row.append(field);
+    }
+    rows.append(row);
+  }
+  host.append(rows);
+}
+
 // ---------------------------------------------------------------------------
 // Hardware scaling (Step 6)
 // ---------------------------------------------------------------------------
@@ -170,6 +246,23 @@ function layerTimes(data, cr, gpu, c) {
   let fFlops = sumFlops(aF) + sumFlops(mF);
   let bFlops = sumFlops(aB) + sumFlops(mB);
   return { fwd, bwd, fFlops, bFlops };
+}
+
+// Effective per-layer time used by the projection. In "manual" mode a set field
+// overrides the trace-derived time for the active GPU; unset fields fall back to
+// trace. FLOPs always stay analytic/trace-derived (manual only overrides time),
+// so TFLOP/s/GPU remains meaningful.
+function effectiveLayerTimes(data, cr, gpu, c) {
+  const trace = layerTimes(data, cr, gpu, c);
+  if (c.modelMode !== "manual") return trace;
+  const m = (c.man && c.man[gpu]) || {};
+  const [fk, bk] = MANUAL_CR_KEYS[cr] || [];
+  return {
+    fwd: isPositiveNumber(m[fk]) ? m[fk] : trace.fwd,
+    bwd: isPositiveNumber(m[bk]) ? m[bk] : trace.bwd,
+    fFlops: trace.fFlops,
+    bFlops: trace.bFlops,
+  };
 }
 
 function expandLayoutRepeats(layout) {
@@ -257,6 +350,21 @@ function validateControls(data, c, gpu = STATE.gpu) {
   const chunks = c.pp * c.vpp;
   const layout = parsePipelineLayout(c.ppLayout, data.model_config.compress_ratios.length, chunks);
   if (!layout.ok) errors.push(`PP layout invalid: ${layout.message}.`);
+
+  if (c.modelMode === "manual") {
+    const man = (c.man && c.man[gpu]) || {};
+    for (const cr of ["0", "4", "128"]) {
+      const count = data.model_config.cr_layer_counts?.[cr] || 0;
+      if (!count) continue; // cr not used by this model; ignore its inputs
+      for (const k of MANUAL_CR_KEYS[cr]) {
+        const v = man[k];
+        if (v != null && v !== "" && !isPositiveNumber(Number(v))) {
+          errors.push(`manual ${k} (cr=${cr}) must be a positive number (µs).`);
+        }
+      }
+    }
+    warnings.push(`Manual mode for ${gpu}: per-cr fwd/bwd you set override the trace; unset fields fall back to trace. Non-layer (embedding/output/loss) and MTP still use the trace breakdown.`);
+  }
 
   const captureEp = data.capture?.ep;
   if (captureEp && c.ep !== captureEp) {
@@ -349,7 +457,7 @@ function project(data, gpu, c, validation = validateControls(data, c, gpu)) {
   const dp = validation.dp;
   const world = c.world;
   const lt = {};
-  for (const cr of ["0", "4", "128"]) lt[cr] = layerTimes(data, cr, gpu, c);
+  for (const cr of ["0", "4", "128"]) lt[cr] = effectiveLayerTimes(data, cr, gpu, c);
 
   // Step 2: assign layers to PP*VPP chunks -> devices
   const C = c.pp * c.vpp;
@@ -555,6 +663,10 @@ function renderValidation(validation) {
 
 function renderBreakdown() {
   $("#breakdown-gpu").textContent = `· ${STATE.gpu}`;
+  const panel = $("#breakdown-panel");
+  if (panel) panel.classList.toggle("is-muted", STATE.controls?.modelMode === "manual");
+  const note = $("#breakdown-manual-note");
+  if (note) note.hidden = STATE.controls?.modelMode !== "manual";
   const host = $("#breakdown-blocks");
   host.innerHTML = "";
   const d = STATE.data;
@@ -605,7 +717,8 @@ function renderResults(validation) {
   const ltDesc = ["0", "4", "128"].map((cr) =>
     `cr${cr}: F ${fmt(p.lt[cr].fwd, 0)} / B ${fmt(p.lt[cr].bwd, 0)} µs`).join("  ·  ");
   const recomputeDesc = c.recompute === "first-n" ? `first ${c.recomputeLayers} layers/stage` : (c.recompute === "full" ? "recompute on" : "no recompute");
-  steps.append(step("Per-layer fwd/bwd (µs, " + recomputeDesc + ")", "", ltDesc));
+  const sourceTag = c.modelMode === "manual" ? "manual" : "trace";
+  steps.append(step(`Per-layer fwd/bwd (µs, ${sourceTag}, ${recomputeDesc})`, "", ltDesc));
   steps.append(step("Critical PP stage (µs)", `F ${fmt(p.critF, 0)} + B ${fmt(p.critB, 0)}`,
     `max over ${c.pp} stages; layout ${p.layoutApplied ? "applied" : "balanced fallback"} (${p.layoutMessage}); counts=[${p.layoutCounts.join(", ")}]; per-device fwd=[${p.Df.map((x) => fmt(x / 1000, 1)).join(", ")}] ms`));
   if ((d.model_config.mtp_num_layers || 0) > 0) {
@@ -641,6 +754,8 @@ function renderAll() {
   const roDp = document.getElementById("ctl-dp");
   if (roDp) roDp.value = Number.isFinite(validation.dp) ? validation.dp : "—";
   renderValidation(validation);
+  renderModeSwitch();
+  renderManualGrid();
   renderConfig();
   renderBreakdown();
   renderResults(validation);
@@ -670,6 +785,7 @@ globalThis.DSV4Projection = {
   expandLayoutRepeats,
   parsePipelineLayout,
   validateControls,
+  effectiveLayerTimes,
   project,
 };
 
@@ -687,6 +803,17 @@ if (typeof document !== "undefined") {
       document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
       tab.classList.add("is-active");
       STATE.gpu = tab.dataset.gpu;
+      if (STATE.controls?.modelMode === "manual") prefillManual(STATE.gpu);
+      renderAll();
+    });
+  });
+
+  document.querySelectorAll(".mode-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const mode = tab.dataset.mode;
+      if (!STATE.controls || STATE.controls.modelMode === mode) return;
+      STATE.controls.modelMode = mode;
+      if (mode === "manual") prefillManual(STATE.gpu);
       renderAll();
     });
   });
