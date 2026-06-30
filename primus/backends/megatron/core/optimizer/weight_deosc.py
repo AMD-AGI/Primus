@@ -50,10 +50,12 @@ convergence-stabilization signal).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
@@ -143,10 +145,12 @@ def qdq_mxfp4(weight: torch.Tensor) -> torch.Tensor:
     ``ScalingRecipe(use_2d_block=True)``, quantized along ``axis=-1``.
 
     Supports 2D dense weights ``[out, in]`` and 3D grouped expert weights
-    ``[num_experts, out, in]`` (the latter is handled per-expert because the
-    single-direction MXFP4 kernel only accepts 2D input). The 3D path is
-    structurally ready for MoE but currently dormant -- the Primus-Turbo grouped
-    GEMM does not support FP4 yet, so no grouped weight is ever de-osc eligible.
+    ``[num_experts, out, in]``. The grouped case is handled per-expert because
+    the single-direction MXFP4 kernel only accepts 2D input; this reproduces the
+    Primus-Turbo grouped MXFP4 forward weight operand (PR #398), which quantizes
+    each expert row-wise along the K (in) axis with ``use_2d_block=True``.
+    Whether a grouped weight is actually de-osc eligible still depends on the
+    grouped FP4 forward setting ``quantized_weight_buffer`` on its module.
     """
     recipe = _ScalingRecipe(use_2d_block=True)
 
@@ -185,6 +189,33 @@ class _ParamDeOscState:
         self.dist_w_qdq = torch.zeros_like(self.prev)
         self.step = 0
 
+    def to_serializable(self) -> dict:
+        return {
+            "prev": self.prev.detach().cpu(),
+            "prev_q": self.prev_q.detach().cpu(),
+            "dist_w": self.dist_w.detach().cpu(),
+            "dist_w_qdq": self.dist_w_qdq.detach().cpu(),
+            "step": int(self.step),
+        }
+
+    @classmethod
+    def from_serializable(cls, blob: dict, device, like: torch.Tensor) -> "_ParamDeOscState":
+        """Rebuild from a checkpoint blob, only if it matches the current shard.
+
+        Returns ``None`` when the saved shape does not match ``like`` (e.g. the
+        checkpoint was taken under a different parallel layout); the caller then
+        falls back to re-seeding, which is harmless for a window accumulator.
+        """
+        if tuple(blob["prev"].shape) != tuple(like.shape):
+            return None
+        obj = cls.__new__(cls)
+        obj.prev = blob["prev"].to(device=device, dtype=torch.float32)
+        obj.prev_q = blob["prev_q"].to(device=device, dtype=torch.float32)
+        obj.dist_w = blob["dist_w"].to(device=device, dtype=torch.float32)
+        obj.dist_w_qdq = blob["dist_w_qdq"].to(device=device, dtype=torch.float32)
+        obj.step = int(blob["step"])
+        return obj
+
 
 class WeightDeOscRunner:
     """Drives MXFP4 weight de-oscillation for a single ``DistributedOptimizer``.
@@ -201,13 +232,32 @@ class WeightDeOscRunner:
         self.config = config
         self._global_step = 0
         self._period_index = 0
-        # Keyed by id(shard_main_param) -- the fp32 local shard is the stable,
-        # per-rank object we both track and snap.
-        self._state: Dict[int, _ParamDeOscState] = {}
+        # Keyed by a stable structural key ("<param_name>|<start>:<end>") so the
+        # state round-trips across checkpoint save/load under the same parallel
+        # layout. The fp32 local shard is the per-rank tensor we track and snap.
+        self._state: Dict[str, _ParamDeOscState] = {}
+        # id(model_param) -> stable param name, cached.
+        self._param_name_cache: Dict[int, str] = {}
+        # State loaded from a checkpoint, consumed lazily on first observation.
+        self._loaded_params: Dict[str, dict] = {}
+        self._forced_sync_warned = False
         # Lazily-built set of id(model_param) for weights actually quantized in
         # the FP4 forward (auto-excludes bf16 first/last layers and any layer
         # whose FP4 path never ran, e.g. grouped experts).
         self._eligible_ids: Optional[set] = None
+
+    # ------------------------------------------------------------------
+    # Stable keys (for in-memory tracking + checkpoint round-trip)
+    # ------------------------------------------------------------------
+    def _stable_key(self, dist_opt, model_param, start: int, end: int) -> str:
+        name = self._param_name_cache.get(id(model_param))
+        if name is None:
+            try:
+                name = dist_opt._param_name(model_param)
+            except Exception:
+                name = f"param@{id(model_param)}"
+            self._param_name_cache[id(model_param)] = name
+        return f"{name}|{start}:{end}"
 
     # ------------------------------------------------------------------
     # Eligibility
@@ -234,8 +284,12 @@ class WeightDeOscRunner:
                     weight = getattr(module, "weight", None)
                 if isinstance(weight, torch.Tensor):
                     eligible.add(id(weight))
-                # Grouped-linear consolidates experts into ``weights`` (3D); kept
-                # for when Primus-Turbo grouped FP4 lands.
+                # Grouped-linear consolidates experts into a 3D ``weights``
+                # (G, out, in). The Primus-Turbo grouped MXFP4 forward
+                # (PR #398, ``_quant_weight_dual``) quantizes it row-wise along
+                # axis=-1 with use_2d_block=True, which is exactly what
+                # ``qdq_mxfp4``'s per-expert 2D path reproduces. Eligible only
+                # once the grouped FP4 forward actually sets quantized_weight_buffer.
                 weights = getattr(module, "weights", None)
                 if isinstance(weights, torch.Tensor):
                     eligible.add(id(weights))
@@ -259,6 +313,11 @@ class WeightDeOscRunner:
                 # FP4 forward has not populated any quantized weight buffers yet;
                 # retry on a later step.
                 return
+
+        # With overlap_param_gather the all-gather for the next forward is
+        # deferred, so model_param.data may not be fully gathered here. Force a
+        # synchronous gather so Q(w) is computed on the complete weight.
+        self._maybe_force_param_sync(dist_opt)
 
         shard_groups = getattr(dist_opt, "shard_fp32_from_float16_groups", None)
         model_groups = getattr(dist_opt, "model_float16_groups", None)
@@ -289,7 +348,8 @@ class WeightDeOscRunner:
                 # fp32 master local shard (denominator + snap target).
                 w_local = shard_main_param.detach()
 
-                reset, elems, closed = self._track_and_snap(shard_main_param, w_local, q_local)
+                key = self._stable_key(dist_opt, model_param, start, end)
+                reset, elems, closed = self._track_and_snap(key, shard_main_param, w_local, q_local)
                 total_reset += reset
                 total_elems += elems
                 period_closed = period_closed or closed
@@ -307,26 +367,50 @@ class WeightDeOscRunner:
                     f"snapped {total_reset}/{total_elems} elems ({frac:.3f}%)"
                 )
 
+    def _maybe_force_param_sync(self, dist_opt) -> None:
+        ddp_config = getattr(dist_opt, "ddp_config", None)
+        if not getattr(ddp_config, "overlap_param_gather", False):
+            return
+        if not self._forced_sync_warned:
+            log_rank_0(
+                "[WeightDeOsc] overlap_param_gather=True: forcing a synchronous "
+                "param all-gather before de-oscillation so Q(w) sees the full weight."
+            )
+            self._forced_sync_warned = True
+        for model_chunk in getattr(dist_opt, "model_chunks", []) or []:
+            try:
+                model_chunk.start_param_sync(force_sync=True)
+            except TypeError:
+                # Older signature without force_sync.
+                model_chunk.start_param_sync()
+
     # ------------------------------------------------------------------
     # Per-parameter tracking / reset
     # ------------------------------------------------------------------
     @torch.no_grad()
     def _track_and_snap(
         self,
+        key: str,
         shard_main_param: torch.Tensor,
         w_local: torch.Tensor,
         q_local: torch.Tensor,
     ) -> Tuple[int, int, bool]:
-        key = id(shard_main_param)
         state = self._state.get(key)
 
         w_local_f = w_local.float()
         q_local_f = q_local.float()
 
         if state is None:
-            # First observation: seed snapshots, do not track this step.
-            self._state[key] = _ParamDeOscState(w_local_f, q_local_f)
-            return 0, w_local_f.numel(), False
+            # Restore from a loaded checkpoint if the shard matches, else seed.
+            loaded = self._loaded_params.pop(key, None)
+            if loaded is not None:
+                state = _ParamDeOscState.from_serializable(loaded, w_local_f.device, w_local_f)
+            if state is None:
+                # First observation: seed snapshots, do not track this step.
+                self._state[key] = _ParamDeOscState(w_local_f, q_local_f)
+                return 0, w_local_f.numel(), False
+            self._state[key] = state
+            # fall through to track this step using the restored snapshots
 
         state.dist_w += (w_local_f - state.prev).abs()
         state.dist_w_qdq += (q_local_f - state.prev_q).abs()
@@ -355,6 +439,79 @@ class WeightDeOscRunner:
         state.dist_w_qdq.zero_()
         state.step = 0
         return reset_count, w_local_f.numel(), True
+
+    # ------------------------------------------------------------------
+    # Checkpoint persistence (per-rank; correct for same parallel layout)
+    # ------------------------------------------------------------------
+    def state_dict(self) -> dict:
+        return {
+            "global_step": int(self._global_step),
+            "period_index": int(self._period_index),
+            "params": {k: v.to_serializable() for k, v in self._state.items()},
+        }
+
+    def load_state_dict(self, sd: Optional[dict]) -> None:
+        if not sd:
+            return
+        self._global_step = int(sd.get("global_step", 0))
+        self._period_index = int(sd.get("period_index", 0))
+        # Consumed lazily on each param's next observation (shape-checked there).
+        self._loaded_params = dict(sd.get("params", {}))
+
+
+def iter_deosc_runners(optimizer) -> List[WeightDeOscRunner]:
+    """Return every :class:`WeightDeOscRunner` attached to ``optimizer``."""
+    candidates = getattr(optimizer, "chained_optimizers", None) or [optimizer]
+    runners: List[WeightDeOscRunner] = []
+    for opt in candidates:
+        runner = getattr(opt, "_primus_weight_deosc_runner", None)
+        if runner is not None:
+            runners.append(runner)
+    return runners
+
+
+def _current_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+def _sidecar_path(ckpt_dir: str, rank: int) -> str:
+    return os.path.join(ckpt_dir, "weight_deosc", f"rank_{rank}.pt")
+
+
+def save_deosc_sidecars(optimizer, ckpt_dir: Optional[str]) -> None:
+    """Write this rank's de-oscillation state next to the checkpoint.
+
+    Format-agnostic (works for both legacy and torch_dist checkpoints): each
+    rank writes its own ``<ckpt_dir>/weight_deosc/rank_<R>.pt``. Correct for
+    resume under the same parallel layout; mismatched shards are dropped on load
+    and simply re-seeded.
+    """
+    runners = iter_deosc_runners(optimizer)
+    if not runners or not ckpt_dir:
+        return
+    sub = os.path.join(ckpt_dir, "weight_deosc")
+    os.makedirs(sub, exist_ok=True)
+    blob = {str(i): runner.state_dict() for i, runner in enumerate(runners)}
+    torch.save(blob, _sidecar_path(ckpt_dir, _current_rank()))
+
+
+def load_deosc_sidecars(optimizer, ckpt_dir: Optional[str]) -> None:
+    """Restore this rank's de-oscillation state from a checkpoint, if present."""
+    runners = iter_deosc_runners(optimizer)
+    if not runners or not ckpt_dir:
+        return
+    path = _sidecar_path(ckpt_dir, _current_rank())
+    if not os.path.isfile(path):
+        return
+    try:
+        blob = torch.load(path, map_location="cpu")
+    except Exception as exc:
+        warning_rank_0(f"[WeightDeOsc] failed to load sidecar {path}: {exc}")
+        return
+    for i, runner in enumerate(runners):
+        runner.load_state_dict(blob.get(str(i)))
 
 
 def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
@@ -393,10 +550,9 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
 
         overlap = getattr(getattr(opt, "ddp_config", None), "overlap_param_gather", False)
         if overlap:
-            warning_rank_0(
-                "[WeightDeOsc] overlap_param_gather=True: the model weight may not be "
-                "fully all-gathered when de-oscillation reads it. Set "
-                "overlap_param_gather=false for correct QDQ."
+            log_rank_0(
+                "[WeightDeOsc] overlap_param_gather=True detected; de-oscillation will "
+                "force a synchronous param all-gather each step before reading weights."
             )
 
         runner = WeightDeOscRunner(config)
