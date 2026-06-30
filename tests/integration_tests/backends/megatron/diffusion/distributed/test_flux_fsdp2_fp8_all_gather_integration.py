@@ -209,9 +209,7 @@ def _init_distributed():
     import primus.core.utils.logger as primus_logger
 
     if primus_logger._logger is None:
-        from primus.core.utils.logger import LoggerConfig, setup_logger
-
-        cfg = LoggerConfig(
+        cfg = primus_logger.LoggerConfig(
             exp_root_path="/tmp/primus_test_logs",
             work_group="test",
             user_name="test",
@@ -220,7 +218,7 @@ def _init_distributed():
             rank=rank,
             world_size=world_size,
         )
-        setup_logger(cfg, is_head=(rank == 0))
+        primus_logger.setup_logger(cfg, is_head=(rank == 0))
 
     from primus.modules.module_utils import set_logging_rank
 
