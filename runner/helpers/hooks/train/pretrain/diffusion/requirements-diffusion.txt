@@ -5,7 +5,6 @@ numpy
 pillow
 decord
 imageio[ffmpeg]
-pydantic
 wandb
+pydantic
 transformers==4.50.0
-peft==0.10.0
