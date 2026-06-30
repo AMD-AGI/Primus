@@ -35,15 +35,25 @@ import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import math as math_dialect
+from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import (
+    arith,
+    buffer_ops,
+    const_expr,
+    gpu,
+    range_constexpr,
+    rocdl,
+    vector,
+)
 from flydsl.expr.typing import T
-from kernels.kernels_common import dtype_to_elem_type
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _llvm, math as math_dialect
-
+from kernels.kernels_common import dtype_to_elem_type
 
 KERNEL_NAME = "v4_csa_fwd_kernel"
 
@@ -139,7 +149,12 @@ def build_v4_csa_fwd_module(
         K_topk: fx.Int32,
     ):
         elem_type = dtype_to_elem_type(dtype_str)
-        compute_type = T.f32
+        # FlyDSL >=0.2.2 compat: dtype_to_elem_type returns a Numeric meta
+        # (e.g. fx.BFloat16); the MLIR type-arg sites below (T.vec, GEPOp,
+        # SmemPtr, trunc_f) require an ir.Type. Coerce once here.
+        if hasattr(elem_type, "ir_type"):
+            elem_type = elem_type.ir_type
+        T.f32
         fm_fast = arith.FastMathFlags.fast
 
         q_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Q)
@@ -149,7 +164,7 @@ def build_v4_csa_fwd_module(
         sm_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), SPARSE_MASK)
         o_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), O)
         lse_rsrc = buffer_ops.create_buffer_resource(LSE, max_size=True)
-        if has_sink:
+        if const_expr(has_sink):
             sink_rsrc = buffer_ops.create_buffer_resource(Sink, max_size=True)
 
         f16_ty = elem_type
@@ -158,10 +173,14 @@ def build_v4_csa_fwd_module(
         # ---- Helpers ----
         def _gep_load_scalar(base_ptr, elem_idx, vec_type, elem_t):
             idx_i64 = arith.index_cast(T.i64, elem_idx)
-            gep = _llvm.GEPOp(_llvm_ptr_ty(), base_ptr, [idx_i64],
-                              rawConstantIndices=[_LLVM_GEP_DYNAMIC],
-                              elem_type=elem_t,
-                              noWrapFlags=0)
+            gep = _llvm.GEPOp(
+                _llvm_ptr_ty(),
+                base_ptr,
+                [idx_i64],
+                rawConstantIndices=[_LLVM_GEP_DYNAMIC],
+                elem_type=elem_t,
+                noWrapFlags=0,
+            )
             return _llvm.LoadOp(vec_type, gep.result).result
 
         def load_f16_v(base_ptr, elem_idx, n):
@@ -204,7 +223,9 @@ def build_v4_csa_fwd_module(
         q_f32_vecs = []
         for h_off in range_constexpr(HEAD_GROUP):
             qhid_h = qhid_base + arith.index(h_off)
-            q_row_base = ((bid * arith.index(NUM_HEADS) + qhid_h) * seq_len_v + pid_m_safe) * arith.index(HEAD_DIM)
+            q_row_base = ((bid * arith.index(NUM_HEADS) + qhid_h) * seq_len_v + pid_m_safe) * arith.index(
+                HEAD_DIM
+            )
             q_lane_off = q_row_base + lane * arith.index(D_PER_LANE)
             q_vec = load_f16_v(q_ptr, q_lane_off, D_PER_LANE)
             q_f32_vec = arith.extf(T.vec(D_PER_LANE, f32_ty), q_vec)
@@ -219,7 +240,7 @@ def build_v4_csa_fwd_module(
         c_sm_scale_f = arith.constant(float(sm_scale), type=f32_ty)
         c_log2e_f = arith.constant(_LOG2E, type=f32_ty)
 
-        lane_i32 = arith.index_cast(T.i32, lane)
+        arith.index_cast(T.i32, lane)
         width_i32 = arith.constant(WARP_SIZE, type=T.i32)
 
         def warp_reduce_sum_f32(v):
@@ -255,7 +276,7 @@ def build_v4_csa_fwd_module(
         init_args = []
         for _h in range_constexpr(HEAD_GROUP):
             init_args.append(c_neg_inf)  # m
-            init_args.append(c_zero_f)   # l
+            init_args.append(c_zero_f)  # l
             for _ in range_constexpr(D_PER_LANE):
                 init_args.append(c_zero_f)
 
@@ -269,7 +290,10 @@ def build_v4_csa_fwd_module(
             # Unpack HEAD_GROUP states from inner_args
             m_is = [inner_args[h * STATE_PER_HEAD] for h in range_constexpr(HEAD_GROUP)]
             l_is = [inner_args[h * STATE_PER_HEAD + 1] for h in range_constexpr(HEAD_GROUP)]
-            accs = [[inner_args[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)] for h in range_constexpr(HEAD_GROUP)]
+            accs = [
+                [inner_args[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)]
+                for h in range_constexpr(HEAD_GROUP)
+            ]
 
             n_start_i32 = arith.index_cast(T.i32, n_start)
             pid_m_i32 = arith.index_cast(T.i32, pid_m)
@@ -288,15 +312,10 @@ def build_v4_csa_fwd_module(
                     arith.constant(n_off, type=T.i32),
                 ).result
                 _kv_plus_w_lo = arith.AddIOp(kv_col_i32, w_i32).result
-                is_swa_lo = arith.cmpi(
-                    arith.CmpIPredicate.sle, _kv_plus_w_lo, pid_m_i32)
-                is_causal_lo = arith.cmpi(
-                    arith.CmpIPredicate.sgt, kv_col_i32, pid_m_i32)
-                is_oob = arith.cmpi(
-                    arith.CmpIPredicate.sge, kv_col_i32, seq_len_i32)
-                bad_lo = arith.OrIOp(
-                    arith.OrIOp(is_causal_lo, is_swa_lo).result,
-                    is_oob).result
+                is_swa_lo = arith.cmpi(arith.CmpIPredicate.sle, _kv_plus_w_lo, pid_m_i32)
+                is_causal_lo = arith.cmpi(arith.CmpIPredicate.sgt, kv_col_i32, pid_m_i32)
+                is_oob = arith.cmpi(arith.CmpIPredicate.sge, kv_col_i32, seq_len_i32)
+                bad_lo = arith.OrIOp(arith.OrIOp(is_causal_lo, is_swa_lo).result, is_oob).result
                 bad_lo_cache.append(bad_lo)
 
                 kv_col_idx = arith.index_cast(T.index, kv_col_i32)
@@ -304,11 +323,13 @@ def build_v4_csa_fwd_module(
                 # When mqa_kv, K is shared across heads -> load once.
                 # When mqa_kv=False, K differs per head, so we'd need per-head loads.
                 # For now this kernel requires mqa_kv when head_group > 1.
-                if mqa_kv:
+                if const_expr(mqa_kv):
                     kl_row_base = (bid * seq_len_v + kv_col_safe) * arith.index(HEAD_DIM)
                 else:
                     # head_group > 1 with non-MQA: would need per-head load. Disallowed at setup.
-                    kl_row_base = ((bid * arith.index(NUM_HEADS) + qhid_base) * seq_len_v + kv_col_safe) * arith.index(HEAD_DIM)
+                    kl_row_base = (
+                        (bid * arith.index(NUM_HEADS) + qhid_base) * seq_len_v + kv_col_safe
+                    ) * arith.index(HEAD_DIM)
                 kl_lane_off = kl_row_base + lane * arith.index(D_PER_LANE)
                 kl_vec = load_f16_v(kl_ptr, kl_lane_off, D_PER_LANE)
                 kl_f32 = arith.extf(T.vec(D_PER_LANE, f32_ty), kl_vec)
@@ -364,14 +385,15 @@ def build_v4_csa_fwd_module(
                     n_start_i32,
                     arith.constant(n_off, type=T.i32),
                 ).result
-                is_oob = arith.cmpi(
-                    arith.CmpIPredicate.sge, kv_col_i32, seq_len_i32)
+                is_oob = arith.cmpi(arith.CmpIPredicate.sge, kv_col_i32, seq_len_i32)
                 kv_col_idx = arith.index_cast(T.index, kv_col_i32)
                 kv_col_safe = arith.select(is_oob, arith.index(0), kv_col_idx)
-                if mqa_kv:
+                if const_expr(mqa_kv):
                     vl_row_base = (bid * seq_len_v + kv_col_safe) * arith.index(HEAD_DIM)
                 else:
-                    vl_row_base = ((bid * arith.index(NUM_HEADS) + qhid_base) * seq_len_v + kv_col_safe) * arith.index(HEAD_DIM)
+                    vl_row_base = (
+                        (bid * arith.index(NUM_HEADS) + qhid_base) * seq_len_v + kv_col_safe
+                    ) * arith.index(HEAD_DIM)
                 vl_lane_off = vl_row_base + lane * arith.index(D_PER_LANE)
                 vl_vec = load_f16_v(vl_ptr, vl_lane_off, D_PER_LANE)
                 vl_f32 = arith.extf(T.vec(D_PER_LANE, f32_ty), vl_vec)
@@ -395,10 +417,13 @@ def build_v4_csa_fwd_module(
         # Unpack HEAD_GROUP states from local SWA results
         m_is = [loop_results_local[h * STATE_PER_HEAD] for h in range_constexpr(HEAD_GROUP)]
         l_is = [loop_results_local[h * STATE_PER_HEAD + 1] for h in range_constexpr(HEAD_GROUP)]
-        accs = [[loop_results_local[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)] for h in range_constexpr(HEAD_GROUP)]
+        accs = [
+            [loop_results_local[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)]
+            for h in range_constexpr(HEAD_GROUP)
+        ]
 
         # ==== SPARSE branch ====
-        if has_sparse:
+        if const_expr(has_sparse):
             init_sparse = []
             for h_off in range_constexpr(HEAD_GROUP):
                 init_sparse.append(m_is[h_off])
@@ -413,7 +438,10 @@ def build_v4_csa_fwd_module(
             ):
                 m_is = [inner_args[h * STATE_PER_HEAD] for h in range_constexpr(HEAD_GROUP)]
                 l_is = [inner_args[h * STATE_PER_HEAD + 1] for h in range_constexpr(HEAD_GROUP)]
-                accs = [[inner_args[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)] for h in range_constexpr(HEAD_GROUP)]
+                accs = [
+                    [inner_args[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)]
+                    for h in range_constexpr(HEAD_GROUP)
+                ]
 
                 k_start_i32 = arith.index_cast(T.i32, k_start)
                 K_topk_i32 = K_topk
@@ -426,14 +454,13 @@ def build_v4_csa_fwd_module(
                         k_start_i32,
                         arith.constant(k_off, type=T.i32),
                     ).result
-                    is_oob = arith.cmpi(
-                        arith.CmpIPredicate.sge, k_pos_i32, K_topk_i32)
+                    is_oob = arith.cmpi(arith.CmpIPredicate.sge, k_pos_i32, K_topk_i32)
                     k_pos_idx = arith.index_cast(T.index, k_pos_i32)
                     k_pos_safe = arith.select(is_oob, arith.index(0), k_pos_idx)
 
-                    g_row_base = (
-                        (bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe
-                    ) * arith.index(HEAD_DIM)
+                    g_row_base = ((bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe) * arith.index(
+                        HEAD_DIM
+                    )
                     g_lane_off = g_row_base + lane * arith.index(D_PER_LANE)
                     g_vec = load_f16_v(g_ptr, g_lane_off, D_PER_LANE)
                     if ENABLE_LDS_CACHE:
@@ -500,13 +527,12 @@ def build_v4_csa_fwd_module(
                             k_start_i32,
                             arith.constant(k_off, type=T.i32),
                         ).result
-                        is_oob = arith.cmpi(
-                            arith.CmpIPredicate.sge, k_pos_i32, K_topk_i32)
+                        is_oob = arith.cmpi(arith.CmpIPredicate.sge, k_pos_i32, K_topk_i32)
                         k_pos_idx = arith.index_cast(T.index, k_pos_i32)
                         k_pos_safe = arith.select(is_oob, arith.index(0), k_pos_idx)
-                        g_row_base = (
-                            (bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe
-                        ) * arith.index(HEAD_DIM)
+                        g_row_base = ((bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe) * arith.index(
+                            HEAD_DIM
+                        )
                         g_lane_off = g_row_base + lane * arith.index(D_PER_LANE)
                         g_vec = load_f16_v(g_ptr, g_lane_off, D_PER_LANE)
                     g_f32 = arith.extf(T.vec(D_PER_LANE, f32_ty), g_vec)
@@ -516,7 +542,9 @@ def build_v4_csa_fwd_module(
                         for d_off in range_constexpr(D_PER_LANE):
                             vv = vector.extract(g_f32, static_position=[d_off], dynamic_position=[])
                             contrib = arith.MulFOp(p_vals_h[k_off], vv, fastmath=fm_fast).result
-                            new_acc_h[d_off] = arith.AddFOp(new_acc_h[d_off], contrib, fastmath=fm_fast).result
+                            new_acc_h[d_off] = arith.AddFOp(
+                                new_acc_h[d_off], contrib, fastmath=fm_fast
+                            ).result
 
                 # Pack yield args
                 yield_args = []
@@ -529,15 +557,21 @@ def build_v4_csa_fwd_module(
 
             m_is = [loop_results_sparse[h * STATE_PER_HEAD] for h in range_constexpr(HEAD_GROUP)]
             l_is = [loop_results_sparse[h * STATE_PER_HEAD + 1] for h in range_constexpr(HEAD_GROUP)]
-            accs = [[loop_results_sparse[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)] for h in range_constexpr(HEAD_GROUP)]
+            accs = [
+                [loop_results_sparse[h * STATE_PER_HEAD + 2 + d] for d in range_constexpr(D_PER_LANE)]
+                for h in range_constexpr(HEAD_GROUP)
+            ]
 
         # ==== Sink epilogue (per-head) ====
-        if has_sink:
+        if const_expr(has_sink):
             for h_off in range_constexpr(HEAD_GROUP):
                 qhid_h = qhid_base + arith.index(h_off)
                 qhid_i32 = arith.index_cast(T.i32, qhid_h)
                 sink_h_val = buffer_ops.buffer_load(
-                    sink_rsrc, qhid_i32, vec_width=1, dtype=f32_ty,
+                    sink_rsrc,
+                    qhid_i32,
+                    vec_width=1,
+                    dtype=f32_ty,
                 )
                 m_i_h = m_is[h_off]
                 l_i_h = l_is[h_off]
@@ -566,17 +600,23 @@ def build_v4_csa_fwd_module(
                 m_i_h = m_is[h_off]
                 acc_h = accs[h_off]
                 inv_l = arith.DivFOp(c_one_f, l_i_h, fastmath=fm_fast).result
-                o_row_base = ((bid * arith.index(NUM_HEADS) + qhid_h) * seq_len_v + pid_m_safe) * arith.index(HEAD_DIM)
+                o_row_base = ((bid * arith.index(NUM_HEADS) + qhid_h) * seq_len_v + pid_m_safe) * arith.index(
+                    HEAD_DIM
+                )
                 o_lane_off = o_row_base + lane * arith.index(D_PER_LANE)
                 for d_off in range_constexpr(D_PER_LANE):
                     o_f32 = arith.MulFOp(acc_h[d_off], inv_l, fastmath=fm_fast).result
                     o_f16 = arith.trunc_f(elem_type, o_f32)
                     elem_off = o_lane_off + arith.index(d_off)
                     idx_i64 = arith.index_cast(T.i64, elem_off)
-                    gep = _llvm.GEPOp(_llvm_ptr_ty(), o_ptr, [idx_i64],
-                                      rawConstantIndices=[_LLVM_GEP_DYNAMIC],
-                                      elem_type=elem_type,
-                                      noWrapFlags=0)
+                    gep = _llvm.GEPOp(
+                        _llvm_ptr_ty(),
+                        o_ptr,
+                        [idx_i64],
+                        rawConstantIndices=[_LLVM_GEP_DYNAMIC],
+                        elem_type=elem_type,
+                        noWrapFlags=0,
+                    )
                     _llvm.StoreOp(o_f16, gep.result)
 
                 is_lane0 = arith.cmpi(arith.CmpIPredicate.eq, lane, arith.index(0))
@@ -616,8 +656,16 @@ def build_v4_csa_fwd_module(
         grid_y = bs_idx * arith.index(NUM_HEAD_GROUPS)
 
         launcher = v4_csa_fwd_kernel(
-            Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK, Sink, O, LSE,
-            seq_len, K_topk,
+            Q,
+            K_LOCAL,
+            V_LOCAL,
+            GATHERED,
+            SPARSE_MASK,
+            Sink,
+            O,
+            LSE,
+            seq_len,
+            K_topk,
         )
 
         if waves_per_eu is not None:
@@ -625,23 +673,34 @@ def build_v4_csa_fwd_module(
             if _wpe >= 1:
                 for op in ctx.gpu_module_body.operations:
                     if getattr(op, "OPERATION_NAME", None) == "gpu.func":
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            T.i32, _wpe)
+                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
 
         passthrough_entries = []
         if daz:
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("denormal-fp-math-f32"),
-                ir.StringAttr.get("preserve-sign,preserve-sign"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("no-nans-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("unsafe-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("denormal-fp-math-f32"),
+                        ir.StringAttr.get("preserve-sign,preserve-sign"),
+                    ]
+                )
+            )
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("no-nans-fp-math"),
+                        ir.StringAttr.get("true"),
+                    ]
+                )
+            )
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("unsafe-fp-math"),
+                        ir.StringAttr.get("true"),
+                    ]
+                )
+            )
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
@@ -661,11 +720,25 @@ def build_v4_csa_fwd_module(
         with CompilationContext.compile_hints(compile_hints):
             return launch_v4_csa_fwd(*args, **kwargs)
 
-    def _compile(Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK, Sink, O, LSE, batch_size, seq_len, K_topk, stream=None):
+    def _compile(
+        Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK, Sink, O, LSE, batch_size, seq_len, K_topk, stream=None
+    ):
         with CompilationContext.compile_hints(compile_hints):
             return flyc.compile(
-                launch_v4_csa_fwd, Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK, Sink, O, LSE,
-                batch_size, seq_len, K_topk, fx.Stream(stream))
+                launch_v4_csa_fwd,
+                Q,
+                K_LOCAL,
+                V_LOCAL,
+                GATHERED,
+                SPARSE_MASK,
+                Sink,
+                O,
+                LSE,
+                batch_size,
+                seq_len,
+                K_topk,
+                fx.Stream(stream),
+            )
 
     _launch.compile = _compile
 

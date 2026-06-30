@@ -2,6 +2,7 @@
 
 Stage A: correctness only. Per-row design forked from Triton monolithic CSA.
 """
+
 from __future__ import annotations
 
 import math
@@ -27,11 +28,32 @@ _KERNEL_CACHE = {}
 _KERNEL_CACHE_LOCK = threading.Lock()
 
 
-def _get_kernel(num_heads_q, head_dim, swa_window, dtype_str,
-                block_n, block_k, waves_per_eu, has_sink, has_sparse, mqa_kv,
-                head_group=1):
-    key = (num_heads_q, head_dim, swa_window, dtype_str,
-           block_n, block_k, waves_per_eu, has_sink, has_sparse, mqa_kv, head_group)
+def _get_kernel(
+    num_heads_q,
+    head_dim,
+    swa_window,
+    dtype_str,
+    block_n,
+    block_k,
+    waves_per_eu,
+    has_sink,
+    has_sparse,
+    mqa_kv,
+    head_group=1,
+):
+    key = (
+        num_heads_q,
+        head_dim,
+        swa_window,
+        dtype_str,
+        block_n,
+        block_k,
+        waves_per_eu,
+        has_sink,
+        has_sparse,
+        mqa_kv,
+        head_group,
+    )
     with _KERNEL_CACHE_LOCK:
         if key in _KERNEL_CACHE:
             return _KERNEL_CACHE[key]
@@ -63,14 +85,14 @@ def _broadcast_kv_mqa(k: torch.Tensor, v: torch.Tensor, head_q: int):
 
 
 def _launch_v4_attention_fwd_csa(
-    q: torch.Tensor,           # [B, H, Sq, D]
-    k_local: torch.Tensor,     # [B, H_KV, Sq, D]  (H_KV=1 for MQA)
-    v_local: torch.Tensor,     # [B, H_KV, Sq, D]
-    gathered: torch.Tensor,    # [B, Sq, K_topk, D]
+    q: torch.Tensor,  # [B, H, Sq, D]
+    k_local: torch.Tensor,  # [B, H_KV, Sq, D]  (H_KV=1 for MQA)
+    v_local: torch.Tensor,  # [B, H_KV, Sq, D]
+    gathered: torch.Tensor,  # [B, Sq, K_topk, D]
     *,
     sink: Optional[torch.Tensor],  # [H] fp32 or None
     swa_window: int,
-    sparse_mask: torch.Tensor,     # [B, Sq, K_topk] additive
+    sparse_mask: torch.Tensor,  # [B, Sq, K_topk] additive
     scale: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """V4 CSA forward launcher.
@@ -156,16 +178,33 @@ def _launch_v4_attention_fwd_csa(
     if HQ % head_group != 0:
         # Silently fall back to HG=1 if shape doesn't divide.
         head_group = 1
-    launch = _get_kernel(HQ, D, int(swa_window), "bf16",
-                          block_n, block_k, waves_per_eu,
-                          has_sink, has_sparse, mqa,
-                          head_group=head_group)
+    launch = _get_kernel(
+        HQ,
+        D,
+        int(swa_window),
+        "bf16",
+        block_n,
+        block_k,
+        waves_per_eu,
+        has_sink,
+        has_sparse,
+        mqa,
+        head_group=head_group,
+    )
 
+    # FlyDSL packs each tensor *shape* dim as int32 (jit_argument.py:
+    # `"i" * len(shape)`). A flat `.view(-1)` collapses a tensor to a single
+    # dim equal to its element count; for V4-Pro CSA `gathered` that is
+    # B*Sq*K_topk*D = 1*4096*1024*512 = 2**31, which overflows int32 ('i')
+    # and aborts the launch. The kernel only needs the aligned base pointer
+    # (it computes all offsets from the B / Sq / K_topk scalars), so passing
+    # `gathered` in its natural [B, Sq, K_topk, D] shape keeps every dim
+    # < 2**31 (strides are packed as int64) without changing kernel math.
     launch(
         q_bhld.view(-1),
         k_bhld.view(-1),
         v_bhld.view(-1),
-        gathered_c.view(-1),
+        gathered_c,
         sparse_mask_fp32.view(-1),
         sink_fp32.view(-1),
         o_bhld.view(-1),

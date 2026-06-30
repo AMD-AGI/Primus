@@ -12,15 +12,25 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import math as math_dialect
+from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import (
+    arith,
+    buffer_ops,
+    const_expr,
+    gpu,
+    range_constexpr,
+    rocdl,
+    vector,
+)
 from flydsl.expr.typing import T
-from kernels.kernels_common import dtype_to_elem_type
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf, fly as _fly, llvm as _llvm, math as math_dialect
-
+from kernels.kernels_common import dtype_to_elem_type
 
 KERNEL_NAME = "v4_csa_bwd_full_kernel"
 _LLVM_GEP_DYNAMIC = -2147483648
@@ -31,11 +41,19 @@ def _llvm_ptr_ty():
 
 
 def build_v4_csa_bwd_full_module(
-    num_heads, head_dim, swa_window,
-    dtype_str="bf16", sm_scale=None, waves_per_eu=2,
-    block_n=32, block_k=32,
-    has_sink=True, has_sparse=True,
-    unsafe_fp_math=True, fast_fp_math=True, daz=True,
+    num_heads,
+    head_dim,
+    swa_window,
+    dtype_str="bf16",
+    sm_scale=None,
+    waves_per_eu=2,
+    block_n=32,
+    block_k=32,
+    has_sink=True,
+    has_sparse=True,
+    unsafe_fp_math=True,
+    fast_fp_math=True,
+    daz=True,
     mqa_kv=True,
 ):
     gpu_arch = get_hip_arch()
@@ -52,20 +70,36 @@ def build_v4_csa_bwd_full_module(
         sm_scale = 1.0 / math.sqrt(HEAD_DIM)
 
     allocator = SmemAllocator(
-        None, arch=gpu_arch,
+        None,
+        arch=gpu_arch,
         global_sym_name=f"v4_csa_bwd_full_smem_N{BLOCK_N}_K{BLOCK_K}_S{int(has_sink)}_HS{int(has_sparse)}",
     )
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def v4_csa_bwd_full_kernel(
-        Q: fx.Tensor, K_LOCAL: fx.Tensor, V_LOCAL: fx.Tensor,
-        GATHERED: fx.Tensor, SPARSE_MASK: fx.Tensor,
-        DOUT: fx.Tensor, LSE: fx.Tensor, DELTAS: fx.Tensor, SINK: fx.Tensor,
-        DQ: fx.Tensor, DK_LOCAL: fx.Tensor, DV_LOCAL: fx.Tensor,
-        DGATHERED: fx.Tensor, DSINK: fx.Tensor,
-        seq_len: fx.Int32, K_topk: fx.Int32,
+        Q: fx.Tensor,
+        K_LOCAL: fx.Tensor,
+        V_LOCAL: fx.Tensor,
+        GATHERED: fx.Tensor,
+        SPARSE_MASK: fx.Tensor,
+        DOUT: fx.Tensor,
+        LSE: fx.Tensor,
+        DELTAS: fx.Tensor,
+        SINK: fx.Tensor,
+        DQ: fx.Tensor,
+        DK_LOCAL: fx.Tensor,
+        DV_LOCAL: fx.Tensor,
+        DGATHERED: fx.Tensor,
+        DSINK: fx.Tensor,
+        seq_len: fx.Int32,
+        K_topk: fx.Int32,
     ):
         elem_type = dtype_to_elem_type(dtype_str)
+        # FlyDSL >=0.2.2 compat: dtype_to_elem_type returns a Numeric meta
+        # (e.g. fx.BFloat16); the MLIR type-arg sites below (T.vec, GEPOp,
+        # SmemPtr, trunc_f) require an ir.Type. Coerce once here.
+        if hasattr(elem_type, "ir_type"):
+            elem_type = elem_type.ir_type
         f16_ty = elem_type
         f32_ty = T.f32
         fm_fast = arith.FastMathFlags.fast
@@ -82,25 +116,31 @@ def build_v4_csa_bwd_full_module(
         dkl_rsrc = buffer_ops.create_buffer_resource(DK_LOCAL, max_size=True)
         dvl_rsrc = buffer_ops.create_buffer_resource(DV_LOCAL, max_size=True)
         dg_rsrc = buffer_ops.create_buffer_resource(DGATHERED, max_size=True)
-        if has_sink:
+        if const_expr(has_sink):
             sink_rsrc = buffer_ops.create_buffer_resource(SINK, max_size=True)
             dsink_rsrc = buffer_ops.create_buffer_resource(DSINK, max_size=True)
 
         def _gep_load(base_ptr, elem_idx, vec_type, elem_t):
             idx_i64 = arith.index_cast(T.i64, elem_idx)
             gep = _llvm.GEPOp(
-                _llvm_ptr_ty(), base_ptr, [idx_i64],
+                _llvm_ptr_ty(),
+                base_ptr,
+                [idx_i64],
                 rawConstantIndices=[_LLVM_GEP_DYNAMIC],
-                elem_type=elem_t, noWrapFlags=0,
+                elem_type=elem_t,
+                noWrapFlags=0,
             )
             return _llvm.LoadOp(vec_type, gep.result).result
 
         def _gep_store_f32(val, base_ptr, elem_idx):
             idx_i64 = arith.index_cast(T.i64, elem_idx)
             gep = _llvm.GEPOp(
-                _llvm_ptr_ty(), base_ptr, [idx_i64],
+                _llvm_ptr_ty(),
+                base_ptr,
+                [idx_i64],
                 rawConstantIndices=[_LLVM_GEP_DYNAMIC],
-                elem_type=T.f32, noWrapFlags=0,
+                elem_type=T.f32,
+                noWrapFlags=0,
             )
             _llvm.StoreOp(val, gep.result)
 
@@ -131,9 +171,7 @@ def build_v4_csa_bwd_full_module(
         c_zero_i32 = arith.constant(0, type=T.i32)
 
         zero_f32_vec = arith.constant_vector(0.0, T.vec(D_PER_LANE, f32_ty))
-        q_row_base = (
-            (bid * arith.index(NUM_HEADS) + qhid) * seq_len_v + pid_m_safe
-        ) * arith.index(HEAD_DIM)
+        q_row_base = ((bid * arith.index(NUM_HEADS) + qhid) * seq_len_v + pid_m_safe) * arith.index(HEAD_DIM)
         q_lane_off = q_row_base + lane * arith.index(D_PER_LANE)
         q_vec_raw = load_f16_v(q_ptr, q_lane_off, D_PER_LANE)
         q_f32 = arith.extf(T.vec(D_PER_LANE, f32_ty), q_vec_raw)
@@ -147,10 +185,16 @@ def build_v4_csa_bwd_full_module(
         lse_delta_off = (bid * arith.index(NUM_HEADS) + qhid) * seq_len_v + pid_m_safe
         lse_delta_off_i32 = arith.index_cast(T.i32, lse_delta_off)
         lse_val = buffer_ops.buffer_load(
-            lse_rsrc, lse_delta_off_i32, vec_width=1, dtype=f32_ty,
+            lse_rsrc,
+            lse_delta_off_i32,
+            vec_width=1,
+            dtype=f32_ty,
         )
         delta_val = buffer_ops.buffer_load(
-            deltas_rsrc, lse_delta_off_i32, vec_width=1, dtype=f32_ty,
+            deltas_rsrc,
+            lse_delta_off_i32,
+            vec_width=1,
+            dtype=f32_ty,
         )
 
         qhid_i32 = arith.index_cast(T.i32, qhid)
@@ -161,16 +205,21 @@ def build_v4_csa_bwd_full_module(
         d_per_lane_i32 = arith.constant(D_PER_LANE, type=T.i32)
         num_heads_i32 = arith.constant(NUM_HEADS, type=T.i32)
 
-        if has_sink:
+        if const_expr(has_sink):
             sink_h = buffer_ops.buffer_load(
-                sink_rsrc, qhid_i32, vec_width=1, dtype=f32_ty,
+                sink_rsrc,
+                qhid_i32,
+                vec_width=1,
+                dtype=f32_ty,
             )
             sink_h = rocdl.readfirstlane(f32_ty, sink_h)
             sub_sh = arith.SubFOp(sink_h, lse_val, fastmath=fm_fast).result
             p_sink = math_dialect.exp(sub_sh, fastmath=fm_fast)
             neg_p_sink = arith.SubFOp(c_zero_f, p_sink, fastmath=fm_fast).result
             dsink_contrib = arith.MulFOp(
-                neg_p_sink, delta_val, fastmath=fm_fast,
+                neg_p_sink,
+                delta_val,
+                fastmath=fm_fast,
             ).result
             is_lane0 = arith.cmpi(arith.CmpIPredicate.eq, lane, arith.index(0))
             do_sink = arith.AndIOp(is_lane0, q_active).result
@@ -178,8 +227,11 @@ def build_v4_csa_bwd_full_module(
             with ir.InsertionPoint(_if_sink.then_block):
                 _dsink_byte_off = arith.MulIOp(qhid_i32, c_four_i32).result
                 rocdl.raw_ptr_buffer_atomic_fadd(
-                    dsink_contrib, dsink_rsrc, _dsink_byte_off,
-                    c_zero_i32, c_zero_i32,
+                    dsink_contrib,
+                    dsink_rsrc,
+                    _dsink_byte_off,
+                    c_zero_i32,
+                    c_zero_i32,
                 )
                 scf.YieldOp([])
 
@@ -208,9 +260,7 @@ def build_v4_csa_bwd_full_module(
         _n_lo_raw = arith.select(_ge_w, _pid_p1 - SWA, arith.index(0))
         BN_idx = arith.index(BLOCK_N)
         n_loop_start = (_n_lo_raw // BN_idx) * BN_idx
-        n_loop_end_blk = (
-            (n_loop_end_row + BN_idx - arith.index(1)) // BN_idx
-        ) * BN_idx
+        n_loop_end_blk = ((n_loop_end_row + BN_idx - arith.index(1)) // BN_idx) * BN_idx
 
         _PAD = 1 if D_PER_LANE == 1 else 0
         init_local = []
@@ -226,7 +276,10 @@ def build_v4_csa_bwd_full_module(
 
         # ==== LOCAL SWA loop ====
         for n_start, inner_args, loop_results_local in scf.for_(
-            n_loop_start, n_loop_end_blk, BN_idx, iter_args=init_local,
+            n_loop_start,
+            n_loop_end_blk,
+            BN_idx,
+            iter_args=init_local,
         ):
             dq_accs = [inner_args[d] for d in range_constexpr(D_PER_LANE)]
             n_start_i32 = arith.index_cast(T.i32, n_start)
@@ -238,7 +291,8 @@ def build_v4_csa_bwd_full_module(
 
             for n_off in range_constexpr(BLOCK_N):
                 kv_col_i32 = arith.AddIOp(
-                    n_start_i32, arith.constant(n_off, type=T.i32),
+                    n_start_i32,
+                    arith.constant(n_off, type=T.i32),
                 ).result
                 kv_col_i32_cache.append(kv_col_i32)
                 _kv_plus_w = arith.AddIOp(kv_col_i32, w_i32).result
@@ -294,10 +348,12 @@ def build_v4_csa_bwd_full_module(
                 _if_dkv = scf.IfOp(do_atom, [], has_else=False)
                 with ir.InsertionPoint(_if_dkv.then_block):
                     _bh = arith.AddIOp(
-                        arith.MulIOp(bid_i32, num_heads_i32).result, qhid_i32,
+                        arith.MulIOp(bid_i32, num_heads_i32).result,
+                        qhid_i32,
                     ).result
                     _bh_n = arith.AddIOp(
-                        arith.MulIOp(_bh, seq_len_i32).result, kv_col_i32,
+                        arith.MulIOp(_bh, seq_len_i32).result,
+                        kv_col_i32,
                     ).result
                     _row_d = arith.AddIOp(
                         arith.MulIOp(_bh_n, head_dim_i32).result,
@@ -309,12 +365,20 @@ def build_v4_csa_bwd_full_module(
                         qv = vector.extract(q_f32, static_position=[d_off], dynamic_position=[])
                         dk_val = arith.MulFOp(ds_scaled, qv, fastmath=fm_fast).result
                         rocdl.raw_ptr_buffer_atomic_fadd(
-                            dk_val, dkl_rsrc, byte_off, c_zero_i32, c_zero_i32,
+                            dk_val,
+                            dkl_rsrc,
+                            byte_off,
+                            c_zero_i32,
+                            c_zero_i32,
                         )
                         dov = vector.extract(do_f32, static_position=[d_off], dynamic_position=[])
                         dv_val = arith.MulFOp(p, dov, fastmath=fm_fast).result
                         rocdl.raw_ptr_buffer_atomic_fadd(
-                            dv_val, dvl_rsrc, byte_off, c_zero_i32, c_zero_i32,
+                            dv_val,
+                            dvl_rsrc,
+                            byte_off,
+                            c_zero_i32,
+                            c_zero_i32,
                         )
                     scf.YieldOp([])
 
@@ -326,12 +390,14 @@ def build_v4_csa_bwd_full_module(
         dq_accs = [loop_results_local[d] for d in range_constexpr(D_PER_LANE)]
 
         # ==== GATHERED branch ====
-        if has_sparse:
+        if const_expr(has_sparse):
             init_sparse = list(dq_accs)
             for _ in range_constexpr(_PAD):
                 init_sparse.append(c_zero_f)
             for k_start, inner_args_g, loop_results_g in scf.for_(
-                arith.index(0), K_topk_v, arith.index(BLOCK_K),
+                arith.index(0),
+                K_topk_v,
+                arith.index(BLOCK_K),
                 iter_args=init_sparse,
             ):
                 dq_accs_g = [inner_args_g[d] for d in range_constexpr(D_PER_LANE)]
@@ -344,16 +410,17 @@ def build_v4_csa_bwd_full_module(
 
                 for k_off in range_constexpr(BLOCK_K):
                     k_pos_i32 = arith.AddIOp(
-                        k_start_i32, arith.constant(k_off, type=T.i32),
+                        k_start_i32,
+                        arith.constant(k_off, type=T.i32),
                     ).result
                     k_pos_i32_cache.append(k_pos_i32)
                     is_oob = arith.cmpi(arith.CmpIPredicate.sge, k_pos_i32, K_topk_i32)
                     k_pos_idx = arith.index_cast(T.index, k_pos_i32)
                     k_pos_safe = arith.select(is_oob, arith.index(0), k_pos_idx)
 
-                    g_row_base = (
-                        (bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe
-                    ) * arith.index(HEAD_DIM)
+                    g_row_base = ((bid * seq_len_v + pid_m_safe) * K_topk_v + k_pos_safe) * arith.index(
+                        HEAD_DIM
+                    )
                     g_lane_off = g_row_base + lane * arith.index(D_PER_LANE)
                     g_vec = load_f16_v(g_ptr, g_lane_off, D_PER_LANE)
                     g_f32 = arith.extf(T.vec(D_PER_LANE, f32_ty), g_vec)
@@ -401,10 +468,12 @@ def build_v4_csa_bwd_full_module(
                     _if_dg = scf.IfOp(do_atom_k, [], has_else=False)
                     with ir.InsertionPoint(_if_dg.then_block):
                         _bm = arith.AddIOp(
-                            arith.MulIOp(bid_i32, seq_len_i32).result, pid_m_safe_i32,
+                            arith.MulIOp(bid_i32, seq_len_i32).result,
+                            pid_m_safe_i32,
                         ).result
                         _bm_k = arith.AddIOp(
-                            arith.MulIOp(_bm, K_topk_i32).result, k_pos_i32,
+                            arith.MulIOp(_bm, K_topk_i32).result,
+                            k_pos_i32,
                         ).result
                         _row_d = arith.AddIOp(
                             arith.MulIOp(_bm_k, head_dim_i32).result,
@@ -419,7 +488,11 @@ def build_v4_csa_bwd_full_module(
                             t2 = arith.MulFOp(p, dov, fastmath=fm_fast).result
                             dg_val = arith.AddFOp(t1, t2, fastmath=fm_fast).result
                             rocdl.raw_ptr_buffer_atomic_fadd(
-                                dg_val, dg_rsrc, byte_off, c_zero_i32, c_zero_i32,
+                                dg_val,
+                                dg_rsrc,
+                                byte_off,
+                                c_zero_i32,
+                                c_zero_i32,
                             )
                         scf.YieldOp([])
 
@@ -433,9 +506,9 @@ def build_v4_csa_bwd_full_module(
         # ==== Store dq direct ====
         _o_guard = scf.IfOp(q_active, [], has_else=False)
         with ir.InsertionPoint(_o_guard.then_block):
-            dq_row_base = (
-                (bid * arith.index(NUM_HEADS) + qhid) * seq_len_v + pid_m_safe
-            ) * arith.index(HEAD_DIM)
+            dq_row_base = ((bid * arith.index(NUM_HEADS) + qhid) * seq_len_v + pid_m_safe) * arith.index(
+                HEAD_DIM
+            )
             dq_lane_off = dq_row_base + lane * arith.index(D_PER_LANE)
             for d_off in range_constexpr(D_PER_LANE):
                 elem_off = dq_lane_off + arith.index(d_off)
@@ -444,12 +517,23 @@ def build_v4_csa_bwd_full_module(
 
     @flyc.jit
     def launch_v4_csa_bwd_full(
-        Q: fx.Tensor, K_LOCAL: fx.Tensor, V_LOCAL: fx.Tensor,
-        GATHERED: fx.Tensor, SPARSE_MASK: fx.Tensor,
-        DOUT: fx.Tensor, LSE: fx.Tensor, DELTAS: fx.Tensor, SINK: fx.Tensor,
-        DQ: fx.Tensor, DK_LOCAL: fx.Tensor, DV_LOCAL: fx.Tensor,
-        DGATHERED: fx.Tensor, DSINK: fx.Tensor,
-        batch_size: fx.Int32, seq_len: fx.Int32, K_topk: fx.Int32,
+        Q: fx.Tensor,
+        K_LOCAL: fx.Tensor,
+        V_LOCAL: fx.Tensor,
+        GATHERED: fx.Tensor,
+        SPARSE_MASK: fx.Tensor,
+        DOUT: fx.Tensor,
+        LSE: fx.Tensor,
+        DELTAS: fx.Tensor,
+        SINK: fx.Tensor,
+        DQ: fx.Tensor,
+        DK_LOCAL: fx.Tensor,
+        DV_LOCAL: fx.Tensor,
+        DGATHERED: fx.Tensor,
+        DSINK: fx.Tensor,
+        batch_size: fx.Int32,
+        seq_len: fx.Int32,
+        K_topk: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         allocator.finalized = False
@@ -463,10 +547,22 @@ def build_v4_csa_bwd_full_module(
         grid_y = bs_idx * arith.index(NUM_HEADS)
 
         launcher = v4_csa_bwd_full_kernel(
-            Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK,
-            DOUT, LSE, DELTAS, SINK,
-            DQ, DK_LOCAL, DV_LOCAL, DGATHERED, DSINK,
-            seq_len, K_topk,
+            Q,
+            K_LOCAL,
+            V_LOCAL,
+            GATHERED,
+            SPARSE_MASK,
+            DOUT,
+            LSE,
+            DELTAS,
+            SINK,
+            DQ,
+            DK_LOCAL,
+            DV_LOCAL,
+            DGATHERED,
+            DSINK,
+            seq_len,
+            K_topk,
         )
 
         if waves_per_eu is not None:
@@ -478,18 +574,30 @@ def build_v4_csa_bwd_full_module(
 
         passthrough_entries = []
         if daz:
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("denormal-fp-math-f32"),
-                ir.StringAttr.get("preserve-sign,preserve-sign"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("no-nans-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
-            passthrough_entries.append(ir.ArrayAttr.get([
-                ir.StringAttr.get("unsafe-fp-math"),
-                ir.StringAttr.get("true"),
-            ]))
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("denormal-fp-math-f32"),
+                        ir.StringAttr.get("preserve-sign,preserve-sign"),
+                    ]
+                )
+            )
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("no-nans-fp-math"),
+                        ir.StringAttr.get("true"),
+                    ]
+                )
+            )
+            passthrough_entries.append(
+                ir.ArrayAttr.get(
+                    [
+                        ir.StringAttr.get("unsafe-fp-math"),
+                        ir.StringAttr.get("true"),
+                    ]
+                )
+            )
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
@@ -507,18 +615,46 @@ def build_v4_csa_bwd_full_module(
             return launch_v4_csa_bwd_full(*args, **kwargs)
 
     def _compile(
-        Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK,
-        DOUT, LSE, DELTAS, SINK,
-        DQ, DK_LOCAL, DV_LOCAL, DGATHERED, DSINK,
-        batch_size, seq_len, K_topk, stream=None,
+        Q,
+        K_LOCAL,
+        V_LOCAL,
+        GATHERED,
+        SPARSE_MASK,
+        DOUT,
+        LSE,
+        DELTAS,
+        SINK,
+        DQ,
+        DK_LOCAL,
+        DV_LOCAL,
+        DGATHERED,
+        DSINK,
+        batch_size,
+        seq_len,
+        K_topk,
+        stream=None,
     ):
         with CompilationContext.compile_hints(compile_hints):
             return flyc.compile(
                 launch_v4_csa_bwd_full,
-                Q, K_LOCAL, V_LOCAL, GATHERED, SPARSE_MASK,
-                DOUT, LSE, DELTAS, SINK,
-                DQ, DK_LOCAL, DV_LOCAL, DGATHERED, DSINK,
-                batch_size, seq_len, K_topk, fx.Stream(stream),
+                Q,
+                K_LOCAL,
+                V_LOCAL,
+                GATHERED,
+                SPARSE_MASK,
+                DOUT,
+                LSE,
+                DELTAS,
+                SINK,
+                DQ,
+                DK_LOCAL,
+                DV_LOCAL,
+                DGATHERED,
+                DSINK,
+                batch_size,
+                seq_len,
+                K_topk,
+                fx.Stream(stream),
             )
 
     _launch.compile = _compile
