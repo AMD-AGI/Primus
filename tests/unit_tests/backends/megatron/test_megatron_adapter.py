@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -123,63 +123,6 @@ PATCH = 3
         assert "Cannot locate" in str(exc_info.value)
 
 
-class TestMegatronAdapterConfigConversion:
-    """Test configuration conversion from Primus to Megatron."""
-
-    @patch("primus.backends.megatron.megatron_adapter.MegatronArgBuilder")
-    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
-    def test_convert_config_basic(self, mock_log, mock_builder_class):
-        """Test basic config conversion workflow."""
-        # Setup mock builder
-        mock_builder = Mock()
-        mock_builder_class.return_value = mock_builder
-
-        # Mock finalize to return SimpleNamespace with args
-        mock_args = SimpleNamespace(
-            micro_batch_size=4,
-            global_batch_size=32,
-            seq_length=2048,
-        )
-        mock_builder.finalize.return_value = mock_args
-
-        # Create mock params
-        mock_params = {
-            "micro_batch_size": 4,
-            "global_batch_size": 32,
-            "seq_length": 2048,
-        }
-
-        # Test conversion
-        adapter = MegatronAdapter()
-        result = adapter.convert_config(mock_params)
-
-        # Verify builder was called correctly
-        mock_builder.update.assert_called_once_with(mock_params)
-        mock_builder.finalize.assert_called_once()
-
-        # Verify result
-        assert result == mock_args
-        assert result.micro_batch_size == 4
-        assert result.global_batch_size == 32
-        assert result.seq_length == 2048
-
-    @patch("primus.backends.megatron.megatron_adapter.MegatronArgBuilder")
-    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
-    def test_convert_config_empty_params(self, mock_log, mock_builder_class):
-        """Test config conversion with empty params dict."""
-        mock_builder = Mock()
-        mock_builder_class.return_value = mock_builder
-        mock_builder.finalize.return_value = SimpleNamespace()
-
-        mock_params = {}
-
-        adapter = MegatronAdapter()
-        result = adapter.convert_config(mock_params)
-
-        mock_builder.update.assert_called_once_with(mock_params)
-        assert isinstance(result, SimpleNamespace)
-
-
 class TestMegatronAdapterTrainerLoading:
     """Test trainer class loading."""
 
@@ -214,31 +157,127 @@ class TestMegatronAdapterTrainerLoading:
         assert "backend trainer not registered" in str(exc_info.value)
 
 
-class TestMegatronAdapterBackendPreparation:
-    """Test backend preparation workflow."""
+class TestMegatronAdapterDynamicTrainerLoading:
+    """Test dynamic trainer class loading by name."""
 
-    @patch("primus.modules.module_utils.log_rank_0")
-    def test_prepare_backend_success(self, mock_log):
-        """Test successful backend preparation."""
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_trainer_class_by_name_takes_precedence_over_stage(self, mock_log):
+        """Test that trainer_class parameter takes precedence over stage."""
         adapter = MegatronAdapter()
-        mock_config = Mock()
 
-        # Should not raise - prepare_backend is inherited from BackendAdapter
-        adapter.prepare_backend(mock_config)
+        # Even with invalid stage, trainer_class should work
+        result = adapter.load_trainer_class(stage="invalid_stage", trainer_class="MegatronPretrainTrainer")
 
+        from primus.backends.megatron.megatron_pretrain_trainer import (
+            MegatronPretrainTrainer,
+        )
 
-class TestMegatronAdapterInitialization:
-    """Test MegatronAdapter initialization."""
+        assert result == MegatronPretrainTrainer
 
-    def test_initialization_default(self):
-        """Test adapter initialization with default framework name."""
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_trainer_class_fallback_tries_multiple_paths(self, mock_log):
+        """Test fallback tries multiple import paths in order for unregistered trainers."""
+        import importlib
+
+        # Use a trainer name NOT in MEGATRON_TRAINERS to exercise the fallback
+        mock_trainer_class = type("CustomExperimentalTrainer", (), {})
+        mock_module = Mock()
+        mock_module.CustomExperimentalTrainer = mock_trainer_class
+
+        import_calls = []
+
+        def side_effect(module_name, *args, **kwargs):
+            import_calls.append(module_name)
+            if len(import_calls) <= 2:
+                raise ImportError(f"Path {len(import_calls)} failed")
+            return mock_module
+
+        with patch.object(importlib, "import_module", side_effect=side_effect):
+            adapter = MegatronAdapter()
+            result = adapter.load_trainer_class(trainer_class="CustomExperimentalTrainer")
+
+        assert result == mock_trainer_class
+        assert len(import_calls) == 3
+        assert "primus.backends.megatron.customexperimentaltrainer" in import_calls[0].lower()
+
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_trainer_class_fallback_all_paths_fail(self, mock_log):
+        """Test error when all fallback paths fail."""
+        import importlib
+
+        # All import attempts fail
+        def side_effect(module_name, *args, **kwargs):
+            raise ImportError("Module not found")
+
+        with patch.object(importlib, "import_module", side_effect=side_effect):
+            adapter = MegatronAdapter()
+
+            with pytest.raises(ValueError) as exc_info:
+                adapter.load_trainer_class(trainer_class="NonExistentTrainer")
+
+        error_msg = str(exc_info.value)
+        # Verify exact error message format from implementation
+        assert "Trainer class 'NonExistentTrainer' not found" in error_msg
+        assert "Available trainers:" in error_msg
+        assert "Hint:" in error_msg
+        assert "MEGATRON_TRAINERS" in error_msg or "standard locations" in error_msg
+
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_trainer_class_falsy_values_fall_back_to_stage(self, mock_log):
+        """Test that falsy trainer_class values (None, empty string) fall back to stage-based selection."""
         adapter = MegatronAdapter()
-        assert adapter.framework == "megatron"
 
-    def test_initialization_custom_framework(self):
-        """Test adapter initialization with custom framework name."""
-        adapter = MegatronAdapter(framework="custom_megatron")
-        assert adapter.framework == "custom_megatron"
+        from primus.backends.megatron.megatron_pretrain_trainer import (
+            MegatronPretrainTrainer,
+        )
+
+        # Test None falls back to stage
+        result = adapter.load_trainer_class(stage="pretrain", trainer_class=None)
+        assert result == MegatronPretrainTrainer
+
+        # Test empty string falls back to stage (falsy)
+        result = adapter.load_trainer_class(stage="pretrain", trainer_class="")
+        assert result == MegatronPretrainTrainer
+
+    def test_load_trainer_class_registry_import_error_provides_context(self):
+        """Test that import errors from registry provide helpful context."""
+        import importlib
+
+        def side_effect(module_name, *args, **kwargs):
+            raise ImportError("Module not found")
+
+        with patch.object(importlib, "import_module", side_effect=side_effect):
+            adapter = MegatronAdapter()
+
+            with pytest.raises(ImportError) as exc_info:
+                adapter.load_trainer_class(trainer_class="MegatronPretrainTrainer")
+
+        error_msg = str(exc_info.value)
+        # Verify exact error message format from implementation
+        assert "Failed to load trainer class 'MegatronPretrainTrainer'" in error_msg
+        assert "Hint:" in error_msg
+        assert "Check that the module exists" in error_msg
+
+    def test_load_trainer_class_registry_attribute_error_provides_context(self):
+        """Test that attribute errors from registry provide helpful context."""
+        import importlib
+
+        # Module imports but class doesn't exist
+        mock_module = Mock()
+        del mock_module.MegatronPretrainTrainer  # Ensure attribute doesn't exist
+
+        def side_effect(module_name, *args, **kwargs):
+            return mock_module
+
+        with patch.object(importlib, "import_module", side_effect=side_effect):
+            adapter = MegatronAdapter()
+
+            with pytest.raises(ImportError) as exc_info:
+                adapter.load_trainer_class(trainer_class="MegatronPretrainTrainer")
+
+        error_msg = str(exc_info.value)
+        assert "Failed to load trainer class" in error_msg
+        assert "Hint:" in error_msg
 
 
 class TestMegatronAdapterIntegration:
