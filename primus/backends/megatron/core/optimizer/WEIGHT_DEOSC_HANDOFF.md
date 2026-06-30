@@ -181,6 +181,17 @@ and read via `getattr(args, ...)`.
    all-gather inside de-osc each step (correctness over the overlap perf win).
    Prefer `overlap_param_gather: false` when de-osc is on.
 
+5. **Incompatible with `use_precision_aware_optimizer` (bf16 main params).**
+   In that mode the distributed optimizer keeps no fp32 master shard
+   (`shard_fp32_from_float16_groups` is all `None`; main params live inside
+   FusedAdam), so de-osc has nothing to track/snap. `install_weight_deosc`
+   detects this and **skips with a clear warning** (it does NOT silently no-op).
+   Keep `use_precision_aware_optimizer: false` for de-osc runs. Supporting it
+   would require reaching into FusedAdam's master and would also weaken the
+   DistRatio denominator (bf16 master loses sub-bf16 movements). Note: a bf16
+   master does not *conceptually* break de-osc (bf16 is still ~16x finer than
+   mxfp4), but it is unsupported in code today.
+
 ---
 
 ## 8. Key external references (read these to understand the integration)

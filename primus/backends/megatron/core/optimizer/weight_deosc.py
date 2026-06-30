@@ -514,6 +514,31 @@ def load_deosc_sidecars(optimizer, ckpt_dir: Optional[str]) -> None:
         runner.load_state_dict(blob.get(str(i)))
 
 
+def _uses_precision_aware_main_params(opt) -> bool:
+    """True if the optimizer holds bf16 main params inside FusedAdam.
+
+    With ``use_precision_aware_optimizer`` the distributed optimizer does not
+    keep a separate fp32 master shard: ``shard_fp32_from_float16_groups`` is
+    filled with ``None`` and the main params live inside FusedAdam. De-osc reads
+    those shards for dist_w and as the snap target, so this mode is unsupported
+    and must be detected explicitly (otherwise de-osc would silently no-op).
+    """
+    cfg = getattr(opt, "config", None)
+    if cfg is not None and (
+        getattr(cfg, "use_precision_aware_optimizer", False)
+        or getattr(cfg, "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False)
+    ):
+        return True
+    # Structural fallback: float16 params exist but every main shard is None.
+    saw_slot = False
+    for group in getattr(opt, "shard_fp32_from_float16_groups", None) or []:
+        for shard_main_param in group:
+            saw_slot = True
+            if shard_main_param is not None:
+                return False
+    return saw_slot
+
+
 def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
     """Attach a :class:`WeightDeOscRunner` to every distributed optimizer instance.
 
@@ -535,6 +560,7 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
         candidates = [optimizer]
 
     instrumented = 0
+    skipped_precision_aware = 0
     for opt in candidates:
         # Duck-type a DistributedOptimizer (avoid hard import / version coupling).
         if not (
@@ -546,6 +572,18 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
             continue
         if getattr(opt, "_primus_weight_deosc_installed", False):
             instrumented += 1
+            continue
+
+        # bf16 main params (use_precision_aware_optimizer) have no fp32 master
+        # shard to track/snap -> de-osc cannot run. Skip with a clear warning
+        # instead of silently doing nothing.
+        if _uses_precision_aware_main_params(opt):
+            skipped_precision_aware += 1
+            warning_rank_0(
+                "[WeightDeOsc] use_precision_aware_optimizer detected (bf16 main params held "
+                "inside FusedAdam; no fp32 master shard). Weight de-oscillation is NOT supported "
+                "in this mode and is skipped. Disable use_precision_aware_optimizer to use it."
+            )
             continue
 
         overlap = getattr(getattr(opt, "ddp_config", None), "overlap_param_gather", False)
@@ -580,6 +618,9 @@ def install_weight_deosc(optimizer, config: WeightDeOscConfig) -> int:
             f"period={config.period}, ratio={config.ratio_threshold}, "
             f"start_step={config.start_step}"
         )
+    elif skipped_precision_aware > 0:
+        # Already warned per instance above; avoid the misleading "no instance" message.
+        pass
     else:
         warning_rank_0(
             "[WeightDeOsc] no DistributedOptimizer instance found; de-oscillation not installed "

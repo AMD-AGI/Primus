@@ -24,6 +24,7 @@ from primus.backends.megatron.core.optimizer.weight_deosc import (
     WeightDeOscConfig,
     WeightDeOscRunner,
     _ParamDeOscState,
+    _uses_precision_aware_main_params,
 )
 
 
@@ -170,6 +171,31 @@ def test_state_dict_round_trip(monkeypatch):
     # Shape mismatch (resharding) is rejected -> caller re-seeds.
     mismatched = _ParamDeOscState.from_serializable(blob, torch.device("cpu"), torch.zeros(n + 1))
     assert mismatched is None
+
+
+def test_precision_aware_detected_by_config():
+    opt = types.SimpleNamespace(
+        config=types.SimpleNamespace(use_precision_aware_optimizer=True),
+        shard_fp32_from_float16_groups=[],
+    )
+    assert _uses_precision_aware_main_params(opt) is True
+
+
+def test_precision_aware_detected_structurally():
+    # float16 slots present but every main shard is None -> bf16 main params.
+    opt = types.SimpleNamespace(
+        config=types.SimpleNamespace(),
+        shard_fp32_from_float16_groups=[[None, None]],
+    )
+    assert _uses_precision_aware_main_params(opt) is True
+
+
+def test_standard_fp32_main_is_not_precision_aware():
+    opt = types.SimpleNamespace(
+        config=types.SimpleNamespace(),
+        shard_fp32_from_float16_groups=[[torch.zeros(4)]],
+    )
+    assert _uses_precision_aware_main_params(opt) is False
 
 
 def test_disabled_runner_is_noop(monkeypatch):
