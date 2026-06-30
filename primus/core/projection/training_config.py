@@ -66,6 +66,15 @@ class ModelConfig:
     v_head_dim: int = 0
     q_lora_rank: int = 0
     kv_lora_rank: int = 0
+    # DeepSeek-V4 custom attention (compressed/hierarchical/sliding-window)
+    compress_ratios: object = None  # per-layer schedule (list or "[...]" string)
+    hc_mult: int = 1  # multi-hyper-connection stream count
+    index_topk: int = 0  # CSA per-query selected keys
+    index_head_dim: int = 0  # indexer head dim
+    index_n_heads: int = 0  # indexer heads
+    attn_sliding_window: int = 0  # SWA local window
+    o_lora_rank: int = 0  # output-projection LoRA rank
+    o_groups: int = 1  # output-projection groups
     # FFN & MoE
     swiglu: bool = False
     num_experts: int = 0

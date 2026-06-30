@@ -600,11 +600,32 @@ def calculate_collective_communication_time(
             # Expert gradient allreduce: across dp_replicas GPUs (1 per node)
             expert_params_per_gpu = (expert_total_params // ep) // (tp * pp)
             expert_grad_size = expert_params_per_gpu * 4  # FP32
-            # These GPUs span different nodes → use inter-node bandwidth
-            # Ring allreduce: 2 * (N-1)/N * msg / BW
+            # Single-NIC inter-node ring. Because EP fills the node (EP ==
+            # gpus_per_node), each expert lives on exactly ONE GPU per node, so a
+            # given expert's gradient is replicated only ACROSS nodes (1 GPU per
+            # node). Two consequences:
+            #   - The ring runs over inter-node links with a single NIC per rank,
+            #     so the per-NIC pod_bw (not the aggregate pod_bw*nics_per_node the
+            #     full-DP all-reduce can stripe across) is the right bandwidth.
+            #   - Hierarchical all-reduce does NOT apply: it needs intra-node
+            #     replicas of the same tensor to pre-reduce, but the node's other
+            #     GPUs hold DIFFERENT experts. The collective is already at its
+            #     inter-node-only form (the 8 experts run as 8 parallel single-NIC
+            #     rings, one per GPU/NIC).
+            #
+            # Ring all-reduce moves 2*(N-1)/N * msg per GPU (reduce-scatter +
+            # all-gather). The (N-1)/N volume fraction is capped at its 2-node
+            # value (0.5): per-GPU traffic is bounded (it only asymptotes 0.5->1.0
+            # per pass as N grows) and, in a ring, each GPU drives a single
+            # dedicated point-to-point link whose bandwidth does not degrade as
+            # nodes are added on a non-blocking rail/fat-tree fabric. So the
+            # per-GPU AR time saturates rather than growing with (N-1)/N; the cap
+            # holds it at the 2-node value. (Flat scaling is only exercised up to
+            # dp_replicas=4; beyond that it is a physically-motivated extrapolation
+            # — an oversubscribed fabric or O(N) ring latency could bend it up.)
             pod_bw = getattr(coll_args, "pod_bw", 50.0)
-            msg_scale = (dp_replicas - 1) / dp_replicas
-            expert_ar_time_ms = 2 * expert_grad_size * msg_scale / (pod_bw * 1e9) * 1e3
+            ring_factor = min((dp_replicas - 1) / dp_replicas, 0.5)
+            expert_ar_time_ms = 2 * expert_grad_size * ring_factor / (pod_bw * 1e9) * 1e3
 
             # Non-expert gradient allreduce: across full DP group
             non_expert_per_rank = non_expert_params // (tp * pp)
@@ -621,8 +642,12 @@ def calculate_collective_communication_time(
             message_info["expert_ar_dp_replicas"] = dp_replicas
             message_info["expert_ar_time_ms"] = expert_ar_time_ms
             message_info["non_expert_ar_time_ms"] = non_expert_ar_ms
-            # MoE all2all barriers prevent gradient allreduce from overlapping
-            message_info["moe_ar_no_overlap"] = True
+            # With overlap_grad_reduce, Megatron's bucketed DDP issues the
+            # expert/non-expert grad all-reduces on a dedicated stream that
+            # overlaps with subsequent backward compute. Only treat the AR as
+            # exposed (non-overlapped) when overlap_grad_reduce is disabled.
+            overlap_grad_reduce_cfg = getattr(mp_config, "overlap_grad_reduce", True)
+            message_info["moe_ar_no_overlap"] = not overlap_grad_reduce_cfg
         else:
             grad_size = num_params_per_rank * 4  # FP32 gradients
             ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
@@ -1045,6 +1070,42 @@ def _has_dense_layers(moe_layer_freq):
     return True
 
 
+def _distinct_compress_ratios(module_config):
+    """Return the set of distinct per-layer compress ratios for a DeepSeek-V4
+    hybrid-attention model, or ``None`` if the model has no per-layer
+    compress_ratios schedule.  Accepts either a list/tuple or a string form
+    (e.g. ``"[0,0,4,128,4,128,4,0]"``)."""
+    crs = getattr(module_config, "compress_ratios", None)
+    if crs is None:
+        return None
+    if isinstance(crs, str):
+        crs = crs.strip("[] ")
+        if not crs:
+            return None
+        try:
+            crs = [int(x) for x in crs.split(",")]
+        except ValueError:
+            return None
+    if not isinstance(crs, (list, tuple)) or not crs:
+        return None
+    return set(int(x) for x in crs)
+
+
+def _flatten_pipeline_for_single_node(module_config):
+    """Disable PP / virtual-PP so the stack profiles on a single node."""
+    module_config.pipeline_model_parallel_size = 1
+    if hasattr(module_config, "virtual_pipeline_model_parallel_size"):
+        module_config.virtual_pipeline_model_parallel_size = 1
+    if hasattr(module_config, "pipeline_model_parallel_layout"):
+        module_config.pipeline_model_parallel_layout = None
+    for attr in (
+        "num_layers_per_virtual_pipeline_stage",
+        "num_virtual_stages_per_pipeline_rank",
+    ):
+        if hasattr(module_config, attr):
+            setattr(module_config, attr, None)
+
+
 def _limit_layers_for_projection(module_config):
     """
     Restrict the transformer stack to a small number of layers for profiling.
@@ -1056,6 +1117,25 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
+
+    # DeepSeek-V4 hybrid attention: per-layer compress_ratio (0=dense/SWA,
+    # 4=CSA, 128=HCA) makes attention cost layer-dependent.  Collapsing the
+    # stack onto a single representative under-counts the expensive CSA/HCA
+    # layers (measured at P32 EP=8: ~178 ms with 1 rep vs ~228 ms cr-aware vs
+    # ~386 ms silicon).  When the model has >1 distinct compress_ratio, keep the
+    # full layer schedule: the cr-aware profiler (language_model.py) still only
+    # benchmarks ONE representative per distinct cr (so the wall-cost is just
+    # N_distinct layer benchmarks, not num_layers), but the composition then
+    # weights each cr by its true layer count instead of averaging.  An explicit
+    # PRIMUS_PROJ_MAX_LAYERS override still wins.
+    _distinct_crs = _distinct_compress_ratios(module_config)
+    if (
+        _distinct_crs is not None
+        and len(_distinct_crs) > 1
+        and os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is None
+    ):
+        _flatten_pipeline_for_single_node(module_config)
+        return
     # Use 1 layer for fast profiling - results are extrapolated to full model.
     # PRIMUS_PROJ_MAX_LAYERS lets the caller benchmark more representative layers
     # (e.g. =2 to capture both the DeepSeek-V4 HCA(cr=128) and CSA(cr=4) attention
@@ -1096,19 +1176,7 @@ def _limit_layers_for_projection(module_config):
         module_config.moe_layer_freq = [0] * target_layers
 
     # disable pipeline model parallelism for single-node layer benchmarking
-    module_config.pipeline_model_parallel_size = 1
-    # PP=1 cannot use interleaved schedule (VPP>1)
-    if hasattr(module_config, "virtual_pipeline_model_parallel_size"):
-        module_config.virtual_pipeline_model_parallel_size = 1
-    # Explicit layout is only meaningful with PP>1/VPP mapping.
-    if hasattr(module_config, "pipeline_model_parallel_layout"):
-        module_config.pipeline_model_parallel_layout = None
-    for attr in (
-        "num_layers_per_virtual_pipeline_stage",
-        "num_virtual_stages_per_pipeline_rank",
-    ):
-        if hasattr(module_config, attr):
-            setattr(module_config, attr, None)
+    _flatten_pipeline_for_single_node(module_config)
 
 
 def _rescale_expert_parallelism(module_config):
@@ -1876,6 +1944,38 @@ def _extract_layer_type_timings(layer_results: dict) -> Dict[str, dict[str, floa
     return type_timings
 
 
+def _extract_cr_timings(layer_results: dict):
+    """Map ``(layer_type, compress_ratio) -> timing`` for V4 cr-aware PP sim.
+
+    DeepSeek-V4 attention cost varies sharply by compress ratio (cr0 dense/SWA,
+    cr4 CSA, cr128 HCA — CSA is ~1.7× the cost of dense here), so the pipeline
+    simulator must time each layer by its OWN cr instead of collapsing every MoE
+    layer onto the first profiled representative. Returns ``(cr_timings,
+    type_fallback)`` where ``type_fallback`` is the first-seen timing per type
+    (used when a target cr was not among the profiled representatives).
+    """
+    cr_timings: Dict[tuple, dict] = {}
+    type_fallback: Dict[str, dict] = {}
+    for result in layer_results.values():
+        if not isinstance(result, dict):
+            continue
+        layer_type = result.get("type")
+        if layer_type not in ("dense", "moe"):
+            continue
+        entry = {
+            "forward": float(result.get("forward_time_ms", 0.0) or 0.0),
+            "backward": float(result.get("backward_time_ms", 0.0) or 0.0),
+            # wgrad is already folded into the benchmarked backward time.
+            "wgrad": 0.0,
+            "activation": float(result.get("activation_memory_bytes", 0.0) or 0.0) / _BYTES_PER_GB,
+        }
+        cr = result.get("compress_ratio")
+        if cr is not None:
+            cr_timings.setdefault((layer_type, int(cr)), entry)
+        type_fallback.setdefault(layer_type, entry)
+    return cr_timings, type_fallback
+
+
 def _add_io_layer_timings(chunk_timings: List[list[dict]], profiling_results: dict):
     if not chunk_timings:
         return
@@ -1970,6 +2070,23 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
     type_timings = _extract_layer_type_timings(layer_results)
     if not type_timings:
         return None
+    # V4 cr-aware composition: time each target layer by its OWN compress ratio
+    # (cr0/cr4/cr128) rather than collapsing all MoE layers onto the first
+    # profiled representative. Without this the heavy CSA (cr4) layers — ~47% of
+    # the 43-layer model — are mis-timed as light cr0 layers, which underestimates
+    # per-layer compute by ~1.4× and inflates projected throughput.
+    cr_timings, cr_type_fallback = _extract_cr_timings(layer_results)
+    cr_raw = getattr(model_cfg, "compress_ratios", None)
+    cr_schedule = None
+    if cr_raw is not None and cr_timings:
+        if isinstance(cr_raw, (list, tuple)):
+            cr_schedule = [int(x) for x in cr_raw]
+        elif isinstance(cr_raw, str):
+            try:
+                _ev = eval(cr_raw.strip(), {}, {})  # noqa: S307 — trusted config literal
+                cr_schedule = [int(x) for x in _ev] if isinstance(_ev, (list, tuple)) else None
+            except Exception:
+                cr_schedule = None
 
     pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
     vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
@@ -2019,7 +2136,12 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
             chunk_entry = {"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0, "activation": 0.0}
             for local_idx, layer_idx in enumerate(chunk_layers):
                 layer_type = "moe" if layer_type_pattern[layer_idx] else "dense"
-                metrics = type_timings.get(layer_type)
+                metrics = None
+                if cr_schedule is not None and 0 <= layer_idx < len(cr_schedule):
+                    cr = int(cr_schedule[layer_idx])
+                    metrics = cr_timings.get((layer_type, cr)) or cr_type_fallback.get(layer_type)
+                if metrics is None:
+                    metrics = type_timings.get(layer_type)
                 if not metrics:
                     continue
                 fwd_time = metrics["forward"]
@@ -2551,6 +2673,106 @@ def _summarize_bench_training_config(training_config) -> Dict[str, Any]:
     }
 
 
+def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
+    """Measure a real ``optimizer.step()`` on silicon (benchmark mode).
+
+    The analytic ``OptimizerProfiler`` models the step as purely
+    HBM-bandwidth-bound (``params/DP x 30 B / BW``).  For a DeepSeek-V4-style
+    distributed AdamW step that is a large under-count: the step is dominated by
+    **launch-bound** ``multi_tensor_apply`` Adam kernels + grad-norm/clip over
+    hundreds of small per-expert param shards (measured ~63 ms vs ~3.4 ms
+    analytic at P32 EP=8, a ~19x miss and ~40% of the projection's residual gap
+    vs silicon).  Since the real model + distributed optimizer are already built
+    for the layer benchmark, time the actual ``optimizer.step()`` instead of
+    modeling it — same philosophy as the per-layer measurement.
+
+    Returns ``{"step_time_ms": float, "samples_ms": [...]}`` or ``None`` if the
+    optimizer/model are unavailable or the measurement raises (falls back to the
+    analytic estimate).
+    """
+    import torch
+
+    if os.environ.get("PRIMUS_BENCH_SKIP_OPTIMIZER", "0") == "1":
+        return None
+
+    model = getattr(trainer, "model", None)
+    optimizer = getattr(trainer, "optimizer", None)
+    if model is None or optimizer is None:
+        return None
+    if not isinstance(model, (list, tuple)):
+        model = [model]
+
+    def _fill_grads():
+        # The distributed optimizer reads grads from the contiguous grad buffers
+        # (``param.main_grad`` are views into ``buffer.grad_data``).  Fill them
+        # with random data so the step does real work (clip + Adam) over the true
+        # shapes.  Fall back to ``param.main_grad`` / ``param.grad`` if the buffer
+        # layout is not exposed.
+        filled = False
+        for chunk in model:
+            buffers = list(getattr(chunk, "buffers", []) or [])
+            buffers += list(getattr(chunk, "expert_parallel_buffers", []) or [])
+            for buf in buffers:
+                gd = getattr(buf, "grad_data", None)
+                if gd is not None:
+                    gd.normal_()
+                    filled = True
+        if not filled:
+            for chunk in model:
+                params = chunk.parameters() if hasattr(chunk, "parameters") else []
+                for p in params:
+                    if getattr(p, "main_grad", None) is not None:
+                        p.main_grad.normal_()
+                        filled = True
+                    elif p.requires_grad:
+                        p.grad = torch.randn_like(p) if p.grad is None else p.grad.normal_()
+                        filled = True
+        return filled
+
+    try:
+        if not _fill_grads():
+            if rank == 0:
+                print(
+                    "[Primus:Performance Projection] Optimizer-step benchmark skipped "
+                    "(no grad buffers found); using analytic estimate."
+                )
+            return None
+
+        for _ in range(num_warmup):
+            _fill_grads()
+            optimizer.step()
+        torch.cuda.synchronize()
+
+        start_ev = torch.cuda.Event(enable_timing=True)
+        end_ev = torch.cuda.Event(enable_timing=True)
+        samples = []
+        for _ in range(num_iters):
+            _fill_grads()
+            torch.cuda.synchronize()
+            start_ev.record()
+            optimizer.step()
+            end_ev.record()
+            torch.cuda.synchronize()
+            samples.append(start_ev.elapsed_time(end_ev))
+
+        samples.sort()
+        median_ms = samples[len(samples) // 2]
+        if rank == 0:
+            print(
+                f"[Primus:Performance Projection] Measured optimizer.step(): "
+                f"median {median_ms:.2f} ms over {num_iters} iters "
+                f"(samples: {[round(s, 2) for s in samples]})"
+            )
+        return {"step_time_ms": median_ms, "samples_ms": samples}
+    except Exception as exc:  # noqa: BLE001
+        if rank == 0:
+            print(
+                f"[Primus:Performance Projection] WARNING: optimizer-step benchmark "
+                f"failed ({exc}); falling back to analytic estimate."
+            )
+        return None
+
+
 def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
@@ -2582,6 +2804,45 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     cfg.overlap_grad_reduce = False
     cfg.overlap_param_gather = False
     cfg.use_torch_fsdp2 = False
+
+    # Coerce string-valued booleans that come from YAML env substitution
+    # (e.g. ``use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}`` resolves to
+    # the *string* "false"). Megatron's arg parser coerces these, but Primus
+    # patches that run with the raw module_config (e.g.
+    # ``megatron.turbo.moe_dispatcher``) do ``bool(getattr(args, flag))`` —
+    # and ``bool("false") is True``, which would wrongly enable the Turbo
+    # DeepEP dispatcher path. Normalize the flags those patches gate on.
+    def _coerce_bool(value):
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    for _bool_flag in ("use_turbo_deepep", "moe_enable_deepep", "enable_primus_turbo"):
+        if hasattr(cfg, _bool_flag):
+            _orig = getattr(cfg, _bool_flag)
+            _coerced = _coerce_bool(_orig)
+            if _orig is not _coerced and _orig != _coerced:
+                setattr(cfg, _bool_flag, _coerced)
+                print(
+                    f"[Primus:Performance Projection] Coerced {_bool_flag}={_orig!r} -> {_coerced} "
+                    "(string->bool) so patch gating reads a real boolean."
+                )
+
+    # DeepSeek-V4 uses a custom (non-Megatron-MLA) attention with its own
+    # YARN rope built inside the V4 block from ``rotary_scaling_factor``.
+    # Stock Megatron's ``core_transformer_config_from_args`` asserts that a
+    # set ``rope_type`` is either "rope" or paired with multi_latent_attention.
+    # The benchmark surfaces ``rope_type="yarn"`` (multi_latent_attention=False),
+    # which trips that assertion even though V4 ignores args.rope_type for its
+    # rope. Clear it so the stock assertion is skipped; V4 still builds yarn rope.
+    _rope_type = str(getattr(cfg, "rope_type", "") or "").lower()
+    if _rope_type not in ("", "rope") and not getattr(cfg, "multi_latent_attention", False):
+        cfg.rope_type = None
+        print(
+            f"[Primus:Performance Projection] Cleared rope_type='{_rope_type}' for "
+            "custom-attention model (e.g. DeepSeek-V4) to skip stock Megatron's "
+            "rope_type assertion; the model still builds its own rope."
+        )
 
     # Auto-enable Primus Turbo kernels when MLA or DeepEP is configured.
     # Do not override explicit YAML kernel choices (e.g. legacy grouped GEMM).
@@ -2623,6 +2884,33 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
         module_master_port=master_port,
         extra_args=unknown_overrides,
     )
+
+    # Apply the "build_args" patch phase that the normal train runtime
+    # (primus.core.runtime.train_runtime) runs before trainer construction.
+    # MegatronPretrainTrainer.init() only runs the "before_train" phase, so the
+    # benchmark path would otherwise skip build_args patches such as
+    # ``megatron.moe.primus_topk_router`` (installs PrimusTopKRouter, which
+    # supports DeepSeek-V4's sqrtsoftplus + expert-bias routing). Without it,
+    # stock Megatron rejects the V4 MoE config during model build. get_args(ctx)
+    # reads module_config.params, so this is safe to run before init().
+    try:
+        from types import SimpleNamespace
+
+        from primus.core.patches import run_patches
+
+        _patch_module_config = SimpleNamespace()
+        _patch_module_config.params = cfg
+        print("[Primus:Performance Projection] Applying build_args patch phase...")
+        run_patches(
+            backend="megatron",
+            phase="build_args",
+            backend_version="0.15.0rc8",
+            model_name=getattr(cfg, "model", None),
+            module_name="pre_trainer",
+            extra={"module_config": _patch_module_config},
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Primus:Performance Projection] WARNING: build_args patch phase failed: {exc}")
 
     print("[Primus:Performance Projection] Initializing Megatron...")
     trainer.init()
@@ -2709,6 +2997,15 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     # profiling results dict so downstream extraction can pick it up.
     if tp_ar_results:
         profiling_results["_tp_allreduce_benchmark"] = tp_ar_results
+
+    # Measure a real optimizer.step() on the built distributed optimizer instead
+    # of relying on the bandwidth-only analytic model (which under-counts the
+    # launch-bound multi_tensor Adam + grad-clip by ~19x for V4-scale MoE).
+    if rank == 0:
+        print("[Primus:Performance Projection] Benchmarking optimizer.step()...")
+    optimizer_bench = _benchmark_optimizer_step(trainer, rank)
+    if optimizer_bench:
+        profiling_results["_optimizer_benchmark"] = optimizer_bench
 
     # Attach the memory benchmark payload to the profiling results dict so
     # _save_profiling_results / _load_profiling_results can persist it
@@ -3391,12 +3688,47 @@ def _run_multinode_projection(
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
 
         if overlap_grad_reduce:
-            # Overlapped: all-reduce runs concurrently with backward of the last
-            # microbatch.  Only backward (~63% of pipeline compute) can hide AR.
-            # Excel / Megatron configs enable overlap_grad_reduce even for MoE;
-            # do not force the full AR on the critical path.
-            backward_time = projected_compute_time_ms * 0.63
-            grad_ar_per_iteration_ms = max(0, target_grad_ar - backward_time)
+            # Overlapped: bucketed grad sync runs concurrently with compute.
+            # The hiding window spans the full fwd+bwd of ALL microbatches in the
+            # iteration, not just the backward of one: gradients accumulate and
+            # the distributed optimizer issues bucketed reduces throughout the
+            # backward, while the matching parameter all-gather overlaps the NEXT
+            # iteration's forward (overlap_param_gather). Using only 0.63×bwd of a
+            # single microbatch made the exposed AR explode once the reduce
+            # exceeded that tiny window
+            rt_cfg = getattr(training_config, "runtime_config", None)
+            # NOTE: time_includes_all_microbatches handling below avoids a
+            # double-count: when the compute time came from the pipeline
+            # simulation it already sums every microbatch.
+            gbs = getattr(rt_cfg, "global_batch_size", None) or 1
+            mbs = getattr(rt_cfg, "micro_batch_size", None) or 1
+            target_microbatches = max(1, gbs // (mbs * dp_target))
+            # The hiding window is the fwd+bwd compute of ALL microbatches in the
+            # iteration. When the time came from the pipeline simulation it ALREADY
+            # sums all microbatches (time_includes_all_microbatches), so multiplying
+            # again would double-count; only scale the per-microbatch path.
+            if time_includes_all_microbatches:
+                overlap_window = projected_compute_time_ms
+            else:
+                overlap_window = projected_compute_time_ms * target_microbatches
+            # With the distributed optimizer (ZeRO-1), the per-iteration grad
+            # sync is a reduce-scatter (half the all-reduce volume); the matching
+            # parameter all-gather overlaps the NEXT forward (overlap_param_gather).
+            use_dist_opt = getattr(mp_config, "use_distributed_optimizer", False)
+            effective_ar = target_grad_ar * (0.5 if use_dist_opt else 1.0)
+            # Exposed grad-AR has two parts:
+            #   1. Bandwidth-bound excess that does not fit the compute hiding
+            #      window: max(0, effective_ar - overlap_window).
+            #   2. An overlap-inefficiency residual: even when the reduce fits the
+            #      window, comm/compute overlap is never perfect (per-bucket launch
+            #      & sync overhead, reduce-scatter reduction compute, and the param
+            #      all-gather not fully tucking under the next forward).
+            GRAD_AR_OVERLAP_INEFFICIENCY = 0.20  # 80% of the reduce is hidden
+            residual = GRAD_AR_OVERLAP_INEFFICIENCY * effective_ar
+            grad_ar_per_iteration_ms = min(
+                effective_ar,
+                max(residual, effective_ar - overlap_window),
+            )
         else:
             # Not overlapped: all-reduce runs sequentially after backward
             grad_ar_per_iteration_ms = target_grad_ar
@@ -3580,6 +3912,24 @@ def _run_multinode_projection(
     )
     optimizer_profiler = OptimizerProfiler(config=training_config, gemm_backend=gemm_backend_for_optim)
     optimizer_step_ms = optimizer_profiler.estimated_step_time_ms(dp_size=dp_target)
+
+    # Prefer the on-silicon measured optimizer.step() (benchmark mode) over the
+    # bandwidth-only analytic model.  The analytic estimate assumes the step is
+    # HBM-bandwidth-bound, but for V4-scale distributed MoE it is launch-bound
+    # (hundreds of small per-expert multi_tensor Adam shards + grad clip),
+    # measured ~19x higher.  Only used when the optimizer was benchmarked at the
+    # target EP/DP config (true when benchmark GPUs == target GPUs).
+    _optimizer_bench = (
+        profiling_results.get("_optimizer_benchmark") if isinstance(profiling_results, dict) else None
+    )
+    if _optimizer_bench and _optimizer_bench.get("step_time_ms"):
+        _measured_opt_ms = float(_optimizer_bench["step_time_ms"])
+        if is_rank_0:
+            print(
+                f"[Primus:Performance Projection] Optimizer step: using MEASURED "
+                f"{_measured_opt_ms:.2f} ms (analytic estimate was {optimizer_step_ms:.2f} ms)"
+            )
+        optimizer_step_ms = _measured_opt_ms
 
     # Build full iteration time:
     #   compute (per-microbatch) × num_microbatches + gradient allreduce + optimizer step

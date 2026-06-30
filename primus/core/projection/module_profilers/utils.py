@@ -34,6 +34,30 @@ def _bench_iter_count(default_warmup: int, default_iters: int) -> Tuple[int, int
     return max(1, warmup), max(1, iters)
 
 
+def _bench_insitu_depth() -> int:
+    """In-situ measurement depth (``PRIMUS_BENCH_INSITU_DEPTH``, default 1).
+
+    The default per-layer bench times a *single* layer in isolation: warm,
+    dedicated caches and only that one layer's activations resident.  The real
+    training step keeps **all** layers' activations resident for backward and
+    runs ~10k kernels back-to-back, so HBM bandwidth and the caching allocator
+    are under pressure and the same kernels run materially slower (silicon
+    evidence: isolated attention-bwd microbench ~2x faster than in-situ EP8).
+
+    Setting depth ``K>1`` chains the representative layer ``K`` times in one
+    forward (output -> next input) and backprops once through the whole stack,
+    so ``K`` sets of activations stay resident; the reported per-layer time is
+    ``total / K``.  This captures the resident-working-set / HBM pressure *by
+    measurement* rather than by a calibration constant.  ``K=1`` is the
+    original behaviour and is the default, so nothing changes unless opted in.
+    """
+    try:
+        depth = int(os.environ.get("PRIMUS_BENCH_INSITU_DEPTH", "1"))
+    except ValueError:
+        depth = 1
+    return max(1, depth)
+
+
 def _bench_central_value(times: list[float]) -> float:
     """Compute the per-iteration central value used by the bench reporters.
 
@@ -206,6 +230,35 @@ def benchmark_layer(
     fp8_context = _get_fp8_context_for_benchmark(transformer_config)
 
     # ===========================================================================
+    # In-situ depth: optionally chain the layer K times so K activation sets are
+    # resident (captures HBM / allocator pressure by measurement; see
+    # _bench_insitu_depth).  ``_run_fwd`` feeds output[0] back as input[0] each
+    # hop and returns the final output tuple; reported time is later divided by
+    # the *effective* depth.  Depth is downgraded to 1 if the layer's first
+    # output shape does not match its first input (chaining would be invalid).
+    # ===========================================================================
+    insitu_depth = [_bench_insitu_depth()]
+
+    def _run_fwd():
+        cur = list(inputs)
+        out = None
+        for hop in range(insitu_depth[0]):
+            out = layer_module(*cur, **kwargs)
+            out_t = out if isinstance(out, (tuple, list)) else (out,)
+            if insitu_depth[0] > 1:
+                first = out_t[0]
+                if (
+                    not isinstance(first, torch.Tensor)
+                    or not isinstance(inputs[0], torch.Tensor)
+                    or first.shape != inputs[0].shape
+                ):
+                    if hop == 0:
+                        insitu_depth[0] = 1  # not chainable; fall back silently
+                    break
+                cur[0] = first  # feed hidden states forward to keep activations live
+        return out
+
+    # ===========================================================================
     # WARMUP (20 iterations) - fully warm GPU caches, JIT, and allocators
     # This matches the "warmed up" state of actual training after many iterations
     # ===========================================================================
@@ -215,7 +268,7 @@ def benchmark_layer(
 
     with fp8_context:
         for _ in range(num_warmup):
-            outputs = layer_module(*inputs, **kwargs)
+            outputs = _run_fwd()
             if not isinstance(outputs, (tuple, list)):
                 outputs = (outputs,)
 
@@ -260,12 +313,14 @@ def benchmark_layer(
 
     with fp8_context:
         for _ in range(num_iterations):
-            outputs = layer_module(*inputs, **kwargs)
+            outputs = _run_fwd()
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     mem_after_forward = torch.cuda.max_memory_allocated(device)
-    activation_memory = (mem_after_forward - mem_before) // num_iterations
+    # ``_run_fwd`` holds ``insitu_depth`` activation sets resident; normalise
+    # back to a single layer's activation footprint.
+    activation_memory = (mem_after_forward - mem_before) // (num_iterations * insitu_depth[0])
 
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
@@ -284,7 +339,7 @@ def benchmark_layer(
             forward_end = torch.cuda.Event(enable_timing=True)
 
             forward_start.record()
-            outputs = layer_module(*inputs, **kwargs)
+            outputs = _run_fwd()
             forward_end.record()
 
             # --- Backward pass ---
@@ -310,8 +365,10 @@ def benchmark_layer(
                 if inp.requires_grad:
                     inp.grad = None
 
-    avg_forward_time = _bench_central_value(forward_times)
-    avg_backward_time = _bench_central_value(backward_times)
+    # Per-layer time = measured stacked time / effective in-situ depth.
+    depth = insitu_depth[0]
+    avg_forward_time = _bench_central_value(forward_times) / depth
+    avg_backward_time = _bench_central_value(backward_times) / depth
 
     return avg_forward_time, avg_backward_time, int(activation_memory)
 

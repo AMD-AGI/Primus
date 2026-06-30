@@ -1868,7 +1868,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 pad_multiple = 32
 
         use_turbo_grouped_mlp = args.use_turbo_grouped_mlp
-        self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
+        deepep_kwargs = dict(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
             ep_group=self.ep_group,
@@ -1885,6 +1885,36 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
+        # Compatibility shim: older primus_turbo (e.g. 0.2.0) ships a
+        # DeepEPTokenDispatcher whose __init__ predates `pad_multiple`. That arg
+        # only matters for FP8/FP4 permute padding (pad_multiple>0); for the
+        # common pad_multiple==0 path dropping it is semantically identical, so
+        # we strip any kwargs the installed signature does not accept rather
+        # than hard-failing the model build.
+        try:
+            import inspect as _inspect
+
+            _accepted = _inspect.signature(
+                primus_turbo_torch.modules.DeepEPTokenDispatcher.__init__
+            ).parameters
+            _dropped = [k for k in deepep_kwargs if k not in _accepted]
+            for k in _dropped:
+                if deepep_kwargs[k]:
+                    raise RuntimeError(
+                        f"primus_turbo DeepEPTokenDispatcher does not accept "
+                        f"'{k}'={deepep_kwargs[k]!r}; upgrade primus_turbo to use it."
+                    )
+                deepep_kwargs.pop(k)
+            if _dropped:
+                import warnings as _warnings
+
+                _warnings.warn(
+                    f"primus_turbo DeepEPTokenDispatcher missing kwargs {_dropped}; "
+                    f"dropping (all were no-ops for this config)."
+                )
+        except (ValueError, TypeError):
+            pass
+        self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(**deepep_kwargs)
         # This is just a place holder.
         # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.
         # But it may get referenced in some Megatron code paths.

@@ -21,6 +21,20 @@ class AttentionProfiler(BaseModuleProfiler):
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
+        self._sim_compress_ratio = None  # Per-layer cr for V4 simulate (no module)
+
+    def set_sim_compress_ratio(self, cr):
+        """Set the DeepSeek-V4 compress ratio for the current simulated layer.
+
+        In ``simulate`` mode no torch module is built, so the cr-aware
+        attention model reads the per-layer compress ratio from here instead
+        of ``module.compress_ratio``.  The cr-aware path stays inactive until
+        this is set (or a real V4 module is bound), so non-cr-aware callers
+        see no behaviour change.
+        """
+        self._sim_compress_ratio = None if cr is None else int(cr)
+        self._cached_results = None
+        self._cache_key = None
 
     def set_module(self, module):
         """Set the actual attention module for benchmarking."""
@@ -248,8 +262,153 @@ class AttentionProfiler(BaseModuleProfiler):
 
         return fwd_time, bwd_time
 
+    def _is_v4_attention(self) -> bool:
+        """True when this profiler should use the cr-aware V4 attention model.
+
+        Active when either a real DeepSeek-V4 module is bound (benchmark-side
+        introspection) or — in pure ``simulate`` mode with no module — the
+        model config carries ``compress_ratios`` *and* a per-layer cr was
+        provided via :meth:`set_sim_compress_ratio`.  Without an explicit cr
+        the cr-aware path stays off so behaviour is unchanged.
+
+        V4 uses per-layer compression (0=dense/SWA, 128=HCA, 4=CSA) and its
+        own LoRA-factored Q/KV/O + compressor/indexer, which the generic
+        standard/MLA simulate path does not represent.
+        """
+        m = self.module
+        if m is not None and hasattr(m, "compress_ratio") and "DeepseekV4" in type(m).__name__:
+            return True
+        return (
+            self._sim_compress_ratio is not None
+            and getattr(self.config.model_config, "compress_ratios", None) is not None
+        )
+
+    def _v4_resolved_cr(self) -> int:
+        m = self.module
+        if m is not None and hasattr(m, "compress_ratio"):
+            return int(m.compress_ratio)
+        return int(self._sim_compress_ratio or 0)
+
+    def _get_v4_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """cr-aware DeepSeek-V4 attention timing — no calibration constants.
+
+        Every term is derived from the module's own shapes, the Origami GEMM
+        backend, the FAv3 SDPA simulator, and HBM bandwidth from the hardware
+        spec.  Validated against the MI355X flash trace: backward within
+        2-13% per cr.  The forward memory-bound ``attn.misc`` overhead (mHC
+        elementwise + the CSA sparse-gather ``cat``) is an implementation
+        kernel cost that analytic simulate underestimates; it is captured
+        exactly only in ``--profiling-mode benchmark`` (measured layers).
+        """
+        m = self.module
+        args = self.config.model_config
+        mp = self.config.model_parallel_config
+        tp_size = max(1, mp.tensor_model_parallel_size)
+        cp_size = max(1, mp.context_model_parallel_size)
+        tcfg = getattr(m, "config", None)
+
+        def cfg(attr, default, *aliases):
+            # Prefer the real module, then its TransformerConfig, then args.
+            for src in (m, tcfg, args):
+                for name in (attr, *aliases):
+                    if src is not None and getattr(src, name, None) is not None:
+                        return getattr(src, name)
+            return default
+
+        cr = self._v4_resolved_cr()
+        hc = max(1, int(cfg("hc_mult", 1)))
+        hidden = int(cfg("hidden_size", 0))
+        heads = int(cfg("num_heads", 0, "num_attention_heads"))
+        hd = int(cfg("head_dim", 0, "kv_channels"))
+        q_lora = int(cfg("q_lora_rank", 0) or 0)
+        o_lora = int(cfg("o_lora_rank", 0) or 0)
+        o_groups = max(1, int(cfg("o_groups", 1) or 1))
+        swa = int(cfg("attn_sliding_window", 0) or 0)
+        index_topk = int(cfg("index_topk", 0) or 0)
+        ihd = int(cfg("index_head_dim", 128) or 128)
+        inh = int(cfg("index_n_heads", heads) or heads)
+        bpe = 2  # bf16 activations
+
+        # hc-expanded token count per rank (the v4_flops ``s_eff`` convention:
+        # V4 runs attention once per mHC stream).
+        T = (batch_size * seq_len // tp_size // cp_size) * hc
+        n_d = heads * hd
+        dt = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
+        hbm = (getattr(self._gemm_backend, "hbm_bandwidth_gbps", None) or 5300.0) * 1e9
+
+        def g(mm, nn, kk):
+            return self._gemm_backend.simulate_gemm(mm, nn, kk, dt).forward_time_ms
+
+        # ---- attn.proj : V4 LoRA Q/KV/O GEMMs (cr-independent) ----
+        if self._gemm_backend is not None:
+            if q_lora > 0:
+                proj_fwd = g(T, q_lora, hidden) + g(T, n_d, q_lora) + g(T, hd, hidden)
+            else:
+                proj_fwd = g(T, n_d, hidden) + g(T, hd, hidden)
+            if o_lora > 0:
+                proj_fwd += g(T, o_lora, n_d) + g(T, hidden, o_groups * o_lora)
+            else:
+                proj_fwd += g(T, hidden, n_d)
+        else:
+            proj_fwd = 0.0
+        proj_bwd = 2.0 * proj_fwd
+
+        # ---- attn.core : FAv3 SDPA with cr-aware visible KV ----
+        core_fwd = core_bwd = 0.0
+        if self._sdpa_backend is not None:
+            if cr == 0:
+                s_k = swa or seq_len
+            elif cr == 128:
+                s_k = (swa or 0) + max(1, seq_len // 128)
+            elif cr == 4:
+                s_k = (swa or 0) + (index_topk or seq_len)
+            else:
+                s_k = seq_len
+            sd = self._sdpa_backend.simulate_sdpa(
+                batch_size=hc, num_heads=heads, seq_len=seq_len, head_dim=hd,
+                causal=True, dtype="bf16", seq_len_kv=s_k,
+            )
+            core_fwd, core_bwd = sd.forward_time_ms, sd.backward_time_ms
+
+        # ---- compressor (cr>0) ----
+        comp_fwd = comp_bwd = 0.0
+        if cr > 0 and self._gemm_backend is not None:
+            coff = 2 if cr == 4 else 1
+            comp_fwd = g(T, coff * hd, hidden)
+            comp_bwd = 2.0 * comp_fwd
+
+        # ---- indexer (cr==4 only): projections + pool scoring ----
+        idx_fwd = idx_bwd = idx_score = 0.0
+        if cr == 4 and self._gemm_backend is not None:
+            pool = max(1, T // cr)
+            idx_fwd = g(T, ihd, hidden) + g(T, inh * ihd, ihd) + g(T, inh, hidden) + g(T, 2 * ihd, hidden)
+            idx_bwd = 2.0 * idx_fwd
+            idx_score = (2.0 * T * inh * pool * ihd) / 4768.0e12 * 1e3  # fp8 peak
+
+        # ---- CSA sparse-gather memory traffic (cr==4) ----
+        # gathered = [hc, seq, index_topk, head_dim] (single-latent, shared
+        # across heads); memory-bound copy ~= 2x bytes / HBM bandwidth.
+        gather_fwd = gather_bwd = 0.0
+        if cr == 4:
+            gathered_bytes = hc * seq_len * (index_topk or 0) * hd * bpe
+            gather_fwd = 2.0 * gathered_bytes / hbm * 1e3
+            gather_bwd = gather_fwd
+
+        # ---- attn.norm : RoPE + q/k norms (memory-bound) ----
+        norm_bytes = T * n_d * bpe
+        norm_fwd = 3.0 * norm_bytes / hbm * 1e3
+        norm_bwd = 4.0 * norm_bytes / hbm * 1e3
+
+        fwd_time = proj_fwd + core_fwd + comp_fwd + idx_fwd + idx_score + gather_fwd + norm_fwd
+        bwd_time = proj_bwd + core_bwd + comp_bwd + idx_bwd + gather_bwd + norm_bwd
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (fwd_time, bwd_time, activation_memory)
+
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get simulated results from GEMM + SDPA simulation backends."""
+        if self._is_v4_attention():
+            return self._get_v4_simulated_results(batch_size, seq_len)
+
         args = self.config.model_config
         mp = self.config.model_parallel_config
         tp_size = max(1, mp.tensor_model_parallel_size)

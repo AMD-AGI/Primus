@@ -1,0 +1,15 @@
+###############################################################################
+# DeepSeek-V4 Flash — P32 anchor proxy (8-layer subset).
+#
+# Matches the measured P32 EP=8 profiling run
+# (profile-after-p32-ep8-20260511.md): 8 layers, compress
+# [0,0,4,128,4,128,4,0].  Used to validate benchmark-mode fidelity against the
+# silicon anchor 888.6 ms/iter (PP=1, EP=8, MBS=1/GBS=8, seq=4096, recompute off).
+###############################################################################
+
+extends:
+  - deepseek_v4_flash.yaml
+
+# P32 proxy subset
+num_layers: 8
+compress_ratios: "[0, 0, 4, 128, 4, 128, 4, 0]"

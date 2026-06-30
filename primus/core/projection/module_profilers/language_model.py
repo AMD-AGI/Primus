@@ -22,6 +22,27 @@ from .transformer_layer import (
 )
 
 
+def _parse_compress_ratios(model_config):
+    """Return the per-layer compress-ratio list, or None.
+
+    ``compress_ratios`` may be a list (already parsed / truncated for the
+    reduced bench model) or a string like ``"[0, 0, 4, 128, ...]"`` from YAML.
+    """
+    cr = getattr(model_config, "compress_ratios", None)
+    if cr is None:
+        return None
+    if isinstance(cr, (list, tuple)):
+        return [int(x) for x in cr]
+    if isinstance(cr, str):
+        try:
+            evaluated = eval(cr.strip(), {}, {})  # noqa: S307 — trusted config literal
+            if isinstance(evaluated, (list, tuple)):
+                return [int(x) for x in evaluated]
+        except Exception:
+            return None
+    return None
+
+
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
     """
     Recursively build a profiler instance from a ModuleProfilerSpec.
@@ -727,6 +748,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
         results = {}
         profiled_types = set()
 
+        # DeepSeek-V4: attention cost depends on the per-layer compress ratio
+        # (0=dense/SWA, 4=CSA, 128=HCA), so we key representative results by
+        # ``(layer_type, cr)`` instead of ``layer_type`` alone.  In *benchmark*
+        # mode this benchmarks the real cr0/cr4/cr128 layer modules separately
+        # (instead of collapsing all layers onto one representative, which
+        # under-counts the expensive CSA/HCA layers); in *simulate* mode we
+        # additionally tell the attention sub-profiler which cr to model.
+        v4_cr_aware = getattr(self.config.model_config, "compress_ratios", None) is not None
+        v4_sim = is_simulation_mode and v4_cr_aware
+        cr_schedule = _parse_compress_ratios(self.config.model_config) if v4_cr_aware else None
+
+        def _layer_cr(idx):
+            if cr_schedule and 0 <= idx < len(cr_schedule):
+                return int(cr_schedule[idx])
+            return None
+
         for layer_idx in self.layers:
             # In benchmark mode, guard against out-of-range layer indices.
             if model is not None and layer_idx >= len(all_layers):
@@ -736,8 +773,10 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             is_moe = self.config.model_config.moe_pattern[layer_idx]
             layer_type = "moe" if is_moe else "dense"
+            cr = _layer_cr(layer_idx)
+            type_key = (layer_type, cr) if v4_cr_aware else layer_type
 
-            if layer_type in profiled_types:
+            if type_key in profiled_types:
                 continue
 
             if is_rank_0:
@@ -753,6 +792,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if model is not None:
                 layer_module = all_layers[layer_idx]
                 layer_profiler.set_layer_module(layer_module)
+
+            # V4 simulate: tell the attention sub-profiler which compress ratio
+            # to model for this representative, and clear stale caches so the
+            # new cr is reflected.
+            if v4_sim and cr is not None:
+                attn_sub = layer_profiler.get_sub_profiler("self_attention")
+                if hasattr(attn_sub, "set_sim_compress_ratio"):
+                    attn_sub.set_sim_compress_ratio(cr)
+                layer_profiler._cached_results = None
+                layer_profiler._cache_key = None
 
             # Benchmark/simulate full layer
             forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
@@ -778,8 +827,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
                 mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
 
-            results[layer_type] = {
+            results[type_key] = {
                 "type": layer_type,
+                "compress_ratio": cr,
                 "forward_time_ms": forward_time,
                 "backward_time_ms": backward_time,
                 "activation_memory_bytes": activation_memory,
@@ -797,7 +847,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 },
             }
 
-            profiled_types.add(layer_type)
+            profiled_types.add(type_key)
 
             is_rank_0 = int(os.getenv("RANK", "0")) == 0
             if is_rank_0:
@@ -819,7 +869,18 @@ class LanguageModelProfiler(BaseModuleProfiler):
         for layer_idx in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer_idx]
             layer_type = "moe" if is_moe else "dense"
-            if layer_type in results:
+            if v4_cr_aware:
+                cr = _layer_cr(layer_idx)
+                key = (layer_type, cr)
+                if key in results:
+                    final_results[layer_idx] = results[key]
+                else:
+                    # Fall back to any profiled representative of the same type
+                    # (cr combo not present among reduced representatives).
+                    same = [v for (t, _c), v in results.items() if t == layer_type]
+                    if same:
+                        final_results[layer_idx] = same[0]
+            elif layer_type in results:
                 final_results[layer_idx] = results[layer_type]
 
         if embedding_stats is not None:
