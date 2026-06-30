@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -132,7 +132,13 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 f"Megatron backend does not support unregistered config keys."
             )
 
-        super().__init__(*args, **kwargs)
+        try:
+            super().__init__(*args, **kwargs)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            raise
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -28,8 +28,8 @@ class BaseModule(ABC):
         module_world_size: int,
         module_master_addr: str = None,
         module_master_port: int = None,
+        **kwargs,  # Accept extra kwargs for cooperative multiple inheritance
     ):
-        # module will be initialized by multiple worker processes
         self.module_name = module_name
 
         assert primus_config is not None
@@ -70,6 +70,25 @@ class BaseModule(ABC):
 
         # setup logger for worker
         self.setup_worker_logger(module_rank, module_world_size)
+
+        # Call super() for cooperative multiple inheritance
+        # MRO for MegatronTrainer: MegatronTrainer -> BaseTrainer -> BaseModule -> ABC -> object
+        #
+        # Flow:
+        # 1. MegatronTrainer.__init__() calls super().__init__() -> BaseTrainer.__init__()
+        # 2. BaseTrainer.__init__() consumes backend_args, then calls super().__init__(**kwargs) -> BaseModule.__init__()
+        #    Note: BaseTrainer passes kwargs containing module_name, primus_config, etc. to BaseModule
+        # 3. BaseModule.__init__() receives module_name, primus_config, etc. as positional/keyword args
+        #    The kwargs dict may still contain these keys, but BaseModule has already consumed them as positional args
+        # 4. BaseModule.__init__() calls super().__init__() -> ABC.__init__() -> object.__init__()
+        #
+        # The issue: If kwargs still contains keys, passing them to super() will eventually reach object.__init__()
+        # which doesn't accept arguments. We must ensure kwargs is empty or only contains args for the next class.
+        # Since the next class after BaseModule is ABC (which doesn't accept kwargs), we should not pass kwargs.
+
+        # Don't pass kwargs to super() - the next class in MRO is ABC, which doesn't need them
+        # All required args for BaseModule have been consumed as positional/keyword arguments above
+        super().__init__()
 
     @abstractmethod
     def init(self, *args, **kwargs):

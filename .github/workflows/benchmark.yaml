@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
+  PRIMUS_TURBO_COMMIT: 3cd482def8bb4814b1799fe481555559fff040b8 # Primus-Turbo main (0.3.x) - exposes mxfp4 gemm_fp4_impl(..., preshuffled=...)
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
