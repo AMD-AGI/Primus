@@ -384,6 +384,26 @@ jobs:
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Run Primus CLI tool smoke (benchmark / preflight, E2E coverage)
+        if: always()
+        continue-on-error: true
+        run: |
+          # Best-effort CLI smoke so primus/tools (GEMM / attention / RCCL
+          # benches + preflight probes) is exercised under the inherited E2E
+          # coverage injection. Never fails CI: coverage is kept up to any exit.
+          export HSA_NO_SCRATCH_RECLAIM=1
+          OUT="${{ env.UT_LOG_PATH }}/cli_smoke"; mkdir -p "$OUT"
+          cli() { python -m primus.cli.main "$@" || true; }
+          # single-GPU benches + preflight info
+          cli benchmark gemm --M 512 --N 512 --K 512 --duration 2 --output-file "$OUT/gemm.md"
+          cli benchmark gemm-dense --seqlen 256 --hidden-size 512 --intermediate-size 512 --duration 2 --output-file "$OUT/gemm_dense.md"
+          cli benchmark gemm-deepseek --seqlen 256 --hidden-size 512 --intermediate-size 512 --moe-intermediate-size 512 --duration 2 --output-file "$OUT/gemm_deepseek.md"
+          cli benchmark attention --backend flash --mbs-list 1,2 --report-csv-path "$OUT/attn.csv"
+          cli preflight --host --gpu --dump-path "$OUT/preflight"
+          # multi-GPU collectives (best-effort; strided needs >=8 GPUs)
+          NGPU=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+          [ "$NGPU" -ge 2 ] && torchrun --nproc_per_node="$NGPU" -m primus.cli.main benchmark rccl --op all_reduce all_gather --min-bytes 1K --max-bytes 256K --num-sizes 2 --iters 3 --warmup 1 --output-file "$OUT/rccl.md" || true
+          [ "$NGPU" -ge 8 ] && torchrun --nproc_per_node=8 -m primus.cli.main benchmark strided-allgather --sizes-mb 8 --iters 3 --warmup 1 || true
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
