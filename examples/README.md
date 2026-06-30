@@ -208,6 +208,13 @@ The following models are supported out of the box via provided configuration fil
 | Mixtral-8x7B-v0.1 | [mistralai/Mixtral-8x7B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)           | [mixtral_8x7B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml)           | |
 | Mixtral-8x22B-v0.1 | [mistralai/Mixtral-8x22B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)           | [mixtral_8x22B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml)           | |
 
+### Diffusion Models
+
+- **Flux** - Flow-based diffusion model for text-to-image generation
+  - Training guide: [examples/megatron/diffusion/README.md](megatron/diffusion/README.md) (Flux 535M and 12B)
+  - Architecture & developer docs: [docs/backends/megatron/diffusion/README.md](../docs/backends/megatron/diffusion/README.md)
+  - FP8 training: [docs/backends/megatron/diffusion/fp8_training.md](../docs/backends/megatron/diffusion/fp8_training.md)
+
 ---
 
 ### 🏃‍♂️ How to Run a Supported Model
