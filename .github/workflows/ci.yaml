@@ -381,10 +381,31 @@ jobs:
           printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
+      - name: Decide E2E scope (torch)
+        run: |
+          # Fail-safe: default to running all E2E (push/release/dispatch, or any
+          # diff failure). On PRs, narrow to the suites the changed files affect.
+          M=1; T=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py --e2e)"
+              echo "Selected torch E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw megatron   || M=0
+                echo "${e2e}" | grep -qw torchtitan || T=0
+              fi
+            fi
+          fi
+          echo "RUN_MEGATRON_E2E=${M}" >> "$GITHUB_ENV"
+          echo "RUN_TORCHTITAN_E2E=${T}" >> "$GITHUB_ENV"
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
@@ -397,6 +418,7 @@ jobs:
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
@@ -567,10 +589,29 @@ jobs:
           printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
+      - name: Decide E2E scope (jax)
+        run: |
+          # Fail-safe: default to running MaxText E2E; on PRs skip it when no
+          # relevant (maxtext / shared) changes are detected.
+          X=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py --e2e)"
+              echo "Selected jax E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw maxtext || X=0
+              fi
+            fi
+          fi
+          echo "RUN_MAXTEXT_E2E=${X}" >> "$GITHUB_ENV"
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_MAXTEXT_E2E:-1}" != "1" ]]; then echo "Skipping MaxText E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
