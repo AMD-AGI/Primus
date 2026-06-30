@@ -88,6 +88,7 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     v4_csa_attention_from_pool,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_gluon import (
+    v4_attention_gluon,
     v4_csa_attention_gluon_from_pool,
 )
 
@@ -1420,7 +1421,20 @@ class DeepseekV4Attention(MLASelfAttention):
             # Precedence ``use_turbo_attention > use_v4_triton_attention
             # > eager`` is enforced by the earlier ``_use_core_attention``
             # branch returning before this block.
-            if self._use_v4_triton_attention:
+            if self._use_v4_gluon_attention:
+                out_bh = v4_attention_gluon(
+                    q_bh,
+                    k_local_bh,
+                    v_local_bh,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    additive_mask=None,
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    hca_local_seqlen=0,
+                )
+            elif self._use_v4_triton_attention:
                 out_bh = self._attention_forward_via_v4_triton(
                     q_bh,
                     k_local_bh,
@@ -1447,7 +1461,20 @@ class DeepseekV4Attention(MLASelfAttention):
             extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
             k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
-            if self._use_v4_triton_attention:
+            if self._use_v4_gluon_attention:
+                out_bh = v4_attention_gluon(
+                    q_bh,
+                    k_full,
+                    v_full,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    additive_mask=extra_mask,
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    hca_local_seqlen=S,
+                )
+            elif self._use_v4_triton_attention:
                 out_bh = self._attention_forward_via_v4_triton(
                     q_bh,
                     k_full,

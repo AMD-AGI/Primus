@@ -174,4 +174,134 @@ def v4_csa_attention_gluon_from_pool(
     )
 
 
-__all__ = ["V4CSAGluonFn", "v4_csa_attention_gluon_from_pool"]
+def _pad_topk_64(topk: torch.Tensor) -> torch.Tensor:
+    """Pad the topk width to a multiple of 64 with -1 so the gluon bwd dKV
+    tiling (TILE_K=64) is valid (e.g. HCA 128+32=160 -> 192)."""
+    tk = topk.shape[1]
+    pad = ((tk + 63) // 64) * 64 - tk
+    if pad > 0:
+        topk = torch.cat(
+            [topk, torch.full((topk.shape[0], pad), -1, device=topk.device, dtype=topk.dtype)], dim=1
+        )
+    return topk.contiguous()
+
+
+class V4GluonAttnFn(torch.autograd.Function):
+    """Gluon sparse-MLA FWD/BWD for the V4 dense (cr=0) and HCA (cr=128) layers.
+
+    ``k`` / ``v`` are the head-broadcast single latent (cr=0) or the
+    ``[local ++ compressed pool]`` concat (cr=128, ``hca_local_seqlen = S``).
+    topk = SWA window (++ causally-visible pool slots from ``additive_mask``).
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        q_bh: torch.Tensor,  # [B, H, S, D]
+        k_bh: torch.Tensor,  # [B, H, Skv, D]  (Skv = S for cr=0; S+P for HCA)
+        v_bh: torch.Tensor,  # [B, H, Skv, D]  (== k_bh in V4)
+        sink: Optional[torch.Tensor],  # [H] fp32 or None
+        swa_window: int,
+        additive_mask: Optional[torch.Tensor],  # [S, P] pool-only mask (HCA) or None
+        scale: float,
+        hca_local_seqlen: int,
+    ) -> torch.Tensor:
+        B, H, S, D = q_bh.shape
+        Skv = k_bh.shape[2]
+        W = int(swa_window)
+        assert q_bh.dtype == torch.bfloat16, "gluon attn requires bf16"
+        assert W > 0, "gluon attn requires swa_window > 0"
+
+        device = q_bh.device
+        base = (torch.arange(B, device=device) * Skv).view(B, 1, 1)
+        win_pos = (
+            torch.arange(S, device=device).view(S, 1) - W + 1 + torch.arange(W, device=device).view(1, W)
+        )
+        win_valid = win_pos >= 0
+        win_idx = base + win_pos.view(1, S, W)
+        win_idx = torch.where(win_valid.view(1, S, W), win_idx, torch.full_like(win_idx, -1))  # [B,S,W]
+
+        if hca_local_seqlen > 0 and additive_mask is not None:
+            P = Skv - int(hca_local_seqlen)
+            vis = (additive_mask == 0).view(1, S, P)  # mask is 0 (visible) / -inf
+            ps = torch.arange(P, device=device).view(1, 1, P)
+            pool_idx = torch.where(
+                vis, base + hca_local_seqlen + ps, torch.full((B, S, P), -1, device=device)
+            )
+            topk = torch.cat([win_idx, pool_idx], dim=2)
+        else:
+            topk = win_idx
+        topk_g = _pad_topk_64(topk.reshape(B * S, -1).to(torch.int32))
+
+        z_q = torch.zeros(B * S, H, _ROPE_PAD, device=device, dtype=q_bh.dtype)
+        q_g = torch.cat([q_bh.permute(0, 2, 1, 3).reshape(B * S, H, D), z_q], dim=-1).contiguous()
+        kv512 = k_bh[:, 0, :, :].reshape(B * Skv, 1, D)  # head-broadcast latent / [local++pool]
+        z_kv = torch.zeros(B * Skv, 1, _ROPE_PAD, device=device, dtype=q_bh.dtype)
+        kv_g = torch.cat([kv512, z_kv], dim=-1).contiguous()
+
+        sink_arg = sink.float().contiguous() if sink is not None else None
+        o_g, lse = sparse_mla_fwd_v4_gluon(
+            q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale)
+        )
+
+        ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        ctx.shapes = (B, H, S, D, Skv)
+        ctx.scale = float(scale)
+        ctx.sink_was_none = sink is None
+        return o_g.reshape(B, S, H, D).permute(0, 2, 1, 3).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_o_bh: torch.Tensor):  # type: ignore[override]
+        q_g, kv_g, o_g, lse, topk_g, sink_saved = ctx.saved_tensors
+        B, H, S, D, Skv = ctx.shapes
+        sink_arg = None if ctx.sink_was_none else sink_saved
+
+        grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
+        dq_g, dkv_g, dsink = sparse_mla_bwd_v4_gluon(
+            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+        )
+
+        dq_bh = dq_g[:, :, :D].reshape(B, S, H, D).permute(0, 2, 1, 3).contiguous()
+        dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
+        dk_bh = torch.zeros(B, H, Skv, D, device=dq_bh.device, dtype=dq_bh.dtype)
+        dk_bh[:, 0, :, :] = dkv.to(dq_bh.dtype)
+        dv_bh = torch.zeros(B, H, Skv, D, device=dq_bh.device, dtype=dq_bh.dtype)
+
+        dsink_out = None
+        if not ctx.sink_was_none and dsink is not None:
+            dsink_out = dsink.to(sink_saved.dtype)
+
+        # forward args: (q_bh, k_bh, v_bh, sink, swa_window, additive_mask, scale, hca_local_seqlen)
+        return dq_bh, dk_bh, dv_bh, dsink_out, None, None, None, None
+
+
+def v4_attention_gluon(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    sink: Optional[torch.Tensor],
+    swa_window: int,
+    additive_mask: Optional[torch.Tensor],
+    attn_dropout: float,
+    training: bool,
+    scale: float,
+    hca_local_seqlen: int = 0,
+) -> torch.Tensor:
+    """Gluon-backed V4 dense (cr=0) / HCA (cr=128) attention. Returns [B, H, S, D]."""
+    if attn_dropout > 0.0 and training:
+        raise NotImplementedError(
+            "v4_attention_gluon does not implement in-kernel attention dropout "
+            f"(V4 trains with attn_dropout=0). Got attn_dropout={attn_dropout}, training={training}."
+        )
+    return V4GluonAttnFn.apply(
+        q, k, v, sink, int(swa_window), additive_mask, float(scale), int(hca_local_seqlen)
+    )
+
+
+__all__ = [
+    "V4CSAGluonFn",
+    "v4_csa_attention_gluon_from_pool",
+    "V4GluonAttnFn",
+    "v4_attention_gluon",
+]
