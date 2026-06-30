@@ -47,7 +47,7 @@ TVM_FFI_VERSION="0.1.6"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
 PRIMUS_BRANCH="9a1547cd5885c4de6ad0935a5d59c08303dd0674"
 AITER_REPO="https://github.com/ROCm/aiter.git"
-AITER_COMMIT="b5e03ed191fca11ee423226537ef8d9435e432a6"
+AITER_COMMIT="0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
 TURBO_COMMIT="3974fc246be594d989156dd83e91da618274b0c8"
 
