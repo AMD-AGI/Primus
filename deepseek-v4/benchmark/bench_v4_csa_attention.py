@@ -147,17 +147,52 @@ def _hca_mask(S: int, P: int, ratio: int, device, dtype):
     return torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
 
 
-def _build_gluon_inputs(*, H: int, S: int, D: int, topk: int, seed: int = 0):
-    """Sparse-MLA latent inputs for the Gluon backend (total_tokens = S)."""
+def _build_gluon_v4form(*, cr: int, H: int, S: int, D: int, K: int, P: int, W: int, seed: int = 0):
+    """Gluon inputs in the **V4 form** (matches the training adapter):
+
+    The 512 V4 latent (RoPE baked in-place) is the gluon "lora" with a zero rope
+    pad (kernel needs D_ROPE>0); kv = [local latent ++ pool] and topk = [SWA
+    window ++ (cr=4: sparse pool top-k | cr=128: full causal pool | cr=0: none)].
+    ``topk`` is padded to a multiple of 64 so the gluon bwd dKV tiling (TILE_K=64)
+    is valid (notably HCA: 128+32=160 -> 192). scale = 1/sqrt(D) (V4, over 512).
+    """
     g = torch.Generator(device="cuda").manual_seed(seed)
     dev, dt = "cuda", torch.bfloat16
-    d_qk = D + _ROPE_DIM
-    q = torch.randn(S, H, d_qk, generator=g, device=dev, dtype=dt)
-    kv = torch.randn(S, 1, d_qk, generator=g, device=dev, dtype=dt)
-    topk_idx = torch.randint(0, S, (S, topk), generator=g, device=dev, dtype=torch.int32)
+    latent = torch.randn(S, D, generator=g, device=dev, dtype=dt)
+    q512 = torch.randn(S, H, D, generator=g, device=dev, dtype=dt)
+    z_q = torch.zeros(S, H, _ROPE_DIM, device=dev, dtype=dt)
+    q_g = torch.cat([q512, z_q], dim=-1).contiguous()  # [S, H, D+rope_pad]
     sink = torch.randn(H, generator=g, device=dev, dtype=torch.float32) * 0.1
     do = torch.randn(S, H, D, generator=g, device=dev, dtype=dt)
-    return q, kv, topk_idx, sink, do
+
+    ti = torch.arange(S, device=dev).view(S, 1)
+    win = ti - W + 1 + torch.arange(W, device=dev).view(1, W)  # [S, W] local token idx
+    win = torch.where(win >= 0, win, torch.full_like(win, -1))
+
+    if cr == 0:
+        kv512 = latent.unsqueeze(1)  # [S, 1, D]
+        topk = win
+    else:
+        pool = torch.randn(P, D, generator=g, device=dev, dtype=dt)
+        kv512 = torch.cat([latent, pool], dim=0).unsqueeze(1)  # [S+P, 1, D]
+        if cr == 4:
+            sp = torch.randint(0, P, (S, K), generator=g, device=dev)
+            pool_topk = S + sp
+        else:  # cr == 128: HCA full causal pool
+            ps = torch.arange(P, device=dev).view(1, P)
+            vis = ((ps + 1) * cr - 1) <= ti  # [S, P]
+            pool_topk = torch.where(vis, S + ps, torch.full_like(ps.expand(S, P), -1))
+        topk = torch.cat([win, pool_topk], dim=1)
+
+    tk = topk.shape[1]
+    pad = ((tk + 63) // 64) * 64 - tk
+    if pad > 0:
+        topk = torch.cat([topk, torch.full((S, pad), -1, device=dev, dtype=topk.dtype)], dim=1)
+    topk_g = topk.to(torch.int32).contiguous()
+
+    z_kv = torch.zeros(kv512.shape[0], 1, _ROPE_DIM, device=dev, dtype=dt)
+    kv_g = torch.cat([kv512, z_kv], dim=-1).contiguous()
+    return q_g, kv_g, topk_g, sink, do
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +269,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
 
     if cr == 0:
         topk_eff = _SWA_WINDOW
+        glu_K, glu_P = 0, 0
         extra = ""
 
         def fwd_triton():
@@ -269,6 +305,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
         P = max(S // 4, 1)
         K = min(cfg["index_topk"], P)
         topk_eff = _SWA_WINDOW + K
+        glu_K, glu_P = K, P
         extra = f" K_topk={K} P={P}"
         pool, topk_idxs, gathered, sparse_mask = _csa_sparse(B, H, S, D, K, P, g)
 
@@ -338,6 +375,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     elif cr == 128:
         P = max(S // cr, 1)
         topk_eff = _SWA_WINDOW + P
+        glu_K, glu_P = 0, P
         extra = f" P={P}"
         pool_bh = torch.randn(B, H, P, D, generator=g, device="cuda", dtype=torch.bfloat16)
         k_hca = torch.cat([k_full, pool_bh], dim=2).contiguous()
@@ -376,11 +414,14 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     else:
         raise ValueError(f"unsupported cr={cr}")
 
-    # Gluon: every cr; the layer kind is just a different TOPK length.
+    # Gluon: V4-form (the production training invocation) for every cr — zero
+    # rope pad + [local ++ pool] buffer + [SWA window ++ pool] topk.
     glu_fwd = glu_bwd = None
     if _GLUON_AVAIL:
-        gq, gkv, gtopk_idx, gsink, gdo = _build_gluon_inputs(H=H, S=S, D=D, topk=topk_eff)
-        gscale = 1.0 / math.sqrt(D + _ROPE_DIM)
+        gq, gkv, gtopk_idx, gsink, gdo = _build_gluon_v4form(
+            cr=cr, H=H, S=S, D=D, K=glu_K, P=glu_P, W=_SWA_WINDOW
+        )
+        gscale = 1.0 / math.sqrt(D)  # V4 scale (score over 512)
 
         def fwd_gluon():
             return sparse_mla_fwd_v4_gluon(gq, gkv, gtopk_idx, attn_sink=gsink, kv_lora_rank=D, scale=gscale)
@@ -394,21 +435,24 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
 
         glu_fwd, glu_bwd = fwd_gluon, bwd_gluon
 
-    # aiter-aligned effective FLOPs (per-backend dims; BWD = 2.5x FWD).
+    # Effective FLOPs over the USEFUL work (score+value both over head_dim=512,
+    # TOPK = real key count); BWD = 2.5x FWD. Same formula for all backends so
+    # TFLOP/s is comparable — the gluon zero-rope-pad overhead shows up in ms,
+    # not in counted FLOPs.
     T = B * S
 
     def _mk_flops(d_qk: int, d_v: int):
         fwd = 2.0 * T * H * topk_eff * (d_qk + d_v)
         return {"fwd": fwd, "bwd": 2.5 * fwd}
 
-    flops_csa = _mk_flops(D, D)  # Triton / FlyDSL (K=V=512)
-    flops_glu = _mk_flops(D + _ROPE_DIM, D)  # Gluon (QK over 576)
+    flops_csa = _mk_flops(D, D)  # Triton / FlyDSL / Gluon — useful work over 512
+    flops_glu = flops_csa
 
     print(
         f"\n=== V4-{variant.upper()} cr={cr} ({_CR_NAME[cr]}) | B={B} H={H} S={S} D={D}"
         f"{extra} TOPK_eff={topk_eff} swa={_SWA_WINDOW} sink=on bf16 ===\n"
-        f"  FWD GFLOP: CSA={flops_csa['fwd'] / 1e9:.1f} Gluon={flops_glu['fwd'] / 1e9:.1f}  "
-        f"(cells: ms | TFLOP/s; per-backend FLOPs)",
+        f"  FWD GFLOP={flops_csa['fwd'] / 1e9:.1f} (useful, over head_dim={D})  "
+        f"(cells: ms | TFLOP/s; Gluon=V4-form w/ zero rope pad)",
         flush=True,
     )
 

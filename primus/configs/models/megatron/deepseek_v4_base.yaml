@@ -72,6 +72,13 @@ use_v4_fp8_indexer: false
 use_v4_tilelang_attention: false
 use_v4_tilelang_csa_attention: false
 
+# Gluon (hardware-controlled Triton) sparse-MLA backend (gfx950 / MI355X).
+# CSA (cr==4) takes precedence over the Triton CSA path when enabled. Surface
+# via PRIMUS_USE_V4_GLUON_ATTENTION / PRIMUS_USE_V4_GLUON_CSA_ATTENTION env
+# vars in run_deepseek_v4.sh. Declared here so the CLI overrides are "known".
+use_v4_gluon_attention: false
+use_v4_gluon_csa_attention: false
+
 # Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
 # projection inside HyperMixer.compute_weights) with a cached
 # ``torch.compile(fullgraph=True, dynamic=False)`` build. Collapses the
