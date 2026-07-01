@@ -173,15 +173,15 @@ def _bridge_weight_grad(
     assert isinstance(
         weight_buffer, PrimusTurboQuantizedTensorPair
     ), "weight_buffer must be a PrimusTurboQuantizedTensorPair"
-    assert weight_buffer.data_rowwise is not None, "weight_buffer.data_rowwise must not be None"
+    assert weight_buffer.data is not None, "weight_buffer.data must not be None"
 
     x, quantized_weight, quantized_weight_trans = _WeightGradBridge.apply(
-        x, weight, weight_buffer.data_rowwise, weight_buffer.data_colwise
+        x, weight, weight_buffer.data, weight_buffer.data_t
     )
 
     # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
     return x, PrimusTurboQuantizedTensorPair(
-        data_rowwise=quantized_weight, data_colwise=quantized_weight_trans
+        data=quantized_weight, data_t=quantized_weight_trans
     )
 
 
@@ -200,14 +200,14 @@ def _maybe_create_quantized_weight_buffers(
     that do not export ``create_quantized_weight`` yet.
     """
     quant_config_internal = quant_config.data()
-    need_cache_colwise = not disable_parameter_transpose_cache
+    need_weight_transpose_cache = not disable_parameter_transpose_cache
 
     if create_quantized_weight is not None:
         return create_quantized_weight(
             weight,
             dest_dtype,
             quant_config_internal,
-            need_cache_colwise=need_cache_colwise,
+            need_weight_transpose_cache=need_weight_transpose_cache,
         )
 
     # TODO(ruibin): Remove this fallback path once create_quantized_weight is
@@ -238,7 +238,7 @@ def _maybe_create_quantized_weight_buffers(
     )
 
     quantized_weight_colwise = None
-    if need_cache_colwise:
+    if need_weight_transpose_cache:
         granularity = quant_config.granularity
         if granularity == ScalingGranularity.TENSORWISE:
             quantized_weight_colwise = quantized_weight_rowwise.transpose(-2, -1)
@@ -1010,7 +1010,7 @@ class PrimusTurboLinear(TELinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp8(
@@ -1038,7 +1038,7 @@ class PrimusTurboLinear(TELinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp4(
@@ -1179,7 +1179,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp8(
@@ -1209,7 +1209,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp4(
@@ -1343,7 +1343,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp8(
@@ -1373,7 +1373,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                     x,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp4(
@@ -1520,7 +1520,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                     inp,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp8(
@@ -1550,7 +1550,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                     inp,
                     weight,
                     PrimusTurboQuantizedTensorPair(
-                        data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                        data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                     ),
                 )
                 out = primus_turbo_torch.ops.gemm_fp4(
@@ -1720,7 +1720,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
         weights = self.weights
         # NOTE: keep x and m_splits on the same device
-        m_splits = m_splits.to(x.device)
+        if m_splits.device != x.device:
+            m_splits = m_splits.to(x.device)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1743,7 +1744,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 x,
                 weights,
                 PrimusTurboQuantizedTensorPair(
-                    data_rowwise=self.quantized_weight_buffer, data_colwise=self.quantized_weight_t_buffer
+                    data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
                 ),
             )
 
