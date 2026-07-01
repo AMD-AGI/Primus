@@ -51,7 +51,7 @@ from primus.backends.megatron.core.transformer.hyper_connection import (  # noqa
     _get_compiled_sinkhorn,
     sinkhorn_normalize,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn import (  # noqa: E402
     SinkhornNormalizeFn,
     eager_sinkhorn_normalize,
 )

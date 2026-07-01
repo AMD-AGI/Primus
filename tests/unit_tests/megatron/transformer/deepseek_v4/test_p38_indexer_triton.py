@@ -7,7 +7,7 @@
 """Plan-6 P38 G41 — `Indexer.forward` scoring Triton parity.
 
 Asserts that :class:`IndexerScoreFn` (Triton kernel from
-``primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score``)
+``primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score``)
 produces scores that match the eager body in
 :meth:`primus.backends.megatron.core.transformer.indexer.Indexer.forward`
 within bf16 tolerance, and that the load-bearing post-`topk`
@@ -32,7 +32,7 @@ if not torch.cuda.is_available():
 pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.indexer import Indexer  # noqa: E402
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (  # noqa: E402
     IndexerScoreFn,
     is_triton_kernel_supported,
 )
@@ -47,7 +47,7 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.inde
 # topk parity assertions still ran the right code.  Switch the
 # import here to the post-tail module so the gate check matches
 # the env var the test sets.
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (  # noqa: E402
     is_triton_path_enabled,
 )
 

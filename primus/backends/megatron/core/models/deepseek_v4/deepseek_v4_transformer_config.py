@@ -111,68 +111,22 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # ``PRIMUS_USE_V4_FP8_INDEXER`` (see run_deepseek_v4.sh / flash yaml).
     use_v4_fp8_indexer: bool = False
 
-    # ---- DeepSeek-V4 plan-4 in-tree Triton attention kernels ----
-    # Plan-4 P25: when ``use_v4_triton_attention=True`` the dense
-    # (``compress_ratio == 0``) and HCA (``compress_ratio == 128``)
-    # paths route through the Primus-owned Triton FlashAttention kernel
-    # in ``v4_attention_kernels/v4_attention.py`` instead of the
-    # eager-Python softmax. Precedence is
-    # ``use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager``.
-    # Plan-4 P26: ``use_v4_triton_csa_attention=True`` enables the CSA
-    # (``compress_ratio == 4``) Triton kernel; precedence is
-    # ``use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager``.
-    use_v4_triton_attention: bool = False
-    use_v4_triton_csa_attention: bool = False
+    # ---- DeepSeek-V4 attention backend selection (unified string selectors) ----
+    # ``use_v4_attention_backend`` selects the dense (cr=0) / HCA (cr=128) kernel;
+    # ``use_v4_csa_attention_backend`` selects the CSA (cr=4) kernel:
+    #   dense/HCA: eager | triton_v1 | triton_v2 | gluon
+    #   CSA:       eager | triton_v0 | triton_v1 | triton_v2 | gluon | flydsl_v0
+    # (triton_v0 = deprecated gathered; flydsl_v0 = deprecated legacy FlyDSL,
+    #  fwd-only). ``use_turbo_attention`` (when a ``core_attention`` module is
+    # built) still takes precedence for the dense path.
+    use_v4_attention_backend: str = "triton_v1"
+    use_v4_csa_attention_backend: str = "triton_v1"
 
     # ---- Per-module precision (paper recipe): routed experts in MXFP4 while the
     # rest of the layer runs FP8. Decoupled from the global --fp4/--fp8 recipe
     # (which are mutually exclusive): with FP8 on, the PrimusTurbo grouped MLP
     # routes the expert GEMMs through the native FP4 (hipBLASLt) path. Default OFF.
     moe_experts_fp4: bool = False
-
-    # ---- DeepSeek-V4 plan-8 tilelang attention kernels (default OFF) ----
-    # Plan-8 P57 close-out 2 (2026-05-15): tilelang is an OPTIONAL
-    # dependency.  When the container has tilelang installed at the
-    # plan-8-pinned version and a caller sets
-    # ``use_v4_tilelang_attention=True`` (or
-    # ``use_v4_tilelang_csa_attention=True`` for the CSA family), the
-    # ``v4_attention`` / ``v4_csa_attention`` dispatcher routes through
-    # the tilelang FWD/BWD instead of the plan-4 / plan-5 Triton path.
-    # When tilelang is NOT installed the dispatcher prints a one-time
-    # rank-0 warning and falls back to Triton -- training continues
-    # without error.  Defaults False so the default container (which
-    # does not include tilelang) works out of the box.
-    #
-    # Replaces the legacy ``PRIMUS_V4_TILELANG_ATTN`` env knob; the env
-    # var is no longer consulted.  See
-    # ``primus/backends/megatron/core/transformer/v4_attention_kernels/_tilelang/__init__.py``
-    # for the dispatcher; the precedence is:
-    #   cr ∈ {0, 128}:
-    #     use_turbo_attention > use_v4_tilelang_attention
-    #                         > use_v4_triton_attention > eager
-    #   cr == 4:
-    #     use_v4_tilelang_csa_attention
-    #                         > use_v4_triton_csa_attention > eager
-    use_v4_tilelang_attention: bool = False
-    use_v4_tilelang_csa_attention: bool = False
-    # FlyDSL backend (gfx950/MI355X). Forward-only, soft-dependency; falls back
-    # to Triton when the FlyDSL runtime is absent.
-    use_v4_flydsl_attention: bool = False
-    use_v4_flydsl_csa_attention: bool = False
-    # Gluon (hardware-controlled Triton) sparse-MLA backend, ported from
-    # ROCm/aiter PR #2922 (gfx950 / MI355X). fwd + bwd. The V4 latent (512,
-    # rope baked in-place) is fed as the gluon "lora" with a zero rope pad
-    # (the kernel requires D_ROPE > 0); the kv buffer is [local ++ pool] and
-    # topk = [SWA window ++ pool top-k]. ``_csa`` flag routes the CSA layers
-    # (cr=4); ``use_v4_gluon_attention`` reserved for the cr=0/128 layers.
-    use_v4_gluon_attention: bool = False
-    use_v4_gluon_csa_attention: bool = False
-
-    # Triton-v2 sparse-MLA backend: same fused single-latent (K==V) path as
-    # gluon, written in plain Triton (tl.dot -> MFMA). ``_csa`` routes the CSA
-    # layers (cr=4); ``use_v4_triton_v2_attention`` the cr=0/128 layers.
-    use_v4_triton_v2_attention: bool = False
-    use_v4_triton_v2_csa_attention: bool = False
 
     # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
     # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-

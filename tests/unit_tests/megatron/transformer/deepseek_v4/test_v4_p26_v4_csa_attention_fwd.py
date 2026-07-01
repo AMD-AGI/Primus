@@ -4,9 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Plan-4 P26 G26 — `v4_csa_attention` Triton FWD equivalence to eager.
+"""Plan-4 P26 G26 — `v4_csa_attention_v0` Triton FWD equivalence to eager.
 
-Asserts that :func:`v4_csa_attention` (Triton kernel from
+Asserts that :func:`v4_csa_attention_v0` (Triton kernel from
 ``primus...transformer.v4_attention_kernels.v4_csa_attention``)
 produces forward output equal to :func:`eager_v4_csa_attention` within
 the plan-4 tolerance budget across:
@@ -18,7 +18,7 @@ the plan-4 tolerance budget across:
 * fp32 and bf16 inputs;
 * ``sink ∈ {None, learned [H]}``;
 * ``K_topk == 0`` short-circuit — the wrapper falls through to the
-  dense :func:`v4_attention` kernel and the result must still match
+  dense :func:`v4_attention_v1` kernel and the result must still match
   the eager reference's degenerate (``gathered.shape[2] == 0``) limit.
 
 The test is GPU-only (Triton requires CUDA / HIP); CPU runs are
@@ -34,13 +34,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
-    pytest.skip("v4_csa_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+    pytest.skip("v4_csa_attention_v0 Triton kernel requires CUDA / HIP", allow_module_level=True)
 
 pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_csa_attention,
-    v4_csa_attention,
+    v4_csa_attention_v0,
 )
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ def test_g26_csa_fwd_matches_eager(
         scale=scale,
     )
 
-    out_cand = v4_csa_attention(
+    out_cand = v4_csa_attention_v0(
         toy["q"],
         toy["k_local"],
         toy["v_local"],
@@ -253,7 +253,7 @@ def test_g26_csa_fwd_matches_eager(
 @pytest.mark.parametrize("dtype", _DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
 @pytest.mark.parametrize("sink_on", _SINK_MODES, ids=["sink_on", "sink_off"])
 def test_g26_csa_fwd_short_circuits_when_k_topk_zero(dtype: torch.dtype, sink_on: bool):
-    """``v4_csa_attention(..., gathered.shape[2] == 0, ...)`` falls through to dense."""
+    """``v4_csa_attention_v0(..., gathered.shape[2] == 0, ...)`` falls through to dense."""
     B, H, S, D = 1, 4, 32, 64
     swa_window = 16
 
@@ -285,8 +285,8 @@ def test_g26_csa_fwd_short_circuits_when_k_topk_zero(dtype: torch.dtype, sink_on
         scale=scale,
     )
 
-    # Candidate: wrapper short-circuits to dense v4_attention.
-    out_cand = v4_csa_attention(
+    # Candidate: wrapper short-circuits to dense v4_attention_v1.
+    out_cand = v4_csa_attention_v0(
         q,
         k_local,
         v_local,
@@ -309,7 +309,7 @@ def test_g26_csa_fwd_short_circuits_when_k_topk_zero(dtype: torch.dtype, sink_on
 
 
 def test_g26_csa_dropout_with_training_is_rejected():
-    """``v4_csa_attention`` raises NotImplementedError on dropout + training=True.
+    """``v4_csa_attention_v0`` raises NotImplementedError on dropout + training=True.
 
     V4 trains with attn_dropout=0; the kernel does not implement
     in-kernel attention dropout. We refuse explicitly so a stray
@@ -329,7 +329,7 @@ def test_g26_csa_dropout_with_training_is_rejected():
     sparse_mask = torch.zeros(B, S, K_topk, device=device, dtype=dtype)
 
     with pytest.raises(NotImplementedError, match="does not implement in-kernel"):
-        v4_csa_attention(
+        v4_csa_attention_v0(
             q,
             k_local,
             v_local,

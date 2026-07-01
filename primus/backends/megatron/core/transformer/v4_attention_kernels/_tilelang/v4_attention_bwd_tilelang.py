@@ -41,12 +41,12 @@ decorator evaluates annotations eagerly via
 
 from typing import Optional, Tuple
 
-import torch
-
 import tilelang
 import tilelang.language as T
+import torch
+
 from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_bwd import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v1.v4_attention_bwd import (
     _launch_v4_attention_bwd,
 )
 

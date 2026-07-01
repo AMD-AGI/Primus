@@ -92,22 +92,22 @@ def fake_quantize_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
     return x_fp8.to(orig_dtype) / scale
 
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (
     indexer_score_triton,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (
     is_triton_kernel_supported as _indexer_triton_full_supported,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (
     is_triton_path_enabled as _indexer_triton_full_enabled,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     indexer_score_post_triton,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     is_triton_kernel_supported as _indexer_tail_triton_supported,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     is_triton_path_enabled as _indexer_tail_triton_enabled,
 )
 

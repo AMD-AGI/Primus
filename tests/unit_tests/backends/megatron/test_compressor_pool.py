@@ -15,7 +15,7 @@ import torch
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="fused compressor pool is CUDA/Triton only")
 
 try:
-    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.compressor_pool import (
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.compressor_pool import (
         fused_softmax_weighted_pool,
     )
 

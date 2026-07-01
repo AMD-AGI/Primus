@@ -125,7 +125,7 @@ def v4_attention_tilelang(
     scale: Optional[float] = None,
     hca_local_seqlen: int = 0,
 ) -> torch.Tensor:
-    """Convenience wrapper matching the existing `v4_attention()`
+    """Convenience wrapper matching the existing `v4_attention_v1()`
     functional API but routing through the tilelang autograd
     Function."""
     if scale is None:

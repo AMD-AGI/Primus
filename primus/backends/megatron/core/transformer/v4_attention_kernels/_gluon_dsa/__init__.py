@@ -18,7 +18,7 @@ latent** representation used by the DeepSeek V4 paper / FlashMLA:
 * ``attn_sink`` : ``[H]`` fp32 optional per-head learnable softmax sink
 
 This is a different (latent + per-token-topk) representation than the in-tree
-CSA path (``v4_csa_attention``: ``q / k_local / v_local / gathered /
+CSA path (``v4_csa_attention_v0``: ``q / k_local / v_local / gathered /
 sparse_mask``); it is exposed here as a standalone ``gluon`` backend.
 
 Public API mirrors aiter's ``sparse_mla_fwd_v4`` / ``sparse_mla_bwd_v4`` with

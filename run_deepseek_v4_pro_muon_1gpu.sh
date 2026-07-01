@@ -207,15 +207,13 @@ export PRIMUS_MOE_ENABLE_EXPERT_BIAS=${PRIMUS_MOE_ENABLE_EXPERT_BIAS:-False}
 # Muon needs fp32 optimizer states (precision-aware off forces this anyway).
 OPT_DTYPE_ARGS="--main_grads_dtype fp32 --exp_avg_dtype fp32 --exp_avg_sq_dtype fp32"
 
-# ---------- Perf knobs: V4 Triton attention ON; turbo paths OFF ------------
-# V4 Triton attention backend (replaces the unfused/eager path). Covers the
-# dense + HCA layers (compress_ratio in {0, 128}) via USE_V4_TRITON_ATTENTION
-# and the CSA layers (compress_ratio == 4) via USE_V4_TRITON_CSA_ATTENTION.
+# ---------- Perf knobs: V4 attention backends ON; turbo paths OFF ----------
+# V4 attention backend (replaces the unfused/eager path). Covers the dense +
+# HCA layers (compress_ratio in {0, 128}) via USE_V4_ATTENTION_BACKEND and the
+# CSA layers (compress_ratio == 4) via USE_V4_CSA_ATTENTION_BACKEND.
 # Validated on gfx1250 after the WMMA tile-floor fix (06ae5214).
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
-export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
-export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
@@ -378,10 +376,8 @@ PROXY_OVERRIDES="\
     --use_turbo_deepep $USE_TURBO_DEEPEP \
     --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
     --use_turbo_parallel_linear $USE_TURBO_PARALLEL_LINEAR \
-    --use_v4_triton_attention $USE_V4_TRITON_ATTENTION \
-    --use_v4_triton_csa_attention $USE_V4_TRITON_CSA_ATTENTION \
-    --use_v4_tilelang_attention $USE_V4_TILELANG_ATTENTION \
-    --use_v4_tilelang_csa_attention $USE_V4_TILELANG_CSA_ATTENTION \
+    --use_v4_attention_backend $USE_V4_ATTENTION_BACKEND \
+    --use_v4_csa_attention_backend $USE_V4_CSA_ATTENTION_BACKEND \
     --use_v4_compiled_sinkhorn $USE_V4_COMPILED_SINKHORN \
     --moe_use_legacy_grouped_gemm False \
     --moe_permute_fusion $MOE_PERMUTE_FUSION \

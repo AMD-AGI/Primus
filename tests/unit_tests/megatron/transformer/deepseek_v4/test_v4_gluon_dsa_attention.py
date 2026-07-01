@@ -13,7 +13,7 @@ against the eager V4 references for all three layer kinds:
 
 * ``compress_ratio == 0``   (dense / SWA)  -> :func:`v4_attention_gluon`
 * ``compress_ratio == 128`` (HCA)          -> :func:`v4_attention_gluon`
-* ``compress_ratio == 4``   (CSA)          -> :func:`v4_csa_attention_gluon_from_pool`
+* ``compress_ratio == 4``   (CSA)          -> :func:`v4_csa_attention_gluon`
 
 The V4 layout has ``head_dim = 512`` with RoPE applied *in-place* (K = V = 512,
 score over 512); the adapter feeds the 512 latent as the gluon "lora" with a
@@ -51,17 +51,17 @@ if "gfx950" not in _ARCH:
 from primus.backends.megatron.core.transformer.sliding_window_kv import (  # noqa: E402
     sliding_window_causal_mask,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels.reference import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._eager.reference import (  # noqa: E402
     eager_v4_attention,
     eager_v4_csa_attention,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_gluon import (  # noqa: E402
     v4_attention_gluon,
-    v4_csa_attention_gluon_from_pool,
+    v4_csa_attention_gluon,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_triton import (  # noqa: E402
-    v4_attention_triton_v2,
-    v4_csa_attention_triton_v2_from_pool,
+    v4_attention_v2,
+    v4_csa_attention_v2,
 )
 
 D = 512  # V4 head_dim (RoPE baked in-place)
@@ -70,8 +70,8 @@ _SWA = 128
 # Fused single-latent (K == V) sparse-MLA backends sharing the V4-form adapter:
 # (dense/HCA attention wrapper, CSA-from-pool wrapper).
 _BACKENDS = {
-    "gluon": (v4_attention_gluon, v4_csa_attention_gluon_from_pool),
-    "triton_v2": (v4_attention_triton_v2, v4_csa_attention_triton_v2_from_pool),
+    "gluon": (v4_attention_gluon, v4_csa_attention_gluon),
+    "triton_v2": (v4_attention_v2, v4_csa_attention_v2),
 }
 
 
@@ -121,7 +121,7 @@ _CASES = [
 @pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
 def test_v4_dense_matches_eager(B, H, S, sink_init, backend):
-    """cr=0 dense/SWA: sparse-MLA v4_attention fwd+bwd vs eager_v4_attention."""
+    """cr=0 dense/SWA: sparse-MLA v4_attention_v1 fwd+bwd vs eager_v4_attention."""
     attn_fn = _BACKENDS[backend][0]
     g = torch.Generator(device="cuda").manual_seed(0)
     scale = 1.0 / math.sqrt(D)
@@ -166,7 +166,7 @@ def test_v4_dense_matches_eager(B, H, S, sink_init, backend):
 @pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
 def test_v4_hca_matches_eager(B, H, S, sink_init, backend):
-    """cr=128 HCA: sparse-MLA v4_attention (local++pool) fwd+bwd vs eager_v4_attention."""
+    """cr=128 HCA: sparse-MLA v4_attention_v1 (local++pool) fwd+bwd vs eager_v4_attention."""
     attn_fn = _BACKENDS[backend][0]
     cr = 128
     P = max(S // cr, 1)
@@ -233,7 +233,7 @@ def test_v4_hca_matches_eager(B, H, S, sink_init, backend):
 @pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
 def test_v4_csa_matches_eager(B, H, S, sink_init, backend):
-    """cr=4 CSA: sparse-MLA v4_csa_attention_from_pool fwd+bwd vs eager_v4_csa_attention."""
+    """cr=4 CSA: sparse-MLA v4_csa_attention_v1 fwd+bwd vs eager_v4_csa_attention."""
     csa_fn = _BACKENDS[backend][1]
     P = max(S // 4, 1)
     K = min(128, P)

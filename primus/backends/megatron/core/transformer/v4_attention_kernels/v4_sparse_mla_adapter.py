@@ -226,7 +226,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
 
 
 def make_csa_from_pool(fwd_fn: Callable, bwd_fn: Callable) -> Callable:
-    """Build a ``v4_csa_attention_from_pool``-style wrapper for a kernel pair."""
+    """Build a ``v4_csa_attention_v1``-style wrapper for a kernel pair."""
 
     def _csa_from_pool(
         q_bh,

@@ -4,9 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Plan-4 P25 G23 — `v4_attention` Triton FWD equivalence to eager.
+"""Plan-4 P25 G23 — `v4_attention_v1` Triton FWD equivalence to eager.
 
-Asserts that :func:`v4_attention` (Triton kernel from
+Asserts that :func:`v4_attention_v1` (Triton kernel from
 ``primus...transformer.v4_attention_kernels.v4_attention``) produces
 forward output equal to :func:`eager_v4_attention` within the plan-4
 tolerance budget across:
@@ -31,7 +31,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
-    pytest.skip("v4_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+    pytest.skip("v4_attention_v1 Triton kernel requires CUDA / HIP", allow_module_level=True)
 
 # Triton import (must be importable in the env).
 pytest.importorskip("triton", reason="Triton not installed")
@@ -41,7 +41,7 @@ from primus.backends.megatron.core.transformer.sliding_window_kv import (  # noq
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_attention,
-    v4_attention,
+    v4_attention_v1,
 )
 
 # ---------------------------------------------------------------------------
@@ -246,8 +246,8 @@ def test_g23_dense_fwd_matches_eager(
         scale=scale,
     )
 
-    # Candidate: v4_attention with swa_window > 0, additive_mask=None
-    out_cand = v4_attention(
+    # Candidate: v4_attention_v1 with swa_window > 0, additive_mask=None
+    out_cand = v4_attention_v1(
         toy["q"],
         toy["k"],
         toy["v"],
@@ -316,7 +316,7 @@ def test_g23_hca_style_fwd_matches_eager(
         scale=scale,
     )
 
-    out_cand = v4_attention(
+    out_cand = v4_attention_v1(
         toy["q"],
         toy["k"],
         toy["v"],
@@ -357,7 +357,7 @@ def test_g25_determinism_fp32_mha():
     )
     scale = 1.0 / math.sqrt(toy["D"])
 
-    out_a = v4_attention(
+    out_a = v4_attention_v1(
         toy["q"],
         toy["k"],
         toy["v"],
@@ -368,7 +368,7 @@ def test_g25_determinism_fp32_mha():
         training=False,
         scale=scale,
     )
-    out_b = v4_attention(
+    out_b = v4_attention_v1(
         toy["q"],
         toy["k"],
         toy["v"],
@@ -379,7 +379,7 @@ def test_g25_determinism_fp32_mha():
         training=False,
         scale=scale,
     )
-    assert torch.equal(out_a, out_b), "v4_attention FWD is non-deterministic at fp32 / MHA"
+    assert torch.equal(out_a, out_b), "v4_attention_v1 FWD is non-deterministic at fp32 / MHA"
 
 
 def test_g25_dropout_with_training_is_rejected():
@@ -396,7 +396,7 @@ def test_g25_dropout_with_training_is_rejected():
     )
     scale = 1.0 / math.sqrt(toy["D"])
     with pytest.raises(NotImplementedError, match="dropout"):
-        v4_attention(
+        v4_attention_v1(
             toy["q"],
             toy["k"],
             toy["v"],

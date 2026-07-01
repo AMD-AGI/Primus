@@ -55,25 +55,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_expand import (
     hc_expand_triton,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_expand import (
     is_triton_kernel_supported as _hc_expand_supported,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_expand import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_expand import (
     is_triton_path_enabled as _hc_expand_enabled,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     hc_glue_compute_tail_triton,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     is_triton_kernel_supported as _hc_glue_supported,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     is_triton_path_enabled as _hc_glue_enabled,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn import (
     SinkhornNormalizeFn,
     is_triton_kernel_supported,
     is_triton_path_enabled,
@@ -203,7 +203,7 @@ def sinkhorn_normalize(
         use_triton: plan-6 P36 hand-rolled Triton FWD/BWD path.  When
             ``True`` (or when the ``PRIMUS_SINKHORN_TRITON`` env knob is
             not ``"0"`` and the input is supported), dispatch to
-            :class:`primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn.SinkhornNormalizeFn`.
+            :class:`primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn.SinkhornNormalizeFn`.
             The Triton path runs the full 1 + 2*(n_iters - 1) normalize
             trajectory in registers per row of the leading axis and emits
             exactly **one** FWD kernel + **one** BWD kernel -- no Dynamo

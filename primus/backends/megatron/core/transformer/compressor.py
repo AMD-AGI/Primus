@@ -181,7 +181,7 @@ class Compressor(nn.Module):
                 torch.float32,
             )
         ):
-            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.compressor_pool import (
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.compressor_pool import (
                 fused_softmax_weighted_pool,
             )
 

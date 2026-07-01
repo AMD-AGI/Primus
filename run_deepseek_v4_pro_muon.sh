@@ -201,10 +201,8 @@ export V4_FP8_ATTN_PROJ=${V4_FP8_ATTN_PROJ:-False}
 if [ "$V4_FP8_ATTN_PROJ" = "True" ]; then
   export PRIMUS_V4_FP8_ATTN_PROJ=1
 fi
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
-export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
-export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
 export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
 
@@ -336,10 +334,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --exp_avg_sq_dtype fp32 \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
-  --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
-  --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
-  --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
-  --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
+  --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
+  --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   --turbo_sync_free_moe_stage "$TURBO_SYNC_FREE_MOE_STAGE" \

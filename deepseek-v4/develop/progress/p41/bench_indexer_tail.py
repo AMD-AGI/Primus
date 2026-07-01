@@ -43,10 +43,10 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (  # noqa: E402
     IndexerScoreFn,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (  # noqa: E402
     IndexerScorePostFn,
 )
 

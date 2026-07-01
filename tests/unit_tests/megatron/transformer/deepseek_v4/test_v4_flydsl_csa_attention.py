@@ -55,18 +55,18 @@ pytest.importorskip("triton", reason="Triton baseline not installed")
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_csa_attention,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_csa_attention_bwd import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v0_deprecated.v4_csa_attention_bwd import (  # noqa: E402
     _launch_v4_csa_attention_bwd,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_csa_attention_fwd import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v0_deprecated.v4_csa_attention_fwd import (  # noqa: E402
     _launch_v4_csa_attention_fwd,
 )
 
 try:
-    from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl.kernels.v4_attention_fwd_flydsl_csa import (  # noqa: E402
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl_v0_deprecated.kernels.v4_attention_fwd_flydsl_csa import (  # noqa: E402
         _launch_v4_attention_fwd_csa,
     )
-    from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl.kernels.v4_csa_attention_bwd_flydsl_mqa import (  # noqa: E402
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl_v0_deprecated.kernels.v4_csa_attention_bwd_flydsl_mqa import (  # noqa: E402
         flydsl_v4_csa_attention_bwd,
     )
 except Exception as exc:  # pragma: no cover - environment-dependent

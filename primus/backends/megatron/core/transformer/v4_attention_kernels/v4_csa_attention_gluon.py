@@ -24,10 +24,10 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_ml
     make_csa_from_pool,
 )
 
-v4_csa_attention_gluon_from_pool = make_csa_from_pool(sparse_mla_fwd_v4_gluon, sparse_mla_bwd_v4_gluon)
+v4_csa_attention_gluon = make_csa_from_pool(sparse_mla_fwd_v4_gluon, sparse_mla_bwd_v4_gluon)
 v4_attention_gluon = make_attention(sparse_mla_fwd_v4_gluon, sparse_mla_bwd_v4_gluon)
 
 __all__ = [
-    "v4_csa_attention_gluon_from_pool",
+    "v4_csa_attention_gluon",
     "v4_attention_gluon",
 ]

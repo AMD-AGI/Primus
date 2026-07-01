@@ -146,37 +146,18 @@ if [ "$OPTIMIZER" = "muon" ] || [ "$OPTIMIZER" = "dist_muon" ]; then
   )
 fi
 
-# Plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
-# Precedence in DeepseekV4Attention.forward:
-#   use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
-#   use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager                 (cr == 4)
-# These are V4-only; they have no effect on other model types.
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
-
-# Gluon sparse-MLA backend (gfx950). CSA (cr==4) takes precedence over the
-# Triton CSA path in DeepseekV4Attention._csa_forward when enabled. Default OFF.
-export USE_V4_GLUON_ATTENTION=${USE_V4_GLUON_ATTENTION:-False}
-export USE_V4_GLUON_CSA_ATTENTION=${USE_V4_GLUON_CSA_ATTENTION:-False}
-export USE_V4_TRITON_V2_ATTENTION=${USE_V4_TRITON_V2_ATTENTION:-False}
-export USE_V4_TRITON_V2_CSA_ATTENTION=${USE_V4_TRITON_V2_CSA_ATTENTION:-False}
+# DeepSeek-V4 attention backend selection (unified string selectors). Default
+# triton_v1 (production). These are V4-only; no effect on other model types.
+#   USE_V4_ATTENTION_BACKEND     (dense cr=0 / HCA cr=128): eager|triton_v1|triton_v2|gluon
+#   USE_V4_CSA_ATTENTION_BACKEND (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
+# use_turbo_attention (when core_attention is built) still wins for the dense path.
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
 
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
 # in-container config regardless of env propagation.
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
-
-# Plan-8 tilelang attention kernels (OPTIONAL — default OFF).
-# Tilelang is NOT bundled in the default Primus container, so we leave
-# both flags off here.  When the container has tilelang installed at
-# the plan-8 pin AND the P50..P55 kernels are registered, set these
-# to True (e.g. in a sweep / experiment script) to route the dense /
-# HCA / CSA paths through tilelang.  Otherwise the dispatcher prints
-# a single rank-0 warning and falls back to the Triton path -- training
-# continues without error.  Replaces the legacy PRIMUS_V4_TILELANG_ATTN
-# env knob (no longer consulted).
-export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
-export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
 # cached torch.compile build. Default OFF here; the proxy script
@@ -192,7 +173,7 @@ export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
 # user enables the kernels at TP>1 so any TP-related regression is
 # easy to attribute.  TP=1 is the V4-Flash / V4-Pro release default
 # (release configs use PP+EP for parallelism, never TP).
-if { [ "$USE_V4_TRITON_ATTENTION" = "True" ] || [ "$USE_V4_TRITON_CSA_ATTENTION" = "True" ]; } && [ "${PRIMUS_TP:-1}" -gt 1 ]; then
+if echo "$USE_V4_ATTENTION_BACKEND $USE_V4_CSA_ATTENTION_BACKEND" | grep -q "triton" && [ "${PRIMUS_TP:-1}" -gt 1 ]; then
   echo "[WARN] Plan-4 V4 Triton kernels enabled at PRIMUS_TP=${PRIMUS_TP}>1; this combination is not covered by Plan-4 unit tests / smoke gates (G28..G30 ran TP=1 only). Functionally the kernels operate per-rank on the local H/TP head slice, so this should work, but treat any TP>1 regression as a Plan-4 follow-up."
 fi
 
@@ -292,15 +273,9 @@ fi
   --mock_data True \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
-  --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
-  --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
-  --use_v4_gluon_attention "$USE_V4_GLUON_ATTENTION" \
-  --use_v4_gluon_csa_attention "$USE_V4_GLUON_CSA_ATTENTION" \
-  --use_v4_triton_v2_attention "$USE_V4_TRITON_V2_ATTENTION" \
-  --use_v4_triton_v2_csa_attention "$USE_V4_TRITON_V2_CSA_ATTENTION" \
+  --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
+  --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
-  --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
-  --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \

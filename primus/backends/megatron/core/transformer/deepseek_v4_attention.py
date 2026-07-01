@@ -81,19 +81,20 @@ from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
+
+# All attention backend entries come from the kernels package __init__ (the
+# single entry point): eager, triton v1/v2, gluon. Naming: v4_attention_<be>
+# (dense/HCA) and v4_csa_attention_<be> (CSA).
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     eager_v4_attention,
     eager_v4_csa_attention,
-    v4_attention,
-    v4_csa_attention_from_pool,
-)
-from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_gluon import (
     v4_attention_gluon,
-    v4_csa_attention_gluon_from_pool,
-)
-from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_triton import (
-    v4_attention_triton_v2,
-    v4_csa_attention_triton_v2_from_pool,
+    v4_attention_v1,
+    v4_attention_v2,
+    v4_csa_attention_gluon,
+    v4_csa_attention_v0,
+    v4_csa_attention_v1,
+    v4_csa_attention_v2,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -102,7 +103,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# P32 diagnostic: collect in-context cuda.Event timings of v4_attention
+# P32 diagnostic: collect in-context cuda.Event timings of v4_attention_v1
 # ---------------------------------------------------------------------------
 
 
@@ -131,7 +132,7 @@ class _DeepseekV4AttentionDiag:
             local_rank = 0
         if local_rank != 0:
             return
-        print("[PRIMUS_V4_DIAG_TIME] v4_attention inline cuda.Event timings:", flush=True)
+        print("[PRIMUS_V4_DIAG_TIME] v4_attention_v1 inline cuda.Event timings:", flush=True)
         for mode, vs in cls._per_mode.items():
             if not vs:
                 continue
@@ -406,11 +407,11 @@ class DeepseekV4Attention(MLASelfAttention):
 
         compress_ratio == 0  (dense / SWA, single key axis):
             use_turbo_attention      > use_v4_triton_attention > eager
-            (-> self.core_attention)   (-> v4_attention)         (-> _attention_forward)
+            (-> self.core_attention)   (-> v4_attention_v1)         (-> _attention_forward)
 
         compress_ratio == 128  (HCA: local SWA + full compressed pool):
             use_v4_triton_attention  > eager
-            (-> v4_attention,          (-> _attention_forward
+            (-> v4_attention_v1,          (-> _attention_forward
              HCA path with joint        with cat([local, pool])
              [local | pool] mask)       additive mask)
 
@@ -420,7 +421,7 @@ class DeepseekV4Attention(MLASelfAttention):
 
         compress_ratio == 4  (CSA: local SWA + per-query top-K gather):
             use_v4_triton_csa_attention  > eager
-            (-> v4_csa_attention)          (-> _csa_forward eager)
+            (-> v4_csa_attention_v0)          (-> _csa_forward eager)
 
             Neither ``use_turbo_attention`` nor
             ``use_v4_triton_attention`` applies to CSA — the per-query
@@ -437,7 +438,7 @@ class DeepseekV4Attention(MLASelfAttention):
 
     On rank 0 each ``__init__`` emits one ``INFO`` log line through
     :meth:`_log_kernel_choice` summarising the dispatch outcome for
-    the layer (e.g. ``[V4-attn] Layer 17: cr=128, kernel = v4_attention
+    the layer (e.g. ``[V4-attn] Layer 17: cr=128, kernel = v4_attention_v1
     (Triton, HCA path)``) so smoke / training logs unambiguously show
     which kernel each layer is firing through.
     """
@@ -652,107 +653,27 @@ class DeepseekV4Attention(MLASelfAttention):
         # Read the config flag once at __init__ so ``forward`` only does
         # a cheap attribute load. Precedence in ``forward`` is
         # ``use_turbo_attention > use_v4_triton_attention > eager``.
-        self._use_v4_triton_attention: bool = bool(getattr(config, "use_v4_triton_attention", False))
-        if self._use_v4_triton_attention and self.compress_ratio not in (0, 128):
-            # Plan-4 P26 ships the CSA Triton kernel under
-            # ``use_v4_triton_csa_attention`` — the dense / HCA flag does
-            # NOT enable it. Surface the misconfiguration loud at build
-            # time so a stray run script doesn't silently fall back to
-            # eager for the CSA layers (and skew layer-vs-layer perf).
-            self._use_v4_triton_attention = False
-
-        # Plan-4 P26: in-tree Primus Triton kernel for cr == 4 (CSA).
-        # Symmetric to ``_use_v4_triton_attention`` above: read the flag
-        # once at __init__, and auto-disable for non-CSA layers so a
-        # stray ``use_v4_triton_csa_attention=True`` does not silently
-        # accelerate the CSA layers only and skew apples-to-apples perf
-        # comparisons. Precedence in ``forward`` (cr == 4 branch) is
-        # ``use_v4_triton_csa_attention > eager``.
-        self._use_v4_triton_csa_attention: bool = bool(getattr(config, "use_v4_triton_csa_attention", False))
-        if self._use_v4_triton_csa_attention and self.compress_ratio != 4:
-            self._use_v4_triton_csa_attention = False
-
-        # Plan-8 P57 close-out 2: optional tilelang dispatch flags
-        # (replace the legacy PRIMUS_V4_TILELANG_ATTN env knob).  Each
-        # flag is layer-kind specific:
-        #
-        #   - ``use_v4_tilelang_attention``     -> cr ∈ {0, 128}
-        #     auto-disabled at non-dense/HCA layers symmetric to the
-        #     ``use_v4_triton_attention`` rule.
-        #   - ``use_v4_tilelang_csa_attention`` -> cr == 4
-        #     auto-disabled at non-CSA layers symmetric to the
-        #     ``use_v4_triton_csa_attention`` rule.
-        #
-        # When either flag is set but tilelang is not installed (or the
-        # plan-8 P50..P55 kernels are not registered) the dispatcher
-        # falls back to the Triton path with a one-time rank-0 warning;
-        # no runtime error is raised so the default container (which
-        # does NOT ship tilelang) just runs Triton transparently.
-        #
-        # We use a string-aware boolean coercion because the yaml
-        # default ``${PRIMUS_USE_V4_TILELANG_ATTENTION:false}`` resolves
-        # to the STRING ``"false"`` when the env var is unset, and
-        # ``bool("false") is True``.  Existing flags
-        # (``use_v4_triton_attention`` etc.) do not trip this because
-        # the V4 run scripts always pass them via ``--<flag> "False"``
-        # CLI which the override parser converts to a Python ``False``.
-        self._use_v4_tilelang_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_tilelang_attention", False),
-            field_name="use_v4_tilelang_attention",
+        # ---- attention backend selection (unified string selectors) ----
+        # ``use_v4_attention_backend`` selects the dense (cr=0) / HCA (cr=128)
+        # kernel; ``use_v4_csa_attention_backend`` selects the CSA (cr=4) kernel.
+        # ``use_turbo_attention`` (built as ``core_attention`` below) still takes
+        # precedence for the dense path when it can be built.
+        _ATTN_BACKENDS = ("eager", "triton_v1", "triton_v2", "gluon")
+        _CSA_BACKENDS = ("eager", "triton_v0", "triton_v1", "triton_v2", "gluon", "flydsl_v0")
+        self._attn_backend: str = str(getattr(config, "use_v4_attention_backend", "triton_v1") or "triton_v1")
+        self._csa_backend: str = str(
+            getattr(config, "use_v4_csa_attention_backend", "triton_v1") or "triton_v1"
         )
-        if self._use_v4_tilelang_attention and self.compress_ratio not in (0, 128):
-            self._use_v4_tilelang_attention = False
-        self._use_v4_tilelang_csa_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_tilelang_csa_attention", False),
-            field_name="use_v4_tilelang_csa_attention",
-        )
-        if self._use_v4_tilelang_csa_attention and self.compress_ratio != 4:
-            self._use_v4_tilelang_csa_attention = False
-        # FlyDSL backend flags (forward-only, soft-dep; same compress-ratio
-        # gating as the tilelang flags above).
-        self._use_v4_flydsl_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_flydsl_attention", False),
-            field_name="use_v4_flydsl_attention",
-        )
-        if self._use_v4_flydsl_attention and self.compress_ratio not in (0, 128):
-            self._use_v4_flydsl_attention = False
-        self._use_v4_flydsl_csa_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_flydsl_csa_attention", False),
-            field_name="use_v4_flydsl_csa_attention",
-        )
-        if self._use_v4_flydsl_csa_attention and self.compress_ratio != 4:
-            self._use_v4_flydsl_csa_attention = False
-
-        # Gluon sparse-MLA backend flags (fwd + bwd; gfx950). Same
-        # compress-ratio gating as the tilelang / flydsl flags above.
-        self._use_v4_gluon_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_gluon_attention", False),
-            field_name="use_v4_gluon_attention",
-        )
-        if self._use_v4_gluon_attention and self.compress_ratio not in (0, 128):
-            self._use_v4_gluon_attention = False
-        self._use_v4_gluon_csa_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_gluon_csa_attention", False),
-            field_name="use_v4_gluon_csa_attention",
-        )
-        if self._use_v4_gluon_csa_attention and self.compress_ratio != 4:
-            self._use_v4_gluon_csa_attention = False
-
-        # Triton-v2 sparse-MLA backend flags (fwd + bwd; gfx950). Same fused
-        # single-latent (K==V) representation as gluon, plain Triton (tl.dot ->
-        # MFMA). Same compress-ratio gating as the gluon flags above.
-        self._use_v4_triton_v2_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_triton_v2_attention", False),
-            field_name="use_v4_triton_v2_attention",
-        )
-        if self._use_v4_triton_v2_attention and self.compress_ratio not in (0, 128):
-            self._use_v4_triton_v2_attention = False
-        self._use_v4_triton_v2_csa_attention: bool = _coerce_optional_bool_flag(
-            getattr(config, "use_v4_triton_v2_csa_attention", False),
-            field_name="use_v4_triton_v2_csa_attention",
-        )
-        if self._use_v4_triton_v2_csa_attention and self.compress_ratio != 4:
-            self._use_v4_triton_v2_csa_attention = False
+        if self._attn_backend not in _ATTN_BACKENDS:
+            raise ValueError(
+                f"use_v4_attention_backend={self._attn_backend!r} is not a valid dense/HCA backend; "
+                f"expected one of {_ATTN_BACKENDS}"
+            )
+        if self._csa_backend not in _CSA_BACKENDS:
+            raise ValueError(
+                f"use_v4_csa_attention_backend={self._csa_backend!r} is not a valid CSA backend; "
+                f"expected one of {_CSA_BACKENDS}"
+            )
 
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
@@ -845,29 +766,12 @@ class DeepseekV4Attention(MLASelfAttention):
         if self.compress_ratio == 0:
             if self._use_core_attention:
                 kernel = "core_attention (Turbo / TE flash)"
-            elif self._use_v4_triton_attention:
-                if self._use_v4_tilelang_attention:
-                    kernel = "v4_attention (tilelang->Triton fallback, dense path)"
-                else:
-                    kernel = "v4_attention (Triton, dense path)"
             else:
-                kernel = "v4_attention (eager Python, dense path)"
+                kernel = f"dense attention backend = {self._attn_backend}"
         elif self.compress_ratio == 128:
-            if self._use_v4_triton_attention:
-                if self._use_v4_tilelang_attention:
-                    kernel = "v4_attention (tilelang->Triton fallback, HCA path)"
-                else:
-                    kernel = "v4_attention (Triton, HCA path)"
-            else:
-                kernel = "v4_attention (eager Python, HCA path)"
+            kernel = f"HCA attention backend = {self._attn_backend}"
         elif self.compress_ratio == 4:
-            if self._use_v4_triton_csa_attention:
-                if self._use_v4_tilelang_csa_attention:
-                    kernel = "v4_csa_attention_from_pool (tilelang->Triton fallback)"
-                else:
-                    kernel = "v4_csa_attention_from_pool (Triton)"
-            else:
-                kernel = "v4_csa_attention (eager Python)"
+            kernel = f"CSA attention backend = {self._csa_backend}"
         else:
             # Defensive: __init__ already raises ValueError for unsupported
             # compress_ratio, so this branch should be unreachable.
@@ -1014,7 +918,7 @@ class DeepseekV4Attention(MLASelfAttention):
         for the dense / HCA paths (single key axis).
 
         Plan-4 P24: math lives in
-        :func:`primus...v4_attention_kernels.reference.eager_v4_attention`
+        :func:`primus...v4_attention_kernels._eager.reference.eager_v4_attention`
         so the dense / HCA path, the plan-4 Triton kernel (P25), and the
         plan-4 unit-test harness share one definition. The caller has
         already pre-built the ``[Sq, Sk]`` additive mask (SWA-causal
@@ -1046,7 +950,7 @@ class DeepseekV4Attention(MLASelfAttention):
         hca_local_seqlen: int = 0,
     ) -> torch.Tensor:
         """Run the dense / HCA softmax-and-attend through the plan-4
-        in-tree :func:`v4_attention` Triton kernel.
+        in-tree :func:`v4_attention_v1` Triton kernel.
 
         Numerically equivalent to :meth:`_attention_forward` (same eager
         ``q @ k^T * scale + mask + sink → softmax → @ v`` math) but
@@ -1085,7 +989,7 @@ class DeepseekV4Attention(MLASelfAttention):
             ev_s = torch.cuda.Event(enable_timing=True)
             ev_e = torch.cuda.Event(enable_timing=True)
             ev_s.record()
-            out = v4_attention(
+            out = v4_attention_v1(
                 q,
                 k,
                 v,
@@ -1096,14 +1000,12 @@ class DeepseekV4Attention(MLASelfAttention):
                 training=self.training,
                 scale=self._attention_scale(),
                 hca_local_seqlen=int(hca_local_seqlen),
-                use_tilelang=self._use_v4_tilelang_attention,
-                use_flydsl=self._use_v4_flydsl_attention,
             )
             ev_e.record()
             torch.cuda.synchronize()
             _DeepseekV4AttentionDiag.record(mode=mode, ms=ev_s.elapsed_time(ev_e), swa=swa_window)
             return out
-        return v4_attention(
+        return v4_attention_v1(
             q,
             k,
             v,
@@ -1114,8 +1016,6 @@ class DeepseekV4Attention(MLASelfAttention):
             training=self.training,
             scale=self._attention_scale(),
             hca_local_seqlen=int(hca_local_seqlen),
-            use_tilelang=self._use_v4_tilelang_attention,
-            use_flydsl=self._use_v4_flydsl_attention,
         )
 
     def _attention_forward_via_core(
@@ -1302,7 +1202,7 @@ class DeepseekV4Attention(MLASelfAttention):
         Plan-4 P24: the compressor / indexer / per-query top-K gather
         stay here (they are V4-specific side-paths that the kernel does
         not own); the joint-softmax math is delegated to
-        :func:`primus...v4_attention_kernels.reference.eager_v4_csa_attention`
+        :func:`primus...v4_attention_kernels._eager.reference.eager_v4_csa_attention`
         so the CSA path, the plan-4 CSA Triton kernel (P26), and the
         plan-4 unit-test harness share one definition. ``local_mask`` is
         retained in the signature for back-compat but unused — the
@@ -1326,12 +1226,38 @@ class DeepseekV4Attention(MLASelfAttention):
 
         # 2) Indexer top-K per query.
         topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
-
-        # Gluon sparse-MLA backend (gfx950): consumes pool + topk like the
-        # Triton pool path; adapts to the gluon kernel internally (zero rope
-        # pad + [local ++ pool] buffer). Numerically == eager_v4_csa_attention.
-        if self._use_v4_gluon_csa_attention:
-            return v4_csa_attention_gluon_from_pool(
+        # Dispatch on ``use_v4_csa_attention_backend``. gluon / triton_v2 /
+        # triton_v1 consume (pool, topk) directly; eager / triton_v0 / flydsl_v0
+        # use the per-query gathered [B, S, K, Dh] representation.
+        be = self._csa_backend
+        if be == "gluon":
+            return v4_csa_attention_gluon(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
+        if be == "triton_v2":
+            return v4_csa_attention_v2(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
+        if be == "triton_v1":
+            return v4_csa_attention_v1(
                 q_bh,
                 k_local_bh,
                 v_local_bh,
@@ -1344,43 +1270,7 @@ class DeepseekV4Attention(MLASelfAttention):
                 scale=self._attention_scale(),
             )
 
-        # Triton-v2 sparse-MLA backend (gfx950): same fused single-latent path
-        # as gluon, plain Triton (tl.dot -> MFMA). Numerically == eager.
-        if self._use_v4_triton_v2_csa_attention:
-            return v4_csa_attention_triton_v2_from_pool(
-                q_bh,
-                k_local_bh,
-                v_local_bh,
-                pool,
-                topk_idxs=topk_idxs,
-                sink=self.attn_sink,
-                swa_window=int(self.attn_sliding_window),
-                attn_dropout=self.attn_dropout,
-                training=self.training,
-                scale=self._attention_scale(),
-            )
-
-        # Plan-5 P31 dispatch: Triton path consumes pool + topk directly
-        # and avoids materialising [B, S, K, Dh] gathered tensors.
-        if self._use_v4_triton_csa_attention:
-            return v4_csa_attention_from_pool(
-                q_bh,
-                k_local_bh,
-                v_local_bh,
-                pool,
-                topk_idxs=topk_idxs,
-                sink=self.attn_sink,
-                swa_window=int(self.attn_sliding_window),
-                attn_dropout=self.attn_dropout,
-                training=self.training,
-                scale=self._attention_scale(),
-                use_tilelang=self._use_v4_tilelang_csa_attention,
-                use_flydsl=self._use_v4_flydsl_csa_attention,
-            )
-
-        # 3) Eager fallback gathers per-query pool slices: [B, S, K, Dh].
-        # ``gathered`` is broadcast across heads in the reference op (no
-        # H dim), matching V4's single-latent pool shared by all heads.
+        # eager / triton_v0 / flydsl_v0: build the per-query gathered slices.
         K = topk_idxs.shape[-1]
         valid = topk_idxs >= 0  # [B, S, K]
         safe_idx = topk_idxs.clamp(min=0)
@@ -1390,6 +1280,20 @@ class DeepseekV4Attention(MLASelfAttention):
         gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
         sparse_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)  # [B, S, K]
 
+        if be in ("triton_v0", "flydsl_v0"):
+            return v4_csa_attention_v0(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                gathered,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                sparse_mask=sparse_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+                use_flydsl=(be == "flydsl_v0"),
+            )
         return eager_v4_csa_attention(
             q_bh,
             k_local_bh,
@@ -1406,6 +1310,49 @@ class DeepseekV4Attention(MLASelfAttention):
     # ------------------------------------------------------------------
     # public forward
     # ------------------------------------------------------------------
+
+    def _attention_backend_forward(self, q_bh, k, v, *, additive_mask, hca_local_seqlen, S, device, dtype):
+        """Dense (cr=0) / HCA (cr=128) dispatch on ``use_v4_attention_backend``."""
+        be = self._attn_backend
+        if be == "gluon":
+            return v4_attention_gluon(
+                q_bh,
+                k,
+                v,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                additive_mask=additive_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+                hca_local_seqlen=hca_local_seqlen,
+            )
+        if be == "triton_v2":
+            return v4_attention_v2(
+                q_bh,
+                k,
+                v,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                additive_mask=additive_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+                hca_local_seqlen=hca_local_seqlen,
+            )
+        if be == "triton_v1":
+            return self._attention_forward_via_v4_triton(
+                q_bh,
+                k,
+                v,
+                additive_mask,
+                swa_window=int(self.attn_sliding_window),
+                hca_local_seqlen=hca_local_seqlen,
+            )
+        # eager
+        local_mask = self._local_mask(S, device=device, dtype=dtype)
+        mask = local_mask if additive_mask is None else torch.cat([local_mask, additive_mask], dim=-1)
+        return self._attention_forward(q_bh, k, v, mask)
 
     def forward(
         self,
@@ -1452,103 +1399,33 @@ class DeepseekV4Attention(MLASelfAttention):
         v_local_bh = v_h.transpose(1, 2)
 
         if self.compress_ratio == 0:
-            # Plan-4 P25: ``use_v4_triton_attention`` routes the dense
-            # softmax-and-attend through the in-tree Triton kernel.
-            # Precedence ``use_turbo_attention > use_v4_triton_attention
-            # > eager`` is enforced by the earlier ``_use_core_attention``
-            # branch returning before this block.
-            if self._use_v4_gluon_attention:
-                out_bh = v4_attention_gluon(
-                    q_bh,
-                    k_local_bh,
-                    v_local_bh,
-                    sink=self.attn_sink,
-                    swa_window=int(self.attn_sliding_window),
-                    additive_mask=None,
-                    attn_dropout=self.attn_dropout,
-                    training=self.training,
-                    scale=self._attention_scale(),
-                    hca_local_seqlen=0,
-                )
-            elif self._use_v4_triton_v2_attention:
-                out_bh = v4_attention_triton_v2(
-                    q_bh,
-                    k_local_bh,
-                    v_local_bh,
-                    sink=self.attn_sink,
-                    swa_window=int(self.attn_sliding_window),
-                    additive_mask=None,
-                    attn_dropout=self.attn_dropout,
-                    training=self.training,
-                    scale=self._attention_scale(),
-                    hca_local_seqlen=0,
-                )
-            elif self._use_v4_triton_attention:
-                out_bh = self._attention_forward_via_v4_triton(
-                    q_bh,
-                    k_local_bh,
-                    v_local_bh,
-                    None,
-                    swa_window=int(self.attn_sliding_window),
-                )
-            else:
-                # Eager-Python dense path (used when ``core_attention`` is not
-                # built or the V4 sink + Turbo sink-attention contract isn't
-                # met; e.g. CPU unit tests or TE-without-sink configs).
-                local_mask = self._local_mask(S, device=device, dtype=dtype)
-                out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
+            out_bh = self._attention_backend_forward(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                additive_mask=None,
+                hca_local_seqlen=0,
+                S=S,
+                device=device,
+                dtype=dtype,
+            )
         elif self.compress_ratio == 128:
-            # HCA cannot use ``core_attention``: the local SWA branch and
-            # the compressed-pool branch share **one** softmax with **one**
-            # sink column. Stock flash-attn returns no LSE, so we can't
-            # decompose into two flash calls and recombine. Plan-4 P25's
-            # in-tree Triton kernel is HCA-aware (it consumes the joint
-            # ``cat([local_mask, pool_mask])`` additive bias and runs a
-            # single online-softmax pass), so HCA opts into
-            # ``use_v4_triton_attention`` too — exactly the same kernel
-            # call as the dense path.
+            # HCA: the local SWA branch and the compressed-pool branch share ONE
+            # softmax with ONE sink column; concatenate the pool to the local
+            # keys and pass the pool-only additive mask.
             extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
             k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
-            if self._use_v4_gluon_attention:
-                out_bh = v4_attention_gluon(
-                    q_bh,
-                    k_full,
-                    v_full,
-                    sink=self.attn_sink,
-                    swa_window=int(self.attn_sliding_window),
-                    additive_mask=extra_mask,
-                    attn_dropout=self.attn_dropout,
-                    training=self.training,
-                    scale=self._attention_scale(),
-                    hca_local_seqlen=S,
-                )
-            elif self._use_v4_triton_v2_attention:
-                out_bh = v4_attention_triton_v2(
-                    q_bh,
-                    k_full,
-                    v_full,
-                    sink=self.attn_sink,
-                    swa_window=int(self.attn_sliding_window),
-                    additive_mask=extra_mask,
-                    attn_dropout=self.attn_dropout,
-                    training=self.training,
-                    scale=self._attention_scale(),
-                    hca_local_seqlen=S,
-                )
-            elif self._use_v4_triton_attention:
-                out_bh = self._attention_forward_via_v4_triton(
-                    q_bh,
-                    k_full,
-                    v_full,
-                    extra_mask,
-                    swa_window=int(self.attn_sliding_window),
-                    hca_local_seqlen=S,
-                )
-            else:
-                local_mask = self._local_mask(S, device=device, dtype=dtype)
-                full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
-                out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
+            out_bh = self._attention_backend_forward(
+                q_bh,
+                k_full,
+                v_full,
+                additive_mask=extra_mask,
+                hca_local_seqlen=S,
+                S=S,
+                device=device,
+                dtype=dtype,
+            )
         elif self.compress_ratio == 4:
             # CSA cannot use ``core_attention``: the per-query top-K
             # gather (``gathered = pool[..., topk_idxs, :]``, shape

@@ -30,10 +30,9 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (  # noqa: E402
     IndexerScoreFn,
 )
-
 
 _MODES = {
     "v4": dict(B=1, S=4096, P=1024, H=8, HD=128),
@@ -85,9 +84,17 @@ def _build_pool(args):
     pool = []
     for c in range(max(1, args.n_input_copies)):
         gen = torch.Generator(device=device).manual_seed(args.seed + c)
-        q = torch.randn((B, S, H, HD), dtype=_dtype(args.dtype), device=device, generator=gen).requires_grad_(True)
-        k = torch.randn((B, P, HD), dtype=_dtype(args.dtype), device=device, generator=gen).requires_grad_(True)
-        w = torch.randn((B, S, H), dtype=_dtype(args.dtype), device=device, generator=gen).abs().requires_grad_(True)
+        q = torch.randn((B, S, H, HD), dtype=_dtype(args.dtype), device=device, generator=gen).requires_grad_(
+            True
+        )
+        k = torch.randn((B, P, HD), dtype=_dtype(args.dtype), device=device, generator=gen).requires_grad_(
+            True
+        )
+        w = (
+            torch.randn((B, S, H), dtype=_dtype(args.dtype), device=device, generator=gen)
+            .abs()
+            .requires_grad_(True)
+        )
         pool.append((q, k, w))
     return pool, cfg
 
@@ -179,8 +186,12 @@ def main() -> None:
     results = {}
     for name, triton_path in [("triton", True), ("eager", False)]:
         _time_fwd(pool, cfg, _dtype(args.dtype), triton_path=triton_path, iters=args.warmup, flusher=flusher)
-        fwd = _time_fwd(pool, cfg, _dtype(args.dtype), triton_path=triton_path, iters=args.iters, flusher=flusher)
-        bwd = _time_bwd(pool, cfg, _dtype(args.dtype), triton_path=triton_path, iters=args.iters, flusher=flusher)
+        fwd = _time_fwd(
+            pool, cfg, _dtype(args.dtype), triton_path=triton_path, iters=args.iters, flusher=flusher
+        )
+        bwd = _time_bwd(
+            pool, cfg, _dtype(args.dtype), triton_path=triton_path, iters=args.iters, flusher=flusher
+        )
         fwd_med = median(fwd)
         bwd_med = median(bwd)
         results[name] = {
