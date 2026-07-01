@@ -45,7 +45,7 @@ dependencies = [
     "blobfile",
     "torchdata>=0.8.0",
     "datasets>=3.6.0",
-    "mlflow==3.4.0",
+    "mlflow==3.11.1",
     "pyrsmi",
     "plotext",
 ]

@@ -28,7 +28,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
@@ -57,7 +57,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -238,7 +238,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
@@ -267,7 +267,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -401,7 +401,7 @@ jobs:
       - name: Set commit hash to env
         run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: AMD-AGI/Primus-Turbo
           submodules: "recursive"
@@ -432,7 +432,7 @@ jobs:
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
       - name: Show Environment Info
@@ -519,7 +519,7 @@ jobs:
     #runs-on: [primus-lm-bench-multinode-p8hz7]
     #steps:
       #- run: echo "🎉 Begin Primus Benchmark."
-      #- uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      #- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         #with:
           #submodules: recursive
       #- name: Show Environment Info
