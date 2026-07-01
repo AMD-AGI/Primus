@@ -82,7 +82,17 @@ def get_batch_func(data_iterator, vp_stage=None):
     else:
         batch = get_batch_on_this_cp_rank(batch)
 
-    return batch.values()
+    # Return a stable, explicitly-ordered 5-tuple so both this path and the
+    # early not-first/last-stage return path have the same shape/type. The keys
+    # match megatron's ``get_batch_on_this_tp_rank`` and the unpack order at all
+    # call sites (tokens, labels, loss_mask, attention_mask, position_ids).
+    return (
+        batch["tokens"],
+        batch["labels"],
+        batch["loss_mask"],
+        batch["attention_mask"],
+        batch["position_ids"],
+    )
 
 
 class DataLoaderStore:

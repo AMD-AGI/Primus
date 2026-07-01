@@ -26,9 +26,6 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
-from megatron.core.distributed.torch_fully_sharded_data_parallel import (
-    TorchFullyShardedDataParallel as torch_FSDP,
-)
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.training.checkpointing import (
     checkpoint_exists,
@@ -45,7 +42,9 @@ from primus.backends.megatron.training.utils import is_pipeline_stage_containing
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
-    pass
+    from megatron.core.distributed.torch_fully_sharded_data_parallel import (
+        TorchFullyShardedDataParallel as torch_FSDP,
+    )
 
     HAVE_FSDP2 = True
 except ImportError:
@@ -977,7 +976,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         model = get_model(model_provider_func, model_type)
         log_rank_0(model)
         # get_megatron_optimizer will use the ddp_config
-        if isinstance(model[0], torch_FSDP):
+        if HAVE_FSDP2 and isinstance(model[0], torch_FSDP):
             model[0].ddp_config = DistributedDataParallelConfig()
             model[0].ddp_config.use_custom_fsdp = False
 
