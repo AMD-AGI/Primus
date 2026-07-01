@@ -36,7 +36,30 @@
       </div>
     </div>
 
-    <main class="layout">
+    <main class="layout layout--split">
+      <aside class="sidebar">
+        <section class="panel" id="controls-panel">
+          <h2>Projection controls</h2>
+          <div class="mode-switch" id="mode-switch">
+            <span class="mode-switch__label">Layer timing</span>
+            <div class="mode-switch__tabs" role="tablist">
+              <button class="mode-tab is-active" data-mode="trace" role="tab">Trace-derived</button>
+              <button class="mode-tab" data-mode="manual" role="tab">Manual per-layer</button>
+            </div>
+          </div>
+          <div id="manual-grid" class="manual-grid" hidden></div>
+          <div id="controls-grid" class="controls-grid"></div>
+          <div id="validation-panel" hidden></div>
+          <p class="muted">
+            DP is derived from World size / (PP·TP·CP); EP is a sub-group of DP.
+            Note: the captured MoE dispatch/combine is intra-node EP=8 and is not
+            re-modeled for other EP values; sequence length is fixed at the
+            capture value (4096).
+          </p>
+        </section>
+      </aside>
+
+      <div class="content">
       <div id="error-state" class="state state--error" hidden></div>
 
       <section class="panel" id="config-panel">
@@ -63,32 +86,38 @@
         <div id="breakdown-blocks"></div>
       </section>
 
-      <div class="two-col">
-        <section class="panel" id="controls-panel">
-          <h2>Projection controls</h2>
-          <div class="mode-switch" id="mode-switch">
-            <span class="mode-switch__label">Layer timing</span>
-            <div class="mode-switch__tabs" role="tablist">
-              <button class="mode-tab is-active" data-mode="trace" role="tab">Trace-derived</button>
-              <button class="mode-tab" data-mode="manual" role="tab">Manual per-layer</button>
+      <section class="panel panel--accent" id="results-panel">
+        <h2>Projected throughput <span id="results-gpu" class="muted"></span></h2>
+        <div id="results-headline" class="headline"></div>
+        <div id="results-steps" class="steps"></div>
+      </section>
+
+      <section class="panel" id="timeline-panel">
+        <div class="panel__head">
+          <h2>Iteration timeline <span id="timeline-gpu" class="muted"></span></h2>
+          <p class="muted">
+            How one iteration's time is composed, bottom-up: a single layer
+            (attn / mlp / a2a) → each pipeline rank's chunks (layer granularity) →
+            the whole 1F1B pipeline schedule. Reacts live to the controls on the left.
+            See <code>design/07-iteration-timeline.md</code>.
+          </p>
+          <div class="tl-head-row">
+            <div class="tl-viewswitch" id="tl-viewswitch">
+              <span class="mode-switch__label">Layout</span>
+              <div class="mode-switch__tabs" role="tablist">
+                <button class="tl-view" data-view="tabs" role="tab">Tabbed</button>
+                <button class="tl-view is-active" data-view="stacked" role="tab">Stacked (all + link)</button>
+              </div>
+            </div>
+            <div class="tl-tabs" id="tl-tabs" role="tablist">
+              <button class="tl-tab is-active" data-level="1" role="tab">L1 · Layer</button>
+              <button class="tl-tab" data-level="2" role="tab">L2 · PP ranks</button>
+              <button class="tl-tab" data-level="3" role="tab">L3 · Schedule</button>
             </div>
           </div>
-          <div id="manual-grid" class="manual-grid" hidden></div>
-          <div id="controls-grid" class="controls-grid"></div>
-          <div id="validation-panel" hidden></div>
-          <p class="muted">
-            DP is derived from World size / (PP·TP·CP); EP is a sub-group of DP.
-            Note: the captured MoE dispatch/combine is intra-node EP=8 and is not
-            re-modeled for other EP values; sequence length is fixed at the
-            capture value (4096).
-          </p>
-        </section>
-
-        <section class="panel panel--accent" id="results-panel">
-          <h2>Projected throughput <span id="results-gpu" class="muted"></span></h2>
-          <div id="results-headline" class="headline"></div>
-          <div id="results-steps" class="steps"></div>
-        </section>
+        </div>
+        <div id="tl-body"></div>
+      </section>
       </div>
     </main>
 
