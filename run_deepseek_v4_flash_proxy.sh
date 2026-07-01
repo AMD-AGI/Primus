@@ -23,8 +23,8 @@
 #                                                command line if OOM)
 #
 # Plan-5 perf knobs default ON:
-#   - USE_V4_ATTENTION_BACKEND      (cr ∈ {0, 128} dense/HCA backend; default triton_v1)
-#   - USE_V4_CSA_ATTENTION_BACKEND  (cr == 4 CSA backend; default triton_v1)
+#   - USE_V4_ATTENTION_BACKEND      (cr ∈ {0, 128} dense/HCA backend; default gluon)
+#   - USE_V4_CSA_ATTENTION_BACKEND  (cr == 4 CSA backend; default gluon)
 #   - USE_TURBO_DEEPEP              (PrimusTurboDeepEPTokenDispatcher)
 #   - TURBO_USE_GROUPED_MLP         (Turbo grouped-GEMM MoE expert path)
 #   - USE_V4_COMPILED_SINKHORN      (P29: torch.compile-fused Sinkhorn,
@@ -128,8 +128,8 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 
 # ---------- Plan-5 perf knobs (all five ON) ---------------------------------
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-gluon}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-gluon}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
 # Plan-5 P29 (RESCOPED): torch.compile-fused HyperMixer Sinkhorn.  Kills

@@ -119,8 +119,8 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # (triton_v0 = deprecated gathered; flydsl_v0 = deprecated legacy FlyDSL,
     #  fwd-only). ``use_turbo_attention`` (when a ``core_attention`` module is
     # built) still takes precedence for the dense path.
-    use_v4_attention_backend: str = "triton_v1"
-    use_v4_csa_attention_backend: str = "triton_v1"
+    use_v4_attention_backend: str = "gluon"
+    use_v4_csa_attention_backend: str = "gluon"
 
     # ---- Per-module precision (paper recipe): routed experts in MXFP4 while the
     # rest of the layer runs FP8. Decoupled from the global --fp4/--fp8 recipe

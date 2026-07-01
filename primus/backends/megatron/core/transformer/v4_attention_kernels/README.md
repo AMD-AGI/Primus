@@ -20,7 +20,7 @@ Two config selectors pick the kernel per group:
 - **`use_v4_attention_backend`** → dense (`cr=0`) and HCA (`cr=128`) layers.
 - **`use_v4_csa_attention_backend`** → CSA (`cr=4`) layers.
 
-Both default to `triton_v1`.
+Both default to `gluon`.
 
 ## Backends
 
@@ -28,9 +28,9 @@ Both default to `triton_v1`.
 | -------------- | -------------- | ------------------------ | ------------------------------------------- | --------------------------------------------------------------------- |
 | `eager`        | dense/HCA, CSA | `_eager/`                | `eager_v4_attention`, `eager_v4_csa_attention` | Pure-PyTorch reference. Bit-identical baseline shared with unit tests; slow, used for correctness. |
 | `triton_v0`    | CSA only       | `_triton_v0_deprecated/` | `v4_csa_attention_v0`                        | **Deprecated.** Gathered per-query CSA with scalar GEMV (~30–260× slower). Not for production. |
-| `triton_v1`    | dense/HCA, CSA | `_triton_v1/`            | `v4_attention_v1`, `v4_csa_attention_v1`     | **Production default.** Separate K/V, pool-based CSA + dense/HCA Triton kernels. |
+| `triton_v1`    | dense/HCA, CSA | `_triton_v1/`            | `v4_attention_v1`, `v4_csa_attention_v1`     | Separate K/V, pool-based CSA + dense/HCA Triton kernels (previous production default). |
 | `triton_v2`    | dense/HCA, CSA | `_triton_v2/`            | `v4_attention_v2`, `v4_csa_attention_v2`     | Fused single-latent sparse-MLA (K=V) using plain Triton `tl.dot` / MFMA. |
-| `gluon`        | dense/HCA, CSA | `_gluon_dsa/`            | `v4_attention_gluon`, `v4_csa_attention_gluon` | Hand-tuned fused single-latent sparse-MLA for gfx950 (CDNA4).         |
+| `gluon`        | dense/HCA, CSA | `_gluon_dsa/`            | `v4_attention_gluon`, `v4_csa_attention_gluon` | **Default.** Hand-tuned fused single-latent sparse-MLA for gfx950 (CDNA4). |
 | `flydsl_v0`    | CSA only       | `_flydsl_v0_deprecated/` | routed via `v4_csa_attention_v0` (`use_flydsl=True`) | **Deprecated**, forward-only legacy FlyDSL scalar CSA.               |
 
 Support folders (not directly selectable):
@@ -57,8 +57,8 @@ same config fields.
 
 ```yaml
 # primus/configs/models/megatron/deepseek_v4_*.yaml
-use_v4_attention_backend: triton_v1      # dense (cr=0) + HCA (cr=128)
-use_v4_csa_attention_backend: triton_v1  # CSA (cr=4)
+use_v4_attention_backend: gluon      # dense (cr=0) + HCA (cr=128)
+use_v4_csa_attention_backend: gluon  # CSA (cr=4)
 ```
 
 ### 2. CLI flags
@@ -80,17 +80,17 @@ export USE_V4_CSA_ATTENTION_BACKEND=triton_v1   # CSA
 ### Examples
 
 ```bash
-# Production default (Triton v1 everywhere)
+# Default: gfx950 hand-tuned gluon backend everywhere
+export USE_V4_ATTENTION_BACKEND=gluon
+export USE_V4_CSA_ATTENTION_BACKEND=gluon
+
+# Production Triton v1 (separate K/V) for all groups
 export USE_V4_ATTENTION_BACKEND=triton_v1
 export USE_V4_CSA_ATTENTION_BACKEND=triton_v1
 
 # Fused single-latent sparse-MLA (Triton v2) for all groups
 export USE_V4_ATTENTION_BACKEND=triton_v2
 export USE_V4_CSA_ATTENTION_BACKEND=triton_v2
-
-# gfx950 hand-tuned gluon backend
-export USE_V4_ATTENTION_BACKEND=gluon
-export USE_V4_CSA_ATTENTION_BACKEND=gluon
 
 # Eager reference (correctness / debugging)
 export USE_V4_ATTENTION_BACKEND=eager

@@ -9,7 +9,7 @@
 Static (wiring) gate for the unified ``use_v4_attention_backend`` selector:
 
 * :class:`DeepSeekV4TransformerConfig` exposes ``use_v4_attention_backend: str``
-  (and ``use_v4_csa_attention_backend``) defaulting to ``"triton_v1"``;
+  (and ``use_v4_csa_attention_backend``) defaulting to ``"gluon"``;
 * :class:`DeepseekV4Attention.__init__` reads them into ``self._attn_backend`` /
   ``self._csa_backend``;
 * the dense/HCA dispatch goes through ``_attention_backend_forward``, which
@@ -29,12 +29,12 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
 
 
 def test_config_exposes_backend_selectors():
-    """V4 transformer config exposes the unified string selectors, default triton_v1."""
+    """V4 transformer config exposes the unified string selectors, default gluon."""
     fields = DeepSeekV4TransformerConfig.__dataclass_fields__
     assert "use_v4_attention_backend" in fields
     assert "use_v4_csa_attention_backend" in fields
-    assert fields["use_v4_attention_backend"].default == "triton_v1"
-    assert fields["use_v4_csa_attention_backend"].default == "triton_v1"
+    assert fields["use_v4_attention_backend"].default == "gluon"
+    assert fields["use_v4_csa_attention_backend"].default == "gluon"
 
 
 def test_attention_init_reads_backend_selector():
