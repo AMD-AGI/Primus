@@ -24,11 +24,26 @@ Attribution (validated against the real ROCm/Kineto trace):
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Merge gap (us) used when reconstructing the backward GPU-time window from the
+# linked backward kernels, so an unlinked kernel sitting in a small stall
+# between two backward kernels is still counted as backward.
+_BWD_WINDOW_GAP_US = 150.0
+
+# A single layer-compute GPU kernel launch at seq=4096/B=1 realistically tops
+# out around ~10 ms (e.g. the V4 attention bwd or a grouped GEMM). Some captures
+# bill a one-off device-side stall / busy-wait to an ordinary elementwise kernel
+# (observed: 3 launches of ~145 ms attributed to aten::mul/add_/div in the cr=0
+# pro trace, 17x the cr=4/128 value). Those are capture artifacts, not per-layer
+# cost, so layer-compute launches above this cap are dropped (and reported in
+# provenance). Optimizer/comm kernels are routed out before this cap applies.
+_MAX_PLAUSIBLE_LAUNCH_US = 50_000.0
 
 from kernel_module_map import flop_class_from_kernel, module_from_kernel
 from v4_flops import FB_FMA, layer_fmac, model_total_params, mtp_flops, nonlayer_fmac
@@ -79,6 +94,26 @@ DEFAULT_HARDWARE = {
     "MI455X": {"peak_tflops_bf16": 10000.0, "hbm_bandwidth_gbps": 19600.0},
 }
 
+# Measured multi-node anchors used to set/validate the site's calibFactor. The
+# projection, configured to the anchor's parallel layout, must reproduce these
+# (see design/06-calibration.md). flash: real 8-node MI355X run (image pr-768,
+# commit 2c9b). pro: production multi-node anchor still TODO (needs >=8 idle
+# nodes); until then pro reuses flash's cross-model calibFactor.
+MODEL_ANCHORS: dict[str, dict[str, Any]] = {
+    "flash": {
+        "measured_iter_time_ms": 4076.0,
+        "measured_anchor": {
+            "config": "PP8/VPP1/EP8/TP1, world 64, MBS1/GBS128, seq4096, full recompute, "
+                      "layout Et*4|t*5|(t*6|)*5,t*4mL (8-node MI355X)",
+            "iter_ms": 4076.0,
+            "tflops_gpu": 722,
+            "tok_s_gpu": 2010,
+            "calib_factor": 0.87,
+            "tolerance": "<0.1%",
+        },
+    },
+}
+
 ALL_MODULES = (
     "attn.proj",
     "attn.core",
@@ -111,6 +146,35 @@ def _dims_key(dims: Any) -> str:
         return json.dumps(dims, separators=(",", ":"))
     except TypeError:
         return str(dims)
+
+
+def _merge_intervals(intervals: list[tuple[float, float]], gap: float = 0.0) -> list[tuple[float, float]]:
+    """Merge [start, end] intervals; bridge neighbours separated by <= gap."""
+    out: list[tuple[float, float]] = []
+    for s, e in sorted(intervals):
+        if out and s <= out[-1][1] + gap:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _make_membership(merged: list[tuple[float, float]]):
+    """Return a fn(ts)->bool: is ts inside one of the merged intervals."""
+    starts = [s for s, _ in merged]
+
+    def _in(ts: float | None) -> bool:
+        if ts is None or not merged:
+            return False
+        i = bisect.bisect_right(starts, ts) - 1
+        return i >= 0 and merged[i][0] <= ts <= merged[i][1]
+
+    return _in
+
+
+def _is_opt_or_comm_kernel(name: str) -> bool:
+    low = name.lower()
+    return "multi_tensor_apply" in name or "fusedadam" in low or "adamw" in low or "nccl" in low
 
 
 def _gemm_flops(dims_key: str) -> float | None:
@@ -228,6 +292,9 @@ def parse_trace(path: Path, ga: int = 2):
     cpu_by_extid: dict[Any, dict] = {}
     # interesting python_function intervals per tid: (ts, end, name)
     pf_by_tid: dict[Any, list[tuple[float, float, str]]] = defaultdict(list)
+    # `autograd::engine::evaluate_function` CPU intervals precisely bracket the
+    # backward pass; a kernel whose launching CPU op falls inside one is bwd.
+    eval_intervals: list[tuple[float, float]] = []
     kernels: list[dict] = []
     num_steps = 0  # real captured training steps (ProfilerStep events, dur>10ms)
 
@@ -240,6 +307,10 @@ def parse_trace(path: Path, ga: int = 2):
             ext = _arg(ev, "External id")
             if ext is not None and ext not in cpu_by_extid:
                 cpu_by_extid[ext] = ev
+            if ev.get("name", "").startswith("autograd::engine::evaluate_function"):
+                ets = ev.get("ts")
+                if ets is not None:
+                    eval_intervals.append((ets, ets + (ev.get("dur") or 0)))
         elif cat == "python_function" and ph == "X":
             name = ev.get("name", "")
             if name.startswith("nn.Module:") or "ackward" in name or "autograd" in name:
@@ -282,12 +353,54 @@ def parse_trace(path: Path, ga: int = 2):
     # and (b) sum dim-derived GEMM FLOPs correctly.
     num_mb = max(1, num_steps * ga)
 
+    # ---- phase classification (forward vs backward) ----------------------
+    # The backward pass is identified by the autograd engine: a kernel is
+    # backward iff its launching CPU op was issued inside an
+    # `autograd::engine::evaluate_function` interval (these precisely bracket
+    # the backward). A `_fwd_`/`_bwd_` tag in the kernel name (V4 Triton kernels
+    # encode it) wins. Unlinked kernels (no External id -> no CPU op; common for
+    # fused/elementwise launches Kineto fails to flow-link) are assigned by
+    # whether their GPU timestamp lands inside the backward GPU-time window
+    # rebuilt from the linked backward kernels. This replaces the old "default
+    # to forward" rule, which systematically leaked backward compute -- incl.
+    # the MoE dgrad/wgrad grouped GEMMs -- into the forward breakdown.
+    bwd_eval = _merge_intervals(eval_intervals)
+    in_bwd_eval = _make_membership(bwd_eval)
+
+    phase_by_idx: list[str | None] = [None] * len(kernels)
+    _bwd_windows: list[tuple[float, float]] = []
+    for i, ev in enumerate(kernels):
+        name = ev.get("name", "")
+        ln = name.lower()
+        if "_fwd" in ln and "_bwd" not in ln:
+            phase_by_idx[i] = "forward"
+            continue
+        if "_bwd" in ln:
+            phase_by_idx[i] = "backward"
+            if not _is_opt_or_comm_kernel(name) and ev["dur"] <= _MAX_PLAUSIBLE_LAUNCH_US:
+                _bwd_windows.append((ev["ts"], ev["ts"] + ev["dur"]))
+            continue
+        ext = _arg(ev, "External id")
+        cpu = cpu_by_extid.get(ext) if ext is not None else None
+        if cpu is not None:
+            ph = "backward" if in_bwd_eval(cpu.get("ts")) else "forward"
+            phase_by_idx[i] = ph
+            if ph == "backward" and not _is_opt_or_comm_kernel(name) and ev["dur"] <= _MAX_PLAUSIBLE_LAUNCH_US:
+                _bwd_windows.append((ev["ts"], ev["ts"] + ev["dur"]))
+        # else: unlinked -> decided below from the GPU-side backward window
+
+    in_bwd_gpu = _make_membership(_merge_intervals(_bwd_windows, _BWD_WINDOW_GAP_US))
+    for i, ev in enumerate(kernels):
+        if phase_by_idx[i] is None:
+            phase_by_idx[i] = "backward" if in_bwd_gpu(ev.get("ts")) else "forward"
+
     # (phase, module) -> { (kernel_name, dims_key): {"durs": [...], "flop_class", "flop_per_launch"} }
     groups: dict[tuple[str, str], dict] = defaultdict(dict)
     optimizer_us = 0.0
     dpcomm_us = 0.0
+    dropped_stall_us = 0.0
 
-    for ev in kernels:
+    for i, ev in enumerate(kernels):
         name = ev.get("name", "")
         dur = float(ev["dur"])
         ext = _arg(ev, "External id")
@@ -302,16 +415,12 @@ def parse_trace(path: Path, ga: int = 2):
         if module == "__dpcomm__":
             dpcomm_us += dur
             continue
-        # Phase: a kernel-name _fwd_/_bwd_ tag is authoritative (V4 triton
-        # kernels encode it). Otherwise use the backward-only "Fwd thread id".
-        ln = name.lower()
-        if "_fwd" in ln and "_bwd" not in ln:
-            phase = "forward"
-        elif "_bwd" in ln:
-            phase = "backward"
-        else:
-            fwd_tid = _arg(cpu, "Fwd thread id") if cpu else None
-            phase = "backward" if (fwd_tid is not None or "ackward" in cpu_name) else "forward"
+        # Drop one-off device-side stalls billed to a layer-compute kernel (see
+        # _MAX_PLAUSIBLE_LAUNCH_US); they are capture artifacts, not per-layer cost.
+        if dur > _MAX_PLAUSIBLE_LAUNCH_US:
+            dropped_stall_us += dur
+            continue
+        phase = phase_by_idx[i]
         dims_key = _dims_key(_arg(cpu, "Input Dims")) if cpu else ""
         flop_per_launch = _gemm_flops(dims_key) if (cpu and flop_class == "gemm") else None
         sub = groups[(phase, module)].setdefault(
@@ -322,6 +431,7 @@ def parse_trace(path: Path, ga: int = 2):
 
     optimizer_us /= max(1, num_steps)  # optimizer runs once per training iteration
     dpcomm_us /= num_mb
+    dropped_stall_us /= num_mb  # report per-microbatch, like the breakdown rows
 
     out = {b: {"forward": {}, "backward": {}} for b in ("attention", "moe", "embedding", "output", "loss")}
     for (phase, module), subs in groups.items():
@@ -374,7 +484,7 @@ def parse_trace(path: Path, ga: int = 2):
         else:
             bucket = "moe"
         out[bucket][phase][module] = entry
-    return out, optimizer_us, dpcomm_us
+    return out, optimizer_us, dpcomm_us, dropped_stall_us
 
 
 def _lists(bd: dict) -> dict:
@@ -397,10 +507,12 @@ def _fwd_total(buckets: dict) -> float:
 def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
     cfg = MODEL_CONFIGS[model]
     per_cr, opt_us = {}, []
+    dropped_stall = {}
     for cr, path in traces.items():
-        buckets, o, _dp = parse_trace(path, ga)
+        buckets, o, _dp, stall = parse_trace(path, ga)
         per_cr[cr] = buckets
         opt_us.append(o)
+        dropped_stall[cr] = round(stall, 1)
 
     # Some cr layers (pure dense cr=0 / HCA cr=128) get CUDA-graph / stream-
     # captured, so their compute kernels are not individually visible in the
@@ -453,10 +565,13 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
         "provenance": {
             "traces": {cr: str(p) for cr, p in traces.items()},
             "graphed_crs_estimated_from_cr4": graphed,
+            "dropped_stall_us_per_mb": dropped_stall,
             "note": (
                 "cr in graphed_crs_estimated_from_cr4 were CUDA-graph/stream-captured "
                 "(compute not visible in trace); their breakdown is copied from cr=4 as an "
-                "estimate. Re-run those cr with graph capture disabled for exact numbers."
+                "estimate. Re-run those cr with graph capture disabled for exact numbers. "
+                "dropped_stall_us_per_mb: per-mb layer-compute kernel time dropped as "
+                "implausible one-off device stalls (> _MAX_PLAUSIBLE_LAUNCH_US)."
             ),
         },
         "capture": {
@@ -469,7 +584,8 @@ def build(model: str, traces: dict[str, Path], ga: int = 2) -> dict[str, Any]:
             "optimizer": "adam",
             "distributed_optimizer": False,
             "recompute": "off",
-            "measured_iter_time_ms": None,
+            "measured_iter_time_ms": MODEL_ANCHORS.get(model, {}).get("measured_iter_time_ms"),
+            "measured_anchor": MODEL_ANCHORS.get(model, {}).get("measured_anchor"),
         },
         "model_config": {
             **cfg,

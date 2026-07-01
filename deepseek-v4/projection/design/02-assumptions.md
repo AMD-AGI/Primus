@@ -54,8 +54,16 @@ start here.
   removing residual jitter.
 - **A13.** Kernel -> nn.module attribution uses `with_stack=True`: GPU kernels are
   linked to their launching CPU op via trace flow events, and the module is read
-  from the CPU op's python call stack. fwd/bwd is determined by the stack
-  (backward frames) and/or `_fwd_`/`_bwd_` in kernel names.
+  from the CPU op's python call stack. **fwd/bwd phase** is determined by, in
+  priority order: (1) a `_fwd_`/`_bwd_` tag in the kernel name; (2) for linked
+  kernels, whether the launching CPU op's timestamp lies inside an
+  `autograd::engine::evaluate_function` interval (= backward); (3) for unlinked
+  kernels (no `External id`), whether the kernel's GPU timestamp lies in the
+  backward GPU-time window reconstructed from the linked backward kernels. The
+  old rule (default-to-forward when unlinked) leaked backward compute -- incl.
+  the MoE dgrad/wgrad grouped GEMMs -- into forward; see `design/06`. One-off
+  device stalls billed to a compute kernel (> `_MAX_PLAUSIBLE_LAUNCH_US`) are
+  dropped as artifacts and reported in `provenance.dropped_stall_us_per_mb`.
 - **A14.** Only `gemm`, `grouped_gemm`, `attn` kernels get a TFLOPs number; all
   other kernels are memory-bound (TFLOPs = null) and contribute time only.
 - **A15.** Embedding / output-logits / loss are taken **once** (from any single
