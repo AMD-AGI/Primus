@@ -77,8 +77,10 @@ fsdp:
   cp_size: 1
   pp_size: 1
   dp_replicate_size: 1
-  # Single-node 8x MI355X (override dp_size to the GPU/world count for other topos).
-  dp_size: 8
+  # dp_size is intentionally left unset: AutoModel derives it from the runtime
+  # world size and the parallel dims (dp = world_size / (tp*cp*pp)), so single-
+  # and multi-node runs work without edits. Pin `dp_size: <n>` only to force a
+  # specific value.
   defer_fsdp_grad_sync: true
   enable_fsdp2_prefetch: true
   # Optimized knobs:

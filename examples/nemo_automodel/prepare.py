@@ -146,8 +146,10 @@ def install_automodel_editable(automodel_path: Path):
     finally:
         try:
             os.unlink(constraints)
-        except OSError:
-            pass
+        except OSError as e:
+            # Best-effort cleanup of the temp constraints file; a failure here is
+            # non-fatal and must not mask the install result.
+            log_info(f"Non-fatal: could not remove temp ROCm constraints file {constraints!r}: {e}")
     if ret is None or ret.returncode != 0:
         rc = ret.returncode if ret is not None else "n/a"
         log_error_and_exit(f"AutoModel editable install failed (exit {rc}).")
