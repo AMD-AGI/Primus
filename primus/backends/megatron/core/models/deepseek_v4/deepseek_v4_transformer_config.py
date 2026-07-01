@@ -168,6 +168,12 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     use_v4_gluon_attention: bool = False
     use_v4_gluon_csa_attention: bool = False
 
+    # Triton-v2 sparse-MLA backend: same fused single-latent (K==V) path as
+    # gluon, written in plain Triton (tl.dot -> MFMA). ``_csa`` routes the CSA
+    # layers (cr=4); ``use_v4_triton_v2_attention`` the cr=0/128 layers.
+    use_v4_triton_v2_attention: bool = False
+    use_v4_triton_v2_csa_attention: bool = False
+
     # ---- DeepSeek-V4 plan-5 P29: torch.compile-fused Sinkhorn ----
     # Plan-5 P29 (RESCOPED from "small-op fusion" — see plan-5 02-phase-
     # details.md). The Sinkhorn-Knopp doubly-stochastic projection inside

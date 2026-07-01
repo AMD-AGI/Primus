@@ -79,6 +79,12 @@ use_v4_tilelang_csa_attention: false
 use_v4_gluon_attention: false
 use_v4_gluon_csa_attention: false
 
+# Triton-v2 sparse-MLA backend (gfx950 / MI355X): same fused single-latent
+# (K==V) path as gluon, plain Triton (tl.dot -> MFMA). Surface via
+# PRIMUS_USE_V4_TRITON_V2_ATTENTION / PRIMUS_USE_V4_TRITON_V2_CSA_ATTENTION env vars.
+use_v4_triton_v2_attention: false
+use_v4_triton_v2_csa_attention: false
+
 # Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
 # projection inside HyperMixer.compute_weights) with a cached
 # ``torch.compile(fullgraph=True, dynamic=False)`` build. Collapses the

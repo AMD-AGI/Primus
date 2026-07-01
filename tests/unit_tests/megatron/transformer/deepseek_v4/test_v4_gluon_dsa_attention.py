@@ -59,9 +59,20 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_atten
     v4_attention_gluon,
     v4_csa_attention_gluon_from_pool,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_triton import (  # noqa: E402
+    v4_attention_triton_v2,
+    v4_csa_attention_triton_v2_from_pool,
+)
 
 D = 512  # V4 head_dim (RoPE baked in-place)
 _SWA = 128
+
+# Fused single-latent (K == V) sparse-MLA backends sharing the V4-form adapter:
+# (dense/HCA attention wrapper, CSA-from-pool wrapper).
+_BACKENDS = {
+    "gluon": (v4_attention_gluon, v4_csa_attention_gluon_from_pool),
+    "triton_v2": (v4_attention_triton_v2, v4_csa_attention_triton_v2_from_pool),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +118,11 @@ _CASES = [
 ]
 
 
+@pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
-def test_v4_gluon_dense_matches_eager(B, H, S, sink_init):
-    """cr=0 dense/SWA: v4_attention_gluon fwd+bwd vs eager_v4_attention."""
+def test_v4_dense_matches_eager(B, H, S, sink_init, backend):
+    """cr=0 dense/SWA: sparse-MLA v4_attention fwd+bwd vs eager_v4_attention."""
+    attn_fn = _BACKENDS[backend][0]
     g = torch.Generator(device="cuda").manual_seed(0)
     scale = 1.0 / math.sqrt(D)
     q = torch.randn(B, H, S, D, generator=g, device="cuda", dtype=torch.bfloat16)
@@ -120,7 +133,7 @@ def test_v4_gluon_dense_matches_eager(B, H, S, sink_init):
     qg, latg = _leaf(q, fp32=False), _leaf(lat, fp32=False)
     sg = _leaf(sink, fp32=False) if sink is not None else None
     kg = latg.unsqueeze(1).expand(B, H, S, D)
-    og = v4_attention_gluon(
+    og = attn_fn(
         qg, kg, kg, sink=sg, swa_window=_SWA, additive_mask=None, attn_dropout=0.0, training=True, scale=scale
     )
     og.backward(do)
@@ -141,7 +154,7 @@ def test_v4_gluon_dense_matches_eager(B, H, S, sink_init):
     )
     of.backward(do.float())
 
-    print(f"\n[gluon V4 dense] B={B} H={H} S={S} sink={sink_init}", flush=True)
+    print(f"\n[{backend} V4 dense] B={B} H={H} S={S} sink={sink_init}", flush=True)
     assert og.shape == (B, H, S, D) and og.dtype == torch.bfloat16
     _check("O", og, of, abs_tol=3e-2, med=2e-2, cos=1e-3)
     _check("dQ", qg.grad, qf.grad, abs_tol=5e-2, sig=1e-3, med=2e-2, cos=1e-3)
@@ -150,9 +163,11 @@ def test_v4_gluon_dense_matches_eager(B, H, S, sink_init):
         _check("dSink", sg.grad, sf.grad, abs_tol=5e-1, sig=1e-3, med=5e-2, cos=1e-2)
 
 
+@pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
-def test_v4_gluon_hca_matches_eager(B, H, S, sink_init):
-    """cr=128 HCA: v4_attention_gluon (local++pool) fwd+bwd vs eager_v4_attention."""
+def test_v4_hca_matches_eager(B, H, S, sink_init, backend):
+    """cr=128 HCA: sparse-MLA v4_attention (local++pool) fwd+bwd vs eager_v4_attention."""
+    attn_fn = _BACKENDS[backend][0]
     cr = 128
     P = max(S // cr, 1)
     g = torch.Generator(device="cuda").manual_seed(2)
@@ -173,7 +188,7 @@ def test_v4_gluon_hca_matches_eager(B, H, S, sink_init):
     qg, latg, poolg = _leaf(q, fp32=False), _leaf(lat, fp32=False), _leaf(pool, fp32=False)
     sg = _leaf(sink, fp32=False) if sink is not None else None
     kg = torch.cat([latg.unsqueeze(1).expand(B, H, S, D), poolg.unsqueeze(1).expand(B, H, P, D)], dim=2)
-    og = v4_attention_gluon(
+    og = attn_fn(
         qg,
         kg,
         kg,
@@ -205,7 +220,7 @@ def test_v4_gluon_hca_matches_eager(B, H, S, sink_init):
     )
     of.backward(do.float())
 
-    print(f"\n[gluon V4 HCA] B={B} H={H} S={S} P={P} sink={sink_init}", flush=True)
+    print(f"\n[{backend} V4 HCA] B={B} H={H} S={S} P={P} sink={sink_init}", flush=True)
     assert og.shape == (B, H, S, D) and og.dtype == torch.bfloat16
     _check("O", og, of, abs_tol=3e-2, med=2e-2, cos=1e-3)
     _check("dQ", qg.grad, qf.grad, abs_tol=5e-2, sig=1e-3, med=2e-2, cos=1e-3)
@@ -215,9 +230,11 @@ def test_v4_gluon_hca_matches_eager(B, H, S, sink_init):
         _check("dSink", sg.grad, sf.grad, abs_tol=5e-1, sig=1e-3, med=5e-2, cos=1e-2)
 
 
+@pytest.mark.parametrize("backend", list(_BACKENDS))
 @pytest.mark.parametrize("B,H,S,sink_init", _CASES, ids=lambda v: str(v))
-def test_v4_gluon_csa_matches_eager(B, H, S, sink_init):
-    """cr=4 CSA: v4_csa_attention_gluon_from_pool fwd+bwd vs eager_v4_csa_attention."""
+def test_v4_csa_matches_eager(B, H, S, sink_init, backend):
+    """cr=4 CSA: sparse-MLA v4_csa_attention_from_pool fwd+bwd vs eager_v4_csa_attention."""
+    csa_fn = _BACKENDS[backend][1]
     P = max(S // 4, 1)
     K = min(128, P)
     g = torch.Generator(device="cuda").manual_seed(3)
@@ -241,7 +258,7 @@ def test_v4_gluon_csa_matches_eager(B, H, S, sink_init):
     qg, latg, poolg = _leaf(q, fp32=False), _leaf(lat, fp32=False), _leaf(pool, fp32=False)
     sg = _leaf(sink, fp32=False) if sink is not None else None
     klg = latg.unsqueeze(1).expand(B, H, S, D)
-    og = v4_csa_attention_gluon_from_pool(
+    og = csa_fn(
         qg,
         klg,
         klg,
@@ -273,7 +290,7 @@ def test_v4_gluon_csa_matches_eager(B, H, S, sink_init):
     )
     of.backward(do.float())
 
-    print(f"\n[gluon V4 CSA] B={B} H={H} S={S} P={P} K={K} sink={sink_init}", flush=True)
+    print(f"\n[{backend} V4 CSA] B={B} H={H} S={S} P={P} K={K} sink={sink_init}", flush=True)
     assert og.shape == (B, H, S, D) and og.dtype == torch.bfloat16
     _check("O", og, of, abs_tol=3e-2, med=2e-2, cos=1e-3)
     _check("dQ", qg.grad, qf.grad, abs_tol=5e-2, sig=1e-3, med=2e-2, cos=1e-3)

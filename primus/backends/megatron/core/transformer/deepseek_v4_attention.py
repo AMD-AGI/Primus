@@ -91,6 +91,10 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_atten
     v4_attention_gluon,
     v4_csa_attention_gluon_from_pool,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_triton import (
+    v4_attention_triton_v2,
+    v4_csa_attention_triton_v2_from_pool,
+)
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
@@ -734,6 +738,22 @@ class DeepseekV4Attention(MLASelfAttention):
         if self._use_v4_gluon_csa_attention and self.compress_ratio != 4:
             self._use_v4_gluon_csa_attention = False
 
+        # Triton-v2 sparse-MLA backend flags (fwd + bwd; gfx950). Same fused
+        # single-latent (K==V) representation as gluon, plain Triton (tl.dot ->
+        # MFMA). Same compress-ratio gating as the gluon flags above.
+        self._use_v4_triton_v2_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_triton_v2_attention", False),
+            field_name="use_v4_triton_v2_attention",
+        )
+        if self._use_v4_triton_v2_attention and self.compress_ratio not in (0, 128):
+            self._use_v4_triton_v2_attention = False
+        self._use_v4_triton_v2_csa_attention: bool = _coerce_optional_bool_flag(
+            getattr(config, "use_v4_triton_v2_csa_attention", False),
+            field_name="use_v4_triton_v2_csa_attention",
+        )
+        if self._use_v4_triton_v2_csa_attention and self.compress_ratio != 4:
+            self._use_v4_triton_v2_csa_attention = False
+
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
         if submodules.core_attention is not None and self.compress_ratio == 0:
@@ -1324,6 +1344,22 @@ class DeepseekV4Attention(MLASelfAttention):
                 scale=self._attention_scale(),
             )
 
+        # Triton-v2 sparse-MLA backend (gfx950): same fused single-latent path
+        # as gluon, plain Triton (tl.dot -> MFMA). Numerically == eager.
+        if self._use_v4_triton_v2_csa_attention:
+            return v4_csa_attention_triton_v2_from_pool(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
+
         # Plan-5 P31 dispatch: Triton path consumes pool + topk directly
         # and avoids materialising [B, S, K, Dh] gathered tensors.
         if self._use_v4_triton_csa_attention:
@@ -1434,6 +1470,19 @@ class DeepseekV4Attention(MLASelfAttention):
                     scale=self._attention_scale(),
                     hca_local_seqlen=0,
                 )
+            elif self._use_v4_triton_v2_attention:
+                out_bh = v4_attention_triton_v2(
+                    q_bh,
+                    k_local_bh,
+                    v_local_bh,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    additive_mask=None,
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    hca_local_seqlen=0,
+                )
             elif self._use_v4_triton_attention:
                 out_bh = self._attention_forward_via_v4_triton(
                     q_bh,
@@ -1463,6 +1512,19 @@ class DeepseekV4Attention(MLASelfAttention):
             v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
             if self._use_v4_gluon_attention:
                 out_bh = v4_attention_gluon(
+                    q_bh,
+                    k_full,
+                    v_full,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    additive_mask=extra_mask,
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    hca_local_seqlen=S,
+                )
+            elif self._use_v4_triton_v2_attention:
+                out_bh = v4_attention_triton_v2(
                     q_bh,
                     k_full,
                     v_full,

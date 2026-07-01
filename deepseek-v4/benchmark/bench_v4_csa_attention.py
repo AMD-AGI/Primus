@@ -4,10 +4,24 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 attention kernel benchmark: Triton vs FlyDSL vs Gluon.
+"""DeepSeek-V4 attention kernel benchmark — all backends in one table.
 
-Benchmarks the **forward** and **backward** V4 attention kernels for the two
-production model sizes across all three layer kinds:
+Unified benchmark of the **forward** and **backward** V4 attention kernels for
+every backend, so there is a single place to compare them (one row per backend,
+``ms | TFLOP/s`` cells; TFLOP/s over the useful work so all rows are comparable):
+
+* ``triton``    — PRODUCTION Triton (separate K/V; pool/SWA/HCA launchers)
+* ``flydsl``    — legacy FlyDSL gathered CSA (cr=4 only, scalarized GEMV)
+* ``gluon``     — fused single-latent (K==V) sparse-MLA, hand-tuned gfx950
+* ``triton_v2`` — fused single-latent sparse-MLA in plain Triton (tl.dot / MFMA)
+* ``flydsl_v2`` — fused single-latent sparse-MLA in FlyDSL MFMA (fwd WIP)
+
+The fused ``gluon`` / ``triton_v2`` / ``flydsl_v2`` backends share ONE kernel-pair
+API and are timed on IDENTICAL V4-form inputs (zero rope pad + [local ++ pool]
+kv + [SWA window ++ pool] topk). Each backend is guarded; unavailable ones are
+simply skipped.
+
+Benchmarks for the two production model sizes across all three layer kinds:
 
 * ``cr=0``   — dense / sliding-window (SWA-only) attention
 * ``cr=4``   — CSA (local SWA + sparse top-k from the compressed pool)
@@ -19,26 +33,21 @@ at the real attention shapes (``seq_len=4096``, ``mbs=1``, bf16, sink on,
 * V4-Flash:  H=64,  head_dim=512, index_topk=512
 * V4-Pro:    H=128, head_dim=512, index_topk=1024
 
-Backends (each on its native / production path; ``ms | TFLOP/s`` per cell):
+Backend detail:
 
-* Triton (ALL crs): the PRODUCTION launchers used by ``DeepseekV4Attention``:
-    - cr=0   : ``_launch_v4_attention_fwd`` / ``_bwd`` (dense, SWA-pruned)
-    - cr=4   : ``_launch_v4_csa_attention_pool_fwd`` / ``_pool_bwd`` (split FWD +
-               segreduce BWD, in-kernel gather; NOT the legacy ``gathered`` API
-               which is ~30-260x slower, see attention_perf.md)
-    - cr=128 : ``_launch_v4_attention_fwd`` / ``_bwd`` with a pool-only joint
-               mask + ``hca_local_seqlen=S``
-* FlyDSL (cr=4 ONLY): ``_launch_v4_attention_fwd_csa`` /
-    ``flydsl_v4_csa_attention_bwd`` (both bwd knobs on -> one full-kernel launch).
-* Gluon (ALL crs): ``sparse_mla_fwd_v4_gluon`` / ``sparse_mla_bwd_v4_gluon``
-    (gfx950). Sparse-MLA latent I/O (q/kv ``[T, H, D+rope]``, a single
-    ``topk_indices`` list); the layer kind is just a different TOPK
-    (cr=0: swa 128; cr=4: 128+sparse; cr=128: 128+pool). Different
-    representation than Triton/FlyDSL, so T/G is indicative, not same-kernel.
+* ``triton`` (ALL crs): PRODUCTION launchers used by ``DeepseekV4Attention`` —
+    cr=0/128 ``_launch_v4_attention_fwd``/``_bwd`` (dense/HCA); cr=4
+    ``_launch_v4_csa_attention_pool_fwd``/``_pool_bwd`` (split FWD + segreduce
+    BWD in-kernel gather; NOT the legacy gathered API, ~30-260x slower).
+* ``flydsl`` (cr=4 ONLY): legacy ``_launch_v4_attention_fwd_csa`` /
+    ``flydsl_v4_csa_attention_bwd`` (scalarized GEMV).
+* ``gluon`` / ``triton_v2`` / ``flydsl_v2`` (ALL crs): fused single-latent
+    sparse-MLA (``sparse_mla_{fwd,bwd}_v4_*``); the layer kind is just a
+    different TOPK (cr=0: swa 128; cr=4: 128+sparse; cr=128: 128+pool).
 
-Effective TFLOP/s uses aiter's formula ``2*T*H*TOPK*(D_QK+D_V)`` (BWD = 2.5x
-FWD), computed per-backend with real dims (Gluon QK over D_QK=576; Triton/FlyDSL
-over 512). ``TOPK = swa_window + sparse/pool`` per layer kind.
+Effective TFLOP/s uses ``2*T*H*TOPK*(D_V+D_V)`` (useful work over head_dim=512),
+BWD = 2.5x FWD, the SAME formula for every backend so rows are directly
+comparable (the fused backends' zero-rope-pad overhead shows up in ms).
 
 Run inside the dev container (gfx950 / MI355X):
 
@@ -77,17 +86,40 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_c
     _launch_v4_csa_attention_pool_fwd,
 )
 
-# Gluon DSA (sparse-MLA latent backend, gfx950). Optional: guarded so the
-# benchmark still runs on archs / triton builds where Gluon is unavailable.
+# Fused single-latent (K==V) sparse-MLA backends. All share ONE kernel-pair
+# API (fwd(q, kv, topk, attn_sink, kv_lora_rank, scale) -> (o, lse); bwd ->
+# (dq, dkv, d_sink)) so they are timed on identical V4-form inputs. Each is
+# guarded so the benchmark still runs where a backend is unavailable.
+_SPARSE_MLA_BACKENDS = {}  # name -> (fwd_fn, bwd_fn)
 try:
     from primus.backends.megatron.core.transformer.v4_attention_kernels._gluon_dsa import (
         sparse_mla_bwd_v4_gluon,
         sparse_mla_fwd_v4_gluon,
     )
 
-    _GLUON_AVAIL = True
+    _SPARSE_MLA_BACKENDS["gluon"] = (sparse_mla_fwd_v4_gluon, sparse_mla_bwd_v4_gluon)
 except Exception:  # noqa: BLE001
-    _GLUON_AVAIL = False
+    pass
+try:
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_dsa import (
+        sparse_mla_bwd_v4_triton,
+        sparse_mla_fwd_v4_triton,
+    )
+
+    _SPARSE_MLA_BACKENDS["triton_v2"] = (sparse_mla_fwd_v4_triton, sparse_mla_bwd_v4_triton)
+except Exception:  # noqa: BLE001
+    pass
+try:
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl_v2 import (
+        sparse_mla_bwd_v4_flydsl,
+        sparse_mla_fwd_v4_flydsl,
+    )
+
+    _SPARSE_MLA_BACKENDS["flydsl_v2"] = (sparse_mla_fwd_v4_flydsl, sparse_mla_bwd_v4_flydsl)
+except Exception:  # noqa: BLE001
+    pass
+
+_GLUON_AVAIL = "gluon" in _SPARSE_MLA_BACKENDS
 
 _VARIANTS = {
     "flash": dict(H=64, index_topk=512),
@@ -414,80 +446,69 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     else:
         raise ValueError(f"unsupported cr={cr}")
 
-    # Gluon: V4-form (the production training invocation) for every cr — zero
-    # rope pad + [local ++ pool] buffer + [SWA window ++ pool] topk.
-    glu_fwd = glu_bwd = None
-    if _GLUON_AVAIL:
+    # Fused single-latent (K==V) sparse-MLA backends (gluon / triton_v2 /
+    # flydsl_v2): all on the SAME V4-form inputs (zero rope pad + [local ++ pool]
+    # kv + [SWA window ++ pool] topk). Time each by swapping the kernel pair.
+    sparse_fb = {}  # name -> (fwd_closure, bwd_closure)
+    if _SPARSE_MLA_BACKENDS:
         gq, gkv, gtopk_idx, gsink, gdo = _build_gluon_v4form(
             cr=cr, H=H, S=S, D=D, K=glu_K, P=glu_P, W=_SWA_WINDOW
         )
         gscale = 1.0 / math.sqrt(D)  # V4 scale (score over 512)
-
-        def fwd_gluon():
-            return sparse_mla_fwd_v4_gluon(gq, gkv, gtopk_idx, attn_sink=gsink, kv_lora_rank=D, scale=gscale)
-
-        out_g, lse_g = _call_fwd(fwd_gluon)
-
-        def bwd_gluon():
-            return sparse_mla_bwd_v4_gluon(
-                gq, gkv, out_g, gdo, gtopk_idx, lse_g, attn_sink=gsink, kv_lora_rank=D, scale=gscale
-            )
-
-        glu_fwd, glu_bwd = fwd_gluon, bwd_gluon
+        for _name, (_fwd_k, _bwd_k) in _SPARSE_MLA_BACKENDS.items():
+            fwd_c = (
+                lambda fk: (lambda: fk(gq, gkv, gtopk_idx, attn_sink=gsink, kv_lora_rank=D, scale=gscale))
+            )(_fwd_k)
+            _out, _lse = _call_fwd(fwd_c)
+            if _out is None:  # fwd unavailable (e.g. flydsl_v2 kernel WIP) -> skip bwd
+                bwd_c = None
+            else:
+                bwd_c = (
+                    lambda bk, o, l: (
+                        lambda: bk(
+                            gq, gkv, o, gdo, gtopk_idx, l, attn_sink=gsink, kv_lora_rank=D, scale=gscale
+                        )
+                    )
+                )(_bwd_k, _out, _lse)
+            sparse_fb[_name] = (fwd_c, bwd_c)
 
     # Effective FLOPs over the USEFUL work (score+value both over head_dim=512,
-    # TOPK = real key count); BWD = 2.5x FWD. Same formula for all backends so
-    # TFLOP/s is comparable — the gluon zero-rope-pad overhead shows up in ms,
-    # not in counted FLOPs.
+    # TOPK = real key count); BWD = 2.5x FWD. Same formula for ALL backends so
+    # TFLOP/s is comparable (the sparse-MLA zero-rope-pad overhead shows up in
+    # ms, not in counted FLOPs).
     T = B * S
+    fwd_flop = 2.0 * T * H * topk_eff * (D + D)
+    flops = {"fwd": fwd_flop, "bwd": 2.5 * fwd_flop}
 
-    def _mk_flops(d_qk: int, d_v: int):
-        fwd = 2.0 * T * H * topk_eff * (d_qk + d_v)
-        return {"fwd": fwd, "bwd": 2.5 * fwd}
-
-    flops_csa = _mk_flops(D, D)  # Triton / FlyDSL / Gluon — useful work over 512
-    flops_glu = flops_csa
+    # Backend table: native production Triton (separate K/V), legacy FlyDSL
+    # (gathered, cr=4 only), then the fused sparse-MLA backends.
+    backends = [("triton", fwd_triton, bwd_triton)]
+    if cr == 4:
+        backends.append(("flydsl", fwd_flydsl, bwd_flydsl))
+    for _name in ("gluon", "triton_v2", "flydsl_v2"):
+        if _name in sparse_fb:
+            backends.append((_name, sparse_fb[_name][0], sparse_fb[_name][1]))
 
     print(
         f"\n=== V4-{variant.upper()} cr={cr} ({_CR_NAME[cr]}) | B={B} H={H} S={S} D={D}"
         f"{extra} TOPK_eff={topk_eff} swa={_SWA_WINDOW} sink=on bf16 ===\n"
-        f"  FWD GFLOP={flops_csa['fwd'] / 1e9:.1f} (useful, over head_dim={D})  "
-        f"(cells: ms | TFLOP/s; Gluon=V4-form w/ zero rope pad)",
+        f"  FWD GFLOP={fwd_flop / 1e9:.1f} (useful, over head_dim={D})  "
+        f"(cells: ms | TFLOP/s; *_v2/gluon = V4-form fused single-latent)",
         flush=True,
     )
-
-    rows = []
-    for op, tri_fn, fly_fn, glu_fn in (
-        ("fwd", fwd_triton, fwd_flydsl, glu_fwd),
-        ("bwd", bwd_triton, bwd_flydsl, glu_bwd),
-    ):
-        tri_med, tri_err = _safe_time(tri_fn, warmup=warmup, iters=iters)
-        fly_med, fly_err = _safe_time(fly_fn, warmup=warmup, iters=iters)
-        glu_med, glu_err = _safe_time(glu_fn, warmup=warmup, iters=iters)
-        if cr != 4:
-            fly_err = "FlyDSL: cr=4 only"
-        rows.append((op, tri_med, tri_err, fly_med, fly_err, glu_med, glu_err))
-
     print(
-        f"  {'op':4s} {'Triton (ms|TF)':>18s} {'FlyDSL (ms|TF)':>18s} "
-        f"{'Gluon (ms|TF)':>18s} {'T/F':>7s} {'T/G':>7s}",
+        f"  {'backend':12s} {'fwd (ms|TF)':>18s} {'bwd (ms|TF)':>18s}",
         flush=True,
     )
-    for op, tri_med, tri_err, fly_med, fly_err, glu_med, glu_err in rows:
-        tf = f"{tri_med / fly_med:6.2f}x" if (tri_med and fly_med) else f"{'-':>7s}"
-        tg = f"{tri_med / glu_med:6.2f}x" if (tri_med and glu_med) else f"{'-':>7s}"
-        fly_cell = _cell(fly_med, flops_csa[op]) if cr == 4 else f"{'n/a':>18s}"
-        print(
-            f"  {op:4s} {_cell(tri_med, flops_csa[op])} {fly_cell} "
-            f"{_cell(glu_med, flops_glu[op])} {tf} {tg}",
-            flush=True,
-        )
-        if tri_err:
-            print(f"       Triton {op} error: {tri_err}", flush=True)
-        if fly_err and cr == 4:
-            print(f"       FlyDSL {op} error: {fly_err}", flush=True)
-        if glu_err:
-            print(f"       Gluon  {op} error: {glu_err}", flush=True)
+    rows = []
+    for name, fwd_fn, bwd_fn in backends:
+        fwd_med, fwd_err = _safe_time(fwd_fn, warmup=warmup, iters=iters)
+        bwd_med, bwd_err = _safe_time(bwd_fn, warmup=warmup, iters=iters)
+        print(f"  {name:12s} {_cell(fwd_med, flops['fwd'])} {_cell(bwd_med, flops['bwd'])}", flush=True)
+        for op, err in (("fwd", fwd_err), ("bwd", bwd_err)):
+            if err:
+                print(f"       {name} {op} error: {err}", flush=True)
+        rows.append((name, fwd_med, bwd_med))
     return rows
 
 
