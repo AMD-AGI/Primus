@@ -163,3 +163,5 @@ modules:
       # they quantize to fp8 too (not just the MoE experts) — matches the paper's
       # "fp8 on all weight GEMMs". Without this the projections stay bf16.
       use_turbo_parallel_linear: true
+
+      moe_router_padding_for_quantization: true
