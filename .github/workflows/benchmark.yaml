@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: 3c39ef259aa6d724c77c481e926466e7a167e938 # fix(moe): declare probs layout explicitly in moe_permute (#355)
+  PRIMUS_TURBO_COMMIT: a04a233cbfb468dbe21600cbf9db70953428b25c # feat: force use nt layout gemm in bwd (#386)
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
