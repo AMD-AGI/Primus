@@ -381,7 +381,7 @@ cd ..
 pip uninstall aiter amd-aiter -y
 git clone --recursive https://github.com/ROCm/aiter.git
 cd aiter
-git checkout b5e03ed191fca11ee423226537ef8d9435e432a6
+git checkout 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e
 git submodule update --init --recursive
 PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 cd ..

@@ -53,6 +53,8 @@ jobs:
         run: pip install pre-commit
       - name: Run pre-commit (all hooks, all files)
         run: pre-commit run --all-files --show-diff-on-failure
+      - name: Check version/commit pin consistency
+        run: python tools/ci/check_version_consistency.py
 
   # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
   # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
@@ -244,6 +246,7 @@ jobs:
       - run: echo "Begin AITER + Primus-Turbo Install."
       - name: Install AITER
         run: |
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           echo "✅ [Uninstall old aiter] started at: $(date)"
           pip3 uninstall aiter amd-aiter -y || true
           rm -rf /tmp/aiter || true
@@ -260,6 +263,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Build aiter] ended at: $(date)"
           echo "⏱️ [Build aiter] Total elapsed time: ${elapsed} seconds"
+          echo -e "Build aiter\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
       - name: Install Primus-Turbo
         run: |
           rm -rf /tmp/Primus-Turbo || true
@@ -275,6 +279,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Pip install requirements] ended at: $(date)"
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          echo -e "primus-turbo: pip install requirements\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
           pip3 install --no-build-isolation -e . -v
@@ -282,6 +287,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [build primus-turbo] ended at: $(date)"
           echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+          echo -e "primus-turbo: build/install\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
       - run: echo "🎉 Begin Primus Unit Test."
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -338,7 +344,21 @@ jobs:
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           export HSA_NO_SCRATCH_RECLAIM=1
           mkdir -p "${GITHUB_WORKSPACE}/test-reports"
-          pytest --maxfail=1 -s ./tests/unit_tests/ \
+          # Component-aware selection on PRs; full suite on push/release/dispatch.
+          # Fail-safe: any failure to compute the diff falls back to the full suite.
+          TARGETS="./tests/unit_tests/"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base_sha}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              sel="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py)"
+              [[ -n "${sel}" ]] && TARGETS="${sel}"
+            fi
+          fi
+          echo "Selected unit-test targets: ${TARGETS}"
+          # shellcheck disable=SC2086 # intentional word-splitting of multiple paths
+          pytest --maxfail=1 -s ${TARGETS} \
             --cov=primus --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
@@ -368,10 +388,31 @@ jobs:
           printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
+      - name: Decide E2E scope (torch)
+        run: |
+          # Fail-safe: default to running all E2E (push/release/dispatch, or any
+          # diff failure). On PRs, narrow to the suites the changed files affect.
+          M=1; T=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py --e2e)"
+              echo "Selected torch E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw megatron   || M=0
+                echo "${e2e}" | grep -qw torchtitan || T=0
+              fi
+            fi
+          fi
+          echo "RUN_MEGATRON_E2E=${M}" >> "$GITHUB_ENV"
+          echo "RUN_TORCHTITAN_E2E=${T}" >> "$GITHUB_ENV"
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
@@ -384,6 +425,7 @@ jobs:
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
@@ -423,6 +465,10 @@ jobs:
         if: always()
         run: |
           python tools/ci/junit_summary.py --title torch test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Write runtime summary
+        if: always()
+        run: |
+          python tools/ci/runtime_summary.py --title torch "$RUNNER_TEMP/runtime.tsv" >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
@@ -488,6 +534,7 @@ jobs:
           echo "Primus-Turbo dir: /tmp/Primus-Turbo"
           git config --global --add safe.directory /tmp/Primus-Turbo
           cd /tmp/Primus-Turbo
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           start_time=$(date +%s)
           echo "✅ [Pip install requirements] started at: $(date)"
           mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
@@ -496,6 +543,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "✅ [Pip install requirements] ended at: $(date)"
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          echo -e "pip install/upgrade\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
           end_time=$(date +%s)
@@ -549,10 +597,29 @@ jobs:
           printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
+      - name: Decide E2E scope (jax)
+        run: |
+          # Fail-safe: default to running MaxText E2E; on PRs skip it when no
+          # relevant (maxtext / shared) changes are detected.
+          X=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py --e2e)"
+              echo "Selected jax E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw maxtext || X=0
+              fi
+            fi
+          fi
+          echo "RUN_MAXTEXT_E2E=${X}" >> "$GITHUB_ENV"
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
+          if [[ "${RUN_MAXTEXT_E2E:-1}" != "1" ]]; then echo "Skipping MaxText E2E: no relevant changes."; exit 0; fi
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
@@ -575,6 +642,10 @@ jobs:
         if: always()
         run: |
           python tools/ci/junit_summary.py --title jax test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Write runtime summary
+        if: always()
+        run: |
+          python tools/ci/runtime_summary.py --title jax "$RUNNER_TEMP/runtime.tsv" >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build jax coverage json (MaxText E2E)
         if: always()
         continue-on-error: true
