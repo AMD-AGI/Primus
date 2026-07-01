@@ -86,7 +86,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             try:
                 m_args = get_megatron_args()
                 if getattr(m_args, "dump_pp_data", False):
-                    from primus.modules.trainer.megatron.utils import (
+                    from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
                         schedule_wrapper,
                         set_dump_pp_data_patch,
                     )
@@ -121,7 +121,9 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
                     get_num_microbatches,
                 )
 
-                from primus.modules.trainer.megatron.utils import dump_pp_data
+                from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+                    dump_pp_data,
+                )
 
                 pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
                 dump_pp_data(megatron_args, get_num_microbatches(), pp_data_dir)

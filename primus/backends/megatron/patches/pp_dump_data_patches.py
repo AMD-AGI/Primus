@@ -30,7 +30,9 @@ def _make_wrapped_get_forward_backward_func(original_get_forward_backward_func):
     def wrapped_get_forward_backward_func():
         from megatron.training import get_args as get_megatron_args
 
-        from primus.modules.trainer.megatron.utils import schedule_wrapper
+        from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+            schedule_wrapper,
+        )
 
         func = original_get_forward_backward_func()
         args = get_megatron_args()
@@ -81,7 +83,7 @@ def patch_pp_dump_data_before_train(ctx: PatchContext):
     import megatron.core.pipeline_parallel as pp_module
     import megatron.training.training as training_module
 
-    import primus.modules.trainer.megatron.utils as utils
+    import primus.backends.megatron.core.pipeline_parallel.pp_visualizer as utils
 
     args = get_args(ctx)
     is_primus_pipeline = getattr(args, "patch_primus_pipeline", False)
@@ -131,7 +133,9 @@ def patch_pp_dump_data_after_train(ctx: PatchContext):
         from megatron.core.num_microbatches_calculator import get_num_microbatches
         from megatron.training import get_args as get_megatron_args
 
-        from primus.modules.trainer.megatron.utils import dump_pp_data
+        from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+            dump_pp_data,
+        )
 
         args = get_megatron_args()
         pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")

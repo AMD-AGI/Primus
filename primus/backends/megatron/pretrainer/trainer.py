@@ -143,7 +143,13 @@ from megatron.training.utils import (
 from megatron.training.yaml_arguments import validate_yaml
 
 from primus.backends.megatron.argument_builder import _load_megatron_defaults
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    schedule_wrapper,
+)
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
+from primus.backends.megatron.patches.args.rocm_arg_validation import (
+    validate_args_on_rocm,
+)
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     get_train_start_time,
@@ -152,26 +158,22 @@ from primus.backends.megatron.training.global_vars import (
 )
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
+from primus.backends.megatron.training.utils import is_v_schedule_enabled
+from primus.core.base_module import BaseModule
 from primus.core.utils import checker, file_utils
-from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
-from primus.modules.base_module import BaseModule
-from primus.modules.module_utils import (
+from primus.core.utils.module_utils import (
     debug_rank_0,
     log_kv_rank_0,
     log_rank_0,
     log_rank_last,
     warning_rank_0,
 )
-from primus.modules.trainer.base_trainer import BaseTrainer
-from primus.modules.trainer.megatron.model_provider import primus_model_provider
+from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
-from .utils import (
-    is_v_schedule_enabled,
-    schedule_wrapper,
-    set_wandb_writer_patch,
-    validate_args_on_rocm,
-)
+from .base_trainer import BaseTrainer
+from .model_provider import primus_model_provider
+from .trainer_utils import set_wandb_writer_patch
 
 # The earliest we can measure the start time.
 set_train_start_time()
@@ -272,14 +274,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(
                 f"-decoder_pipeline_manual_split_list has been deprecated, please use pipeline_model_parallel_layout instead"
             )
-            from .utils import set_manual_pipeline_split_patch, validate_manual_split
+            from .trainer_utils import (
+                set_manual_pipeline_split_patch,
+                validate_manual_split,
+            )
 
             log_rank_0(f"-monkey patch to enable manual pipeline split...")
             if validate_manual_split(args):
                 set_manual_pipeline_split_patch(args)
 
         if args.recompute_layer_ids is not None:
-            from .utils import validate_specified_recompute_layers
+            from .trainer_utils import validate_specified_recompute_layers
 
             validate_specified_recompute_layers(args)
 
@@ -823,7 +828,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args = validate_yaml(args, args_defaults)
         else:
             if args.decoder_pipeline_manual_split_list is not None:
-                from .utils import validate_args_modified
+                from .trainer_utils import validate_args_modified
 
                 ori_code = "if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:"
                 new_code = (
@@ -833,7 +838,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
             elif args.fp4 is not None:
                 # TODO(ruibin): Remove it when ROCm TE upgrade to 2.7.0.dev0
-                from .utils import validate_args_modified
+                from .trainer_utils import validate_args_modified
 
                 ori_code = """raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")"""
                 new_code = """pass"""
@@ -1438,7 +1443,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f">>> Weight hashes match after {iteration} iterations...")
 
         if args.dump_pp_data:
-            from .utils import set_dump_pp_data_patch
+            from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+                set_dump_pp_data_patch,
+            )
 
             set_dump_pp_data_patch()
             log_rank_0(f"dump pp schedule data for visualization")
@@ -1655,7 +1662,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger_utils.track_e2e_metrics()
 
         if args.dump_pp_data:
-            from .utils import dump_pp_data
+            from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+                dump_pp_data,
+            )
 
             pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
             dump_pp_data(args, get_num_microbatches(), pp_data_dir)

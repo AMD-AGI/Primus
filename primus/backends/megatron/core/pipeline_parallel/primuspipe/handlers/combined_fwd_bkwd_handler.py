@@ -8,6 +8,9 @@ from megatron.core.pipeline_parallel.combined_1f1b import combined_forward_backw
 from megatron.core.pipeline_parallel.schedules import deallocate_output_tensor
 from megatron.training.global_vars import get_args
 
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    combined_fwd_bwd_wrapper,
+)
 from primus.backends.megatron.core.pipeline_parallel.primuspipe.handlers.communication_handler import (
     batch_p2p_communication_handler,
 )
@@ -17,7 +20,6 @@ from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     SchedulerNode,
 )
 from primus.core.pipeline_parallel.utils import find_prev_node_with_type
-from primus.modules.trainer.megatron.utils import combined_fwd_bwd_wrapper
 
 
 def megatron_check_combined_fwd_bkwd_node_valid(node: SchedulerNode):

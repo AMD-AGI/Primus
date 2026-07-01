@@ -2537,7 +2537,7 @@ def _summarize_bench_training_config(training_config) -> Dict[str, Any]:
 
 
 def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
-    from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+    from primus.backends.megatron.pretrainer.pre_trainer import MegatronPretrainTrainer
 
     module_config = primus_config.get_module_config("pre_trainer")
     _limit_layers_for_projection(module_config)

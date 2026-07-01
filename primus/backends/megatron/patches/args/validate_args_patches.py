@@ -34,7 +34,9 @@ def patch_validate_args(ctx: PatchContext):
     import megatron.training.arguments as megatron_args
     import megatron.training.initialize as megatron_init
 
-    from primus.modules.trainer.megatron.utils import validate_args_on_rocm
+    from primus.backends.megatron.patches.args.rocm_arg_validation import (
+        validate_args_on_rocm,
+    )
 
     megatron_args._primus_original_validate_args = megatron_args.validate_args
 
