@@ -124,16 +124,14 @@ if [ "$USE_DISTRIBUTED_OPTIMIZER" = "False" ]; then
   DISTOPT_ARGS+=(--use_precision_aware_optimizer False --main_grads_dtype fp32 --exp_avg_dtype fp32 --exp_avg_sq_dtype fp32)
 fi
 
-# ---------- Perf knobs (production V4 Triton attn + Turbo MoE) --------------
+# ---------- Perf knobs (production V4 attn backends + Turbo MoE) ------------
 export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-True}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
-export USE_V4_TRITON_ATTENTION=${USE_V4_TRITON_ATTENTION:-True}
-export USE_V4_TRITON_CSA_ATTENTION=${USE_V4_TRITON_CSA_ATTENTION:-True}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-True}
-export USE_V4_TILELANG_ATTENTION=${USE_V4_TILELANG_ATTENTION:-False}
-export USE_V4_TILELANG_CSA_ATTENTION=${USE_V4_TILELANG_CSA_ATTENTION:-False}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-True}
 export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
 export PRIMUS_V4_ATTN_BWD_USE_SPLIT=${PRIMUS_V4_ATTN_BWD_USE_SPLIT:-1}
@@ -229,11 +227,9 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   "${DISTOPT_ARGS[@]}" \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
-  --use_v4_triton_attention "$USE_V4_TRITON_ATTENTION" \
-  --use_v4_triton_csa_attention "$USE_V4_TRITON_CSA_ATTENTION" \
+  --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
+  --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
-  --use_v4_tilelang_attention "$USE_V4_TILELANG_ATTENTION" \
-  --use_v4_tilelang_csa_attention "$USE_V4_TILELANG_CSA_ATTENTION" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \

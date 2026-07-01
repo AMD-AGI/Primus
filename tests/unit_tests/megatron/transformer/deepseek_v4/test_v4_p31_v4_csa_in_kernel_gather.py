@@ -22,13 +22,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
-    pytest.skip("v4_csa_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+    pytest.skip("v4_csa_attention_v0 Triton kernel requires CUDA / HIP", allow_module_level=True)
 
 pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_csa_attention,
-    v4_csa_attention_from_pool,
+    v4_csa_attention_v1,
 )
 
 _SHAPES = [
@@ -168,7 +168,7 @@ def test_p31_csa_pool_fwd_matches_gathered_reference(
         training=False,
         scale=scale,
     )
-    out_cand = v4_csa_attention_from_pool(
+    out_cand = v4_csa_attention_v1(
         inp["q"],
         inp["k_local"],
         inp["v_local"],
@@ -247,7 +247,7 @@ def test_p31_csa_pool_bwd_matches_gathered_reference(
         ref_inp["sink"],
     )
 
-    out_cand = v4_csa_attention_from_pool(
+    out_cand = v4_csa_attention_v1(
         cand_inp["q"],
         cand_inp["k_local"],
         cand_inp["v_local"],

@@ -249,7 +249,7 @@ class TestG49Misc:
 
 
 # ---------------------------------------------------------------------------
-# G49.6: dispatcher wired into v4_attention / v4_csa_attention wrappers
+# G49.6: dispatcher wired into v4_attention_v1 / v4_csa_attention_v0 wrappers
 # ---------------------------------------------------------------------------
 
 
@@ -261,19 +261,19 @@ class TestG49WrappersHaveDispatch:
         import inspect
 
         mod = importlib.import_module(
-            "primus.backends.megatron.core.transformer.v4_attention_kernels.v4_attention"
+            "primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v1.v4_attention"
         )
-        src = inspect.getsource(mod.v4_attention)
-        assert "should_dispatch" in src, "v4_attention wrapper must call _tilelang.should_dispatch(...)"
-        assert "v4_attention_fwd_tilelang" in src, "v4_attention wrapper must route to the tilelang stub"
+        src = inspect.getsource(mod.v4_attention_v1)
+        assert "should_dispatch" in src, "v4_attention_v1 wrapper must call _tilelang.should_dispatch(...)"
+        assert "v4_attention_fwd_tilelang" in src, "v4_attention_v1 wrapper must route to the tilelang stub"
 
     def test_v4_csa_attention_calls_should_dispatch(self):
         import importlib
         import inspect
 
         mod = importlib.import_module(
-            "primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention"
+            "primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v0_deprecated.v4_csa_attention"
         )
-        src = inspect.getsource(mod.v4_csa_attention)
+        src = inspect.getsource(mod.v4_csa_attention_v0)
         assert "should_dispatch" in src
         assert "v4_csa_attention_fwd_tilelang" in src

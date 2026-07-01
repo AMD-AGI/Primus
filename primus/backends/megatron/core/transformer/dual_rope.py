@@ -42,7 +42,7 @@ import os
 import torch
 import torch.nn as nn
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.rope_interleaved_partial import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     RoPEInterleavedPartialFn,
 )
 

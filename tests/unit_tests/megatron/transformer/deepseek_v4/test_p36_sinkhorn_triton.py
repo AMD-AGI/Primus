@@ -7,7 +7,7 @@
 """Plan-6 P36 G39 — `sinkhorn_normalize` Triton FWD/BWD parity.
 
 Asserts that :class:`SinkhornNormalizeFn` (Triton kernel from
-``primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn``)
+``primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn``)
 matches the eager :func:`sinkhorn_normalize` body in
 ``primus.backends.megatron.core.transformer.hyper_connection`` and the
 plan-5 P29 compiled path within dtype tolerance, FWD **and** BWD, at
@@ -57,7 +57,7 @@ from primus.backends.megatron.core.transformer.hyper_connection import (  # noqa
     _get_compiled_sinkhorn,
     sinkhorn_normalize,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.sinkhorn import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn import (  # noqa: E402
     SinkhornNormalizeFn,
     eager_sinkhorn_normalize,
     is_triton_kernel_supported,

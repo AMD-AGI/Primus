@@ -4,10 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Plan-4 P25 G24 — `v4_attention` Triton BWD equivalence to autograd-on-eager.
+"""Plan-4 P25 G24 — `v4_attention_v1` Triton BWD equivalence to autograd-on-eager.
 
 Asserts that gradients (``dq``, ``dk``, ``dv``, ``dsink``) returned by
-:func:`v4_attention`'s autograd Function match the gradients computed
+:func:`v4_attention_v1`'s autograd Function match the gradients computed
 by autograd-on-:func:`eager_v4_attention` within the plan-4 tolerance
 budget across the same shape envelope as G23 (V4-Flash + V4-Pro,
 ``compress_ratio ∈ {0, 128}``, fp32 + bf16, sink_on / sink_off, MQA /
@@ -27,7 +27,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
-    pytest.skip("v4_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+    pytest.skip("v4_attention_v1 Triton kernel requires CUDA / HIP", allow_module_level=True)
 
 pytest.importorskip("triton", reason="Triton not installed")
 
@@ -36,7 +36,7 @@ from primus.backends.megatron.core.transformer.sliding_window_kv import (  # noq
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_attention,
-    v4_attention,
+    v4_attention_v1,
 )
 
 # ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ def test_g24_dense_bwd_matches_eager(
         out_ref, ref_inp["q"], ref_inp["k"], ref_inp["v"], ref_inp["sink"]
     )
 
-    out_cand = v4_attention(
+    out_cand = v4_attention_v1(
         cand_inp["q"],
         cand_inp["k"],
         cand_inp["v"],
@@ -373,7 +373,7 @@ def test_g24_hca_style_bwd_matches_eager(
         out_ref, ref_inp["q"], ref_inp["k"], ref_inp["v"], ref_inp["sink"]
     )
 
-    out_cand = v4_attention(
+    out_cand = v4_attention_v1(
         cand_inp["q"],
         cand_inp["k"],
         cand_inp["v"],
@@ -420,7 +420,7 @@ def test_g24_no_nan_in_grads_dense_fp32():
         use_hca=False,
         seed=4321,
     )
-    out_cand = v4_attention(
+    out_cand = v4_attention_v1(
         inp["q"],
         inp["k"],
         inp["v"],

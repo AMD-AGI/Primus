@@ -7,7 +7,7 @@
 """Plan-6 P37 G40 — `HyperMixer.compute_weights` tail Triton parity.
 
 Asserts that :class:`HCComputeTailFn` (Triton kernel from
-``primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue``)
+``primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue``)
 matches the eager body in
 ``primus.backends.megatron.core.transformer.hyper_connection.HyperMixer.compute_weights``
 bit-for-bit-equivalent FWD and BWD at two tiers:
@@ -43,7 +43,7 @@ pytest.importorskip("triton", reason="Triton not installed")
 from primus.backends.megatron.core.transformer.hyper_connection import (  # noqa: E402
     HyperMixer,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.hc_glue import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (  # noqa: E402
     HCComputeTailFn,
     is_triton_kernel_supported,
     is_triton_path_enabled,

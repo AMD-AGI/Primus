@@ -7,7 +7,7 @@
 """Plan-6 P41 G43 — `Indexer.forward` post-einsum tail Triton parity.
 
 Asserts that :class:`IndexerScorePostFn` (Triton tail kernel from
-``primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post``)
+``primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post``)
 produces scores that match the eager **tail** (``relu + mul + sum(H)
 + causal_mask``, with the einsum kept eager) within bf16 tolerance,
 and that the load-bearing post-`topk` ``topk_idxs`` are bit-equal
@@ -35,7 +35,7 @@ if not torch.cuda.is_available():
 pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.indexer import Indexer  # noqa: E402
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score_post import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (  # noqa: E402
     IndexerScorePostFn,
     indexer_score_post_triton,
     is_triton_kernel_supported,
@@ -269,7 +269,7 @@ class TestG43EdgeCases:
     def test_env_distinct_from_full(self):
         """`PRIMUS_INDEXER_TRITON` controls the tail path; the legacy
         P38 full-fuse path is gated by `PRIMUS_INDEXER_TRITON_FULL`."""
-        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.indexer_score import (
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (
             is_triton_path_enabled as full_enabled,
         )
 

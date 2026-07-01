@@ -31,11 +31,11 @@ if not torch.cuda.is_available():
 # environment instead of erroring at import time.
 pytest.importorskip("tilelang.language", reason="tilelang not installed")
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._eager.reference import (  # noqa: E402
+    eager_v4_attention,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4_attention_fwd_tilelang import (  # noqa: E402
     v4_attention_fwd_tilelang,
-)
-from primus.backends.megatron.core.transformer.v4_attention_kernels.reference import (  # noqa: E402
-    eager_v4_attention,
 )
 
 

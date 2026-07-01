@@ -106,25 +106,14 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # plan-4 P25 / P26: in-tree Primus Triton kernels for V4 attention.
-      # Precedence in DeepseekV4Attention.forward:
-      #   use_turbo_attention > use_v4_tilelang_attention > use_v4_triton_attention > eager   (cr ∈ {0, 128})
-      #   use_v4_tilelang_csa_attention > use_v4_triton_csa_attention > eager                 (cr == 4)
-      use_v4_triton_attention: ${PRIMUS_USE_V4_TRITON_ATTENTION:false}
-      use_v4_triton_csa_attention: ${PRIMUS_USE_V4_TRITON_CSA_ATTENTION:false}
+      # V4 attention backend selection (unified string selectors; default triton_v1).
+      #   use_v4_attention_backend     (dense cr=0 / HCA cr=128): eager|triton_v1|triton_v2|gluon
+      #   use_v4_csa_attention_backend (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
+      use_v4_attention_backend: ${PRIMUS_USE_V4_ATTENTION_BACKEND:triton_v1}
+      use_v4_csa_attention_backend: ${PRIMUS_USE_V4_CSA_ATTENTION_BACKEND:triton_v1}
 
       # FP8 (E4M3) Indexer QK path (CSA selector); BF16 index-score preserved.
       use_v4_fp8_indexer: ${PRIMUS_USE_V4_FP8_INDEXER:false}
-
-      # Plan-8 tilelang attention kernels (OPTIONAL — tilelang is NOT
-      # bundled in the default Primus container). When enabled, the
-      # V4 attention dispatcher routes through the tilelang FWD/BWD;
-      # when tilelang is not installed, the dispatcher prints a single
-      # rank-0 warning and falls back to Triton -- training continues
-      # without error. Replaces the legacy PRIMUS_V4_TILELANG_ATTN env
-      # knob (no longer consulted).
-      use_v4_tilelang_attention: ${PRIMUS_USE_V4_TILELANG_ATTENTION:false}
-      use_v4_tilelang_csa_attention: ${PRIMUS_USE_V4_TILELANG_CSA_ATTENTION:false}
 
       # plan-5 P29 (RESCOPED): wrap sinkhorn_normalize with a cached
       # torch.compile(fullgraph=True, dynamic=False) build. Default

@@ -33,7 +33,7 @@ attention kernels (cr ∈ {0, 4, 128}).  At P49 it ships only the
   - :func:`v4_csa_attention_bwd_tilelang`       (P55 — cr=4 BWD)
 
 The dispatcher precedence (enforced inside the V4 attention
-functional wrappers ``v4_attention`` / ``v4_csa_attention``) is:
+functional wrappers ``v4_attention_v1`` / ``v4_csa_attention_v0``) is:
 
 .. code-block:: text
 
@@ -291,7 +291,7 @@ def v4_csa_attention_bwd_tilelang(*args: Any, **kwargs: Any):  # type: ignore[no
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher helpers — used by the v4_attention / v4_csa_attention wrappers
+# Dispatcher helpers — used by the v4_attention_v1 / v4_csa_attention_v0 wrappers
 # ---------------------------------------------------------------------------
 
 _FALLBACK_WARNED: Set[str] = set()
@@ -337,8 +337,8 @@ def _maybe_warn_fallback(kernel_name: str) -> None:
 
 
 def should_dispatch(kernel_name: str, enabled: bool = False) -> bool:
-    """Single dispatcher predicate used by ``v4_attention`` /
-    ``v4_csa_attention`` wrappers.
+    """Single dispatcher predicate used by ``v4_attention_v1`` /
+    ``v4_csa_attention_v0`` wrappers.
 
     Returns True iff all three conditions hold:
 

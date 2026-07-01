@@ -4,10 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Plan-4 P26 G27 — `v4_csa_attention` Triton BWD equivalence to autograd-on-eager.
+"""Plan-4 P26 G27 — `v4_csa_attention_v0` Triton BWD equivalence to autograd-on-eager.
 
 Asserts that gradients (``dq``, ``dk_local``, ``dv_local``,
-``dgathered``, ``dsink``) returned by :func:`v4_csa_attention`'s
+``dgathered``, ``dsink``) returned by :func:`v4_csa_attention_v0`'s
 autograd Function match the gradients computed by autograd-on-
 :func:`eager_v4_csa_attention` within the plan-4 tolerance budget.
 
@@ -36,13 +36,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
-    pytest.skip("v4_csa_attention Triton kernel requires CUDA / HIP", allow_module_level=True)
+    pytest.skip("v4_csa_attention_v0 Triton kernel requires CUDA / HIP", allow_module_level=True)
 
 pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (  # noqa: E402
     eager_v4_csa_attention,
-    v4_csa_attention,
+    v4_csa_attention_v0,
 )
 
 # ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def test_g27_csa_bwd_matches_eager(
         ref_inp["sink"],
     )
 
-    out_cand = v4_csa_attention(
+    out_cand = v4_csa_attention_v0(
         cand_inp["q"],
         cand_inp["k_local"],
         cand_inp["v_local"],
@@ -326,7 +326,7 @@ def test_g27_csa_bwd_grads_finite_with_masked_topk(dtype: torch.dtype):
     )
     sink = torch.randn(H, generator=g, device=device, dtype=torch.float32, requires_grad=True) * 0.1
 
-    out = v4_csa_attention(
+    out = v4_csa_attention_v0(
         q,
         k_local,
         v_local,

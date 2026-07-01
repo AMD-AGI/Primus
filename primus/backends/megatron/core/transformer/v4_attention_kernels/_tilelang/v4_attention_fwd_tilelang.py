@@ -57,15 +57,15 @@ local scope (e.g. ``q_shape`` defined inside the JIT factory).
 
 from typing import Optional, Tuple
 
-import torch
-
 # Lazy import — tilelang is heavy.  The wrapper checks
 # ``_tilelang.should_dispatch(...)`` upstream so we only land here
 # when the env knob is set + tilelang is importable.
 import tilelang
 import tilelang.language as T
+import torch
+
 from primus.backends.megatron.core.transformer.v4_attention_kernels import _tilelang
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.v4_attention_fwd import (
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v1.v4_attention_fwd import (
     _launch_v4_attention_fwd,
 )
 
@@ -428,7 +428,7 @@ def v4_attention_fwd_tilelang(
 ) -> torch.Tensor:
     """Plan-8 P50 tilelang dense / SWA / sink FWD wrapper.
 
-    Drop-in replacement for the relevant subset of ``v4_attention``
+    Drop-in replacement for the relevant subset of ``v4_attention_v1``
     (the Triton autograd path).  When the call site requires features
     P50 doesn't cover (`additive_mask`, `hca_local_seqlen > 0`), the
     wrapper falls back to the Triton kernel via

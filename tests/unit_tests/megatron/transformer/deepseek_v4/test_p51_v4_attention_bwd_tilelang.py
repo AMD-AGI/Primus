@@ -30,12 +30,12 @@ if not torch.cuda.is_available():
 # from the vendored source tree.
 pytest.importorskip("tilelang.language", reason="tilelang not installed")
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._eager.reference import (  # noqa: E402
+    eager_v4_attention,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._tilelang.v4_attention_autograd_tilelang import (  # noqa: E402
     V4AttentionTilelangFn,
     v4_attention_tilelang,
-)
-from primus.backends.megatron.core.transformer.v4_attention_kernels.reference import (  # noqa: E402
-    eager_v4_attention,
 )
 
 
@@ -157,20 +157,20 @@ class TestG51DispatcherRegistration:
 
     def test_full_dispatch_uses_autograd_path(self):
         """When ``use_tilelang=True`` and both FWD/BWD are registered, the
-        public ``v4_attention()`` should route through ``V4AttentionTilelangFn``.
+        public ``v4_attention_v1()`` should route through ``V4AttentionTilelangFn``.
 
         Plan-8 P57 close-out 2: the legacy ``PRIMUS_V4_TILELANG_ATTN``
         env knob is gone; the caller now plumbs the config flag via
         the ``use_tilelang`` kwarg.
         """
         from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_attention import (
-            v4_attention,
+            v4_attention_v1,
         )
 
         B, HQ, Sq, Sk, D = 1, 4, 32, 32, 64
         q, k, v, sink = _build_inputs(B=B, HQ=HQ, HK=1, Sq=Sq, Sk=Sk, D=D, dtype=torch.bfloat16)
         q.requires_grad_(True)
-        out = v4_attention(
+        out = v4_attention_v1(
             q,
             k,
             v,

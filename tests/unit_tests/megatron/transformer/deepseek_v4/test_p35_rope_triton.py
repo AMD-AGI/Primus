@@ -7,7 +7,7 @@
 """Plan-6 P35 G38 — `apply_interleaved_partial_rope` Triton FWD/BWD parity.
 
 Asserts that :class:`RoPEInterleavedPartialFn` (Triton kernel from
-``primus.backends.megatron.core.transformer.v4_attention_kernels._triton.rope_interleaved_partial``)
+``primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial``)
 produces the same output as the eager
 :func:`apply_interleaved_partial_rope` body in
 ``primus.backends.megatron.core.transformer.dual_rope``, FWD **and**
@@ -48,7 +48,7 @@ pytest.importorskip("triton", reason="Triton not installed")
 from primus.backends.megatron.core.transformer.dual_rope import (  # noqa: E402
     apply_interleaved_partial_rope,
 )
-from primus.backends.megatron.core.transformer.v4_attention_kernels._triton.rope_interleaved_partial import (  # noqa: E402
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (  # noqa: E402
     RoPEInterleavedPartialFn,
     apply_rope_interleaved_partial,
     eager_apply_interleaved_partial_rope,
