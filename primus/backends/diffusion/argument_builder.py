@@ -53,7 +53,7 @@ class WanArgBuilder:
             "per_device_eval_batch_size": 1,
             "gradient_accumulation_steps": 1,
             "gradient_checkpointing": True,
-            "attention_backend": "sdpa",
+            "attention_backend": "flash_attn_aiter",
             "learning_rate": 1.0e-5,
             "lr_scheduler_type": "constant",
             "warmup_steps": 0,
