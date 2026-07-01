@@ -92,6 +92,15 @@ select, input {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 7px; padding: 7px 9px; font-size: 14px;
 }
+/* Drop the native number spinner buttons: in the narrow sidebar they eat ~17px
+   and clip long values (e.g. 15824 shown as "1582"). Values are typed, not
+   stepped, so the arrows add no value. */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* Slightly tighter type + padding for the sidebar grids so 5-6 digit numbers
+   fit their column without truncation. */
+.controls-grid input, .manual-row input { font-size: 13px; padding-left: 8px; padding-right: 8px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field--inline { flex-direction: row; align-items: center; gap: 8px; }
 .field > span { font-size: 12px; color: var(--muted); }
