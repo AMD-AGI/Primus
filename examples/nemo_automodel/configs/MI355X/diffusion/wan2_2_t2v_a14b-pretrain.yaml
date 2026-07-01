@@ -1,0 +1,43 @@
+# Primus EXP config — Wan 2.2 T2V A14B pretrain via the NeMo AutoModel backend
+# on MI355X. Selects framework: nemo_automodel, consistent
+# with how the megatron diffusion FLUX EXPs select framework: megatron.
+#
+# One-time setup (like any other Primus backend): initialize the submodule. The
+# launcher's prepare step then installs it editable (ROCm-pinned) on first run.
+#   git submodule update --init third_party/Automodel
+#   # (skipped automatically if the image already ships nemo_automodel)
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain.yaml \
+#   bash examples/run_pretrain.sh
+#   # AC-off operating points (Wan 2.1 GB300-comparable) via CLI overrides, e.g.:
+#   #   ... bash examples/run_pretrain.sh \
+#   #       fsdp.activation_checkpointing=false \
+#   #       step_scheduler.local_batch_size=8 step_scheduler.global_batch_size=64
+#
+# low-noise expert: override model.stage=low_noise and
+#   model.pipeline_spec.subfolder=transformer_2.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      # Throughput-benchmark sizing (optimized headline point: bs32 AC-on).
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 32
+        global_batch_size: 256
+      data:
+        dataloader:
+          cache_dir: /dataset/pusa_v1_512sq
+      checkpoint:
+        enabled: false

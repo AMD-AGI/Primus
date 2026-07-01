@@ -1,0 +1,52 @@
+# Primus EXP — Wan 2.2 T2V A14B PRETRAIN, optimized AC-off bs8.
+# =============================================================================
+# Fastest measured operating point. With torch.compile cutting activation
+# memory, activation checkpointing can be turned OFF at bs8 (which OOM'd in the
+# un-optimized baseline), giving the best throughput. This mirrors the Wan 2.1
+# GB300 small-batch / AC-off reference setup.
+#
+# Measured (8x MI355X, 512x512, real PusaV1, fp32 master / bf16 compute):
+#   ~3.68-3.69 samples/s/GPU (~29.4 total) at mem ~236.8 GB (AC OFF, bs8)
+#   == new best point; un-optimized AC-off OOM'd at bs8 (ceiling was bs6 @ ~240 GB).
+# (bs6 AC-off, the more conservative GB300-comparable point, measures
+#  ~3.54 s/s/GPU @ ~183.5 GB — set local_batch_size=6 / global_batch_size=48.)
+#
+# One-time setup (like any Primus backend): initialize the submodule; the
+# launcher's prepare step installs it editable (ROCm-pinned) on first run.
+#   git submodule update --init third_party/Automodel
+#   # (auto-skipped if the image already ships nemo_automodel)
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain-bs8-acoff.yaml \
+#   bash examples/run_pretrain.sh
+#
+# low-noise expert: override model.stage=low_noise and
+#   model.pipeline_spec.subfolder=transformer_2.
+# Remove step_scheduler.max_steps to train full epochs instead of a benchmark cap.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-pretrain-bs8-acoff}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      # AC-OFF best point: compile buys enough memory to drop activation
+      # checkpointing at bs8 (~237 GB of the 288 GB HBM3e).
+      step_scheduler:
+        max_steps: 25            # benchmark cap; remove for a real pretrain run
+        local_batch_size: 8
+        global_batch_size: 64    # 8 x dp8
+      fsdp:
+        activation_checkpointing: false
+      data:
+        dataloader:
+          cache_dir: /dataset/pusa_v1_512sq
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run
