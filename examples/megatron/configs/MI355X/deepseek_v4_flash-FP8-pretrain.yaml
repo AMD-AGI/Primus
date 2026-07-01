@@ -120,11 +120,11 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # V4 attention backend selection (unified string selectors; default gluon).
+      # V4 attention backend selection (unified string selectors; default triton_v1).
       #   use_v4_attention_backend     (dense cr=0 / HCA cr=128): eager|triton_v1|triton_v2|gluon
       #   use_v4_csa_attention_backend (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
-      use_v4_attention_backend: ${PRIMUS_USE_V4_ATTENTION_BACKEND:gluon}
-      use_v4_csa_attention_backend: ${PRIMUS_USE_V4_CSA_ATTENTION_BACKEND:gluon}
+      use_v4_attention_backend: ${PRIMUS_USE_V4_ATTENTION_BACKEND:triton_v1}
+      use_v4_csa_attention_backend: ${PRIMUS_USE_V4_CSA_ATTENTION_BACKEND:triton_v1}
 
       # plan-5 P29 (RESCOPED): wrap sinkhorn_normalize with a cached
       # torch.compile(fullgraph=True, dynamic=False) build. Default

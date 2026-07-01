@@ -9,7 +9,7 @@
 Static (wiring) gate for the unified ``use_v4_csa_attention_backend`` selector:
 
 * :class:`DeepSeekV4TransformerConfig` exposes ``use_v4_csa_attention_backend: str``
-  defaulting to ``"gluon"``;
+  defaulting to ``"triton_v1"``;
 * :class:`DeepseekV4Attention.__init__` reads it into ``self._csa_backend``;
 * :meth:`DeepseekV4Attention._csa_forward` switches on ``self._csa_backend``,
   dispatching to ``v4_csa_attention_gluon`` / ``v4_csa_attention_v2`` /
@@ -28,10 +28,10 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
 
 
 def test_config_exposes_csa_backend_selector():
-    """V4 config exposes ``use_v4_csa_attention_backend: str = 'gluon'``."""
+    """V4 config exposes ``use_v4_csa_attention_backend: str = 'triton_v1'``."""
     fields = DeepSeekV4TransformerConfig.__dataclass_fields__
     assert "use_v4_csa_attention_backend" in fields
-    assert fields["use_v4_csa_attention_backend"].default == "gluon"
+    assert fields["use_v4_csa_attention_backend"].default == "triton_v1"
 
 
 def test_attention_init_reads_csa_backend_selector():
@@ -57,11 +57,12 @@ def test_csa_forward_switches_on_csa_backend_and_references_kernels():
     assert "_csa_backend" in names
     for be in ("gluon", "triton_v2", "triton_v1", "flydsl_v0"):
         assert be in consts, f"_csa_forward must handle CSA backend value {be!r}"
-    # references the pool (v1), sparse-MLA (v2), gluon, gathered (v0) and eager entries
+    # references the pool (v1), sparse-MLA (v2), gathered (v0) and eager entries;
+    # gluon is loaded lazily onto ``self._v4_csa_attention_gluon`` (attribute access).
     for fn in (
         "v4_csa_attention_v1",
         "v4_csa_attention_v2",
-        "v4_csa_attention_gluon",
+        "_v4_csa_attention_gluon",
         "v4_csa_attention_v0",
         "eager_v4_csa_attention",
     ):

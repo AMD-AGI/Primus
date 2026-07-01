@@ -16,6 +16,7 @@ candidate kernels and assert exactly one fires. ``__init__`` is bypassed via
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -47,6 +48,11 @@ def _make_bare_attn(
     attn._use_core_attention = bool(use_core_attention)
     attn._attn_backend = attn_backend
     attn._csa_backend = csa_backend
+    # gluon is loaded lazily onto the instance in __init__; mirror the None
+    # placeholders here so non-gluon paths never touch it (tests that exercise the
+    # gluon branch set these to a mock explicitly).
+    attn._v4_attention_gluon = None
+    attn._v4_csa_attention_gluon = None
     return attn
 
 
@@ -111,7 +117,15 @@ def test_dense_backend_forward_dispatch(attn_be, fired):
     attn.training = False
     attn._attention_scale = MagicMock(return_value=0.125)
     sentinel = object()
-    with patch.object(v4_attn_mod, fired, return_value=sentinel) as mock_fired:
+    mock_fired = MagicMock(return_value=sentinel)
+    # gluon is dispatched via the lazily-loaded instance attribute
+    # (self._v4_attention_gluon); other backends via a module-level entry.
+    if attn_be == "gluon":
+        attn._v4_attention_gluon = mock_fired
+        ctx = contextlib.nullcontext()
+    else:
+        ctx = patch.object(v4_attn_mod, fired, mock_fired)
+    with ctx:
         out = DeepseekV4Attention._attention_backend_forward(
             attn,
             MagicMock(),
@@ -204,9 +218,17 @@ def test_csa_forward_dispatch(csa_be, fired, builds_gathered):
     attn.indexer = MagicMock(return_value=(topk, MagicMock()))
 
     sentinel = object()
-    with patch.object(v4_attn_mod, fired, return_value=sentinel) as mock_fired, patch(
-        "torch.gather", return_value=MagicMock()
-    ), patch("torch.where", return_value=MagicMock()):
+    mock_fired = MagicMock(return_value=sentinel)
+    # gluon is dispatched via the lazily-loaded instance attribute
+    # (self._v4_csa_attention_gluon); other backends via a module-level entry.
+    if csa_be == "gluon":
+        attn._v4_csa_attention_gluon = mock_fired
+        fired_ctx = contextlib.nullcontext()
+    else:
+        fired_ctx = patch.object(v4_attn_mod, fired, mock_fired)
+    with fired_ctx, patch("torch.gather", return_value=MagicMock()), patch(
+        "torch.where", return_value=MagicMock()
+    ):
         _, q_bh, k_local_bh, v_local_bh, local_mask = _stub_csa_inputs()
         out = DeepseekV4Attention._csa_forward(
             attn,

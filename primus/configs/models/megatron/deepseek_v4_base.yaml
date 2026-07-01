@@ -53,8 +53,8 @@ attn_sink: true
 #   use_v4_csa_attention_backend (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
 # use_turbo_attention (when a core_attention module is built) still takes
 # precedence for the dense path.
-use_v4_attention_backend: gluon
-use_v4_csa_attention_backend: gluon
+use_v4_attention_backend: triton_v1
+use_v4_csa_attention_backend: triton_v1
 
 # FP8 (E4M3) Indexer QK path (CSA selector). Default off; the indexer QK
 # scoring inputs are fake-quantized to FP8 when enabled (BF16 index-score /

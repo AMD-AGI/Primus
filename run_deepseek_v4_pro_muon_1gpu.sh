@@ -212,8 +212,8 @@ OPT_DTYPE_ARGS="--main_grads_dtype fp32 --exp_avg_dtype fp32 --exp_avg_sq_dtype 
 # HCA layers (compress_ratio in {0, 128}) via USE_V4_ATTENTION_BACKEND and the
 # CSA layers (compress_ratio == 4) via USE_V4_CSA_ATTENTION_BACKEND.
 # Validated on gfx1250 after the WMMA tile-floor fix (06ae5214).
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-gluon}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-gluon}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}

@@ -83,15 +83,16 @@ from primus.backends.megatron.core.transformer.sliding_window_kv import (
 )
 
 # All attention backend entries come from the kernels package __init__ (the
-# single entry point): eager, triton v1/v2, gluon. Naming: v4_attention_<be>
-# (dense/HCA) and v4_csa_attention_<be> (CSA).
+# single entry point): eager, triton v1/v2. Naming: v4_attention_<be>
+# (dense/HCA) and v4_csa_attention_<be> (CSA). The gluon backend is NOT imported
+# here — it hard-depends on triton.experimental.gluon (gfx950 only) and is loaded
+# lazily via load_gluon_attention_backends() only when a layer selects it.
 from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     eager_v4_attention,
     eager_v4_csa_attention,
-    v4_attention_gluon,
+    load_gluon_attention_backends,
     v4_attention_v1,
     v4_attention_v2,
-    v4_csa_attention_gluon,
     v4_csa_attention_v0,
     v4_csa_attention_v1,
     v4_csa_attention_v2,
@@ -100,6 +101,28 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
 logger = logging.getLogger(__name__)
+
+
+def _require_gfx950() -> None:
+    """Assert the current device is gfx950 / CDNA4 before using the gluon backend.
+
+    The gluon sparse-MLA kernels are hand-tuned for gfx950 (MI350/MI355X); running
+    them on any other arch is unsupported. Called only when a layer selects
+    ``use_v4_attention_backend`` / ``use_v4_csa_attention_backend = 'gluon'``.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "use_v4_attention_backend / use_v4_csa_attention_backend = 'gluon' requires a "
+            "CUDA/HIP gfx950 (CDNA4) device, but no accelerator is available. Select "
+            "eager | triton_v1 | triton_v2 instead."
+        )
+    arch = str(getattr(torch.cuda.get_device_properties(0), "gcnArchName", ""))
+    if "gfx950" not in arch:
+        raise RuntimeError(
+            "use_v4_attention_backend / use_v4_csa_attention_backend = 'gluon' targets gfx950 / "
+            f"CDNA4 (MI350/MI355X); got device arch {arch!r}. Select eager | triton_v1 | triton_v2 "
+            "instead, or run on gfx950."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +698,17 @@ class DeepseekV4Attention(MLASelfAttention):
                 f"expected one of {_CSA_BACKENDS}"
             )
 
+        # gluon is a gfx950/CDNA4-only backend with a hard triton.experimental.gluon
+        # dependency. Load it (and validate the arch) ONLY when a layer actually
+        # selects it, so non-gluon backends never pay the import and never crash on
+        # unsupported hardware / Triton builds. The loader raises a clear ImportError
+        # if the dependency is missing; ``_require_gfx950`` raises if the arch is wrong.
+        self._v4_attention_gluon = None
+        self._v4_csa_attention_gluon = None
+        if "gluon" in (self._attn_backend, self._csa_backend):
+            _require_gfx950()
+            self._v4_attention_gluon, self._v4_csa_attention_gluon = load_gluon_attention_backends()
+
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
         if submodules.core_attention is not None and self.compress_ratio == 0:
@@ -1231,7 +1265,7 @@ class DeepseekV4Attention(MLASelfAttention):
         # use the per-query gathered [B, S, K, Dh] representation.
         be = self._csa_backend
         if be == "gluon":
-            return v4_csa_attention_gluon(
+            return self._v4_csa_attention_gluon(
                 q_bh,
                 k_local_bh,
                 v_local_bh,
@@ -1315,7 +1349,7 @@ class DeepseekV4Attention(MLASelfAttention):
         """Dense (cr=0) / HCA (cr=128) dispatch on ``use_v4_attention_backend``."""
         be = self._attn_backend
         if be == "gluon":
-            return v4_attention_gluon(
+            return self._v4_attention_gluon(
                 q_bh,
                 k,
                 v,
