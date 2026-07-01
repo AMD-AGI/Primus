@@ -21,7 +21,7 @@ after_train:
 import os
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _make_wrapped_get_forward_backward_func(original_get_forward_backward_func):

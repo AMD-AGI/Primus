@@ -33,7 +33,7 @@ from primus.core.pipeline_parallel.scheduler.schedule_table_factory import (
 )
 from primus.core.pipeline_parallel.scheduler.scheduler import ScheduleRunner
 from primus.core.pipeline_parallel.scheduler.scheduler_node import FuncType
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 
 class PrimusPipelineParallelLauncher:

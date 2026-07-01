@@ -14,7 +14,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
 from primus.backends.megatron.core.enums import Fp4Recipe
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False

@@ -17,7 +17,7 @@ DataLoaderStore and uses its push/pop mechanism for batch retrieval.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _needs_forward_step_patch(ctx: PatchContext) -> bool:

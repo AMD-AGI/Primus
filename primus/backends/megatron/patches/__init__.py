@@ -14,7 +14,7 @@ import importlib
 import pkgutil
 
 # from primus.core.patches import run_patches
-# from primus.modules.module_utils import log_rank_0
+# from primus.core.utils.module_utils import log_rank_0
 
 
 def _auto_import_patch_modules() -> None:

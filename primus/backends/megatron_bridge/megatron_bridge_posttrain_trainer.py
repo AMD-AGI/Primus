@@ -22,7 +22,7 @@ from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0
 
 
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):

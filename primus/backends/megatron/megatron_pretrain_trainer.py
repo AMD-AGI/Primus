@@ -5,7 +5,7 @@
 ###############################################################################
 
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class MegatronPretrainTrainer(MegatronBaseTrainer):

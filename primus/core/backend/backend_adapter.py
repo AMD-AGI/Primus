@@ -40,7 +40,7 @@ class BackendAdapter(ABC):
         beyond `BackendRegistry.run_setup(self.framework)`.
         """
         from primus.core.backend.backend_registry import BackendRegistry
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         BackendRegistry.run_setup(self.framework)
         log_rank_0(f"[Primus:{self.framework}] Backend prepared")
@@ -57,7 +57,7 @@ class BackendAdapter(ABC):
         import sys
         from pathlib import Path
 
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         def _use_path(path: str, error_msg: str) -> str:
             norm_path = os.path.abspath(os.path.normpath(str(path)))

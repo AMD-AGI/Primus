@@ -217,7 +217,7 @@ class TestMegatronAdapterTrainerLoading:
 class TestMegatronAdapterBackendPreparation:
     """Test backend preparation workflow."""
 
-    @patch("primus.modules.module_utils.log_rank_0")
+    @patch("primus.core.utils.module_utils.log_rank_0")
     def test_prepare_backend_success(self, mock_log):
         """Test successful backend preparation."""
         adapter = MegatronAdapter()
@@ -244,7 +244,7 @@ class TestMegatronAdapterInitialization:
 class TestMegatronAdapterIntegration:
     """Integration tests for complete adapter workflow."""
 
-    @patch("primus.modules.module_utils.log_rank_0")
+    @patch("primus.core.utils.module_utils.log_rank_0")
     @patch("primus.backends.megatron.megatron_adapter.MegatronAdapter.detect_backend_version")
     @patch("primus.backends.megatron.megatron_adapter.MegatronArgBuilder")
     @patch("primus.backends.megatron.megatron_adapter.log_rank_0")

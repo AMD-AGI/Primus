@@ -14,7 +14,7 @@ from Megatron's training.train(). Logic mirrors trainer.py L1277-1298.
 import inspect
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _is_called_from_training_train() -> bool:
@@ -32,7 +32,7 @@ def _create_primus_prof(args, exp_name: str, original_profile):
     """
     Create torch profiler with Primus options.
 
-    Logic from primus/modules/trainer/megatron/trainer.py L1277-1298.
+    Logic from primus/backends/megatron/pretrainer/trainer.py.
     """
     import torch
 

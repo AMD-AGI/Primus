@@ -15,7 +15,7 @@ from primus.backends.megatron.training.global_vars import (
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.env import flush_before_hard_exit
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):

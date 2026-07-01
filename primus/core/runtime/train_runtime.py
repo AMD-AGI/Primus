@@ -25,12 +25,12 @@ from primus.core.patches import run_patches
 from primus.core.runtime.logging import init_worker_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     merge_namespace,
     nested_namespace_to_dict,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 
 # ---------------------------------------------------------------------------
 # Context & Hooks
