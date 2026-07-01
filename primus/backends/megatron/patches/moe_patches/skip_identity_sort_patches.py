@@ -35,10 +35,15 @@ import torch
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
-# Cache the identity decision keyed on the index tensor object. The topology
-# index tensors persist for the dispatcher's lifetime, so a WeakKeyDictionary
-# evicts entries automatically once a dispatcher is freed.
-_IDENTITY_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+# Cache the identity decision keyed on the index tensor's ``id()``. The topology
+# index tensors persist for the dispatcher's lifetime, so caching by identity is
+# stable across steps. A ``WeakKeyDictionary`` cannot be used here because weakref
+# equality falls back to ``tensor == tensor`` (which yields a tensor, not a bool)
+# and raises "Boolean value of Tensor ... is ambiguous". Instead we key on
+# ``id(idxs)`` and register a ``weakref.finalize`` callback so the entry is
+# evicted when the tensor is garbage-collected (preventing stale hits from
+# ``id()`` reuse).
+_IDENTITY_CACHE: dict = {}
 
 
 def _skip_enabled(_ctx: PatchContext) -> bool:
@@ -48,14 +53,18 @@ def _skip_enabled(_ctx: PatchContext) -> bool:
 def _is_identity(idxs) -> bool:
     if idxs is None or not torch.is_tensor(idxs) or idxs.dim() != 1 or idxs.numel() == 0:
         return False
-    cached = _IDENTITY_CACHE.get(idxs)
+    key = id(idxs)
+    cached = _IDENTITY_CACHE.get(key)
     if cached is not None:
         return cached
     result = bool(
         torch.equal(idxs, torch.arange(idxs.numel(), device=idxs.device, dtype=idxs.dtype))
     )
     try:
-        _IDENTITY_CACHE[idxs] = result
+        # Evict on GC so a future tensor reusing this ``id()`` cannot hit a stale
+        # decision.
+        weakref.finalize(idxs, _IDENTITY_CACHE.pop, key, None)
+        _IDENTITY_CACHE[key] = result
     except TypeError:
         # Some tensors are not weak-referenceable; fall back to no caching.
         pass
