@@ -40,15 +40,14 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 DATASET_PATH=/data/tiny-video-samples/meta.jsonl \
 DATA_FOLDER=/data/tiny-video-samples/data \
 ATTENTION_BACKEND=sdpa \
-CONFIG=examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-pretrain.yaml \
 SP_SIZE=1 \
-MAX_STEPS=3 \
+MAX_STEPS=10 \
 torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
   --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
   --nproc_per_node="$GPUS_PER_NODE" \
   -m primus.cli.main train pretrain \
-  --config "$CONFIG"
+  --config examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-pretrain.yaml
 ```
 
 Use `SP_SIZE=4` or `SP_SIZE=8` to enable Ulysses sequence parallelism
@@ -60,14 +59,13 @@ when the model head count supports it.
 INIT_CHECKPOINT=/models/Wan2.2-TI2V-5B \
 DATASET_PATH=/data/tiny-video-samples/meta.jsonl \
 DATA_FOLDER=/data/tiny-video-samples/data \
-CONFIG=examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-posttrain.yaml \
-MAX_STEPS=3 \
+MAX_STEPS=10 \
 torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
   --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
   --nproc_per_node="$GPUS_PER_NODE" \
   -m primus.cli.main train posttrain \
-  --config "$CONFIG"
+  --config examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-posttrain.yaml
 ```
 
 The MI355X configs use Primus-style override sections such as `training`,
