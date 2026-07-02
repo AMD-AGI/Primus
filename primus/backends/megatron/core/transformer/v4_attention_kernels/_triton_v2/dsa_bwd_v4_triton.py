@@ -21,15 +21,15 @@ reduction ``-sum_t exp(sink - lse) * delta``.
 import torch
 import triton
 
-# These bwd-gather kernels are plain @triton.jit (not gluon) and backend-neutral;
-# reuse them rather than duplicate ~600 lines.
-from .._gluon_dsa._dsa_bwd_gather import (
-    _build_inverted_topk_slice,
-    _bwd_chunk_dkv_interm,
-    _bwd_chunk_dq,
+# CSR-inverted-topk builder + Delta preprocess are backend-neutral torch/host
+# helpers; reuse them. The compute kernels are owned locally (dsa_bwd_kernels)
+# so this backend can be tuned independently of the gluon path.
+from .._gluon_dsa._dsa_bwd_gather import _build_inverted_topk_slice
+from .dsa_bwd_kernels import (
+    _bwd_chunk_dq_store_ds,
+    _bwd_compute_dkv_intermediate,
     _bwd_dkv_gather_acc,
 )
-from .._gluon_dsa._dsa_bwd_preprocess import _sparse_mla_bwd_preprocess
 
 
 def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_lora_rank=512, scale=None):
@@ -54,34 +54,46 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
     if has_sink:
         assert attn_sink.dtype == torch.float32 and attn_sink.shape == (num_heads,)
 
-    # ---- preprocess: Delta = rowsum(O*dO) ----
+    # Delta = rowsum(O*dO) is fused into the first dQ chunk (no preprocess kernel).
     delta = torch.empty(total_tokens, num_heads, dtype=torch.float32, device=q.device)
-    BLOCK_H_PRE = triton.next_power_of_2(min(64, num_heads))
-    _sparse_mla_bwd_preprocess[(total_tokens, triton.cdiv(num_heads, BLOCK_H_PRE))](
-        O_ptr=o,
-        dO_ptr=do,
-        Delta_ptr=delta,
-        stride_o_t=o.stride(0),
-        stride_o_h=o.stride(1),
-        num_heads=num_heads,
-        D_V=kv_lora_rank,
-        BLOCK_H=BLOCK_H_PRE,
-    )
 
     # ---- config (mirror the gluon bwd chunking) ----
-    R_CHUNK = min(256, topk)
+    # R_CHUNK (rank-chunk width): dQ is read-modify-written across chunks, so more
+    # chunks = more redundant dq reload passes + repeated launches/CSR builds. For
+    # high head counts (H>=128) the dq RMW volume is large, so a single chunk over
+    # the whole topk (bounded for memory) is a big win (-22% on pro cr4). For low
+    # head counts (H<=64) the smaller dq RMW is outweighed by the larger per-chunk
+    # buffers/occupancy, and 256 stays best — so keep the cap there.
+    if num_heads >= 128:
+        R_CHUNK = min(topk, 1536)
+    else:
+        R_CHUNK = min(256, topk)
     BH_DQ, TK_DQ = 64, 16
-    BH_DKV, TK_DKV = 32, 64
+    # dKV tiling: the default (BH_DKV=32, TK_DKV=64) is best for high head counts
+    # (H>=128) and for chunk widths that are not 128-aligned. For low head counts
+    # (H<=64) with a 128-aligned chunk, a wider TILE_K=128 over a single head-group
+    # (BH_DKV=64, NUM_HG=1) reduces redundant Q/dO re-loads and issues fuller MMAs,
+    # which is faster there; it regresses for H>=128 (register pressure) and for
+    # non-128-aligned chunks (partial tiles), so it is guarded on both.
+    if num_heads <= 64 and R_CHUNK % 128 == 0:
+        BH_DKV, TK_DKV = 64, 128
+    else:
+        BH_DKV, TK_DKV = 32, 64
     num_hg_dq = triton.cdiv(num_heads, BH_DQ)
     num_hg_dkv = triton.cdiv(num_heads, BH_DKV)
 
+    # In the V4 single-latent form the D_ROPE block of q/kv is a zero pad (RoPE is
+    # baked in-place over the 512 latent) and its gradient is discarded by the
+    # adapter (dq[..., :D_V], dkv[..., :D_V]). So all rope MMAs / K_rope loads /
+    # interm-rope traffic compute a provably-zero result that is thrown away.
+    # Skip them: bit-identical non-rope outputs, zero rope outputs (== gluon).
+    HAS_ROPE = False
+
     dq = torch.empty_like(q)
+    chunk_dS = torch.empty(total_tokens, num_heads, R_CHUNK, dtype=torch.bfloat16, device=q.device)
+    chunk_P = torch.empty(total_tokens, num_heads, R_CHUNK, dtype=torch.bfloat16, device=q.device)
     dkv_acc = torch.zeros(num_kv, d_qk, dtype=torch.float32, device=q.device)
     interm = torch.empty(total_tokens, R_CHUNK, d_qk, dtype=torch.bfloat16, device=q.device)
-
-    # dKV-interm consumes q/do transposed to [T, D, H].
-    q_t = q.transpose(1, 2).contiguous()
-    do_t = do[..., :kv_lora_rank].transpose(1, 2).contiguous()
 
     # pad topk to an R_CHUNK multiple (-1 = invalid).
     topk_padded_len = ((topk + R_CHUNK - 1) // R_CHUNK) * R_CHUNK
@@ -99,22 +111,29 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
     for chunk_idx, r_start in enumerate(range(0, topk, R_CHUNK)):
         is_first = r_start == 0
 
-        _bwd_chunk_dq[(total_tokens, num_hg_dq)](
+        _bwd_chunk_dq_store_ds[(total_tokens, num_hg_dq)](
             q,
             kv,
             do,
             topk_padded,
             lse,
             delta,
+            o,
             dq,
+            chunk_dS,
+            chunk_P,
             q.stride(0),
             q.stride(1),
             kv.stride(0),
             do.stride(0),
             do.stride(1),
+            o.stride(0),
+            o.stride(1),
             dq.stride(0),
             dq.stride(1),
             topk_padded.stride(0),
+            chunk_dS.stride(0),
+            chunk_dS.stride(1),
             scale,
             num_heads,
             r_start,
@@ -123,34 +142,34 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
             TILE_K=TK_DQ,
             D_V=kv_lora_rank,
             D_ROPE=rope_rank,
+            HAS_ROPE=HAS_ROPE,
             IS_FIRST_CHUNK=is_first,
             num_warps=4,
             waves_per_eu=1,
         )
 
-        _bwd_chunk_dkv_interm[(total_tokens,)](
-            q_t,
-            do_t,
-            topk_padded,
-            lse,
-            delta,
-            kv,
+        _bwd_compute_dkv_intermediate[(total_tokens,)](
+            q,
+            do,
+            chunk_dS,
+            chunk_P,
             interm,
-            q_t.stride(0),
-            do_t.stride(0),
-            topk_padded.stride(0),
-            kv.stride(0),
+            q.stride(0),
+            q.stride(1),
+            do.stride(0),
+            do.stride(1),
+            chunk_dS.stride(0),
+            chunk_dS.stride(1),
             interm.stride(0),
             interm.stride(1),
-            scale,
             num_heads,
-            r_start,
             R_CHUNK=R_CHUNK,
             TILE_K=TK_DKV,
             BLOCK_H=BH_DKV,
             NUM_HG=num_hg_dkv,
             D_V=kv_lora_rank,
             D_ROPE=rope_rank,
+            HAS_ROPE=HAS_ROPE,
             num_warps=4,
         )
 
@@ -164,6 +183,7 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
             dkv_acc.stride(0),
             D_V=kv_lora_rank,
             D_ROPE=rope_rank,
+            HAS_ROPE=HAS_ROPE,
             num_warps=4,
         )
 
