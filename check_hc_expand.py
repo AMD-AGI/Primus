@@ -77,7 +77,9 @@ def bench(leading, K, D, dtype, iters=50):
     x = torch.randn(*leading, K, D, device=dev, dtype=dtype, requires_grad=True)
     out = torch.randn(*leading, D, device=dev, dtype=dtype, requires_grad=True)
     post = torch.randn(*leading, K, device=dev, dtype=dtype, requires_grad=True)
-    comb = torch.softmax(torch.randn(*leading, K, K, device=dev).float(), dim=-1).to(dtype).requires_grad_(True)
+    comb = (
+        torch.softmax(torch.randn(*leading, K, K, device=dev).float(), dim=-1).to(dtype).requires_grad_(True)
+    )
     g = torch.randn(*leading, K, D, device=dev, dtype=dtype)
 
     def step(fn):

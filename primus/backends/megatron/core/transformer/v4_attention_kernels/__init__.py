@@ -87,6 +87,33 @@ def load_gluon_attention_backends():
     return v4_attention_gluon, v4_csa_attention_gluon
 
 
+def load_flydsl_attention_backends():
+    """Lazily import the native-FlyDSL sparse-MLA attention entries.
+
+    The flydsl_v1 backend (:mod:`_flydsl_v1`) hard-depends on the installed
+    ``flydsl`` pip package (gfx950 / CDNA4). This helper defers that import so
+    selecting any other backend never pays it — and never crashes on a build /
+    GPU arch without flydsl. Call it only when a layer actually selects
+    ``flydsl_v1``.
+
+    Returns ``(v4_attention_flydsl, v4_csa_attention_flydsl)``. Raises
+    :class:`ImportError` with an actionable message when flydsl is unavailable.
+    """
+    try:
+        from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_flydsl import (
+            v4_attention_flydsl,
+            v4_csa_attention_flydsl,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "use_v4_attention_backend / use_v4_csa_attention_backend = 'flydsl_v1' requires "
+            "the native FlyDSL sparse-MLA backend (the `flydsl` pip package, gfx950 / CDNA4), "
+            f"which failed to import: {exc}. Select a different backend "
+            "(eager | triton_v1 | triton_v2 | gluon), or install flydsl on a gfx950 build."
+        ) from exc
+    return v4_attention_flydsl, v4_csa_attention_flydsl
+
+
 __all__ = [
     # eager reference
     "eager_v4_attention",
@@ -104,4 +131,6 @@ __all__ = [
     "v4_csa_attention_v2",
     # gluon (fused single-latent sparse-MLA, gfx950) — lazily loaded
     "load_gluon_attention_backends",
+    # flydsl_v1 (native FlyDSL fused single-latent sparse-MLA, gfx950) — lazily loaded
+    "load_flydsl_attention_backends",
 ]

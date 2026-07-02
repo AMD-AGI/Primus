@@ -18,6 +18,9 @@ not bottlenecked by global atomics. ``d_sink`` is the closed-form torch
 reduction ``-sum_t exp(sink - lse) * delta``.
 """
 
+import contextlib
+import os
+
 import torch
 import triton
 
@@ -25,6 +28,7 @@ import triton
 # helpers; reuse them. The compute kernels are owned locally (dsa_bwd_kernels)
 # so this backend can be tuned independently of the gluon path.
 from .._gluon_dsa._dsa_bwd_gather import _build_inverted_topk_slice
+from ._amd_knobs import amd_pingpong_disabled
 from .dsa_bwd_kernels import (
     _bwd_chunk_dq_store_ds,
     _bwd_compute_dkv_intermediate,
@@ -69,16 +73,27 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
     else:
         R_CHUNK = min(256, topk)
     BH_DQ, TK_DQ = 64, 16
-    # dKV tiling: the default (BH_DKV=32, TK_DKV=64) is best for high head counts
-    # (H>=128) and for chunk widths that are not 128-aligned. For low head counts
-    # (H<=64) with a 128-aligned chunk, a wider TILE_K=128 over a single head-group
-    # (BH_DKV=64, NUM_HG=1) reduces redundant Q/dO re-loads and issues fuller MMAs,
-    # which is faster there; it regresses for H>=128 (register pressure) and for
-    # non-128-aligned chunks (partial tiles), so it is guarded on both.
-    if num_heads <= 64 and R_CHUNK % 128 == 0:
-        BH_DKV, TK_DKV = 64, 128
-    else:
-        BH_DKV, TK_DKV = 32, 64
+    # dKV-intermediate tiling. The default (BH_DKV=32, TK_DKV=64) is best for high
+    # head counts (H>=128) and for chunk widths that are not 128-aligned. For low
+    # head counts (H<=64) with a 128-aligned chunk, a wider TILE_K=128 over a single
+    # head-group (BH_DKV=64, NUM_HG=1) reduces redundant Q/dO re-loads and issues
+    # fuller MMAs (measured ~6-7% faster on the full flash bwd: cr=0 1.21->1.14 ms,
+    # cr=4 5.44->5.09 ms in bench_v4_attention); it regresses for H>=128 (register
+    # pressure) and for non-128-aligned chunks (partial tiles), so it is guarded.
+    #
+    # The wide config's per-launch LDS overflows the 160 KB limit ONLY when the AMD
+    # ping-pong / async-copy knobs are on (primus_turbo's set_triton_knobs_gfx950()
+    # enables them globally in training), which double-buffer the LDS operand tiles
+    # and ~double this kernel's shared memory (BH64/TK128 R_CHUNK256: fits
+    # standalone, 347904 B in training). Since the whole bwd now compiles with those
+    # knobs disabled (see the amd_pingpong_disabled scope below), the wide config
+    # fits in both the benchmark and training, so it is the default where it applies
+    # (~6-7% faster on the full flash bwd). Set PRIMUS_DSA_DKV_SAFE=1 to force the
+    # narrow 32/64 (which fits regardless of the knobs).
+    use_wide_dkv = (
+        num_heads <= 64 and R_CHUNK % 128 == 0 and os.environ.get("PRIMUS_DSA_DKV_SAFE", "0") != "1"
+    )
+    BH_DKV, TK_DKV = (64, 128) if use_wide_dkv else (32, 64)
     num_hg_dq = triton.cdiv(num_heads, BH_DQ)
     num_hg_dkv = triton.cdiv(num_heads, BH_DKV)
 
@@ -108,84 +123,103 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
         for rs in range(0, topk, R_CHUNK)
     ]
 
-    for chunk_idx, r_start in enumerate(range(0, topk, R_CHUNK)):
-        is_first = r_start == 0
+    # The AMD ping-pong / async-copy knobs primus_turbo enables globally are a
+    # pessimization for the whole triton_v2 backward (measured ~5-7% slower on the
+    # full bwd for both flash and pro in bench_v4_attention), and they overflow the
+    # 160 KB LDS limit for the wide dKV tiling. Compile the entire bwd (dQ /
+    # dKV-intermediate / gather) with them disabled; the knobs are read at compile
+    # time and are not in Triton's cache key, so this pins the faster non-ping-pong
+    # schedule for these kernels without touching any kernel compiled elsewhere.
+    # PRIMUS_DSA_BWD_PINGPONG_OFF=0 keeps the ambient knobs (the wide dKV still
+    # forces them off below, since it does not fit otherwise).
+    _bwd_ctx = (
+        amd_pingpong_disabled()
+        if os.environ.get("PRIMUS_DSA_BWD_PINGPONG_OFF", "1") == "1"
+        else contextlib.nullcontext()
+    )
+    with _bwd_ctx:
+        for chunk_idx, r_start in enumerate(range(0, topk, R_CHUNK)):
+            is_first = r_start == 0
 
-        _bwd_chunk_dq_store_ds[(total_tokens, num_hg_dq)](
-            q,
-            kv,
-            do,
-            topk_padded,
-            lse,
-            delta,
-            o,
-            dq,
-            chunk_dS,
-            chunk_P,
-            q.stride(0),
-            q.stride(1),
-            kv.stride(0),
-            do.stride(0),
-            do.stride(1),
-            o.stride(0),
-            o.stride(1),
-            dq.stride(0),
-            dq.stride(1),
-            topk_padded.stride(0),
-            chunk_dS.stride(0),
-            chunk_dS.stride(1),
-            scale,
-            num_heads,
-            r_start,
-            R_CHUNK=R_CHUNK,
-            BLOCK_H=BH_DQ,
-            TILE_K=TK_DQ,
-            D_V=kv_lora_rank,
-            D_ROPE=rope_rank,
-            HAS_ROPE=HAS_ROPE,
-            IS_FIRST_CHUNK=is_first,
-            num_warps=4,
-            waves_per_eu=1,
-        )
+            _bwd_chunk_dq_store_ds[(total_tokens, num_hg_dq)](
+                q,
+                kv,
+                do,
+                topk_padded,
+                lse,
+                delta,
+                o,
+                dq,
+                chunk_dS,
+                chunk_P,
+                q.stride(0),
+                q.stride(1),
+                kv.stride(0),
+                do.stride(0),
+                do.stride(1),
+                o.stride(0),
+                o.stride(1),
+                dq.stride(0),
+                dq.stride(1),
+                topk_padded.stride(0),
+                chunk_dS.stride(0),
+                chunk_dS.stride(1),
+                scale,
+                num_heads,
+                r_start,
+                R_CHUNK=R_CHUNK,
+                BLOCK_H=BH_DQ,
+                TILE_K=TK_DQ,
+                D_V=kv_lora_rank,
+                D_ROPE=rope_rank,
+                HAS_ROPE=HAS_ROPE,
+                IS_FIRST_CHUNK=is_first,
+                num_warps=4,
+                waves_per_eu=1,
+            )
 
-        _bwd_compute_dkv_intermediate[(total_tokens,)](
-            q,
-            do,
-            chunk_dS,
-            chunk_P,
-            interm,
-            q.stride(0),
-            q.stride(1),
-            do.stride(0),
-            do.stride(1),
-            chunk_dS.stride(0),
-            chunk_dS.stride(1),
-            interm.stride(0),
-            interm.stride(1),
-            num_heads,
-            R_CHUNK=R_CHUNK,
-            TILE_K=TK_DKV,
-            BLOCK_H=BH_DKV,
-            NUM_HG=num_hg_dkv,
-            D_V=kv_lora_rank,
-            D_ROPE=rope_rank,
-            HAS_ROPE=HAS_ROPE,
-            num_warps=4,
-        )
+            # The wide dKV kernel MUST compile with ping-pong off to fit LDS, even
+            # if the outer bwd gate is disabled — force it off here regardless.
+            _dkv_ctx = amd_pingpong_disabled() if use_wide_dkv else contextlib.nullcontext()
+            with _dkv_ctx:
+                _bwd_compute_dkv_intermediate[(total_tokens,)](
+                    q,
+                    do,
+                    chunk_dS,
+                    chunk_P,
+                    interm,
+                    q.stride(0),
+                    q.stride(1),
+                    do.stride(0),
+                    do.stride(1),
+                    chunk_dS.stride(0),
+                    chunk_dS.stride(1),
+                    interm.stride(0),
+                    interm.stride(1),
+                    num_heads,
+                    R_CHUNK=R_CHUNK,
+                    TILE_K=TK_DKV,
+                    BLOCK_H=BH_DKV,
+                    NUM_HG=num_hg_dkv,
+                    D_V=kv_lora_rank,
+                    D_ROPE=rope_rank,
+                    HAS_ROPE=HAS_ROPE,
+                    num_warps=4,
+                )
 
-        inv_ptr, inv_data = all_csr[chunk_idx]
-        _bwd_dkv_gather_acc[(num_kv,)](
-            interm,
-            inv_ptr,
-            inv_data,
-            dkv_acc,
-            interm.stride(1),
-            dkv_acc.stride(0),
-            D_V=kv_lora_rank,
-            D_ROPE=rope_rank,
-            HAS_ROPE=HAS_ROPE,
-            num_warps=4,
-        )
+            inv_ptr, inv_data = all_csr[chunk_idx]
+            _bwd_dkv_gather_acc[(num_kv,)](
+                interm,
+                inv_ptr,
+                inv_data,
+                dkv_acc,
+                interm.stride(1),
+                dkv_acc.stride(0),
+                D_V=kv_lora_rank,
+                D_ROPE=rope_rank,
+                HAS_ROPE=HAS_ROPE,
+                num_warps=4,
+            )
 
     d_sink = None
     if has_sink:

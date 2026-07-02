@@ -19,9 +19,14 @@ keeps K and V separate to share kernels with the dense path; here K == V is a
 single latent (matching gluon / the V4 paper), which is the whole point of v2.
 """
 
+import contextlib
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+from ._amd_knobs import amd_pingpong_disabled
 
 
 def _get_fwd_configs():
@@ -165,25 +170,37 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
     has_rope = False
 
     grid = lambda META: (total_tokens, triton.cdiv(num_heads, META["BLOCK_H"]))
-    _sparse_mla_fwd_tr_kernel[grid](
-        Q_ptr=q,
-        KV_ptr=kv,
-        TopK_ptr=topk_indices,
-        Sink_ptr=sink_ptr,
-        O_ptr=o,
-        LSE_ptr=lse,
-        stride_q_t=q.stride(0),
-        stride_q_h=q.stride(1),
-        stride_kv_t=kv.stride(0),
-        stride_o_t=o.stride(0),
-        stride_o_h=o.stride(1),
-        stride_topk_t=topk_indices.stride(0),
-        scale=scale,
-        num_heads=num_heads,
-        TOPK=topk,
-        D_V=kv_lora_rank,
-        D_ROPE=rope_rank,
-        HAS_ROPE=has_rope,
-        HAS_SINK=has_sink,
+    # The AMD ping-pong / async-copy knobs primus_turbo enables globally are a
+    # pessimization for this fwd kernel (~16-29% slower on flash in
+    # bench_v4_attention). They are read at compile time and are not part of
+    # Triton's cache key, so autotuning/compiling this kernel with them disabled
+    # pins the faster (non-ping-pong) schedule for the process without touching
+    # any other kernel. PRIMUS_DSA_FWD_PINGPONG_OFF=0 keeps the ambient knobs.
+    _fwd_ctx = (
+        amd_pingpong_disabled()
+        if os.environ.get("PRIMUS_DSA_FWD_PINGPONG_OFF", "1") == "1"
+        else contextlib.nullcontext()
     )
+    with _fwd_ctx:
+        _sparse_mla_fwd_tr_kernel[grid](
+            Q_ptr=q,
+            KV_ptr=kv,
+            TopK_ptr=topk_indices,
+            Sink_ptr=sink_ptr,
+            O_ptr=o,
+            LSE_ptr=lse,
+            stride_q_t=q.stride(0),
+            stride_q_h=q.stride(1),
+            stride_kv_t=kv.stride(0),
+            stride_o_t=o.stride(0),
+            stride_o_h=o.stride(1),
+            stride_topk_t=topk_indices.stride(0),
+            scale=scale,
+            num_heads=num_heads,
+            TOPK=topk,
+            D_V=kv_lora_rank,
+            D_ROPE=rope_rank,
+            HAS_ROPE=has_rope,
+            HAS_SINK=has_sink,
+        )
     return o, lse

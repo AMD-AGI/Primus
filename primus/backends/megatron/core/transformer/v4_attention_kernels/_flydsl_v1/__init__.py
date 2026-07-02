@@ -16,15 +16,15 @@ kernel-pair API**, so it plugs straight into the kernel-agnostic V4 adapter
 * ``topk_indices`` : ``[T, TOPK]`` int32 (SWA window ++ sparse pool, -1 = invalid)
 * ``attn_sink`` : ``[H]`` fp32 optional per-head softmax sink
 
-Unlike the legacy wired FlyDSL CSA path (scalarized GEMV, no MFMA), the v2
-**forward** uses FlyDSL MFMA (``rocdl.mfma_*`` matrix cores) over a top-k gather.
+Unlike the legacy wired FlyDSL CSA path (scalarized GEMV, no MFMA), the v1
+kernels use FlyDSL MFMA (``rocdl.mfma_*`` matrix cores) over a top-k gather.
 
 * :func:`sparse_mla_fwd_v4_flydsl` -> ``(o, lse)``   (native FlyDSL MFMA)
-* :func:`sparse_mla_bwd_v4_flydsl` -> ``(dq, dkv, d_sink)``
+* :func:`sparse_mla_bwd_v4_flydsl` -> ``(dq, dkv, d_sink)``   (native FlyDSL MFMA dQ
+  + shared Triton dKV intermediate/scatter-gather)
 
-NOTE: the v2 backward currently reuses the shared, proven pure-Triton non-atomic
-chunked-gather backward (also MFMA via ``tl.dot``); a FlyDSL-native MFMA backward
-is a follow-up. This keeps the autograd path correct end-to-end today.
+Depends only on the installed ``flydsl`` pip package (no /workspace/FlyDSL-amd
+source tree required).
 """
 
 from .dsa_bwd_v4_flydsl import sparse_mla_bwd_v4_flydsl
