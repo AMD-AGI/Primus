@@ -28,11 +28,12 @@ run profiling script (per cr)  ->  chrome trace JSON (rank 0)
                                 breakdown JSON (site/data/<model>.json)
                                            |
                                            v
-                              static site (site/index.html)
+                                static site (site/index.html)
                                   - model config view
                                   - per-cr fwd/bwd breakdown tables
                                   - GPU + parallelism controls
                                   - step-by-step iter-time / TFLOPs / tok/s derivation
+                                  - iteration timeline (3 levels: layer / PP ranks / schedule)
                                   - MI355X page + MI455X scaled page
 ```
 
@@ -46,6 +47,7 @@ deepseek-v4/projection/
     02-assumptions.md
     03-json-schema.md
     04-projection-math.md
+    07-iteration-timeline.md       # 3-level iteration-time composition view
   script/                        # profiling launchers (one trace per cr)
     deepseek_v4_layer_trace-projection.sh
   tools/                         # trace -> breakdown JSON

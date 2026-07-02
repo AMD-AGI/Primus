@@ -67,8 +67,10 @@ Rules baked into the implementation:
 - **Time only, FLOPs stay analytic.** Manual input overrides time but not FLOPs;
   `TFLOP/s/GPU` continues to use the V4 analytic model FLOPs (Step 5), so it
   stays meaningful.
-- **Scope.** Manual covers the three per-cr decoder layers only. Non-layer parts
-  (embedding / output / loss) and MTP keep using the trace breakdown.
+- **Scope.** Manual covers the three per-cr decoder layers **and** the non-layer
+  parts — embedding (PP stage 0), output / loss / MTP (last PP stage) — each as a
+  fwd/bwd pair. Any field left unset falls back to its trace-derived value, so you
+  can override just the parts you care about. FLOPs stay analytic regardless.
 
 ## Step 1 — recompute (A16)
 
