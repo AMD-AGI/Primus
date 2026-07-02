@@ -125,11 +125,11 @@ def sparse_mla_bwd_v4_flydsl(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
     )
 
     # ---- dKV: intermediate GEMM + CSR inverted-topk scatter-reduce (Triton) ----
+    # BH_DKV=32/TK_DKV=64 whole-top-k (R_CHUNK=TOPK) in one dKV-intermediate pass.
+    # This config's LDS stays < 160 KB in both the standalone and training Triton
+    # contexts (the wider 64/128 config overflows under the training runtime).
     HAS_ROPE = False
-    if num_heads <= 64 and TOPK % 128 == 0:
-        BH_DKV, TK_DKV = 64, 128
-    else:
-        BH_DKV, TK_DKV = 32, 64
+    BH_DKV, TK_DKV = 32, 64
     num_hg_dkv = triton.cdiv(num_heads, BH_DKV)
 
     interm = torch.empty(total_tokens, TOPK, d_qk, dtype=torch.bfloat16, device=q.device)
