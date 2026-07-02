@@ -22,15 +22,26 @@ from primus.modules.module_utils import log_rank_0
     "megatron.te.delayed_scaling_reduce_amax",
     backend="megatron",
     phase="before_train",
-    description="Disable reduce_amax in TEDelayedScaling for FP8 training",
+    description="Set reduce_amax in TEDelayedScaling based on TP/SP requirements",
+    condition=lambda ctx: (
+        getattr(get_args(ctx), "fp8", False) and getattr(get_args(ctx), "fp8_recipe", "delayed") == "delayed"
+    ),
 )
 def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     """
-    Patch TEDelayedScaling to disable reduce_amax.
+    Patch TEDelayedScaling to choose reduce_amax based on parallelism mode.
 
-    This customizes the DelayedScaling recipe behavior by setting
-    reduce_amax=False during initialization.
+        - reduce_amax=False was introduced as an FP8 optimization to avoid
+            cross-rank amax synchronization in delayed scaling.
+        - FP8 + sequence parallelism requires amax reduction across the tensor
+            parallel group so all ranks use compatible scaling factors.
+
     """
+    args = get_args(ctx)
+    tp_size = getattr(args, "tensor_model_parallel_size", 1) or 1
+    sequence_parallel = bool(getattr(args, "sequence_parallel", False))
+    reduce_amax = bool(sequence_parallel and tp_size > 1)
+
     from megatron.core.extensions import transformer_engine as te_ext
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
 
@@ -40,10 +51,10 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
 
     def new_init(self, *args, **kwargs):
         """Wrapper around TEDelayedScaling.__init__ that temporarily overrides
-        Transformer Engine kwargs to set reduce_amax=False during initialization."""
+        Transformer Engine kwargs to set reduce_amax during initialization."""
         # Temporarily override the TE kwargs with our custom flag
         te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
-            original_get_extra_te_kwargs, reduce_amax=False
+            original_get_extra_te_kwargs, reduce_amax=reduce_amax
         )
         try:
             orig_init(self, *args, **kwargs)
@@ -54,7 +65,7 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     TEDelayedScaling.__init__ = new_init
     log_rank_0(
         "[Patch:megatron.te.delayed_scaling_reduce_amax]   Patched TEDelayedScaling.__init__ "
-        "to disable reduce_amax"
+        f"to set reduce_amax={reduce_amax} "
     )
 
 

@@ -1,0 +1,508 @@
+# Primus Training Dockerfile for ROCm on TheRock
+ARG DEFAULT_BASE=ubuntu:24.04
+ARG BASE_IMAGE=${DEFAULT_BASE}
+FROM  ${BASE_IMAGE:-$DEFAULT_BASE} AS pytorch_base
+
+WORKDIR /workspace/
+ENV MAX_JOBS=128
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV ROCM_AMDGPU_TARGETS="gfx942,gfx950"
+
+# Install Ubuntu dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+    && apt install -y \
+    gfortran \
+    git \
+    git-lfs \
+    ninja-build \
+    g++ \
+    pkg-config \
+    xxd \
+    patchelf \
+    automake \
+    libtool \
+    python3-venv \
+    python3-dev \
+    python3-pip \
+    python-is-python3 \
+    libegl1-mesa-dev \
+    wget \
+    sudo \
+    flex \
+    liblzma-dev \
+    ccache \
+    libdw1 \
+    libdrm-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Setup python env
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip \
+    && pip install \
+        pybind11 \
+        typeguard \
+        wheel==0.45.1 \
+        cmake==3.31.6 \
+        ninja==1.11.1.3 \
+        packaging==25.0 \
+        setuptools==75.1.0 \
+    && rm -rf /root/.cache
+
+RUN apt update \
+    && apt install -y ninja-build autoconf libtool flex rdma-core ffmpeg \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Workaround for the HSA_STATUS_ERROR_OUT_OF_RESOURCES issue
+ENV HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
+ENV HSA_NO_SCRATCH_RECLAIM=1
+
+# Pytorch + rocm
+# See: https://rocm.nightlies.amd.com/whl-multi-arch/torch/
+ARG PYTORCH_VERSION=2.12.0+rocm7.14.0a20260608
+
+RUN pip install \
+    cxxfilt==0.3.0 \
+    tqdm==4.67.3 \
+    pyyaml==6.0.3 \
+    pytest==9.0.3 \
+    matplotlib==3.10.9 \
+    pandas==2.3.3 \
+    py-cpuinfo==9.0.0 \
+    build==1.5.0 \
+    && rm -rf /root/.cache
+
+RUN python -m pip uninstall -y torch && \
+    python -m pip install \
+        --index-url https://rocm.nightlies.amd.com/whl-multi-arch \
+        --pre \
+        torch==${PYTORCH_VERSION} \
+        amd-torch-device-gfx942==${PYTORCH_VERSION} \
+        amd-torch-device-gfx950==${PYTORCH_VERSION} \
+        rocm-sdk-devel \
+        rocm-sdk-device-gfx942 \
+        rocm-sdk-device-gfx950 \
+        torchaudio \
+        torchvision \
+        amd-torchvision-device-gfx942 \
+        amd-torchvision-device-gfx950 \
+        apex \
+    && rm -rf /root/.cache
+
+RUN rocm-sdk init
+ENV ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+# Note: Primus uses `ROCM_HOME` instead of `ROCM_PATH`. Set both to avoid potential issues.
+ENV ROCM_HOME=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+ENV HIP_PLATFORM=amd
+ENV HIP_PATH=$ROCM_PATH
+ENV HIP_CLANG_PATH=$ROCM_PATH/llvm/bin
+ENV HIP_INCLUDE_PATH=$ROCM_PATH/include
+ENV HIP_LIB_PATH=$ROCM_PATH/lib
+ENV HIP_DEVICE_LIB_PATH=$ROCM_PATH/lib/llvm/amdgcn/bitcode
+ENV PATH="$ROCM_PATH/bin:$HIP_CLANG_PATH:$PATH"
+ENV LD_LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64:$ROCM_PATH/llvm/lib:$ROCM_PATH/lib/host-math/lib:$ROCM_PATH/lib/rocm_sysdeps/lib"
+ENV LIBRARY_PATH="$HIP_LIB_PATH:$ROCM_PATH/lib:$ROCM_PATH/lib64"
+ENV CPATH=$HIP_INCLUDE_PATH
+ENV PKG_CONFIG_PATH="$ROCM_PATH/lib/pkgconfig"
+
+# FA
+ARG FA_REPO=https://github.com/ROCm/flash-attention.git
+ARG FA_BRANCH=6387433156558135a998d5568a9d74c1778666d8
+ENV GPU_ARCHS="${PYTORCH_ROCM_ARCH}"
+
+RUN git clone --recursive ${FA_REPO} \
+    && cd flash-attention \
+    && git checkout ${FA_BRANCH} \
+    && python setup.py install \
+    && cd .. \
+    && rm -rf flash-attention \
+    && rm -rf /root/.cache
+
+# Latest TransformerEngine
+ARG TE_REPO=https://github.com/ROCm/TransformerEngine.git
+ARG TE_BRANCH=e6ede467a49cfda1859b145e045109e2f330bccc
+
+ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_FRAMEWORK=pytorch
+ENV NVTE_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+ENV NVTE_USE_CAST_TRANSPOSE_TRITON=1
+ENV NVTE_CK_IS_V3_ATOMIC_FP32=0
+ENV NVTE_CK_USES_BWD_V3=1
+ENV NVTE_CK_USES_FWD_V3=1
+ENV CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=2
+ENV NVTE_CK_HOW_V3_BF16_CVT=2
+ENV NVTE_USE_ROCM=1
+
+RUN git clone --recursive ${TE_REPO} \
+    && cd TransformerEngine \
+    && git checkout ${TE_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install psutil \
+    && MAX_JOBS=${MAX_JOBS} pip install --no-build-isolation . \
+    && cd .. \
+    && rm -rf /root/.cache
+
+# Flux
+ARG FLUX_REPO=https://github.com/ROCm/AMDiffusionBenchmark.git
+ARG FLUX_BRANCH=26.4_RC_Patch_torchcodec
+
+RUN git clone ${FLUX_REPO} \
+    && cd AMDiffusionBenchmark \
+    && git checkout ${FLUX_BRANCH} \
+    && pip install -r requirements.txt \
+    && cd .. \
+    && rm -rf /root/.cache
+
+# DLRM
+ARG DLRM_REPO=https://github.com/AMD-AGI/DLRMBenchmark.git
+ARG DLRM_BRANCH=main
+
+RUN git clone ${DLRM_REPO} \
+    && cd DLRMBenchmark \
+    && git checkout ${DLRM_BRANCH} \
+    && cd .. \
+    && rm -rf /root/.cache
+
+# torchtune
+ARG TORCHTUNE_REPO=https://github.com/pytorch/torchtune.git
+ARG TORCHTUNE_BRANCH=b4c98ac2a37f0397d64c22579aed415ce7264db6
+
+RUN git clone ${TORCHTUNE_REPO} \
+    && if [ "${TORCHTUNE_BRANCH}" != "" ]; then cd torchtune && git checkout ${TORCHTUNE_BRANCH} && cd ..; fi \
+    && cd torchtune \
+    && git checkout ${TORCHTUNE_BRANCH} \
+    && find torchtune/modules/moe/utils.py -type f -print0 | xargs -0 sed -i 's/use_grouped_mm = True/use_grouped_mm = False/g' \
+    && pip install . \
+    && cd .. \
+    && rm -rf torchtune \
+    && rm -rf /root/.cache
+
+# Note: we need to change `pad_inner_dim` default explicitly to address fp8 in torchtune issue
+# torchao
+ARG TORCHAO_REPO=https://github.com/pytorch/ao.git
+ARG TORCHAO_BRANCH=e9c7bead90b840b280f97374308255957108ce47
+
+RUN git clone ${TORCHAO_REPO} \
+    && cd ao && git checkout ${TORCHAO_BRANCH} \
+    && find torchao/float8/config.py -type f -print0 | xargs -0 sed -i 's/pad_inner_dim: bool = False/pad_inner_dim: bool = True/g' \
+    && find torchao/csrc/rocm/swizzle/swizzle.cpp -type f -print0 | xargs -0 sed -i 's/if defined(HIPBLASLT_VEC_EXT)/if false/g' \
+    && pip install --no-build-isolation . \
+    && cd .. \
+    && rm -rf ao \
+    && rm -rf /root/.cache
+
+RUN pip install \
+    datasets==3.6.0 \
+    av==16.0.1 \
+    transformers==4.55.0 \
+    optree==0.18.0 \
+    sympy \
+    accelerate==1.9.0 \
+    trl==0.21.0 \
+    tensorboard==2.20.0 \
+    peft \
+    scipy \
+    einops \
+    flask-restful \
+    nltk \
+    pytest \
+    pytest-cov \
+    pytest_mock \
+    pytest-csv \
+    pytest-random-order \
+    sentencepiece \
+    wrapt \
+    zarr==2.18.7 \
+    numcodecs==0.12.1 \
+    xarray \
+    wandb \
+    tensorstore==0.1.45 \
+    pytest_mock \
+    pybind11 \
+    tiktoken \
+    pynvml \
+    huggingface_hub[cli] \
+    && python3 -m nltk.downloader punkt_tab \
+    && rm -rf /root/.cache
+
+# Groupped GEMM
+ARG GROUPED_GEMM_REPO=https://github.com/caaatch22/grouped_gemm.git
+ARG GROUPED_GEMM_BRANCH=rocm
+
+RUN git clone ${GROUPED_GEMM_REPO} \
+    && cd grouped_gemm \
+    && git checkout ${GROUPED_GEMM_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install --no-build-isolation . \
+    && cd .. \
+    && rm -rf grouped_gemm \
+    && rm -rf /root/.cache
+
+# Install Causal-Conv1d and its dependencies
+ARG CAUSAL_CONV1D_REPO=https://github.com/Dao-AILab/causal-conv1d
+ARG CAUSAL_CONV1D_BRANCH=e940ead2fd962c56854455017541384909ca669f
+
+ENV CAUSAL_CONV1D_FORCE_BUILD=TRUE
+ENV MAMBA_FORCE_BUILD=TRUE
+ENV HIP_ARCHITECTURES=gfx942,gfx950
+
+RUN git clone ${CAUSAL_CONV1D_REPO} causal-conv1d \
+    && cd causal-conv1d \
+    && git checkout ${CAUSAL_CONV1D_BRANCH} \
+    && git show --oneline -s \
+    && pip install --no-build-isolation . \
+    && cd .. \
+    && rm -fr causal-conv1d \
+    && rm -rf /root/.cache
+
+# Mamba
+ARG MAMBA_REPO=https://github.com/AndreasKaratzas/mamba.git
+ARG MAMBA_BRANCH=enable-primus-hybrid-models
+
+RUN pip install apache-tvm-ffi==0.1.11 \
+    && git clone --branch ${MAMBA_BRANCH} ${MAMBA_REPO} \
+    && cd mamba \
+    && python setup.py install \
+    && cd .. \
+    && rm -rf /root/.cache
+
+# Primus
+ARG PRIMUS_REPO=https://github.com/AMD-AGI/Primus.git
+# Latest commit on `main` branch. Commited on 2026-06-17.
+ARG PRIMUS_BRANCH=236cfa9d8764bf8519063178dcc6279c635c6f6c
+# Note: those envs are required to resolve ther issue around the primus update
+# post v26.2
+ENV NVTE_FLASH_ATTN=0
+ENV NVTE_FUSED_ATTN=1
+
+RUN git clone --recurse-submodules ${PRIMUS_REPO} \
+    && cd Primus \
+    && git checkout ${PRIMUS_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt \
+    && cd .. \
+    && rm -rf /root/.cache
+
+# Aiter
+ARG AITER_REPO=https://github.com/ROCm/aiter.git
+ARG AITER_COMMIT=0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e
+
+RUN pip uninstall aiter amd-aiter -y \
+    && rm -rf aiter \
+    && git clone --recursive ${AITER_REPO} \
+    && cd aiter \
+    && git checkout ${AITER_COMMIT} \
+    && git submodule update --init --recursive \
+    && PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 . \
+    && cd .. \
+    && rm -rf aiter
+
+# Primus-Turbo
+ARG TURBO_REPO=https://github.com/AMD-AGI/Primus-Turbo.git
+# Latest commit on `main` branch. Commited on 2026-06-03.
+ARG TURBO_COMMIT=a04a233cbfb468dbe21600cbf9db70953428b25c
+ENV MAX_JOBS=128
+ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
+
+RUN git clone ${TURBO_REPO} --recursive \
+    && cd Primus-Turbo \
+    && git checkout ${TURBO_COMMIT} \
+    && git submodule update --init --recursive \
+    && pip3 install -r requirements.txt \
+    && pip3 install --no-build-isolation . -v \
+    && cd .. \
+    && rm -rf /root/.cache
+
+RUN pip install \
+    boto3==1.35.42 \
+    botocore==1.35.99 \
+    && rm -rf /root/.cache
+
+WORKDIR /workspace/
+
+# Install torchrec
+RUN pip install --no-deps torchrec \
+    && pip install \
+        tensordict \
+        iopath \
+        torchmetrics==1.0.3 \
+        git+https://github.com/mlperf/logging.git \
+        --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch \
+    && rm -rf /root/.cache
+
+# Install FBGEMM
+ARG FBGEMM_REPO=https://github.com/pytorch/FBGEMM.git
+# Latest known working commit on the `main` branch. Committed on 2026-06-17.
+ARG FBGEMM_COMMIT=80bd3c077dc41b55cd16ed4dcad15cf7c1c1d76a
+ENV BUILD_ROCM_VERSION='7.14'
+
+RUN apt update \
+    && apt install -y libtbb-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone ${FBGEMM_REPO} \
+    && cd FBGEMM \
+    && git checkout ${FBGEMM_COMMIT} \
+    && cd fbgemm_gpu \
+    && git clean -dfx \
+    && git submodule sync \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt \
+    && pip install setuptools==75.1.0 \
+    && python setup.py install \
+        --build-variant=rocm \
+        --build-target=default \
+        -DAMDGPU_TARGETS="gfx942;gfx950" \
+        -DHIP_ROOT_DIR=$ROCM_PATH \
+        -DCMAKE_C_FLAGS="-DTORCH_USE_HIP_DSA" \
+        -DCMAKE_CXX_FLAGS="-DTORCH_USE_HIP_DSA" \
+    && cd ../.. \
+    && rm -rf /root/.cache
+
+# Install numactl
+RUN apt update \
+    && apt install -y numactl \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# This is improtant to unset and reset the arc so aiter can
+# pick up the correct architecture
+ENV GPU_ARCHS=native
+
+RUN apt update \
+    && apt install -y \
+    libz3-dev \
+    pciutils \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+####### AINIC related installations #######
+RUN apt update \
+    && apt install -y \
+    libibverbs-dev \
+    jq \
+    dpkg-dev \
+    kmod \
+    xz-utils \
+    ibverbs-utils \
+    infiniband-diags \
+    rdma-core \
+    ethtool \
+    libevent-dev \
+    libhwloc-dev \
+    libmunge-dev \
+    software-properties-common \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install AMD AINIC library
+ARG AINIC_BUNDLE_VERSION="1.117.5-a-77"
+
+RUN add-apt-repository -y "deb https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_BUNDLE_VERSION} noble main" \
+    && apt update --allow-insecure-repositories \
+    && apt install -y --allow-unauthenticated libionic-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Allow insecure repositories by default
+RUN echo 'Acquire::AllowInsecureRepositories "true";' >> /etc/apt/apt.conf.d/99allow-insecure-repositories
+
+# Install UCX
+ARG UCX_VERSION="1.18.0"
+
+RUN wget https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz \
+    && mkdir -p ucx-${UCX_VERSION} \
+    && tar -zxf ucx-${UCX_VERSION}.tar.gz -C ucx-${UCX_VERSION} --strip-components=1 \
+    && cd ucx-${UCX_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=/workspace/ucx-${UCX_VERSION}/install --with-rocm=${ROCM_PATH} \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm ucx-${UCX_VERSION}.tar.gz
+
+ENV UCX_INSTALL_DIR=/workspace/ucx-${UCX_VERSION}/install
+
+# Install OpenMPI
+ARG MPI_VERSION="4.1.6"
+
+RUN wget https://download.open-mpi.org/release/open-mpi/v$(echo "${MPI_VERSION}" | cut -d. -f1-2)/openmpi-${MPI_VERSION}.tar.gz \
+    && mkdir -p ompi-${MPI_VERSION} \
+    && tar -zxf openmpi-${MPI_VERSION}.tar.gz -C ompi-${MPI_VERSION} --strip-components=1 \
+    && cd ompi-${MPI_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=/opt/openmpi --with-ucx=${UCX_INSTALL_DIR} --disable-oshmem --disable-mpi-fortran \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm openmpi-${MPI_VERSION}.tar.gz \
+    && rm -rf ompi-${MPI_VERSION}
+
+ENV PATH="/opt/openmpi/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH}"
+
+####### End of AINIC related installations #######
+
+# Install rocSHMEM dependencies
+# Note: we need to install rocSHMEM after OpenMPI and UCX as it depends on them.
+ARG ROCSHMEM_REPO=https://github.com/ROCm/rocSHMEM.git
+ARG ROCSHMEM_BRANCH=17ff985c026f9f97f85068647e863ab541dd5645
+ENV ROCSHMEM_HOME=/opt/rocshmem
+ENV UCX_HOME=${UCX_INSTALL_DIR}
+ENV MPI_HOME=/opt/openmpi
+
+RUN mkdir -p /opt && cd /opt \
+    && git clone ${ROCSHMEM_REPO} \
+    && cd rocSHMEM \
+    && git checkout ${ROCSHMEM_BRANCH} \
+    && mkdir build \
+    && cd build \
+    && MPI_ROOT=${MPI_HOME} \
+        UCX_ROOT=${UCX_HOME} \
+        INSTALL_PREFIX=${ROCSHMEM_HOME} \
+        ../scripts/build_configs/gda \
+            -DROCM_PATH=${ROCM_PATH} \
+            -DGDA_IONIC=ON \
+            -DGDA_MLX5=ON  \
+            -DGDA_BNXT=ON  \
+            -DUSE_IPC=ON \
+    && cd /workspace \
+    && rm -rf /opt/rocSHMEM \
+    && rm -rf /root/.cache
+
+# Some secrets could leak from these files. Explicitly clean them out.
+RUN rm -f /workspace/Megatron-LM/.gitlab/stages/00.pre.yml \
+ /workspace/Primus/third_party/Megatron-LM/.gitlab/stages/00.pre.yml
+
+# Secret scan will complain those files to be secrets. Explicitly remove them.
+RUN rm -f /workspace/Primus/.git/packed-refs /workspace/Primus/.git/modules/third_party/**/packed-refs
+
+# Clean cache
+RUN rm -rf /root/.cache
+
+# Clean build files
+RUN rm -rf /*.whl \
+    && rm -rf /root/.triton \
+    && rm -rf /workspace/aiter/aiter/jit/build \
+    && rm -rf /workspace/TransformerEngine
+
+# Training docker manifest
+ARG GIT_COMMIT_TAG=DEV
+ARG DOCKERFILE_PATH=Dockerfile
+
+# Copy patch files for training docker versioning
+RUN mkdir -p /workspace/.manifest \
+    && env > /workspace/.manifest/env.txt \
+    && pip list > /workspace/.manifest/requirements.txt \
+    && dpkg -l > /workspace/.manifest/dpkg-list.txt \
+    && echo "${GIT_COMMIT_TAG}" > /workspace/.manifest/training_docker_version
+
+COPY ${DOCKERFILE_PATH} /workspace/.manifest/Dockerfile
+
+CMD ["/usr/bin/bash"]

@@ -53,18 +53,29 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         set_primus_global_variables(self.backend_args)
 
         import primus.backends.megatron.patches  # noqa: F401
+        import primus.backends.megatron_bridge.patches  # noqa: F401
 
         # Create module_config from backend_args for patch context
         module_config = SimpleNamespace(params=self.backend_args)
 
+        megatron_version = type(self).detect_megatron_version()
+        patch_extra = {
+            "module_config": module_config,
+            "backend_args": self.backend_args,
+        }
+
         run_patches(
             backend="megatron",
             phase="before_train",
-            backend_version=type(self).detect_megatron_version(),
-            extra={
-                "module_config": module_config,
-                "backend_args": self.backend_args,
-            },
+            backend_version=megatron_version,
+            extra=patch_extra,
+        )
+
+        run_patches(
+            backend="megatron_bridge",
+            phase="before_train",
+            backend_version=megatron_version,
+            extra=patch_extra,
         )
 
         log_rank_0("=" * 80)

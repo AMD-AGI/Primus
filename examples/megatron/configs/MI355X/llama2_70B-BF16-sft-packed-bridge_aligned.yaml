@@ -1,0 +1,301 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+# Recommended invocation::
+#
+#   export PRIMUS_EXP_NAME=native_llama2_70b_$(date +%Y%m%d_%H%M%S)
+#   EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-bridge_aligned.yaml \
+#       bash examples/run_pretrain.sh
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-sft-packed-bridge_aligned}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Llama-2 70B LoRA SFT — NATIVE-PATH apples-to-apples baseline for the
+# Bridge-vs-Native A/B benchmark (THIS YAML LIVES IN THE 0507 NATIVE PROJECT)
+# =============================================================================
+# Companion config (the Bridge side, lives in the 0509 project):
+#   Primus_0509/Primus/examples/megatron_bridge/configs/MI355X/
+#       llama2_70b_lora_posttrain_packed.yaml
+#
+# Container mapping (don't mix these up):
+#   * 0509 + Bridge          -> primus_050 (image 5582e5d7699c)
+#   * 0507 + Native (this)   -> sft_primus_0509 (image ac68ece9ed7d)
+#
+# Raw archived counterpart (the previous "DDP all-off + native CE" build,
+# kept for reference comparisons):
+#   examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-bridge_aligned_raw.yaml
+#
+# Aligned hyperparameters (must match Bridge llama2_70b PEFT recipe + AB yaml):
+#   * Shape: mbs=1, gbs=128, seq=2048 (same as llama31_70b reference)
+#   * Parallelism: TP=${PRIMUS_TP:1}, PP=1, EP=1, CP=1, SP=false
+#       (Bridge yaml mirror; TP=1 forces DP=8 across the 8 ranks. At
+#       this layout the 70B BF16 base weights live on every rank — TP=1
+#       only works because ``use_distributed_optimizer=true`` shards the
+#       optimizer state across DP and recompute=8 keeps the activation
+#       footprint bounded. To trade compute for memory headroom, run
+#       with ``PRIMUS_TP=8 PRIMUS_PP=1`` from the launch script.)
+#   * LoRA dim=16, alpha=32, target=[qkv, proj, fc1, fc2]
+#   * lr=1e-4, warmup=10, decay=20 (cosine)
+#   * seed=5678 (Bridge ``_peft_common`` RNGConfig)
+#   * Dataset: SQuAD with `squad` formatter (byte-identical prompt template)
+#   * train_iters=20, eval skipped
+#
+# DDP / CE alignment with deepseek_v2_lite-BF16-sft-packed-bridge_aligned.yaml:
+#   * use_distributed_optimizer: true
+#   * overlap_grad_reduce: true
+#   * overlap_param_gather: true
+#   * gradient_accumulation_fusion: true
+#   * cross_entropy_fusion_impl: "te"
+#   * cross_entropy_loss_fusion: true
+#
+# Primus Turbo + ROCm-only fused kernels ALL forced OFF so Bridge (which
+# has no Primus Turbo integration on its Llama-2 PEFT path) and Native
+# walk the same kernel set.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:llama2_70B}.yaml
+
+    overrides:
+      stage: sft
+
+      # NousResearch (non-gated) mirror of meta-llama/Llama-2-70b-hf.
+      # Native side only uses hf_path for (a) tokenizer init via HF
+      # AutoTokenizer and (b) prepare.py preprocessing — both of which
+      # respect tokenizer_model.
+      hf_path: NousResearch/Llama-2-70b-hf
+      tokenizer_model: NousResearch/Llama-2-70b-hf
+
+      # SQuAD with `squad` formatter (byte-identical prompt template to
+      # Bridge). Packing artifacts are cached on-disk by PackedSFTDataset
+      # (primus/backends/megatron/sft/packing.py); first run costs a few
+      # tens of seconds of tokenize+pack work, subsequent runs hit the
+      # cache and finish in <5 s. Override the cache dir via
+      # PRIMUS_PACK_CACHE_DIR; disable entirely via
+      # PRIMUS_DISABLE_PACK_CACHE=1.
+      sft_dataset_name: "rajpurkar/squad"
+      sft_conversation_format: "squad"
+
+      # KEY: enable sequence packing
+      enable_packed_sequences: true
+      use_packed_attention: true
+      ddp_average_in_collective: true
+
+      # Opt-in Bridge-parity mode. When True Native switches BOTH:
+      #   1. Tokenize layout: per-segment tokenize + inline BOS + trailing
+      #      EOS (mirrors NeMo Megatron-Bridge's packed parquet).
+      #   2. Packing algorithm: ``first_fit_shuffle`` instead of FFD, so
+      #      each pack contains length-mixed samples (Bridge default).
+      # Default False = clean Native (single-shot tokenize, FFD packer,
+      # iter-1 lm-loss ~0.15 on Llama-2 70B + SQuAD). Set True only for
+      # numerical A/B comparison against Bridge -- iter-1 lm-loss is
+      # expected to climb to ~4.x because the inline BOS is OOD for
+      # Llama-2's pretraining distribution.
+      sft_bridge_compat_inline_bos: true ##false
+
+      # MATCH BRIDGE dataset config (insofar as Native Megatron supports it):
+      #   * num_workers: Bridge=1 → Native=1 (Native trainer_base default 8).
+      #   * dataloader_type: Bridge="batch" is Bridge's own variable-length
+      #     finetuning sampler; Native Megatron only accepts
+      #     {single, cyclic, external}. ``cyclic`` is the closest in
+      #     semantics — random sampling, full epoch, one GBS per iter.
+      num_workers: 1
+      dataloader_type: cyclic
+
+      wandb_project: "Primus_Llama2_70B_SFT_Packed_Bridge_Aligned"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---------- Training schedule ----------
+      train_iters: 200 ###20
+      micro_batch_size: 1
+      global_batch_size: 16  ##128
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096} ##8192 ##2048
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096} ##8192 ##2048
+
+      # ---------- LR / SFT discipline ----------
+      # Mirror Bridge AB yaml: warmup=10, decay=20 to honor Megatron's
+      # hard assert ``lr_warmup_steps < lr_decay_steps`` while preserving
+      # the cosine LR shape (ramp 0 → 1e-4 at iter 10, decay 1e-4 → 0
+      # by iter 20).
+      lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 10
+      lr_decay_iters: 200 ###20
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1.0e-8
+
+      # Match Bridge ``_peft_common``'s RNGConfig(seed=5678).
+      seed: 5678
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---------- Parallelism ----------
+      ##pretrained_checkpoint: /workspace/megatron_checkpoints/Llama-2-70b-hf
+      tensor_model_parallel_size: ${PRIMUS_TP:2}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ---------- DDP / optimizer (ALIGN WITH BRIDGE PRIMUS-SIDE RECIPE) ----
+      # The Bridge llama2 PEFT recipe (primus/backends/megatron_bridge/
+      # recipes/llama2_amd_peft.py) sets:
+      #   ddp.use_distributed_optimizer = True
+      #   ddp.overlap_grad_reduce       = True
+      #   ddp.overlap_param_gather      = True
+      # Match all three here. ZeRO-1 sharded optimizer is also what makes
+      # TP=1 + 70B feasible — without it the 280 GB of fp32 optimizer
+      # state would live in full on every rank.
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      use_precision_aware_optimizer: false
+      apply_rope_fusion: true
+
+      # Bridge-parity: matching softmax fusion & dtype settings.
+      masked_softmax_fusion: true        # +5~7%
+      attention_softmax_in_fp32: false   # +3~4% (BF16 training does not need FP32 softmax)
+      align_param_gather: false          # +1~2%
+
+      # ---------- Activation recompute (REQUIRED at TP=1) -----------------
+      # TP=1 + 70B BF16 puts ~140 GB of weights on every rank. Without
+      # recompute the activation footprint at mbs=1 + seq=2048 pushes the
+      # peak to ~180 GB which OOMs at the first forward. Recompute 8 of
+      # the 80 transformer blocks in block mode brings the peak down by
+      # ~20 GB at a ~10 % step-time cost. Mirrors the Bridge launcher
+      # yaml exactly. Comment out at TP=8 if you want the highest TFLOPS.
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 8
+
+      # ---------- Checkpoint ----------
+      # =====================================================================
+      # CRITICAL: keep these keys at the FLAT (yaml top-of-overrides) level.
+      # ---------------------------------------------------------------------
+      # The Native path goes through
+      #     primus/backends/megatron/argument_builder.py:106-109
+      #
+      #     for key, value in items:
+      #         if key in megatron_keys:          # megatron flat argparse names
+      #             self.overrides[key] = value
+      #
+      # so only keys that megatron-LM registers as flat argparse flags are
+      # honoured. ``pretrained_checkpoint``, ``finetune``, ``load``,
+      # ``save``, ``save_interval``, ``dist_ckpt_strictness`` are flat
+      # flags. A nested
+      #
+      #     checkpoint:
+      #       pretrained_checkpoint: ...
+      #       finetune: true
+      #
+      # block (this is the *Bridge* yaml schema — Bridge uses a
+      # ``ConfigContainer.checkpoint`` sub-dataclass; see
+      # examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain_packed.yaml
+      # lines 203-209) is silently dropped on the Native side because
+      # ``checkpoint`` is not a megatron flag. The result is
+      #   args.pretrained_checkpoint = None
+      # the load_checkpoint() entry-point is skipped, the 70B model
+      # trains from random init, iter-1 lm-loss ≈ log(32000) = 10.4.
+      #
+      # CRITICAL: primus.backends.megatron.patches.args.checkpoint_path_patches
+      # *unconditionally* overrides ``args.save`` to ``<exp_root>/checkpoints``
+      # at build_args time -- yaml ``save: null`` is silently ignored. The
+      # ONLY way to keep the run from emitting a distributed checkpoint at
+      # mid-training is to set ``save_interval`` larger than ``train_iters``
+      # (and keep ``disable_last_saving: true`` so the final-step save is
+      # also skipped). One 70B Llama-2 LoRA save is 8 ranks * ~3.6 GB =
+      # ~28 GB of .distcp files; on a 114 GB NFS quota a single save easily
+      # fills the disk and crashes loguru into a recursion loop.
+      # =====================================================================
+      # pretrained_checkpoint: /workspace/megatron_checkpoints/Llama-2-70b-hf/release
+      pretrained_checkpoint: /workspace/megatron_checkpoints/Llama-2-70b-hf
+      finetune: true
+      load: null
+      save: null  # NOTE: ignored by checkpoint_path_patches.py, see comment above
+      save_interval: 1000000  # >> train_iters so mid-training save never fires
+      eval_interval: 1000000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true  # also skip the final-step save
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: log_all
+
+      bf16: true
+      # ---------- FP8: HARD-DISABLED for apples-to-apples BF16 comparison ----
+      # Do NOT enable FP8 on the Native side. In Megatron-LM the TE FP8
+      # path does NOT replace BF16 weights; it ADDS a parallel FP8 weight
+      # cache + transpose cache. Leaving ``fp8_format`` / ``fp8_recipe``
+      # unset = FP8 disabled in Megatron-LM. Bridge yaml mirrors this via
+      # ``fp8_recipe: null`` to undo its GPTModelProvider default.
+
+      # =====================================================================
+      # PRIMUS-TURBO + FUSED-KERNEL FAMILY: ALL FORCED OFF
+      # =====================================================================
+      # Bridge has no Primus Turbo integration on its llama2 PEFT path.
+      # Disabling these on Native side keeps the kernel set identical on
+      # both sides.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: false
+
+      # ---------- Cross-entropy fusion (ALIGN WITH BRIDGE RECIPE) ----------
+      # The Bridge llama2 PEFT recipe sets ``cross_entropy_loss_fusion=
+      # True`` + ``cross_entropy_fusion_impl="te"`` on the GPTModelProvider
+      # (primus/backends/megatron_bridge/recipes/llama2_amd_peft.py L130-
+      # 131). Set the same two flags here so Native goes through the
+      # identical TE fused-CE kernel on the loss path.
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # MATCH BRIDGE: Bridge recipe sets manual_gc=True / interval=100.
+      # Native default is manual_gc=False / interval=1. Force these on so
+      # the per-step Python GC overhead matches Bridge exactly.
+      manual_gc: true
+      manual_gc_interval: 100
+
+      # =====================================================================
+      # Profile (aligned to Bridge yaml: capture iter 11 only)
+      # =====================================================================
+      profile: true
+      use_pytorch_profiler: true
+      use_nsys_profiler: false
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+      pytorch_profiler_collect_shapes: true
+      pytorch_profiler_collect_callstack: false
+      pytorch_profiler_collect_chakra: false
+      record_shapes: false
+      record_memory_history: false
+      nvtx_ranges: false
+
+      eval_iters: 0
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

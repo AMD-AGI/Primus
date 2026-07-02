@@ -21,10 +21,10 @@ rocm-smi && docker --version
 
 ```bash
 # Pull Docker image
-docker pull docker.io/rocm/primus:v26.2
+docker pull docker.io/rocm/primus:v26.3
 
 # Clone repository
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 ```
 
@@ -32,7 +32,7 @@ cd Primus
 
 ```bash
 # Run a quick benchmark in container
-./primus-cli container --image rocm/primus:v26.2 \
+./primus-cli container --image rocm/primus:v26.3 \
   -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
@@ -50,7 +50,7 @@ Use the Docker image you just pulled:
 
 ```bash
 # Run training in container (recommended for getting started)
-./primus-cli container --image rocm/primus:v26.2 \
+./primus-cli container --image rocm/primus:v26.3 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -62,7 +62,7 @@ Use the Docker image you just pulled:
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 
 # Slurm mode (for multi-node cluster)
-./primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v26.2 \
+./primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v26.3 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
 ```
 
@@ -93,7 +93,7 @@ primus-cli [options] <mode> [mode-args] -- [command]
 
 **Need Help?**
 - [FAQ](./faq.md) - Common questions
-- [GitHub Issues](https://github.com/AMD-AIG-AIMA/Primus/issues) - Report bugs
+- [GitHub Issues](https://github.com/AMD-AGI/Primus/issues) - Report bugs
 
 ---
 

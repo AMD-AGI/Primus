@@ -33,7 +33,7 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
@@ -167,6 +167,14 @@ def prepare_dataset_if_needed(
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
         return
+    # SFT runs build the dataset on-the-fly (HF datasets API) inside the
+    # trainer; the bookcorpus tokenisation flow below is pretrain-only.
+    if getattr(pre_trainer_cfg, "stage", None) == "sft":
+        log_info(
+            "stage=sft detected, skipping bookcorpus tokenisation "
+            "(SFT dataset is loaded inside the trainer)."
+        )
+        return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
     if (
@@ -258,13 +266,26 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
     dataset_cpp_dir = megatron_path / "megatron/core/datasets"
     log_info(f"Building Megatron dataset helper in {dataset_cpp_dir}")
 
-    ret = subprocess.run(["make"], cwd=dataset_cpp_dir)
+    # `-s` silences make's "Nothing to be done"/recipe echo on no-op rebuilds;
+    # real compiler errors still surface and are handled below.
+    ret = subprocess.run(["make", "-s"], cwd=dataset_cpp_dir)
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ helper failed.")
 
     emerging_optimizers_path = primus_path / "third_party/Emerging-Optimizers"
+    has_pyproject = (emerging_optimizers_path / "pyproject.toml").is_file()
+    has_setup = (emerging_optimizers_path / "setup.py").is_file()
+    if not (has_pyproject or has_setup):
+        log_info(
+            f"Skipping Emerging-Optimizers install: submodule at "
+            f"{emerging_optimizers_path} is empty (run 'git submodule update --init --recursive' "
+            f"if you actually need it). SFT does not require this dependency."
+        )
+        return
     log_info(f"Building Emerging Optimizers in {emerging_optimizers_path}")
-    ret = subprocess.run(["pip", "install", "-e", str(emerging_optimizers_path)], check=True)
+    ret = subprocess.run(
+        ["pip", "install", "--no-build-isolation", "-e", str(emerging_optimizers_path)], check=True
+    )
     if ret.returncode != 0:
         log_error_and_exit("Building Emerging Optimizers failed.")
 

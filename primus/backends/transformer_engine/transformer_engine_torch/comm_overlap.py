@@ -87,18 +87,33 @@ def view_as_torch_dtype(tensor: torch.Tensor, dtype: tex.DType):
 if is_te_min_version("2.0"):
     import warnings
 
-    from transformer_engine.pytorch.tensor._internal.float8_tensor_base import (
-        Float8TensorBase,
-    )
-    from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import (
-        MXFP8TensorBase,
-    )
+    try:  # TE >= 2.12: base classes moved to tensor.storage and renamed *Storage
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage as Float8TensorBase,
+        )
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
+            MXFP8TensorStorage as MXFP8TensorBase,
+        )
+    except ModuleNotFoundError:  # TE <= 2.8
+        from transformer_engine.pytorch.tensor._internal.float8_tensor_base import (
+            Float8TensorBase,
+        )
+        from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import (
+            MXFP8TensorBase,
+        )
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-    from transformer_engine.pytorch.tensor.quantized_tensor import (
-        QuantizedTensor,
-        Quantizer,
-    )
+
+    try:
+        from transformer_engine.pytorch.tensor.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
+    except ModuleNotFoundError:
+        from transformer_engine.pytorch.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
 
     class CommOverlapBase:
         def __init__(self, buffer_shape: List[int], buffer_dtype: torch.dtype, group_name: str, tp_size: int):

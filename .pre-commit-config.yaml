@@ -4,6 +4,10 @@
 # Install
 # 1. pip install pre-commit
 # 2. pre-commit install(the first time you download the repo, it will be cached for future use)
+
+# Vendored code is linted upstream; keep hooks focused on Primus-owned paths.
+exclude: ^third_party/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.0.1
@@ -41,3 +45,15 @@ repos:
     rev: v0.10.0.1
     hooks:
       - id: shellcheck
+  - repo: local
+    hooks:
+      # Keep the committed primus/_thirdparty.lock in sync with the submodule
+      # pins. always_run because a submodule bump changes a gitlink, not a file
+      # pre-commit would otherwise match; if the lock changes the commit fails so
+      # the regenerated lock gets staged. Mirrors the release CI drift check.
+      - id: thirdparty-lock
+        name: regenerate primus/_thirdparty.lock from submodule pins
+        entry: python tools/pip_index/gen_thirdparty_lock.py
+        language: system
+        pass_filenames: false
+        always_run: true

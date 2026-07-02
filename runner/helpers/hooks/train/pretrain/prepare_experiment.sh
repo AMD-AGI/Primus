@@ -19,12 +19,17 @@
 set -euo pipefail
 
 # First two args are the hook group/name injected by execute_hooks.sh (e.g. train pretrain)
-HOOK_GROUP="$1"
-HOOK_NAME="$2"
+: "${1:?missing hook group}" "${2:?missing hook name}"
 shift 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRIMUS_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
+
+# Load shared logging so output honors PRIMUS_LOG_LEVEL (DEBUG/INFO/WARN/ERROR).
+# When invoked through primus-cli the LOG_* functions are already exported, but
+# sourcing here keeps the hook usable standalone and under `set -u`.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../../../hook_common.sh"
 
 CONFIG_FILE=""
 DATA_PATH="./data/"
@@ -64,7 +69,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$CONFIG_FILE" ]]; then
-    echo "[WARNING] prepare_experiment.sh: no --config provided, skipping framework dispatch" >&2
+    LOG_WARN "prepare_experiment.sh: no --config provided, skipping framework dispatch"
     exit 0
 fi
 
@@ -78,44 +83,49 @@ fi
 PATCH_DIR="$(dirname "$PATCH_ARGS")"
 mkdir -p "$PATCH_DIR"
 : > "$PATCH_ARGS"
-echo "[INFO] prepare_experiment.sh: patch args file: $PATCH_ARGS" >&2
+LOG_INFO "prepare_experiment.sh: patch args file: $PATCH_ARGS"
 
 # Route priority:
 #   1) --backend (explicit override)
 #   2) pre_trainer.framework from --config
 FRAMEWORK_FROM_CONFIG="$(python3 -c "
-import sys
+import os, sys
 from pathlib import Path
 
-print(f'[DEBUG] CONFIG_FILE: ${CONFIG_FILE}', file=sys.stderr)
+_DEBUG = os.environ.get('PRIMUS_LOG_LEVEL', 'INFO').upper() == 'DEBUG'
+def _dbg(m):
+    if _DEBUG:
+        print(f'[DEBUG] {m}', file=sys.stderr)
+
+_dbg('CONFIG_FILE: ${CONFIG_FILE}')
 
 sys.path.insert(0, '${PRIMUS_ROOT}')
 from primus.core.config.primus_config import load_primus_config, get_module_config
 
 cfg = load_primus_config(Path('${CONFIG_FILE}'), None)
-print(f'[DEBUG] cfg type: {type(cfg)}', file=sys.stderr)
+_dbg(f'cfg type: {type(cfg)}')
 
 pre_trainer = get_module_config(cfg, 'pre_trainer')
-print(f'[DEBUG] pre_trainer type: {type(pre_trainer)}', file=sys.stderr)
+_dbg(f'pre_trainer type: {type(pre_trainer)}')
 
 if pre_trainer is None:
-    print('[DEBUG] pre_trainer is None', file=sys.stderr)
+    _dbg('pre_trainer is None')
     sys.exit(1)
 
 if not hasattr(pre_trainer, 'framework'):
-    print('[DEBUG] pre_trainer has no framework attribute', file=sys.stderr)
+    _dbg('pre_trainer has no framework attribute')
     sys.exit(1)
 
-print(f'[DEBUG] pre_trainer.framework: {pre_trainer.framework}', file=sys.stderr)
+_dbg(f'pre_trainer.framework: {pre_trainer.framework}')
 
 print(pre_trainer.framework)
-" 2> >(tee /dev/stderr >&2) | tail -n 1 | tr -d '\r' || true)"
+" | tail -n 1 | tr -d '\r' || true)"
 
 if [[ -n "$BACKEND_OVERRIDE" ]]; then
     FRAMEWORK="$BACKEND_OVERRIDE"
     if [[ -n "$FRAMEWORK_FROM_CONFIG" ]]; then
         if [[ "$BACKEND_OVERRIDE" != "$FRAMEWORK_FROM_CONFIG" ]]; then
-            echo "[ERROR] prepare_experiment.sh: --backend=$BACKEND_OVERRIDE conflicts with framework=$FRAMEWORK_FROM_CONFIG from config" >&2
+            LOG_ERROR "prepare_experiment.sh: --backend=$BACKEND_OVERRIDE conflicts with framework=$FRAMEWORK_FROM_CONFIG from config"
             exit 1
         fi
     fi
@@ -124,7 +134,7 @@ else
 fi
 
 if [[ -z "$FRAMEWORK" ]]; then
-    echo "[WARNING] prepare_experiment.sh: no framework found (provide --backend or --config with pre_trainer.framework), skipping dispatch" >&2
+    LOG_WARN "prepare_experiment.sh: no framework found (provide --backend or --config with pre_trainer.framework), skipping dispatch"
     exit 0
 fi
 
@@ -152,11 +162,11 @@ if [[ -d "$FRAMEWORK_HOOK_DIR" ]]; then
     exit_code=0
     set +e
     for hook_file in "${SH_HOOK_FILES[@]}"; do
-        echo "[INFO] prepare_experiment.sh: executing shell hook $(basename "$hook_file")" >&2
+        LOG_INFO "prepare_experiment.sh: executing shell hook $(basename "$hook_file")"
         bash "$hook_file" "${HOOK_ARGS[@]}"
         exit_code=$?
         if [[ $exit_code -ne 0 ]]; then
-            echo "[ERROR] prepare_experiment.sh: shell hook failed: $hook_file (exit code: $exit_code)" >&2
+            LOG_ERROR "prepare_experiment.sh: shell hook failed: $hook_file (exit code: $exit_code)"
             exit $exit_code
         fi
     done
@@ -164,11 +174,11 @@ if [[ -d "$FRAMEWORK_HOOK_DIR" ]]; then
 fi
 
 if [[ ! -f "$FRAMEWORK_SCRIPT" ]]; then
-    echo "[WARNING] prepare_experiment.sh: backend prepare script not found: $FRAMEWORK_SCRIPT" >&2
+    LOG_WARN "prepare_experiment.sh: backend prepare script not found: $FRAMEWORK_SCRIPT"
     exit 0
 fi
 
-echo "[INFO] prepare_experiment.sh: framework=$FRAMEWORK script=$FRAMEWORK_SCRIPT" >&2
+LOG_INFO "prepare_experiment.sh: framework=$FRAMEWORK script=$FRAMEWORK_SCRIPT"
 
 CMD=(python3 "$FRAMEWORK_SCRIPT"
      --config "$CONFIG_FILE"
@@ -240,13 +250,13 @@ if [[ "$FRAMEWORK_DIR" == "megatron" ]]; then
             3)
                 TUNE_FILE="${HIPBLASLT_TUNING_OVERRIDE_FILE:-${TUNE_ROOT}/gemm_tune/${RESULT_FILE}}"
                 if [[ ! -f "$TUNE_FILE" ]]; then
-                    echo "[ERROR] prepare_experiment.sh: Missing tuning result file: $TUNE_FILE" >&2
+                    LOG_ERROR "prepare_experiment.sh: Missing tuning result file: $TUNE_FILE"
                     exit 1
                 fi
                 emit_env "HIPBLASLT_TUNING_OVERRIDE_FILE" "$TUNE_FILE"
                 ;;
             *)
-                echo "[ERROR] prepare_experiment.sh: Invalid PRIMUS_HIPBLASLT_TUNING_STAGE=$STAGE (expected 0/1/2/3)" >&2
+                LOG_ERROR "prepare_experiment.sh: Invalid PRIMUS_HIPBLASLT_TUNING_STAGE=$STAGE (expected 0/1/2/3)"
                 exit 1
                 ;;
         esac
@@ -258,4 +268,3 @@ if [[ "$FRAMEWORK_DIR" == "megatron" ]]; then
 fi
 
 exec "${CMD[@]}"
-

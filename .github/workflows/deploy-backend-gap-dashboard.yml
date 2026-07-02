@@ -1,0 +1,75 @@
+name: Deploy Backend Gap Dashboard
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/backend-gap/**"
+      - "docs/weekly_reports/**"
+      - "docs/monthly_reports/**"
+      - "tools/backend_gap_report/**"
+      - ".github/workflows/deploy-backend-gap-dashboard.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: backend-gap-dashboard-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PDF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc weasyprint fonts-noto-cjk
+
+      - name: Build and validate standalone dashboard bundle
+        run: python3 tools/backend_gap_report/build_site_bundle.py --output-dir "${{ runner.temp }}/backend-gap-site"
+
+      # Append a PEP 503 "simple" index for released Primus wheels into the same
+      # site bundle (under /simple/). The wheels stay on GitHub Releases; only
+      # small HTML index files are published here. Runs AFTER the bundle build
+      # because build_site_bundle.py wipes and recreates the output directory.
+      - name: Add pip (PEP 503) index for released wheels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/pip_index/build_pip_index.py \
+            --repo "${{ github.repository }}" \
+            --package primus \
+            --requires-python ">=3.10" \
+            --output-dir "${{ runner.temp }}/backend-gap-site/simple"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/backend-gap-site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

@@ -1,0 +1,88 @@
+extends:
+  - language_model.yaml
+
+# GLM-5 Model (GLM MoE with MLA + DeepSeek Sparse Attention)
+# 744B total params, ~40B active params
+# https://huggingface.co/zai-org/GLM-5
+
+tokenizer_type: HuggingFaceTokenizer
+##### TODO update to GLM-5 tokenizer
+tokenizer_model: THUDM/glm-4-9b  # GLM-5 tokenizer requires newer transformers; use GLM-4 for mock_data testing
+
+# model architecture
+num_layers: 78
+hidden_size: 6144
+ffn_hidden_size: 12288
+num_attention_heads: 64
+
+# MLA (Multi-Latent Attention)
+multi_latent_attention: true
+apply_rope_fusion: false
+qk_layernorm: true
+q_lora_rank: 2048
+kv_lora_rank: 512
+qk_head_dim: 192
+qk_pos_emb_head_dim: 64
+v_head_dim: 256
+kv_channels: 128
+
+# MTP
+mtp_num_layers: 1
+mtp_loss_scaling_factor: 0.1
+
+# MoE - first 3 layers dense, rest are MoE
+moe_layer_freq: "([0]*3+[1]*75)"
+num_experts: 256
+moe_router_topk: 8
+# num_shared_experts: 1  # Calculated as moe_shared_expert_intermediate_size // moe_ffn_hidden_size
+moe_ffn_hidden_size: 2048
+moe_shared_expert_intermediate_size: 2048
+
+# routing
+expert_model_parallel_size: 8
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: true
+moe_router_bias_update_rate: 1.0e-3
+moe_router_load_balancing_type: seq_aux_loss
+moe_aux_loss_coeff: 0.001
+moe_router_topk_scaling_factor: 2.5
+moe_token_dispatcher_type: alltoall
+
+# MoE optimization
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+moe_shared_expert_overlap: true
+
+# rotary - MLA always uses YarnRotaryEmbedding, need all YaRN params
+rotary_base: 1000000
+rotary_scaling_factor: 1.0
+rotary_interleaved: false
+original_max_position_embeddings: 4096
+mscale: 1.0
+mscale_all_dim: 1.0
+
+# other settings
+swiglu: true
+bias_swiglu_fusion: false
+add_bias_linear: false
+attention_softmax_in_fp32: true
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+position_embedding_type: rope
+normalization: RMSNorm
+norm_epsilon: 1.0e-5
+init_method_std: 0.008
+
+masked_softmax_fusion: false
+
+# primus specific
+disable_primus_topk_router: false
+moe_router_force_load_balancing: false
+use_deprecated_20241209_moe_layer: false
+final_logit_softcapping: null
+attn_logit_softcapping: null
+router_logit_softcapping: null

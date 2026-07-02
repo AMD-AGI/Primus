@@ -75,6 +75,10 @@ else
     }
 fi
 
+# Load path helpers so ROCm libraries keep highest priority.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/path_utils.sh"
+
 # ---------------------------------------------------------------------------
 # Distributed Training Cluster Configuration
 # ---------------------------------------------------------------------------
@@ -93,19 +97,30 @@ log_exported_vars "Training Cluster Info" \
 PRIMUS_PATH=$(cd "$SCRIPT_DIR/../../.." && pwd)
 export PRIMUS_PATH
 
+# Determine the directory that must be on PYTHONPATH for `import primus` to work.
+# - git checkout: PRIMUS_PATH is the repo root that *contains* the `primus/` package.
+# - pip/site-packages install: PRIMUS_PATH is the `primus` package dir itself, so the
+#   import root is its parent (e.g. .../site-packages).
+if [[ -f "${PRIMUS_PATH}/__init__.py" ]]; then
+    PRIMUS_IMPORT_ROOT="$(cd "${PRIMUS_PATH}/.." && pwd)"
+else
+    PRIMUS_IMPORT_ROOT="${PRIMUS_PATH}"
+fi
+export PRIMUS_IMPORT_ROOT
+
 # Set data paths
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
 if [[ -n "$site_packages" ]]; then
-    export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${site_packages}:${PYTHONPATH:-}"
 else
-    export PYTHONPATH="${PRIMUS_PATH}:${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${PYTHONPATH:-}"
 fi
 
 log_exported_vars "Python Path and Data Paths" \
-    PRIMUS_PATH DATA_PATH HF_HOME PYTHONPATH
+    PRIMUS_PATH PRIMUS_IMPORT_ROOT DATA_PATH HF_HOME PYTHONPATH
 
 # =============================================================================
 # NCCL and Network Configuration
@@ -115,8 +130,8 @@ log_exported_vars "Python Path and Data Paths" \
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
-# set LD_LIBRARY_PATH for ROCm in case it is not set in the container
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/opt/rocm/lib}
+# Keep ROCm libraries ahead of any system-provided HSA runtime.
+ensure_rocm_ld_library_path
 
 # ----------------- NCCL and Network Settings -----------------
 
@@ -182,7 +197,7 @@ export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 # Prevent scratch memory from being reclaimed to stabilize large memory usage
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
 # Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 log_exported_vars "AMD GPU Optimizations" \
     HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM
@@ -211,7 +226,7 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 log_exported_vars "General Performance Tuning" \
-    GPU_MAX_HW_QUEUES ENABLE_NUMA_BINDING CUDA_DEVICE_MAX_CONNECTIONS \
+    GPU_MAX_HW_QUEUES ENABLE_NUMA_BINDING HSA_KERNARG_POOL_SIZE CUDA_DEVICE_MAX_CONNECTIONS \
     TORCH_NCCL_HIGH_PRIORITY NCCL_PXN_DISABLE NCCL_P2P_NET_CHUNKSIZE
 
 # ----------------- Transformer Engine Optimizations -----------------
@@ -222,8 +237,7 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 # enable mxfp8 on ROCm Transformer Engine
 export NVTE_ROCM_ENABLE_MXFP8=1
 
-# Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Note: Disable fp32 atomic if you find any accuracy issue
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
@@ -242,11 +256,15 @@ if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
     export ROCBLAS_DEFAULT_ATOMICS_MODE=0
     # Disable torch compile to avoid race issues in some triton versions.
     export TORCH_COMPILE_DISABLE=1
+    export PRIMUS_TURBO_AUTO_TUNE=0
 fi
+# turbo deepep timeout
+export PRIMUS_TURBO_DEEPEP_TIMEOUT=${PRIMUS_TURBO_DEEPEP_TIMEOUT:-600}
 
 log_exported_vars "Transformer Engine Optimizations" \
     NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
     NVTE_CK_USES_BWD_V3 PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32 \
     NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN \
     PRIMUS_DETERMINISTIC NCCL_ALGO NVTE_ALLOW_NONDETERMINISTIC_ALGO \
-    ROCBLAS_DEFAULT_ATOMICS_MODE TORCH_COMPILE_DISABLE
+    ROCBLAS_DEFAULT_ATOMICS_MODE TORCH_COMPILE_DISABLE \
+    PRIMUS_TURBO_DEEPEP_TIMEOUT

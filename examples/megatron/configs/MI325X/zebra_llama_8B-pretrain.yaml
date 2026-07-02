@@ -1,0 +1,70 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_8B-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: zebra_llama_8B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Zebra_Llama_8B_Pretrain"
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 100
+      micro_batch_size: 2
+      global_batch_size: 16
+
+      seq_length: 8192
+      max_position_embeddings: 8192
+      original_max_position_embeddings: 8192
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 10000
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # Mamba-specific: must provide spec
+      # Use custom hybrid Mamba+MLA spec
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hybrid_stack_spec']
+
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.1-8B
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 10000
+      disable_last_saving: true
+      ckpt_format: torch

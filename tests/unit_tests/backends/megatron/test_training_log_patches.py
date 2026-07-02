@@ -98,6 +98,12 @@ def test_patch_training_log_skips_when_no_extensions(monkeypatch: pytest.MonkeyP
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
     )
+    # No injection and no forwarding -> patch must be a no-op. Pin forwarding to
+    # False so this test does not depend on the runner's env vars.
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches._should_forward_training_log_to_rank_0",
+        lambda: False,
+    )
 
     tl_patches.patch_training_log_unified(ctx)
 
@@ -134,12 +140,48 @@ def test_patch_training_log_wraps_and_stacks_extensions(monkeypatch: pytest.Monk
 
 
 def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.MonkeyPatch):
-    # Prepare fake torch and ROCm SMI helpers.
+    # Prepare fake torch and ROCm SMI helpers. MemoryStatsExtension also calls
+    # torch.tensor / torch.distributed.all_gather for cross-rank max ROCm mem;
+    # stub those so inject() does not fall into the exception path in unit tests.
+    class _FakeTensor:
+        __slots__ = ("_value",)
+
+        def __init__(self, value: int):
+            self._value = int(value)
+
+        def item(self) -> int:
+            return self._value
+
+    def _tensor(data, device=None, dtype=None):
+        if isinstance(data, (list, tuple)):
+            return _FakeTensor(data[0])
+        return _FakeTensor(data)
+
+    def _zeros_like(_t):
+        return _FakeTensor(0)
+
+    def _get_world_size():
+        return 8
+
+    def _all_gather(gathered_list, tensor):
+        v = tensor.item()
+        for i in range(len(gathered_list)):
+            gathered_list[i] = _FakeTensor(v)
+
+    # `inject` passes `dtype=torch.int64`; SimpleNamespace must expose `int64`
+    # or attribute lookup fails before our fake `tensor()` runs.
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(
             mem_get_info=lambda: (2 * 1024**3, 4 * 1024**3),
             current_device=lambda: 0,
-        )
+        ),
+        tensor=_tensor,
+        zeros_like=_zeros_like,
+        int64=int,
+        distributed=SimpleNamespace(
+            get_world_size=_get_world_size,
+            all_gather=_all_gather,
+        ),
     )
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.torch",
@@ -151,12 +193,7 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
         lambda rank: (8 * 1024**3, 6 * 1024**3, 2 * 1024**3),
     )
 
-    captured = []
     # Avoid real logging via Primus logger during unit tests.
-    monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_all",
-        lambda msg, *a, **k: captured.append(msg),
-    )
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
@@ -179,14 +216,12 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
     parsed = prl_patches.parse_training_log_line("iter 1:")
     mem_ext.inject("iter 1:", call_index=1, parsed=parsed)
     out = prl_patches.render_training_log_line(parsed)
-    prl_patches.log_rank_all(out)
 
-    assert len(captured) == 1
-    out = captured[0]
     assert "iter 1:" in out
     # Basic sanity checks that memory substrings are present.
     assert "hip mem usage/free/total/usage_ratio" in out
     assert "rocm mem usage/free/total/usage_ratio" in out
+    assert "rocm max mem usage/usage_ratio" in out
 
 
 def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest.MonkeyPatch):
@@ -212,12 +247,7 @@ def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest
         lambda rank: _raise_smi(),
     )
 
-    captured = []
     # Avoid real logging via Primus logger during unit tests.
-    monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_all",
-        lambda msg, *a, **k: captured.append(msg),
-    )
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
@@ -237,10 +267,8 @@ def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest
     parsed = prl_patches.parse_training_log_line("iter 2:")
     mem_ext.inject("iter 2:", call_index=1, parsed=parsed)
     out = prl_patches.render_training_log_line(parsed)
-    prl_patches.log_rank_all(out)
 
-    assert len(captured) == 1
-    assert captured[0].startswith("iter 2:")
+    assert out.startswith("iter 2:")
 
 
 def test_parse_training_log_line_does_not_confuse_iteration_and_elapsed():
@@ -269,3 +297,149 @@ def test_parse_training_log_line_does_not_confuse_iteration_and_elapsed():
     # Global batch size and throughput should be populated as well.
     assert info.global_batch_size == 128
     assert info.throughput_tflops == pytest.approx(1255.4)
+
+
+def test_bridge_forward_patch_wraps_and_forwards(monkeypatch: pytest.MonkeyPatch):
+    """
+    Megatron-Bridge forwarding patch.
+
+    Bridge hosts ``training_log`` in ``megatron.bridge.training.train`` (call
+    site) but resolves ``print_rank_last`` from
+    ``megatron.bridge.training.utils.train_utils``. The patch must wrap the
+    former and, only during the call, override the latter so the last-rank line
+    is forwarded to rank 0. The log content must stay unchanged and
+    ``print_rank_last`` must be restored afterwards. Wrapping is idempotent.
+    """
+    import sys
+
+    # Minimal module tree so the patch's ``import megatron.bridge...`` resolves.
+    # ``import ... as`` hits sys.modules directly, so parent wiring is not needed.
+    mods = {
+        name: types.ModuleType(name)
+        for name in (
+            "megatron",
+            "megatron.bridge",
+            "megatron.bridge.training",
+            "megatron.bridge.training.train",
+            "megatron.bridge.training.utils",
+            "megatron.bridge.training.utils.train_utils",
+        )
+    }
+    for name, mod in mods.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    train_mod = mods["megatron.bridge.training.train"]
+    train_utils_mod = mods["megatron.bridge.training.utils.train_utils"]
+
+    printed = []
+
+    def fake_print_rank_last(msg):
+        printed.append(msg)
+
+    def fake_training_log(line):
+        # Bridge: training_log resolves print_rank_last from train_utils.
+        train_utils_mod.print_rank_last(line)
+        return "done"
+
+    train_utils_mod.print_rank_last = fake_print_rank_last
+    train_mod.training_log = fake_training_log
+
+    forwarded = []
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches._should_forward_training_log_to_rank_0",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches._forward_single_node_training_log",
+        lambda msg: forwarded.append(msg),
+    )
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
+        lambda *a, **k: None,
+    )
+
+    ctx = SimpleNamespace(extra={})
+    tl_patches.patch_bridge_training_log_forward(ctx)
+
+    # Call-site training_log is wrapped; print_rank_last untouched until called.
+    assert train_mod.training_log is not fake_training_log
+    assert train_utils_mod.print_rank_last is fake_print_rank_last
+
+    line = "[ts] iteration 1/10 | lm loss: 1.0 |"
+    result = train_mod.training_log(line)
+
+    assert result == "done"
+    assert printed == [line]  # forwarding only: content is unchanged
+    assert len(forwarded) == 1
+    assert forwarded[0].endswith(line)
+    # print_rank_last must be restored after the call.
+    assert train_utils_mod.print_rank_last is fake_print_rank_last
+
+    # Idempotent: a second application is a no-op.
+    wrapped_once = train_mod.training_log
+    tl_patches.patch_bridge_training_log_forward(ctx)
+    assert train_mod.training_log is wrapped_once
+
+
+def test_native_forwarding_only_without_injection(monkeypatch: pytest.MonkeyPatch):
+    """
+    Decoupling: with ROCm/throughput injection disabled but single-node
+    forwarding active, the native patch must still wrap training_log and forward
+    the last-rank line to rank 0 -- without altering the log content.
+    """
+    import sys
+
+    megatron_mod = types.ModuleType("megatron")
+    training_pkg = types.ModuleType("megatron.training")
+    training_mod = types.ModuleType("megatron.training.training")
+
+    printed = []
+
+    def fake_print_rank_last(msg):
+        printed.append(msg)
+
+    def fake_training_log(line):
+        # Native: training_log resolves print_rank_last from the same module.
+        training_mod.print_rank_last(line)
+        return "ok"
+
+    training_mod.print_rank_last = fake_print_rank_last
+    training_mod.training_log = fake_training_log
+    training_pkg.training = training_mod
+    megatron_mod.training = training_pkg
+    for name, mod in [
+        ("megatron", megatron_mod),
+        ("megatron.training", training_pkg),
+        ("megatron.training.training", training_mod),
+    ]:
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    forwarded = []
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches._should_forward_training_log_to_rank_0",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches._forward_single_node_training_log",
+        lambda msg: forwarded.append(msg),
+    )
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
+        lambda *a, **k: None,
+    )
+
+    # log_throughput=False -> enable_rocm_stats is False -> injection disabled.
+    ctx = _make_ctx(args=SimpleNamespace(log_throughput=False), config={})
+    tl_patches.patch_training_log_unified(ctx)
+
+    # Even without injection, forwarding alone causes training_log to be wrapped.
+    assert training_mod.training_log is not fake_training_log
+
+    line = "[ts] iteration        1/      10 | lm loss: 1.0 |"
+    result = training_mod.training_log(line)
+
+    assert result == "ok"
+    assert printed == [line]  # content unchanged (no injection)
+    assert len(forwarded) == 1
+    assert forwarded[0].endswith(line)
+    # print_rank_last must be restored after the call.
+    assert training_mod.print_rank_last is fake_print_rank_last

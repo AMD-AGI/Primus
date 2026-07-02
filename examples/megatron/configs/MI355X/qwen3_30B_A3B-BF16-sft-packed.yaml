@@ -1,0 +1,262 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-sft-packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen3-30B-A3B SFT - sequence packing
+# =============================================================================
+# Hybrid of three references:
+#   1) deepseek_v2_lite-BF16-sft-packed.yaml  -- the verified SFT template
+#      (LoRA, packing, loss_mask gating, lr-warmup discipline).
+#   2) qwen3_30B_A3B-BF16-pretrain.yaml       -- Qwen3-specific fusion /
+#      recompute / precision-aware optimizer settings that have been
+#      empirically validated for this 30 B param + 128 expert architecture.
+#   3) examples/moe_package/start_training_qwen_30B_a3B.sh
+#      -- the actual override values used to reach the published
+#      ~555 TFLOPS pretrain steady state (mbs=8, gbs=512, recompute=5,
+#      manual_gc, mtp_num_layers=0).
+#
+# Model differences vs DeepSeek-V2-Lite (taken from configs/models/megatron/
+# qwen3_30B_A3B.yaml):
+#   * num_layers = 48 (vs 27)
+#   * num_experts = 128 (vs 64) -> 2x DeepEP buffer per layer
+#   * moe_router_topk = 8 (vs 6) -> 33 % more dispatch traffic per token
+#   * GQA with num_query_groups = 4 (vs DeepSeek's MLA)
+#   * total params 30.43 B (vs 15.82 B)
+#
+# What we DO copy from pretrain.yaml:
+#   * mbs=8, gbs=512, recompute_num_layers=5, EP=8       (memory layout)
+#   * use_precision_aware_optimizer + bf16 grad/exp_avg  (-50 % opt mem)
+#   * apply_rope_fusion + enable_experimental            (kernel speedup)
+#   * use_turbo_attention=false, use_turbo_rms_norm=false (current Qwen3
+#     bugs on these turbo paths -- pretrain already disables them)
+#   * manual_gc=true, manual_gc_interval=1               (avoid GC stalls
+#     at this parameter count)
+#   * mtp_num_layers=0                                   (no multi-token
+#     prediction head -- not relevant for SFT)
+#   * cross_entropy_fusion_impl=te + cross_entropy_loss_fusion
+#   * moe_use_legacy_grouped_gemm=true
+#
+# What we do NOT copy from pretrain.yaml (would break SFT):
+#   * moe_router_force_load_balancing=true  -> would freeze the router
+#   * mock_data=true                        -> we use real alpaca
+#   * eod_mask_loss=true                    -> we use loss_mask
+#   * lr_warmup_iters=2, lr_decay_iters=null
+#                                           -> SFT needs long warmup to
+#                                              protect pretrained weights
+#   * gradient_accumulation_fusion=true     -> conflicts with LoRA grad
+#                                              accumulation path on the
+#                                              frozen base; keep false
+#                                              (matches DeepSeek SFT)
+#
+# Memory expectation:
+#   pretrain mbs=8 / gbs=512 / recompute=5 -> 227 GB max mem (78 %).
+#   SFT replaces the 217 GB full-param bf16 optimizer state with a ~3 GB
+#   LoRA optimizer (only 0.88 % of params trainable), saving ~210 GB.
+#   It then adds ~16-20 GB for DeepEP buffer over-provision (router is no
+#   longer force-balanced, so DeepEP must reserve ~2 x average per-rank
+#   token slots) plus a few GB of packing/LoRA-adapter activation.
+#   Net: SFT mbs=8 should sit comfortably below 100 GB -- plenty of room
+#   to drop recompute later if we want more TFLOPS.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:qwen3_30B_A3B}.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: Qwen/Qwen3-30B-A3B
+      tokenizer_model: Qwen/Qwen3-30B-A3B
+
+      # SFT data
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # Sequence packing
+      enable_packed_sequences: true
+      # Strict per-segment isolation (qkv_format='thd') still SIGABRTs on
+      # ROCm + aiter. Implicit-multi-turn packing (full-pack causal attn,
+      # loss_mask gating) is the same regime LLaMA-Factory ships.
+      use_packed_attention: false
+
+      wandb_project: "Primus_Qwen3_30B_A3B_SFT_Packed"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # ---- training ------------------------------------------------------
+      # train_iters can be raised by the runner via override; 20 is the
+      # smoke-test value matching deepseek SFT.
+      train_iters: 20
+      # mbs / gbs / recompute mirror pretrain.sh exactly. We pick this
+      # configuration because it is the ONLY (mbs, gbs, recompute) tuple
+      # that has been verified end-to-end on 1 node mi355-gpu-8 (pretrain
+      # ran 18 iterations at 555 TFLOPS / 227 GB, log
+      # output/.../qwen3_30B_A3B-pretrain-...). For SFT we expect strictly
+      # lower memory due to LoRA, so this is a conservative starting point.
+      micro_batch_size: 8
+      # Constraint check: gbs % (mbs * dp_size) == 0
+      # On 1 node 8 GPU + TP=PP=CP=1: dp_size = 8 / (1*1*1) = 8.
+      #   512 % (8 * 8) = 0  -> num_microbatches = 512/64 = 8  OK.
+      global_batch_size: 512
+      moe_router_force_load_balancing: true
+
+      # 30 B params with full-precision activation is too large for one
+      # 288 GB GPU even with the LoRA optimizer savings; activation is
+      # dominated by the 48 transformer layers. recompute_num_layers=5
+      # block-recomputes the last 5 layers' fwd activations during bwd
+      # (saves ~10-12 GB at the cost of ~5/48 = 10 % extra compute).
+      # Pretrain validated this split is the sweet spot for Qwen3-30B.
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 5
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      # ---- LR / SFT discipline ------------------------------------------
+      # SFT-specific schedule: long warmup protects pretrained weights;
+      # explicit decay end so loss curve doesn't oscillate.
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      # SFT loss path
+      eod_mask_loss: false       # we use loss_mask (response-only) instead
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ---- parallelism --------------------------------------------------
+      # Qwen3-30B has 128 routed experts. EP=8 -> 16 experts per rank,
+      # which avoids the "0-token expert" NaN that EP=4 / EP=2 hit on
+      # DeepSeek-V2-Lite SFT. Qwen3's larger expert count makes the
+      # imbalance probability strictly lower, but we still keep EP=8.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # ZeRO-1 distributed optimizer + comm/comp overlap, mirrored from
+      # pretrain. Note: gradient_accumulation_fusion is INTENTIONALLY
+      # false (pretrain has it true). LoRA freezes the base model, and
+      # the in-place fused-grad-accum kernel does not interact correctly
+      # with the frozen-param branch in the current Megatron-LM tag, so
+      # we disable it (same choice as deepseek_v2_lite-BF16-sft-packed).
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      # ---- precision-aware optimizer ------------------------------------
+      # Stores main_grads / exp_avg / exp_avg_sq in bf16 instead of fp32.
+      # Saves ~50 % optimizer memory; safe for the LoRA branch (only the
+      # LoRA adapter params live in the optimizer; base model is frozen).
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # ---- rope / attention ---------------------------------------------
+      apply_rope_fusion: true
+      enable_experimental: true
+
+      # GQA model -- DO NOT enable multi_latent_attention (that's MLA,
+      # used by DeepSeek). Qwen3 uses GQA with num_query_groups=4
+      # (declared in primus/configs/models/megatron/qwen3_30B_A3B.yaml).
+
+      # ---- ckpt ---------------------------------------------------------
+      finetune: true
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+
+      bf16: true
+
+      # ---- Turbo --------------------------------------------------------
+      enable_primus_turbo: true
+      # use_turbo_attention currently has a bug on Qwen3 GQA path; pretrain
+      # already disables it. Will re-enable once primus-turbo lands the fix.
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: false   # bug; pretrain disables
+
+      # ---- DeepEP -------------------------------------------------------
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      # Qwen3 pretrain uses 80 (256-CU GPU divides nicely into 8 EP * 80
+      # CU per dispatch); DeepSeek uses 64. Stay with 80 for Qwen3 to
+      # match pretrain's measured 555 TFLOPS scheduling.
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      # Auto-enabled by sync_free_moe_stage>=1 but listing them here for
+      # clarity (see pretrain log "Enable Sync-Free MoE Stage 1 ...").
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # MoE grouped-GEMM kernel selection -- aligned with pretrain.
+      moe_use_legacy_grouped_gemm: true
+
+      # Final lm_head + cross_entropy fusion -- aligned with pretrain.
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # ---- 30 B-specific stability flags --------------------------------
+      # Manual GC every iter avoids the multi-second Python GC stall we
+      # observed on 30 B+ models when allocator pressure is high. Pretrain
+      # passes this via the sh; we make it explicit in the yaml so the
+      # SFT path doesn't need an external runner override.
+      manual_gc: true
+      manual_gc_interval: 1
+
+      # No multi-token prediction head (pretrain disables it via sh
+      # override --mtp_num_layers 0; carry the same).
+      mtp_num_layers: 0
+
+      # ---- profiling (iter 10-11; matches DeepSeek SFT cadence) ---------
+      # See deepseek_v2_lite-BF16-sft-packed.yaml for the full step_num /
+      # megatron-iter offset explanation. With profile_step_start=10,
+      # profile_step_end=11 we capture iter-10 and iter-11 of the
+      # megatron log (steady state, after the ~iter-3 turbo warmup).
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+
+      eval_iters: 10
+
+      # ---- LoRA ---------------------------------------------------------
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

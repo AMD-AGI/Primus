@@ -16,11 +16,150 @@ configuration representations used in Megatron-Bridge integration:
 
 from __future__ import annotations
 
+import ast
 import importlib
 from types import SimpleNamespace
 from typing import Any, Callable, Dict
 
 from primus.modules.module_utils import log_rank_0
+
+DATASET_PATH_KEYS = (
+    "data_paths",
+    "train_data_path",
+    "valid_data_path",
+    "test_data_path",
+)
+DATASET_CONFIG_FILE_KEYS = (
+    "data_args_path",
+    "per_split_data_args_path",
+)
+_BOOL_MAP = {"true": True, "false": False}
+_is_dict = lambda o: isinstance(o, dict)
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    return obj.get(key, default) if _is_dict(obj) else getattr(obj, key, default)
+
+
+def _has(obj: Any, key: str) -> bool:
+    return key in obj if _is_dict(obj) else hasattr(obj, key)
+
+
+def _set(obj: Any, key: str, value: Any) -> None:
+    if _is_dict(obj):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def _delete(obj: Any, key: str) -> None:
+    if _is_dict(obj):
+        obj.pop(key, None)
+    elif hasattr(obj, key):
+        delattr(obj, key)
+
+
+def _normalize_optional_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    stripped = value.strip()
+    if not stripped or stripped.lower() == "none":
+        return None
+
+    return stripped
+
+
+def _parse_optional_bool(value: Any, field_name: str) -> bool | None:
+    """
+    Parse optional boolean values from bool/str/None with strict semantics.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = _normalize_optional_string(value)
+        if normalized is None:
+            return None
+        lowered = normalized.lower()
+        if lowered in _BOOL_MAP:
+            return _BOOL_MAP[lowered]
+        raise ValueError(
+            f"Invalid boolean string for '{field_name}': {value!r}. Expected one of: true/false."
+        )
+
+    raise TypeError(f"Invalid type for '{field_name}': {type(value).__name__}. Expected bool, str, or None.")
+
+
+def _to_str_list(value: Any) -> list[str]:
+    """Coerce a single value or collection into a flat list of non-empty strings."""
+    if isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+        except Exception:
+            parsed = None
+        raw = list(parsed) if isinstance(parsed, (list, tuple)) else [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = [value]
+    return [str(v) for v in raw if _normalize_optional_string(v) is not None]
+
+
+def _normalize_dataset_path_value(value: Any) -> list[str] | None:
+    """Normalize dataset path fields to ``list[str] | None`` for Bridge recipes."""
+    value = _normalize_optional_string(value)
+    if value is None:
+        return None
+    return _to_str_list(value) or None
+
+
+def _has_real_data_config(obj: Any) -> bool:
+    for key in (*DATASET_PATH_KEYS, *DATASET_CONFIG_FILE_KEYS):
+        value = _get(obj, key)
+        if isinstance(value, str):
+            if _normalize_optional_string(value) is not None:
+                return True
+        elif value:
+            return True
+    return False
+
+
+def normalize_megatron_bridge_dataset_args(args: Any) -> Any:
+    """
+    Normalize Primus/CLI dataset arguments into the shapes expected by Bridge recipes.
+
+    This keeps Primus config authoring flexible while making runtime behavior
+    predictable for Megatron-Bridge:
+      - accepts legacy `mock_data` as input alias, then converges to `mock`
+      - string dataset prefixes are wrapped into lists
+      - Python list literals passed through CLI remain supported
+      - any explicit real-data config forces `mock=false` to avoid silent fallback
+    """
+    if args is None:
+        return args
+
+    for key in DATASET_PATH_KEYS:
+        if _has(args, key):
+            _set(args, key, _normalize_dataset_path_value(_get(args, key)))
+
+    for key in DATASET_CONFIG_FILE_KEYS:
+        if _has(args, key):
+            _set(args, key, _normalize_optional_string(_get(args, key)))
+
+    mock = _parse_optional_bool(_get(args, "mock"), "mock")
+    if mock is None:
+        mock = _parse_optional_bool(_get(args, "mock_data"), "mock_data")
+
+    _delete(args, "mock_data")
+
+    if _has_real_data_config(args):
+        mock = False
+
+    if mock is not None:
+        _set(args, "mock", mock)
+
+    return args
 
 
 def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: int = 50) -> Any:
@@ -185,7 +324,69 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
                 )
 
 
+def _resolve_recipe(recipe: str, flavor: str):
+    """
+    Resolve a recipe module and function by searching multiple namespaces.
+
+    Search order:
+        1. Direct custom module path (e.g., primus.recipes.llama2_custom)
+        2. primus.backends.megatron_bridge.recipes.{recipe}  (Primus-side extensions)
+        3. megatron.bridge.recipes.{recipe}                   (upstream Megatron-Bridge)
+        4. recipe as a direct Python module path (fallback)
+
+    Returns:
+        Tuple of (module, full_module_path) for the first namespace that
+        contains the requested *flavor* function.
+
+    Raises:
+        AssertionError if the recipe cannot be found in any namespace.
+    """
+    custom_prefixes = ("primus.recipes.", "primus.")
+    if any(recipe.startswith(prefix) for prefix in custom_prefixes):
+        try:
+            module = importlib.import_module(recipe)
+        except ImportError as e:
+            assert False, f"Recipe loading failed: Cannot import custom recipe '{recipe}': {e}"
+        assert hasattr(
+            module, flavor
+        ), f"Recipe loading failed: Function '{flavor}' not found in custom recipe '{recipe}'"
+        log_rank_0(f"  ℹ️  Using custom recipe from: {recipe}")
+        return module, recipe
+
+    search_prefixes = [
+        "primus.backends.megatron_bridge.recipes",
+        "megatron.bridge.recipes",
+    ]
+
+    for prefix in search_prefixes:
+        full_module_path = f"{prefix}.{recipe}"
+        try:
+            module = importlib.import_module(full_module_path)
+        except ImportError:
+            continue
+        if hasattr(module, flavor):
+            return module, full_module_path
+
+    # Fallback: try recipe as a direct Python module path
+    if "." in recipe and not recipe.startswith(("/", ".")):
+        try:
+            module = importlib.import_module(recipe)
+            if hasattr(module, flavor):
+                log_rank_0(f"  ℹ️  Using custom recipe from: {recipe}")
+                return module, recipe
+        except ImportError:
+            pass
+
+    # Build a helpful error message listing all paths that were tried.
+    tried = [f"{p}.{recipe}" for p in search_prefixes]
+    if "." in recipe:
+        tried.append(recipe)
+    assert False, f"Recipe loading failed: Function '{flavor}' not found. " f"Searched modules: {tried}"
+
+
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
+    normalize_megatron_bridge_dataset_args(backend_args)
+
     recipe = backend_args.recipe
     flavor = backend_args.flavor
 
@@ -193,63 +394,13 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     assert recipe, "Recipe must be specified for Megatron-Bridge backend"
     assert flavor, "Flavor must be specified for Megatron-Bridge backend"
 
-    # Determine if this is a custom recipe or standard Megatron-Bridge recipe
-    # Custom recipes can be specified as:
-    # 1. Python module path (e.g., "primus.recipes.llama2_custom")
-    # 2. Standard Megatron-Bridge recipe (e.g., "llama.llama2")
-    #
-    # We detect custom recipes by checking if they start with known custom prefixes
-    # or if they don't match the standard megatron.bridge.recipes structure
-    is_custom_recipe = False
-    full_module_path = recipe
-
-    # Check if this is a custom recipe (starts with known custom module prefixes)
-    custom_prefixes = ["primus.recipes.", "primus."]
-    for prefix in custom_prefixes:
-        if recipe.startswith(prefix):
-            is_custom_recipe = True
-            break
-
-    # If not explicitly custom, check if it looks like a standard megatron recipe
-    # Standard recipes are in the form "model.variant" (e.g., "llama.llama2")
-    if not is_custom_recipe:
-        # If it doesn't contain dots or looks like a relative path, treat as standard
-        if "." in recipe and not recipe.startswith("/") and not recipe.startswith("."):
-            # Could be either standard or custom. Try standard first.
-            full_module_path = f"megatron.bridge.recipes.{recipe}"
-        else:
-            # Assume it's a standard recipe
-            full_module_path = f"megatron.bridge.recipes.{recipe}"
-
     function_name = flavor
 
+    # Resolve recipe module from Primus-side extensions or upstream Megatron-Bridge
+    module, full_module_path = _resolve_recipe(recipe, function_name)
+
     log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
-    if is_custom_recipe:
-        log_rank_0(f"  ℹ️  Using custom recipe from: {full_module_path}")
 
-    # Import module and get function
-    try:
-        module = importlib.import_module(full_module_path)
-    except ImportError as e:
-        # If standard recipe failed and we haven't tried custom yet, try as custom
-        if not is_custom_recipe and "." in recipe:
-            try:
-                log_rank_0(f"  ⚠️  Standard recipe import failed, trying as custom module...")
-                module = importlib.import_module(recipe)
-                full_module_path = recipe
-                is_custom_recipe = True
-                log_rank_0(f"  ✅ Successfully loaded custom recipe: {recipe}")
-            except ImportError as e2:
-                assert False, (
-                    f"Recipe loading failed: Cannot import as standard '{full_module_path}' "
-                    f"or custom '{recipe}': {e2}"
-                )
-        else:
-            assert False, f"Recipe loading failed: Cannot import '{full_module_path}': {e}"
-
-    assert hasattr(
-        module, function_name
-    ), f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
     recipe_func = getattr(module, function_name)
 
     # Convert backend_args to dict once (used for both recipe call and config override)

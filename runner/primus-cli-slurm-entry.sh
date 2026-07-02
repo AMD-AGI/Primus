@@ -76,7 +76,6 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
-echo "PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
 
 # Load configuration (specified or defaults)
 load_config_auto "$CONFIG_FILE" "slurm-entry" || {
@@ -119,14 +118,22 @@ if [[ -z "${SLURM_NODELIST:-}" ]]; then
     exit 2
 fi
 
-# Pick master node address from SLURM_NODELIST, or fallback
-if [[ -z "${MASTER_ADDR:-}" ]]; then
-    MASTER_ADDR="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1 || echo localhost)"
-fi
-MASTER_PORT="${MASTER_PORT:-1234}"
-
 # Get all node hostnames (sorted, as needed)
 readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+SLURM_MASTER_ADDR="${NODE_ARRAY[0]:-}"
+if [[ -z "$SLURM_MASTER_ADDR" ]]; then
+    LOG_ERROR "[slurm-entry] Failed to resolve the first host from SLURM_NODELIST=$SLURM_NODELIST"
+    exit 2
+fi
+
+if [[ -z "${MASTER_ADDR:-}" ]]; then
+    MASTER_ADDR="$SLURM_MASTER_ADDR"
+elif [[ "$MASTER_ADDR" != "$SLURM_MASTER_ADDR" ]]; then
+    LOG_ERROR "[slurm-entry] MASTER_ADDR must match the first host in SLURM_NODELIST."
+    LOG_ERROR "[slurm-entry] MASTER_ADDR=$MASTER_ADDR, expected=$SLURM_MASTER_ADDR"
+    exit 2
+fi
+MASTER_PORT="${MASTER_PORT:-1234}"
 # (Optional: sort by IP if needed, e.g., for deterministic rank mapping)
 # Uncomment if you need IP sort
 # readarray -t NODE_ARRAY < <(

@@ -18,6 +18,7 @@ from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from primus.pretrain import setup_backend_path
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     get_node_rank,
     log_error_and_exit,
@@ -32,14 +33,13 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
 
 
 def prepare_dataset(
-    primus_path: Path,
     data_path: Path,
     tokenizer_type: str,
     tokenizer_model: str,
@@ -101,14 +101,13 @@ def prepare_dataset(
     log_info(f"Preprocessing completed in {int(time.time() - start)} s")
 
 
-def prepare_dataset_if_needed(
-    primus_config: PrimusConfig, primus_path: Path, data_path: Path, patch_args: Path, env=None
-):
+def prepare_dataset_if_needed(primus_config: PrimusConfig, data_path: Path, env=None):
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
         return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
+    tokenizer_model = pre_trainer_cfg.tokenizer_model
     default_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_text_sentence"
     tokenized_data_path = Path(os.environ.get("TOKENIZED_DATA_PATH", str(default_tokenized_path)))
 
@@ -121,13 +120,9 @@ def prepare_dataset_if_needed(
             if not hf_token:
                 log_error_and_exit("Environment variable HF_TOKEN must be set.")
 
-            tokenizer_type = primus_config.get_module_config("pre_trainer").tokenizer_type
-            tokenizer_model = primus_config.get_module_config("pre_trainer").tokenizer_model
-
-            log_info(f"TOKENIZER_DATA_PATH is {tokenized_data_path}")
+            log_info(f"TOKENIZED_DATA_PATH is {tokenized_data_path}")
 
             prepare_dataset(
-                primus_path=primus_path,
                 data_path=data_path,
                 tokenizer_type=tokenizer_type,
                 tokenizer_model=tokenizer_model,
@@ -147,22 +142,32 @@ def prepare_dataset_if_needed(
     print(f"extra.train_data_path={tokenized_data_path}")
 
 
-def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str = None):
-    """Build Megatron's helper C++ dataset library."""
+def resolve_megatron_path_for_helper(primus_path: Path, backend_path: str | None) -> Path:
+    """Resolve Megatron path for C++ helper build: CLI > BACKEND_PATH > MEGATRON_PATH > default."""
     if backend_path:
-        megatron_path = Path(backend_path).resolve()
-        log_info(f"Using backend_path from argument: {megatron_path}")
-    else:
-        # megatron_path = primus_path / "third_party/megatron"
-        # log_info(f"No backend_path provided, falling back to: {megatron_path}")
-        env_backend = get_env_case_insensitive("MEGATRON_PATH")
-        if env_backend:
-            megatron_path = Path(env_backend).resolve()
-            log_info(f"Using backend_path from environment: {megatron_path}")
-        else:
-            megatron_path = primus_path / "third_party/Megatron-LM"
-            log_info(f"No backend_path provided, falling back to: {megatron_path}")
+        path = Path(backend_path).resolve()
+        log_info(f"Using backend_path from argument: {path}")
+        return path
 
+    env_backend = get_env_case_insensitive("BACKEND_PATH")
+    if env_backend:
+        path = Path(env_backend).resolve()
+        log_info(f"Using backend_path from BACKEND_PATH environment: {path}")
+        return path
+
+    env_backend = get_env_case_insensitive("MEGATRON_PATH")
+    if env_backend:
+        path = Path(env_backend).resolve()
+        log_info(f"Using backend_path from MEGATRON_PATH environment: {path}")
+        return path
+
+    path = default_backend_path(primus_path, "Megatron-LM")
+    log_info(f"No backend_path provided, falling back to: {path}")
+    return path
+
+
+def build_megatron_helper(megatron_path: Path):
+    """Build Megatron's helper C++ dataset library."""
     # Expose resolved backend_path to the caller (e.g., primus-cli direct)
     # via a generic extra.* line on stdout, which will be converted to:
     #   --backend_path <megatron_path>
@@ -174,7 +179,9 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
     dataset_cpp_dir = megatron_path / "megatron/core/datasets"
     log_info(f"Building Megatron dataset helper in {dataset_cpp_dir}")
 
-    ret = subprocess.run(["make"], cwd=dataset_cpp_dir)
+    # `-s` silences make's "Nothing to be done"/recipe echo on no-op rebuilds;
+    # real compiler errors still surface and are handled below.
+    ret = subprocess.run(["make", "-s"], cwd=dataset_cpp_dir)
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ helper failed.")
 
@@ -189,7 +196,7 @@ def main():
         "--patch_args",
         type=str,
         default="/tmp/primus_patch_args.txt",
-        help="Path to write additional args (used during training phase)",
+        help="Reserved for runner hook interface compatibility",
     )
     parser.add_argument(
         "--backend_path",
@@ -214,9 +221,9 @@ def main():
         log_error_and_exit(f"The specified EXP file does not exist: {exp_path}")
     log_info(f"EXP is set to: {exp_path}")
 
-    patch_args_file = Path(args.patch_args).resolve()
-    log_info(f"PATCH-ARGS is set to: {patch_args_file}")
+    log_info(f"PATCH-ARGS is set to: {Path(args.patch_args).resolve()} (unused in megatron prepare hook)")
 
+    build_backend_path = resolve_megatron_path_for_helper(primus_path, args.backend_path)
     used_backend_path = setup_backend_path(framework="megatron", backend_path=args.backend_path, verbose=True)
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{used_backend_path}:{env.get('PYTHONPATH', '')}"
@@ -227,13 +234,11 @@ def main():
     else:
         prepare_dataset_if_needed(
             primus_config=primus_config,
-            primus_path=primus_path,
             data_path=data_path,
-            patch_args=patch_args_file,
             env=env,
         )
 
-    build_megatron_helper(primus_path=primus_path, backend_path=args.backend_path, patch_args=patch_args_file)
+    build_megatron_helper(megatron_path=build_backend_path)
 
 
 if __name__ == "__main__":
