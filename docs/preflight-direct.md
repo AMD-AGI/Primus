@@ -792,4 +792,3 @@ final `summary.txt` are written under `--output-dir`.
 - `[runner/primus-cli-direct.sh](../runner/primus-cli-direct.sh)` — the direct launcher itself (`primus-cli direct` dispatches here)
 - `[primus/tools/preflight/](../primus/tools/preflight/)` — preflight implementation
 - `[tools/preflight_bisect/bisect.py](../tools/preflight_bisect/bisect.py)` — bisect wrapper for narrowing down failing nodes in multi-node preflight runs
-

@@ -262,15 +262,17 @@ def _build_link_matrix(gpu_nodes: List[GpuNode]) -> List[LinkInfo]:
                 link_type = "unknown"
                 hops = 0
 
-            links.append(LinkInfo(
-                src_idx=src_idx,
-                dst_idx=dst_idx,
-                link_type=link_type,
-                weight=weight,
-                min_bandwidth=min_bw,
-                max_bandwidth=max_bw,
-                hops=hops,
-            ))
+            links.append(
+                LinkInfo(
+                    src_idx=src_idx,
+                    dst_idx=dst_idx,
+                    link_type=link_type,
+                    weight=weight,
+                    min_bandwidth=min_bw,
+                    max_bandwidth=max_bw,
+                    hops=hops,
+                )
+            )
 
     return links
 
@@ -316,10 +318,7 @@ def sysfs_gpu_bdfs() -> List[Dict[str, Any]]:
     """
     try:
         nodes = _enumerate_gpu_nodes()
-        return [
-            {"gpu": i, "pci_bdf": n.pci_bdf_str, "numa_node": n.numa_node}
-            for i, n in enumerate(nodes)
-        ]
+        return [{"gpu": i, "pci_bdf": n.pci_bdf_str, "numa_node": n.numa_node} for i, n in enumerate(nodes)]
     except Exception:
         return []
 

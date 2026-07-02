@@ -183,9 +183,7 @@ def run_gpu_basic_checks(
     if probe.backend == "rocm":
         detected = [k for k in ("sysfs", "amd-smi", "rocm-smi") if k in probe.tooling]
         if detected:
-            findings.append(
-                Finding("info", "ROCm runtime/tooling detected", {"tooling": detected})
-            )
+            findings.append(Finding("info", "ROCm runtime/tooling detected", {"tooling": detected}))
         else:
             from primus.tools.preflight.global_vars import LOCAL_RANK
 
