@@ -25,15 +25,19 @@ import triton.language as tl
 
 
 def _get_fwd_configs():
+    # Focused around the autotune winners from the wide sweep (TILE_K=16,
+    # num_stages=3 dominated -> latency-bound; deep pipelining is the lever), plus
+    # num_stages=4 to probe deeper pipelining. Keeps first-call autotune cheap.
     return [
-        triton.Config({"BLOCK_H": bh, "TILE_K": tk}, num_warps=4, num_stages=ns)
-        for bh in (16, 32, 64)
-        for tk in (32, 64)
-        for ns in (1, 2)
+        triton.Config({"BLOCK_H": bh, "TILE_K": tk, "waves_per_eu": wpe}, num_warps=4, num_stages=ns)
+        for bh in (32, 64)
+        for tk in (16, 32)
+        for ns in (2, 3, 4)
+        for wpe in (0, 1)
     ]
 
 
-@triton.autotune(configs=_get_fwd_configs(), key=["num_heads", "TOPK", "D_V", "D_ROPE"])
+@triton.autotune(configs=_get_fwd_configs(), key=["num_heads", "TOPK", "D_V", "D_ROPE", "HAS_ROPE"])
 @triton.jit
 def _sparse_mla_fwd_tr_kernel(
     Q_ptr,  # [total_tokens, num_heads, D_QK] bf16
@@ -55,6 +59,7 @@ def _sparse_mla_fwd_tr_kernel(
     TILE_K: tl.constexpr,
     D_V: tl.constexpr,
     D_ROPE: tl.constexpr,
+    HAS_ROPE: tl.constexpr,
     HAS_SINK: tl.constexpr,
 ):
     tok = tl.program_id(0)
@@ -67,7 +72,8 @@ def _sparse_mla_fwd_tr_kernel(
 
     q_base = tok.to(tl.int64) * stride_q_t + offs_h.to(tl.int64)[:, None] * stride_q_h
     q_lora = tl.load(Q_ptr + q_base + offs_v[None, :], mask=mask_h[:, None], other=0.0)
-    q_rope = tl.load(Q_ptr + q_base + (D_V + offs_r)[None, :], mask=mask_h[:, None], other=0.0)
+    if HAS_ROPE:
+        q_rope = tl.load(Q_ptr + q_base + (D_V + offs_r)[None, :], mask=mask_h[:, None], other=0.0)
 
     m_i = tl.full([BLOCK_H], float("-inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_H], dtype=tl.float32)
@@ -82,11 +88,12 @@ def _sparse_mla_fwd_tr_kernel(
 
         kv_base = safe[:, None] * stride_kv_t
         k_lora = tl.load(KV_ptr + kv_base + offs_v[None, :], mask=valid[:, None], other=0.0)
-        k_rope = tl.load(KV_ptr + kv_base + (D_V + offs_r)[None, :], mask=valid[:, None], other=0.0)
 
         # S = q @ k^T over [lora ++ rope]  -> [BLOCK_H, TILE_K]
         s = tl.dot(q_lora, tl.trans(k_lora))
-        s += tl.dot(q_rope, tl.trans(k_rope))
+        if HAS_ROPE:
+            k_rope = tl.load(KV_ptr + kv_base + (D_V + offs_r)[None, :], mask=valid[:, None], other=0.0)
+            s += tl.dot(q_rope, tl.trans(k_rope))
         s = s * scale
         s = tl.where(valid[None, :] & mask_h[:, None], s, float("-inf"))
 
@@ -153,6 +160,10 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
     o = torch.empty(total_tokens, num_heads, kv_lora_rank, dtype=q.dtype, device=q.device)
     lse = torch.empty(total_tokens, num_heads, dtype=torch.float32, device=q.device)
 
+    # V4 single-latent form: the D_ROPE block of q/kv is a zero pad (RoPE baked
+    # in-place over the 512 latent), so the rope QK term is provably zero — skip it.
+    has_rope = False
+
     grid = lambda META: (total_tokens, triton.cdiv(num_heads, META["BLOCK_H"]))
     _sparse_mla_fwd_tr_kernel[grid](
         Q_ptr=q,
@@ -172,6 +183,7 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
         TOPK=topk,
         D_V=kv_lora_rank,
         D_ROPE=rope_rank,
+        HAS_ROPE=has_rope,
         HAS_SINK=has_sink,
     )
     return o, lse
