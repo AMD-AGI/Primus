@@ -131,9 +131,7 @@ def _import_primus_turbo_deepep_dispatcher_cls():
     if importlib.util.find_spec("primus_turbo") is None:
         return None
     try:
-        module = importlib.import_module(
-            "primus.backends.megatron.core.extensions.primus_turbo"
-        )
+        module = importlib.import_module("primus.backends.megatron.core.extensions.primus_turbo")
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
             "[DeepSeek-V4][P23] Failed to import "

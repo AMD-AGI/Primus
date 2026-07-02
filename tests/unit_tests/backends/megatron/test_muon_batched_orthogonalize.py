@@ -37,9 +37,7 @@ def test_batched_3d_orthogonalize_matches_loop(shape, monkeypatch):
     torch.set_float32_matmul_precision("high")
     try:
         p = torch.nn.Parameter(torch.zeros(E, N, K, dtype=torch.float32))
-        opt = TensorParallelMuon(
-            [p], lr=1e-3, coefficient_type="deepseekv4", extra_scale_factor=0.18
-        )
+        opt = TensorParallelMuon([p], lr=1e-3, coefficient_type="deepseekv4", extra_scale_factor=0.18)
         grad = torch.randn(E, N, K, dtype=torch.float32)
 
         monkeypatch.setenv("PRIMUS_MUON_BATCHED_NS", "1")

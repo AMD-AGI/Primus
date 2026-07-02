@@ -111,7 +111,7 @@ PROJ_ARGS="$PROJ_ARGS $EXTRA_OVERRIDES"
 
 # TE wheel install prefix (same as pretrain launcher)
 TE_INSTALL="true"
-if ls ${TE_WHEEL_DIR}/transformer_engine-*.whl >/dev/null 2>&1; then
+if ls "${TE_WHEEL_DIR}"/transformer_engine-*.whl >/dev/null 2>&1; then
     TE_INSTALL="pip install --quiet --force-reinstall --no-deps ${TE_WHEEL_DIR}/transformer_engine-*.whl && \
         pip install --quiet einops nvdlfw-inspect onnxscript onnx pydantic importlib-metadata packaging transformers pybind11"
 fi

@@ -39,10 +39,8 @@ from dataclasses import fields
 
 import pytest
 import torch
-
 from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-
+from megatron.core.transformer.spec_utils import ModuleSpec
 
 # ---------------------------------------------------------------------------
 # G18 — submodules surface
@@ -153,9 +151,7 @@ class TestSpecEmission:
     def test_dense_emits_core_attention(self, _tp1_distributed):
         cfg = _make_v4_cfg(attn_sink=True, attn_sliding_window=4)
         submods = _make_v4_submods(cfg, compress_ratio=0)
-        assert submods.core_attention is not None, (
-            "compress_ratio == 0 must emit a ``core_attention`` spec."
-        )
+        assert submods.core_attention is not None, "compress_ratio == 0 must emit a ``core_attention`` spec."
 
     def test_csa_no_core_attention(self, _tp1_distributed):
         cfg = _make_v4_cfg(attn_sink=True, attn_sliding_window=4)
@@ -321,9 +317,7 @@ class TestG18AliasAndForward:
         )
 
         provider = DeepSeekV4SpecProvider(config=cfg)
-        attn2 = _build_v4_attention_with(
-            cfg, core_attention_class=provider.core_attention()
-        )
+        attn2 = _build_v4_attention_with(cfg, core_attention_class=provider.core_attention())
         assert attn2.core_attention is not None, "TE core_attention must build"
         assert attn2._use_core_attention is False, (
             "When the built core_attention does not support learned sinks "
@@ -341,9 +335,7 @@ class TestG18AliasAndForward:
         cfg = _make_v4_cfg(attn_sink=True, attn_sliding_window=0)
 
         attn_eager = _build_v4_attention_with(cfg, core_attention_class=None)
-        attn_turbo = _build_v4_attention_with(
-            cfg, core_attention_class=_MockTurboCoreAttention
-        )
+        attn_turbo = _build_v4_attention_with(cfg, core_attention_class=_MockTurboCoreAttention)
 
         # Copy weights so both modules have identical parameters.
         with torch.no_grad():

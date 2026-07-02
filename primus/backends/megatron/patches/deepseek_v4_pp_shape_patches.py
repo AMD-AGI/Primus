@@ -132,14 +132,9 @@ def patch_v4_pp_tensor_shape(ctx: PatchContext):
     # Wrapper 1: get_tensor_shapes (used by the non-interleaved schedule).
     original_get_tensor_shapes = schedules_module.get_tensor_shapes
     if getattr(original_get_tensor_shapes, "_v4_pp_shape_patched", False):
-        log_rank_0(
-            "[Patch:megatron.deepseek_v4.pp_tensor_shape] get_tensor_shapes "
-            "already patched, skip"
-        )
+        log_rank_0("[Patch:megatron.deepseek_v4.pp_tensor_shape] get_tensor_shapes " "already patched, skip")
     else:
-        schedules_module.get_tensor_shapes = _make_v4_get_tensor_shapes(
-            original_get_tensor_shapes, hc_mult
-        )
+        schedules_module.get_tensor_shapes = _make_v4_get_tensor_shapes(original_get_tensor_shapes, hc_mult)
         log_rank_0(
             f"[Patch:megatron.deepseek_v4.pp_tensor_shape] wrapped "
             f"get_tensor_shapes; PP wire seq_len * hc_mult={hc_mult} "
@@ -153,12 +148,11 @@ def patch_v4_pp_tensor_shape(ctx: PatchContext):
     original_interleaved = schedules_module.forward_backward_pipelining_with_interleaving
     if getattr(original_interleaved, "_v4_pp_interleaved_patched", False):
         log_rank_0(
-            "[Patch:megatron.deepseek_v4.pp_tensor_shape] interleaved "
-            "schedule already patched, skip"
+            "[Patch:megatron.deepseek_v4.pp_tensor_shape] interleaved " "schedule already patched, skip"
         )
     else:
-        schedules_module.forward_backward_pipelining_with_interleaving = (
-            _make_v4_interleaved_schedule(original_interleaved, hc_mult)
+        schedules_module.forward_backward_pipelining_with_interleaving = _make_v4_interleaved_schedule(
+            original_interleaved, hc_mult
         )
         log_rank_0(
             f"[Patch:megatron.deepseek_v4.pp_tensor_shape] wrapped "

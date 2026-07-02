@@ -174,4 +174,3 @@ profile launchers + matching `.log` outputs).
 - Profile traces: see §3.2 above (rank-0 Chrome-trace JSON in the
 `output/amd/tas-mi355x-20260507/p19_profile_`* `tensorboard/` folders).
 - Day-1 baseline (plan-0 / plan-1): `[progress/2026-04-28-day-1-summary.md](./2026-04-28-day-1-summary.md)`.
-

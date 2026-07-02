@@ -163,7 +163,12 @@ def mtp_fmac(model: str, seq: int, mtp_num_layers: int = 1, mtp_cr: int = 4) -> 
     FLOPs anchor reports a CSA-style MTP inner layer (cr=4).
     """
     if mtp_num_layers <= 0:
-        return {"inner_layer": 0, "eh_proj": 0, "extra_logits": 0, "hc_head": _hc_head(seq, MODEL_PARAMS[model], 0)}
+        return {
+            "inner_layer": 0,
+            "eh_proj": 0,
+            "extra_logits": 0,
+            "hc_head": _hc_head(seq, MODEL_PARAMS[model], 0),
+        }
     p = MODEL_PARAMS[model]
     inner = sum(layer_fmac(model, mtp_cr, seq).values()) * mtp_num_layers
     main_logits = seq * p["hidden"] * p["vocab"]
@@ -195,7 +200,11 @@ def model_total_params(model: str, num_layers: int, mtp_num_layers: int = 0) -> 
         + SWIGLU * p["hidden"] * p["shared_ffn"]
         + p["hidden"] * p["experts"]
     )
-    return int((num_layers + mtp_num_layers) * (attn + moe) + mtp_num_layers * 2 * p["hidden"] * p["hidden"] + 2 * p["vocab"] * p["hidden"])
+    return int(
+        (num_layers + mtp_num_layers) * (attn + moe)
+        + mtp_num_layers * 2 * p["hidden"] * p["hidden"]
+        + 2 * p["vocab"] * p["hidden"]
+    )
 
 
 # Map analytic components to projection module names (per layer).

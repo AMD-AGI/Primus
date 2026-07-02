@@ -44,9 +44,11 @@ export FP8=null
 export FP8_RECIPE=null
 
 export EXP=examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml
-export BACKEND_PATH="$(pwd)/third_party/Megatron-LM"
+BACKEND_PATH="$(pwd)/third_party/Megatron-LM"
+export BACKEND_PATH
 export PRIMUS_TEAM=amd
-export PRIMUS_USER=tas-mi355x-$(date +%Y%m%d)
+PRIMUS_USER=tas-mi355x-$(date +%Y%m%d)
+export PRIMUS_USER
 export PRIMUS_EXP_NAME=p19_profile_pp1_ep8
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"

@@ -58,9 +58,6 @@ from megatron.core.transformer.multi_token_prediction import (
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
 
-from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
-    DeepSeekV4SpecProvider,
-)
 from primus.backends.megatron.core.models.deepseek_v4 import (
     DeepseekV4HybridLayer,
     DeepseekV4HybridLayerSubmodules,

@@ -104,7 +104,7 @@ MODEL_ANCHORS: dict[str, dict[str, Any]] = {
         "measured_iter_time_ms": 4076.0,
         "measured_anchor": {
             "config": "PP8/VPP1/EP8/TP1, world 64, MBS1/GBS128, seq4096, full recompute, "
-                      "layout Et*4|t*5|(t*6|)*5,t*4mL (8-node MI355X)",
+            "layout Et*4|t*5|(t*6|)*5,t*4mL (8-node MI355X)",
             "iter_ms": 4076.0,
             "tflops_gpu": 722,
             "tok_s_gpu": 2010,
@@ -385,7 +385,11 @@ def parse_trace(path: Path, ga: int = 2):
         if cpu is not None:
             ph = "backward" if in_bwd_eval(cpu.get("ts")) else "forward"
             phase_by_idx[i] = ph
-            if ph == "backward" and not _is_opt_or_comm_kernel(name) and ev["dur"] <= _MAX_PLAUSIBLE_LAUNCH_US:
+            if (
+                ph == "backward"
+                and not _is_opt_or_comm_kernel(name)
+                and ev["dur"] <= _MAX_PLAUSIBLE_LAUNCH_US
+            ):
                 _bwd_windows.append((ev["ts"], ev["ts"] + ev["dur"]))
         # else: unlinked -> decided below from the GPU-side backward window
 

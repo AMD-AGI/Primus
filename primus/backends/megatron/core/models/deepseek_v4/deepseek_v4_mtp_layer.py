@@ -40,9 +40,7 @@ from typing import Optional
 
 import torch
 from megatron.core import tensor_parallel
-from megatron.core.transformer.multi_token_prediction import (
-    MultiTokenPredictionLayer,
-)
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 from megatron.core.transformer.spec_utils import build_module
 
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
@@ -182,9 +180,7 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
                 # Per-depth collapse K streams -> single stream.
                 if self.hc_mult > 1 and self.mtp_hyper_head is not None:
                     x = self.mtp_hyper_head(x)  # [B, S, D]
-                hidden_states = _lower_streams_out(
-                    x, post_process=True, hc_mult=self.hc_mult
-                )  # [S, B, D]
+                hidden_states = _lower_streams_out(x, post_process=True, hc_mult=self.hc_mult)  # [S, B, D]
 
         hidden_states = self._postprocess(hidden_states)
         return hidden_states

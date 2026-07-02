@@ -82,9 +82,9 @@ def _extract_v4_inner_layer_spec(transformer_layer_spec: ModuleSpec) -> ModuleSp
     handed a layer spec (e.g. CPU unit tests) we thread it through unchanged.
     """
     submods = getattr(transformer_layer_spec, "submodules", None)
-    is_block_spec = getattr(transformer_layer_spec, "module", None) is DeepseekV4TransformerBlock or isinstance(
-        submods, DeepseekV4TransformerBlockSubmodules
-    )
+    is_block_spec = getattr(
+        transformer_layer_spec, "module", None
+    ) is DeepseekV4TransformerBlock or isinstance(submods, DeepseekV4TransformerBlockSubmodules)
     if is_block_spec:
         layer_specs = getattr(submods, "layer_specs", None)
         if not layer_specs:

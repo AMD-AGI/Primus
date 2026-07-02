@@ -80,7 +80,6 @@ import torch
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
-
 # ---------------------------------------------------------------------------
 # Module-local pre-broadcast cache.
 #
@@ -240,10 +239,7 @@ def patch_v4_pp_token_pre_broadcast(ctx: PatchContext):
 
     original_get_batch = pretrain_gpt.get_batch
     if getattr(original_get_batch, "_v4_pp_get_batch_patched", False):
-        log_rank_0(
-            "[Patch:megatron.deepseek_v4.pp_token_pre_broadcast] get_batch "
-            "already patched, skip"
-        )
+        log_rank_0("[Patch:megatron.deepseek_v4.pp_token_pre_broadcast] get_batch " "already patched, skip")
         return
 
     # Hook 1: replace pretrain_gpt.get_batch with a cache-consuming wrapper.

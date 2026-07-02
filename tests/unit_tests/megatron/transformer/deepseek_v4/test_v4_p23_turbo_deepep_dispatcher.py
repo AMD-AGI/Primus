@@ -58,7 +58,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
 from megatron.core.transformer.moe.token_dispatcher import (
     MoEAllGatherTokenDispatcher,
     MoEAlltoAllTokenDispatcher,
@@ -75,7 +74,6 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs im
     is_v4_turbo_deepep_active,
 )
 from primus.backends.megatron.core.transformer.moe.v4_moe import DeepseekV4MoE
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -115,9 +113,7 @@ def primus_turbo_available(monkeypatch):
             return MagicMock()
         return real_find_spec(name)
 
-    monkeypatch.setattr(
-        deepseek_v4_layer_specs.importlib.util, "find_spec", _fake
-    )
+    monkeypatch.setattr(deepseek_v4_layer_specs.importlib.util, "find_spec", _fake)
 
 
 @pytest.fixture
@@ -130,9 +126,7 @@ def primus_turbo_unavailable(monkeypatch):
             return None
         return real_find_spec(name)
 
-    monkeypatch.setattr(
-        deepseek_v4_layer_specs.importlib.util, "find_spec", _fake
-    )
+    monkeypatch.setattr(deepseek_v4_layer_specs.importlib.util, "find_spec", _fake)
 
 
 # ``type(..., (), {})`` produces a class whose ``__name__`` is the
@@ -293,9 +287,7 @@ class TestPickDispatcherCls:
         assert cls is MoEFlexTokenDispatcher
         assert type_name == "flex"
 
-    def test_flex_with_turbo_active(
-        self, primus_turbo_available, fake_turbo_class
-    ):
+    def test_flex_with_turbo_active(self, primus_turbo_available, fake_turbo_class):
         cfg = _make_cfg(moe_token_dispatcher_type="flex")
         args = _make_args(
             enable_primus_turbo=True,
@@ -306,9 +298,7 @@ class TestPickDispatcherCls:
         assert cls is fake_turbo_class
         assert type_name == "flex"
 
-    def test_flex_with_turbo_active_but_class_missing(
-        self, primus_turbo_available, monkeypatch
-    ):
+    def test_flex_with_turbo_active_but_class_missing(self, primus_turbo_available, monkeypatch):
         """Gracefully fall back to the upstream class with a warning."""
         monkeypatch.setattr(
             deepseek_v4_layer_specs,
@@ -325,9 +315,7 @@ class TestPickDispatcherCls:
         assert cls is MoEFlexTokenDispatcher
         assert type_name == "flex"
 
-    def test_flex_with_turbo_inactive_tp_gt_1(
-        self, primus_turbo_available, fake_turbo_class
-    ):
+    def test_flex_with_turbo_inactive_tp_gt_1(self, primus_turbo_available, fake_turbo_class):
         """TP > 1 keeps the upstream Flex dispatcher."""
         cfg = _make_cfg(moe_token_dispatcher_type="flex")
         args = _make_args(
@@ -345,10 +333,7 @@ class TestPickDispatcherCls:
             cls, type_name = _pick_v4_dispatcher_cls(cfg, args=_make_args())
         assert cls is MoEAlltoAllTokenDispatcher
         assert type_name == "alltoall"
-        assert any(
-            "unsupported moe_token_dispatcher_type" in rec.message
-            for rec in caplog.records
-        )
+        assert any("unsupported moe_token_dispatcher_type" in rec.message for rec in caplog.records)
 
     def test_args_none_falls_back_when_megatron_not_initialised(
         self, primus_turbo_available, fake_turbo_class, monkeypatch
@@ -379,23 +364,16 @@ class TestV4MoEResolver:
 
     def test_turbo_class_resolves_to_flex(self):
         spec = ModuleSpec(module=_FakeTurboDispatcher)
-        assert (
-            DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "flex"
-        )
+        assert DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "flex"
 
     def test_turbo_class_bare_resolves_to_flex(self):
         # The resolver also accepts a bare class (some call sites pass
         # the type directly, not a ModuleSpec).
-        assert (
-            DeepseekV4MoE._resolve_dispatcher_type_from_spec(_FakeTurboDispatcher)
-            == "flex"
-        )
+        assert DeepseekV4MoE._resolve_dispatcher_type_from_spec(_FakeTurboDispatcher) == "flex"
 
     def test_alltoall_unchanged(self):
         spec = ModuleSpec(module=MoEAlltoAllTokenDispatcher)
-        assert (
-            DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "alltoall"
-        )
+        assert DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "alltoall"
 
     def test_flex_unchanged(self):
         spec = ModuleSpec(module=MoEFlexTokenDispatcher)
@@ -403,9 +381,7 @@ class TestV4MoEResolver:
 
     def test_allgather_unchanged(self):
         spec = ModuleSpec(module=MoEAllGatherTokenDispatcher)
-        assert (
-            DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "allgather"
-        )
+        assert DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec) == "allgather"
 
     def test_unknown_class_falls_back_to_alltoall(self, caplog):
         class _Unknown:
@@ -415,6 +391,4 @@ class TestV4MoEResolver:
         with caplog.at_level("WARNING"):
             result = DeepseekV4MoE._resolve_dispatcher_type_from_spec(spec)
         assert result == "alltoall"
-        assert any(
-            "unsupported dispatcher module" in rec.message for rec in caplog.records
-        )
+        assert any("unsupported dispatcher module" in rec.message for rec in caplog.records)

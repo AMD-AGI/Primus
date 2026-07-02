@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import types
 
-import pytest
 import torch
 
 from primus.backends.megatron.core.optimizer.moun import (
@@ -43,7 +42,7 @@ def test_2d_weight_matrices_go_to_muon():
     # attention / MoE expert / mHC mixing matrix (HyperMixer.fn) are 2-D.
     assert _param_goes_to_muon(_p((4096, 1024))) is True  # attn proj
     assert _param_goes_to_muon(_p((2048, 4096))) is True  # MoE expert fc
-    assert _param_goes_to_muon(_p((24, 16384))) is True   # HyperMixer.fn (K*D->(2+K)K)
+    assert _param_goes_to_muon(_p((24, 16384))) is True  # HyperMixer.fn (K*D->(2+K)K)
 
 
 def test_embedding_and_output_go_to_adamw():
@@ -55,10 +54,10 @@ def test_embedding_and_output_go_to_adamw():
 def test_1d_params_go_to_adamw():
     # RMSNorm weight, mHC static bias (HyperMixer.base / HyperHead.base),
     # mHC gating scale (HyperMixer.scale shape [3]), and biases are 1-D.
-    assert _param_goes_to_muon(_p((4096,))) is False   # RMSNorm weight
-    assert _param_goes_to_muon(_p((24,))) is False     # HyperMixer.base
-    assert _param_goes_to_muon(_p((3,))) is False      # HyperMixer.scale
-    assert _param_goes_to_muon(_p((4,))) is False      # HyperHead.base (K)
+    assert _param_goes_to_muon(_p((4096,))) is False  # RMSNorm weight
+    assert _param_goes_to_muon(_p((24,))) is False  # HyperMixer.base
+    assert _param_goes_to_muon(_p((3,))) is False  # HyperMixer.scale
+    assert _param_goes_to_muon(_p((4,))) is False  # HyperHead.base (K)
 
 
 def test_scalar_params_go_to_adamw():

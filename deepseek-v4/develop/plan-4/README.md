@@ -96,5 +96,3 @@ the release gate).
 | **P25** | `v4_attention` Triton kernel (forward + backward) for `compress_ratio ∈ {0, 128}` + `use_v4_triton_attention` switch   | "My understanding: develop two attention versions — one normal attention used for compress=0 and 128 — implemented in Triton."                         |
 | **P26** | `v4_csa_attention` Triton kernel (forward + backward) for `compress_ratio == 4` + `use_v4_triton_csa_attention` switch | "Plus a CSA version — use the two switches `use_v4_triton_attention` and `use_v4_triton_csa_attention` to control whether the new Triton versions are used."                                  |
 | **P27** | V4 attention dispatch wiring + `run_deepseek_v4.sh` smoke (TP=1 PP=1 EP=8)                                      | "The PyTorch small-op version is currently in tree — keep it. You can add new Triton versions and use `use_v4_triton_attention` / `use_v4_triton_csa_attention` switches to control which is used."              |
-
-

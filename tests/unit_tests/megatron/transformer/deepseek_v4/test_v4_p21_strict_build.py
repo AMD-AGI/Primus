@@ -124,8 +124,7 @@ class TestG15NoNNLinearFallback:
             "provider-built module instantiates cleanly (see "
             "DeepSeekV4SpecProvider.column_parallel_linear_with_gather_output "
             "/ row_parallel_linear_with_scatter_input for the canonical "
-            "non-TE path), or let build_module raise.\n\nOffenders:\n  "
-            + "\n  ".join(offenders)
+            "non-TE path), or let build_module raise.\n\nOffenders:\n  " + "\n  ".join(offenders)
         )
 
     @pytest.mark.parametrize(
@@ -273,7 +272,6 @@ class TestG15bTPOneBuildSmoke:
         """Initialize a 1-rank torch.distributed group on gloo (CPU)."""
         import os
 
-        import torch
         import torch.distributed as dist
         from megatron.core import parallel_state
 
@@ -301,9 +299,6 @@ class TestG15bTPOneBuildSmoke:
     def test_v4_attention_strict_build_at_tp1(self, _tp1_distributed):
         import torch
 
-        from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
-            DeepSeekV4TransformerConfig,
-        )
         # Order matters: importing the V4 model package above (via the
         # config import) makes ``deepseek_v4_block`` finish loading,
         # which then unblocks the ``deepseek_v4_attention`` import below.
@@ -312,6 +307,9 @@ class TestG15bTPOneBuildSmoke:
         )
         from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
             _build_v4_attention_submodules,
+        )
+        from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+            DeepSeekV4TransformerConfig,
         )
         from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
             DeepseekV4Attention,
@@ -362,13 +360,15 @@ class TestG15bTPOneBuildSmoke:
         )
 
         # Sanity: every linear is a Megatron parallel module, not a bare nn.Linear.
+        from megatron.core.extensions.transformer_engine import TELinear
         from megatron.core.tensor_parallel.layers import (
             ColumnParallelLinear,
             RowParallelLinear,
         )
 
-        from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboLinear
-        from megatron.core.extensions.transformer_engine import TELinear
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLinear,
+        )
 
         sharded_or_te = (
             ColumnParallelLinear,

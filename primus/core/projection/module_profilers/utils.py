@@ -77,11 +77,7 @@ def v4_module_inputs(module, batch_size, seq_len, hidden_size, hc_mult, kind):
         )
     if kind == "layer" and "DeepseekV4HybridLayer" in cls:
         k = max(1, int(hc_mult or 1))
-        ishapes = (
-            [(batch_size, seq_len, k, hidden_size)]
-            if k > 1
-            else [(batch_size, seq_len, hidden_size)]
-        )
+        ishapes = [(batch_size, seq_len, k, hidden_size)] if k > 1 else [(batch_size, seq_len, hidden_size)]
         # position_ids for RoPE; token_ids required by hash-routed MoE layers
         # (ignored by non-hash layers). Both keyword-only on the V4 layer forward.
         return (

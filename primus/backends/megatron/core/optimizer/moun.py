@@ -90,8 +90,7 @@ def _resolve_muon_coefficient_type(config, model_chunks) -> str:
     coeff = str(getattr(config, "muon_coefficient_type", "quintic") or "quintic")
     if coeff == "quintic":
         is_v4 = any(
-            type(getattr(mc, "config", None)).__name__ == "DeepSeekV4TransformerConfig"
-            for mc in model_chunks
+            type(getattr(mc, "config", None)).__name__ == "DeepSeekV4TransformerConfig" for mc in model_chunks
         )
         if is_v4:
             coeff = "deepseekv4"
@@ -216,10 +215,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
                 # ``PRIMUS_MUON_BATCHED_NS=0`` to force the per-expert loop.
                 return self.scaled_orthogonalize_fn(grad, tp_group, None)
             return torch.stack(
-                [
-                    self.scaled_orthogonalize_fn(grad[e], tp_group, slice_pdim)
-                    for e in range(grad.shape[0])
-                ],
+                [self.scaled_orthogonalize_fn(grad[e], tp_group, slice_pdim) for e in range(grad.shape[0])],
                 dim=0,
             )
 

@@ -180,9 +180,7 @@ def _bridge_weight_grad(
     )
 
     # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
-    return x, PrimusTurboQuantizedTensorPair(
-        data=quantized_weight, data_t=quantized_weight_trans
-    )
+    return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
 
 
 def _maybe_create_quantized_weight_buffers(

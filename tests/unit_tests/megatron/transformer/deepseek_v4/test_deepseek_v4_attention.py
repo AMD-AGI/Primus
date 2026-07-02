@@ -744,16 +744,10 @@ def test_attention_spec_uses_column_and_row_parallel():
     # must route to the upstream non-TE classes because the TE wrappers
     # explicitly reject those flags.
     assert submods.linear_q_up_proj is not None
-    assert (
-        submods.linear_q_up_proj.module
-        is provider.column_parallel_linear_with_gather_output()
-    )
+    assert submods.linear_q_up_proj.module is provider.column_parallel_linear_with_gather_output()
     assert submods.linear_q_up_proj.params.get("gather_output") is True
     assert submods.linear_o_b is not None
-    assert (
-        submods.linear_o_b.module
-        is provider.row_parallel_linear_with_scatter_input()
-    )
+    assert submods.linear_o_b.module is provider.row_parallel_linear_with_scatter_input()
     assert submods.linear_o_b.params.get("input_is_parallel") is False
 
     # Flat-O fallback path also goes through row-parallel.
@@ -775,10 +769,7 @@ def test_attention_spec_uses_column_and_row_parallel():
     # Same reasoning as ``linear_o_b``: ``input_is_parallel=False`` must
     # route to the upstream non-TE class.
     assert submods_flat.linear_proj is not None
-    assert (
-        submods_flat.linear_proj.module
-        is provider.row_parallel_linear_with_scatter_input()
-    )
+    assert submods_flat.linear_proj.module is provider.row_parallel_linear_with_scatter_input()
 
 
 def test_attention_spec_includes_compressor_and_indexer():
