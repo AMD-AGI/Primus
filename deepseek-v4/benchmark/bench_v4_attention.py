@@ -11,12 +11,15 @@ every backend, so there is a single place to compare them (one row per backend,
 ``ms | TFLOP/s`` cells; TFLOP/s over the useful work so all rows are comparable):
 
 * ``triton``    — PRODUCTION Triton (separate K/V; pool/SWA/HCA launchers)
-* ``flydsl``    — legacy FlyDSL gathered CSA (cr=4 only, scalarized GEMV)
 * ``gluon``     — fused single-latent (K==V) sparse-MLA, hand-tuned gfx950
 * ``triton_v2`` — fused single-latent sparse-MLA in plain Triton (tl.dot / MFMA)
-* ``flydsl_v2`` — fused single-latent sparse-MLA in FlyDSL MFMA (fwd WIP)
+* ``flydsl_v1`` — fused single-latent sparse-MLA in native FlyDSL MFMA (fwd + bwd)
 
-The fused ``gluon`` / ``triton_v2`` / ``flydsl_v2`` backends share ONE kernel-pair
+The legacy ``_flydsl_v0_deprecated`` gathered-CSA backend (scalarized GEMV) is
+NOT benchmarked: it has known correctness issues and depends on the
+/workspace/FlyDSL-amd source tree.
+
+The fused ``gluon`` / ``triton_v2`` / ``flydsl_v1`` backends share ONE kernel-pair
 API and are timed on IDENTICAL V4-form inputs (zero rope pad + [local ++ pool]
 kv + [SWA window ++ pool] topk). Each backend is guarded; unavailable ones are
 simply skipped.
@@ -39,9 +42,7 @@ Backend detail:
     cr=0/128 ``_launch_v4_attention_fwd``/``_bwd`` (dense/HCA); cr=4
     ``_launch_v4_csa_attention_pool_fwd``/``_pool_bwd`` (split FWD + segreduce
     BWD in-kernel gather; NOT the legacy gathered API, ~30-260x slower).
-* ``flydsl`` (cr=4 ONLY): legacy ``_launch_v4_attention_fwd_csa`` /
-    ``flydsl_v4_csa_attention_bwd`` (scalarized GEMV).
-* ``gluon`` / ``triton_v2`` / ``flydsl_v2`` (ALL crs): fused single-latent
+* ``gluon`` / ``triton_v2`` / ``flydsl_v1`` (ALL crs): fused single-latent
     sparse-MLA (``sparse_mla_{fwd,bwd}_v4_*``); the layer kind is just a
     different TOPK (cr=0: swa 128; cr=4: 128+sparse; cr=128: 128+pool).
 
@@ -64,15 +65,10 @@ from typing import Tuple
 
 import torch
 
-from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl_v0_deprecated.kernels.v4_attention_fwd_flydsl_csa import (
-    _launch_v4_attention_fwd_csa,
-)
-from primus.backends.megatron.core.transformer.v4_attention_kernels._flydsl_v0_deprecated.kernels.v4_csa_attention_bwd_flydsl_mqa import (
-    flydsl_v4_csa_attention_bwd,
-)
-
-# Import local primus Triton launchers first so they are cached before the
-# FlyDSL wrappers (which insert /workspace/Primus onto sys.path) load.
+# NOTE: the legacy `_flydsl_v0_deprecated` CSA backend (scalarized GEMV) is
+# intentionally NOT imported/benchmarked here — it has known correctness issues
+# and depends on the /workspace/FlyDSL-amd source tree. The native FlyDSL MFMA
+# backend is `_flydsl_v1` (benchmarked below as `flydsl_v1`).
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v1.v4_attention_bwd import (
     _launch_v4_attention_bwd,
 )
@@ -297,7 +293,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     g = torch.Generator(device="cuda").manual_seed(11)
     q, k_mqa, v_mqa, k_full, v_full, sink, dout = _common_inputs(B, H, S, D)
 
-    fwd_triton = bwd_triton = fwd_flydsl = bwd_flydsl = None
+    fwd_triton = bwd_triton = None
 
     if cr == 0:
         topk_eff = _SWA_WINDOW
@@ -365,40 +361,6 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
                 out_t,
                 dout,
                 lse_t,
-                sink=sink,
-                swa_window=_SWA_WINDOW,
-                scale=scale,
-            )
-
-        # FlyDSL: CSA only. Both bwd knobs on -> single full-kernel launch.
-        os.environ["V4_FLYDSL_CSA_BWD_FLY_DQ"] = "1"
-        os.environ["V4_FLYDSL_CSA_BWD_FLY_DKV"] = "1"
-        os.environ.setdefault("V4_FLYDSL_BWD_VERBOSE", "0")
-
-        def fwd_flydsl():
-            return _launch_v4_attention_fwd_csa(
-                q,
-                k_mqa,
-                v_mqa,
-                gathered,
-                sink=sink,
-                swa_window=_SWA_WINDOW,
-                sparse_mask=sparse_mask,
-                scale=scale,
-            )
-
-        out_f, lse_f = _call_fwd(fwd_flydsl)
-
-        def bwd_flydsl():
-            return flydsl_v4_csa_attention_bwd(
-                q,
-                k_full,
-                v_full,
-                gathered,
-                sparse_mask,
-                out_f,
-                dout,
-                lse_f,
                 sink=sink,
                 swa_window=_SWA_WINDOW,
                 scale=scale,
@@ -480,11 +442,9 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     fwd_flop = 2.0 * T * H * topk_eff * (D + D)
     flops = {"fwd": fwd_flop, "bwd": 2.5 * fwd_flop}
 
-    # Backend table: native production Triton (separate K/V), legacy FlyDSL
-    # (gathered, cr=4 only), then the fused sparse-MLA backends.
+    # Backend table: native production Triton (separate K/V), then the fused
+    # sparse-MLA backends (legacy `_flydsl_v0` gathered CSA is excluded).
     backends = [("triton", fwd_triton, bwd_triton)]
-    if cr == 4:
-        backends.append(("flydsl", fwd_flydsl, bwd_flydsl))
     for _name in ("gluon", "triton_v2", "flydsl_v1"):
         if _name in sparse_fb:
             backends.append((_name, sparse_fb[_name][0], sparse_fb[_name][1]))
