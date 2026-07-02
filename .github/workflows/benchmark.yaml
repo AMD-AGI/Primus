@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: bc6c7d2a9b7cc890a0b575b94f4fc5515afa5200 # Primus-Turbo main (#392): exposes gemm_fp4_impl(..., preshuffled=) (mxfp4) and DeepEPTokenDispatcher(pad_multiple=)
+  PRIMUS_TURBO_COMMIT: a04a233cbfb468dbe21600cbf9db70953428b25c # feat: force use nt layout gemm in bwd (#386)
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
