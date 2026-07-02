@@ -26,6 +26,7 @@ worker via sitecustomize (this dir is on PYTHONPATH). Two independent fixes:
    loudly instead of computing garbage. The shim only installs when the real
    package is absent, so it can never shadow a real primus_turbo install.
 """
+
 import sys
 
 
@@ -38,7 +39,7 @@ def _install_rccl_avg_workaround():
     def all_reduce_avg_safe(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False):
         is_avg = False
         try:
-            is_avg = (op == avg_op)
+            is_avg = op == avg_op
         except Exception:
             is_avg = str(op) == str(avg_op)
         if is_avg:
@@ -54,8 +55,11 @@ def _install_rccl_avg_workaround():
         return orig_all_reduce(tensor, op=op, group=group, async_op=async_op)
 
     dist.all_reduce = all_reduce_avg_safe
-    print("[rccl_avg_workaround] patched torch.distributed.all_reduce (AVG -> SUM/ws)",
-          file=sys.stderr, flush=True)
+    print(
+        "[rccl_avg_workaround] patched torch.distributed.all_reduce (AVG -> SUM/ws)",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _install_primus_turbo_stub():
@@ -112,9 +116,12 @@ def _install_primus_turbo_stub():
             module._primus_turbo_stub = True
 
     sys.meta_path.append(_Finder())
-    print("[primus_turbo_stub] primus_turbo not installed -> import shim active "
-          "(turbo classes import as raising stubs; all use_turbo_* must stay False)",
-          file=sys.stderr, flush=True)
+    print(
+        "[primus_turbo_stub] primus_turbo not installed -> import shim active "
+        "(turbo classes import as raising stubs; all use_turbo_* must stay False)",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 # Only patch the actual training worker. Importing torch here is heavy, so we
