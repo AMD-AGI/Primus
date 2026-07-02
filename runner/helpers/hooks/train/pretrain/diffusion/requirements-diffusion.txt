@@ -1,0 +1,10 @@
+einops
+loguru
+safetensors
+numpy
+pillow
+decord
+imageio[ffmpeg]
+wandb
+pydantic
+transformers==4.50.0

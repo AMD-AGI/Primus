@@ -1,0 +1,13 @@
+model:
+  name: wan
+  config:
+    load_from_pretrained_path: ${PRETRAINED_PATH:/models/Wan2.2-TI2V-5B}
+    config:
+      model_type: ti2v
+      seperated_timestep: false
+      fuse_vae_embedding_in_latents: false
+      trainable_modules: dit
+      vae_type: wan_video_vae_38
+    encoder:
+      t5_encoder: ${TEXT_ENCODER:/models/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth}
+      autoencoder: ${VAE_CHECKPOINT:/models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth}
