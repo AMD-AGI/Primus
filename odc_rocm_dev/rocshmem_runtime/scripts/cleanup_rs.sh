@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2009  # need full args column; pgrep can't match python -m patterns
 # Terminate all residual training/compile processes from the abandoned rocSHMEM
 # smoke in THIS container. Patterns live in this file (not in the invoking
 # shell's argv), so `pkill -f` cannot match its own parent shell.

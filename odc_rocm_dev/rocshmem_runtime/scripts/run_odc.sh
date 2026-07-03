@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"            # rocshmem_runtime/
 ODC_ROCM_DEV="$(cd "$RUNTIME_DIR/.." && pwd)"          # odc_rocm_dev/
 PRIMUS_ROOT="${PRIMUS_ROOT:-$(cd "$ODC_ROCM_DEV/.." && pwd)}"
-cd "$PRIMUS_ROOT"
+cd "$PRIMUS_ROOT" || exit 1
 
 export EXP=$EXP_REL
 # ODC arm env
@@ -68,6 +68,7 @@ else
   export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/tcache_mori}
 fi
 # extra KEY=VAL env
+# shellcheck disable=SC2163  # kv is a literal KEY=VAL token, so export works
 for kv in "$@"; do export "$kv"; done
 
 # Unique per-run timestamp so reruns never clobber earlier logs. Override

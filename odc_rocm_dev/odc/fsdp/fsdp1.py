@@ -1,12 +1,11 @@
 import logging
 
+import odc
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.fsdp._flat_param import FlatParamHandle, HandleShardingStrategy
 from torch.distributed.fsdp._runtime_utils import _div_if_needed, _FSDPState
-
-import odc
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +29,7 @@ def custom_get_reduce_scatter_tensors(
     """
     chunks = list(unsharded_grad.chunk(state.world_size))
     numel_to_pad = state.world_size * chunks[0].numel() - unsharded_grad.numel()
-    padded_unsharded_grad = (
-        F.pad(unsharded_grad, [0, numel_to_pad]) if numel_to_pad > 0 else unsharded_grad
-    )
+    padded_unsharded_grad = F.pad(unsharded_grad, [0, numel_to_pad]) if numel_to_pad > 0 else unsharded_grad
     # new_sharded_grad = torch.empty_like(chunks[0])  # padded
     # return padded_unsharded_grad, new_sharded_grad
     return padded_unsharded_grad
@@ -72,9 +69,7 @@ def _reduce_grad(state, handle) -> None:
 
         rs_func = get_reduction_service().scatter_accumulate
         rs_func(id(handle.flat_param), padded_unsharded_grad, pg)
-        handle.flat_param._saved_grad_shard = get_reduction_service().get_accumulation(
-            id(handle.flat_param)
-        )
+        handle.flat_param._saved_grad_shard = get_reduction_service().get_accumulation(id(handle.flat_param))
 
         assert not uses_hybrid_sharded_strategy, "ODC does not support hybrid sharded strategy"
         # if uses_hybrid_sharded_strategy:
@@ -200,9 +195,7 @@ def all_gather_flat_param(self, padded_unsharded_flat_param):
         if needs_dtype_conversion:
             assert self._uses_param_mixed_precision
             # Convert output to orig_dtype for all-gather (creates new tensor)
-            padded_unsharded_flat_param_orig_dtype = padded_unsharded_flat_param.to(
-                self._orig_param_dtype
-            )
+            padded_unsharded_flat_param_orig_dtype = padded_unsharded_flat_param.to(self._orig_param_dtype)
         else:
             padded_unsharded_flat_param_orig_dtype = padded_unsharded_flat_param
 
@@ -241,9 +234,7 @@ def custom_get_shard(tensor, rank, world_size):
 
     sharded, padded = old_get_shard(tensor, rank, world_size)
     assert isinstance(tensor, FlatParameter)
-    sharded_in_nvshmem = odc.SymmBufferRegistry.get_instance().update_symm_buffer(
-        id(tensor), sharded
-    )
+    sharded_in_nvshmem = odc.SymmBufferRegistry.get_instance().update_symm_buffer(id(tensor), sharded)
     return sharded_in_nvshmem, padded
 
 
@@ -329,9 +320,7 @@ def pre_optimizer_step(fsdp_module):
     for handle in fsdp_module._all_handles:
         # print(f"Rank {dist.get_rank()}: cast_grad_to_param_dtype_if_needed shape: {handle.flat_param.shape}")
         handle.flat_param.grad = (
-            get_reduction_service()
-            .get_accumulation(id(handle.flat_param))
-            .to(handle.flat_param.dtype)
+            get_reduction_service().get_accumulation(id(handle.flat_param)).to(handle.flat_param.dtype)
         )
 
 

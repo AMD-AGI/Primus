@@ -30,12 +30,15 @@ Two pieces live here:
 """
 
 import os
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import torch
 
-from primus.backends.megatron.sft.lb_mini_packing import plan_minibatch, resolve_cost_func
+from primus.backends.megatron.sft.lb_mini_packing import (
+    plan_minibatch,
+    resolve_cost_func,
+)
 from primus.modules.module_utils import log_rank_0
 
 

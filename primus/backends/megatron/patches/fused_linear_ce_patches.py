@@ -72,9 +72,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
         with torch.no_grad():
             for i in range(0, seq, chunk):
                 logits = model._scale_logits(torch.matmul(hidden[i : i + chunk], weight.t()))
-                parts.append(
-                    model.compute_language_model_loss(labels[:, i : i + chunk].contiguous(), logits)
-                )
+                parts.append(model.compute_language_model_loss(labels[:, i : i + chunk].contiguous(), logits))
         return torch.cat(parts, dim=1)  # [b, s]
 
     @staticmethod
@@ -90,9 +88,7 @@ class _ChunkedLinearCE(torch.autograd.Function):
             w = weight.detach().requires_grad_(True)
             with torch.enable_grad():
                 logits = model._scale_logits(torch.matmul(h_c, w.t()))
-                loss_c = model.compute_language_model_loss(
-                    labels[:, i : i + chunk].contiguous(), logits
-                )
+                loss_c = model.compute_language_model_loss(labels[:, i : i + chunk].contiguous(), logits)
             g_h, g_w = torch.autograd.grad(loss_c, (h_c, w), grad_out[:, i : i + chunk].contiguous())
             grad_hidden[i : i + chunk] = g_h
             grad_weight = grad_weight + g_w

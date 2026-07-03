@@ -233,7 +233,6 @@ def _odc_grad_spike_guard(root):
     The all_reduce below is safe under DiffMicro: optimizer.step runs once per
     minibatch at a sync point where all ranks are aligned.
     """
-    import torch
     import torch.distributed as dist
 
     thr = float(os.environ.get("ODC_GRAD_SPIKE_THRESHOLD", "1000"))
@@ -299,9 +298,7 @@ def _install_train_loop_hooks():
                 try:
                     odc_fsdp2.pre_optimizer_step(root)
                 except Exception as e:  # noqa: BLE001
-                    warning_rank_0(
-                        f"[ODC.torch_fsdp2] pre_optimizer_step failed: {type(e).__name__}: {e}"
-                    )
+                    warning_rank_0(f"[ODC.torch_fsdp2] pre_optimizer_step failed: {type(e).__name__}: {e}")
                 # fused CE: reduce-scatter cached full output-weight grad back to
                 # the sharded param (sync point, one collective per minibatch).
                 _odc_reduce_output_grad(root)

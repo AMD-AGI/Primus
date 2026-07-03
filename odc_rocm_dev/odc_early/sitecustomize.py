@@ -19,6 +19,7 @@ Enable by:
 
 This is gated by ODC_ENABLE so it is a complete no-op for normal runs.
 """
+
 import os
 import sys
 
@@ -26,6 +27,7 @@ if os.environ.get("ODC_ENABLE", "0") == "1":
     try:
         import mori  # noqa: F401  -- loads libmori / MORI C++ runtime
         import mori.shmem  # noqa: F401
+
         sys.stderr.write("[ODC sitecustomize] pre-imported mori before TE (load-order fix)\n")
         sys.stderr.flush()
     except Exception as _e:  # noqa: BLE001

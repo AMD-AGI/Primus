@@ -14,12 +14,10 @@ import torch.distributed as dist
 import torch.multiprocessing
 import triton
 import triton.language as tl
-
 from odc.primitives import (
     NVSHMEM_EXTERN_LIBS,
     __syncthreads,
     get_ipc_handle,
-    int_g,
     int_p,
     int_p_remote,
     int_wait_until_equals,
@@ -399,7 +397,6 @@ def server_loop(server_context, dispatch_func, exit_predicate, client_mask=None)
     # latency, burns one CPU core) or a smaller value to poll more often.
     watcher_sleep_s = float(os.environ.get("ODC_WATCHER_SLEEP_S", "0.0001"))
     iter_count = 0
-    last_seen_nonempty = 0.0
     started_at = time.time()
     while True:
         request_buffer_cpu.copy_(server_context.request_buffer)
@@ -413,7 +410,7 @@ def server_loop(server_context, dispatch_func, exit_predicate, client_mask=None)
                 flush=True,
             )
         if nonzeros:
-            last_seen_nonempty = time.time()
+            time.time()
         if watcher_sleep_s > 0:
             time.sleep(watcher_sleep_s)
         for client_rank in nonzeros:
@@ -642,9 +639,7 @@ class ReductionService:
     def get_chunk_size(self, buffer_dtype):
         return self.chunk_size_bytes // buffer_dtype.itemsize
 
-    def register(
-        self, key, output_tensor_shape, grad_dtype, reduction_dtype, pg: dist.ProcessGroup
-    ):
+    def register(self, key, output_tensor_shape, grad_dtype, reduction_dtype, pg: dist.ProcessGroup):
         if self.reduction_watcher is None:
             self.lock = DistLock()
             request_buffer_handle = get_nvshmem_handle(self.lock.request_buffer)
@@ -667,9 +662,7 @@ class ReductionService:
 
         def create_and_register_accumulation(key, shape, dtype, add_func):
             buffer = registry.allocate_symm_buffer(key, shape, dtype)
-            call_watcher(
-                self.reduction_watcher, add_func, [get_nvshmem_handle(buffer)], group_world_size
-            )
+            call_watcher(self.reduction_watcher, add_func, [get_nvshmem_handle(buffer)], group_world_size)
             return buffer
 
         def create_and_register_buffer(key, shape, dtype, add_func):
@@ -686,9 +679,7 @@ class ReductionService:
         self.accumulation_indices[key] = len(self.accumulations)
         self.accumulations.append(acc)
 
-        buffer_size = self.buffer_splitter.get_local_buffer_size(
-            output_tensor_shape, group_world_size
-        )
+        buffer_size = self.buffer_splitter.get_local_buffer_size(output_tensor_shape, group_world_size)
         output_size = reduce(lambda x, y: x * y, output_tensor_shape)
         logger.info(
             f"buffer_size: {buffer_size} output_size: {output_size} num_split: {math.ceil(output_size / buffer_size)}"
@@ -734,9 +725,9 @@ class ReductionService:
         it on-chip into the fp32 accumulation buffer (acc += reduce_scatter(input)).
         """
         gws = torch.distributed.get_world_size(pg)
-        assert gws == _rs._n_pes, (
-            f"GDA reduce-scatter requires a full-world group: gws={gws} n_pes={_rs._n_pes}"
-        )
+        assert (
+            gws == _rs._n_pes
+        ), f"GDA reduce-scatter requires a full-world group: gws={gws} n_pes={_rs._n_pes}"
         assert input_tensor.numel() % gws == 0, f"{input_tensor.numel()=} % {gws=}"
         shard_elems = input_tensor.numel() // gws
         dt = input_tensor.dtype
@@ -782,6 +773,7 @@ class ReductionService:
         rank = torch.distributed.get_rank(pg)
         official = _official_push()
         import time as _t
+
         _prof = os.environ.get("ODC_GDA_PROFILE", "0") == "1"
         # Cross-node write-visibility strategy for the just-staged grad (see the
         # warm-up note below for why this is needed at all):
@@ -812,7 +804,8 @@ class ReductionService:
         if not getattr(self, "_logged_warm_mode", False):
             logger.warning(
                 "[GDA] reduce-scatter warm-up mode=%s stride_bytes=%s",
-                _warm_mode, os.environ.get("ODC_GDA_STRIDE_BYTES", "65536"),
+                _warm_mode,
+                os.environ.get("ODC_GDA_STRIDE_BYTES", "65536"),
             )
             self._logged_warm_mode = True
         # OVERLAP (ODC_GDA_OVERLAP=1): the previous group's reduce-scatter was
@@ -900,18 +893,37 @@ class ReductionService:
             t1 = torch.zeros(shard_elems, dtype=torch.float32, device="cuda")
             t2 = torch.zeros(shard_elems, dtype=torch.float32, device="cuda")
             _rs.gda_reduce_scatter_acc(
-                t1.data_ptr(), input_sym.data_ptr(), rank * shard_elems * es,
-                shard_elems, _rs._n_pes, scratch.data_ptr(), chunk * es, _rs.dtype_code(dt), nblk)
+                t1.data_ptr(),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                shard_elems,
+                _rs._n_pes,
+                scratch.data_ptr(),
+                chunk * es,
+                _rs.dtype_code(dt),
+                nblk,
+            )
             _rs.barrier()
             _rs.gda_reduce_scatter_acc(
-                t2.data_ptr(), input_sym.data_ptr(), rank * shard_elems * es,
-                shard_elems, _rs._n_pes, scratch.data_ptr(), chunk * es, _rs.dtype_code(dt), nblk)
+                t2.data_ptr(),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                shard_elems,
+                _rs._n_pes,
+                scratch.data_ptr(),
+                chunk * es,
+                _rs.dtype_code(dt),
+                nblk,
+            )
             torch.cuda.synchronize()
             d = (t1 - t2).abs().max().item()
             if rank == 0:
                 logger.warning(
                     "[GDA-VERIFY] key=%s n=%d max|run1-run2|=%.4e run1_norm=%.4e",
-                    str(key), shard_elems, d, t1.norm().item(),
+                    str(key),
+                    shard_elems,
+                    d,
+                    t1.norm().item(),
                 )
 
         # Cross-node write-visibility settle (FIX for the intermittent stale-read
@@ -958,8 +970,15 @@ class ReductionService:
             nblk_t = min(int(total_touch), 4096, max(1, scratch_cap // sstride))
             _tw0 = _t.perf_counter()
             _rs.gda_strided_touch(
-                input_sym.data_ptr(), rank * shard_elems * es, seg_bytes,
-                _rs._n_pes, stride_b, touch_b, scratch.data_ptr(), sstride, int(nblk_t),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                seg_bytes,
+                _rs._n_pes,
+                stride_b,
+                touch_b,
+                scratch.data_ptr(),
+                sstride,
+                int(nblk_t),
             )
             if not _bucket:
                 _rs.barrier()  # barrier#2 (redundant in bucket mode; see _bucket note)
@@ -978,9 +997,15 @@ class ReductionService:
             _tw0 = _t.perf_counter()
             warmup.zero_()
             _rs.gda_reduce_scatter_acc(
-                warmup.data_ptr(), input_sym.data_ptr(), rank * shard_elems * es,
-                n_warm, _rs._n_pes, scratch.data_ptr(), w_stride,
-                _rs.dtype_code(dt), w_nblk,
+                warmup.data_ptr(),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                n_warm,
+                _rs._n_pes,
+                scratch.data_ptr(),
+                w_stride,
+                _rs.dtype_code(dt),
+                w_nblk,
             )
             _rs.barrier()
             _t_warm = _t.perf_counter() - _tw0
@@ -991,15 +1016,27 @@ class ReductionService:
             # scatter call's start-sync (and sync() at step end) collect it. acc and
             # input_sym are both guarded by those waits -> no stale read / race.
             _rs.gda_reduce_scatter_acc_async(
-                acc.data_ptr(), input_sym.data_ptr(), rank * shard_elems * es,
-                shard_elems, _rs._n_pes, scratch.data_ptr(), chunk * es,
-                _rs.dtype_code(dt), nblk,
+                acc.data_ptr(),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                shard_elems,
+                _rs._n_pes,
+                scratch.data_ptr(),
+                chunk * es,
+                _rs.dtype_code(dt),
+                nblk,
             )
         else:
             _rs.gda_reduce_scatter_acc(
-                acc.data_ptr(), input_sym.data_ptr(), rank * shard_elems * es,
-                shard_elems, _rs._n_pes, scratch.data_ptr(), pipe * chunk * es,
-                _rs.dtype_code(dt), nblk,
+                acc.data_ptr(),
+                input_sym.data_ptr(),
+                rank * shard_elems * es,
+                shard_elems,
+                _rs._n_pes,
+                scratch.data_ptr(),
+                pipe * chunk * es,
+                _rs.dtype_code(dt),
+                nblk,
             )
             torch.cuda.synchronize()
         _t_real = _t.perf_counter() - _tr0
@@ -1007,7 +1044,11 @@ class ReductionService:
         if _prof and rank == 0:
             logger.warning(
                 "[GDA-PROF scatter] shard=%d stage=%.3f barrier=%.3f warmup_rs=%.3f real_rs=%.3f",
-                shard_elems, _t_stage, _t_bar, _t_warm, _t_real,
+                shard_elems,
+                _t_stage,
+                _t_bar,
+                _t_warm,
+                _t_real,
             )
 
     def scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
@@ -1037,9 +1078,7 @@ class ReductionService:
                 return
             return self._gda_scatter_accumulate(key, input_tensor, pg)
         output_tensor_shape = self.infer_output_shape(input_tensor, pg)
-        accum_dtype = (
-            self.accumulation_dtype if self.accumulation_dtype is not None else input_tensor.dtype
-        )
+        accum_dtype = self.accumulation_dtype if self.accumulation_dtype is not None else input_tensor.dtype
         if key not in self.accumulation_indices:
             self.register(key, output_tensor_shape, input_tensor.dtype, accum_dtype, pg)
 
@@ -1048,9 +1087,7 @@ class ReductionService:
             torch.distributed.get_world_size(),
             get_local_world_size(),
         ), f"{group_world_size=} {torch.distributed.get_world_size()=} {get_local_world_size()=}"
-        local_buf_size = self.buffer_splitter.get_local_buffer_size(
-            output_tensor_shape, group_world_size
-        )
+        local_buf_size = self.buffer_splitter.get_local_buffer_size(output_tensor_shape, group_world_size)
         output_size = reduce(lambda x, y: x * y, output_tensor_shape)
 
         chunk_size = self.get_chunk_size(input_tensor.dtype)
@@ -1073,9 +1110,7 @@ class ReductionService:
         accumulation_id = self.accumulation_indices[key] + 1
 
         accumulation_command = (buffer_id << 16) | accumulation_id
-        assert (
-            buffer.nbytes % (2**6) == 0
-        ), f"better align to 64 for efficiency. Found {buffer.nbytes} bytes"
+        assert buffer.nbytes % (2**6) == 0, f"better align to 64 for efficiency. Found {buffer.nbytes} bytes"
 
         get_comm_stream().wait_stream(torch.cuda.current_stream())
         rank_start_same_node = rank - rank % get_local_world_size()
@@ -1265,15 +1300,14 @@ class ReductionService:
         scratch_ptr = response_scratch.data_ptr()
         base = self.lock.client_context.next_request_id
         remote_peers = [
-            r
-            for r in range(group_world_size)
-            if not (rank_start_same_node <= r < rank_end_same_node)
+            r for r in range(group_world_size) if not (rank_start_same_node <= r < rank_end_same_node)
         ]
         comm_stream = get_comm_stream()
         flat_input = input_tensor.view(-1)
 
         prof = os.environ.get("ODC_RO_PROFILE", "0") == "1"
         import time as _t
+
         t_put = t_quiet = t_sig = t_ack = 0.0
         ack_polls = 0
         t0_total = _t.perf_counter()
@@ -1317,8 +1351,15 @@ class ReductionService:
             logger.info(
                 "[RO-PROF scatter] out=%d chunks=%d peers=%d total=%.3fs | put=%.3f quiet=%.3f "
                 "signal=%.3f ackwait=%.3f ack_polls=%d",
-                output_size, chunk_idx, len(remote_peers), _t.perf_counter() - t0_total,
-                t_put, t_quiet, t_sig, t_ack, ack_polls,
+                output_size,
+                chunk_idx,
+                len(remote_peers),
+                _t.perf_counter() - t0_total,
+                t_put,
+                t_quiet,
+                t_sig,
+                t_ack,
+                ack_polls,
             )
 
     def get_accumulation(self, key):
@@ -1357,9 +1398,7 @@ class ReductionService:
                 torch.cuda.current_stream().synchronize()
         dispatched_task_list = [None for _ in range(dist.get_world_size(pg))]
         with torch.cuda.nvtx.range("task_all_gather"):
-            torch.distributed.all_gather_object(
-                dispatched_task_list, self.dispatched_tasks, group=pg
-            )
+            torch.distributed.all_gather_object(dispatched_task_list, self.dispatched_tasks, group=pg)
         target = sum(dispatched_task_list)
 
         watchdog = _settle_watchdog_sec() if _settle_defer() else 0.0

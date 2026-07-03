@@ -28,6 +28,7 @@ Host-API ABI (extern "C" in ``librs_host5.so``)::
     void      rs_barrier();
     void      rs_finalize();
 """
+
 import ctypes
 import logging
 import os
@@ -184,13 +185,24 @@ def _load_lib():
         lib.rs_is_remote.argtypes = [ctypes.c_longlong, ctypes.c_int]
         lib.gda_gather.restype = ctypes.c_int
         lib.gda_gather.argtypes = [
-            ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t,
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_size_t,
         ]
         lib.gda_reduce_scatter_acc.restype = ctypes.c_int
         lib.gda_reduce_scatter_acc.argtypes = [
-            ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t, ctypes.c_size_t,
-            ctypes.c_int, ctypes.c_longlong, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_int,
         ]
         if hasattr(lib, "gda_stage_fence"):
             lib.gda_stage_fence.restype = ctypes.c_int
@@ -203,8 +215,14 @@ def _load_lib():
         if hasattr(lib, "gda_strided_touch"):
             lib.gda_strided_touch.restype = ctypes.c_int
             lib.gda_strided_touch.argtypes = [
-                ctypes.c_longlong, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_int,
-                ctypes.c_size_t, ctypes.c_size_t, ctypes.c_longlong, ctypes.c_size_t,
+                ctypes.c_longlong,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                ctypes.c_longlong,
+                ctypes.c_size_t,
                 ctypes.c_int,
             ]
         if hasattr(lib, "gda_reduce_scatter_acc_async"):
@@ -215,8 +233,13 @@ def _load_lib():
         if hasattr(lib, "gda_gather_async"):
             lib.gda_gather_async.restype = ctypes.c_int
             lib.gda_gather_async.argtypes = [
-                ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t,
-                ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_longlong,
             ]
     return lib
 
@@ -328,9 +351,9 @@ def init():
 
     _my_pe = _lib.rs_my_pe()
     _n_pes = _lib.rs_n_pes()
-    assert _my_pe == rank and _n_pes == world, (
-        f"rocSHMEM PE mismatch: my_pe={_my_pe} rank={rank} n_pes={_n_pes} world={world}"
-    )
+    assert (
+        _my_pe == rank and _n_pes == world
+    ), f"rocSHMEM PE mismatch: my_pe={_my_pe} rank={rank} n_pes={_n_pes} world={world}"
     logger.info("init_nvshmem (rocSHMEM host-API): my_pe=%d n_pes=%d", _my_pe, _n_pes)
     _initialized = True
 
@@ -360,9 +383,7 @@ def _ensure_peer_deltas(base, local_world_size, rank):
         else:
             peer = _lib.rs_ptr(base, pe)
             if peer == 0:
-                raise RuntimeError(
-                    f"rs_ptr(base, {pe}) == 0: no XGMI P2P route to same-node peer"
-                )
+                raise RuntimeError(f"rs_ptr(base, {pe}) == 0: no XGMI P2P route to same-node peer")
             deltas[i] = peer - base
     from .nvshmem_triton import set_rocshmem_peer_deltas
 
@@ -487,13 +508,29 @@ def gda_gather(target_ptr, src_ptr, nbytes, peers, stride_bytes):
         raise RuntimeError(f"gda_gather hipError={rc}")
 
 
-def gda_reduce_scatter_acc(acc_ptr, input_ptr, seg_off_bytes, shard_elems, n_pes,
-                           scratch_ptr, scratch_stride_bytes, dtype_code, nblocks):
+def gda_reduce_scatter_acc(
+    acc_ptr,
+    input_ptr,
+    seg_off_bytes,
+    shard_elems,
+    n_pes,
+    scratch_ptr,
+    scratch_stride_bytes,
+    dtype_code,
+    nblocks,
+):
     """Device pull-based reduce-scatter accumulate: acc_fp32[i] += sum over all
     PEs of input[seg_off + i] (pulled from each PE). Race-free (on-chip sum)."""
     rc = _lib.gda_reduce_scatter_acc(
-        int(acc_ptr), int(input_ptr), int(seg_off_bytes), int(shard_elems),
-        int(n_pes), int(scratch_ptr), int(scratch_stride_bytes), int(dtype_code), int(nblocks),
+        int(acc_ptr),
+        int(input_ptr),
+        int(seg_off_bytes),
+        int(shard_elems),
+        int(n_pes),
+        int(scratch_ptr),
+        int(scratch_stride_bytes),
+        int(dtype_code),
+        int(nblocks),
     )
     if rc != 0:
         raise RuntimeError(f"gda_reduce_scatter_acc hipError={rc}")
@@ -521,27 +558,58 @@ def gda_hdp_flush():
     return int(_lib.gda_hdp_flush())
 
 
-def gda_strided_touch(input_ptr, seg_off_bytes, seg_bytes, n_pes, stride_bytes,
-                      touch_bytes, scratch_ptr, scratch_stride_bytes, nblocks):
+def gda_strided_touch(
+    input_ptr,
+    seg_off_bytes,
+    seg_bytes,
+    n_pes,
+    stride_bytes,
+    touch_bytes,
+    scratch_ptr,
+    scratch_stride_bytes,
+    nblocks,
+):
     """Strided page-touch warm-up: a tiny RDMA read at every ``stride_bytes`` page
     of my shard segment on every PE, priming all pages/NICs (deterministic
     read-triggered settle) at minimal volume vs the full-shard throwaway RS."""
     rc = _lib.gda_strided_touch(
-        int(input_ptr), int(seg_off_bytes), int(seg_bytes), int(n_pes),
-        int(stride_bytes), int(touch_bytes), int(scratch_ptr),
-        int(scratch_stride_bytes), int(nblocks),
+        int(input_ptr),
+        int(seg_off_bytes),
+        int(seg_bytes),
+        int(n_pes),
+        int(stride_bytes),
+        int(touch_bytes),
+        int(scratch_ptr),
+        int(scratch_stride_bytes),
+        int(nblocks),
     )
     if rc != 0:
         raise RuntimeError(f"gda_strided_touch hipError={rc}")
 
 
-def gda_reduce_scatter_acc_async(acc_ptr, input_ptr, seg_off_bytes, shard_elems, n_pes,
-                                 scratch_ptr, scratch_stride_bytes, dtype_code, nblocks):
+def gda_reduce_scatter_acc_async(
+    acc_ptr,
+    input_ptr,
+    seg_off_bytes,
+    shard_elems,
+    n_pes,
+    scratch_ptr,
+    scratch_stride_bytes,
+    dtype_code,
+    nblocks,
+):
     """Comm/compute OVERLAP: launch reduce-scatter on a side stream WITHOUT syncing.
     Caller must gda_rs_overlap_sync() before re-staging input or consuming acc."""
     rc = _lib.gda_reduce_scatter_acc_async(
-        int(acc_ptr), int(input_ptr), int(seg_off_bytes), int(shard_elems),
-        int(n_pes), int(scratch_ptr), int(scratch_stride_bytes), int(dtype_code), int(nblocks),
+        int(acc_ptr),
+        int(input_ptr),
+        int(seg_off_bytes),
+        int(shard_elems),
+        int(n_pes),
+        int(scratch_ptr),
+        int(scratch_stride_bytes),
+        int(dtype_code),
+        int(nblocks),
     )
     if rc != 0:
         raise RuntimeError(f"gda_reduce_scatter_acc_async launch err={rc}")

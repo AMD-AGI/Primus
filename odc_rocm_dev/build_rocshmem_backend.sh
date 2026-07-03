@@ -95,9 +95,9 @@ clone_rocshmem() {
     echo "== cloning rocSHMEM into ${SRC}"
     git clone "${ROCSHMEM_URL}" "${SRC}"
   fi
-  ( cd "${SRC}" \
-    && git fetch --all --quiet 2>/dev/null || true
-    cd "${SRC}" && git checkout --quiet "${ROCSHMEM_COMMIT}" )
+  ( cd "${SRC}" || exit 1
+    git fetch --all --quiet 2>/dev/null || true
+    git checkout --quiet "${ROCSHMEM_COMMIT}" )
   echo "== rocSHMEM at commit $(cd "${SRC}" && git rev-parse HEAD)"
 }
 

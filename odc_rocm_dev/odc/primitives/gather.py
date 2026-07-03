@@ -5,9 +5,13 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
-from torch import Tensor
-
-from odc.primitives import NVSHMEM_EXTERN_LIBS, __syncthreads, getmem_nbi_block, quiet, tid
+from odc.primitives import (
+    NVSHMEM_EXTERN_LIBS,
+    __syncthreads,
+    getmem_nbi_block,
+    quiet,
+    tid,
+)
 from odc.primitives.utils import (
     BufferSplitter,
     SymmBufferRegistry,
@@ -15,6 +19,7 @@ from odc.primitives.utils import (
     get_local_world_size,
     sync_cta,
 )
+from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +109,7 @@ class GatherService:
     def get_chunk_size(self, buffer_dtype):
         return self.chunk_size_bytes // buffer_dtype.itemsize
 
-    def gather_into_tensor(
-        self, output_tensor: Tensor, input_tensor: Tensor, pg: dist.ProcessGroup
-    ):
+    def gather_into_tensor(self, output_tensor: Tensor, input_tensor: Tensor, pg: dist.ProcessGroup):
         buf_size = self.buffer_splitter.get_global_buffer_size(output_tensor.shape)
         buffer_shape = (buf_size,)
         output_size = output_tensor.numel()
@@ -149,8 +152,12 @@ class GatherService:
         gda = _gda_active() and local_world_size != group_world_size
         if gda:
             self._gda_gather_into_tensor(
-                output_tensor, input_tensor, target_tensor, buf_size,
-                group_world_size, rank,
+                output_tensor,
+                input_tensor,
+                target_tensor,
+                buf_size,
+                group_world_size,
+                rank,
             )
             return
 
@@ -176,6 +183,7 @@ class GatherService:
             ro = _ro_active() and local_world_size != group_world_size and not _official_push()
             import os as _os
             import time as _t
+
             _prof = ro and _os.environ.get("ODC_RO_PROFILE", "0") == "1"
             _g_get = _g_quiet = _g_bar = 0.0
             if ro:
@@ -247,14 +255,16 @@ class GatherService:
                     for r in range(group_world_size):
                         if rank_same_node_start <= r < rank_same_node_end:
                             continue
-                        output_tensor_split[r, start : start + size].copy_(
-                            target_tensor_split[r, :]
-                        )
+                        output_tensor_split[r, start : start + size].copy_(target_tensor_split[r, :])
         torch.cuda.current_stream().wait_stream(get_comm_stream())
         if _prof and rank == 0:
             logger.info(
                 "[RO-PROF gather] in_numel=%d ws=%d | barrier=%.3fs getmem=%.3fs quiet=%.3fs",
-                input_tensor.numel(), group_world_size, _g_bar, _g_get, _g_quiet,
+                input_tensor.numel(),
+                group_world_size,
+                _g_bar,
+                _g_get,
+                _g_quiet,
             )
 
     def _gda_gather_into_tensor(
@@ -265,6 +275,7 @@ class GatherService:
         then copied into output_tensor_split[r]. No XGMI peer views / host loop."""
         import os as _os
         import time as _t
+
         _prof = _os.environ.get("ODC_GDA_PROFILE", "0") == "1"
         _g_bar = _g_get = _g_copy = 0.0
         es = input_tensor.element_size()
@@ -317,8 +328,12 @@ class GatherService:
                 if _gather_async:
                     # launch on comm stream, NO sync -> overlaps with compute
                     _rs.gda_gather_async(
-                        target_tensor.data_ptr(), sub_input.data_ptr(), size * es,
-                        peers, size * es, comm.cuda_stream,
+                        target_tensor.data_ptr(),
+                        sub_input.data_ptr(),
+                        size * es,
+                        peers,
+                        size * es,
+                        comm.cuda_stream,
                     )
                 else:
                     _rs.gda_gather(
@@ -335,5 +350,8 @@ class GatherService:
         if _prof and rank == 0:
             logger.warning(
                 "[GDA-PROF gather] in_numel=%d barrier=%.3f gda_gather=%.3f reassembly=%.3f",
-                input_tensor.numel(), _g_bar, _g_get, _g_copy,
+                input_tensor.numel(),
+                _g_bar,
+                _g_get,
+                _g_copy,
             )

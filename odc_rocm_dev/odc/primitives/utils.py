@@ -35,7 +35,6 @@ from typing import List
 import torch
 import triton
 import triton.language as tl
-
 from odc.primitives import __syncthreads, tid
 
 logger = logging.getLogger(__name__)
@@ -359,9 +358,7 @@ class SymmBufferRegistry:
         if _USE_ROCSHMEM:
             # rocSHMEM host-API: one-shot symmetric alloc + same-node peer-view
             # list (equivalent to MORI's mori_shmem_create_tensor_list_intra_node).
-            tensor, peer_tensors = _rs.alloc_peer_tensors(
-                shape, dtype, local_world_size, rank
-            )
+            tensor, peer_tensors = _rs.alloc_peer_tensors(shape, dtype, local_world_size, rank)
             self.allocations.append(tensor)
         elif _IS_ROCM:
             # node_start == 0 covers BOTH the single-node case and node 0 of a
@@ -393,8 +390,7 @@ class SymmBufferRegistry:
                     for i in range(local_world_size)
                 ]
                 assert len(peer_tensors) == local_world_size, (
-                    f"expected {local_world_size} same-node peer views, "
-                    f"got {len(peer_tensors)}"
+                    f"expected {local_world_size} same-node peer views, " f"got {len(peer_tensors)}"
                 )
                 # peer_tensors[local_rank] resolves to peer == my_pe, i.e. the
                 # true local allocation (base_tensor) — right object to free.

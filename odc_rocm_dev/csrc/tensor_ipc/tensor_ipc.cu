@@ -33,7 +33,7 @@ py::bytes get_ipc_handle(at::Tensor tensor) {
     // printf("ptr: %p, base ptr: %p, device: %d\n", ptr, base, attr.device);
 
     size_t pointer_offset = (size_t)ptr - (size_t)base;
-    
+
     cudaIpcMemHandle_t mem_handle;
     CUDA_CHECK(cudaIpcGetMemHandle(&mem_handle, (void*)base));
     std::string s;

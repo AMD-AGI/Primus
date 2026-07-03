@@ -89,6 +89,7 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
+# shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
 # Under PRIMUS_LAUNCHER=mpi this script runs once PER RANK (mpirun launches one

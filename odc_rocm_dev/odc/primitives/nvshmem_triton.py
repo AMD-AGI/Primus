@@ -50,7 +50,6 @@ import triton.language as tl
 from packaging import version
 from triton.language import core
 
-
 # ---------------------------------------------------------------------------
 # Platform selection: ROCm uses MORI; NVIDIA uses NVSHMEM upstream code path.
 # ---------------------------------------------------------------------------
@@ -590,9 +589,7 @@ else:
         NBI: core.constexpr = core.constexpr(""),
         _semantic=None,
     ):
-        assert (
-            is_triton_version_supported()
-        ), "putmem_nbi_block is only supported in Triton v3.4.0 and above"
+        assert is_triton_version_supported(), "putmem_nbi_block is only supported in Triton v3.4.0 and above"
         name = f"nvshmem{'x' if SCOPE_SUFFIX.value else ''}_putmem{NBI.value}{SCOPE_SUFFIX.value}"
         return core.extern_elementwise(
             LIB_NAME,
@@ -747,7 +744,6 @@ else:
         quiet + int_g spin verbatim. Signature matches the ROCm variant so
         the shared remote-node kernel is platform agnostic.
         """
-        _unused = scratch_ptr
         r = expected - 1
         while r != expected:
             quiet()
