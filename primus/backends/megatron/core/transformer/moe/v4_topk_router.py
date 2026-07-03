@@ -66,9 +66,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
-    is_triton_kernel_supported as _v4_router_triton_supported,
-)
-from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
     is_triton_path_enabled as _v4_router_triton_enabled,
 )
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
@@ -131,7 +128,7 @@ def _compute_route(
         sel_score = scores_for_selection
     indices = sel_score.topk(topk, dim=-1).indices  # [N, K]
 
-    if _v4_router_triton_enabled() and _v4_router_triton_supported(logits, indices):
+    if _v4_router_triton_enabled():
         # The Triton kernel re-applies the score function inside (so
         # it can save the full row for backward).  This keeps the
         # eager path's bit-equivalent behaviour for the gathered

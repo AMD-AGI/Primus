@@ -44,6 +44,7 @@ import torch.nn as nn
 
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     RoPEInterleavedPartialFn,
+    apply_rope_from_positions,
 )
 
 # ---------------------------------------------------------------------------
@@ -330,14 +331,23 @@ class DualRoPE(nn.Module):
         position_ids: torch.Tensor,
         compress_ratio: int,
     ) -> torch.Tensor:
-        """Convenience: pick the right rope, build cos/sin, apply partial RoPE.
+        """Convenience: pick the right rope and apply partial RoPE.
 
-        ``position_ids`` shape ``[B, S]`` or ``[S]``. Cos/sin will broadcast
-        over any extra heads dim of ``x``.
+        ``position_ids`` shape ``[B, S]`` or ``[S]``. cos/sin broadcast over
+        the heads dim of ``x``.
+
+        Small-kernel-fusion (2026-07-03): route through
+        :func:`apply_rope_from_positions`, which generates cos/sin *inside*
+        the RoPE Triton kernel from ``(position_ids, inv_freq)`` — removing
+        the separate ``position_ids.float() * inv_freq`` / ``cos`` / ``sin``
+        launches, the ``.to(x.dtype)`` cast, and the cos/sin HBM tensors that
+        the eager ``rope(position_ids)`` path materialised (and recomputed
+        identically for Q and K). YaRN is already baked into ``inv_freq``.
+        Gated by ``PRIMUS_ROPE_TRITON`` (falls back to the eager cos/sin path
+        on CPU / when off).
         """
         rope = self.get_rope(compress_ratio=compress_ratio)
-        cos, sin = rope(position_ids)
-        return apply_interleaved_partial_rope(x, cos, sin, rotary_dim=self.rotary_dim)
+        return apply_rope_from_positions(x, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
 
     # Convenience accessors for callers who need the YaRN m_scale (e.g. to
     # adjust attention softmax scale on compressed layers).

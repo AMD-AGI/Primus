@@ -78,47 +78,55 @@ _SCORE_FN_MAP = {
 @triton.jit
 def _v4_router_post_fwd_kernel(
     LOGITS_PTR,  # [N, E] fp32
-    INDICES_PTR,  # [N, K] int64 (gather positions)
+    INDICES_PTR,  # [N, BLOCK_K] int64 (gather positions; padded to BLOCK_K)
     PROBS_PTR,  # [N, E] OUT_DTYPE (must be zero-init'd by caller)
     RMAP_PTR,  # [N, E] bool   (must be zero-init'd by caller)
     SCORES_OUT_PTR,  # [N, E] fp32 (saved-for-backward; full row of scores)
-    WEIGHTS_OUT_PTR,  # [N, K] fp32 (saved-for-backward; gathered weights, post-denom, pre-scale)
+    WEIGHTS_OUT_PTR,  # [N, BLOCK_K] fp32 (saved-for-backward; gathered weights, post-denom, pre-scale)
     DENOM_OUT_PTR,  # [N] fp32  (saved-for-backward; the clamped denom)
     N,
-    E: tl.constexpr,
-    K: tl.constexpr,
+    E,  # runtime int (real expert count; NOT required to be a power of 2)
+    K,  # runtime int (real topk; NOT required to be a power of 2)
     SCORE_FN: tl.constexpr,
     SCALE: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_E: tl.constexpr,  # next_pow2(E) — column block over the expert axis
+    BLOCK_K: tl.constexpr,  # next_pow2(K) — column block over the topk axis
     OUT_DTYPE: tl.constexpr,
 ):
     """One program tile = ``BLOCK_N`` rows of the post-logits chain.
 
-    Layout: per-row state in fp32 registers (`[BLOCK_N, E]` scores
-    + `[BLOCK_N, K]` weights).  At V4-Flash N=4096, E=256, K=6 the
-    per-row footprint is ~1 KiB which lets us pick BLOCK_N=16 without
-    hitting register pressure.
+    Supports arbitrary (non-power-of-2) ``E`` / ``K``: the expert axis is
+    tiled by ``BLOCK_E = next_pow2(E)`` and the topk axis by
+    ``BLOCK_K = next_pow2(K)``, with masks zeroing the padded columns.
+    ``INDICES_PTR`` / ``WEIGHTS_OUT_PTR`` are laid out with row stride
+    ``BLOCK_K`` (host pads the indices tensor to ``[N, BLOCK_K]``).
     """
 
     pid = tl.program_id(0)
     n_offs = pid * BLOCK_N + tl.arange(0, BLOCK_N)
     n_mask = n_offs < N
 
-    e_idx = tl.arange(0, E)
-    k_idx = tl.arange(0, K)
+    e_idx = tl.arange(0, BLOCK_E)
+    e_mask = e_idx < E
+    k_idx = tl.arange(0, BLOCK_K)
+    k_mask = k_idx < K
 
-    # Load logits [BLOCK_N, E] in fp32.
+    # Load logits [BLOCK_N, BLOCK_E] in fp32 (padded cols masked out).
     logits = tl.load(
         LOGITS_PTR + n_offs[:, None] * E + e_idx[None, :],
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & e_mask[None, :],
         other=0.0,
     ).to(tl.float32)
 
-    # Apply score_fn (compile-time specialised).
+    # Apply score_fn (compile-time specialised). Padded expert columns must
+    # not leak into the softmax reduction, so mask them to -inf first.
     if SCORE_FN == 0:  # softmax
-        m = tl.max(logits, axis=1, keep_dims=True)
-        e = tl.exp(logits - m)
+        neg_inf = float("-inf")
+        logits_m = tl.where(e_mask[None, :], logits, neg_inf)
+        m = tl.max(logits_m, axis=1, keep_dims=True)
+        e = tl.where(e_mask[None, :], tl.exp(logits_m - m), 0.0)
         s = tl.sum(e, axis=1, keep_dims=True)
         scores = e / s
     elif SCORE_FN == 1:  # sigmoid
@@ -128,32 +136,38 @@ def _v4_router_post_fwd_kernel(
         # Stable: for large x, log(1+exp(x)) ≈ x.
         scores = tl.sqrt(softplus)
 
-    # Save full scores row for backward.
+    # Zero padded expert columns so they never contribute to gather / denom.
+    scores = tl.where(e_mask[None, :], scores, 0.0)
+
+    # Save full scores row for backward (real columns only).
     tl.store(
         SCORES_OUT_PTR + n_offs[:, None] * E + e_idx[None, :],
         scores,
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & e_mask[None, :],
     )
 
-    # Load indices [BLOCK_N, K] (int64).
+    # Load indices [BLOCK_N, BLOCK_K] (int64; padded cols read as 0, masked below).
     indices = tl.load(
-        INDICES_PTR + n_offs[:, None] * K + k_idx[None, :],
-        mask=n_mask[:, None],
+        INDICES_PTR + n_offs[:, None] * BLOCK_K + k_idx[None, :],
+        mask=n_mask[:, None] & k_mask[None, :],
         other=0,
     )
 
-    # Gather weights from scores at the K indices per row by computing
-    # the gather entirely in registers (avoid store-then-reload-via-HBM
-    # hazard).  Build weights[BLOCK_N, K] as the per-(n, k) score at
-    # index indices[n, k] by static loop over K:
-    weights = tl.zeros((BLOCK_N, K), dtype=tl.float32)
-    for k_off in tl.static_range(K):
-        idx_col = tl.load(INDICES_PTR + n_offs * K + k_off, mask=n_mask, other=0)
+    # Gather weights from scores at the K indices per row entirely in
+    # registers (avoid store-then-reload-via-HBM hazard). Build
+    # weights[BLOCK_N, BLOCK_K] via a static loop over BLOCK_K, extracting
+    # each column from the already-loaded ``indices`` tile.
+    weights = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+    for k_off in tl.static_range(BLOCK_K):
+        k_is_off = (k_idx == k_off).to(tl.float32)
+        idx_col = tl.sum(tl.where(k_idx[None, :] == k_off, indices, 0), axis=1)
         # scores_at_idx[n] = scores[n, idx_col[n]]
         e_is_idx = e_idx[None, :] == idx_col[:, None]
         scores_at_idx = tl.sum(scores * e_is_idx.to(tl.float32), axis=1)
-        k_is_off = (k_idx == k_off).to(tl.float32)
         weights += scores_at_idx[:, None] * k_is_off[None, :]
+
+    # Zero padded topk columns (k >= K).
+    weights = tl.where(k_mask[None, :], weights, 0.0)
 
     # If non-softmax: denom + normalize.
     if SCORE_FN != 0:
@@ -170,41 +184,44 @@ def _v4_router_post_fwd_kernel(
 
     # Save weights for backward.
     tl.store(
-        WEIGHTS_OUT_PTR + n_offs[:, None] * K + k_idx[None, :],
+        WEIGHTS_OUT_PTR + n_offs[:, None] * BLOCK_K + k_idx[None, :],
         weights,
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & k_mask[None, :],
     )
 
     # Sparse scatter (probs[n, indices] = weights, rmap[n, indices] = True).
     # No atomics needed because each (n, e) is written at most once
-    # per row (caller guarantees indices are unique within a row).
+    # per row (caller guarantees indices are unique within a row).  Padded
+    # topk columns are masked out so they never write to expert 0.
     tl.store(
         PROBS_PTR + n_offs[:, None] * E + indices,
         weights.to(OUT_DTYPE),
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & k_mask[None, :],
     )
     tl.store(
         RMAP_PTR + n_offs[:, None] * E + indices,
-        tl.full((BLOCK_N, K), 1, dtype=tl.int1),
-        mask=n_mask[:, None],
+        tl.full((BLOCK_N, BLOCK_K), 1, dtype=tl.int1),
+        mask=n_mask[:, None] & k_mask[None, :],
     )
 
 
 @triton.jit
 def _v4_router_post_bwd_kernel(
     DPROBS_PTR,  # [N, E] OUT_DTYPE upstream grad
-    INDICES_PTR,  # [N, K] int64
+    INDICES_PTR,  # [N, BLOCK_K] int64 (padded)
     SCORES_PTR,  # [N, E] fp32 saved
-    WEIGHTS_PTR,  # [N, K] fp32 saved (post-scaled)
+    WEIGHTS_PTR,  # [N, BLOCK_K] fp32 saved (post-scaled, padded)
     DENOM_PTR,  # [N]   fp32 saved
     DLOGITS_PTR,  # [N, E] fp32 OUT
     N,
-    E: tl.constexpr,
-    K: tl.constexpr,
+    E,  # runtime int
+    K,  # runtime int
     SCORE_FN: tl.constexpr,
     SCALE: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     """VJP through the chain.
 
@@ -239,26 +256,29 @@ def _v4_router_post_bwd_kernel(
     n_offs = pid * BLOCK_N + tl.arange(0, BLOCK_N)
     n_mask = n_offs < N
 
-    e_idx = tl.arange(0, E)
-    k_idx = tl.arange(0, K)
+    e_idx = tl.arange(0, BLOCK_E)
+    e_mask = e_idx < E
+    k_idx = tl.arange(0, BLOCK_K)
+    k_mask = k_idx < K
 
     # Load saved state.
     scores = tl.load(
         SCORES_PTR + n_offs[:, None] * E + e_idx[None, :],
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & e_mask[None, :],
         other=0.0,
     )
     indices = tl.load(
-        INDICES_PTR + n_offs[:, None] * K + k_idx[None, :],
-        mask=n_mask[:, None],
+        INDICES_PTR + n_offs[:, None] * BLOCK_K + k_idx[None, :],
+        mask=n_mask[:, None] & k_mask[None, :],
         other=0,
     )
 
     # Gather upstream grad at the K indices per row.
-    # dprobs_at = dprobs[n, indices[n, k]]   shape [BLOCK_N, K], fp32.
+    # dprobs_at = dprobs[n, indices[n, k]]   shape [BLOCK_N, BLOCK_K], fp32.
+    # Padded topk columns are masked to 0 so they carry no gradient.
     dprobs_at = tl.load(
         DPROBS_PTR + n_offs[:, None] * E + indices,
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & k_mask[None, :],
         other=0.0,
     ).to(tl.float32)
     # Chain through the SCALE multiply: forward was
@@ -276,8 +296,8 @@ def _v4_router_post_bwd_kernel(
         # so gathered_k = weights_saved_k * denom / SCALE.
         denom = tl.load(DENOM_PTR + n_offs, mask=n_mask, other=1.0)
         weights_saved = tl.load(
-            WEIGHTS_PTR + n_offs[:, None] * K + k_idx[None, :],
-            mask=n_mask[:, None],
+            WEIGHTS_PTR + n_offs[:, None] * BLOCK_K + k_idx[None, :],
+            mask=n_mask[:, None] & k_mask[None, :],
             other=0.0,
         )
         gathered_k = weights_saved * (denom[:, None] / SCALE)
@@ -287,15 +307,18 @@ def _v4_router_post_bwd_kernel(
         # Softmax: weights_pre is just gathered directly.
         d_gathered = dweights_pre_scale
 
+    # Zero padded topk columns so they contribute no gradient.
+    d_gathered = tl.where(k_mask[None, :], d_gathered, 0.0)
+
     # Build d_scores_full entirely in registers using an explicit static
-    # loop over K.  For each k, we add d_gathered[:, k] at the position
+    # loop over BLOCK_K.  For each k, we add d_gathered[:, k] at the position
     # indices[:, k] in the E-axis using a broadcast compare.  This avoids
-    # the round-trip-via-HBM hazard of a scatter-then-load pattern.
-    d_scores_full = tl.zeros((BLOCK_N, E), dtype=tl.float32)
-    for k_off in tl.static_range(K):
-        idx_col = tl.load(INDICES_PTR + n_offs * K + k_off, mask=n_mask, other=0)
-        grad_col = tl.load(INDICES_PTR + n_offs * K + k_off, mask=n_mask, other=0)  # placeholder
-        _ = grad_col  # unused; the real grad comes from d_gathered slice
+    # the round-trip-via-HBM hazard of a scatter-then-load pattern.  Padded
+    # columns carry d_gathered == 0, so they add nothing even though their
+    # index reads as 0.
+    d_scores_full = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.float32)
+    for k_off in tl.static_range(BLOCK_K):
+        idx_col = tl.sum(tl.where(k_idx[None, :] == k_off, indices, 0), axis=1)
         # Slice d_gathered[:, k_off] -> shape [BLOCK_N]
         grad_k = tl.sum(d_gathered * (k_idx[None, :] == k_off).to(tl.float32), axis=1)
         # Contribution: grad_k[:, None] where e_idx == idx_col[:, None]
@@ -323,7 +346,7 @@ def _v4_router_post_bwd_kernel(
     tl.store(
         DLOGITS_PTR + n_offs[:, None] * E + e_idx[None, :],
         d_logits,
-        mask=n_mask[:, None],
+        mask=n_mask[:, None] & e_mask[None, :],
     )
 
 
@@ -366,26 +389,34 @@ class V4RouterPostFn(torch.autograd.Function):
             )
         N, E = logits.shape
         _, K = indices.shape
-        if E & (E - 1) != 0:
-            raise ValueError(f"E must be a power of 2; got E={E}")
-        if K & (K - 1) != 0:
-            raise ValueError(f"K must be a power of 2; got K={K}")
+        # Arbitrary (non-power-of-2) E / K are supported: the kernel tiles
+        # both axes by their next power of 2 and masks the padded columns.
+        block_e = triton.next_power_of_2(E)
+        block_k = triton.next_power_of_2(K)
 
         score_fn_enum = _SCORE_FN_MAP[score_function]
         logits_c = logits.contiguous().to(torch.float32)
         indices_c = indices.contiguous().to(torch.int64)
+        # Pad the indices tensor to [N, BLOCK_K] so the kernel's BLOCK_K-wide
+        # loads stay in-bounds; padded columns (value 0) are masked out
+        # everywhere via k_mask so they never gather / scatter / grad.
+        if block_k != K:
+            indices_pad = torch.zeros((N, block_k), dtype=torch.int64, device=indices_c.device)
+            indices_pad[:, :K] = indices_c
+        else:
+            indices_pad = indices_c
 
         device = logits_c.device
         probs = torch.zeros((N, E), dtype=out_dtype, device=device)
         routing_map = torch.zeros((N, E), dtype=torch.bool, device=device)
         scores_saved = torch.empty((N, E), dtype=torch.float32, device=device)
-        weights_saved = torch.empty((N, K), dtype=torch.float32, device=device)
+        weights_saved = torch.zeros((N, block_k), dtype=torch.float32, device=device)
         denom_saved = torch.empty((N,), dtype=torch.float32, device=device)
 
-        # BLOCK_N heuristic: per-row state ~ E + K + few scalars in fp32.
-        if E <= 64:
+        # BLOCK_N heuristic: per-row state ~ BLOCK_E + BLOCK_K + few scalars.
+        if block_e <= 64:
             block_n = 64
-        elif E <= 256:
+        elif block_e <= 256:
             block_n = 16
         else:
             block_n = 4
@@ -393,19 +424,21 @@ class V4RouterPostFn(torch.autograd.Function):
 
         _v4_router_post_fwd_kernel[grid](
             logits_c,
-            indices_c,
+            indices_pad,
             probs,
             routing_map,
             scores_saved,
             weights_saved,
             denom_saved,
             N,
-            E=E,
-            K=K,
+            E,
+            K,
             SCORE_FN=score_fn_enum,
             SCALE=float(topk_scaling_factor),
             EPS=1e-12,
             BLOCK_N=block_n,
+            BLOCK_E=block_e,
+            BLOCK_K=block_k,
             OUT_DTYPE={
                 torch.float32: tl.float32,
                 torch.float16: tl.float16,
@@ -414,27 +447,31 @@ class V4RouterPostFn(torch.autograd.Function):
             }[out_dtype],
         )
 
-        ctx.save_for_backward(indices_c, scores_saved, weights_saved, denom_saved)
+        ctx.save_for_backward(indices_pad, scores_saved, weights_saved, denom_saved)
         ctx.score_fn_enum = score_fn_enum
         ctx.scale = float(topk_scaling_factor)
         ctx.E = E
         ctx.K = K
+        ctx.block_e = block_e
+        ctx.block_k = block_k
         ctx.block_n = block_n
         ctx.in_dtype = logits.dtype
         return probs, routing_map
 
     @staticmethod
     def backward(ctx, d_probs, d_routing_map):  # type: ignore[override]
-        indices_c, scores_saved, weights_saved, denom_saved = ctx.saved_tensors
+        indices_pad, scores_saved, weights_saved, denom_saved = ctx.saved_tensors
         E = ctx.E
         K = ctx.K
+        block_e = ctx.block_e
+        block_k = ctx.block_k
         block_n = ctx.block_n
         score_fn_enum = ctx.score_fn_enum
         scale = ctx.scale
         in_dtype = ctx.in_dtype
 
-        N = indices_c.shape[0]
-        device = indices_c.device
+        N = indices_pad.shape[0]
+        device = indices_pad.device
 
         d_probs = d_probs.contiguous()
         # d_routing_map ignored (bool tensor, no grad flow).
@@ -444,18 +481,20 @@ class V4RouterPostFn(torch.autograd.Function):
         grid = (triton.cdiv(N, block_n),)
         _v4_router_post_bwd_kernel[grid](
             d_probs,
-            indices_c,
+            indices_pad,
             scores_saved,
             weights_saved,
             denom_saved,
             d_logits_fp32,
             N,
-            E=E,
-            K=K,
+            E,
+            K,
             SCORE_FN=score_fn_enum,
             SCALE=scale,
             EPS=1e-12,
             BLOCK_N=block_n,
+            BLOCK_E=block_e,
+            BLOCK_K=block_k,
         )
 
         return d_logits_fp32.to(in_dtype), None, None, None, None
@@ -480,21 +519,6 @@ def is_triton_path_enabled() -> bool:
     return os.environ.get("PRIMUS_V4_ROUTER_TRITON", "1") != "0"
 
 
-def is_triton_kernel_supported(logits: torch.Tensor, indices: torch.Tensor) -> bool:
-    """Return True iff inputs are CUDA + power-of-2 E + K."""
-    if not logits.is_cuda or not indices.is_cuda:
-        return False
-    if logits.dim() != 2 or indices.dim() != 2:
-        return False
-    N, E = logits.shape
-    _, K = indices.shape
-    if E & (E - 1) != 0:
-        return False
-    if K & (K - 1) != 0:
-        return False
-    return True
-
-
 def v4_router_post_triton(
     logits: torch.Tensor,
     indices: torch.Tensor,
@@ -508,7 +532,12 @@ def v4_router_post_triton(
     Returns ``(probs, routing_map)``.  Caller pre-computes ``indices``
     (hash router via ``tid2eid[flat_ids]``; learned router via
     ``torch.topk(sel_score, K).indices``).
+
+    Arbitrary (non-power-of-2) ``E`` / ``K`` are supported — the kernel
+    tiles both axes by the next power of 2 and masks the padded columns —
+    so the only hard requirement is that the tensors live on the GPU.
     """
+    assert logits.is_cuda and indices.is_cuda, "v4_router_post_triton requires CUDA / HIP tensors"
     return V4RouterPostFn.apply(logits, indices, score_function, topk_scaling_factor, out_dtype)
 
 
@@ -516,5 +545,4 @@ __all__ = [
     "V4RouterPostFn",
     "v4_router_post_triton",
     "is_triton_path_enabled",
-    "is_triton_kernel_supported",
 ]

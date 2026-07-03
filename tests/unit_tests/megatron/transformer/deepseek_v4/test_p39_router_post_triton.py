@@ -33,7 +33,6 @@ pytest.importorskip("triton", reason="Triton not installed")
 
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (  # noqa: E402
     V4RouterPostFn,
-    is_triton_kernel_supported,
     is_triton_path_enabled,
 )
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import (  # noqa: E402
@@ -123,14 +122,27 @@ class TestG42ForwardParity:
         torch.testing.assert_close(rmap_t, rmap_e)
         torch.testing.assert_close(probs_t.nonzero(), probs_e.nonzero(), check_dtype=False)
 
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+    @pytest.mark.parametrize("shape", [(64, 256, 6), (64, 7, 3), (64, 100, 5)])
+    def test_non_pow2_e_k_fwd_parity(self, score_function, shape):
+        """Arbitrary (non-power-of-2) E / K — the production V4-Flash router
+        runs E=256, K=6, so K=6 is the load-bearing case.  Also cover a
+        non-power-of-2 E (7, 100)."""
+        N, E, K = shape
+        logits, indices = _build_inputs(N=N, E=E, K=K, seed=2500)
+        probs_t, rmap_t = V4RouterPostFn.apply(logits, indices, score_function, 2.5, torch.float32)
+        probs_e, rmap_e = _eager_post(
+            logits, indices, score_function=score_function, topk_scaling_factor=2.5, out_dtype=torch.float32
+        )
+        torch.testing.assert_close(probs_t, probs_e, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(rmap_t, rmap_e)
+
     @pytest.mark.slow
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
     def test_release_tier_fwd_eager_parity(self, score_function):
+        # V4-Flash production widths: E=256, K=6 (non-power-of-2 topk).
         N, E, K = 4096, 256, 6
-        K_pow2 = 8  # K must be power of 2 in the kernel; pad indices
-        logits, indices_full = _build_inputs(N=N, E=E, K=K_pow2, seed=8000)
-        # Use only the first K columns (K=6 unique indices per row).
-        indices = indices_full[:, :K_pow2]
+        logits, indices = _build_inputs(N=N, E=E, K=K, seed=8000)
         probs_t, rmap_t = V4RouterPostFn.apply(logits, indices, score_function, 2.5, torch.float32)
         probs_e, rmap_e = _eager_post(
             logits, indices, score_function=score_function, topk_scaling_factor=2.5, out_dtype=torch.float32
@@ -147,8 +159,9 @@ class TestG42ForwardParity:
 class TestG42BackwardParity:
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
     @pytest.mark.parametrize("scale", [1.0, 2.5])
-    def test_fast_tier_bwd_eager_parity(self, score_function, scale):
-        N, E, K = 64, 32, 4
+    @pytest.mark.parametrize("shape", [(64, 32, 4), (64, 256, 6), (64, 100, 5)])
+    def test_fast_tier_bwd_eager_parity(self, score_function, scale, shape):
+        N, E, K = shape
         logits_e, indices = _build_inputs(N=N, E=E, K=K, seed=3100)
         logits_e = logits_e.requires_grad_(True)
         logits_t = logits_e.detach().clone().requires_grad_(True)
@@ -230,27 +243,25 @@ class TestG42ComposedRouters:
 
 
 class TestG42EdgeCases:
-    def test_unsupported_e_raises(self):
-        # E must be power of 2
-        logits = torch.randn((4, 7), dtype=torch.float32, device="cuda")
-        indices = torch.zeros((4, 2), dtype=torch.int64, device="cuda")
-        with pytest.raises(ValueError, match="E must be"):
-            V4RouterPostFn.apply(logits, indices, "softmax", 1.0, torch.float32)
-
     def test_unknown_score_function_raises(self):
         logits = torch.randn((4, 8), dtype=torch.float32, device="cuda")
         indices = torch.zeros((4, 2), dtype=torch.int64, device="cuda")
         with pytest.raises(ValueError, match="score_function"):
             V4RouterPostFn.apply(logits, indices, "tanh", 1.0, torch.float32)
 
-    def test_supported_predicate(self):
-        good_logits = torch.randn((4, 8), dtype=torch.float32, device="cuda")
-        good_idx = torch.zeros((4, 2), dtype=torch.int64, device="cuda")
-        assert is_triton_kernel_supported(good_logits, good_idx)
-
-        bad_e = torch.randn((4, 7), dtype=torch.float32, device="cuda")
-        assert not is_triton_kernel_supported(bad_e, good_idx)
+    def test_cpu_tensor_asserts(self):
+        # v4_router_post_triton asserts CUDA tensors (no support predicate).
+        from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+            v4_router_post_triton,
+        )
 
         cpu_logits = torch.randn((4, 8), dtype=torch.float32)
         cpu_idx = torch.zeros((4, 2), dtype=torch.int64)
-        assert not is_triton_kernel_supported(cpu_logits, cpu_idx)
+        with pytest.raises(AssertionError, match="CUDA"):
+            v4_router_post_triton(
+                cpu_logits,
+                cpu_idx,
+                score_function="softmax",
+                topk_scaling_factor=1.0,
+                out_dtype=torch.float32,
+            )
