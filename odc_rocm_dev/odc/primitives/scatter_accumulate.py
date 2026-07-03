@@ -14,6 +14,7 @@ import torch.distributed as dist
 import torch.multiprocessing
 import triton
 import triton.language as tl
+
 from odc.primitives import (
     NVSHMEM_EXTERN_LIBS,
     __syncthreads,
@@ -708,7 +709,7 @@ class ReductionService:
     def clear_accumulations(self):
         for acc in self.accumulations:
             acc.fill_(0)
-        if hasattr(self, "_gda_deferred"):  # 交付23: reset per-minibatch deferred grads
+        if hasattr(self, "_gda_deferred"):  # Deliverable 23: reset per-minibatch deferred grads
             self._gda_deferred = {}
             self._gda_deferred_pg = {}
 
@@ -748,14 +749,14 @@ class ReductionService:
             )
         input_sym = self.input_buffer[in_key]
 
-        # GRID geometry sweep (交付15): nblk = reduce-scatter kernel grid (one block
+        # GRID geometry sweep (Deliverable 15): nblk = reduce-scatter kernel grid (one block
         # per disjoint shard chunk -> # concurrent cross-node getmem_wg = QP/NIC
         # parallelism lever). Scratch auto-resizes (sc_key includes chunk*nblk), so
         # this stays correct for any nblk. Default 64 (current behavior).
         nblk = int(os.environ.get("ODC_GDA_RS_BLOCKS", "64"))
         if nblk < 1:
             nblk = 1
-        # PIPE (交付17): peer-pipeline batch depth. The pipelined rs_acc needs `pipe`
+        # PIPE (Deliverable 17): peer-pipeline batch depth. The pipelined rs_acc needs `pipe`
         # scratch slots PER BLOCK (issues `pipe` peers' nbi getmem concurrently), so
         # scratch grows pipe x and the main call passes scratch_stride = pipe*chunk.
         pipe = int(os.environ.get("ODC_GDA_PIPE", "1"))
@@ -830,7 +831,7 @@ class ReductionService:
             # Ensure the grad (input_tensor) is fully produced before copy+fence,
             # then copy into the symmetric staging buffer with a trailing
             # system-scope fence (gda_stage_fence self-syncs the device).
-            # 交付19 阶段2: "hdpfence" = device system-scope fence (orders the staged
+            # Deliverable 19 phase 2: "hdpfence" = device system-scope fence (orders the staged
             # writes to system scope) PLUS an HDP register flush (pushes this GPU's
             # HDP cache so the remote NIC's RDMA read sees fresh data) -- a read-FREE
             # visibility guarantee combining BOTH writer-side primitives, to skip the
@@ -852,7 +853,7 @@ class ReductionService:
             get_comm_stream().wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(get_comm_stream()):
                 input_sym.copy_(input_tensor.view(-1))
-            # 交付20: the staging only needs the COPY (on comm stream) done before the
+            # Deliverable 20: the staging only needs the COPY (on comm stream) done before the
             # settle/RS read input_sym; a FULL torch.cuda.synchronize() also waits the
             # gather-async kernels on their DEDICATED stream (which are already waited
             # by gather.py's own wait_stream at consumption) -> redundant, it absorbs
@@ -1054,7 +1055,7 @@ class ReductionService:
     def scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         official = _official_push()
         if _gda_active():
-            # 交付23: DEFER the cross-node reduce to once-per-minibatch. The per-call
+            # Deliverable 23: DEFER the cross-node reduce to once-per-minibatch. The per-call
             # _gda_scatter_accumulate does rocshmem_barrier_all (collective); calling it
             # per-microbatch deadlocks under nopad (ranks have different micro-batch
             # counts -> mismatched barrier counts vs pre_optimizer_step's NCCL barrier,
@@ -1363,7 +1364,7 @@ class ReductionService:
             )
 
     def get_accumulation(self, key):
-        # 交付23 DEFER: run the single per-minibatch cross-node reduce-scatter now
+        # Deliverable 23 DEFER: run the single per-minibatch cross-node reduce-scatter now
         # (once per group, matched barrier count across ranks -> deadlock-free).
         if _gda_active() and getattr(self, "_gda_deferred", None) is not None:
             pending = self._gda_deferred.get(key)

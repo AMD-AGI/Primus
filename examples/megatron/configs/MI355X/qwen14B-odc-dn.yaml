@@ -1,8 +1,9 @@
-### [50-iter 背靠背对照 · fit 组] thd=true + cost_model=fit。
-### 与 deepseek1.5B-lbmini-cmp-linear.yaml 的唯一差别：lb_mini_cost_model = fit。
-### 目的：在完全相同条件(同 50 iter、关 profile、背靠背串行)下确认 linear vs fit
-### 谁更优，排除之前"不同 run + 仅 20 iter"的噪声。两个 yaml 除 cost_model 外完全相同。
-### fit 系数为 lb_mini_packing.py get_seq_costs_fit 的 1.5B 拟合(1.982122/2.611821)。
+### [50-iter back-to-back comparison, fit group] thd=true + cost_model=fit.
+### The only difference from deepseek1.5B-lbmini-cmp-linear.yaml: lb_mini_cost_model = fit.
+### Purpose: under fully identical conditions (same 50 iters, profiling off, back-to-back serial runs),
+### determine which of linear vs fit is better, eliminating the earlier noise from "different runs + only 20 iters".
+### The two yamls are identical except for cost_model.
+### The fit coefficients are the 1.5B fit from lb_mini_packing.py get_seq_costs_fit (1.982122/2.611821).
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
@@ -25,10 +26,10 @@ modules:
       sft_dataset_name: "zai-org/LongAlign-10k"
       sft_conversation_format: "messages"
 
-      # P0 开启：thd 分段注意力(同主配置)。两组共有。
+      # P0 enabled: thd segmented attention (same as main config). Shared by both groups.
       enable_packed_sequences: true
       use_packed_attention: true
-      # 本组变量：fit 成本模型(注意力感知 a*s^2+b*s, 1.5B 系数)。
+      # Variable for this group: fit cost model (attention-aware a*s^2+b*s, 1.5B coefficients).
       lb_mini_cost_model: fit
 
       wandb_project: "Primus_DeepSeek1.5B_LBMini_cmp"

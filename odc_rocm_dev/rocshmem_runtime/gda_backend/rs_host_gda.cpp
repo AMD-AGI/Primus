@@ -75,10 +75,10 @@ __global__ void rs_acc_kernel(float *acc, const char *input_sym, size_t seg_off,
   }
 }
 
-// --- PIPELINED reduce-scatter (交付17): overlap per-peer RDMA latency ---------
+// --- PIPELINED reduce-scatter (Deliverable 17): overlap per-peer RDMA latency ---------
 // Original rs_acc pulls peers SEQUENTIALLY with blocking getmem_wg -> each block
 // eats n_pes x (RTT+transfer) serially. For the small per-peer per-chunk segments
-// (latency-bound; 交付16 showed only LARGE msgs are BW-saturated) this serial RTT
+// (latency-bound; Deliverable 16 showed only LARGE msgs are BW-saturated) this serial RTT
 // chain is the cross-node RDMA time we can shorten. Here each block issues a BATCH
 // of `pipe_b` peers' getmem NON-BLOCKING (rocshmem_char_get_nbi_wg) into distinct
 // scratch slots, then ONE rocshmem_quiet() waits the whole batch -> the batch's RTTs
@@ -118,7 +118,7 @@ __global__ void rs_acc_kernel_pipe(float *acc, const char *input_sym, size_t seg
   }
 }
 
-// --- MULTI-QP (交付15) ctx-aware kernel variants ----------------------------
+// --- MULTI-QP (Deliverable 15) ctx-aware kernel variants ----------------------------
 // The GDA backend allocates one QueuePair PER PE PER CONTEXT (queue_pair.cpp:
 // hipMalloc(qps, sizeof(QueuePair)*num_pes)). So N host-created contexts give N
 // QPs per peer-connection. These ctx variants round-robin blocks across a pool of
@@ -376,7 +376,7 @@ int gda_reduce_scatter_acc(long long acc_fp32, long long input_sym, size_t seg_o
                            size_t scratch_stride_bytes, int dtype_code, int nblocks) {
   int blk = env_block(), nqp = env_numqp(), pipe = env_pipe();
   dim3 grid(nblocks), block(blk);
-  if (pipe > 1) {  // 交付17: peer-pipelined non-blocking getmem (scratch_stride sized pipe*chunk by python)
+  if (pipe > 1) {  // Deliverable 17: peer-pipelined non-blocking getmem (scratch_stride sized pipe*chunk by python)
     if (dtype_code == DT_BF16) {
       rs_acc_kernel_pipe<__hip_bfloat16><<<grid, block>>>((float *)acc_fp32, (const char *)input_sym,
           seg_off_bytes, shard_elems, n_pes, (char *)scratch_sym, scratch_stride_bytes, pipe);
@@ -455,12 +455,12 @@ int gda_rs_overlap_sync() {
   return (int)hipStreamSynchronize(g_rs_stream);
 }
 
-// --- 方案4 feasibility microbench: device-side completion/visibility ---------
+// --- Approach 4 feasibility microbench: device-side completion/visibility ---------
 // Tests whether a device kernel's rocshmem_getmem (+ device rocshmem_quiet) makes
 // the pulled cross-node data visible to the NEXT kernel on the same stream WITHOUT
 // a host hipDeviceSynchronize. err==0 => device-side visibility works (gather-async
-// failure was a buffer race, not visibility -> 方案4 feasible). err>0 => stale
-// (host sync is load-bearing for visibility -> 方案4 blocked on this stack).
+// failure was a buffer race, not visibility -> Approach 4 feasible). err>0 => stale
+// (host sync is load-bearing for visibility -> Approach 4 blocked on this stack).
 __global__ void mb_fill(int *buf, int val, int n) {
   for (int i = threadIdx.x; i < n; i += blockDim.x) buf[i] = val;
 }
@@ -508,7 +508,7 @@ int gda_microbench(int n, int reps, int do_quiet) {
 }
 }  // extern "C"
 
-// --- Async GATHER (方案1: gather prefetch/overlap) --------------------------
+// --- Async GATHER (Approach 1: gather prefetch/overlap) --------------------------
 // Launch the all-gather kernel on the CALLER-PROVIDED stream WITHOUT syncing, so
 // FSDP2's prefetch (issue layer L+1's all-gather during layer L compute) actually
 // overlaps. Gather reads STABLE params (written a step earlier, read-only through

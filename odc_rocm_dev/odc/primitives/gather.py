@@ -5,13 +5,9 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
-from odc.primitives import (
-    NVSHMEM_EXTERN_LIBS,
-    __syncthreads,
-    getmem_nbi_block,
-    quiet,
-    tid,
-)
+from torch import Tensor
+
+from odc.primitives import NVSHMEM_EXTERN_LIBS, __syncthreads, getmem_nbi_block, quiet, tid
 from odc.primitives.utils import (
     BufferSplitter,
     SymmBufferRegistry,
@@ -19,7 +15,6 @@ from odc.primitives.utils import (
     get_local_world_size,
     sync_cta,
 )
-from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +278,7 @@ class GatherService:
         local_buf_size = buf_size // group_world_size
         output_split = output_tensor.view(group_world_size, -1)
         peers = list(range(group_world_size))
-        # 方案1 (ODC_GDA_GATHER_ASYNC=1): launch the all-gather kernel on the comm
+        # Approach 1 (ODC_GDA_GATHER_ASYNC=1): launch the all-gather kernel on the comm
         # stream WITHOUT a host hipDeviceSynchronize, so FSDP2's prefetch (it issues
         # layer L+1's all-gather during layer L compute, async_op=True) actually
         # overlaps. Gather reads STABLE params (written last step, read-only) -> no

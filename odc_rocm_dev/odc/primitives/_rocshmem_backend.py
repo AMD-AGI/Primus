@@ -623,7 +623,7 @@ def gda_rs_overlap_sync():
 
 
 def gda_gather_async(target_ptr, src_ptr, nbytes, peers, stride_bytes, stream):
-    """方案1: launch all-gather kernel on the given HIP `stream` WITHOUT syncing,
+    """Approach 1: launch all-gather kernel on the given HIP `stream` WITHOUT syncing,
     so FSDP2 prefetch overlaps it with compute. Reassembly + consumer order via the
     same stream (gather reads stable params -> no settle/barrier needed)."""
     n = len(peers)
