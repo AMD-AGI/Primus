@@ -57,9 +57,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
-    is_triton_kernel_supported as _v4_router_triton_supported,
-)
-from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
     is_triton_path_enabled as _v4_router_triton_enabled,
 )
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
@@ -204,11 +201,16 @@ class DeepseekV4HashRouter(nn.Module):
             probs = torch.zeros(n_zero, self.num_experts, dtype=torch.float32, device=device)
             routing_map = torch.zeros(n_zero, self.num_experts, dtype=torch.bool, device=device)
             return probs, routing_map
-        if int(flat_ids.max().item()) >= self.vocab_size:
-            raise ValueError(
-                f"token_ids has values >= vocab_size ({self.vocab_size}); "
-                f"max found = {int(flat_ids.max().item())}"
-            )
+        # NOTE: the token-id bounds check below is intentionally disabled — the
+        # ``.item()`` forces a device->host sync every hash-router forward, which
+        # stalls the CPU (shows up as a blocking cpu_op in the trace). token_ids
+        # come straight from the (already-validated) input pipeline, so the check
+        # is redundant on the hot path. Re-enable for debugging if needed.
+        # if int(flat_ids.max().item()) >= self.vocab_size:
+        #     raise ValueError(
+        #         f"token_ids has values >= vocab_size ({self.vocab_size}); "
+        #         f"max found = {int(flat_ids.max().item())}"
+        #     )
 
         # Learned scores (fp32) over the full expert axis.
         logits = F.linear(flat_hidden.to(torch.float32), self.weight.to(torch.float32))
@@ -218,7 +220,7 @@ class DeepseekV4HashRouter(nn.Module):
 
         # Plan-6 P39: route the post-logits chain through one fused
         # Triton kernel when PRIMUS_V4_ROUTER_TRITON=1 (default OFF).
-        if _v4_router_triton_enabled() and _v4_router_triton_supported(logits, indices):
+        if _v4_router_triton_enabled():
             probs, routing_map = v4_router_post_triton(
                 logits,
                 indices,

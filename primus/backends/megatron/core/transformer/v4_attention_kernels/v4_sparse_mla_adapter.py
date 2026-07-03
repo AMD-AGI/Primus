@@ -130,7 +130,15 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
 
         dk_local = torch.zeros(B, H, S, D, device=dq_bh.device, dtype=dq_bh.dtype)
         dk_local[:, 0, :, :] = dlatent.to(dq_bh.dtype)
-        dv_local = torch.zeros(B, H, S, D, device=dq_bh.device, dtype=dq_bh.dtype)
+        # V4 is single-latent (K = V = kv): the kernel returns one combined
+        # ``dkv`` which we route entirely through ``dk_local``. The V branch
+        # gradient is structurally zero, so we return ``None`` for it instead
+        # of allocating (and zeroing) a full [B, H, S, D] tensor — this removes
+        # the largest ``Memset (Device)`` bucket in the trace (~268 MB / call).
+        # ``k_local_bh`` and ``v_local_bh`` are two ``kv.expand`` views of the
+        # same latent, so autograd accumulates ``dk_local + 0`` into ``kv`` —
+        # identical to before.
+        dv_local = None
 
         dsink_out = None
         if not ctx.sink_was_none and dsink is not None:
@@ -215,7 +223,10 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
         dk_bh = torch.zeros(B, H, Skv, D, device=dq_bh.device, dtype=dq_bh.dtype)
         dk_bh[:, 0, :, :] = dkv.to(dq_bh.dtype)
-        dv_bh = torch.zeros(B, H, Skv, D, device=dq_bh.device, dtype=dq_bh.dtype)
+        # Single-latent (K = V): route the combined ``dkv`` through ``dk_bh``;
+        # the V branch gradient is structurally zero, so return ``None`` and
+        # skip the big [B, H, Skv, D] memset (see the CSA branch note).
+        dv_bh = None
 
         dsink_out = None
         if not ctx.sink_was_none and dsink is not None:

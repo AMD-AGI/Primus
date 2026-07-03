@@ -98,6 +98,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     v4_csa_attention_v1,
     v4_csa_attention_v2,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
+    fused_rms_norm,
+)
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
@@ -369,11 +372,15 @@ def _per_head_rms_norm(x: torch.Tensor, *, eps: float) -> torch.Tensor:
     into the surrounding ``linear_q_up_proj`` weights at training time.
     The check confirmed the released checkpoint has no separate
     ``q_rms.weight`` parameter.
+
+    Small-kernel-fusion (2026-07-03): the eager chain (bf16->fp32 cast +
+    square + mean + rsqrt + mul + fp32->bf16 cast, ~6 kernels / call ×
+    8 attention layers) is collapsed into one Triton FWD + one BWD kernel
+    via :func:`fused_rms_norm` (parameter-less, ``out_dtype = in_dtype``).
+    Gated by ``PRIMUS_RMSNORM_TRITON`` (default on); the dispatcher falls
+    back to the bit-identical eager body on CPU / when the knob is off.
     """
-    in_dtype = x.dtype
-    x32 = x.float()
-    rsqrt = torch.rsqrt(x32.square().mean(dim=-1, keepdim=True) + eps)
-    return (x32 * rsqrt).to(in_dtype)
+    return fused_rms_norm(x, None, eps=eps, mid_cast=False, out_dtype=x.dtype)
 
 
 def _build_local_rms_norm(dim: int, *, eps: float) -> nn.Module:

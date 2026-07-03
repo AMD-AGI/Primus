@@ -55,6 +55,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_collapse import (
+    hc_collapse_triton,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_expand import (
     hc_expand_triton,
 )
@@ -72,6 +75,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     is_triton_path_enabled as _hc_glue_enabled,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
+    fused_rms_norm,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.sinkhorn import (
     SinkhornNormalizeFn,
@@ -306,11 +312,16 @@ class HyperMixer(nn.Module):
 
         ``x``: ``[..., K, D]`` → ``flat`` ``[..., K*D]`` → ``logits`` ``[..., out_dim]``.
         Done in fp32 for stability (HC parameters are fp32 anyway).
+
+        Small-kernel-fusion (2026-07-03): the parameter-less RMS over the
+        packed ``K*D`` axis (bf16->fp32 cast + pow + mean + rsqrt + mul) is
+        fused into one Triton FWD + one BWD kernel producing the fp32
+        normalized tensor directly for ``F.linear``. Gated by
+        ``PRIMUS_RMSNORM_TRITON`` (default on).
         """
         flat = x.flatten(-2)
-        flat32 = flat.float()
-        rsqrt = torch.rsqrt(flat32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        logits = F.linear(flat32 * rsqrt, self.fn.weight.to(dtype=flat32.dtype))
+        normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
+        logits = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))
         return logits
 
     # ---- public API ------------------------------------------------------
@@ -364,8 +375,16 @@ class HyperMixer(nn.Module):
 
         ``x``: ``[..., K, D]``;  ``pre``: ``[..., K]``;
         returns ``[..., D]``.
+
+        Small-kernel-fusion (2026-07-03): the eager
+        ``(pre.unsqueeze(-1) * x).sum(-2)`` (broadcast-mul into a full
+        ``[..., K, D]`` temporary + reduce = 2 kernels + ``K*D`` extra HBM
+        traffic) is fused into one Triton FWD + one BWD kernel. Symmetric to
+        the already-shipped ``expand`` fusion. Gated by
+        ``PRIMUS_HC_COLLAPSE_TRITON`` (default on); eager fallback on
+        CPU / unsupported K.
         """
-        return (pre.unsqueeze(-1) * x).sum(dim=-2)
+        return hc_collapse_triton(x, pre)
 
     @staticmethod
     def expand(
@@ -429,10 +448,15 @@ class HyperHead(nn.Module):
         nn.init.ones_(self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """``x``: ``[..., K, D]`` → ``[..., D]``."""
-        flat = x.flatten(-2).float()
-        rsqrt = torch.rsqrt(flat.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        mixes = F.linear(flat * rsqrt, self.fn.weight.to(dtype=flat.dtype))  # [..., K]
+        """``x``: ``[..., K, D]`` → ``[..., D]``.
+
+        Small-kernel-fusion (2026-07-03): the parameter-less RMS over the
+        packed ``K*D`` axis is fused into one Triton FWD + one BWD kernel
+        (fp32 output for ``F.linear``). Gated by ``PRIMUS_RMSNORM_TRITON``.
+        """
+        flat = x.flatten(-2)
+        normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
+        mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
         pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
         return (pre.unsqueeze(-1) * x).sum(dim=-2).to(x.dtype)
 

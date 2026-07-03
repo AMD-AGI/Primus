@@ -37,6 +37,10 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
+    fused_rms_norm,
+)
+
 
 class LocalRMSNorm(nn.Module):
     """Single canonical RMSNorm fallback used across V4 modules.
@@ -78,10 +82,22 @@ class LocalRMSNorm(nn.Module):
         self.eps = float(eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_dtype = x.dtype
-        x32 = x.float()
-        rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (x32 * rsqrt).to(in_dtype) * self.weight
+        # Small-kernel-fusion (2026-07-03): collapse the eager RMS chain
+        # (bf16->fp32 cast + pow + mean + rsqrt + mul + fp32->bf16 cast +
+        # weight mul) into one Triton FWD + one BWD kernel. ``mid_cast=True``
+        # replicates the eager ``(x32*rstd).to(in_dtype)`` rounding BEFORE the
+        # weight multiply so numerics match bit-for-bit (within fp32 accum).
+        # ``out_dtype`` = the eager output dtype ``promote(in_dtype, weight)``.
+        # Gated by ``PRIMUS_RMSNORM_TRITON`` (default on); falls back to the
+        # eager body on CPU / when off.
+        out_dtype = torch.promote_types(x.dtype, self.weight.dtype)
+        return fused_rms_norm(
+            x,
+            self.weight,
+            eps=self.eps,
+            mid_cast=True,
+            out_dtype=out_dtype,
+        )
 
 
 __all__ = ["LocalRMSNorm"]

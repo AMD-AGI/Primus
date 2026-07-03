@@ -449,6 +449,241 @@ class RoPEInterleavedPartialFn(torch.autograd.Function):
 
 
 # ---------------------------------------------------------------------------
+# Fused variant: compute cos/sin IN-KERNEL from (position_ids, inv_freq).
+#
+# The plain RoPE kernel above consumes precomputed cos/sin tensors, which
+# means the caller still pays 3 small kernels per call
+# (``position_ids.float() * inv_freq`` -> ``cos`` -> ``sin``) plus a
+# ``.to(x.dtype)`` cast, and (in ``DeepseekV4Attention._apply_rope_q_k``)
+# recomputes them identically for Q and K.  This variant folds the cos/sin
+# generation into the rotation kernel: it loads the row's scalar position +
+# the ``[rd_half]`` inv_freq vector and computes ``cos``/``sin`` in registers,
+# so no cos/sin HBM tensor is ever materialised.  YaRN is already baked into
+# ``inv_freq`` (a buffer), so the compress base is handled transparently.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _rope_gen_fwd_kernel(
+    X_PTR,  # [N, H, head_dim] contiguous
+    POS_PTR,  # [N] (position per row; fp32)
+    INVFREQ_PTR,  # [rd_half] fp32
+    OUT_PTR,  # [N, H, head_dim] contiguous
+    N,
+    H,
+    HEAD_DIM: tl.constexpr,
+    NOPE: tl.constexpr,
+    RD_HALF: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_NOPE: tl.constexpr,
+    BLOCK_RD_HALF: tl.constexpr,
+    DTYPE: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    h_offs = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    h_mask = h_offs < H
+
+    rd_half_offs = tl.arange(0, BLOCK_RD_HALF)
+    rd_half_mask = rd_half_offs < RD_HALF
+
+    # cos/sin for this position, computed once, broadcast across BLOCK_H heads.
+    pos = tl.load(POS_PTR + pid_n).to(tl.float32)
+    inv_freq = tl.load(INVFREQ_PTR + rd_half_offs, mask=rd_half_mask, other=0.0).to(tl.float32)
+    angle = pos * inv_freq
+    cos = tl.cos(angle).to(DTYPE)
+    sin = tl.sin(angle).to(DTYPE)
+
+    row_base = pid_n * H * HEAD_DIM + h_offs[:, None] * HEAD_DIM
+
+    if NOPE > 0:
+        nope_offs = tl.arange(0, BLOCK_NOPE)
+        nope_mask = (nope_offs < NOPE)[None, :] & h_mask[:, None]
+        x_nope = tl.load(X_PTR + row_base + nope_offs[None, :], mask=nope_mask, other=0.0)
+        tl.store(OUT_PTR + row_base + nope_offs[None, :], x_nope, mask=nope_mask)
+
+    even_offs = NOPE + 2 * rd_half_offs
+    odd_offs = NOPE + 2 * rd_half_offs + 1
+    pair_mask = h_mask[:, None] & rd_half_mask[None, :]
+    even = tl.load(X_PTR + row_base + even_offs[None, :], mask=pair_mask, other=0.0)
+    odd = tl.load(X_PTR + row_base + odd_offs[None, :], mask=pair_mask, other=0.0)
+    rot_even = even * cos[None, :] - odd * sin[None, :]
+    rot_odd = even * sin[None, :] + odd * cos[None, :]
+    tl.store(OUT_PTR + row_base + even_offs[None, :], rot_even, mask=pair_mask)
+    tl.store(OUT_PTR + row_base + odd_offs[None, :], rot_odd, mask=pair_mask)
+
+
+@triton.jit
+def _rope_gen_bwd_kernel(
+    DOUT_PTR,  # [N, H, head_dim] contiguous
+    POS_PTR,  # [N] fp32
+    INVFREQ_PTR,  # [rd_half] fp32
+    DX_PTR,  # [N, H, head_dim] contiguous
+    N,
+    H,
+    HEAD_DIM: tl.constexpr,
+    NOPE: tl.constexpr,
+    RD_HALF: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_NOPE: tl.constexpr,
+    BLOCK_RD_HALF: tl.constexpr,
+    DTYPE: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    h_offs = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    h_mask = h_offs < H
+
+    rd_half_offs = tl.arange(0, BLOCK_RD_HALF)
+    rd_half_mask = rd_half_offs < RD_HALF
+
+    pos = tl.load(POS_PTR + pid_n).to(tl.float32)
+    inv_freq = tl.load(INVFREQ_PTR + rd_half_offs, mask=rd_half_mask, other=0.0).to(tl.float32)
+    angle = pos * inv_freq
+    cos = tl.cos(angle).to(DTYPE)
+    sin = tl.sin(angle).to(DTYPE)
+
+    row_base = pid_n * H * HEAD_DIM + h_offs[:, None] * HEAD_DIM
+
+    if NOPE > 0:
+        nope_offs = tl.arange(0, BLOCK_NOPE)
+        nope_mask = (nope_offs < NOPE)[None, :] & h_mask[:, None]
+        dout_nope = tl.load(DOUT_PTR + row_base + nope_offs[None, :], mask=nope_mask, other=0.0)
+        tl.store(DX_PTR + row_base + nope_offs[None, :], dout_nope, mask=nope_mask)
+
+    even_offs = NOPE + 2 * rd_half_offs
+    odd_offs = NOPE + 2 * rd_half_offs + 1
+    pair_mask = h_mask[:, None] & rd_half_mask[None, :]
+    dout_even = tl.load(DOUT_PTR + row_base + even_offs[None, :], mask=pair_mask, other=0.0)
+    dout_odd = tl.load(DOUT_PTR + row_base + odd_offs[None, :], mask=pair_mask, other=0.0)
+    dx_even = dout_even * cos[None, :] + dout_odd * sin[None, :]
+    dx_odd = -dout_even * sin[None, :] + dout_odd * cos[None, :]
+    tl.store(DX_PTR + row_base + even_offs[None, :], dx_even, mask=pair_mask)
+    tl.store(DX_PTR + row_base + odd_offs[None, :], dx_odd, mask=pair_mask)
+
+
+class RoPEFromPositionsFn(torch.autograd.Function):
+    """RoPE that computes cos/sin in-kernel from ``(position_ids, inv_freq)``.
+
+    Eliminates the separate ``cos``/``sin`` generation kernels and HBM
+    tensors.  ``position_ids`` / ``inv_freq`` are non-differentiable
+    (positions are integer, inv_freq is a buffer), so the backward returns
+    ``None`` for both and recomputes cos/sin in-kernel.
+    """
+
+    @staticmethod
+    def forward(ctx, x, pos_flat, inv_freq, rotary_dim):  # type: ignore[override]
+        head_dim = x.shape[-1]
+        if rotary_dim % 2 != 0:
+            raise ValueError(f"rotary_dim must be even, got {rotary_dim}")
+        if rotary_dim > head_dim:
+            raise ValueError(f"rotary_dim ({rotary_dim}) must be <= head_dim ({head_dim})")
+
+        x = x.contiguous()
+        leading = x.shape[:-2]
+        H = x.shape[-2]
+        N = 1
+        for s in leading:
+            N *= s
+        rd_half = rotary_dim // 2
+        if inv_freq.shape[-1] != rd_half:
+            raise ValueError(
+                f"inv_freq last dim must be rotary_dim // 2 ({rd_half}); got {tuple(inv_freq.shape)}"
+            )
+
+        pos_c = pos_flat.contiguous().to(torch.float32)
+        inv_c = inv_freq.contiguous().to(torch.float32)
+        out = torch.empty_like(x)
+
+        nope = head_dim - rotary_dim
+        block_h = _pick_block_h(H)
+        block_nope = max(triton.next_power_of_2(max(nope, 1)), 1)
+        block_rd_half = triton.next_power_of_2(rd_half)
+        grid = (N, triton.cdiv(H, block_h))
+        _rope_gen_fwd_kernel[grid](
+            x,
+            pos_c,
+            inv_c,
+            out,
+            N,
+            H,
+            HEAD_DIM=head_dim,
+            NOPE=nope,
+            RD_HALF=rd_half,
+            BLOCK_H=block_h,
+            BLOCK_NOPE=block_nope,
+            BLOCK_RD_HALF=block_rd_half,
+            DTYPE=_triton_dtype(x.dtype),
+        )
+
+        ctx.save_for_backward(pos_c, inv_c)
+        ctx.rotary_dim = rotary_dim
+        ctx.head_dim = head_dim
+        ctx.H = H
+        ctx.N = N
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):  # type: ignore[override]
+        pos_c, inv_c = ctx.saved_tensors
+        rotary_dim = ctx.rotary_dim
+        head_dim = ctx.head_dim
+        H = ctx.H
+        N = ctx.N
+        dout = dout.contiguous()
+        rd_half = rotary_dim // 2
+        nope = head_dim - rotary_dim
+        block_h = _pick_block_h(H)
+        block_nope = max(triton.next_power_of_2(max(nope, 1)), 1)
+        block_rd_half = triton.next_power_of_2(rd_half)
+        dx = torch.empty_like(dout)
+        grid = (N, triton.cdiv(H, block_h))
+        _rope_gen_bwd_kernel[grid](
+            dout,
+            pos_c,
+            inv_c,
+            dx,
+            N,
+            H,
+            HEAD_DIM=head_dim,
+            NOPE=nope,
+            RD_HALF=rd_half,
+            BLOCK_H=block_h,
+            BLOCK_NOPE=block_nope,
+            BLOCK_RD_HALF=block_rd_half,
+            DTYPE=_triton_dtype(dout.dtype),
+        )
+        return dx, None, None, None
+
+
+def apply_rope_from_positions(
+    x: torch.Tensor,
+    position_ids: torch.Tensor,
+    inv_freq: torch.Tensor,
+    *,
+    rotary_dim: int,
+) -> torch.Tensor:
+    """Fused interleaved partial RoPE that generates cos/sin in-kernel.
+
+    ``x``: ``[..., H, head_dim]``; ``position_ids`` broadcastable to
+    ``x.shape[:-2]``; ``inv_freq``: ``[rotary_dim // 2]`` (YaRN pre-applied).
+    Dispatches to the Triton kernel when enabled + CUDA, else falls back to
+    the eager ``cos = pos*inv_freq -> cos/sin -> rotate`` path.
+    """
+    if rotary_dim == 0:
+        return x
+    if is_triton_path_enabled() and x.is_cuda:
+        leading = x.shape[:-2]
+        pos_flat = position_ids.broadcast_to(leading).reshape(-1)
+        return RoPEFromPositionsFn.apply(x, pos_flat, inv_freq, rotary_dim)
+    # Eager fallback: build cos/sin then apply.
+    freqs = position_ids.float().unsqueeze(-1) * inv_freq
+    return eager_apply_interleaved_partial_rope(x, freqs.cos(), freqs.sin(), rotary_dim=rotary_dim)
+
+
+# ---------------------------------------------------------------------------
 # Public Python entry points
 # ---------------------------------------------------------------------------
 
@@ -535,7 +770,9 @@ def apply_rope_interleaved_partial(
 
 __all__ = [
     "RoPEInterleavedPartialFn",
+    "RoPEFromPositionsFn",
     "apply_rope_interleaved_partial",
+    "apply_rope_from_positions",
     "eager_apply_interleaved_partial_rope",
     "is_triton_path_enabled",
 ]

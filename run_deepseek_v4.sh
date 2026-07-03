@@ -147,13 +147,14 @@ if [ "$OPTIMIZER" = "muon" ] || [ "$OPTIMIZER" = "dist_muon" ]; then
 fi
 
 # DeepSeek-V4 attention backend selection (unified string selectors). Default
-# triton_v1 (production). These are V4-only; no effect on other model types.
+# triton_v2 (production default; fastest V4 sparse-MLA path). These are
+# V4-only; no effect on other model types.
 #   USE_V4_ATTENTION_BACKEND     (dense cr=0 / HCA cr=128): eager|triton_v1|triton_v2|gluon
 #   USE_V4_CSA_ATTENTION_BACKEND (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
 # gluon is gfx950/CDNA4-only (lazily imported; asserts arch when selected).
 # use_turbo_attention (when core_attention is built) still wins for the dense path.
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v1}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v1}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v2}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
 
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
