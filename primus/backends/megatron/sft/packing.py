@@ -526,7 +526,18 @@ class PackedSFTDataset(Dataset):
         )
         cache_dir = _resolve_pack_cache_dir()
         cache_file = cache_dir / f"sft_pack_{cache_key}.pt"
-        lock_file = cache_dir / f"sft_pack_{cache_key}.lock"
+        # Keep the lock on node-LOCAL storage when PRIMUS_PACK_LOCK_DIR is set. On a
+        # shared NFS cache dir, cross-node FileLock contention (e.g. 16 ranks over 2
+        # nodes in dual-node ODC) triggers ESTALE ([Errno 116] Stale file handle).
+        # Routing the lock to node-local /tmp avoids the NFS flock race; the cache
+        # .pt itself stays shared on NFS (deterministic build, atomic rename).
+        _lock_base = os.environ.get("PRIMUS_PACK_LOCK_DIR")
+        if _lock_base:
+            _lock_dir = Path(_lock_base)
+            _lock_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            _lock_dir = cache_dir
+        lock_file = _lock_dir / f"sft_pack_{cache_key}.lock"
 
         # Lazy import keeps filelock optional for non-cache code paths (and out
         # of unit tests that don't exercise PackedSFTDataset).

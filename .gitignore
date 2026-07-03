@@ -13,3 +13,5 @@ output
 experiment
 data
 pp_simulation_result
+odc_logs/
+odc_run/

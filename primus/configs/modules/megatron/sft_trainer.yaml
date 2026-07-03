@@ -84,6 +84,29 @@ enable_packed_sequences: false
 #            short-sample datasets.
 use_packed_attention: false
 
+# === LB-Mini (ODC sequence-length load balancing) ===
+# When true (and env ODC_ENABLE=1 + use_torch_fsdp2=true), the TRAIN data is
+# served variable-length and Karmarkar-Karp balanced across DP ranks, and each
+# rank runs its OWN (possibly different) number of micro-batches -- removing the
+# workload-imbalance bubble on variable-length datasets (e.g. LongAlign).
+# Requires ODC point-to-point comm; it would deadlock under NCCL collectives.
+# DEFAULT false => stock Megatron fixed-num_microbatches, all-ranks-in-lockstep
+# schedule, byte-for-byte unchanged. (Env ODC_LB_MINI=1 also flips the switch.)
+enable_odc_lb_mini: false
+# Per-micro-batch token cap for LB-Mini (0 => use seq_length).
+lb_mini_max_token_len: 0
+# LB-Mini cost model: "linear" (token count) or "fit" (attention-aware, ~s^2).
+lb_mini_cost_model: "linear"
+
+# === Chunked linear cross-entropy (avoid full-logits OOM) ===
+# When true (or env FUSED_LINEAR_CE=1), GPTModel computes the LM loss in
+# sequence chunks under activation checkpointing, so the full [seq, vocab]
+# logits is never materialized. Essential for large-vocab models (e.g. Qwen
+# 151936) at long sequence lengths where the logits tensor alone would OOM.
+# DEFAULT false => stock full-logits path, byte-for-byte unchanged. Numerically
+# equivalent when on. Tune chunk via env FUSED_CE_CHUNK (default 4096).
+enable_fused_linear_ce: false
+
 # Opt-in: reproduce NeMo Megatron-Bridge's packed dataset byte-for-byte.
 #
 # When False (default) Native does a clean single-shot tokenize of the full
