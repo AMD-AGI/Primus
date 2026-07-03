@@ -144,7 +144,10 @@ want single && build_librocshmem single -DUSE_IPC=ON -DUSE_SINGLE_NODE=ON -DUSE_
 # multi-node Reverse-Offload library (RO is the point here)
 want ro     && build_librocshmem ro     -DUSE_IPC=ON -DUSE_RO=ON
 # GPU-direct (GDA) library. Same USE_RO=OFF caveat as single (GDA is its own conduit).
-want gda    && build_librocshmem gda    -DUSE_GDA=ON -DUSE_RO=OFF
+# GDA_MLX5=ON is required: rocSHMEM defaults GDA_MLX5/BNXT/IONIC to OFF, which compiles
+# out the MLX5 DirectVerbs provider and makes multi-node GDA fail at runtime with
+# "open_dv_libs: no DV library could dlopen for ... MLX5 GDA support".
+want gda    && build_librocshmem gda    -DUSE_GDA=ON -DUSE_RO=OFF -DGDA_MLX5=ON
 
 # =============================================================================
 # Stage 2: hipcc-compile the ctypes host bindings (.so)
