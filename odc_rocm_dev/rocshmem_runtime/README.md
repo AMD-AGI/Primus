@@ -151,4 +151,70 @@ The container `/root/odc_rs/` still holds the following, **intentionally not ext
   `tcache_*/` — large and not required at runtime, so omitted.
 - The rocSHMEM source `/root/rocshmem_src` (23M) — only the commit is recorded; it can
   be re-obtained with the commands above.
+
+## Multi-node deployment (GDA / RoCE cross-node)
+
+Multi-node (cross-node) ODC uses `gda_backend/librs_host_gda.so` (GPU-Direct RDMA over
+RoCE). There are two orthogonal concerns: **correctness** (handled in code by default,
+no env needed) and **cluster-specific deployment env** (NIC list, library paths — these
+must be set per your cluster and are NOT hardcoded in the repo).
+
+### 1. Correctness: automatic cross-node defer (built-in, no env needed)
+
+`odc/primitives/scatter_accumulate.py` selects the GDA reduce-scatter strategy by topology:
+
+- **Multi-node (`n_pes > GPUs-per-node`) defaults to `ODC_GDA_DEFER_REDUCE=1`**:
+  accumulate each micro-batch's unsharded grad locally, then do ONE barriered
+  reduce-scatter per minibatch.
+- **Single-node defaults to `0`**: keep the per-call overlap path.
+
+Reason: the per-micro-batch path issues a collective `rocshmem_barrier_all`. Under
+variable-length (nopad) packing, ranks on different nodes get UNEQUAL micro-batch counts
+-> unequal barrier counts -> cross-node rendezvous DEADLOCK. Deferring makes the barrier
+count == number of groups (equal across ranks) -> deadlock-free. Verified on 2 nodes:
+`DEFER=0` hangs; `DEFER=1` runs nopad gbs64/gbs128 to 25/25 with 0 nan. `ODC_GDA_PIPE`
+already defaults to `1`. Both env vars still override the defaults.
+
+### 2. Cluster-specific deployment env (set per your cluster; do NOT hardcode)
+
+| env | example value | notes |
+|-----|---------------|-------|
+| `ROCSHMEM_HCA_LIST` | `mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9` | The compute NICs of THIS cluster. Without it, all 16 ranks' cross-node traffic funnels through `mlx5_0` (pad perf ~0.7-0.8x). This list varies per cluster; it is deployment config, not code. Only the develop-branch GDA `.so` honors it (release ignores it; see section 4). |
+| `LD_LIBRARY_PATH` | `/opt/rocm/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/openmpi/lib:$LD_LIBRARY_PATH` | `librs_host_gda.so` needs OpenMPI (bootstrap) + ROCm runtime. |
+| `ROCSHMEM_GDA_PROVIDER` | `mlx5` | RDMA provider. |
+| `ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME` | `eth0` | rocSHMEM bootstrap ethernet interface. |
+| `ROCSHMEM_HEAP_SIZE` | `8589934592` | Symmetric heap in RAW bytes (decimal only, no K/M/G). |
+| `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | `eth0` | torch.distributed control-plane interface. |
+| `NCCL_IB_GID_INDEX` | `3` | RoCE v2 GID (varies with cluster fabric). |
+| `ODC_GDA_WARMUP_MODE` / `ODC_GDA_STRIDE_BYTES` | `strided` / `65536` | GDA connection warmup (code defaults; pinning explicitly is steadier on multi-node). |
+
+### 3. Reference launch (mpirun, 8 GPU/node)
+
+```bash
+/usr/bin/mpirun --allow-run-as-root -np 16 \
+  --host <node0>:8,<node1>:8 \
+  --mca oob_tcp_if_include eth0 --mca btl_tcp_if_include eth0 \
+  --mca osc ucx --mca pml ucx \
+  -x UCX_NET_DEVICES=mlx5_0:1 -x UCX_TLS=rc,sm,self \
+  -x MASTER_ADDR=<node0> -x MASTER_PORT=29600 \
+  -x ODC_P2P_BACKEND=rocshmem -x ODC_ROCSHMEM_GDA=1 \
+  -x ODC_ROCSHMEM_LIB=<...>/rocshmem_runtime/gda_backend/librs_host_gda.so \
+  -x ROCSHMEM_GDA_PROVIDER=mlx5 -x ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0 \
+  -x ROCSHMEM_HEAP_SIZE=8589934592 \
+  -x ROCSHMEM_HCA_LIST=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9 \
+  -x NCCL_SOCKET_IFNAME=eth0 -x GLOO_SOCKET_IFNAME=eth0 -x NCCL_IB_GID_INDEX=3 \
+  -x LD_LIBRARY_PATH \
+  bash <your_rank_entry>.sh
+# Correctness (DEFER) is auto-enabled; no need to set ODC_GDA_DEFER_REDUCE here.
+```
+
+### 4. rocSHMEM version of the GDA `.so` (perf, optional)
+
+- **Correctness is version-independent**: the release commit (rocm-7.2.0 / v3.2.0) GDA
+  `.so` plus the `DEFER=1` default runs nopad dual-node to 25/25 (measured).
+- **Multi-NIC speedup needs the develop branch**: `ROCSHMEM_HCA_LIST` (multi-NIC
+  selection) is only recognized by the develop-branch GDA `.so`, which lifts pad gbs128
+  from ~908 to ~1298 TFLOP/s/GPU (aligned with the known-good `.so` ~1305).
+- `build_rocshmem_backend.sh` keeps the stable release commit by default; rebuild with
+  the develop commit to enable multi-NIC (see the script's comments).
 ```

@@ -1065,7 +1065,16 @@ class ReductionService:
             # do ONE barriered reduce-scatter per group at get_accumulation (count =
             # #groups, matched across ranks). Deterministic strided settle preserved.
             # ODC_OFFICIAL_PUSH skips DEFER (official does no local pre-accumulation).
-            if os.environ.get("ODC_GDA_DEFER_REDUCE", "0") == "1" and not official:
+            # Multi-node DEFAULT = defer. The per-microbatch path issues a collective
+            # rocshmem_barrier_all; under variable-length (nopad) packing, ranks on
+            # different nodes get UNEQUAL micro-batch counts -> unequal barrier counts
+            # -> cross-node rendezvous DEADLOCK (reproduced dual-node: DEFER=0 hangs,
+            # DEFER=1 runs 25/25 with 0 nan). Deferring does ONE barriered reduce-scatter
+            # per group (count == #groups, matched across ranks) -> deadlock-free.
+            # Single-node (n_pes <= local_world_size) keeps the per-call path (no
+            # cross-node barrier to mismatch). The env var still overrides both.
+            defer_default = "1" if _rs._n_pes > get_local_world_size() else "0"
+            if os.environ.get("ODC_GDA_DEFER_REDUCE", defer_default) == "1" and not official:
                 if not hasattr(self, "_gda_deferred"):
                     self._gda_deferred = {}
                     self._gda_deferred_pg = {}
