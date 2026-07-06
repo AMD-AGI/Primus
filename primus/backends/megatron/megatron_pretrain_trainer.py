@@ -11,14 +11,15 @@ from primus.core.utils.module_utils import log_rank_0
 class MegatronPretrainTrainer(MegatronBaseTrainer):
     """Trainer for Megatron-LM pre-training."""
 
-    def build_model_for_benchmark(self):
+    def setup_model_only(self):
         """Initialize Megatron and build the model WITHOUT running the training loop.
 
-        This mirrors the front of ``megatron.training.pretrain`` (``initialize_megatron``
-        followed by ``setup_model_and_optimizer``) so that Primus performance
-        projection's layer benchmark can construct a model identical to the real
-        training path and measure per-layer kernels, without datasets or a train
-        loop.
+        A general, training-neutral capability: mirrors the front of
+        ``megatron.training.pretrain`` (``initialize_megatron`` followed by
+        ``setup_model_and_optimizer``) to construct a model identical to the real
+        training path, but stops before datasets / the train loop. Useful for any
+        "build the model only" scenario (offline profiling, layer benchmarking,
+        model inspection); performance/memory projection is the current consumer.
 
         Prerequisites (handled by the runtime before calling this): ``setup()``
         has patched ``parse_args`` to return ``self.backend_args`` and set the
@@ -26,7 +27,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         have been applied. Returns the built model (a list of model chunks, as
         produced by megatron's ``get_model``) and also stores it on ``self.model``.
         """
-        log_rank_0("Building Megatron model for benchmark (no training loop)...")
+        log_rank_0("Setting up Megatron model only (no training loop)...")
 
         from megatron.core.enums import ModelType
         from megatron.training.initialize import initialize_megatron
@@ -57,7 +58,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         self.optimizer = optimizer
         self.opt_param_scheduler = opt_param_scheduler
 
-        log_rank_0("Megatron model build for benchmark completed.")
+        log_rank_0("Megatron model-only setup completed.")
         return model
 
     def train(self):

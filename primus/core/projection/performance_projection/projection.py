@@ -2651,7 +2651,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
 
     print("[Primus:Performance Projection] Initializing Megatron and building model...")
     runtime = PrimusRuntime(args=args)
-    trainer = runtime.build_model_for_benchmark(
+    trainer = runtime.setup_model_only(
         module_name="pre_trainer",
         overrides=unknown_overrides,
         primus_config=runtime_primus_config,

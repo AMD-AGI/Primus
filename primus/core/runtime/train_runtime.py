@@ -109,20 +109,22 @@ class PrimusRuntime:
             self._safe_cleanup(error=e)
             raise RuntimeError(f"Training execution failed: {e}") from e
 
-    def build_model_for_benchmark(
+    def setup_model_only(
         self,
         module_name: str = "pre_trainer",
         overrides: Optional[List[str]] = None,
         primus_config: Any = None,
     ) -> Any:
-        """Build a backend model (init + model, no training loop) for offline tools.
+        """Run the runtime pipeline but stop after building the model (no training).
 
-        Reuses the full runtime initialization pipeline (config → environment →
-        distributed → logging → backend adapter → args conversion → build_args
-        patches → trainer setup/init → before_train patches) and then asks the
-        trainer to build only the model via ``build_model_for_benchmark``. Used by
-        performance projection's layer benchmark so it no longer needs a legacy
-        trainer to stand up a model.
+        A general, training-neutral entry that mirrors :meth:`run_train_module`
+        except it replaces the training step with a model-only build. Reuses the
+        full runtime initialization pipeline (config → environment → distributed →
+        logging → backend adapter → args conversion → build_args patches → trainer
+        setup/init → before_train patches) and then asks the trainer to build only
+        the model via ``setup_model_only``. Useful for any "build the model only"
+        scenario (offline profiling, layer benchmarking, model inspection);
+        performance/memory projection is the current consumer.
 
         Args:
             module_name: training module to build (default ``pre_trainer``).
@@ -156,11 +158,11 @@ class PrimusRuntime:
         self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
 
         # 5) Build only the model (no datasets / no train loop).
-        build_fn = getattr(trainer, "build_model_for_benchmark", None)
+        build_fn = getattr(trainer, "setup_model_only", None)
         if build_fn is None:
             raise NotImplementedError(
                 f"Trainer '{type(trainer).__name__}' for framework "
-                f"'{self.ctx.framework}' does not implement build_model_for_benchmark()."
+                f"'{self.ctx.framework}' does not implement setup_model_only()."
             )
         build_fn()
         return trainer
