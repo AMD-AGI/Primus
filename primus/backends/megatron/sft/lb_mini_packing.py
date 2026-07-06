@@ -7,7 +7,7 @@
 """LB-Mini sequence-length load balancing for Megatron-native SFT (ODC path).
 
 This is the Megatron-side port of the load-balancing core that ODC's official
-example (``odc_rocm_dev/examples/llm_training/packing.py``) uses. The algorithm
+example (``primus/core/odc/examples/llm_training/packing.py``) uses. The algorithm
 itself is unchanged (it is already validated on the ODC example); we only strip
 the example's ``from args import get_args`` dependency so it can be driven by
 plain function arguments from a Primus monkey-patch.

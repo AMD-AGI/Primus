@@ -14,9 +14,9 @@ Run once inside a base-image container that has this project mounted (pure CPU
 cross-compilation for gfx942, **no GPU required**):
 
 ```bash
-bash odc_rocm_dev/build_rocshmem_backend.sh          # build everything: single + gda
+bash primus/core/odc/build_rocshmem_backend.sh          # build everything: single + gda
 # or build only the single-node backend (most common):
-bash odc_rocm_dev/build_rocshmem_backend.sh single
+bash primus/core/odc/build_rocshmem_backend.sh single
 ```
 
 The script is idempotent: it will (1) git clone rocSHMEM at the pinned commit and
@@ -54,7 +54,7 @@ rocshmem_runtime/
 └── backup/                       ← reference copies of adapter code and smoke configs (not required at runtime)
 ```
 
-(The build script itself lives one level up: `odc_rocm_dev/build_rocshmem_backend.sh`.)
+(The build script itself lives one level up: `primus/core/odc/build_rocshmem_backend.sh`.)
 
 ## Key facts
 
@@ -99,7 +99,7 @@ single-node IPC `.so`.
 
 ```bash
 # Inside a container that has this project mounted:
-bash odc_rocm_dev/rocshmem_runtime/scripts/run_odc.sh \
+bash primus/core/odc/rocshmem_runtime/scripts/run_odc.sh \
   rocshmem nopad \
   examples/megatron/configs/MI355X/deepseek1.5B-lbmini-cmp-fit.yaml \
   my_rocshmem_smoke
@@ -111,9 +111,9 @@ Always use `build_rocshmem_backend.sh`; it encapsulates all of the details below
 
 ```bash
 # Rebuild everything:
-bash odc_rocm_dev/build_rocshmem_backend.sh --force
+bash primus/core/odc/build_rocshmem_backend.sh --force
 # Rebuild only one variant's .so (the static lib is reused if it exists):
-bash odc_rocm_dev/build_rocshmem_backend.sh single        # or gda
+bash primus/core/odc/build_rocshmem_backend.sh single        # or gda
 ```
 
 The cmake / hipcc commands for each variant (what the script actually runs, for reference):

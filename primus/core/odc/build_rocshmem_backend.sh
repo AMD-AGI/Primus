@@ -15,23 +15,23 @@
 # Everything is CPU-side cross-compilation for gfx942 — NO GPU is required.
 #
 # Usage:
-#   bash odc_rocm_dev/build_rocshmem_backend.sh [variants...] [--force]
+#   bash primus/core/odc/build_rocshmem_backend.sh [variants...] [--force]
 #     variants : any of {single gda all}  (default: all)
 #     --force  : rebuild even if outputs already exist
 #
 # Examples:
-#   bash odc_rocm_dev/build_rocshmem_backend.sh              # build everything
-#   bash odc_rocm_dev/build_rocshmem_backend.sh single       # single-node .so only
-#   bash odc_rocm_dev/build_rocshmem_backend.sh single gda --force
+#   bash primus/core/odc/build_rocshmem_backend.sh              # build everything
+#   bash primus/core/odc/build_rocshmem_backend.sh single       # single-node .so only
+#   bash primus/core/odc/build_rocshmem_backend.sh single gda --force
 #
 # All output is tee'd to rocshmem_runtime/build.log so a detached run can be
 # picked up later:
-#   nohup bash odc_rocm_dev/build_rocshmem_backend.sh > /dev/null 2>&1 &
+#   nohup bash primus/core/odc/build_rocshmem_backend.sh > /dev/null 2>&1 &
 # =============================================================================
 set -euo pipefail
 
 # --- locate ourselves --------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../odc_rocm_dev
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../primus/core/odc
 RT="${SCRIPT_DIR}/rocshmem_runtime"
 SRC="${RT}/rocshmem_src"
 LOG="${RT}/build.log"

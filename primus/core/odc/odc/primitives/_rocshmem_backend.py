@@ -95,7 +95,7 @@ def _default_host_lib():
     """Project-relative fallback path to the rocSHMEM host binding.
 
     The binary ships inside the project at
-    ``odc_rocm_dev/rocshmem_runtime/host_bindings/librs_host5.so`` so the
+    ``primus/core/odc/rocshmem_runtime/host_bindings/librs_host5.so`` so the
     backend works on any base image that mounts only the project directory
     (no dependence on the container's ``/root`` layer). The multinode GPU-direct
     binding lives next to it under ``gda_backend/librs_host_gda.so`` and is
@@ -136,7 +136,7 @@ def _load_lib():
             f"rocSHMEM host binding not found at {so}. Set ODC_ROCSHMEM_LIB "
             f"(or ODC_RS_HOST_LIB) to the path of librs_host5.so, or "
             f"ROCSHMEM_LIB_DIR to the directory containing it. The binary "
-            f"ships in the project at odc_rocm_dev/rocshmem_runtime/."
+            f"ships in the project at primus/core/odc/rocshmem_runtime/."
         )
     lib = ctypes.CDLL(so)
     lib.rs_uid_bytes.restype = ctypes.c_int

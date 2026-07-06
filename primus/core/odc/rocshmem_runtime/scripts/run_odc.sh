@@ -4,7 +4,7 @@
 #
 # Runs an ODC LB-mini training job. Default P2P backend is `mori`; passing
 # `rocshmem` switches to the rocSHMEM host-API backend that ships inside this
-# project (odc_rocm_dev/rocshmem_runtime/), so it works on any base image that
+# project (primus/core/odc/rocshmem_runtime/), so it works on any base image that
 # mounts ONLY the project directory — no dependence on the container `/root`
 # layer.
 #
@@ -26,16 +26,16 @@ set -u
 BACKEND=$1; PAD=$2; EXP_REL=$3; EXPNAME=$4; shift 4
 
 # --- derive project root from this script's location (portable) -------------
-# scripts/ -> rocshmem_runtime/ -> odc_rocm_dev/ -> <PRIMUS_ROOT>
+# scripts/ -> rocshmem_runtime/ -> odc/ -> core/ -> primus/ -> <PRIMUS_ROOT>
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"            # rocshmem_runtime/
-ODC_ROCM_DEV="$(cd "$RUNTIME_DIR/.." && pwd)"          # odc_rocm_dev/
-PRIMUS_ROOT="${PRIMUS_ROOT:-$(cd "$ODC_ROCM_DEV/.." && pwd)}"
+ODC_ROOT="$(cd "$RUNTIME_DIR/.." && pwd)"              # primus/core/odc/
+PRIMUS_ROOT="${PRIMUS_ROOT:-$(cd "$ODC_ROOT/../../.." && pwd)}"
 cd "$PRIMUS_ROOT" || exit 1
 
 export EXP=$EXP_REL
 # ODC arm env
-export PYTHONPATH="$ODC_ROCM_DEV/odc_early:$ODC_ROCM_DEV"
+export PYTHONPATH="$ODC_ROOT/odc_early:$ODC_ROOT"
 export ODC_ENABLE=1 ODC_LB_MINI=1 ODC_PHASE=2 MORI_SHMEM_HEAP_SIZE=8G
 if [ "$PAD" = "pad" ]; then export LB_MINI_SAME_MICRO=1; else export LB_MINI_SAME_MICRO=0; fi
 # public env

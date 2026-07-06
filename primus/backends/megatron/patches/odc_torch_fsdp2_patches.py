@@ -4,7 +4,7 @@
 # Gated by env var ODC_ENABLE=1 (so it is a no-op unless explicitly turned on)
 # AND requires use_torch_fsdp2=true.
 #
-# Strategy (see odc_rocm_dev/ROCM_ADAPTATION_REPORT.md for context):
+# Strategy (see primus/core/odc/ROCM_ADAPTATION_REPORT.md for context):
 #   Megatron's TorchFullyShardedDataParallel wraps the model with the STANDARD
 #   PyTorch `fully_shard` API. ODC's odc/fsdp/fsdp2.py monkey-patches the same
 #   torch.distributed.fsdp._fully_shard internals (foreach_all_gather,

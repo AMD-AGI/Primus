@@ -15,7 +15,7 @@ Root cause (verified on MI300X + ROCm 7.2 + PyTorch 2.10a):
 
 Enable by:
     export ODC_ENABLE=1
-    export PYTHONPATH=/workspace/Primus/odc_rocm_dev/odc_early:$PYTHONPATH
+    export PYTHONPATH=/workspace/Primus/primus/core/odc/odc_early:$PYTHONPATH
 
 This is gated by ODC_ENABLE so it is a complete no-op for normal runs.
 """
