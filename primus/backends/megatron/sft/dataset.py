@@ -123,7 +123,7 @@ def build_train_valid_test_datasets(
     byte-identical packs produced by the upstream mlperf
     ``download_dataset.py + convert_dataset.py + create_metadata.py``
     pipeline (used by ``examples/megatron_bridge/configs/MI355X/
-    llama2_70b_lora_posttrain.yaml``).
+    ``llama2_70b_lora_mlperf_posttrain.yaml``).
     """
     from primus.backends.megatron.sft.mlperf_packed_dataset import (
         build_mlperf_packed_datasets,

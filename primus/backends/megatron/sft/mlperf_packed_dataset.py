@@ -9,7 +9,7 @@
 This module lets the Megatron-native SFT backend consume the exact same
 ``train.npy`` / ``validation.npy`` / ``packed_metadata.jsonl`` artefacts that
 the upstream mlperf LLama-2-70B PEFT recipe ships through Megatron-Bridge
-(``examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml``).
+(``examples/megatron_bridge/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml``).
 
 Why a separate dataset class?
 -----------------------------

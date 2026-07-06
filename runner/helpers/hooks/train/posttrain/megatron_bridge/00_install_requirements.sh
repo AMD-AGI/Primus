@@ -28,4 +28,7 @@ pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
 
 pip install --cache-dir="${PIP_CACHE_DIR}" -r "${SCRIPT_DIR}/requirements-megatron-bridge.txt"
 
+# datasets 5.x requires fsspec<=2026.4.0; megatron-bridge deps may upgrade it.
+pip install --cache-dir="${PIP_CACHE_DIR}" 'fsspec>=2023.1.0,<=2026.4.0'
+
 echo "[OK] Megatron-Bridge dependencies installed"

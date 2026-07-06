@@ -78,6 +78,7 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         log_rank_0("Initializing Megatron-Bridge post-training components...")
 
         self.cfg_container = load_recipe_config(self.backend_args)
+        self._apply_nested_overrides()
 
         log_rank_0("Post-training initialization completed")
 

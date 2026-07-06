@@ -158,10 +158,22 @@ else
     LOG_INFO_RANK0 "HF checkpoint will be downloaded from ${HF_PATH}"
 fi
 
+resolve_pretrained_checkpoint() {
+    local base="$1"
+    # Megatron-Bridge PEFT validation (checkpoint_exists) and load both expect the
+    # checkpoint *root* (latest_train_state.pt / latest_checkpointed_iteration.txt
+    # live here; weights are under iter_*). Do not point at iter_0000000.
+    printf '%s' "${base}"
+}
+
 # Check if Megatron checkpoint already exists
 if [[ -d "$MEGATRON_PATH" ]]; then
     LOG_INFO_RANK0 "Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
-    echo "extra.pretrained_checkpoint=${MEGATRON_PATH}"
+    CKPT_PATH="$(resolve_pretrained_checkpoint "${MEGATRON_PATH}")"
+    echo "extra.pretrained_checkpoint=${CKPT_PATH}"
+    echo "env.NVTE_FLASH_ATTN=0"
+    echo "env.NVTE_FUSED_ATTN=1"
+    echo "env.NVTE_UNFUSED_ATTN=0"
     exit 0
 fi
 
@@ -181,9 +193,22 @@ if [[ "$NODE_RANK" == "0" ]]; then
     # Set up Python path for Megatron-Bridge
     export PYTHONPATH="${PRIMUS_ROOT}/third_party/Megatron-Bridge/src:${PRIMUS_ROOT}/third_party/Megatron-Bridge/3rdparty/Megatron-LM:${PYTHONPATH:-}"
 
+    # HF→Megatron conversion uses attention_backend=auto; clear pre-set TE
+    # env vars from the container image (e.g. NVTE_FLASH_ATTN=0) so Megatron
+    # can configure them for the conversion pass.
+    unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_UNFUSED_ATTN
+
     python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
       --hf-model "${HF_PATH}" \
       --megatron-path "${MEGATRON_PATH}"
+
+    # Restore MLPerf fused-attention env for the training run.
+    export NVTE_FLASH_ATTN=0
+    export NVTE_FUSED_ATTN=1
+    export NVTE_UNFUSED_ATTN=0
+    echo "env.NVTE_FLASH_ATTN=0"
+    echo "env.NVTE_FUSED_ATTN=1"
+    echo "env.NVTE_UNFUSED_ATTN=0"
 
     # Create done file and remove lock
     touch "$DONE_FILE"
@@ -216,4 +241,6 @@ else
     echo "[OK] [RANK ${NODE_RANK}] Checkpoint ready at ${MEGATRON_PATH}"
 fi
 
-echo "extra.pretrained_checkpoint=${MEGATRON_PATH}"
+CKPT_PATH="$(resolve_pretrained_checkpoint "${MEGATRON_PATH}")"
+echo "extra.pretrained_checkpoint=${CKPT_PATH}"
+exit 0

@@ -284,10 +284,12 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
 def _log_gpu_mem(tag: str) -> None:
     """Print rank-0 GPU mem checkpoint (allocated / reserved / max-allocated, GiB).
 
-    Gated by ``MXFP4_HEALING_DEBUG`` (default ``False``) so these diagnostic
-    lines are opt-in and don't clutter normal runs.
+    Enabled when ``PRIMUS_LOG_GPU_MEM=1`` or ``MXFP4_HEALING_DEBUG=1``.
     """
-    if not _truthy_env("MXFP4_HEALING_DEBUG", default=False):
+    if not (
+        _truthy_env("PRIMUS_LOG_GPU_MEM", default=False)
+        or _truthy_env("MXFP4_HEALING_DEBUG", default=False)
+    ):
         return
     try:
         import torch

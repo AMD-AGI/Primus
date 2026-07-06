@@ -1,0 +1,4 @@
+# MXFP4 LoRA recipe for MLPerf Llama2-70B (MI355X)
+recipe: primus.recipes.llama2_custom
+flavor: llama2_70b_lora_mxfp4_config
+hf_path: meta-llama/Llama-2-70b-hf

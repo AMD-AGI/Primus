@@ -122,6 +122,15 @@ from megatron.core.rerun_state_machine import get_rerun_state_machine
 from primus.modules.module_utils import log_rank_0
 
 
+def _safe_log_rank_0(msg: str) -> None:
+    """Log on rank 0; fall back to print if the global logger is not ready yet."""
+    try:
+        log_rank_0(msg)
+    except AttributeError:
+        if os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) in ("0", "", None):
+            print(msg, flush=True)
+
+
 # Same value Megatron-Bridge uses in ``masked_next_token_loss``.
 _SPIKY_LOSS_FACTOR: int = 10
 
@@ -553,7 +562,7 @@ def install_nemo_loss_if_enabled() -> bool:
     if _INSTALLED:
         return False
     if not _enabled():
-        log_rank_0(
+        _safe_log_rank_0(
             "[primus.nemo_loss] PRIMUS_NEMO_LOSS disabled; using Megatron-Bridge "
             "default global-token-mean loss"
         )
@@ -565,25 +574,25 @@ def install_nemo_loss_if_enabled() -> bool:
         from megatron.bridge.training import vlm_step as _vlm
 
         _vlm._create_loss_function = create_nemo_masked_next_token_loss_function
-        log_rank_0(
+        _safe_log_rank_0(
             "[primus.nemo_loss] Patched megatron.bridge.training.vlm_step._create_loss_function "
             "-> NeMo MaskedTokenLossReduction-equivalent (per-sample token-mean)"
         )
         patched_any = True
     except Exception as e:  # pragma: no cover - defensive
-        log_rank_0(f"[primus.nemo_loss] Skipping vlm_step patch: {e!r}")
+        _safe_log_rank_0(f"[primus.nemo_loss] Skipping vlm_step patch: {e!r}")
 
     try:
         from megatron.bridge.training import gpt_step as _gpt
 
         _gpt.masked_next_token_loss = nemo_masked_next_token_loss
-        log_rank_0(
+        _safe_log_rank_0(
             "[primus.nemo_loss] Patched megatron.bridge.training.gpt_step.masked_next_token_loss "
             "-> NeMo per-sample-mean variant"
         )
         patched_any = True
     except Exception as e:  # pragma: no cover - defensive
-        log_rank_0(f"[primus.nemo_loss] Skipping gpt_step patch: {e!r}")
+        _safe_log_rank_0(f"[primus.nemo_loss] Skipping gpt_step patch: {e!r}")
 
     _INSTALLED = patched_any
     return patched_any
