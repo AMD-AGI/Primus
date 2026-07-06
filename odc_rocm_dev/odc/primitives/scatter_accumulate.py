@@ -38,23 +38,12 @@ from odc.primitives.utils import (
 
 logger = logging.getLogger(__name__)
 
-# rocSHMEM RO (host-driven) cross-node backend for reduce-scatter. When active,
-# the cross-node scatter-accumulate handshake (push my segment to a remote
-# peer's staging buffer, signal its watcher, wait for the ack) is driven from
-# the CPU with blocking ``rs_putmem`` / ``rs_int_p`` / ``rs_getmem`` instead of
-# the device-initiated MORI kernels. The same-node path (XGMI peer
-# copy + on-device int_p/wait handshake) and the watcher subprocess are reused
-# unchanged. The mori device kernel path is untouched.
 from odc.primitives.utils import _USE_ROCSHMEM  # noqa: E402
 
 if _USE_ROCSHMEM:
     from odc.primitives import _rocshmem_backend as _rs
 else:
     _rs = None
-
-
-def _ro_active():
-    return _rs is not None and _rs.ro_enabled()
 
 
 def _gda_active():
@@ -87,13 +76,9 @@ def _single_device_reduce():
 
     Default ("0") preserves the watcher + tensor_ipc path byte-for-byte; nothing
     is deleted. Only same-node reduce groups take this path (see the guard in
-    ``scatter_accumulate``); multi-node GDA/RO is untouched.
+    ``scatter_accumulate``); the multi-node GDA path is untouched.
     """
-    return (
-        os.environ.get("ODC_SINGLE_DEVICE_REDUCE", "0") == "1"
-        and not _gda_active()
-        and not _ro_active()
-    )
+    return os.environ.get("ODC_SINGLE_DEVICE_REDUCE", "0") == "1" and not _gda_active()
 
 
 def _official_push():
@@ -1320,47 +1305,32 @@ class ReductionService:
             response_scratch = SymmBufferRegistry.get_instance().get_or_create_symm_buffer(
                 "rs_response_scratch", (world_size,), torch.int32
             )
-            if _ro_active():
-                self._ro_cross_node_scatter(
-                    input_tensor=input_tensor,
-                    buffer=buffer,
+            with torch.cuda.stream(get_comm_stream()):
+                signal_ptr.fill_(0)
+                shmem_cross_node_scatter[(grid_size,)](
+                    input_tensor_ptr=input_tensor,
                     rank_input_size=rank_input_size,
+                    chunk_buffer=input_tensor_symm,
+                    trans_buffer=buf,
+                    size_per_elem=buf.element_size(),
+                    rank=rank,
+                    num_ranks_per_node=grid_size,
+                    world_size=group_world_size,
                     output_size=output_size,
                     local_buf_size=local_buf_size,
-                    accumulation_command=accumulation_command,
-                    response_scratch=response_scratch,
-                    rank=rank,
+                    chunk_size=chunk_size,
+                    signal_ptr=signal_ptr,
+                    # client request
+                    request_buffer_ptr=self.lock.request_buffer,
+                    response_buffer_ptr=self.lock.response_buffer,
+                    response_scratch_ptr=response_scratch,
                     rank_start_same_node=rank_start_same_node,
                     rank_end_same_node=rank_end_same_node,
-                    group_world_size=group_world_size,
+                    accumulation_command=accumulation_command,
+                    next_request_id=self.lock.client_context.next_request_id,
+                    num_warps=32,
+                    extern_libs=SHMEM_EXTERN_LIBS,
                 )
-            else:
-                with torch.cuda.stream(get_comm_stream()):
-                    signal_ptr.fill_(0)
-                    shmem_cross_node_scatter[(grid_size,)](
-                        input_tensor_ptr=input_tensor,
-                        rank_input_size=rank_input_size,
-                        chunk_buffer=input_tensor_symm,
-                        trans_buffer=buf,
-                        size_per_elem=buf.element_size(),
-                        rank=rank,
-                        num_ranks_per_node=grid_size,
-                        world_size=group_world_size,
-                        output_size=output_size,
-                        local_buf_size=local_buf_size,
-                        chunk_size=chunk_size,
-                        signal_ptr=signal_ptr,
-                        # client request
-                        request_buffer_ptr=self.lock.request_buffer,
-                        response_buffer_ptr=self.lock.response_buffer,
-                        response_scratch_ptr=response_scratch,
-                        rank_start_same_node=rank_start_same_node,
-                        rank_end_same_node=rank_end_same_node,
-                        accumulation_command=accumulation_command,
-                        next_request_id=self.lock.client_context.next_request_id,
-                        num_warps=32,
-                        extern_libs=SHMEM_EXTERN_LIBS,
-                    )
         self.lock.client_context.next_request_id += num_requests
         if self.lock.client_context.next_request_id > MAX_REQUEST_COUNT:
             self.lock.client_context.next_request_id = 1
@@ -1384,111 +1354,6 @@ class ReductionService:
                 for local_peer in range(rank_start_same_node, rank_end_same_node):
                     torch.cuda.current_stream().wait_stream(self.rank_streams[local_peer])
                 torch.cuda.current_stream().wait_stream(get_comm_stream())
-
-    def _ro_cross_node_scatter(
-        self,
-        *,
-        input_tensor,
-        buffer,
-        rank_input_size,
-        output_size,
-        local_buf_size,
-        accumulation_command,
-        response_scratch,
-        rank,
-        rank_start_same_node,
-        rank_end_same_node,
-        group_world_size,
-    ):
-        """Host-driven RO cross-node scatter-accumulate (rocSHMEM RO backend).
-
-        Mirrors ``shmem_cross_node_scatter`` but drives the transfer from the
-        CPU: for each output chunk and each remote peer ``r``, push my segment
-        destined for ``r`` into ``buffer[my_rank]`` on ``r`` (which ``r``'s
-        watcher accumulates), signal ``r``'s request slot, and wait for the ack.
-        Same-node contributions were already handshaked on-device before this.
-        """
-        es = buffer.element_size()
-        isize = 4  # int32 bytes
-        # Symmetric staging for the putmem source (must be a registered
-        # symmetric address). Sized to one local buffer chunk, reused per peer
-        # (rs_putmem is blocking on the source, so reuse is safe).
-        staging_key = ("ro_scatter_staging", buffer.dtype, int(local_buf_size))
-        if staging_key not in self.input_buffer:
-            self.input_buffer[staging_key] = SymmBufferRegistry.get_instance().get_or_create_symm_buffer(
-                f"ro_scatter_staging_{buffer.dtype}_{local_buf_size}",
-                (int(local_buf_size),),
-                buffer.dtype,
-            )
-        staging = self.input_buffer[staging_key]
-
-        dst_ptr = buffer.data_ptr()
-        req_ptr = self.lock.request_buffer.data_ptr()
-        resp_ptr = self.lock.response_buffer.data_ptr()
-        scratch_ptr = response_scratch.data_ptr()
-        base = self.lock.client_context.next_request_id
-        remote_peers = [
-            r for r in range(group_world_size) if not (rank_start_same_node <= r < rank_end_same_node)
-        ]
-        comm_stream = get_comm_stream()
-        flat_input = input_tensor.view(-1)
-
-        prof = os.environ.get("ODC_RO_PROFILE", "0") == "1"
-        import time as _t
-
-        t_put = t_quiet = t_sig = t_ack = 0.0
-        ack_polls = 0
-        t0_total = _t.perf_counter()
-
-        chunk_idx = 0
-        for start in range(0, output_size, local_buf_size):
-            size = min(local_buf_size, output_size - start)
-            nbytes = size * es
-            # 1. push my segment for each remote peer into peer's buffer[my_rank]
-            _tp = _t.perf_counter()
-            for r in remote_peers:
-                seg_start = r * rank_input_size + start
-                with torch.cuda.stream(comm_stream):
-                    staging[:size].copy_(flat_input[seg_start : seg_start + size])
-                comm_stream.synchronize()
-                _rs.putmem(dst_ptr, staging.data_ptr(), nbytes, r)
-            t_put += _t.perf_counter() - _tp
-            _tq = _t.perf_counter()
-            _rs.quiet()
-            t_quiet += _t.perf_counter() - _tq
-            # 2. signal each remote peer's watcher (request_buffer[my_rank]=cmd)
-            _ts = _t.perf_counter()
-            for r in remote_peers:
-                _rs.int_p(req_ptr + rank * isize, int(accumulation_command), r)
-            _rs.quiet()
-            t_sig += _t.perf_counter() - _ts
-            # 3. wait for each remote peer's ack (response_buffer[my_rank]==expected)
-            expected = base + chunk_idx
-            _ta = _t.perf_counter()
-            for r in remote_peers:
-                while True:
-                    _rs.getmem(scratch_ptr + rank * isize, resp_ptr + rank * isize, isize, r)
-                    _rs.quiet()
-                    ack_polls += 1
-                    if int(response_scratch[rank].item()) == expected:
-                        break
-            t_ack += _t.perf_counter() - _ta
-            chunk_idx += 1
-
-        if prof and rank == 0:
-            logger.info(
-                "[RO-PROF scatter] out=%d chunks=%d peers=%d total=%.3fs | put=%.3f quiet=%.3f "
-                "signal=%.3f ackwait=%.3f ack_polls=%d",
-                output_size,
-                chunk_idx,
-                len(remote_peers),
-                _t.perf_counter() - t0_total,
-                t_put,
-                t_quiet,
-                t_sig,
-                t_ack,
-                ack_polls,
-            )
 
     def get_accumulation(self, key):
         # Deliverable 23 DEFER: run the single per-minibatch cross-node reduce-scatter now

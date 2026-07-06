@@ -79,18 +79,7 @@ _ref_base = None  # reference symmetric address used for affine peer deltas
 _allocations = []  # keep python tensor objects alive for the run
 _initialized = False
 
-# RO (Reverse-Offload) host-driven cross-node path. Enabled by ODC_ROCSHMEM_RO=1
-# together with the RO-capable binding (librs_host_ro.so), which adds host
-# put/get primitives forwarded over the MPI/UCX conduit from the CPU (no
-# device-side completion polling -> avoids MORI's GPU-initiated IBGDA hang).
-_ro_enabled = False
 _gda_enabled = False  # GPU-direct (GDA) device path: ODC_ROCSHMEM_GDA=1
-_mpi = None  # ctypes handle to libmpi (kept alive; MPI_Init_thread lives here)
-
-
-def ro_enabled():
-    """True when the host-driven cross-node RO path is active."""
-    return _ro_enabled
 
 
 def gda_enabled():
@@ -108,16 +97,14 @@ def _default_host_lib():
     The binary ships inside the project at
     ``odc_rocm_dev/rocshmem_runtime/host_bindings/librs_host5.so`` so the
     backend works on any base image that mounts only the project directory
-    (no dependence on the container's ``/root`` layer). The multinode RO
-    binding lives next to it under ``ro_backend/librs_host_ro.so`` and is
-    selected when ``ODC_ROCSHMEM_RO=1``.
+    (no dependence on the container's ``/root`` layer). The multinode GPU-direct
+    binding lives next to it under ``gda_backend/librs_host_gda.so`` and is
+    selected when ``ODC_ROCSHMEM_GDA=1``.
     """
     here = os.path.dirname(os.path.abspath(__file__))
     runtime = os.path.normpath(os.path.join(here, "..", "..", "rocshmem_runtime"))
     if _is_gda():
         return os.path.join(runtime, "gda_backend", "librs_host_gda.so")
-    if os.environ.get("ODC_ROCSHMEM_RO", "0") == "1":
-        return os.path.join(runtime, "ro_backend", "librs_host_ro.so")
     return os.path.join(runtime, "host_bindings", "librs_host5.so")
 
 
@@ -128,7 +115,7 @@ def _resolve_host_lib():
     touching code:
       1. ``ODC_ROCSHMEM_LIB`` — explicit full path to the .so (back-compat).
       2. ``ODC_RS_HOST_LIB``  — alias for the explicit full path.
-      3. ``ROCSHMEM_LIB_DIR``/librs_host[_ro].so — a directory holding the .so.
+      3. ``ROCSHMEM_LIB_DIR``/librs_host[_gda].so — a directory holding the .so.
       4. project-relative default under ``rocshmem_runtime/`` (see above).
     """
     for var in ("ODC_ROCSHMEM_LIB", "ODC_RS_HOST_LIB"):
@@ -137,8 +124,7 @@ def _resolve_host_lib():
             return v
     lib_dir = os.environ.get("ROCSHMEM_LIB_DIR")
     if lib_dir:
-        ro = os.environ.get("ODC_ROCSHMEM_RO", "0") == "1"
-        name = "librs_host_ro.so" if ro else "librs_host5.so"
+        name = "librs_host_gda.so" if _is_gda() else "librs_host5.so"
         return os.path.join(lib_dir, name)
     return _default_host_lib()
 
@@ -162,27 +148,10 @@ def _load_lib():
     lib.rs_malloc.argtypes = [ctypes.c_size_t]
     lib.rs_ptr.restype = ctypes.c_longlong
     lib.rs_ptr.argtypes = [ctypes.c_longlong, ctypes.c_int]
-    # RO-capable bindings expose host-driven cross-node primitives. Bind them
-    # if present (librs_host_ro.so); absent on the single-node librs_host5.so.
-    if hasattr(lib, "rs_putmem"):
-        lib.rs_is_remote.restype = ctypes.c_int
-        lib.rs_is_remote.argtypes = [ctypes.c_longlong, ctypes.c_int]
-        lib.rs_putmem.restype = None
-        lib.rs_putmem.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t, ctypes.c_int]
-        lib.rs_getmem.restype = None
-        lib.rs_getmem.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t, ctypes.c_int]
-        lib.rs_int_p.restype = None
-        lib.rs_int_p.argtypes = [ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
-        lib.rs_quiet.restype = None
-        lib.rs_quiet.argtypes = []
-        lib.rs_fence.restype = None
-        lib.rs_fence.argtypes = []
-    # GDA binding (librs_host_gda.so): MPI bootstrap + device-kernel launchers.
+    # GDA binding (librs_host_gda.so): device-kernel launchers. Host init reuses
+    # the same rs_get_uid / rs_init_uid unique-id bootstrap as the single-node
+    # binding (bound above); no MPI bootstrap is used.
     if hasattr(lib, "gda_gather"):
-        lib.rs_init_mpi.restype = None
-        lib.rs_init_mpi.argtypes = []
-        lib.rs_is_remote.restype = ctypes.c_int
-        lib.rs_is_remote.argtypes = [ctypes.c_longlong, ctypes.c_int]
         lib.gda_gather.restype = ctypes.c_int
         lib.gda_gather.argtypes = [
             ctypes.c_longlong,
@@ -244,39 +213,6 @@ def _load_lib():
     return lib
 
 
-# MPI thread-support level (MPI_THREAD_MULTIPLE == 3 in the MPI standard). The
-# RO conduit runs a background progress thread, so the job MUST be initialized
-# with MULTIPLE or one-sided window progress can deadlock.
-_MPI_THREAD_MULTIPLE = 3
-
-
-def _ensure_mpi_initialized():
-    """Initialize MPI with THREAD_MULTIPLE before rocSHMEM-RO bootstrap.
-
-    The RO binding links system OpenMPI (libmpi.so.40) and creates one-sided
-    MPI windows inside ``rs_init_uid``. Those windows span the WHOLE job's
-    MPI_COMM_WORLD, so the process MUST be part of a real MPI job (launched via
-    ``srun --mpi=pmix`` / ``mpirun``); a torchrun launch yields a singleton
-    MPI_COMM_WORLD and ``MPI_Win_create`` then fails / cannot reach peers.
-    """
-    global _mpi
-    _mpi = ctypes.CDLL("libmpi.so.40", mode=ctypes.RTLD_GLOBAL)
-    inited = ctypes.c_int(0)
-    _mpi.MPI_Initialized(ctypes.byref(inited))
-    if inited.value:
-        return
-    provided = ctypes.c_int(0)
-    rc = _mpi.MPI_Init_thread(None, None, _MPI_THREAD_MULTIPLE, ctypes.byref(provided))
-    if rc != 0:
-        raise RuntimeError(f"MPI_Init_thread failed rc={rc}")
-    if provided.value < _MPI_THREAD_MULTIPLE:
-        logger.warning(
-            "MPI thread level %d < MPI_THREAD_MULTIPLE(%d): RO progress may stall",
-            provided.value,
-            _MPI_THREAD_MULTIPLE,
-        )
-
-
 def _build_from_blob():
     from torch.utils.cpp_extension import load_inline
 
@@ -304,8 +240,18 @@ def _nbytes(shape, dtype):
 
 def init():
     """Bootstrap rocSHMEM from PyTorch's WORLD process group via a unique-id
-    broadcast (mirrors the verified single-node init)."""
-    global _lib, _from_blob, _my_pe, _n_pes, _initialized, _ro_enabled, _gda_enabled
+    broadcast.
+
+    BOTH the single-node IPC backend (``librs_host5.so``) and the multi-node
+    GPU-direct backend (``librs_host_gda.so``) use the SAME unique-id bootstrap:
+    rank 0 generates the uid (``rs_get_uid``), it is broadcast over the torch
+    WORLD process group, and every rank calls ``rs_init_uid`` (which maps to
+    ``rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID)``). The GDA transport
+    exchanges the uid over a TCP socket bootstrap
+    (``ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME``), so NO MPI job / mpirun is required —
+    the run can be launched with plain torchrun.
+    """
+    global _lib, _from_blob, _my_pe, _n_pes, _initialized, _gda_enabled
     if _initialized:
         return
     assert dist.is_initialized(), "torch.distributed must be initialized first"
@@ -314,26 +260,10 @@ def init():
 
     _gda_enabled = _is_gda() and hasattr(_lib, "gda_gather")
     if _gda_enabled:
-        # GDA bootstrap: rocshmem_init() over MPI_COMM_WORLD (the validated probe
-        # path). Needs MPI + UCX-OSC from the mpirun launch; MPI_Win_create for
-        # the host setup uses the UCX OSC component. THREAD_MULTIPLE is safe.
-        _ensure_mpi_initialized()
-        _lib.rs_init_mpi()
-        _my_pe = _lib.rs_my_pe()
-        _n_pes = _lib.rs_n_pes()
-        assert _my_pe == dist.get_rank() and _n_pes == dist.get_world_size(), (
-            f"GDA PE mismatch: my_pe={_my_pe} rank={dist.get_rank()} "
-            f"n_pes={_n_pes} world={dist.get_world_size()}"
-        )
-        logger.info("init_shmem (rocSHMEM GDA): my_pe=%d n_pes=%d", _my_pe, _n_pes)
-        _initialized = True
-        return
-
-    _ro_enabled = os.environ.get("ODC_ROCSHMEM_RO", "0") == "1" and hasattr(_lib, "rs_putmem")
-    if _ro_enabled:
-        # RO bootstrap needs an already-running MPI job (THREAD_MULTIPLE) before
-        # the symmetric heap / one-sided windows are created in rs_init_uid.
-        _ensure_mpi_initialized()
+        # GDA multi-node bootstrap carries rank-0's address inside the uid and
+        # exchanges it over a TCP socket. Default the bootstrap NIC to eth0 unless
+        # the deployment overrode it; this replaces the old MPI/mpirun bootstrap.
+        os.environ.setdefault("ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME", "eth0")
 
     rank = dist.get_rank()
     world = dist.get_world_size()
@@ -354,7 +284,12 @@ def init():
     assert (
         _my_pe == rank and _n_pes == world
     ), f"rocSHMEM PE mismatch: my_pe={_my_pe} rank={rank} n_pes={_n_pes} world={world}"
-    logger.info("init_shmem (rocSHMEM host-API): my_pe=%d n_pes=%d", _my_pe, _n_pes)
+    logger.info(
+        "init_shmem (rocSHMEM %s, uid bootstrap): my_pe=%d n_pes=%d",
+        "GDA" if _gda_enabled else "host-API",
+        _my_pe,
+        _n_pes,
+    )
     _initialized = True
 
 
@@ -449,47 +384,6 @@ def free_tensor(tensor):
 
 def barrier():
     _lib.rs_barrier()
-
-
-# ---------------------------------------------------------------------------
-# Host-driven RO cross-node primitives (only valid when ro_enabled()).
-#
-# These forward to the rocSHMEM RO conduit from the CPU. ``dest``/``src`` are
-# raw device pointers (int) into the symmetric heap; ``pe`` is the GLOBAL PE
-# (== torch rank). ``src`` (get) / ``dest`` (put) must be SYMMETRIC addresses
-# so the runtime resolves the matching object on the remote PE.
-# ---------------------------------------------------------------------------
-def is_remote(base_ptr, pe):
-    """1 if PE ``pe`` is inter-node (must use RO put/get); 0 if intra-node."""
-    return int(_lib.rs_is_remote(int(base_ptr), int(pe)))
-
-
-def putmem(dest_ptr, src_ptr, nbytes, pe):
-    """Blocking host put: copy ``nbytes`` from local symmetric ``src_ptr`` into
-    the symmetric object ``dest_ptr`` on PE ``pe`` (forwarded over the conduit)."""
-    _lib.rs_putmem(int(dest_ptr), int(src_ptr), int(nbytes), int(pe))
-
-
-def getmem(dest_ptr, src_ptr, nbytes, pe):
-    """Blocking host get: pull ``nbytes`` from symmetric ``src_ptr`` on PE
-    ``pe`` into local symmetric ``dest_ptr``."""
-    _lib.rs_getmem(int(dest_ptr), int(src_ptr), int(nbytes), int(pe))
-
-
-def int_p(dest_ptr, value, pe):
-    """Host int store to the symmetric int slot ``dest_ptr`` on PE ``pe`` (used
-    for the cross-node scatter-accumulate request/ack handshake)."""
-    _lib.rs_int_p(int(dest_ptr), int(value), int(pe))
-
-
-def quiet():
-    """Complete all outstanding RO puts/gets issued by this PE."""
-    _lib.rs_quiet()
-
-
-def fence():
-    """Order RO puts to a given PE (point-to-point ordering)."""
-    _lib.rs_fence()
 
 
 # ---------------------------------------------------------------------------

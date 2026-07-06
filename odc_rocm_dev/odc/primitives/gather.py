@@ -18,11 +18,6 @@ from odc.primitives.utils import (
 
 logger = logging.getLogger(__name__)
 
-# rocSHMEM RO (host-driven) cross-node backend. When active, the cross-node
-# all-gather pulls each remote peer's input shard with a blocking host
-# ``rs_getmem`` from the CPU (no device-initiated RDMA -> avoids the MORI
-# device-completion hang on this fabric). Same-node peers still use the
-# XGMI peer-tensor copy. The mori device kernel path is untouched.
 from odc.primitives.utils import _USE_ROCSHMEM  # noqa: E402
 
 if _USE_ROCSHMEM:
@@ -31,20 +26,16 @@ else:
     _rs = None
 
 
-def _ro_active():
-    return _rs is not None and _rs.ro_enabled()
-
-
 def _gda_active():
     return _rs is not None and _rs.gda_enabled()
 
 
 def _official_push():
     """ODC_OFFICIAL_PUSH=1 -> use the single-sided device-get all-gather and
-    skip our host-driven RO get + the GDA gather barrier/async extras. Default
-    ("0") keeps current behaviour. Env-gated; nothing deleted. (Gather is
-    read-only on stable params, so this is the lower-risk side; the primary
-    alignment target is scatter-accumulate.)"""
+    skip the GDA gather barrier/async extras. Default ("0") keeps current
+    behaviour. Env-gated; nothing deleted. (Gather is read-only on stable
+    params, so this is the lower-risk side; the primary alignment target is
+    scatter-accumulate.)"""
     import os as _os
 
     return _os.environ.get("ODC_OFFICIAL_PUSH", "0") == "1"
@@ -173,23 +164,6 @@ class GatherService:
             assert buf_size % group_world_size == 0
             local_buf_size = buf_size // group_world_size
             signal_ptr = torch.empty(1, dtype=torch.int32, device="cuda")
-            # ODC_OFFICIAL_PUSH: bypass the host-driven RO get (and its barrier) and
-            # use the upstream single-sided device-get kernel instead.
-            ro = _ro_active() and local_world_size != group_world_size and not _official_push()
-            import os as _os
-            import time as _t
-
-            _prof = ro and _os.environ.get("ODC_RO_PROFILE", "0") == "1"
-            _g_get = _g_quiet = _g_bar = 0.0
-            if ro:
-                # Cross-node host-driven RO gather: every PE must have its input
-                # shard resident on the symmetric heap and be at the same point
-                # before any peer pulls it. rs_barrier() (rocshmem_barrier_all)
-                # provides the cross-PE rendezvous + completes pending ops.
-                _tb = _t.perf_counter()
-                torch.cuda.synchronize()
-                _rs.barrier()
-                _g_bar = _t.perf_counter() - _tb
             for start in range(0, input_tensor.numel(), local_buf_size):
                 if local_world_size == group_world_size:
                     continue
@@ -202,42 +176,23 @@ class GatherService:
                 assert target_buf_size <= buf_size
                 target_tensor_split = target_tensor[:target_buf_size].view(group_world_size, size)
 
-                if ro:
-                    # Host-driven RO: for each cross-node peer r, pull r's input
-                    # piece [start:start+size] (at the symmetric address of MY
-                    # sub_input_tensor, which maps to r's matching shard) into
-                    # target_tensor_split[r]. Same-node ranks were already copied
-                    # via XGMI peer-tensors above.
-                    src_ptr = sub_input_tensor.data_ptr()
-                    nbytes = sub_input_tensor.numel() * sub_input_tensor.element_size()
-                    _tg = _t.perf_counter()
-                    for r in range(group_world_size):
-                        if rank_same_node_start <= r < rank_same_node_end:
-                            continue
-                        _rs.getmem(target_tensor_split[r].data_ptr(), src_ptr, nbytes, r)
-                    _g_get += _t.perf_counter() - _tg
-                    _tq = _t.perf_counter()
-                    _rs.quiet()
-                    torch.cuda.synchronize()
-                    _g_quiet += _t.perf_counter() - _tq
-                else:
-                    signal_ptr.fill_(0)
-                    assert group_world_size % 8 == 0 or group_world_size < 8
-                    # grid_size = 8 if world_size == 32 else world_size
-                    grid_size = local_world_size
-                    shmem_device_producer_gather_2d_get_block_kernel_chunked_synced[(grid_size,)](
-                        remote_tensor_ptr=sub_input_tensor,
-                        target_tensor_ptr=target_tensor_split.view(-1),
-                        elem_per_rank=sub_input_tensor.numel(),
-                        size_per_elem=sub_input_tensor.element_size(),
-                        rank=rank,
-                        num_ranks_per_node=local_world_size,
-                        world_size=group_world_size,
-                        chunk_size=chunk_size,
-                        signal_ptr=signal_ptr,
-                        num_warps=32,
-                        extern_libs=SHMEM_EXTERN_LIBS,
-                    )
+                signal_ptr.fill_(0)
+                assert group_world_size % 8 == 0 or group_world_size < 8
+                # grid_size = 8 if world_size == 32 else world_size
+                grid_size = local_world_size
+                shmem_device_producer_gather_2d_get_block_kernel_chunked_synced[(grid_size,)](
+                    remote_tensor_ptr=sub_input_tensor,
+                    target_tensor_ptr=target_tensor_split.view(-1),
+                    elem_per_rank=sub_input_tensor.numel(),
+                    size_per_elem=sub_input_tensor.element_size(),
+                    rank=rank,
+                    num_ranks_per_node=local_world_size,
+                    world_size=group_world_size,
+                    chunk_size=chunk_size,
+                    signal_ptr=signal_ptr,
+                    num_warps=32,
+                    extern_libs=SHMEM_EXTERN_LIBS,
+                )
                 if buf_size == output_size:
                     local_world_data_size = size * local_world_size
                     local_world_idx = rank // local_world_size
@@ -252,15 +207,6 @@ class GatherService:
                             continue
                         output_tensor_split[r, start : start + size].copy_(target_tensor_split[r, :])
         torch.cuda.current_stream().wait_stream(get_comm_stream())
-        if _prof and rank == 0:
-            logger.info(
-                "[RO-PROF gather] in_numel=%d ws=%d | barrier=%.3fs getmem=%.3fs quiet=%.3fs",
-                input_tensor.numel(),
-                group_world_size,
-                _g_bar,
-                _g_get,
-                _g_quiet,
-            )
 
     def _gda_gather_into_tensor(
         self, output_tensor, input_tensor, target_tensor, buf_size, group_world_size, rank

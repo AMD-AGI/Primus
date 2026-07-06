@@ -92,11 +92,11 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 # shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
-# Under PRIMUS_LAUNCHER=mpi this script runs once PER RANK (mpirun launches one
-# process per GPU), so 16 concurrent pip installs would race on the shared venv.
-# The deps already ship in the image; skip pip in MPI mode.
-if [ "${PRIMUS_LAUNCHER:-torchrun}" == "mpi" ]; then
-    LOG_INFO_RANK0 "PRIMUS_LAUNCHER=mpi: skipping per-rank pip install (deps from image)"
+# PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
+# image). Use it when many ranks/nodes share one venv and concurrent pip installs
+# would race, or simply to speed up a warm container. Not keyed on the launcher.
+if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
+    LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
 else
     LOG_INFO_RANK0 "Pip installing required packages ..."
     if [ "${BACKEND:-}" != "MaxText" ]; then
@@ -348,14 +348,6 @@ fi
 
 # -------------------- Launch Training --------------------
 if [ "${BACKEND:-}" == "MaxText" ]; then
-    CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
-elif [ "${PRIMUS_LAUNCHER:-torchrun}" == "mpi" ]; then
-    # ODC rocSHMEM dual-node: this script is one process per rank, already
-    # launched by mpirun. Skip torchrun and run the trainer directly;
-    # torch.distributed inits from RANK/LOCAL_RANK/WORLD_SIZE/MASTER_ADDR/
-    # MASTER_PORT (mapped from OMPI_* by the launcher) so all 16 ranks share the
-    # same MPI_COMM_WORLD that rocSHMEM's cross-node conduit needs.
-    LOG_INFO "PRIMUS_LAUNCHER=mpi: direct launch RANK=${RANK} LOCAL_RANK=${LOCAL_RANK} WORLD_SIZE=${WORLD_SIZE}"
     CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 else
     DISTRIBUTED_ARGS=(

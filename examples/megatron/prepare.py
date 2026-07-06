@@ -282,8 +282,8 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
             f"if you actually need it). SFT does not require this dependency."
         )
         return
-    # Under PRIMUS_LAUNCHER=mpi this prepare runs once PER RANK (e.g. 16 concurrent
-    # processes on a node), and concurrent `pip install -e` writes race on the shared
+    # This prepare step may run once PER RANK (e.g. 8-16 concurrent processes on a
+    # node under torchrun), and concurrent `pip install -e` writes race on the shared
     # venv .pth file (OSError). If the package is already importable (one-time
     # pre-install), take a fast, write-free path so all ranks agree without racing.
     import importlib.util

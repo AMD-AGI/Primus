@@ -4,9 +4,10 @@
 // device gather / reduce-scatter kernels, so the device default context set up by
 // rocshmem_init is visible to the kernels (validated by the ctypes probe).
 //
-// Host ABI is a superset of the RO binding (rs_my_pe/n_pes/malloc/ptr/barrier/
-// finalize/is_remote) so _rocshmem_backend.py can reuse it, plus:
-//   rs_init_mpi()          -> rocshmem_init() (MPI bootstrap; mpirun + UCX-OSC)
+// Host ABI mirrors the single-node binding (rs_my_pe/n_pes/malloc/ptr/barrier/
+// finalize) so _rocshmem_backend.py can reuse it, plus:
+//   rs_get_uid()/rs_init_uid() -> unique-id bootstrap over a TCP socket
+//                                 (ROCSHMEM_INIT_WITH_UNIQUEID); no MPI/mpirun
 //   gda_gather(...)        -> per cross-node peer device rocshmem_getmem_wg
 //   gda_reduce_scatter_acc -> pull-based, on-chip fp32 accumulate (race-free)
 //
@@ -219,7 +220,7 @@ static int gda_ensure_ctxs(int nqp) {
 
 extern "C" {
 
-// RO-ABI-compatible surface (so _rocshmem_backend can reuse it) ----------------
+// Single-node-binding-compatible surface (so _rocshmem_backend can reuse it) ----
 int  rs_uid_bytes() { return (int)sizeof(rocshmem_uniqueid_t); }
 void rs_get_uid(char *out) { rocshmem_uniqueid_t uid; rocshmem_get_uniqueid(&uid); memcpy(out, uid.data(), sizeof(uid)); }
 void rs_init_uid(int rank, int nranks, const char *bytes) {
@@ -228,8 +229,6 @@ void rs_init_uid(int rank, int nranks, const char *bytes) {
   rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID, &attr);
   g_initialized = 1;
 }
-// GDA MPI bootstrap (the validated probe path): rocshmem_init() over MPI_COMM_WORLD.
-void rs_init_mpi() { rocshmem_init(); g_initialized = 1; }
 int  rs_my_pe() { return rocshmem_my_pe(); }
 int  rs_n_pes() { return rocshmem_n_pes(); }
 long long rs_malloc(size_t n) { return (long long)rocshmem_malloc(n); }

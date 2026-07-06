@@ -8,22 +8,22 @@
 #
 # It performs three idempotent stages:
 #   1. Clone rocSHMEM @ pinned commit and cmake-build the static `librocshmem.a`
-#      for each requested variant (single / ro / gda).
-#   2. hipcc-compile the three ctypes host bindings (librs_host5.so,
-#      librs_host_ro.so, librs_host_gda.so) against those static libs.
+#      for each requested variant (single / gda).
+#   2. hipcc-compile the two ctypes host bindings (librs_host5.so,
+#      librs_host_gda.so) against those static libs.
 #   3. `pip install --no-build-isolation -e .` to (re)build tensor_ipc.so.
 #
 # Everything is CPU-side cross-compilation for gfx942 — NO GPU is required.
 #
 # Usage:
 #   bash odc_rocm_dev/build_rocshmem_backend.sh [variants...] [--force]
-#     variants : any of {single ro gda tensor_ipc all}  (default: all)
+#     variants : any of {single gda tensor_ipc all}  (default: all)
 #     --force  : rebuild even if outputs already exist
 #
 # Examples:
 #   bash odc_rocm_dev/build_rocshmem_backend.sh              # build everything
 #   bash odc_rocm_dev/build_rocshmem_backend.sh single       # single-node .so only
-#   bash odc_rocm_dev/build_rocshmem_backend.sh single ro --force
+#   bash odc_rocm_dev/build_rocshmem_backend.sh single gda --force
 #
 # All output is tee'd to rocshmem_runtime/build.log so a detached run can be
 # picked up later:
@@ -65,7 +65,7 @@ VARIANTS=()
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
-    all|single|ro|gda|tensor_ipc) VARIANTS+=("$a") ;;
+    all|single|gda|tensor_ipc) VARIANTS+=("$a") ;;
     *) echo "!! unknown arg: $a"; exit 2 ;;
   esac
 done
@@ -131,7 +131,6 @@ build_librocshmem() {
 
 NEED_SRC=0
 want single && NEED_SRC=1
-want ro     && NEED_SRC=1
 want gda    && NEED_SRC=1
 if [ "${NEED_SRC}" -eq 1 ]; then
   clone_rocshmem
@@ -141,8 +140,6 @@ fi
 # pull the MPI Reverse-Offload transport (MPI_Win_create at init -> fatal under a
 # torchrun launch with no mpirun). Must force USE_RO=OFF for the single-node lib.
 want single && build_librocshmem single -DUSE_IPC=ON -DUSE_SINGLE_NODE=ON -DUSE_RO=OFF
-# multi-node Reverse-Offload library (RO is the point here)
-want ro     && build_librocshmem ro     -DUSE_IPC=ON -DUSE_RO=ON
 # GPU-direct (GDA) library. Same USE_RO=OFF caveat as single (GDA is its own conduit).
 # GDA_MLX5=ON is required: rocSHMEM defaults GDA_MLX5/BNXT/IONIC to OFF, which compiles
 # out the MLX5 DirectVerbs provider and makes multi-node GDA fail at runtime with
@@ -150,7 +147,7 @@ want ro     && build_librocshmem ro     -DUSE_IPC=ON -DUSE_RO=ON
 want gda    && build_librocshmem gda    -DUSE_GDA=ON -DUSE_RO=OFF -DGDA_MLX5=ON
 
 # =============================================================================
-# Stage 2: hipcc-compile the ctypes host bindings (.so)
+# Stage 2: hipcc-compile the ctypes host bindings (.so): single + gda
 #
 # librocshmem.a is built with fgpu-rdc device code, so the final .so link MUST
 # be a HIP device link (-fgpu-rdc --hip-link) or the __hip_gpubin_handle_*
@@ -189,14 +186,6 @@ if want single; then
     -L"${OMPI_LIB}" -lmpi
 fi
 
-# ro: librs_host_ro.so (Reverse-Offload; host-driven MPI/UCX transport)
-if want ro; then
-  compile_binding ro \
-    "${RT}/ro_backend/rs_host_ro.cpp" \
-    "${RT}/ro_backend/librs_host_ro.so" \
-    -L"${OMPI_LIB}" -lmpi
-fi
-
 # gda: librs_host_gda.so (GPU-direct; host+device kernels, RDMA verbs)
 if want gda; then
   compile_binding gda \
@@ -220,5 +209,5 @@ fi
 echo "============================================================"
 echo "DONE @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "Built artifacts:"
-ls -la "${RT}"/host_bindings/*.so "${RT}"/ro_backend/*.so "${RT}"/gda_backend/*.so 2>/dev/null || true
+ls -la "${RT}"/host_bindings/*.so "${RT}"/gda_backend/*.so 2>/dev/null || true
 echo "============================================================"

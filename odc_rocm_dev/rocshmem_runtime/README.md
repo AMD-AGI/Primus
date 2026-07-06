@@ -14,13 +14,13 @@ Run once inside a base-image container that has this project mounted (pure CPU
 cross-compilation for gfx942, **no GPU required**):
 
 ```bash
-bash odc_rocm_dev/build_rocshmem_backend.sh          # build everything: single + ro + gda + tensor_ipc
+bash odc_rocm_dev/build_rocshmem_backend.sh          # build everything: single + gda + tensor_ipc
 # or build only the single-node backend (most common):
 bash odc_rocm_dev/build_rocshmem_backend.sh single tensor_ipc
 ```
 
 The script is idempotent: it will (1) git clone rocSHMEM at the pinned commit and
-cmake-build each variant's `librocshmem.a`, (2) hipcc-build the 3 ctypes binding
+cmake-build each variant's `librocshmem.a`, (2) hipcc-build the 2 ctypes binding
 `.so` files, and (3) `pip install -e .` to build `tensor_ipc.so`.
 All logs go to `rocshmem_runtime/build.log`; the artifacts (`.so` / `rocshmem_*/`)
 are already ignored by `.gitignore` and will not accidentally be checked in. Add
@@ -40,16 +40,12 @@ rocshmem_runtime/
 ├── host_bindings/                ← single-node IPC backend
 │   ├── rs_host.cpp               ← source (checked in)
 │   └── librs_host5.so            ← [gen] host ctypes binding
-├── ro_backend/                   ← multi-node RO backend
-│   ├── rs_host_ro.cpp            ← source (checked in; includes cross-node put/get/int_p)
-│   └── librs_host_ro.so          ← [gen]
 ├── gda_backend/                  ← multi-node GPU-direct (GDA) backend
 │   ├── rs_host_gda.cpp           ← source (checked in; host + device gather/reduce-scatter kernels)
 │   └── librs_host_gda.so         ← [gen]
 ├── rocshmem_src/                 ← [gen] git-cloned rocSHMEM source (pinned to the commit below)
 ├── rocshmem_single/              ← [gen] single-node static-lib install tree: USE_IPC + USE_SINGLE_NODE
 │   └── lib/librocshmem.a, include/rocshmem/*.hpp
-├── rocshmem_ro/                  ← [gen] RO static lib: USE_IPC + USE_RO
 ├── rocshmem_gda/                 ← [gen] GDA static lib: USE_GDA
 ├── build.log                     ← [gen] build log
 ├── scripts/
@@ -63,7 +59,7 @@ rocshmem_runtime/
 ## Key facts
 
 - **Pure source build.** No `.so` / `.a` is stored in git; `build_rocshmem_backend.sh`
-  builds `librocshmem.a` and all 3 binding `.so` files from source. `librs_host5.so`
+  builds `librocshmem.a` and both binding `.so` files from source. `librs_host5.so`
   links `librocshmem.a` statically, so at runtime it only depends on the ROCm runtime
   shipped in the base image (`libamdhip64`, `libhsa-runtime64`) plus the system
   `libmpi`.
@@ -92,9 +88,9 @@ following order (first hit wins):
 1. `ODC_ROCSHMEM_LIB` — explicit full path to the .so (backward compatible, highest priority)
 2. `ODC_RS_HOST_LIB` — an alias for the above
 3. `ROCSHMEM_LIB_DIR` — the directory holding the .so (automatically picks
-   `librs_host5.so`, or `librs_host_ro.so` in RO mode)
+   `librs_host5.so`, or `librs_host_gda.so` when `ODC_ROCSHMEM_GDA=1`)
 4. **Project-relative default** — this directory's `host_bindings/librs_host5.so`
-   (or `ro_backend/librs_host_ro.so` when `ODC_ROCSHMEM_RO=1`)
+   (or `gda_backend/librs_host_gda.so` when `ODC_ROCSHMEM_GDA=1`)
 
 So it runs **even with no env vars set**: by default it uses the project's bundled
 single-node IPC `.so`.
@@ -117,24 +113,28 @@ Always use `build_rocshmem_backend.sh`; it encapsulates all of the details below
 # Rebuild everything:
 bash odc_rocm_dev/build_rocshmem_backend.sh --force
 # Rebuild only one variant's .so (the static lib is reused if it exists):
-bash odc_rocm_dev/build_rocshmem_backend.sh single        # or ro / gda / tensor_ipc
+bash odc_rocm_dev/build_rocshmem_backend.sh single        # or gda / tensor_ipc
 ```
 
 The cmake / hipcc commands for each variant (what the script actually runs, for reference):
 
 - `librocshmem.a` cmake (all with `-DGPU_TARGETS=gfx942 -DCMAKE_POSITION_INDEPENDENT_CODE=ON`):
-  - single: `-DUSE_IPC=ON -DUSE_SINGLE_NODE=ON`
-  - ro: `-DUSE_IPC=ON -DUSE_RO=ON`
-  - gda: `-DUSE_GDA=ON`
-- binding `.so` (two-stage, `<v>` ∈ single/ro/gda):
+  - single: `-DUSE_IPC=ON -DUSE_SINGLE_NODE=ON -DUSE_RO=OFF`
+  - gda: `-DUSE_GDA=ON -DUSE_RO=OFF -DGDA_MLX5=ON`
+- binding `.so` (two-stage, `<v>` ∈ single/gda):
 
 ```bash
 hipcc -fgpu-rdc -x hip --offload-arch=gfx942:xnack- -fPIC -O2 -std=c++17 \
   -c <cpp> -o <obj> -I rocshmem_<v>/include -I /usr/lib/x86_64-linux-gnu/openmpi/include
 hipcc -fgpu-rdc --hip-link -shared <obj> -o <out.so> --offload-arch=gfx942:xnack- \
   -x none rocshmem_<v>/lib/librocshmem.a -L/opt/rocm/lib -lamdhip64 -lhsa-runtime64 \
-  -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi     # ro/gda also: -libverbs -lmlx5 -lnuma (gda)
+  -L/usr/lib/x86_64-linux-gnu/openmpi/lib -lmpi     # gda also: -libverbs -lmlx5 -lnuma
 ```
+
+> `-lmpi` is a LINK-time dependency only: rocSHMEM's `librocshmem.a` references MPI
+> symbols unconditionally (`rocshmem.hpp` pulls `<mpi.h>`), so both bindings must link
+> it. At RUNTIME neither binding drives MPI — bootstrap is the unique-id-over-socket
+> path (`rs_get_uid`/`rs_init_uid`), so the job launches with plain torchrun (no mpirun).
 
 ## Unpackaged / deprecated artifacts (noted)
 
@@ -180,7 +180,7 @@ already defaults to `1`. Both env vars still override the defaults.
 | env | example value | notes |
 |-----|---------------|-------|
 | `ROCSHMEM_HCA_LIST` | `mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9` | The compute NICs of THIS cluster. Without it, all 16 ranks' cross-node traffic funnels through `mlx5_0` (pad perf ~0.7-0.8x). This list varies per cluster; it is deployment config, not code. Only the develop-branch GDA `.so` honors it (release ignores it; see section 4). |
-| `LD_LIBRARY_PATH` | `/opt/rocm/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/openmpi/lib:$LD_LIBRARY_PATH` | `librs_host_gda.so` needs OpenMPI (bootstrap) + ROCm runtime. |
+| `LD_LIBRARY_PATH` | `/opt/rocm/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/openmpi/lib:$LD_LIBRARY_PATH` | `librs_host_gda.so` link-depends on `libmpi` (rocSHMEM references MPI symbols) + ROCm runtime; it is NOT used for bootstrap at runtime (uid-over-socket). |
 | `ROCSHMEM_GDA_PROVIDER` | `mlx5` | RDMA provider. |
 | `ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME` | `eth0` | rocSHMEM bootstrap ethernet interface. |
 | `ROCSHMEM_HEAP_SIZE` | `8589934592` | Symmetric heap in RAW bytes (decimal only, no K/M/G). |
@@ -188,23 +188,29 @@ already defaults to `1`. Both env vars still override the defaults.
 | `NCCL_IB_GID_INDEX` | `3` | RoCE v2 GID (varies with cluster fabric). |
 | `ODC_GDA_WARMUP_MODE` / `ODC_GDA_STRIDE_BYTES` | `strided` / `65536` | GDA connection warmup (code defaults; pinning explicitly is steadier on multi-node). |
 
-### 3. Reference launch (mpirun, 8 GPU/node)
+### 3. Reference launch (torchrun + Slurm, 8 GPU/node)
+
+The GDA backend bootstraps rocSHMEM with a unique-id over a TCP socket
+(`ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME`), so it launches with plain **torchrun** — no
+mpirun / MPI job. Under Slurm, start one torchrun per node (each spawns 8 ranks) via
+`srun`; torch's own c10d rendezvous (`--master_addr:--master_port`, or
+`--rdzv_backend=c10d --rdzv_endpoint`) forms the 16-rank WORLD, and rank 0 broadcasts
+the rocSHMEM uid over that group.
 
 ```bash
-/usr/bin/mpirun --allow-run-as-root -np 16 \
-  --host <node0>:8,<node1>:8 \
-  --mca oob_tcp_if_include eth0 --mca btl_tcp_if_include eth0 \
-  --mca osc ucx --mca pml ucx \
-  -x UCX_NET_DEVICES=mlx5_0:1 -x UCX_TLS=rc,sm,self \
-  -x MASTER_ADDR=<node0> -x MASTER_PORT=29600 \
-  -x ODC_P2P_BACKEND=rocshmem -x ODC_ROCSHMEM_GDA=1 \
-  -x ODC_ROCSHMEM_LIB=<...>/rocshmem_runtime/gda_backend/librs_host_gda.so \
-  -x ROCSHMEM_GDA_PROVIDER=mlx5 -x ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0 \
-  -x ROCSHMEM_HEAP_SIZE=8589934592 \
-  -x ROCSHMEM_HCA_LIST=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9 \
-  -x NCCL_SOCKET_IFNAME=eth0 -x GLOO_SOCKET_IFNAME=eth0 -x NCCL_IB_GID_INDEX=3 \
-  -x LD_LIBRARY_PATH \
-  bash <your_rank_entry>.sh
+# Per node (NODE_RANK 0 on <node0>, 1 on <node1>); MASTER_ADDR=<node0>:
+export NNODES=2 GPUS_PER_NODE=8 NODE_RANK=<0|1>
+export MASTER_ADDR=<node0> MASTER_PORT=29600
+export PRIMUS_SKIP_PIP=1                         # deps already in image (many ranks share one venv)
+export ODC_ENABLE=1 ODC_P2P_BACKEND=rocshmem ODC_ROCSHMEM_GDA=1
+export ODC_ROCSHMEM_LIB=<...>/rocshmem_runtime/gda_backend/librs_host_gda.so
+export ROCSHMEM_GDA_PROVIDER=mlx5 ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0
+export ROCSHMEM_HEAP_SIZE=8589934592
+export ROCSHMEM_HCA_LIST=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9
+export NCCL_SOCKET_IFNAME=eth0 GLOO_SOCKET_IFNAME=eth0 NCCL_IB_GID_INDEX=3
+# run_pretrain.sh builds the torchrun command from NNODES/NODE_RANK/GPUS_PER_NODE/
+# MASTER_ADDR/MASTER_PORT (no PRIMUS_LAUNCHER=mpi special-case any more):
+EXP=<config.yaml> bash examples/run_pretrain.sh
 # Correctness (DEFER) is auto-enabled; no need to set ODC_GDA_DEFER_REDUCE here.
 ```
 
