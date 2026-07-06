@@ -3,7 +3,7 @@
 # Extracted from third_party/Megatron-Bridge/pyproject.toml
 
 # Transformers (pinned version for compatibility)
-transformers==4.57.6
+transformers==5.3.0
 
 # Core dependencies from [project.dependencies]
 qwen-vl-utils
