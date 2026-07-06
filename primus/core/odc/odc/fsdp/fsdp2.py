@@ -8,9 +8,6 @@ from typing import Any, Callable, Optional, cast
 
 import torch
 import torch.distributed as dist
-from odc.primitives.gather import GatherService
-from odc.primitives.scatter_accumulate import ReductionService
-from odc.primitives.utils import SymmBufferRegistry, finalize_distributed
 from torch import nn
 from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import fully_shard
@@ -46,6 +43,10 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
 )
 from torch.distributed.tensor import DTensor
 from torch.profiler import record_function
+
+from odc.primitives.gather import GatherService
+from odc.primitives.scatter_accumulate import ReductionService
+from odc.primitives.utils import SymmBufferRegistry, finalize_distributed
 
 logger = logging.getLogger(__name__)
 

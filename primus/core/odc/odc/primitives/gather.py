@@ -5,6 +5,8 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
+from torch import Tensor
+
 from odc.primitives import (
     SHMEM_EXTERN_LIBS,
     __syncthreads,
@@ -19,7 +21,6 @@ from odc.primitives.utils import (
     get_local_world_size,
     sync_cta,
 )
-from torch import Tensor
 
 logger = logging.getLogger(__name__)
 

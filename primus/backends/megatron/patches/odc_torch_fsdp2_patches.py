@@ -265,6 +265,7 @@ def _odc_grad_spike_guard(root):
 def _install_train_loop_hooks():
     """PHASE 2: wire pre_minibatch_start / pre_optimizer_step into the loop."""
     import megatron.training.training as mt_training
+
     from odc.fsdp import fsdp2 as odc_fsdp2
 
     if getattr(mt_training.train_step, "_odc_hooked", False):
