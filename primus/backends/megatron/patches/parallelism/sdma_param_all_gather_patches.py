@@ -171,15 +171,11 @@ def patch_sdma_param_all_gather(ctx: PatchContext):
         return
 
     if not getattr(bucket_group_cls, "_primus_sdma_param_gather_patched", False):
-        bucket_group_cls.start_param_sync = _make_start_param_sync(
-            bucket_group_cls.start_param_sync
-        )
+        bucket_group_cls.start_param_sync = _make_start_param_sync(bucket_group_cls.start_param_sync)
         bucket_group_cls._primus_sdma_param_gather_patched = True
 
     if not getattr(DistributedDataParallel, "_primus_sdma_param_gather_patched", False):
-        DistributedDataParallel.__init__ = _make_wrapped_ddp_init(
-            DistributedDataParallel.__init__
-        )
+        DistributedDataParallel.__init__ = _make_wrapped_ddp_init(DistributedDataParallel.__init__)
         DistributedDataParallel._primus_sdma_param_gather_patched = True
 
     # MoE experts: move tokens_per_expert onto the dispatched-input device.

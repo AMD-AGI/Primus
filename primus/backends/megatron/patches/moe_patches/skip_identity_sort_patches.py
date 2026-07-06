@@ -57,9 +57,7 @@ def _is_identity(idxs) -> bool:
     cached = _IDENTITY_CACHE.get(key)
     if cached is not None:
         return cached
-    result = bool(
-        torch.equal(idxs, torch.arange(idxs.numel(), device=idxs.device, dtype=idxs.dtype))
-    )
+    result = bool(torch.equal(idxs, torch.arange(idxs.numel(), device=idxs.device, dtype=idxs.dtype)))
     try:
         # Evict on GC so a future tensor reusing this ``id()`` cannot hit a stale
         # decision.
@@ -99,8 +97,7 @@ def patch_moe_skip_identity_sort(ctx: PatchContext):
         from megatron.core.transformer.moe import token_dispatcher as td_mod
     except ImportError as exc:
         warning_rank_0(
-            f"[Patch:megatron.moe.skip_identity_sort] token_dispatcher not "
-            f"importable; skipping: {exc}"
+            f"[Patch:megatron.moe.skip_identity_sort] token_dispatcher not " f"importable; skipping: {exc}"
         )
         return
 

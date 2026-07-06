@@ -35,9 +35,7 @@ def _env_truthy(name: str) -> bool:
 
 
 def _is_fused_residual_norm_enabled(ctx: PatchContext) -> bool:
-    return _env_truthy("PRIMUS_FUSED_RESIDUAL_NORM") or _env_truthy(
-        "PRIMUS_FUSED_RESIDUAL_NORM_V2"
-    )
+    return _env_truthy("PRIMUS_FUSED_RESIDUAL_NORM") or _env_truthy("PRIMUS_FUSED_RESIDUAL_NORM_V2")
 
 
 @register_patch(
@@ -66,9 +64,7 @@ def patch_fused_residual_norm(ctx: PatchContext):
     )
     ok = fused_residual_rmsnorm.install()
     if ok:
-        log_rank_0(
-            "[Patch:megatron.turbo.fused_residual_norm]   install() returned True"
-        )
+        log_rank_0("[Patch:megatron.turbo.fused_residual_norm]   install() returned True")
     else:
         log_rank_0(
             "[Patch:megatron.turbo.fused_residual_norm]   install() returned False "

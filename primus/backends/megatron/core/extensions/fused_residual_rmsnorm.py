@@ -81,8 +81,7 @@ def install() -> bool:
     if _INSTALLED:
         return True
     if not _enabled():
-        _log("disabled (set PRIMUS_FUSED_RESIDUAL_NORM=1 or "
-             "PRIMUS_FUSED_RESIDUAL_NORM_V2=1 to enable)")
+        _log("disabled (set PRIMUS_FUSED_RESIDUAL_NORM=1 or " "PRIMUS_FUSED_RESIDUAL_NORM_V2=1 to enable)")
         return False
 
     try:
@@ -125,9 +124,7 @@ def install() -> bool:
                 gamma = self.weight
                 if getattr(self, "zero_centered_gamma", False):
                     gamma = gamma + 1
-                norm_out, _xpr = triton_rmsnorm_residual(
-                    x_pending, r_pending, gamma, self.eps
-                )
+                norm_out, _xpr = triton_rmsnorm_residual(x_pending, r_pending, gamma, self.eps)
                 return norm_out
             if residual is None:
                 return _orig_norm_forward(self, x)
@@ -141,9 +138,7 @@ def install() -> bool:
         _log("patched PrimusTurboRMSNorm.forward (residual= arg + V2 _pending_carry)")
 
     # ----- 2. Patch TransformerBlock.__init__ to wire V2 layer links --------
-    if _v2_enabled() and not getattr(
-        TransformerBlock, "_fused_residual_v2_init_patched", False
-    ):
+    if _v2_enabled() and not getattr(TransformerBlock, "_fused_residual_v2_init_patched", False):
         _orig_block_init = TransformerBlock.__init__
 
         def _v2_init(self, *args, **kwargs):
@@ -151,8 +146,7 @@ def install() -> bool:
             try:
                 _wire_v2_layer_links(self)
             except Exception as exc:
-                _log(f"V2 layer-link wiring raised {type(exc).__name__}: {exc}; "
-                     "block will run V1-only")
+                _log(f"V2 layer-link wiring raised {type(exc).__name__}: {exc}; " "block will run V1-only")
 
         TransformerBlock.__init__ = _v2_init
         TransformerBlock._fused_residual_v2_init_patched = True
@@ -172,8 +166,10 @@ def install() -> bool:
             try:
                 return _do_fused_forward(self, *args, **kwargs)
             except Exception as exc:
-                _log(f"fused forward raised {type(exc).__name__}: {exc}; "
-                     f"falling back to original forward for all layers")
+                _log(
+                    f"fused forward raised {type(exc).__name__}: {exc}; "
+                    f"falling back to original forward for all layers"
+                )
                 TransformerLayer.forward = _orig_layer_forward
                 return _orig_layer_forward(self, *args, **kwargs)
 
@@ -220,9 +216,7 @@ def _wire_v2_layer_links(block: Any) -> None:
         object.__setattr__(layer, "_v2_block", block)
         object.__setattr__(layer, "_v2_next_layer", nxt)
         object.__setattr__(layer, "_v2_is_last_layer", is_last)
-        object.__setattr__(
-            layer, "_v2_final_layernorm", final_ln if is_last else None
-        )
+        object.__setattr__(layer, "_v2_final_layernorm", final_ln if is_last else None)
         object.__setattr__(layer, "_v2_carry", None)
 
 
@@ -284,6 +278,7 @@ def _can_fuse(layer: Any) -> bool:
         return False
 
     from megatron.core.transformer.identity_op import IdentityOp
+
     cross_attn = getattr(layer, "cross_attention", None)
     if cross_attn is not None and not isinstance(cross_attn, IdentityOp):
         return False
@@ -344,6 +339,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         nvtx_range_pop,
         nvtx_range_push,
     )
+
     if hidden_states is None:
         hidden_states = kwargs.pop("hidden_states")
     else:
@@ -368,6 +364,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         from primus_turbo.pytorch.ops.normalization import (
             rmsnorm_residual as triton_rmsnorm_residual,
         )
+
         in_ln = layer.input_layernorm
         gamma = in_ln.weight
         if getattr(in_ln, "zero_centered_gamma", False):
@@ -403,18 +400,14 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     # ---- V1 fuse: bda(attn_out, residual) + pre_mlp_layernorm ------------
     nvtx_range_push(suffix="fused_residual_pre_mlp_layernorm")
-    pre_mlp_layernorm_output, hidden_states = layer.pre_mlp_layernorm(
-        attn_out, residual=residual
-    )
+    pre_mlp_layernorm_output, hidden_states = layer.pre_mlp_layernorm(attn_out, residual=residual)
     nvtx_range_pop(suffix="fused_residual_pre_mlp_layernorm")
     # hidden_states now == attn_out + residual (= residual_post_attn).
 
     # ---- mlp -------------------------------------------------------------
     padding_mask = kwargs.get("padding_mask", None)
     try:
-        mlp_output_with_bias = layer.mlp(
-            pre_mlp_layernorm_output, padding_mask=padding_mask
-        )
+        mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
     except TypeError:
         mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
 

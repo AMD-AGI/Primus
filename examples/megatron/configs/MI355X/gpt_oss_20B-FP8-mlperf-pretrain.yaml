@@ -52,13 +52,13 @@ modules:
       profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
       profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
       profile_ranks: [0,1,2,3,4,5,6,7]
-      
+
       # enable fp8 training
       fp8: e4m3
       fp8_recipe: tensorwise
       clip_grad: 1.0  # Gradient clipping (already default, but explicit)
       check_for_nan_in_loss_and_grad: false
-      
+
       # hyper parameters
       train_iters: ${PRIMUS_TRAIN_ITERS:1200000}
       micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:2}
@@ -73,7 +73,7 @@ modules:
       lr_decay_style: cosine
       weight_decay: 0.1
       optimizer: adam
-      use_distributed_optimizer: true # use distributed optimizer 
+      use_distributed_optimizer: true # use distributed optimizer
       adam_beta1: 0.9
       adam_beta2: 0.95
       adam_eps: 1.0e-5

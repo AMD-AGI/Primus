@@ -85,8 +85,7 @@ def _get_sdma_peer_copy_stream_count(world_size: int) -> int:
         configured_streams = int(env_value)
     except ValueError:
         warnings.warn(
-            f"Invalid MEGATRON_SDMA_PEER_COPY_STREAMS={env_value!r}; using default "
-            f"{default_streams}."
+            f"Invalid MEGATRON_SDMA_PEER_COPY_STREAMS={env_value!r}; using default " f"{default_streams}."
         )
         return default_streams
 
@@ -148,13 +147,10 @@ def all_gather_into_tensor_sdma(
 
     if output_tensor.numel() != input_tensor.numel() * world_size:
         raise ValueError(
-            "output_tensor.numel() must equal input_tensor.numel() * world_size "
-            "for all_gather_into_tensor"
+            "output_tensor.numel() must equal input_tensor.numel() * world_size " "for all_gather_into_tensor"
         )
     if output_tensor.dtype != input_tensor.dtype:
-        raise ValueError(
-            "output_tensor.dtype must match input_tensor.dtype for SDMA all_gather_into_tensor"
-        )
+        raise ValueError("output_tensor.dtype must match input_tensor.dtype for SDMA all_gather_into_tensor")
 
     # SDMA path is CUDA-only and expects a contiguous flattened layout.
     if (
@@ -174,9 +170,7 @@ def all_gather_into_tensor_sdma(
         get_amd_symm_mem_workspace = importlib.import_module(
             "primus_turbo.pytorch.kernels.async_tp.amd_symmetric_memory"
         ).get_amd_symm_mem_workspace
-        hip_check = importlib.import_module(
-            "primus_turbo.pytorch.kernels.async_tp.common_ops"
-        ).hip_check
+        hip_check = importlib.import_module("primus_turbo.pytorch.kernels.async_tp.common_ops").hip_check
     except Exception:
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
@@ -196,9 +190,7 @@ def all_gather_into_tensor_sdma(
     )
 
     # Allocate/reuse symmetric workspace and expose each rank's local shard buffer.
-    symm_mem = get_amd_symm_mem_workspace(
-        group_name, min_size=max(input_nbytes, _SDMA_SYMM_MEM_MIN_BYTES)
-    )
+    symm_mem = get_amd_symm_mem_workspace(group_name, min_size=max(input_nbytes, _SDMA_SYMM_MEM_MIN_BYTES))
     gather_buffers = [
         symm_mem.get_buffer(r, input_tensor.shape, input_tensor.dtype) for r in range(world_size)
     ]

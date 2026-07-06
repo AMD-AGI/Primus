@@ -131,9 +131,7 @@ def patch_te_fmha_bshd_layout(ctx: PatchContext):
 
     cls = getattr(te_ext, "TEDotProductAttention", None)
     if cls is None:
-        warning_rank_0(
-            "[Patch:megatron.te.fmha_bshd_layout] TEDotProductAttention not found; skipping."
-        )
+        warning_rank_0("[Patch:megatron.te.fmha_bshd_layout] TEDotProductAttention not found; skipping.")
         return
 
     if getattr(cls, "_primus_bshd_patched", False):
