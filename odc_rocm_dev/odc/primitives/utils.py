@@ -1,27 +1,26 @@
 """
-ODC primitives utilities — ROCm/MORI adaptation.
+ODC primitives utilities — ROCm symmetric-memory management.
 
-Upstream this file used ``nvshmem.core`` (a.k.a. nvshmem4py) for symmetric
-memory allocation and ``cuda.core.experimental.Device`` to wrap the device
-object passed to ``nvshmem.core.init``. This adaptation:
+ODC allocates symmetric memory and enumerates same-node peer views. On ROCm
+there are two backends, selected by ``ODC_P2P_BACKEND``:
 
-* On ROCm (``torch.version.hip is not None``):
-    - ``init_nvshmem`` initializes MORI-SHMEM from the PyTorch process
+* ``mori`` (default):
+    - ``init_shmem`` initializes MORI-SHMEM from the PyTorch process
       group via ``mori.shmem.shmem_torch_process_group_init("default")``.
-      ``cuda.core.experimental.Device`` is not used and not required.
-    - ``nvshmem_create_tensor`` calls ``mori.shmem.mori_shmem_create_tensor``.
-    - ``get_same_node_tensors`` is replaced by a single MORI call:
+    - ``shmem_create_tensor`` calls ``mori.shmem.mori_shmem_create_tensor``.
+    - Same-node peer views are obtained in a single MORI call:
       ``mori_shmem_create_tensor_list_intra_node`` which returns the
       list of symmetric views across all same-node ranks. Because that
       API allocates *and* returns the peer-view list together, we
-      restructure ``SymmBufferRegistry.allocate_symm_buffer`` to use it,
+      structure ``SymmBufferRegistry.allocate_symm_buffer`` to use it,
       keeping the same external contract (a single tensor handed back
       to the caller, plus a separately stored peer list).
-    - ``nvshmem_free_tensor_sync`` and ``finalize_distributed`` map to
+    - ``shmem_free_tensor_sync`` and ``finalize_distributed`` map to
       ``mori.shmem.mori_shmem_free_tensor`` / ``shmem_finalize``.
-* On NVIDIA: original code path is preserved unchanged.
+* ``rocshmem``: a host-API rocSHMEM backend (single-node / IPC-only)
+  implemented in ``_rocshmem_backend.py``.
 
-NOTE on environment variables for ROCm:
+NOTE on environment variables (mori backend):
     Set ``MORI_SHMEM_HEAP_SIZE`` (e.g. ``"4G"``) *before* the first MORI
     call. Also set ``MORI_SOCKET_IFNAME`` (defaults to the value of
     ``NCCL_SOCKET_IFNAME`` if available) for the MORI bootstrap.
@@ -35,21 +34,19 @@ from typing import List
 import torch
 import triton
 import triton.language as tl
-from odc.primitives import __syncthreads, tid
+
+from odc.primitives import __syncthreads
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Platform selection
-# ---------------------------------------------------------------------------
-_IS_ROCM = torch.version.hip is not None
-
-# ODC P2P backend selector (ROCm only). Default "mori" preserves the existing,
-# verified behaviour byte-for-byte; "rocshmem" selects the host-API backend
+# ODC P2P backend selector. Default "mori" preserves the existing, verified
+# behaviour byte-for-byte; "rocshmem" selects the host-API backend
 # (single-node / IPC-only) implemented in _rocshmem_backend.py.
+# ---------------------------------------------------------------------------
 _P2P_BACKEND = os.environ.get("ODC_P2P_BACKEND", "mori").lower()
-_USE_ROCSHMEM = _IS_ROCM and _P2P_BACKEND == "rocshmem"
+_USE_ROCSHMEM = _P2P_BACKEND == "rocshmem"
 
 
 # ---------------------------------------------------------------------------
@@ -57,29 +54,24 @@ _USE_ROCSHMEM = _IS_ROCM and _P2P_BACKEND == "rocshmem"
 # ---------------------------------------------------------------------------
 if _USE_ROCSHMEM:
     from . import _rocshmem_backend as _rs
-elif _IS_ROCM:
-    import mori.shmem as _mori_shmem
 else:
-    import nvshmem.core
-    from cuda.core.experimental import Device
+    import mori.shmem as _mori_shmem
 
 
 # ---------------------------------------------------------------------------
-# init_nvshmem — kept under the original name so callers (FSDP patches,
-# examples) do not need to change.
+# init_shmem — initialize the symmetric-memory runtime.
 # ---------------------------------------------------------------------------
-def init_nvshmem():
+def init_shmem():
     """Initialize the symmetric-memory runtime on the global process group.
 
-    ROCm path (MORI):
+    mori backend:
         Bootstrap MORI-SHMEM from PyTorch's WORLD process group by name.
         Requires that PyTorch distributed is already initialized.
         ``MORI_SHMEM_HEAP_SIZE`` and ``MORI_SOCKET_IFNAME`` should be
         exported in the environment before this call.
 
-    NVIDIA path (NVSHMEM):
-        Original ODC bootstrap — broadcast a unique id via
-        ``broadcast_object_list``, then ``nvshmem.core.init(...)``.
+    rocshmem backend:
+        Bootstrap the rocSHMEM host-API runtime via a unique-id broadcast.
     """
     assert torch.distributed.is_initialized()
 
@@ -88,105 +80,77 @@ def init_nvshmem():
         _rs.init()
         return
 
-    if _IS_ROCM:
-        # MORI requires MORI_SHMEM_HEAP_SIZE to be set. Inherit a sensible
-        # default if the user did not export one — this is purely a guard;
-        # production paths should always set it explicitly.
-        os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "4G")
+    # MORI requires MORI_SHMEM_HEAP_SIZE to be set. Inherit a sensible
+    # default if the user did not export one — this is purely a guard;
+    # production paths should always set it explicitly.
+    os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "4G")
 
-        # MORI uses its own TCP bootstrap socket. If the user set
-        # NCCL_SOCKET_IFNAME but not MORI_SOCKET_IFNAME, mirror it so they
-        # stay aligned (same idiom as ODC's launch.sh upstream).
-        if "MORI_SOCKET_IFNAME" not in os.environ and "NCCL_SOCKET_IFNAME" in os.environ:
-            os.environ["MORI_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"].lstrip("=")
+    # MORI uses its own TCP bootstrap socket. If the user set
+    # NCCL_SOCKET_IFNAME but not MORI_SOCKET_IFNAME, mirror it so they
+    # stay aligned.
+    if "MORI_SOCKET_IFNAME" not in os.environ and "NCCL_SOCKET_IFNAME" in os.environ:
+        os.environ["MORI_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"].lstrip("=")
 
-        # Two init methods (select via ODC_MORI_INIT env var):
-        #   "pg"  (default): shmem_torch_process_group_init("default")
-        #   "uid": shmem_init_attr(WITH_UNIQUEID, rank, world, uid) — does NOT
-        #          touch PyTorch process-group registration. Use this when the
-        #          host framework (e.g. Megatron) has already created many
-        #          named process groups and the PG-based init crashes
-        #          (observed: `free(): invalid pointer` during
-        #          shmem_torch_process_group_init under Megatron).
-        init_method = os.environ.get("ODC_MORI_INIT", "pg")
-        logger.info(
-            "init_nvshmem (MORI): heap=%s, sock_ifname=%s, method=%s",
-            os.environ.get("MORI_SHMEM_HEAP_SIZE"),
-            os.environ.get("MORI_SOCKET_IFNAME", "<auto>"),
-            init_method,
+    # Two init methods (select via ODC_MORI_INIT env var):
+    #   "pg"  (default): shmem_torch_process_group_init("default")
+    #   "uid": shmem_init_attr(WITH_UNIQUEID, rank, world, uid) — does NOT
+    #          touch PyTorch process-group registration. Use this when the
+    #          host framework (e.g. Megatron) has already created many
+    #          named process groups and the PG-based init crashes
+    #          (observed: `free(): invalid pointer` during
+    #          shmem_torch_process_group_init under Megatron).
+    init_method = os.environ.get("ODC_MORI_INIT", "pg")
+    logger.info(
+        "init_shmem (MORI): heap=%s, sock_ifname=%s, method=%s",
+        os.environ.get("MORI_SHMEM_HEAP_SIZE"),
+        os.environ.get("MORI_SOCKET_IFNAME", "<auto>"),
+        init_method,
+    )
+
+    if init_method == "uid":
+        rank_id = torch.distributed.get_rank()
+        num_ranks = torch.distributed.get_world_size()
+        # rank 0 generates the 128-byte unique id; broadcast to all ranks.
+        uid_holder = [_mori_shmem.shmem_get_unique_id() if rank_id == 0 else None]
+        torch.distributed.broadcast_object_list(uid_holder, src=0)
+        torch.distributed.barrier()
+        unique_id = uid_holder[0]
+        _mori_shmem.shmem_init_attr(
+            _mori_shmem.MORI_SHMEM_INIT_WITH_UNIQUEID,
+            rank_id,
+            num_ranks,
+            unique_id,
         )
-
-        if init_method == "uid":
-            rank_id = torch.distributed.get_rank()
-            num_ranks = torch.distributed.get_world_size()
-            # rank 0 generates the 128-byte unique id; broadcast to all ranks.
-            uid_holder = [_mori_shmem.shmem_get_unique_id() if rank_id == 0 else None]
-            torch.distributed.broadcast_object_list(uid_holder, src=0)
-            torch.distributed.barrier()
-            unique_id = uid_holder[0]
-            _mori_shmem.shmem_init_attr(
-                _mori_shmem.MORI_SHMEM_INIT_WITH_UNIQUEID,
-                rank_id,
-                num_ranks,
-                unique_id,
-            )
-            return
-
-        # method == "pg": register WORLD as "default", then PG-based init.
-        world_group = torch.distributed.group.WORLD
-        try:
-            torch._C._distributed_c10d._register_process_group("default", world_group)
-        except RuntimeError:
-            # Already registered — ignore.
-            pass
-        _mori_shmem.shmem_torch_process_group_init("default")
         return
 
-    # ---- NVIDIA path: original upstream code, unchanged ----
-    assert "NVSHMEM_HOME" in os.environ
-    current_lib_paths = os.environ.get("LD_LIBRARY_PATH", "").split(":")
-    if os.environ["NVSHMEM_HOME"] not in current_lib_paths:
-        current_lib_paths.insert(0, os.environ["NVSHMEM_HOME"] + "/lib")
-    os.environ["LD_LIBRARY_PATH"] = ":".join(current_lib_paths)
-
-    logger.debug(f"init_nvshmem: {os.environ}")
-    num_ranks = torch.distributed.get_world_size()
-    rank_id = torch.distributed.get_rank()
-
-    pg = torch.distributed.group.WORLD
-    broadcast_objects = [nvshmem.core.get_unique_id(empty=rank_id != 0)]
-    torch.distributed.broadcast_object_list(broadcast_objects, src=0, group=pg)
-    torch.distributed.barrier(group=pg)
-    nvshmem.core.init(
-        device=Device(torch.cuda.current_device()),
-        uid=broadcast_objects[0],
-        rank=rank_id,
-        nranks=num_ranks,
-        initializer_method="uid",
-    )
+    # method == "pg": register WORLD as "default", then PG-based init.
+    world_group = torch.distributed.group.WORLD
+    try:
+        torch._C._distributed_c10d._register_process_group("default", world_group)
+    except RuntimeError:
+        # Already registered — ignore.
+        pass
+    _mori_shmem.shmem_torch_process_group_init("default")
 
 
 # ---------------------------------------------------------------------------
 # Symmetric tensor creation / peer-view enumeration / free
 # ---------------------------------------------------------------------------
-def nvshmem_create_tensor(shape, dtype) -> torch.Tensor:
+def shmem_create_tensor(shape, dtype) -> torch.Tensor:
     """Allocate a symmetric tensor on the symmetric heap.
 
-    For ROCm, the upstream split (``nvshmem_create_tensor`` then
-    ``get_same_node_tensors``) is restructured into one call inside
+    The full allocate + same-node peer enumeration is done in one call inside
     ``SymmBufferRegistry.allocate_symm_buffer`` (see below). This top-level
     helper is kept for callers that want a bare local tensor without the
-    peer list (e.g. when only the local view is needed). On ROCm it calls
-    ``mori_shmem_create_tensor``, which allocates from MORI's symmetric
-    heap.
+    peer list (e.g. when only the local view is needed). On the mori backend
+    it calls ``mori_shmem_create_tensor``, which allocates from MORI's
+    symmetric heap.
     """
     torch.cuda.synchronize()
     if _USE_ROCSHMEM:
         tensor = _rs.create_tensor(shape, dtype)
-    elif _IS_ROCM:
-        tensor = _mori_shmem.mori_shmem_create_tensor(shape, dtype)
     else:
-        tensor = nvshmem.core.tensor(shape, dtype=dtype)
+        tensor = _mori_shmem.mori_shmem_create_tensor(shape, dtype)
     torch.cuda.synchronize()
     return tensor
 
@@ -195,52 +159,35 @@ def get_same_node_tensors(tensor, rank, local_world_size) -> List[torch.Tensor]:
     """Return the list of peer-view tensors for the given symmetric ``tensor``
     across the same-node ranks (``rank // local_world_size``'s peers).
 
-    NVIDIA path: ``nvshmem.core.get_peer_tensor`` for each peer.
-    ROCm path: This API is only safe when ``tensor`` was created by the
-    paired ``mori_shmem_create_tensor_list_intra_node`` (see
+    This API is only safe when ``tensor`` was created by the paired
+    ``mori_shmem_create_tensor_list_intra_node`` (see
     ``SymmBufferRegistry.allocate_symm_buffer``); the list is retrieved
     from the registry. As a stand-alone fall-back, we synthesize it via
     ``shmem_ptr_p2p`` and wrap raw device pointers with
     ``torch.frombuffer``-style construction.
     """
-    if _IS_ROCM:
-        # When the tensor was created via the registry path, the registry
-        # already stores the peer list — callers should prefer
-        # ``SymmBufferRegistry.get_peer_tensors``.
-        # As a stand-alone fallback for ad-hoc symmetric tensors, build
-        # peer views via shmem_ptr_p2p + torch.Tensor reconstruction.
-        peer_tensors: List[torch.Tensor] = []
-        local_rank = rank % local_world_size
-        rank_on_same_node_start = rank - local_rank
-        for peer in range(rank_on_same_node_start, rank_on_same_node_start + local_world_size):
-            if peer == rank:
-                peer_tensors.append(tensor)
-                continue
-            peer_ptr = _mori_shmem.shmem_ptr_p2p(tensor.data_ptr(), rank, peer)
-            if peer_ptr == 0:
-                raise RuntimeError(
-                    f"shmem_ptr_p2p returned 0 for peer {peer}: no XGMI P2P route "
-                    "from PE {rank}. This usually means peer is on a different node "
-                    "(requires RDMA, not P2P)."
-                )
-            # Build a torch.Tensor view at peer_ptr.
-            peer_tensors.append(_tensor_from_raw_ptr(peer_ptr, tensor.shape, tensor.dtype, tensor.device))
-        return peer_tensors
-
-    def get_same_node_peer_tensor(t, peer) -> torch.Tensor:
-        # avoid create tensor on the same buf again. nvshmem4py can't handle multiple reference with grace. so we handle it here.
-        # https://forums.developer.nvidia.com/t/nvshmem4py-nvshmem-core-finalize-does-not-handle-everything/337979
-        if peer == rank:
-            return t
-        return nvshmem.core.get_peer_tensor(t, peer)
-
+    # When the tensor was created via the registry path, the registry
+    # already stores the peer list — callers should prefer
+    # ``SymmBufferRegistry.get_peer_tensors``.
+    # As a stand-alone fallback for ad-hoc symmetric tensors, build
+    # peer views via shmem_ptr_p2p + torch.Tensor reconstruction.
+    peer_tensors: List[torch.Tensor] = []
     local_rank = rank % local_world_size
     rank_on_same_node_start = rank - local_rank
-    rank_on_same_node_end = rank_on_same_node_start + local_world_size
-    return [
-        get_same_node_peer_tensor(tensor, peer)
-        for peer in range(rank_on_same_node_start, rank_on_same_node_end)
-    ]
+    for peer in range(rank_on_same_node_start, rank_on_same_node_start + local_world_size):
+        if peer == rank:
+            peer_tensors.append(tensor)
+            continue
+        peer_ptr = _mori_shmem.shmem_ptr_p2p(tensor.data_ptr(), rank, peer)
+        if peer_ptr == 0:
+            raise RuntimeError(
+                f"shmem_ptr_p2p returned 0 for peer {peer}: no XGMI P2P route "
+                "from PE {rank}. This usually means peer is on a different node "
+                "(requires RDMA, not P2P)."
+            )
+        # Build a torch.Tensor view at peer_ptr.
+        peer_tensors.append(_tensor_from_raw_ptr(peer_ptr, tensor.shape, tensor.dtype, tensor.device))
+    return peer_tensors
 
 
 def _tensor_from_raw_ptr(raw_ptr: int, shape, dtype, device) -> torch.Tensor:
@@ -277,24 +224,20 @@ def _tensor_from_raw_ptr(raw_ptr: int, shape, dtype, device) -> torch.Tensor:
     )
 
 
-def nvshmem_free_tensor_sync(tensor):
+def shmem_free_tensor_sync(tensor):
     torch.cuda.synchronize()
     if _USE_ROCSHMEM:
         _rs.free_tensor(tensor)
-    elif _IS_ROCM:
-        _mori_shmem.mori_shmem_free_tensor(tensor)
     else:
-        nvshmem.core.free_tensor(tensor)
+        _mori_shmem.mori_shmem_free_tensor(tensor)
     torch.cuda.synchronize()
 
 
 def finalize_distributed():
     if _USE_ROCSHMEM:
         _rs.finalize()
-    elif _IS_ROCM:
-        _mori_shmem.shmem_finalize()
     else:
-        nvshmem.core.finalize()
+        _mori_shmem.shmem_finalize()
 
 
 # ---------------------------------------------------------------------------
@@ -331,24 +274,23 @@ class SymmBufferRegistry:
         return self.local_tensor[buffer_key]
 
     @classmethod
-    def set_nvshmem_flag(cls, tensor):
-        tensor._odc_is_nvshmem = True
+    def set_shmem_flag(cls, tensor):
+        tensor._odc_is_shmem = True
 
     @classmethod
-    def is_nvshmem_tensor(cls, tensor):
-        return hasattr(tensor, "_odc_is_nvshmem") and tensor._odc_is_nvshmem
+    def is_shmem_tensor(cls, tensor):
+        return hasattr(tensor, "_odc_is_shmem") and tensor._odc_is_shmem
 
     def allocate_symm_buffer(self, key, shape, dtype):
         """Allocate a symmetric tensor and record same-node peer views.
 
-        ROCm path: one-shot via ``mori_shmem_create_tensor_list_intra_node``,
+        mori backend: one-shot via ``mori_shmem_create_tensor_list_intra_node``,
         which returns ``list[torch.Tensor]`` of length ``local_world_size``,
         each entry being the same symmetric allocation viewed from the
         corresponding peer's address space. ``tensors[my_local_rank]`` is
         the local view; the entire list is recorded as the peer-view list.
 
-        NVIDIA path: alloc with ``nvshmem.core.tensor``, then enumerate
-        peer views with ``get_peer_tensor`` (original upstream behavior).
+        rocshmem backend: one-shot ``_rs.alloc_peer_tensors`` (equivalent).
         """
         assert key not in self.local_tensor
         local_world_size = get_local_world_size()
@@ -360,11 +302,11 @@ class SymmBufferRegistry:
             # list (equivalent to MORI's mori_shmem_create_tensor_list_intra_node).
             tensor, peer_tensors = _rs.alloc_peer_tensors(shape, dtype, local_world_size, rank)
             self.allocations.append(tensor)
-        elif _IS_ROCM:
+        else:
             # node_start == 0 covers BOTH the single-node case and node 0 of a
             # multi-node run. In that case the same-node PEs are exactly
             # [0, local_world_size), so we call MORI's one-shot helper VERBATIM
-            # — byte-for-byte the original ODC ROCm behaviour (single-node
+            # — byte-for-byte the original single-node behaviour (single-node
             # protected, zero change).
             #
             # node_start > 0 (only reachable on node>0 of a multi-node run):
@@ -397,12 +339,8 @@ class SymmBufferRegistry:
                 tensor = peer_tensors[local_rank]
             # Keep the same allocation list to track for finalize.
             self.allocations.append(tensor)
-        else:
-            tensor = nvshmem_create_tensor(shape, dtype)
-            peer_tensors = get_same_node_tensors(tensor, rank, local_world_size)
-            self.allocations.append(tensor)
 
-        self.set_nvshmem_flag(tensor)
+        self.set_shmem_flag(tensor)
         assert len(peer_tensors) == local_world_size
 
         # ranks inside the same node must be contiguous.
@@ -435,7 +373,7 @@ class SymmBufferRegistry:
 
     def finalize(self):
         for t in self.allocations:
-            nvshmem_free_tensor_sync(t)
+            shmem_free_tensor_sync(t)
         self.local_tensor.clear()
         self.local_tensor_to_keys.clear()
         self.updated.clear()
@@ -521,37 +459,18 @@ class BufferSplitter:
 # ---------------------------------------------------------------------------
 # sync_cta — CTA-internal synchronization helper
 # ---------------------------------------------------------------------------
-# On NVIDIA this uses `tid(axis=0) == 0` to elect a single thread that
-# does the atomic_add. On ROCm we cannot do that directly (no NVVM
-# intrinsic), so we use the Triton vector mask pattern which is
-# platform-portable.
-if _IS_ROCM:
-
-    @triton.jit
-    def sync_cta(signal_ptr, expected):
-        # Use a length-1 lane vector with mask to ensure only lane 0 of
-        # the wave performs the atomic_add. This is the Triton-native way
-        # to elect a "first thread" without relying on PTX intrinsics.
-        offsets = tl.arange(0, 1)
-        mask = offsets == 0
-        tl.atomic_add(signal_ptr + offsets, 1, mask=mask)
-        __syncthreads()
-        r = 0
-        while r < expected:
-            signals = tl.load(signal_ptr + offsets, mask=mask, volatile=True)
-            r = tl.max(signals)
-
-else:
-
-    @triton.jit
-    def sync_cta(signal_ptr, expected):
-        tidx = tid(axis=0)
-        if tidx == 0:
-            tl.atomic_add(signal_ptr, 1)
-        __syncthreads()
-        offsets = tl.arange(0, 1)
-        mask = offsets == 0
-        r = 0
-        while r < expected:
-            signals = tl.load(signal_ptr + offsets, mask=mask, volatile=True)
-            r = tl.max(signals)
+# Elect a single thread (lane 0) to do the atomic_add using the Triton vector
+# mask pattern (no NVVM tid intrinsic exists on AMDGPU).
+@triton.jit
+def sync_cta(signal_ptr, expected):
+    # Use a length-1 lane vector with mask to ensure only lane 0 of
+    # the wave performs the atomic_add. This is the Triton-native way
+    # to elect a "first thread".
+    offsets = tl.arange(0, 1)
+    mask = offsets == 0
+    tl.atomic_add(signal_ptr + offsets, 1, mask=mask)
+    __syncthreads()
+    r = 0
+    while r < expected:
+        signals = tl.load(signal_ptr + offsets, mask=mask, volatile=True)
+        r = tl.max(signals)

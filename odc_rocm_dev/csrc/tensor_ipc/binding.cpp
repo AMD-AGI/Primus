@@ -1,6 +1,6 @@
 #include <torch/extension.h>
 
-// Declare the function from the CUDA file
+// Declare the functions from the HIP file (tensor_ipc.hip)
 
 py::bytes get_ipc_handle(at::Tensor tensor);
 at::Tensor reconstruct_tensor(py::bytes handle, std::vector<int64_t> shape, torch::ScalarType dtype);

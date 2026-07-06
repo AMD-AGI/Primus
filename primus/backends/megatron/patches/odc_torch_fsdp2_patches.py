@@ -47,9 +47,9 @@ def _ensure_odc_ready():
         os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
         if "MORI_SOCKET_IFNAME" not in os.environ and "NCCL_SOCKET_IFNAME" in os.environ:
             os.environ["MORI_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"].lstrip("=")
-        odc.init_nvshmem()
+        odc.init_shmem()
         _ODC_READY = True
-        log_rank_0("[ODC.torch_fsdp2] init_nvshmem (MORI) done")
+        log_rank_0("[ODC.torch_fsdp2] init_shmem (MORI) done")
 
     if not _FSDP2_PATCHED:
         odc_fsdp2.patch_fsdp2(enable_hpz=False)
@@ -265,6 +265,7 @@ def _odc_grad_spike_guard(root):
 def _install_train_loop_hooks():
     """PHASE 2: wire pre_minibatch_start / pre_optimizer_step into the loop."""
     import megatron.training.training as mt_training
+
     from odc.fsdp import fsdp2 as odc_fsdp2
 
     if getattr(mt_training.train_step, "_odc_hooked", False):

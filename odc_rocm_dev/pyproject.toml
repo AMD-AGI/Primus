@@ -12,10 +12,8 @@ version = "0.1.0-alpha.0"
 description = "On-demand Communication Library (ROCm adaptation)"
 readme = "README.md"
 requires-python = ">=3.8"
-# NOTE: Backend dependency (amd_mori on ROCm, nvshmem packages on CUDA) is
-# decided at install time by setup.py based on torch.version.hip, so it is
-# NOT listed here. Listing both here would force pulling in NVSHMEM wheels
-# on ROCm machines.
+# NOTE: The symmetric-memory backend dependency (amd_mori) is declared in
+# setup.py's install_requires, not here.
 dependencies = [
     "torch",
     "triton>=3.4.0",

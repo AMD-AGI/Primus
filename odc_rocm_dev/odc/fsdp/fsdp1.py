@@ -1,11 +1,12 @@
 import logging
 
-import odc
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.fsdp._flat_param import FlatParamHandle, HandleShardingStrategy
 from torch.distributed.fsdp._runtime_utils import _div_if_needed, _FSDPState
+
+import odc
 
 logger = logging.getLogger(__name__)
 
@@ -234,8 +235,8 @@ def custom_get_shard(tensor, rank, world_size):
 
     sharded, padded = old_get_shard(tensor, rank, world_size)
     assert isinstance(tensor, FlatParameter)
-    sharded_in_nvshmem = odc.SymmBufferRegistry.get_instance().update_symm_buffer(id(tensor), sharded)
-    return sharded_in_nvshmem, padded
+    sharded_in_shmem = odc.SymmBufferRegistry.get_instance().update_symm_buffer(id(tensor), sharded)
+    return sharded_in_shmem, padded
 
 
 def _use_low_precision_shard(self):

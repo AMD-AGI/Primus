@@ -14,8 +14,9 @@ import torch.distributed as dist
 import torch.multiprocessing
 import triton
 import triton.language as tl
+
 from odc.primitives import (
-    NVSHMEM_EXTERN_LIBS,
+    SHMEM_EXTERN_LIBS,
     __syncthreads,
     get_ipc_handle,
     int_p,
@@ -41,9 +42,9 @@ logger = logging.getLogger(__name__)
 # the cross-node scatter-accumulate handshake (push my segment to a remote
 # peer's staging buffer, signal its watcher, wait for the ack) is driven from
 # the CPU with blocking ``rs_putmem`` / ``rs_int_p`` / ``rs_getmem`` instead of
-# the device-initiated NVSHMEM/MORI kernels. The same-node path (XGMI peer
+# the device-initiated MORI kernels. The same-node path (XGMI peer
 # copy + on-device int_p/wait handshake) and the watcher subprocess are reused
-# unchanged. The mori / nvshmem device kernel path is untouched.
+# unchanged. The mori device kernel path is untouched.
 from odc.primitives.utils import _USE_ROCSHMEM  # noqa: E402
 
 if _USE_ROCSHMEM:
@@ -61,19 +62,19 @@ def _gda_active():
 
 
 def _official_push():
-    """ODC_OFFICIAL_PUSH=1 -> faithfully reproduce upstream NVSHMEM ODC's
-    single-sided "push + fire-and-forget" scatter-accumulate, bypassing every
-    ROCm-specific addition we layered on (NONE are deleted -- they are only
-    skipped via ``if not _official_push()`` while this switch is on):
+    """ODC_OFFICIAL_PUSH=1 -> faithfully reproduce the reference single-sided
+    "push + fire-and-forget" scatter-accumulate, bypassing every ROCm-specific
+    addition we layered on (NONE are deleted -- they are only skipped via
+    ``if not _official_push()`` while this switch is on):
 
       * intra-node IPC path: keep the direct peer write (``peer_buf.copy_``) +
         the watcher request signal (owner-side accumulation), but DROP the
-        per-call ack/settle kernel (``nvshmem_wait_accumulation_same_node_kernel``)
+        per-call ack/settle kernel (``shmem_wait_accumulation_same_node_kernel``)
         and DROP the trailing ``wait_stream`` serialization so the push overlaps
         the backward compute (fire-and-forget). A single light minibatch-end
         ``sync()`` (watcher task-count rendezvous) guarantees arrival.
       * inter-node non-GDA path already IS the official single-sided push
-        (``nvshmem_cross_node_scatter`` -> device ``putmem_nbi`` + periodic
+        (``shmem_cross_node_scatter`` -> device ``putmem_nbi`` + periodic
         ``quiet``), so it is used unchanged.
       * GDA path: skip our ``_rs.barrier()`` per-call, strided/full warmup
         settle, overlap side-stream and DEFER block (collective reduce-scatter
@@ -86,7 +87,7 @@ def _official_push():
 
 def _settle_defer():
     """ODC_SETTLE_DEFER=1 -> move the per-layer settle (the
-    ``nvshmem_wait_accumulation_same_node_kernel`` ack-wait) OFF the backward
+    ``shmem_wait_accumulation_same_node_kernel`` ack-wait) OFF the backward
     critical path to raise compute/settle overlap, WITHOUT going fully
     fire-and-forget (which deadlocks, see ``_official_push``).
 
@@ -121,7 +122,7 @@ MAX_REQUEST_COUNT = 2 * 100000
 
 
 @triton.jit(do_not_specialize=[])
-def nvshmem_scatter_kernel(
+def shmem_scatter_kernel(
     input_tensor_ptr,
     rank_input_size,
     input_segment_start,
@@ -161,8 +162,8 @@ def nvshmem_scatter_kernel(
             mask = chunk_offsets < this_chunk_size
             input_chunk_data = tl.load(input_tensor_ptr + input_start + chunk_offsets, mask=mask)
             tl.store(chunk_buffer_seg + chunk_offsets, input_chunk_data, mask=mask)
-            # As we initialize NVSHMEM on global process group,
-            # we need to use the global rank to access the peer tensor.
+            # As we initialize the symmetric runtime on the global process
+            # group, we need to use the global rank to access the peer tensor.
             putmem_nbi_block(
                 output_tensor_ptr + (chunk * chunk_size),
                 chunk_buffer_seg,
@@ -191,7 +192,7 @@ def nvshmem_scatter_kernel(
 
 
 @triton.jit(do_not_specialize=["rank", "peer", "next_request_id"])
-def nvshmem_cross_node_scatter(
+def shmem_cross_node_scatter(
     input_tensor_ptr,
     rank_input_size,
     chunk_buffer,
@@ -216,7 +217,7 @@ def nvshmem_cross_node_scatter(
     signal_next_expected = 0
     for start in range(0, output_size, local_buf_size):
         size = min(local_buf_size, output_size - start)
-        signal_next_expected = nvshmem_scatter_kernel(
+        signal_next_expected = shmem_scatter_kernel(
             input_tensor_ptr=input_tensor_ptr,
             rank_input_size=rank_input_size,
             input_segment_start=start,
@@ -232,7 +233,7 @@ def nvshmem_cross_node_scatter(
             signal_ptr=signal_ptr,
         )
 
-        nvshmem_request_accumulation_remote_node_kernel(
+        shmem_request_accumulation_remote_node_kernel(
             request_buffer_ptr=request_buffer_ptr,
             rank=rank,
             rank_start_same_node=rank_start_same_node,
@@ -240,7 +241,7 @@ def nvshmem_cross_node_scatter(
             world_size=world_size,
             accumulation_command=accumulation_command,
         )
-        nvshmem_wait_accumulation_remote_node_kernel(
+        shmem_wait_accumulation_remote_node_kernel(
             response_buffer_ptr=response_buffer_ptr,
             scratch_ptr=response_scratch_ptr,
             rank=rank,
@@ -258,7 +259,7 @@ def nvshmem_cross_node_scatter(
 
 
 @triton.jit(do_not_specialize=["rank", "peer", "accumulation_command"])
-def nvshmem_request_accumulation_same_node_kernel(
+def shmem_request_accumulation_same_node_kernel(
     request_buffer_ptr,
     rank,
     peer,
@@ -273,17 +274,16 @@ def nvshmem_request_accumulation_same_node_kernel(
 
 
 @triton.jit(do_not_specialize=["rank", "peer", "next_request_id"])
-def nvshmem_wait_accumulation_same_node_kernel(
+def shmem_wait_accumulation_same_node_kernel(
     response_buffer_ptr,
     rank,
     peer,
     next_request_id,
 ):
-    # ROCm fix: the upstream loop `while r != next_request_id: quiet(); int_g(...)`
+    # ROCm fix: a naive loop `while r != next_request_id: quiet(); int_g(...)`
     # hangs on MI300X because a repeated in-kernel volatile load of a peer
     # address never observes the watcher's ack (GPU L2 stale). int_wait_until_equals
-    # uses a system-scope atomic load that bypasses the L2; on NVIDIA it falls
-    # back to the original quiet+int_g spin (which has acquire semantics there).
+    # uses a system-scope atomic load that bypasses the L2.
     pid = tl.program_id(axis=0)
     if pid == 0:
         int_wait_until_equals(response_buffer_ptr + rank, next_request_id, peer)
@@ -299,7 +299,7 @@ def nvshmem_wait_accumulation_same_node_kernel(
         "accumulation_command",
     ]
 )
-def nvshmem_request_accumulation_remote_node_kernel(
+def shmem_request_accumulation_remote_node_kernel(
     request_buffer_ptr,
     rank,
     rank_start_same_node,
@@ -329,7 +329,7 @@ def nvshmem_request_accumulation_remote_node_kernel(
         "next_request_id",
     ]
 )
-def nvshmem_wait_accumulation_remote_node_kernel(
+def shmem_wait_accumulation_remote_node_kernel(
     response_buffer_ptr,
     scratch_ptr,
     rank,
@@ -342,8 +342,7 @@ def nvshmem_wait_accumulation_remote_node_kernel(
     # XGMI-mapped response slot), a remote-node peer has no local alias for its
     # response buffer, so we actively pull the slot over RDMA with
     # ``int_wait_until_equals_remote`` (getmem-spin into a local symmetric
-    # scratch). On NVIDIA this primitive delegates to the upstream
-    # nvshmem_int_g spin (scratch unused), preserving behaviour there.
+    # scratch).
     pid = tl.program_id(axis=0)
     if pid == 0:
         for peer in range(world_size):
@@ -612,9 +611,9 @@ def call_watcher(watcher_handle, cmd, *args):
     return response_queue.get()
 
 
-def get_nvshmem_handle(tensor):
+def get_shmem_handle(tensor):
     logger.info(
-        f"Rank {torch.distributed.get_rank()} get_nvshmem_handle {tensor.data_ptr()} with shape {tensor.shape} and dtype {tensor.dtype}",
+        f"Rank {torch.distributed.get_rank()} get_shmem_handle {tensor.data_ptr()} with shape {tensor.shape} and dtype {tensor.dtype}",
     )
     handle = get_ipc_handle(tensor)
     return handle, tensor.numel(), tensor.dtype
@@ -642,8 +641,8 @@ class ReductionService:
     def register(self, key, output_tensor_shape, grad_dtype, reduction_dtype, pg: dist.ProcessGroup):
         if self.reduction_watcher is None:
             self.lock = DistLock()
-            request_buffer_handle = get_nvshmem_handle(self.lock.request_buffer)
-            response_buffer_handle = get_nvshmem_handle(self.lock.response_buffer)
+            request_buffer_handle = get_shmem_handle(self.lock.request_buffer)
+            response_buffer_handle = get_shmem_handle(self.lock.response_buffer)
 
             # Make sure changes are visible to all reduction watchers
             torch.distributed.barrier()
@@ -662,7 +661,7 @@ class ReductionService:
 
         def create_and_register_accumulation(key, shape, dtype, add_func):
             buffer = registry.allocate_symm_buffer(key, shape, dtype)
-            call_watcher(self.reduction_watcher, add_func, [get_nvshmem_handle(buffer)], group_world_size)
+            call_watcher(self.reduction_watcher, add_func, [get_shmem_handle(buffer)], group_world_size)
             return buffer
 
         def create_and_register_buffer(key, shape, dtype, add_func):
@@ -670,7 +669,7 @@ class ReductionService:
             for rank in range(group_world_size):
                 buffer = registry.allocate_symm_buffer(f"{key}_rank_{rank}", shape, dtype)
                 buffers.append(buffer)
-            call_watcher(self.reduction_watcher, add_func, [get_nvshmem_handle(b) for b in buffers])
+            call_watcher(self.reduction_watcher, add_func, [get_shmem_handle(b) for b in buffers])
             return buffers
 
         acc = create_and_register_accumulation(
@@ -1158,13 +1157,13 @@ class ReductionService:
 
             for local_peer in range(rank_start_same_node, rank_end_same_node):
                 with torch.cuda.stream(self.rank_streams[local_peer]):
-                    nvshmem_request_accumulation_same_node_kernel[(1,)](
+                    shmem_request_accumulation_same_node_kernel[(1,)](
                         request_buffer_ptr=self.lock.request_buffer,
                         rank=rank,
                         peer=local_peer,
                         accumulation_command=accumulation_command,
                         num_warps=1,
-                        extern_libs=NVSHMEM_EXTERN_LIBS,
+                        extern_libs=SHMEM_EXTERN_LIBS,
                     )
                     # ODC_OFFICIAL_PUSH: fire-and-forget. The push (peer_buf.copy_)
                     # + request signal are enough for the owner's watcher to
@@ -1175,13 +1174,13 @@ class ReductionService:
                     # reusing this staging slot before the watcher consumed it can
                     # stale/lose a gradient (the documented divergence risk).
                     if not official:
-                        nvshmem_wait_accumulation_same_node_kernel[(1,)](
+                        shmem_wait_accumulation_same_node_kernel[(1,)](
                             response_buffer_ptr=self.lock.response_buffer,
                             rank=rank,
                             peer=local_peer,
                             next_request_id=self.lock.client_context.local_next_request_id,
                             num_warps=1,
-                            extern_libs=NVSHMEM_EXTERN_LIBS,
+                            extern_libs=SHMEM_EXTERN_LIBS,
                         )
             self.lock.client_context.local_next_request_id += 1
             if self.lock.client_context.local_next_request_id > MAX_REQUEST_COUNT:
@@ -1217,7 +1216,7 @@ class ReductionService:
             else:
                 with torch.cuda.stream(get_comm_stream()):
                     signal_ptr.fill_(0)
-                    nvshmem_cross_node_scatter[(grid_size,)](
+                    shmem_cross_node_scatter[(grid_size,)](
                         input_tensor_ptr=input_tensor,
                         rank_input_size=rank_input_size,
                         chunk_buffer=input_tensor_symm,
@@ -1239,7 +1238,7 @@ class ReductionService:
                         accumulation_command=accumulation_command,
                         next_request_id=self.lock.client_context.next_request_id,
                         num_warps=32,
-                        extern_libs=NVSHMEM_EXTERN_LIBS,
+                        extern_libs=SHMEM_EXTERN_LIBS,
                     )
         self.lock.client_context.next_request_id += num_requests
         if self.lock.client_context.next_request_id > MAX_REQUEST_COUNT:
@@ -1264,7 +1263,6 @@ class ReductionService:
                 for local_peer in range(rank_start_same_node, rank_end_same_node):
                     torch.cuda.current_stream().wait_stream(self.rank_streams[local_peer])
                 torch.cuda.current_stream().wait_stream(get_comm_stream())
-        # nvshmem.core.quiet(stream=torch.cuda.current_stream())
 
     def _ro_cross_node_scatter(
         self,
@@ -1283,7 +1281,7 @@ class ReductionService:
     ):
         """Host-driven RO cross-node scatter-accumulate (rocSHMEM RO backend).
 
-        Mirrors ``nvshmem_cross_node_scatter`` but drives the transfer from the
+        Mirrors ``shmem_cross_node_scatter`` but drives the transfer from the
         CPU: for each output chunk and each remote peer ``r``, push my segment
         destined for ``r`` into ``buffer[my_rank]`` on ``r`` (which ``r``'s
         watcher accumulates), signal ``r``'s request slot, and wait for the ack.

@@ -6,7 +6,7 @@ backend uses ONLY rocSHMEM's *host* API (``librs_host5.so``:
 to manage the symmetric heap and resolve peer pointers. It deliberately does
 NOT link any rocSHMEM *device* bitcode into Triton — every on-device P2P op is
 plain Triton ``tl.load`` / ``tl.store`` / ``tl.atomic_*`` to XGMI-mapped peer
-addresses (see the ``rocshmem`` branch in ``nvshmem_triton.py``).
+addresses (see the ``rocshmem`` branch in ``shmem_triton.py``).
 
 Single-node only. The heavy gather / scatter data movement is host-side torch
 ``.copy_()`` on peer-view tensors (XGMI peer load/store); the only device
@@ -325,7 +325,7 @@ def init():
             f"GDA PE mismatch: my_pe={_my_pe} rank={dist.get_rank()} "
             f"n_pes={_n_pes} world={dist.get_world_size()}"
         )
-        logger.info("init_nvshmem (rocSHMEM GDA): my_pe=%d n_pes=%d", _my_pe, _n_pes)
+        logger.info("init_shmem (rocSHMEM GDA): my_pe=%d n_pes=%d", _my_pe, _n_pes)
         _initialized = True
         return
 
@@ -354,7 +354,7 @@ def init():
     assert (
         _my_pe == rank and _n_pes == world
     ), f"rocSHMEM PE mismatch: my_pe={_my_pe} rank={rank} n_pes={_n_pes} world={world}"
-    logger.info("init_nvshmem (rocSHMEM host-API): my_pe=%d n_pes=%d", _my_pe, _n_pes)
+    logger.info("init_shmem (rocSHMEM host-API): my_pe=%d n_pes=%d", _my_pe, _n_pes)
     _initialized = True
 
 
@@ -385,7 +385,7 @@ def _ensure_peer_deltas(base, local_world_size, rank):
             if peer == 0:
                 raise RuntimeError(f"rs_ptr(base, {pe}) == 0: no XGMI P2P route to same-node peer")
             deltas[i] = peer - base
-    from .nvshmem_triton import set_rocshmem_peer_deltas
+    from .shmem_triton import set_rocshmem_peer_deltas
 
     set_rocshmem_peer_deltas(deltas, node_start)
     logger.info(

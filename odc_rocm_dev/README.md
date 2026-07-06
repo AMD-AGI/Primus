@@ -15,7 +15,7 @@ The key idea is to replace the collective all-gather and reduce-scatter with a o
 
 ![ODC Primitives](./docs/readme/ag_rs.png)
 
-TO support transparent on-demand communications, we implement RDMA based primitives based on cuda IPC (intra-node) and NVSHMEM (inter-node). Details are in [odc/primitives](./odc/primitives).
+To support transparent on-demand communications, we implement RDMA based primitives on ROCm using HIP GPU IPC (intra-node) and MORI-SHMEM / rocSHMEM (inter-node). Details are in [odc/primitives](./odc/primitives).
 
 ## Support for FSDP
 - FSDP1
@@ -27,19 +27,19 @@ TO support transparent on-demand communications, we implement RDMA based primiti
 
 ### Prerequisites
 
-- PyTorch (with CUDA support)
-- CUDA 12.x
+- PyTorch (ROCm build)
+- ROCm 7.x
 - Python >= 3.8
+- `amd_mori` (symmetric-memory / RDMA backend)
 
-We highly recommand using a pytorch container like
-- `nvcr.io/nvidia/pytorch:25.06-py3` [Full List](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags)
-- `pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel` [Full List](https://hub.docker.com/r/pytorch/pytorch/tags)
+We highly recommend using a ROCm PyTorch base image (e.g. the
+`tasimage/primus-odc` images, ROCm 7.2.0 based).
 
 ### Install ODC
 ```
 pip install --no-build-isolation -e .
 ```
-It **requires some time** to compile the CUDA extension `tensor_ipc`.
+It **requires some time** to compile the HIP extension `tensor_ipc`.
 
 ## Quick Start
 
@@ -51,10 +51,10 @@ bash examples/llm_training/run.sh
 ```
 
 ## Memory
-> User may need to tune `NVSHMEM_SYMMETRIC_SIZE` for better memory usage.
-When using ODC in FSDP, NVSHMEM symmetric buffer are allocated for sharded parameters, sharded gradient accumulation buffer, miscellaneous buffers for `gather` and `scatter-accumulate`.
+> User may need to tune `MORI_SHMEM_HEAP_SIZE` for better memory usage.
+When using ODC in FSDP, symmetric buffers are allocated for sharded parameters, sharded gradient accumulation buffer, miscellaneous buffers for `gather` and `scatter-accumulate`.
 To achieve smallest memory footprint,
-`NVSHMEM_SYMMETRIC_SIZE` should be set to be slightly higher than the size of sharded parameters and gradient: params.element_size() * params.numel() + grad_reduce_buf.element_size() * grad_reduce_buf.numel().
+`MORI_SHMEM_HEAP_SIZE` should be set to be slightly higher than the size of sharded parameters and gradient: params.element_size() * params.numel() + grad_reduce_buf.element_size() * grad_reduce_buf.numel().
 
 ### Basic Usage with FSDP1
 
@@ -69,7 +69,7 @@ from odc.fsdp import fsdp1
 fsdp1.patch_fsdp1()
 
 torch.distributed.init_process_group(backend="nccl", device_id=device)
-odc.init_nvshmem()
+odc.init_shmem()
 
 
 fsdp_model = FSDP(
@@ -98,7 +98,7 @@ from odc.fsdp import fsdp2
 
 
 torch.distributed.init_process_group(backend="nccl", device_id=device)
-odc.init_nvshmem()
+odc.init_shmem()
 
 fsdp2.patch_fsdp2()
 

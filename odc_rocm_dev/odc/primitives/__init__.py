@@ -1,6 +1,6 @@
-from .nvshmem_triton import (
-    LIB_NVSHMEM_PATH,
-    NVSHMEM_EXTERN_LIBS,
+from .shmem_triton import (
+    LIB_SHMEM_PATH,
+    SHMEM_EXTERN_LIBS,
     __syncthreads,
     getmem_nbi_block,
     int_atomic_compare_swap,
@@ -28,11 +28,11 @@ try:
 except ImportError as e:
     raise ImportError(
         f"Failed to import tensor_ipc. "
-        f"Please install the package using 'pip install' or 'pip install -e .' to build the CUDA extensions: {e}"
+        f"Please install the package using 'pip install' or 'pip install -e .' to build the HIP extensions: {e}"
     ) from e
 
 __all__ = [
-    # nvshmem_triton
+    # shmem_triton
     "int_atomic_compare_swap",
     "int_atomic_swap",
     "putmem_nbi_block",
@@ -45,8 +45,8 @@ __all__ = [
     "int_wait_until_equals_remote",
     "tid",
     "__syncthreads",
-    "LIB_NVSHMEM_PATH",
-    "NVSHMEM_EXTERN_LIBS",
+    "LIB_SHMEM_PATH",
+    "SHMEM_EXTERN_LIBS",
     # tensor_ipc
     "get_ipc_handle",
     "reconstruct_tensor",

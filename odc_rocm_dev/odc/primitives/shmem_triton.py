@@ -1,63 +1,56 @@
 """
-ODC Triton device API — ROCm/MORI adaptation.
+ODC Triton device API — ROCm implementation.
 
-Upstream ODC links NVSHMEM's device bitcode (libnvshmem_device.bc) into its
-Triton kernels via ``core.extern_elementwise``. This file is the drop-in
-replacement that uses MORI-SHMEM's device bitcode (libmori_shmem_device.bc,
-JIT-compiled by ``mori.ir.find_bitcode()``) on ROCm, while keeping the
-exact same public names and call signatures that the rest of ODC
-(``gather.py`` / ``scatter_accumulate.py``) imports.
+ODC's Triton kernels reach symmetric peer memory through a small set of
+device primitives. On ROCm there are two backends, selected by the
+``ODC_P2P_BACKEND`` environment variable:
 
-Module-level public names (kept identical with upstream):
+* ``mori`` (default): re-exports MORI-SHMEM's device API. MORI provides the
+  device bitcode (``libmori_shmem_device.bc``, JIT-compiled by
+  ``mori.ir.find_bitcode()``) that is linked into the Triton kernels.
+* ``rocshmem``: a host-API rocSHMEM backend (single-node / IPC-only) that
+  links NO device bitcode — every P2P op is plain Triton to an XGMI-mapped
+  peer address.
+
+Module-level public names (stable across backends):
     putmem_nbi_block, getmem_nbi_block, quiet, int_p, int_g,
     int_atomic_compare_swap, int_atomic_swap,
     tid, __syncthreads,
-    LIB_NVSHMEM_PATH, NVSHMEM_EXTERN_LIBS
+    LIB_SHMEM_PATH, SHMEM_EXTERN_LIBS
 
 Design notes
 ------------
 1. ``putmem_nbi_block``, ``getmem_nbi_block``, ``int32_p`` and other MORI
-   device functions take an *extra* ``qp`` (queue-pair index) argument that
-   NVSHMEM does not have. The ODC wrappers below thread a fixed ``qp=0``
-   inside ``@triton.jit``-decorated thin shims so callers in ODC need not
-   change.
-2. MORI has no exact equivalent of ``nvshmem_int_g`` (single-int blocking
-   get). We implement ``int_g`` via a 4-byte ``getmem_thread`` into a
-   scratch register, which is bytewise equivalent.
+   device functions take an *extra* ``qp`` (queue-pair index) argument. The
+   ODC wrappers below thread a fixed ``qp=0`` inside ``@triton.jit``-decorated
+   thin shims so callers in ODC need not change.
+2. MORI has no single-int blocking get, so ``int_g`` is implemented via a
+   4-byte ``getmem_thread`` into a scratch register.
 3. ``tid(axis=0)`` was used by ``utils.sync_cta`` to elect a "first thread"
-   in a wave that performs an atomic_add. NVVM ``llvm.nvvm.read.ptx.sreg.tid.x``
-   does not exist on AMDGPU. We provide a Triton-native alternative
-   (``_TID_LANE0``) that returns a value comparable with 0 — used in the
-   same idiom ``if tidx == 0:``. Concretely we use Triton's vector mask
-   pattern: an ``arange(0, 1)`` lane vector with mask ``offsets == 0``
-   already restricts execution to lane 0, so ``tid`` is implemented as a
-   helper constant that the caller compares against 0.
-4. ``__syncthreads`` is implemented via Triton's IR barrier (``create_barrier``).
-   This is platform-independent (lowers to ``s_barrier`` on AMDGPU and
-   ``barrier.sync`` on PTX).
-5. ``NVSHMEM_EXTERN_LIBS`` is replaced with ``mori.ir.triton.get_extern_libs()``
-   which automatically locates the JIT-compiled MORI device bitcode for
-   the current GPU + NIC. The Triton compile hook ``install_hook()`` is
-   called at import time, replacing ODC's hand-written
-   ``CompiledKernel._init_handles`` monkey-patch.
+   in a wave that performs an atomic_add. ``llvm.nvvm.read.ptx.sreg.tid.x``
+   does not exist on AMDGPU. We provide a Triton-native alternative: an
+   ``arange(0, 1)`` lane vector with mask ``offsets == 0`` restricts execution
+   to lane 0, so ``tid`` is implemented as a constant that the caller compares
+   against 0.
+4. ``__syncthreads`` is implemented via Triton's IR barrier
+   (``create_barrier``), which lowers to ``s_barrier`` on AMDGPU.
+5. ``SHMEM_EXTERN_LIBS`` is ``mori.ir.triton.get_extern_libs()`` which locates
+   the JIT-compiled MORI device bitcode for the current GPU + NIC. The Triton
+   compile hook ``install_hook()`` is called at import time.
 """
 
 import os
 
-import torch
 import triton
 import triton.language as tl
 from packaging import version
 from triton.language import core
 
 # ---------------------------------------------------------------------------
-# Platform selection: ROCm uses MORI; NVIDIA uses NVSHMEM upstream code path.
-# ---------------------------------------------------------------------------
-_IS_ROCM = torch.version.hip is not None
-
-# ODC P2P backend selector (ROCm only). Default "mori" keeps the existing,
-# verified behaviour byte-for-byte; "rocshmem" selects the host-API backend
+# ODC P2P backend selector. Default "mori" keeps the existing, verified
+# behaviour byte-for-byte; "rocshmem" selects the host-API backend
 # (single-node / IPC-only) defined in the dedicated branch below.
+# ---------------------------------------------------------------------------
 _P2P_BACKEND = os.environ.get("ODC_P2P_BACKEND", "mori").lower()
 
 
@@ -66,9 +59,9 @@ def is_triton_version_supported():
 
 
 # ===========================================================================
-# Branch 1a: ROCm + rocSHMEM host-API backend (single-node / IPC-only).
+# Branch A: rocSHMEM host-API backend (single-node / IPC-only).
 #
-# No device bitcode is linked into Triton (NVSHMEM_EXTERN_LIBS == {}); every
+# No device bitcode is linked into Triton (SHMEM_EXTERN_LIBS == {}); every
 # P2P op is plain Triton to an XGMI-mapped peer address. A LOCAL symmetric
 # address is translated to a peer address by adding a per-PE affine byte delta
 # (rocshmem_ptr is affine — empirically verified). The delta table is populated
@@ -80,11 +73,11 @@ def is_triton_version_supported():
 # TRITON_CACHE_DIR so a rank never loads another rank's cached kernel (the
 # baked deltas differ per process).
 # ===========================================================================
-if _IS_ROCM and _P2P_BACKEND == "rocshmem":
+if _P2P_BACKEND == "rocshmem":
     # Empty extern-libs: Triton compiles these kernels with NO device bitcode.
-    NVSHMEM_EXTERN_LIBS = {}
+    SHMEM_EXTERN_LIBS = {}
     LIB_NAME = "librocshmem_host"
-    LIB_NVSHMEM_PATH = ""
+    LIB_SHMEM_PATH = ""
 
     # Per-PE affine pointer deltas (bytes), indexed by LOCAL position
     # (global pe - node_start), baked into the int_p / int_g /
@@ -219,37 +212,36 @@ if _IS_ROCM and _P2P_BACKEND == "rocshmem":
 
 
 # ===========================================================================
-# Branch 1b: ROCm + MORI backend (default) — re-export MORI device API.
+# Branch B: MORI backend (default) — re-export MORI device API.
 # ===========================================================================
-elif _IS_ROCM:
+else:
     import mori.shmem as _ms  # noqa: F401  (used by users importing this module)
     from mori.ir import triton as _mt
     from mori.ir.triton import get_extern_libs as _mori_get_extern_libs
     from mori.ir.triton import install_hook as _mori_install_hook
 
-    # Install MORI's Triton compile hook (replaces ODC's CompiledKernel._init_handles
-    # monkey-patch). After install_hook(), Triton compilation of any kernel that
-    # uses MORI device functions will be linked against libmori_shmem_device.bc.
+    # Install MORI's Triton compile hook. After install_hook(), Triton
+    # compilation of any kernel that uses MORI device functions will be linked
+    # against libmori_shmem_device.bc.
     _mori_install_hook()
 
-    # NVSHMEM_EXTERN_LIBS used to be a dict {LIB_NAME: LIB_NVSHMEM_PATH}; MORI
-    # returns the same shape from ``get_extern_libs()``.
-    NVSHMEM_EXTERN_LIBS = _mori_get_extern_libs()
+    # SHMEM_EXTERN_LIBS is a dict {LIB_NAME: LIB_SHMEM_PATH}; MORI returns the
+    # same shape from ``get_extern_libs()``.
+    SHMEM_EXTERN_LIBS = _mori_get_extern_libs()
     LIB_NAME = "libmori_shmem"
-    # LIB_NVSHMEM_PATH kept for backward compatibility with code that probes
-    # the dict (e.g. nvshmem_triton.py:24 in the upstream init_handles patch).
-    # On ROCm this is the path to the JIT-compiled MORI bitcode.
-    if isinstance(NVSHMEM_EXTERN_LIBS, dict) and NVSHMEM_EXTERN_LIBS:
-        LIB_NVSHMEM_PATH = next(iter(NVSHMEM_EXTERN_LIBS.values()))
+    # LIB_SHMEM_PATH kept for backward compatibility with code that probes the
+    # dict; on ROCm this is the path to the JIT-compiled MORI bitcode.
+    if isinstance(SHMEM_EXTERN_LIBS, dict) and SHMEM_EXTERN_LIBS:
+        LIB_SHMEM_PATH = next(iter(SHMEM_EXTERN_LIBS.values()))
     else:
-        LIB_NVSHMEM_PATH = ""
+        LIB_SHMEM_PATH = ""
 
     # -----------------------------------------------------------------------
     # Device API: thin @triton.jit shims that fold the extra ``qp`` argument.
     # -----------------------------------------------------------------------
-    # NOTE: MORI device functions take an extra qp index. ODC's upstream
-    # signatures pass (dest, src, nbytes, pe). We hard-code qp=0 for now
-    # (single-QP is the default); if/when ODC wants multi-QP, change here.
+    # NOTE: MORI device functions take an extra qp index. ODC's signatures pass
+    # (dest, src, nbytes, pe). We hard-code qp=0 for now (single-QP is the
+    # default); if/when ODC wants multi-QP, change here.
 
     @triton.jit
     def putmem_nbi_block(dest, source, nbytes, pe):
@@ -267,8 +259,7 @@ elif _IS_ROCM:
     def int_p(dest, value, pe):
         """Write a 32-bit int to ``dest`` on rank ``pe`` from this rank.
 
-        ROCm/MORI implementation (SAME-NODE ONLY — byte-identical to the
-        original ODC ROCm port; do NOT add cross-node code here).
+        SAME-NODE ONLY.
         ------------------------------------------------------------------
         Resolve the peer pointer via ``ptr_p2p`` (XGMI direct mapping)
         and write through it with ``tl.store``. This is the recommended
@@ -308,13 +299,13 @@ elif _IS_ROCM:
         (IBGDA) transport for a cross-node PE (and P2P for a same-node PE, so
         it is also safe if called with a same-node peer). ``dest`` is the
         LOCAL symmetric address; MORI resolves the remote PE's matching
-        symmetric offset internally (qp=0). Mirrors ``nvshmem_int_p``.
+        symmetric offset internally (qp=0).
 
         This primitive is intentionally SEPARATE from ``int_p`` so that the
         RDMA device symbol is only ever linked into the cross-node-only
-        kernels (``nvshmem_*_remote_node_kernel`` / ``nvshmem_cross_node_*``),
+        kernels (``shmem_*_remote_node_kernel`` / ``shmem_cross_node_*``),
         which are never compiled/launched on a single node. This keeps the
-        single-node code path byte-identical to upstream.
+        single-node code path unchanged.
         """
         _mt.int32_p(dest.to(tl.uint64, bitcast=True), value, pe, 0)
 
@@ -322,9 +313,7 @@ elif _IS_ROCM:
     def int_g(src, pe):
         """Read a 32-bit int from ``src`` on rank ``pe`` to this rank (single read).
 
-        ROCm/MORI implementation (SAME-NODE ONLY — byte-identical to the
-        original ODC ROCm port; do NOT add cross-node code here, same
-        regression-guard rationale as ``int_p``).
+        SAME-NODE ONLY (same regression-guard rationale as ``int_p``).
         ------------------------------------------------------------------
         Resolve the peer pointer via ``ptr_p2p`` (XGMI direct mapping) and
         read with ``tl.load``. NOTE: a *single* read is fine, but do NOT
@@ -345,18 +334,16 @@ elif _IS_ROCM:
     def int_wait_until_equals(ptr, expected, pe):
         """Block until the int32 at ``ptr`` on rank ``pe`` equals ``expected``.
 
-        This is the correct replacement for ODC's upstream
+        This is the correct replacement for a naive
             ``while r != expected: quiet(); r = int_g(...)``
         spin loop on ROCm.
 
         Root cause it fixes
         -------------------
-        ODC's upstream wait loop uses ``nvshmem_int_g`` which carries GPU
-        memory-model acquire semantics on NVIDIA. The naive ROCm port
-        ``while ...: tl.load(volatile=True)`` does NOT — on MI300X the GPU
-        L2 caches the peer address and a long-lived in-kernel spin never
-        sees the watcher subprocess's ack write, causing the
-        scatter_accumulate "60s hang".
+        A naive spin ``while ...: tl.load(volatile=True)`` does not observe
+        cross-process updates on MI300X: the GPU L2 caches the peer address
+        and a long-lived in-kernel spin never sees the watcher subprocess's
+        ack write, causing the scatter_accumulate "60s hang".
 
         MORI's ``int32_wait_until_equals`` is implemented as
             ``while (AtomicLoadRelaxedSystem(addr) != val) {}``
@@ -364,7 +351,7 @@ elif _IS_ROCM:
         the cross-process / cross-GPU write becomes visible. Verified on
         MI300X: replacing the volatile spin with this turns a hang into a
         ~0.19 ms wait. We pass the PEER's P2P-resolved address so the
-        same-node read path is exercised (mirrors ODC's int_g(.., peer)).
+        same-node read path is exercised.
         """
         my_pe = _mt.my_pe()
         if pe == my_pe:
@@ -388,13 +375,11 @@ elif _IS_ROCM:
         ``ptr_p2p`` returns 0 and there is no local address that aliases
         the remote slot — so we must actively pull the value over RDMA.
 
-        Implementation (mirrors upstream NVSHMEM's ``int_g`` spin)
-        ---------------------------------------------------------
+        Implementation
+        --------------
         Repeatedly RDMA-``get`` the 4-byte remote slot into a local
-        symmetric scratch and compare, exactly like upstream ODC's
-        ``while r != expected: quiet(); r = nvshmem_int_g(ptr, pe)``.
-        ``getmem`` carries no atomic-alignment constraint (unlike a remote
-        atomic), so any int32 slot works.
+        symmetric scratch and compare. ``getmem`` carries no atomic-alignment
+        constraint (unlike a remote atomic), so any int32 slot works.
 
         Args:
             scratch_ptr: a LOCAL symmetric/registered int32 scratch slot
@@ -464,291 +449,5 @@ elif _IS_ROCM:
 
     @core.extern
     def __syncthreads(_semantic=None):
-        # Platform-portable: Triton IR barrier. Lowers to s_barrier on
-        # AMDGPU and barrier.sync 0 on NVPTX.
-        return tl.tensor(_semantic.builder.create_barrier(), tl.void)
-
-
-# ===========================================================================
-# Branch 2: NVIDIA path — original ODC upstream code, unchanged.
-# ===========================================================================
-else:
-    import pathlib
-
-    import nvidia.nvshmem
-    import nvshmem.bindings
-    import triton.compiler.compiler as compiler_module
-
-    # Monkey patch the CompiledKernel._init_handles or it will crash on:
-    #     RuntimeError: CUDA error: an illegal memory access was encountered
-    original_init_handles = compiler_module.CompiledKernel._init_handles
-
-    nvshmem_init_kernels = set()
-
-    def patched_init_handles(self):
-        original_init_handles(self)
-        extern_libs = self.metadata.extern_libs
-        enable_nvshmem = any(
-            lib_name == LIB_NAME or path == LIB_NVSHMEM_PATH for lib_name, path in extern_libs
-        )
-        key = (self.name, self.module)
-        if enable_nvshmem and key not in nvshmem_init_kernels:
-            assert self.module is not None, "Module is None"
-            nvshmem.bindings.nvshmem.cumodule_init(self.module)
-            nvshmem_init_kernels.add(key)
-
-    compiler_module.CompiledKernel._init_handles = patched_init_handles
-
-    def get_nvshmem_home_path():
-        if "NVSHMEM_HOME" in os.environ:
-            return pathlib.Path(os.environ["NVSHMEM_HOME"])
-        return pathlib.Path(nvidia.nvshmem.__path__[0])
-
-    LIB_NVSHMEM_PATH = str(get_nvshmem_home_path() / "lib" / "libnvshmem_device.bc")
-    LIB_NAME = "libnvshmem"
-
-    NVSHMEM_EXTERN_LIBS = {
-        LIB_NAME: LIB_NVSHMEM_PATH,
-    }
-
-    @core.extern
-    def _tid_wrapper(axis: core.constexpr, _semantic=None):
-        return core.extern_elementwise(
-            "",
-            "",
-            [],
-            {
-                (): (
-                    f"llvm.nvvm.read.ptx.sreg.tid.{axis.value}",
-                    core.dtype("int32"),
-                ),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    # pylint: disable=inconsistent-return-statements
-    @core.extern
-    def tid(axis: core.constexpr, _semantic=None):
-        if axis == 0:
-            return _tid_wrapper(core.constexpr("x"), _semantic=_semantic)
-        elif axis == 1:
-            return _tid_wrapper(core.constexpr("y"), _semantic=_semantic)
-        elif axis == 2:
-            return _tid_wrapper(core.constexpr("z"), _semantic=_semantic)
-        else:
-            tl.static_assert(False, "axis must be 0, 1 or 2", _semantic=_semantic)
-
-    @triton.jit
-    def int_atomic_compare_swap(dest, cond, value, pe):
-        return int_atomic_compare_swap_wrapper(dest.to(tl.int64), cond, value, pe)
-
-    @core.extern
-    def int_atomic_compare_swap_wrapper(dest, cond, value, pe, _semantic=None):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [dest, cond, value, pe],
-            {
-                (tl.int64, tl.int32, tl.int32, tl.int32): (
-                    "nvshmem_int_atomic_compare_swap",
-                    tl.int32,
-                ),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def int_atomic_swap(dest, value, pe):
-        return int_atomic_swap_wrapper(dest.to(tl.int64), value, pe)
-
-    @core.extern
-    def int_atomic_swap_wrapper(dest, value, pe, _semantic=None):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [dest, value, pe],
-            {
-                (tl.int64, tl.int32, tl.int32): (
-                    "nvshmem_int_atomic_swap",
-                    tl.int32,
-                ),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @core.extern
-    def _putmem_impl(
-        dest,
-        source,
-        nbytes,
-        pe,
-        SCOPE_SUFFIX: core.constexpr,
-        NBI: core.constexpr = core.constexpr(""),
-        _semantic=None,
-    ):
-        assert is_triton_version_supported(), "putmem_nbi_block is only supported in Triton v3.4.0 and above"
-        name = f"nvshmem{'x' if SCOPE_SUFFIX.value else ''}_putmem{NBI.value}{SCOPE_SUFFIX.value}"
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [
-                dest,
-                source,
-                nbytes,
-                pe,
-            ],
-            {
-                (
-                    tl.int64,
-                    tl.int64,
-                    tl.uint64,
-                    tl.int32,
-                ): (name, tl.int32),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def putmem_nbi_block(dest, source, nbytes, pe):
-        return _putmem_impl(
-            dest.to(tl.int64),
-            source.to(tl.int64),
-            nbytes.to(tl.uint64),
-            pe,
-            core.constexpr("_block"),
-            core.constexpr("_nbi"),
-        )
-
-    @core.extern
-    def _getmem_impl(
-        dest,
-        source,
-        nbytes,
-        pe,
-        SCOPE_SUFFIX: core.constexpr,
-        NBI: core.constexpr = core.constexpr(""),
-        _semantic=None,
-    ):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [
-                dest,
-                source,
-                nbytes,
-                pe,
-            ],
-            {
-                (
-                    tl.int64,
-                    tl.int64,
-                    tl.uint64,
-                    tl.int32,
-                ): (
-                    f"nvshmem{'x' if SCOPE_SUFFIX.value else ''}_getmem{NBI.value}{SCOPE_SUFFIX.value}",
-                    tl.int32,
-                ),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def getmem_nbi_block(dest, source, nbytes, pe):
-        return _getmem_impl(
-            dest.to(tl.int64),
-            source.to(tl.int64),
-            nbytes.to(tl.uint64),
-            pe,
-            core.constexpr("_block"),
-            core.constexpr("_nbi"),
-        )
-
-    @core.extern
-    def quiet(_semantic=None):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [],
-            {
-                (): ("nvshmem_quiet", tl.int32),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def int_p(dest, value, pe):
-        return int_p_wrapper(dest.to(tl.int64), value, pe)
-
-    @triton.jit
-    def int_p_remote(dest, value, pe):
-        # NVIDIA: nvshmem_int_p already routes to the remote PE over the active
-        # transport (IB/RDMA for cross-node), so the cross-node primitive is
-        # identical to int_p. Kept as a separate name so the shared remote-node
-        # kernels are platform agnostic.
-        return int_p_wrapper(dest.to(tl.int64), value, pe)
-
-    @core.extern
-    def int_p_wrapper(dest, value, pe, _semantic=None):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [dest, value, pe],
-            {
-                (tl.int64, tl.int32, tl.int32): ("nvshmem_int_p", tl.int32),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def int_g(src, pe):
-        return int_g_wrapper(src.to(tl.int64), pe)
-
-    @core.extern
-    def int_g_wrapper(src, pe, _semantic=None):
-        return core.extern_elementwise(
-            LIB_NAME,
-            LIB_NVSHMEM_PATH,
-            [src, pe],
-            {
-                (tl.int64, tl.int32): ("nvshmem_int_g", tl.int32),
-            },
-            is_pure=False,
-            _semantic=_semantic,
-        )
-
-    @triton.jit
-    def int_wait_until_equals(ptr, expected, pe):
-        """NVIDIA path: spin with nvshmem_int_g (which has acquire semantics).
-
-        Mirror of the ROCm ``int_wait_until_equals``; here we keep the
-        upstream ODC behaviour (quiet + int_g spin), which works on
-        NVIDIA because nvshmem_int_g is not a plain volatile load.
-        """
-        r = expected - 1
-        while r != expected:
-            quiet()
-            r = int_g(ptr, pe)
-
-    @triton.jit
-    def int_wait_until_equals_remote(scratch_ptr, src_ptr, expected, pe):
-        """NVIDIA path: cross-node spin-wait. ``nvshmem_int_g`` already pulls
-        the value from the remote PE over the active transport (IB/RDMA),
-        so the scratch argument is unused — we keep the upstream
-        quiet + int_g spin verbatim. Signature matches the ROCm variant so
-        the shared remote-node kernel is platform agnostic.
-        """
-        r = expected - 1
-        while r != expected:
-            quiet()
-            r = int_g(src_ptr, pe)
-
-    @core.extern
-    def __syncthreads(_semantic=None):
+        # Platform-portable: Triton IR barrier. Lowers to s_barrier on AMDGPU.
         return tl.tensor(_semantic.builder.create_barrier(), tl.void)

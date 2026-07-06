@@ -5,13 +5,9 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
-from odc.primitives import (
-    NVSHMEM_EXTERN_LIBS,
-    __syncthreads,
-    getmem_nbi_block,
-    quiet,
-    tid,
-)
+from torch import Tensor
+
+from odc.primitives import SHMEM_EXTERN_LIBS, __syncthreads, getmem_nbi_block, quiet, tid
 from odc.primitives.utils import (
     BufferSplitter,
     SymmBufferRegistry,
@@ -19,15 +15,14 @@ from odc.primitives.utils import (
     get_local_world_size,
     sync_cta,
 )
-from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
 # rocSHMEM RO (host-driven) cross-node backend. When active, the cross-node
 # all-gather pulls each remote peer's input shard with a blocking host
-# ``rs_getmem`` from the CPU (no device-initiated RDMA -> avoids the MORI /
-# NVSHMEM device-completion hang on this fabric). Same-node peers still use the
-# XGMI peer-tensor copy. The mori / nvshmem device kernel path is untouched.
+# ``rs_getmem`` from the CPU (no device-initiated RDMA -> avoids the MORI
+# device-completion hang on this fabric). Same-node peers still use the
+# XGMI peer-tensor copy. The mori device kernel path is untouched.
 from odc.primitives.utils import _USE_ROCSHMEM  # noqa: E402
 
 if _USE_ROCSHMEM:
@@ -45,18 +40,18 @@ def _gda_active():
 
 
 def _official_push():
-    """ODC_OFFICIAL_PUSH=1 -> use upstream NVSHMEM ODC's single-sided device-get
-    all-gather and skip our host-driven RO get + the GDA gather barrier/async
-    extras. Default ("0") keeps current behaviour. Env-gated; nothing deleted.
-    (Gather is read-only on stable params, so this is the lower-risk side; the
-    primary alignment target is scatter-accumulate.)"""
+    """ODC_OFFICIAL_PUSH=1 -> use the single-sided device-get all-gather and
+    skip our host-driven RO get + the GDA gather barrier/async extras. Default
+    ("0") keeps current behaviour. Env-gated; nothing deleted. (Gather is
+    read-only on stable params, so this is the lower-risk side; the primary
+    alignment target is scatter-accumulate.)"""
     import os as _os
 
     return _os.environ.get("ODC_OFFICIAL_PUSH", "0") == "1"
 
 
 @triton.jit
-def nvshmem_device_producer_gather_2d_get_block_kernel_chunked_synced(
+def shmem_device_producer_gather_2d_get_block_kernel_chunked_synced(
     remote_tensor_ptr,
     target_tensor_ptr,
     elem_per_rank,
@@ -230,7 +225,7 @@ class GatherService:
                     assert group_world_size % 8 == 0 or group_world_size < 8
                     # grid_size = 8 if world_size == 32 else world_size
                     grid_size = local_world_size
-                    nvshmem_device_producer_gather_2d_get_block_kernel_chunked_synced[(grid_size,)](
+                    shmem_device_producer_gather_2d_get_block_kernel_chunked_synced[(grid_size,)](
                         remote_tensor_ptr=sub_input_tensor,
                         target_tensor_ptr=target_tensor_split.view(-1),
                         elem_per_rank=sub_input_tensor.numel(),
@@ -241,7 +236,7 @@ class GatherService:
                         chunk_size=chunk_size,
                         signal_ptr=signal_ptr,
                         num_warps=32,
-                        extern_libs=NVSHMEM_EXTERN_LIBS,
+                        extern_libs=SHMEM_EXTERN_LIBS,
                     )
                 if buf_size == output_size:
                     local_world_data_size = size * local_world_size
