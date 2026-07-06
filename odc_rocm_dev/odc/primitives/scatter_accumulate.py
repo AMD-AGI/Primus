@@ -61,6 +61,41 @@ def _gda_active():
     return _rs is not None and _rs.gda_enabled()
 
 
+def _single_device_reduce():
+    """ODC_SINGLE_DEVICE_REDUCE=1 -> single-node, watcher-FREE reduce-scatter
+    accumulate. This is the gated grey path that lets us evaluate dropping the
+    ReductionWatcher subprocess + tensor_ipc (HIP GPU-IPC) on a single node.
+
+    Mechanism (owner-side PULL + on-chip sum over XGMI peer views):
+      * Each PE stages its (locally pre-accumulated) full grad into a symmetric
+        buffer whose same-node peer views are already resolved via ``rs_ptr``
+        (rocshmem) / ``mori`` -- the SAME XGMI peer-view machinery gather.py and
+        the watcher push already use.
+      * After a rendezvous barrier, PE r reads every same-node peer p's segment
+        destined for r (a plain XGMI ``.copy_`` peer read) and sums it into its
+        fp32 accumulator on-chip. There are NO cross-rank writes -> no device
+        atomics -> no MI300X write-visibility/L2-staleness hazard; only XGMI
+        reads gated by a barrier (identical guarantee to the gather pull).
+      * No second process -> no ``get_ipc_handle`` / ``reconstruct_tensor`` and
+        no ``ReductionWatcher``/``server_loop`` at all on this path.
+
+    Deadlock safety: like the multi-node GDA path, the per-micro-batch call only
+    pre-accumulates LOCALLY (no collective), and the ONE barriered reduce runs
+    per-group at ``get_accumulation`` (barrier count == #param-groups, matched
+    across ranks). So variable-length (nopad) micro-batch counts cannot mismatch
+    a collective barrier -> no rendezvous deadlock.
+
+    Default ("0") preserves the watcher + tensor_ipc path byte-for-byte; nothing
+    is deleted. Only same-node reduce groups take this path (see the guard in
+    ``scatter_accumulate``); multi-node GDA/RO is untouched.
+    """
+    return (
+        os.environ.get("ODC_SINGLE_DEVICE_REDUCE", "0") == "1"
+        and not _gda_active()
+        and not _ro_active()
+    )
+
+
 def _official_push():
     """ODC_OFFICIAL_PUSH=1 -> faithfully reproduce the reference single-sided
     "push + fire-and-forget" scatter-accumulate, bypassing every ROCm-specific
@@ -710,6 +745,9 @@ class ReductionService:
         if hasattr(self, "_gda_deferred"):  # Deliverable 23: reset per-minibatch deferred grads
             self._gda_deferred = {}
             self._gda_deferred_pg = {}
+        if hasattr(self, "_sdr_deferred"):  # ODC_SINGLE_DEVICE_REDUCE: reset per-minibatch deferred grads
+            self._sdr_deferred = {}
+            self._sdr_deferred_pg = {}
 
     def infer_output_shape(self, input_tensor, pg: dist.ProcessGroup):
         assert len(input_tensor.shape) == 1
@@ -1050,6 +1088,73 @@ class ReductionService:
                 _t_real,
             )
 
+    def _single_device_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
+        """Single-node, watcher-FREE device-side reduce-scatter accumulate.
+
+        Owner-side PULL + on-chip sum over same-node XGMI peer views (see
+        ``_single_device_reduce`` for the full rationale). ``input_tensor`` is
+        this PE's full (locally pre-accumulated) grad, laid out as
+        ``[shard_0 | shard_1 | ... | shard_{gws-1}]``; PE r owns output shard r.
+
+        Steps (all same-node, no subprocess, no IPC handle, no atomics):
+          1. Stage my full grad into a symmetric fp32 buffer (peer views resolved
+             on allocation, exactly like the watcher push buffer).
+          2. cuda sync + collective barrier -> every peer's stage is retired and
+             visible before any peer reads it over XGMI.
+          3. For each same-node peer p, XGMI-``.copy_`` p's segment destined for
+             MY shard into a local temp, then acc += temp (fp32 on-chip sum).
+          4. cuda sync + collective barrier -> all reads done before the shared
+             staging buffer can be reused by the next key/minibatch.
+        """
+        gws = torch.distributed.get_world_size(pg)
+        lws = get_local_world_size()
+        assert gws == lws, f"single-device reduce is same-node only: gws={gws} lws={lws}"
+        assert input_tensor.numel() % gws == 0, f"{input_tensor.numel()=} % {gws=}"
+        shard_elems = input_tensor.numel() // gws
+        reg = SymmBufferRegistry.get_instance()
+        rank = torch.distributed.get_rank(pg)  # single node -> group rank == local pos
+
+        # fp32 accumulator = MY output shard (matches GDA's fp32 acc semantics).
+        if key not in self.accumulation_indices:
+            acc = reg.get_or_create_symm_buffer(f"sdr_acc_{key}", (shard_elems,), torch.float32)
+            acc.fill_(0)
+            self.accumulation_indices[key] = len(self.accumulations)
+            self.accumulations.append(acc)
+        acc = self.accumulations[self.accumulation_indices[key]]
+
+        # Symmetric fp32 staging for my full grad, WITH same-node peer views. One
+        # per grad-numel; reused across keys/minibatches (guarded by the trailing
+        # barrier so no peer reuses it mid-read).
+        in_key = ("sdr_in", input_tensor.numel())
+        if in_key not in self.input_buffer:
+            self.input_buffer[in_key] = reg.get_or_create_symm_buffer(
+                f"sdr_in_{input_tensor.numel()}", (input_tensor.numel(),), torch.float32
+            )
+        input_sym = self.input_buffer[in_key]
+        peer_inputs = reg.get_peer_tensors(input_sym)
+        assert len(peer_inputs) == lws
+
+        tmp_key = ("sdr_tmp", shard_elems)
+        if tmp_key not in self.input_buffer:
+            self.input_buffer[tmp_key] = torch.empty(shard_elems, dtype=torch.float32, device="cuda")
+        tmp = self.input_buffer[tmp_key]
+
+        input_sym.copy_(input_tensor.view(-1).to(torch.float32))
+        torch.cuda.synchronize()
+        torch.distributed.barrier(group=pg)
+
+        lo = rank * shard_elems
+        hi = lo + shard_elems
+        # Rotate the peer order by local rank so all 8 PEs don't hammer the same
+        # peer's HBM first (matches the gather/scatter round-robin peer ordering).
+        for off in range(lws):
+            p = (rank + off) % lws
+            tmp.copy_(peer_inputs[p][lo:hi])
+            acc.add_(tmp)
+        torch.cuda.synchronize()
+        torch.distributed.barrier(group=pg)
+        self.dispatched_tasks += 1
+
     def scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         official = _official_push()
         if _gda_active():
@@ -1085,6 +1190,22 @@ class ReductionService:
                 self._gda_deferred_pg[key] = pg
                 return
             return self._gda_scatter_accumulate(key, input_tensor, pg)
+        if _single_device_reduce() and torch.distributed.get_world_size(pg) == get_local_world_size():
+            # ODC_SINGLE_DEVICE_REDUCE grey path (single node only). DEFER exactly
+            # like the multi-node GDA path: pre-accumulate this micro-batch's grad
+            # LOCALLY (no collective -> nopad-safe), then run ONE barriered
+            # owner-side pull-sum per group at get_accumulation. Pre-accumulate in
+            # fp32 so cross-micro-batch accumulation matches the watcher's fp32 acc.
+            if not hasattr(self, "_sdr_deferred"):
+                self._sdr_deferred = {}
+                self._sdr_deferred_pg = {}
+            cur = self._sdr_deferred.get(key)
+            if cur is None:
+                self._sdr_deferred[key] = input_tensor.detach().to(torch.float32)
+            else:
+                cur.add_(input_tensor)
+            self._sdr_deferred_pg[key] = pg
+            return
         output_tensor_shape = self.infer_output_shape(input_tensor, pg)
         accum_dtype = self.accumulation_dtype if self.accumulation_dtype is not None else input_tensor.dtype
         if key not in self.accumulation_indices:
@@ -1377,6 +1498,13 @@ class ReductionService:
             if pending is not None:
                 self._gda_deferred[key] = None
                 self._gda_scatter_accumulate(key, pending, self._gda_deferred_pg[key])
+        # ODC_SINGLE_DEVICE_REDUCE DEFER: run the single per-minibatch owner-side
+        # pull-sum now (once per group, matched barrier count across ranks).
+        if _single_device_reduce() and getattr(self, "_sdr_deferred", None) is not None:
+            pending = self._sdr_deferred.get(key)
+            if pending is not None:
+                self._sdr_deferred[key] = None
+                self._single_device_scatter_accumulate(key, pending, self._sdr_deferred_pg[key])
         acc = self.accumulations[self.accumulation_indices[key]]
         return acc
 
@@ -1390,6 +1518,15 @@ class ReductionService:
                 _rs.gda_rs_overlap_sync()
             # GDA path is fully synchronous (device kernels + barriers); no watcher
             # task accounting needed.
+            torch.cuda.synchronize()
+            torch.distributed.barrier(group=pg)
+            self.dispatched_tasks = 0
+            return
+        if _single_device_reduce():
+            # Single-node watcher-free path: the owner-side pull-sum already ran
+            # (synchronously, with its own barriers) inside get_accumulation. No
+            # watcher subprocess and no task-count rendezvous exists on this path;
+            # just a final cuda sync + barrier before the optimizer reads acc.
             torch.cuda.synchronize()
             torch.distributed.barrier(group=pg)
             self.dispatched_tasks = 0
