@@ -6,18 +6,17 @@
 # binaries. Run this once inside the base image (tasimage/primus-odc:v26.2 or
 # pr-722, ROCm 7.2.0 / gfx942) before using `ODC_P2P_BACKEND=rocshmem`.
 #
-# It performs three idempotent stages:
+# It performs two idempotent stages:
 #   1. Clone rocSHMEM @ pinned commit and cmake-build the static `librocshmem.a`
 #      for each requested variant (single / gda).
 #   2. hipcc-compile the two ctypes host bindings (librs_host5.so,
 #      librs_host_gda.so) against those static libs.
-#   3. `pip install --no-build-isolation -e .` to (re)build tensor_ipc.so.
 #
 # Everything is CPU-side cross-compilation for gfx942 — NO GPU is required.
 #
 # Usage:
 #   bash odc_rocm_dev/build_rocshmem_backend.sh [variants...] [--force]
-#     variants : any of {single gda tensor_ipc all}  (default: all)
+#     variants : any of {single gda all}  (default: all)
 #     --force  : rebuild even if outputs already exist
 #
 # Examples:
@@ -65,7 +64,7 @@ VARIANTS=()
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
-    all|single|gda|tensor_ipc) VARIANTS+=("$a") ;;
+    all|single|gda) VARIANTS+=("$a") ;;
     *) echo "!! unknown arg: $a"; exit 2 ;;
   esac
 done
@@ -192,18 +191,6 @@ if want gda; then
     "${RT}/gda_backend/rs_host_gda.cpp" \
     "${RT}/gda_backend/librs_host_gda.so" \
     -L"${OMPI_LIB}" -lmpi -libverbs -lmlx5 -lnuma
-fi
-
-# =============================================================================
-# Stage 3: build tensor_ipc.so (odc C++/HIP extension)
-# =============================================================================
-if want tensor_ipc; then
-  echo "== pip install -e odc (builds tensor_ipc.so)"
-  ( cd "${SCRIPT_DIR}" && pip install --no-build-isolation -e . )
-  python - <<'PY'
-import odc  # noqa
-print("== OK: import odc succeeded (tensor_ipc loaded)")
-PY
 fi
 
 echo "============================================================"

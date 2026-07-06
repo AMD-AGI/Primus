@@ -14,14 +14,14 @@ Run once inside a base-image container that has this project mounted (pure CPU
 cross-compilation for gfx942, **no GPU required**):
 
 ```bash
-bash odc_rocm_dev/build_rocshmem_backend.sh          # build everything: single + gda + tensor_ipc
+bash odc_rocm_dev/build_rocshmem_backend.sh          # build everything: single + gda
 # or build only the single-node backend (most common):
-bash odc_rocm_dev/build_rocshmem_backend.sh single tensor_ipc
+bash odc_rocm_dev/build_rocshmem_backend.sh single
 ```
 
 The script is idempotent: it will (1) git clone rocSHMEM at the pinned commit and
-cmake-build each variant's `librocshmem.a`, (2) hipcc-build the 2 ctypes binding
-`.so` files, and (3) `pip install -e .` to build `tensor_ipc.so`.
+cmake-build each variant's `librocshmem.a`, and (2) hipcc-build the 2 ctypes
+binding `.so` files.
 All logs go to `rocshmem_runtime/build.log`; the artifacts (`.so` / `rocshmem_*/`)
 are already ignored by `.gitignore` and will not accidentally be checked in. Add
 `--force` to force a rebuild.
@@ -113,7 +113,7 @@ Always use `build_rocshmem_backend.sh`; it encapsulates all of the details below
 # Rebuild everything:
 bash odc_rocm_dev/build_rocshmem_backend.sh --force
 # Rebuild only one variant's .so (the static lib is reused if it exists):
-bash odc_rocm_dev/build_rocshmem_backend.sh single        # or gda / tensor_ipc
+bash odc_rocm_dev/build_rocshmem_backend.sh single        # or gda
 ```
 
 The cmake / hipcc commands for each variant (what the script actually runs, for reference):

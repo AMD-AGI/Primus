@@ -15,22 +15,6 @@ from .shmem_triton import (
     tid,
 )
 
-# Try to import tensor_ipc as a proper extension module (for pip install)
-try:
-    # Need to import torch first to avoid:
-    # ImportError: libc10.so: cannot open shared object file
-    import torch  # noqa: F401
-
-    from . import tensor_ipc  # pylint: disable=import-self
-
-    get_ipc_handle = tensor_ipc.get_ipc_handle
-    reconstruct_tensor = tensor_ipc.reconstruct_tensor
-except ImportError as e:
-    raise ImportError(
-        f"Failed to import tensor_ipc. "
-        f"Please install the package using 'pip install' or 'pip install -e .' to build the HIP extensions: {e}"
-    ) from e
-
 __all__ = [
     # shmem_triton
     "int_atomic_compare_swap",
@@ -47,7 +31,4 @@ __all__ = [
     "__syncthreads",
     "LIB_SHMEM_PATH",
     "SHMEM_EXTERN_LIBS",
-    # tensor_ipc
-    "get_ipc_handle",
-    "reconstruct_tensor",
 ]

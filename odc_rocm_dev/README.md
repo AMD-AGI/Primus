@@ -39,7 +39,9 @@ We highly recommend using a ROCm PyTorch base image (e.g. the
 ```
 pip install --no-build-isolation -e .
 ```
-It **requires some time** to compile the HIP extension `tensor_ipc`.
+ODC is a pure-Python package; the rocSHMEM host bindings (single-node XGMI IPC
+and multi-node GPU-direct GDA) are built from source via
+`build_rocshmem_backend.sh`.
 
 ## Quick Start
 

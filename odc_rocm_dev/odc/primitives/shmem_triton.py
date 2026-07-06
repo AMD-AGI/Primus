@@ -140,8 +140,8 @@ if _P2P_BACKEND == "rocshmem":
     @triton.jit
     def int_p(dest, value, pe):
         """Same-node single-int put: SYSTEM-scope release atomic store to the
-        peer's XGMI-mapped fine-grained slot (visible to the peer's CPU watcher
-        D2H read). ``pe == my_pe`` -> delta 0 -> local store."""
+        peer's XGMI-mapped fine-grained slot (visible to a peer CPU-side read).
+        ``pe == my_pe`` -> delta 0 -> local store."""
         peer = _rs_peer_addr(dest, pe).to(tl.pointer_type(tl.int32), bitcast=True)
         tl.atomic_xchg(peer, value, sem="release", scope="sys")
 
@@ -156,7 +156,7 @@ if _P2P_BACKEND == "rocshmem":
     def int_wait_until_equals(ptr, expected, pe):
         """Spin until the peer slot == ``expected`` using a SYSTEM-scope acquire
         atomic load (atomic_add of 0). This bypasses the MI300X L2 staleness that
-        makes a naive volatile-load spin never observe the watcher's ack
+        makes a naive volatile-load spin never observe a peer's ack
         (verified: ~sub-ms wait instead of a hang). The pure-Triton equivalent
         of mori's int32_wait_until_equals."""
         peer = _rs_peer_addr(ptr, pe).to(tl.pointer_type(tl.int32), bitcast=True)
@@ -342,7 +342,7 @@ else:
         -------------------
         A naive spin ``while ...: tl.load(volatile=True)`` does not observe
         cross-process updates on MI300X: the GPU L2 caches the peer address
-        and a long-lived in-kernel spin never sees the watcher subprocess's
+        and a long-lived in-kernel spin never sees a cross-process peer's
         ack write, causing the scatter_accumulate "60s hang".
 
         MORI's ``int32_wait_until_equals`` is implemented as

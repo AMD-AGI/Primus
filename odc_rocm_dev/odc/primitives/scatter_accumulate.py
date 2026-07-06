@@ -1,39 +1,13 @@
 import logging
-import math
 import os
-import queue as _queue
-import time
-from collections import defaultdict
-from dataclasses import dataclass
-from functools import reduce
-from threading import Thread
-from typing import List, Mapping, Tuple
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
-import triton
-import triton.language as tl
 
-from odc.primitives import (
-    SHMEM_EXTERN_LIBS,
-    __syncthreads,
-    get_ipc_handle,
-    int_p,
-    int_p_remote,
-    int_wait_until_equals,
-    int_wait_until_equals_remote,
-    putmem_nbi_block,
-    quiet,
-    reconstruct_tensor,
-    tid,
-)
 from odc.primitives.utils import (
-    BufferSplitter,
     SymmBufferRegistry,
     get_comm_stream,
     get_local_world_size,
-    sync_cta,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,694 +24,49 @@ def _gda_active():
     return _rs is not None and _rs.gda_enabled()
 
 
-def _single_device_reduce():
-    """ODC_SINGLE_DEVICE_REDUCE=1 -> single-node, watcher-FREE reduce-scatter
-    accumulate. This is the gated grey path that lets us evaluate dropping the
-    ReductionWatcher subprocess + tensor_ipc (HIP GPU-IPC) on a single node.
-
-    Mechanism (owner-side PULL + on-chip sum over XGMI peer views):
-      * Each PE stages its (locally pre-accumulated) full grad into a symmetric
-        buffer whose same-node peer views are already resolved via ``rs_ptr``
-        (rocshmem) / ``mori`` -- the SAME XGMI peer-view machinery gather.py and
-        the watcher push already use.
-      * After a rendezvous barrier, PE r reads every same-node peer p's segment
-        destined for r (a plain XGMI ``.copy_`` peer read) and sums it into its
-        fp32 accumulator on-chip. There are NO cross-rank writes -> no device
-        atomics -> no MI300X write-visibility/L2-staleness hazard; only XGMI
-        reads gated by a barrier (identical guarantee to the gather pull).
-      * No second process -> no ``get_ipc_handle`` / ``reconstruct_tensor`` and
-        no ``ReductionWatcher``/``server_loop`` at all on this path.
-
-    Deadlock safety: like the multi-node GDA path, the per-micro-batch call only
-    pre-accumulates LOCALLY (no collective), and the ONE barriered reduce runs
-    per-group at ``get_accumulation`` (barrier count == #param-groups, matched
-    across ranks). So variable-length (nopad) micro-batch counts cannot mismatch
-    a collective barrier -> no rendezvous deadlock.
-
-    Default ("0") preserves the watcher + tensor_ipc path byte-for-byte; nothing
-    is deleted. Only same-node reduce groups take this path (see the guard in
-    ``scatter_accumulate``); the multi-node GDA path is untouched.
-    """
-    return os.environ.get("ODC_SINGLE_DEVICE_REDUCE", "0") == "1" and not _gda_active()
-
-
 def _official_push():
-    """ODC_OFFICIAL_PUSH=1 -> faithfully reproduce the reference single-sided
-    "push + fire-and-forget" scatter-accumulate, bypassing every ROCm-specific
-    addition we layered on (NONE are deleted -- they are only skipped via
-    ``if not _official_push()`` while this switch is on):
-
-      * intra-node IPC path: keep the direct peer write (``peer_buf.copy_``) +
-        the watcher request signal (owner-side accumulation), but DROP the
-        per-call ack/settle kernel (``shmem_wait_accumulation_same_node_kernel``)
-        and DROP the trailing ``wait_stream`` serialization so the push overlaps
-        the backward compute (fire-and-forget). A single light minibatch-end
-        ``sync()`` (watcher task-count rendezvous) guarantees arrival.
-      * inter-node non-GDA path already IS the official single-sided push
-        (``shmem_cross_node_scatter`` -> device ``putmem_nbi`` + periodic
-        ``quiet``), so it is used unchanged.
-      * GDA path: skip our ``_rs.barrier()`` per-call, strided/full warmup
-        settle, overlap side-stream and DEFER block (collective reduce-scatter
-        runs bare -- closest reproduction of official no-settle).
-
-    Default ("0") preserves all current behaviour. Env-gated; nothing removed.
+    """ODC_OFFICIAL_PUSH=1 -> reproduce the reference single-sided push on the
+    GDA path: skip our per-call ``_rs.barrier()``, the strided/full warm-up
+    settle, the overlap side-stream and the DEFER block, so the collective
+    reduce-scatter runs bare (the closest reproduction of the upstream
+    no-settle behaviour). Default ("0") preserves the current GDA behaviour.
     """
     return os.environ.get("ODC_OFFICIAL_PUSH", "0") == "1"
 
 
-def _settle_defer():
-    """ODC_SETTLE_DEFER=1 -> move the per-layer settle (the
-    ``shmem_wait_accumulation_same_node_kernel`` ack-wait) OFF the backward
-    critical path to raise compute/settle overlap, WITHOUT going fully
-    fire-and-forget (which deadlocks, see ``_official_push``).
-
-    What it changes (intra-node same-node path only):
-      * KEEP the per-layer push + per-layer ack/settle kernel (nothing deleted)
-        -- they stay queued on the per-peer ``rank_streams`` whose serial order
-        still guards staging-buffer reuse across layers.
-      * SKIP the trailing per-layer ``current_stream().wait_stream(rank_streams)``
-        so backward compute does not block on each layer's settle.
-      * A SINGLE aggregate join in ``sync()`` (per minibatch, before the
-        optimizer reads the grads) collects all side-stream settles -> grads
-        are guaranteed landed before optimizer.step.
-      * ``record_stream`` keeps the source grad alive until the side-stream push
-        copy consumed it (cheap protection against source-buffer reuse).
-
-    Default ("0") preserves all current behaviour byte-for-byte. Env-gated.
-    """
-    return os.environ.get("ODC_SETTLE_DEFER", "0") == "1"
-
-
-def _settle_watchdog_sec():
-    """Fail-fast timeout (seconds) for the minibatch-end watcher rendezvous when
-    ODC_SETTLE_DEFER is on; 0 disables. Avoids a permanent GPU spin if the
-    watcher task-count never converges."""
-    try:
-        return float(os.environ.get("ODC_SETTLE_WATCHDOG_SEC", "120"))
-    except ValueError:
-        return 120.0
-
-
-MAX_REQUEST_COUNT = 2 * 100000
-
-
-@triton.jit(do_not_specialize=[])
-def shmem_scatter_kernel(
-    input_tensor_ptr,
-    rank_input_size,
-    input_segment_start,
-    chunk_buffer,
-    output_tensor_ptr,
-    elem_per_rank,
-    size_per_elem,
-    rank,
-    num_ranks_per_node,
-    world_size: tl.constexpr,
-    chunk_size: tl.constexpr,
-    signal_next_expected,
-    signal_ptr,
-):
-    pid = tl.program_id(axis=0)
-    tidx = tid(axis=0)
-    # np = tl.num_programs(axis=0)
-    assert num_ranks_per_node == tl.num_programs(axis=0)
-    np = num_ranks_per_node
-    assert world_size % np == 0
-    num_nodes = world_size // np
-    expected = signal_next_expected
-    chunk_buffer_seg = chunk_buffer + pid * chunk_size
-
-    # Use different kernel for the ranks in the same node.
-    for i in range(1, num_nodes):
-        peer_node = (i + rank // np) % num_nodes
-        peer = (pid + peer_node * np) % world_size
-
-        num_chunks = tl.cdiv(elem_per_rank, chunk_size)
-        for chunk in range(num_chunks):
-            this_chunk_size = chunk_size
-            if chunk == num_chunks - 1:
-                this_chunk_size = elem_per_rank - chunk * chunk_size
-            chunk_offsets = tl.arange(0, chunk_size)
-            input_start = peer * rank_input_size + input_segment_start + (chunk * chunk_size)
-            mask = chunk_offsets < this_chunk_size
-            input_chunk_data = tl.load(input_tensor_ptr + input_start + chunk_offsets, mask=mask)
-            tl.store(chunk_buffer_seg + chunk_offsets, input_chunk_data, mask=mask)
-            # As we initialize the symmetric runtime on the global process
-            # group, we need to use the global rank to access the peer tensor.
-            putmem_nbi_block(
-                output_tensor_ptr + (chunk * chunk_size),
-                chunk_buffer_seg,
-                this_chunk_size * size_per_elem,
-                peer,
-            )
-
-            expected += np
-            sync_cta(signal_ptr, expected)
-            if tidx == 0 and pid == 0:
-                quiet()
-            __syncthreads()
-
-            expected += np
-            sync_cta(signal_ptr, expected)
-
-    expected += np
-    sync_cta(signal_ptr, expected)
-
-    if pid == 0:
-        if tidx == 0:
-            quiet()
-        __syncthreads()
-
-    return expected
-
-
-@triton.jit(do_not_specialize=["rank", "peer", "next_request_id"])
-def shmem_cross_node_scatter(
-    input_tensor_ptr,
-    rank_input_size,
-    chunk_buffer,
-    trans_buffer,
-    size_per_elem,
-    rank,
-    num_ranks_per_node,
-    world_size: tl.constexpr,
-    output_size,
-    local_buf_size,
-    chunk_size: tl.constexpr,
-    signal_ptr,
-    # client request
-    request_buffer_ptr,
-    response_buffer_ptr,
-    response_scratch_ptr,
-    rank_start_same_node,
-    rank_end_same_node,
-    accumulation_command,
-    next_request_id,
-):
-    signal_next_expected = 0
-    for start in range(0, output_size, local_buf_size):
-        size = min(local_buf_size, output_size - start)
-        signal_next_expected = shmem_scatter_kernel(
-            input_tensor_ptr=input_tensor_ptr,
-            rank_input_size=rank_input_size,
-            input_segment_start=start,
-            chunk_buffer=chunk_buffer,
-            output_tensor_ptr=trans_buffer,
-            elem_per_rank=size,
-            size_per_elem=size_per_elem,
-            rank=rank,
-            num_ranks_per_node=num_ranks_per_node,
-            world_size=world_size,
-            chunk_size=chunk_size,
-            signal_next_expected=signal_next_expected,
-            signal_ptr=signal_ptr,
-        )
-
-        shmem_request_accumulation_remote_node_kernel(
-            request_buffer_ptr=request_buffer_ptr,
-            rank=rank,
-            rank_start_same_node=rank_start_same_node,
-            rank_end_same_node=rank_end_same_node,
-            world_size=world_size,
-            accumulation_command=accumulation_command,
-        )
-        shmem_wait_accumulation_remote_node_kernel(
-            response_buffer_ptr=response_buffer_ptr,
-            scratch_ptr=response_scratch_ptr,
-            rank=rank,
-            rank_start_same_node=rank_start_same_node,
-            rank_end_same_node=rank_end_same_node,
-            world_size=world_size,
-            next_request_id=next_request_id,
-        )
-        next_request_id += 1
-
-        # All CTAs need to wait for the first CTA to finish the accumulation request.
-        if start + local_buf_size < output_size:
-            signal_next_expected += num_ranks_per_node
-            sync_cta(signal_ptr, signal_next_expected)
-
-
-@triton.jit(do_not_specialize=["rank", "peer", "accumulation_command"])
-def shmem_request_accumulation_same_node_kernel(
-    request_buffer_ptr,
-    rank,
-    peer,
-    accumulation_command,
-):
-    pid = tl.program_id(axis=0)
-    tidx = tid(axis=0)
-    if pid == 0:
-        if tidx == 0:
-            int_p(request_buffer_ptr + rank, accumulation_command, peer)
-        __syncthreads()
-
-
-@triton.jit(do_not_specialize=["rank", "peer", "next_request_id"])
-def shmem_wait_accumulation_same_node_kernel(
-    response_buffer_ptr,
-    rank,
-    peer,
-    next_request_id,
-):
-    # ROCm fix: a naive loop `while r != next_request_id: quiet(); int_g(...)`
-    # hangs on MI300X because a repeated in-kernel volatile load of a peer
-    # address never observes the watcher's ack (GPU L2 stale). int_wait_until_equals
-    # uses a system-scope atomic load that bypasses the L2.
-    pid = tl.program_id(axis=0)
-    if pid == 0:
-        int_wait_until_equals(response_buffer_ptr + rank, next_request_id, peer)
-        __syncthreads()
-
-
-@triton.jit(
-    do_not_specialize=[
-        "rank",
-        "rank_start_same_node",
-        "rank_end_same_node",
-        "world_size",
-        "accumulation_command",
-    ]
-)
-def shmem_request_accumulation_remote_node_kernel(
-    request_buffer_ptr,
-    rank,
-    rank_start_same_node,
-    rank_end_same_node,
-    world_size,
-    accumulation_command,
-):
-    pid = tl.program_id(axis=0)
-    tidx = tid(axis=0)
-    if pid == 0:
-        if tidx == 0:
-            for peer in range(world_size):
-                if peer < rank_start_same_node or peer >= rank_end_same_node:
-                    # cross-node peer -> RDMA single-int put (int_p_remote).
-                    # This kernel is only ever compiled on multi-node runs, so
-                    # the RDMA device symbol never enters a single-node kernel.
-                    int_p_remote(request_buffer_ptr + rank, accumulation_command, peer)
-        __syncthreads()
-
-
-@triton.jit(
-    do_not_specialize=[
-        "rank",
-        "rank_start_same_node",
-        "rank_end_same_node",
-        "world_size",
-        "next_request_id",
-    ]
-)
-def shmem_wait_accumulation_remote_node_kernel(
-    response_buffer_ptr,
-    scratch_ptr,
-    rank,
-    rank_start_same_node,
-    rank_end_same_node,
-    world_size,
-    next_request_id,
-):
-    # Cross-node ack wait. Unlike the same-node kernel (which polls the peer's
-    # XGMI-mapped response slot), a remote-node peer has no local alias for its
-    # response buffer, so we actively pull the slot over RDMA with
-    # ``int_wait_until_equals_remote`` (getmem-spin into a local symmetric
-    # scratch).
-    pid = tl.program_id(axis=0)
-    if pid == 0:
-        for peer in range(world_size):
-            if peer < rank_start_same_node or peer >= rank_end_same_node:
-                int_wait_until_equals_remote(
-                    scratch_ptr + rank,
-                    response_buffer_ptr + rank,
-                    next_request_id,
-                    peer,
-                )
-        __syncthreads()
-
-
-@dataclass
-class ClientContext:
-    request_buffer: torch.Tensor
-    response_buffer: torch.Tensor
-    next_request_id: int
-    local_next_request_id: int
-
-
-@dataclass
-class ServerContext:
-    request_buffer: torch.Tensor
-    response_buffer: torch.Tensor
-    next_request_id: list[int]
-    accumulation_start: Mapping[Tuple[int, int], int]
-
-
-def ack(server_context, client_rank):
-    server_context.request_buffer[client_rank] = 0
-    server_context.response_buffer[client_rank] = server_context.next_request_id[client_rank]
-    server_context.next_request_id[client_rank] += 1
-    if server_context.next_request_id[client_rank] > MAX_REQUEST_COUNT:
-        server_context.next_request_id[client_rank] = 1
-
-
-def server_loop(server_context, dispatch_func, exit_predicate, client_mask=None):
-    if client_mask is None:
-        client_mask = set()
-    request_buffer_cpu = torch.empty_like(server_context.request_buffer, device="cpu").pin_memory()
-    # ODC_DEBUG_WATCHER=1 turns on once-per-N-iter diagnostics inside the
-    # watcher subprocess. Useful when the client appears to send requests
-    # but the watcher never processes them (typical symptom of a missing
-    # memory fence in the int_p path).
-    debug = bool(int(os.environ.get("ODC_DEBUG_WATCHER", "0")))
-    # Tuning knob (single-node rocSHMEM scatter-accumulate hand-shake latency):
-    # the watcher D2H-polls request_buffer in a tight loop. Default 1/10000 s
-    # (== 0.0001) preserves the original byte-for-byte behaviour (mori path
-    # unchanged). Set ODC_WATCHER_SLEEP_S=0 to busy-spin (lowest dispatch
-    # latency, burns one CPU core) or a smaller value to poll more often.
-    watcher_sleep_s = float(os.environ.get("ODC_WATCHER_SLEEP_S", "0.0001"))
-    iter_count = 0
-    started_at = time.time()
-    while True:
-        request_buffer_cpu.copy_(server_context.request_buffer)
-        nonzeros = torch.nonzero(request_buffer_cpu, as_tuple=False).squeeze(1).tolist()
-        if debug and (iter_count % 100000 == 0):
-            buf_preview = request_buffer_cpu.tolist()
-            elapsed = time.time() - started_at
-            print(
-                f"[watcher pid={os.getpid()}] iter={iter_count} elapsed={elapsed:.1f}s "
-                f"request_buffer={buf_preview} nonzeros={nonzeros}",
-                flush=True,
-            )
-        if nonzeros:
-            time.time()
-        if watcher_sleep_s > 0:
-            time.sleep(watcher_sleep_s)
-        for client_rank in nonzeros:
-            if len(client_mask) > 0 and client_rank not in client_mask:
-                continue
-            command = request_buffer_cpu[client_rank].item()
-            assert isinstance(client_rank, int)
-            assert isinstance(command, int)
-            if debug:
-                print(
-                    f"[watcher pid={os.getpid()}] dispatching client_rank={client_rank} cmd={command}",
-                    flush=True,
-                )
-            acked = dispatch_func(client_rank, command)
-            if not acked:
-                with torch.cuda.nvtx.range(f"ack {client_rank} cmd {command}"):
-                    ack(server_context, client_rank)
-        if exit_predicate():
-            break
-        iter_count += 1
-
-
-class DistLock:
-    def __init__(self):
-        self.world_size = torch.distributed.get_world_size()
-        self.request_buffer = SymmBufferRegistry.get_instance().allocate_symm_buffer(
-            "request_buffer", (self.world_size,), torch.int32
-        )
-        self.response_buffer = SymmBufferRegistry.get_instance().allocate_symm_buffer(
-            "response_buffer", (self.world_size,), torch.int32
-        )
-        self.request_buffer.fill_(0)
-        self.response_buffer.fill_(0)
-        self.client_context = ClientContext(self.request_buffer, self.response_buffer, 1, 1)
-
-
-class ReductionWatcher:
-    def __init__(
-        self,
-        world_size,
-        accumulations: List[torch.Tensor],
-        buffers: List[torch.Tensor],
-        request_buffer: torch.Tensor,
-        response_buffer: torch.Tensor,
-    ):
-        assert len(accumulations) == 0
-        assert len(buffers) == 0
-        self.accumulations = accumulations
-        self.group_world_sizes = []
-        self.buffers = buffers
-        self.request_buffer = request_buffer
-        self.response_buffer = response_buffer
-        self.running = True
-        self.task_count = 0
-        self.server_context = ServerContext(
-            self.request_buffer, self.response_buffer, [1] * world_size, defaultdict(lambda: 0)
-        )
-
-    def stop(self):
-        self.running = False
-
-    def wait_and_reset_task_count(self, expected):
-        while self.task_count < expected:
-            time.sleep(0)
-        self.task_count = 0
-
-    def add_buffer(self, buffers):
-        self.buffers.append([tensor_from_handle(*buffer) for buffer in buffers])
-
-    def add_accumulation(self, accumulations, group_world_size):
-        tensors = [tensor_from_handle(*acc) for acc in accumulations]
-        # Ensure the watcher-side view starts from zeros (epoch 0 safety).
-        for tensor in tensors:
-            tensor.zero_()
-        self.accumulations.append(tensors)
-        self.group_world_sizes.append(group_world_size)
-
-    def run(self):
-        def dispatch_func(client_rank, command):
-            if command == -1:
-                # client_mask.add(client_rank)
-                return False
-            else:
-                buffer_id = command >> 16
-                accumulation_id = command & 0xFFFF
-
-                acc = self.accumulations[accumulation_id - 1][0]
-                # Only support one unified group_world_size for scatter-accumulate calls for now.
-                client_group_rank = client_rank % self.group_world_sizes[accumulation_id - 1]
-                buf = self.buffers[buffer_id][client_group_rank]
-                start = self.server_context.accumulation_start[(buffer_id, client_rank)]
-                size = min(buf.numel(), acc.numel() - start)
-                with torch.cuda.nvtx.range(
-                    f"add client {client_rank} buffer {buffer_id} accumulation {accumulation_id}"
-                ):
-                    acc[start : start + size].add_(buf[:size])
-                if start + size >= acc.numel():
-                    assert start + size == acc.numel()
-                    self.server_context.accumulation_start[(buffer_id, client_rank)] = 0
-                else:
-                    self.server_context.accumulation_start[(buffer_id, client_rank)] += size
-                torch.cuda.current_stream().synchronize()
-                self.task_count += 1
-                # client_mask.remove(client_rank)
-                return False
-
-        def exit_predicate():
-            return not self.running
-
-        client_mask = set()
-        server_loop(self.server_context, dispatch_func, exit_predicate, client_mask)
-
-
-def tensor_from_handle(handle, size, dtype):
-    return reconstruct_tensor(handle, (size,), dtype)
-
-
-def reduction_watcher_function(
-    device_id,
-    world_size,
-    accumulations,
-    buffers,
-    request_buffer,
-    response_buffer,
-    cmd_queue,
-    response_queue,
-):
-    torch.cuda.set_device(device_id)
-
-    # torch.cuda.cudart().cudaProfilerStart()
-    buffers = [tensor_from_handle(*buffer) for buffer in buffers]
-    accumulations = [tensor_from_handle(*acc) for acc in accumulations]
-    request_buffer = tensor_from_handle(*request_buffer)
-    response_buffer = tensor_from_handle(*response_buffer)
-
-    watcher = ReductionWatcher(world_size, accumulations, buffers, request_buffer, response_buffer)
-
-    def cmd_thread():
-        torch.cuda.set_device(device_id)
-        while True:
-            data = cmd_queue.get()
-            cmd = data[0]
-            args = data[1:]
-            response_queue.put(getattr(watcher, cmd)(*args))
-            if cmd == "stop":
-                break
-
-    cmd_thread = Thread(target=cmd_thread)
-    cmd_thread.start()
-    watcher.run()
-    cmd_thread.join()
-
-
-def start_reduction_watcher(accumulations, buffers, request_buffer, response_buffer):
-    rank = torch.distributed.get_rank()
-    current_device = torch.cuda.current_device()
-    local_world_size = get_local_world_size()
-
-    logger.debug(
-        f"Rank {rank} start_reduction_watcher: "
-        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT_SET')}, "
-        f"current_device={current_device}, "
-        f"local_world_size={local_world_size}"
-    )
-
-    ctx = torch.multiprocessing.get_context("spawn")
-    cmd_queue = ctx.Queue()
-    response_queue = ctx.Queue()
-    device_id = torch.distributed.get_rank() % get_local_world_size()
-    world_size = torch.distributed.get_world_size()
-
-    logger.debug(f"Rank {rank} spawning reduction_watcher with device_id={device_id}")
-    process = ctx.Process(
-        target=reduction_watcher_function,
-        args=(
-            device_id,
-            world_size,
-            accumulations,
-            buffers,
-            request_buffer,
-            response_buffer,
-            cmd_queue,
-            response_queue,
-        ),
-        # ROCm/MI355X teardown fix: the watcher's server_loop spins forever until
-        # it receives an explicit "stop". If the process exits without ODC teardown
-        # (crash, KeyboardInterrupt, or a host that skips stop()), a non-daemon
-        # watcher keeps the parent rank blocked on join() and holds the GPU. Marking
-        # it daemon lets the Python runtime reap it on parent exit so the GPU frees.
-        daemon=True,
-    )
-    process.start()
-    return cmd_queue, response_queue
-
-
-def call_watcher(watcher_handle, cmd, *args):
-    cmd_queue, response_queue = watcher_handle
-    cmd_queue.put((cmd, *args))
-    return response_queue.get()
-
-
-def get_shmem_handle(tensor):
-    logger.info(
-        f"Rank {torch.distributed.get_rank()} get_shmem_handle {tensor.data_ptr()} with shape {tensor.shape} and dtype {tensor.dtype}",
-    )
-    handle = get_ipc_handle(tensor)
-    return handle, tensor.numel(), tensor.dtype
-
-
 class ReductionService:
+    """Reduce-scatter-accumulate service (device-side, watcher-free).
+
+    Two paths, both device-side and free of any host-polling subprocess:
+      * single node  -> owner-side XGMI PULL + on-chip fp32 sum
+        (``_single_device_scatter_accumulate``).
+      * multi node    -> rocSHMEM GPU-direct (GDA) reduce-scatter
+        (``_gda_scatter_accumulate``).
+
+    Both DEFER the collective reduce to once per param-group at
+    ``get_accumulation`` (matched barrier count across ranks -> deadlock-free
+    under variable-length / nopad micro-batching), pre-accumulating each
+    micro-batch's grad locally in fp32.
+    """
+
     def __init__(self, accumulation_dtype=None):
         self.accumulations = []
-        self.buffers = []
-        self.lock = None
-        self.reduction_watcher = None
         self.accumulation_indices = {}
-        self.buffer_indices = {}
-        self.shared_buffer = {}
         self.input_buffer = {}
         self.dispatched_tasks = 0
+        # Accepted for API compatibility with the FSDP1 caller; the device and
+        # GDA reduce paths always accumulate in fp32.
         self.accumulation_dtype = accumulation_dtype
-        self.buffer_splitter = BufferSplitter()
-        self.rank_streams = defaultdict(torch.cuda.Stream)
-        self.chunk_size_bytes = 2**20
-
-    def get_chunk_size(self, buffer_dtype):
-        return self.chunk_size_bytes // buffer_dtype.itemsize
-
-    def register(self, key, output_tensor_shape, grad_dtype, reduction_dtype, pg: dist.ProcessGroup):
-        if self.reduction_watcher is None:
-            self.lock = DistLock()
-            request_buffer_handle = get_shmem_handle(self.lock.request_buffer)
-            response_buffer_handle = get_shmem_handle(self.lock.response_buffer)
-
-            # Make sure changes are visible to all reduction watchers
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
-
-            self.reduction_watcher = start_reduction_watcher(
-                [], [], request_buffer_handle, response_buffer_handle
-            )
-
-        accumulation_key = f"rs_accumulation_{key}"
-        assert len(output_tensor_shape) == 1
-        registry = SymmBufferRegistry.get_instance()
-        assert not registry.has_key(accumulation_key)
-        # assert self.reduction_watcher is None, "Reduction watcher is already running"
-        group_world_size = torch.distributed.get_world_size(pg)
-
-        def create_and_register_accumulation(key, shape, dtype, add_func):
-            buffer = registry.allocate_symm_buffer(key, shape, dtype)
-            call_watcher(self.reduction_watcher, add_func, [get_shmem_handle(buffer)], group_world_size)
-            return buffer
-
-        def create_and_register_buffer(key, shape, dtype, add_func):
-            buffers = []
-            for rank in range(group_world_size):
-                buffer = registry.allocate_symm_buffer(f"{key}_rank_{rank}", shape, dtype)
-                buffers.append(buffer)
-            call_watcher(self.reduction_watcher, add_func, [get_shmem_handle(b) for b in buffers])
-            return buffers
-
-        acc = create_and_register_accumulation(
-            accumulation_key, output_tensor_shape, reduction_dtype, "add_accumulation"
-        )
-        self.accumulation_indices[key] = len(self.accumulations)
-        self.accumulations.append(acc)
-
-        buffer_size = self.buffer_splitter.get_local_buffer_size(output_tensor_shape, group_world_size)
-        output_size = reduce(lambda x, y: x * y, output_tensor_shape)
-        logger.info(
-            f"buffer_size: {buffer_size} output_size: {output_size} num_split: {math.ceil(output_size / buffer_size)}"
-        )
-        buffer_shape = (buffer_size,)
-
-        shared_buffer_key = (grad_dtype, buffer_shape)
-        if shared_buffer_key not in self.shared_buffer:
-            output_size = reduce(lambda x, y: x * y, output_tensor_shape)
-            logger.info(
-                f"Rank {torch.distributed.get_rank()} create buffer: output_size: {output_size} num_sub_buffers: {math.ceil(output_size / buffer_size)} buffer_size: {buffer_size}",
-            )
-            cnt = len(self.shared_buffer)
-            buffers = create_and_register_buffer(
-                f"shared_buffer_{cnt}", buffer_shape, grad_dtype, "add_buffer"
-            )
-            self.shared_buffer[shared_buffer_key] = (cnt, buffers)
-
-            self.buffers.append(buffers)
-        self.buffer_indices[key] = self.shared_buffer[shared_buffer_key][0]
-
-        # Make sure changes are visible to all reduction watchers
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
 
     def clear_accumulations(self):
         for acc in self.accumulations:
             acc.fill_(0)
-        if hasattr(self, "_gda_deferred"):  # Deliverable 23: reset per-minibatch deferred grads
+        if hasattr(self, "_gda_deferred"):  # reset per-minibatch deferred grads
             self._gda_deferred = {}
             self._gda_deferred_pg = {}
-        if hasattr(self, "_sdr_deferred"):  # ODC_SINGLE_DEVICE_REDUCE: reset per-minibatch deferred grads
+        if hasattr(self, "_sdr_deferred"):  # reset per-minibatch deferred grads
             self._sdr_deferred = {}
             self._sdr_deferred_pg = {}
-
-    def infer_output_shape(self, input_tensor, pg: dist.ProcessGroup):
-        assert len(input_tensor.shape) == 1
-        assert input_tensor.shape[0] % dist.get_world_size(pg) == 0
-        return (input_tensor.shape[0] // dist.get_world_size(pg),)
 
     def _gda_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         """GPU-direct pull-based reduce-scatter accumulate (race-free, no watcher).
@@ -1076,14 +405,23 @@ class ReductionService:
     def _single_device_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         """Single-node, watcher-FREE device-side reduce-scatter accumulate.
 
-        Owner-side PULL + on-chip sum over same-node XGMI peer views (see
-        ``_single_device_reduce`` for the full rationale). ``input_tensor`` is
-        this PE's full (locally pre-accumulated) grad, laid out as
-        ``[shard_0 | shard_1 | ... | shard_{gws-1}]``; PE r owns output shard r.
+        Mechanism (owner-side PULL + on-chip fp32 sum over same-node XGMI peer
+        views): each PE stages its (locally pre-accumulated) full grad into a
+        symmetric fp32 buffer whose same-node peer views are already resolved on
+        allocation (the same XGMI peer-view machinery gather.py uses); after a
+        rendezvous barrier, PE r reads every same-node peer's segment destined
+        for its shard (a plain XGMI ``.copy_`` peer read) and sums it on-chip.
+        There are NO cross-rank writes -> no device atomics -> no MI300X
+        write-visibility hazard; only XGMI reads gated by a barrier. No second
+        process -> no IPC handle and no host-side reduction subprocess.
+
+        ``input_tensor`` is this PE's full (locally pre-accumulated) grad, laid
+        out as ``[shard_0 | shard_1 | ... | shard_{gws-1}]``; PE r owns output
+        shard r.
 
         Steps (all same-node, no subprocess, no IPC handle, no atomics):
           1. Stage my full grad into a symmetric fp32 buffer (peer views resolved
-             on allocation, exactly like the watcher push buffer).
+             on allocation).
           2. cuda sync + collective barrier -> every peer's stage is retired and
              visible before any peer reads it over XGMI.
           3. For each same-node peer p, XGMI-``.copy_`` p's segment destined for
@@ -1141,27 +479,18 @@ class ReductionService:
         self.dispatched_tasks += 1
 
     def scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
-        official = _official_push()
         if _gda_active():
-            # Deliverable 23: DEFER the cross-node reduce to once-per-minibatch. The per-call
-            # _gda_scatter_accumulate does rocshmem_barrier_all (collective); calling it
-            # per-microbatch deadlocks under nopad (ranks have different micro-batch
-            # counts -> mismatched barrier counts vs pre_optimizer_step's NCCL barrier,
-            # py-spy confirmed). Official ODC is single-sided push (no per-call barrier).
-            # Fix (matches official's per-minibatch sync): accumulate the unsharded grad
-            # LOCALLY here (no comm/barrier -> backward is lockstep-free -> ranks run
-            # variable micro-batch counts without deadlock AND bubbles are saved), then
-            # do ONE barriered reduce-scatter per group at get_accumulation (count =
-            # #groups, matched across ranks). Deterministic strided settle preserved.
-            # ODC_OFFICIAL_PUSH skips DEFER (official does no local pre-accumulation).
-            # Multi-node DEFAULT = defer. The per-microbatch path issues a collective
-            # rocshmem_barrier_all; under variable-length (nopad) packing, ranks on
-            # different nodes get UNEQUAL micro-batch counts -> unequal barrier counts
-            # -> cross-node rendezvous DEADLOCK (reproduced dual-node: DEFER=0 hangs,
-            # DEFER=1 runs 25/25 with 0 nan). Deferring does ONE barriered reduce-scatter
-            # per group (count == #groups, matched across ranks) -> deadlock-free.
-            # Single-node (n_pes <= local_world_size) keeps the per-call path (no
-            # cross-node barrier to mismatch). The env var still overrides both.
+            official = _official_push()
+            # DEFER the cross-node reduce to once-per-minibatch. The per-call
+            # _gda_scatter_accumulate does rocshmem_barrier_all (collective);
+            # calling it per-microbatch deadlocks under nopad (ranks have
+            # different micro-batch counts -> mismatched barrier counts). Fix:
+            # accumulate the unsharded grad LOCALLY here (no comm/barrier ->
+            # backward is lockstep-free), then do ONE barriered reduce-scatter
+            # per group at get_accumulation (count == #groups, matched across
+            # ranks). Multi-node DEFAULT = defer; single-node (n_pes <=
+            # local_world_size) keeps the per-call path. ODC_OFFICIAL_PUSH skips
+            # DEFER (official does no local pre-accumulation). Env var overrides.
             defer_default = "1" if _rs._n_pes > get_local_world_size() else "0"
             if os.environ.get("ODC_GDA_DEFER_REDUCE", defer_default) == "1" and not official:
                 if not hasattr(self, "_gda_deferred"):
@@ -1175,197 +504,41 @@ class ReductionService:
                 self._gda_deferred_pg[key] = pg
                 return
             return self._gda_scatter_accumulate(key, input_tensor, pg)
-        if _single_device_reduce() and torch.distributed.get_world_size(pg) == get_local_world_size():
-            # ODC_SINGLE_DEVICE_REDUCE grey path (single node only). DEFER exactly
-            # like the multi-node GDA path: pre-accumulate this micro-batch's grad
-            # LOCALLY (no collective -> nopad-safe), then run ONE barriered
-            # owner-side pull-sum per group at get_accumulation. Pre-accumulate in
-            # fp32 so cross-micro-batch accumulation matches the watcher's fp32 acc.
-            if not hasattr(self, "_sdr_deferred"):
-                self._sdr_deferred = {}
-                self._sdr_deferred_pg = {}
-            cur = self._sdr_deferred.get(key)
-            if cur is None:
-                self._sdr_deferred[key] = input_tensor.detach().to(torch.float32)
-            else:
-                cur.add_(input_tensor)
-            self._sdr_deferred_pg[key] = pg
-            return
-        output_tensor_shape = self.infer_output_shape(input_tensor, pg)
-        accum_dtype = self.accumulation_dtype if self.accumulation_dtype is not None else input_tensor.dtype
-        if key not in self.accumulation_indices:
-            self.register(key, output_tensor_shape, input_tensor.dtype, accum_dtype, pg)
-
-        group_world_size = torch.distributed.get_world_size(pg)
-        assert group_world_size in (
-            torch.distributed.get_world_size(),
-            get_local_world_size(),
-        ), f"{group_world_size=} {torch.distributed.get_world_size()=} {get_local_world_size()=}"
-        local_buf_size = self.buffer_splitter.get_local_buffer_size(output_tensor_shape, group_world_size)
-        output_size = reduce(lambda x, y: x * y, output_tensor_shape)
-
-        chunk_size = self.get_chunk_size(input_tensor.dtype)
-        grid_size = get_local_world_size()
-        input_tensor_symm_shape = (chunk_size * grid_size,)
-        rank = torch.distributed.get_rank()
-        if (input_tensor_symm_shape, input_tensor.dtype) not in self.input_buffer:
-            self.input_buffer[
-                (input_tensor_symm_shape, input_tensor.dtype)
-            ] = SymmBufferRegistry.get_instance().allocate_symm_buffer(
-                f"rs_buffer_{input_tensor_symm_shape}_{input_tensor.dtype}",
-                input_tensor_symm_shape,
-                input_tensor.dtype,
-            )
-        input_tensor_symm = self.input_buffer[(input_tensor_symm_shape, input_tensor.dtype)]
-
-        buffer_id = self.buffer_indices[key]
-        group_rank = torch.distributed.get_rank(pg)
-        buffer = self.buffers[buffer_id][group_rank]
-        accumulation_id = self.accumulation_indices[key] + 1
-
-        accumulation_command = (buffer_id << 16) | accumulation_id
-        assert buffer.nbytes % (2**6) == 0, f"better align to 64 for efficiency. Found {buffer.nbytes} bytes"
-
-        get_comm_stream().wait_stream(torch.cuda.current_stream())
-        rank_start_same_node = rank - rank % get_local_world_size()
-        rank_end_same_node = rank_start_same_node + get_local_world_size()
-        for local_peer in range(rank_start_same_node, rank_end_same_node):
-            self.rank_streams[local_peer].wait_stream(torch.cuda.current_stream())
-
-        with torch.cuda.stream(get_comm_stream()):
-            signal_ptr = torch.empty(1, dtype=torch.int32, device="cuda")
-        num_requests = math.ceil(output_size / local_buf_size)
-        assert group_world_size % 8 == 0 or group_world_size < 8
-        assert group_world_size % grid_size == 0
-        _, rank_input_size = input_tensor.view(-1).view(group_world_size, -1).shape
-
-        for start in range(0, output_size, local_buf_size):
-            size = min(local_buf_size, output_size - start)
-            assert local_buf_size == buffer.numel(), f"{local_buf_size=} {buffer.numel()=}"
-            buf = buffer[:size]
-            # Use mem-copy for the ranks in the same node.
-            same_node_tensors = SymmBufferRegistry.get_instance().get_peer_tensors(buffer)
-            for i in range(get_local_world_size()):
-                peer_idx = (rank % get_local_world_size() + i) % get_local_world_size()
-                local_peer = rank_start_same_node + peer_idx
-                if group_world_size == get_local_world_size():
-                    rank_input_start = peer_idx * rank_input_size + start
-                else:
-                    rank_input_start = local_peer * rank_input_size + start
-                same_node_peer_buffer = same_node_tensors[peer_idx]
-                peer_buf = same_node_peer_buffer[:size]
-                stream = self.rank_streams[local_peer]
-                with torch.cuda.stream(stream):
-                    peer_buf.copy_(
-                        input_tensor[rank_input_start : rank_input_start + size],
-                        non_blocking=True,
-                    )
-
-            for local_peer in range(rank_start_same_node, rank_end_same_node):
-                with torch.cuda.stream(self.rank_streams[local_peer]):
-                    shmem_request_accumulation_same_node_kernel[(1,)](
-                        request_buffer_ptr=self.lock.request_buffer,
-                        rank=rank,
-                        peer=local_peer,
-                        accumulation_command=accumulation_command,
-                        num_warps=1,
-                        extern_libs=SHMEM_EXTERN_LIBS,
-                    )
-                    # ODC_OFFICIAL_PUSH: fire-and-forget. The push (peer_buf.copy_)
-                    # + request signal are enough for the owner's watcher to
-                    # accumulate; DROP the per-call ack/settle wait so the push
-                    # overlaps backward compute. Arrival is guaranteed by the
-                    # single minibatch-end sync() (watcher task-count rendezvous).
-                    # NOTE: this removes the buffer-reuse handshake -> a later call
-                    # reusing this staging slot before the watcher consumed it can
-                    # stale/lose a gradient (the documented divergence risk).
-                    if not official:
-                        shmem_wait_accumulation_same_node_kernel[(1,)](
-                            response_buffer_ptr=self.lock.response_buffer,
-                            rank=rank,
-                            peer=local_peer,
-                            next_request_id=self.lock.client_context.local_next_request_id,
-                            num_warps=1,
-                            extern_libs=SHMEM_EXTERN_LIBS,
-                        )
-            self.lock.client_context.local_next_request_id += 1
-            if self.lock.client_context.local_next_request_id > MAX_REQUEST_COUNT:
-                self.lock.client_context.local_next_request_id = 1
-
-        if group_world_size > get_local_world_size():
-            assert group_world_size % get_local_world_size() == 0
-            # Cross-node only: a symmetric int32 scratch for the RDMA getmem-spin
-            # ack wait (one slot per global rank; we only read [rank]). Allocated
-            # lazily and collectively on the FIRST cross-node scatter — every
-            # rank enters this branch together because group_world_size >
-            # local_world_size is a global property, so symmetric offsets stay
-            # consistent. On a single node this branch is never taken, so no
-            # extra symmetric buffer is allocated and behaviour is unchanged.
-            world_size = torch.distributed.get_world_size()
-            response_scratch = SymmBufferRegistry.get_instance().get_or_create_symm_buffer(
-                "rs_response_scratch", (world_size,), torch.int32
-            )
-            with torch.cuda.stream(get_comm_stream()):
-                signal_ptr.fill_(0)
-                shmem_cross_node_scatter[(grid_size,)](
-                    input_tensor_ptr=input_tensor,
-                    rank_input_size=rank_input_size,
-                    chunk_buffer=input_tensor_symm,
-                    trans_buffer=buf,
-                    size_per_elem=buf.element_size(),
-                    rank=rank,
-                    num_ranks_per_node=grid_size,
-                    world_size=group_world_size,
-                    output_size=output_size,
-                    local_buf_size=local_buf_size,
-                    chunk_size=chunk_size,
-                    signal_ptr=signal_ptr,
-                    # client request
-                    request_buffer_ptr=self.lock.request_buffer,
-                    response_buffer_ptr=self.lock.response_buffer,
-                    response_scratch_ptr=response_scratch,
-                    rank_start_same_node=rank_start_same_node,
-                    rank_end_same_node=rank_end_same_node,
-                    accumulation_command=accumulation_command,
-                    next_request_id=self.lock.client_context.next_request_id,
-                    num_warps=32,
-                    extern_libs=SHMEM_EXTERN_LIBS,
-                )
-        self.lock.client_context.next_request_id += num_requests
-        if self.lock.client_context.next_request_id > MAX_REQUEST_COUNT:
-            self.lock.client_context.next_request_id = 1
-        self.dispatched_tasks += num_requests
-
-        # ODC_OFFICIAL_PUSH: do NOT serialize the current stream onto the per-peer
-        # push streams / comm stream (that trailing wait_stream is what forces the
-        # push to complete before backward continues). Skipping it lets the push
-        # truly overlap the backward compute (fire-and-forget); the minibatch-end
-        # sync() is the single light rendezvous that guarantees completion.
-        if not official:
-            if _settle_defer():
-                # ODC_SETTLE_DEFER: do NOT serialize backward onto the per-peer
-                # settle here -- keep push+ack queued on rank_streams (their
-                # serial order still guards staging-buffer reuse) and let the
-                # single sync() join collect them before optimizer.step. Keep the
-                # source grad alive until the side-stream copy consumed it.
-                for local_peer in range(rank_start_same_node, rank_end_same_node):
-                    input_tensor.record_stream(self.rank_streams[local_peer])
-            else:
-                for local_peer in range(rank_start_same_node, rank_end_same_node):
-                    torch.cuda.current_stream().wait_stream(self.rank_streams[local_peer])
-                torch.cuda.current_stream().wait_stream(get_comm_stream())
+        # Single-node device-side reduce (replaces the removed host-side
+        # reduction subprocess path). Cross-node reduce always goes through the
+        # rocSHMEM GDA path above.
+        assert torch.distributed.get_world_size(pg) == get_local_world_size(), (
+            f"non-GDA reduce-scatter is single-node only "
+            f"(gws={torch.distributed.get_world_size(pg)} lws={get_local_world_size()}); "
+            f"multi-node requires the rocSHMEM GDA backend"
+        )
+        # DEFER exactly like the multi-node GDA path: pre-accumulate this
+        # micro-batch's grad LOCALLY (no collective -> nopad-safe), then run ONE
+        # barriered owner-side pull-sum per group at get_accumulation.
+        # Pre-accumulate in fp32 so cross-micro-batch accumulation matches the
+        # fp32 device accumulator.
+        if not hasattr(self, "_sdr_deferred"):
+            self._sdr_deferred = {}
+            self._sdr_deferred_pg = {}
+        cur = self._sdr_deferred.get(key)
+        if cur is None:
+            self._sdr_deferred[key] = input_tensor.detach().to(torch.float32)
+        else:
+            cur.add_(input_tensor)
+        self._sdr_deferred_pg[key] = pg
+        return
 
     def get_accumulation(self, key):
-        # Deliverable 23 DEFER: run the single per-minibatch cross-node reduce-scatter now
+        # GDA DEFER: run the single per-minibatch cross-node reduce-scatter now
         # (once per group, matched barrier count across ranks -> deadlock-free).
         if _gda_active() and getattr(self, "_gda_deferred", None) is not None:
             pending = self._gda_deferred.get(key)
             if pending is not None:
                 self._gda_deferred[key] = None
                 self._gda_scatter_accumulate(key, pending, self._gda_deferred_pg[key])
-        # ODC_SINGLE_DEVICE_REDUCE DEFER: run the single per-minibatch owner-side
+        # Single-node device DEFER: run the single per-minibatch owner-side
         # pull-sum now (once per group, matched barrier count across ranks).
-        if _single_device_reduce() and getattr(self, "_sdr_deferred", None) is not None:
+        if not _gda_active() and getattr(self, "_sdr_deferred", None) is not None:
             pending = self._sdr_deferred.get(key)
             if pending is not None:
                 self._sdr_deferred[key] = None
@@ -1375,60 +548,24 @@ class ReductionService:
 
     def sync(self, pg: dist.ProcessGroup):
         if _gda_active():
-            # OVERLAP: collect any in-flight side-stream reduce-scatters before the
-            # optimizer reads acc (final correctness barrier for the overlap path).
-            # ODC_OFFICIAL_PUSH forces synchronous RS (no side stream), so nothing
-            # to collect here.
+            # OVERLAP: collect any in-flight side-stream reduce-scatters before
+            # the optimizer reads acc. ODC_OFFICIAL_PUSH forces synchronous RS
+            # (no side stream), so nothing to collect here.
             if os.environ.get("ODC_GDA_OVERLAP", "0") == "1" and not _official_push():
                 _rs.gda_rs_overlap_sync()
-            # GDA path is fully synchronous (device kernels + barriers); no watcher
-            # task accounting needed.
+            # GDA path is fully synchronous (device kernels + barriers).
             torch.cuda.synchronize()
             torch.distributed.barrier(group=pg)
             self.dispatched_tasks = 0
             return
-        if _single_device_reduce():
-            # Single-node watcher-free path: the owner-side pull-sum already ran
-            # (synchronously, with its own barriers) inside get_accumulation. No
-            # watcher subprocess and no task-count rendezvous exists on this path;
-            # just a final cuda sync + barrier before the optimizer reads acc.
-            torch.cuda.synchronize()
-            torch.distributed.barrier(group=pg)
-            self.dispatched_tasks = 0
-            return
-        if _settle_defer():
-            # ODC_SETTLE_DEFER: single aggregate join of every deferred per-peer
-            # settle stream (replaces the per-layer wait_stream we skipped) so all
-            # gradient accumulations are landed before the optimizer reads them.
-            with torch.cuda.nvtx.range("settle_defer_join"):
-                for stream in list(self.rank_streams.values()):
-                    torch.cuda.current_stream().wait_stream(stream)
-                torch.cuda.current_stream().wait_stream(get_comm_stream())
-                torch.cuda.current_stream().synchronize()
-        dispatched_task_list = [None for _ in range(dist.get_world_size(pg))]
-        with torch.cuda.nvtx.range("task_all_gather"):
-            torch.distributed.all_gather_object(dispatched_task_list, self.dispatched_tasks, group=pg)
-        target = sum(dispatched_task_list)
-
-        watchdog = _settle_watchdog_sec() if _settle_defer() else 0.0
-        if watchdog > 0:
-            # Fail-fast rendezvous: a missing watcher convergence must raise
-            # instead of spinning the GPU forever.
-            cmd_queue, response_queue = self.reduction_watcher
-            cmd_queue.put(("wait_and_reset_task_count", target))
-            try:
-                response_queue.get(timeout=watchdog)
-            except _queue.Empty:
-                raise RuntimeError(
-                    f"[ODC_SETTLE_DEFER] watcher rendezvous timed out after "
-                    f"{watchdog}s (target={target}); failing fast to avoid GPU hang"
-                )
-        else:
-            call_watcher(self.reduction_watcher, "wait_and_reset_task_count", target)
+        # Single-node device path: the owner-side pull-sum already ran
+        # (synchronously, with its own barriers) inside get_accumulation. Just a
+        # final cuda sync + barrier before the optimizer reads acc.
+        torch.cuda.synchronize()
+        torch.distributed.barrier(group=pg)
         self.dispatched_tasks = 0
 
     def stop(self):
-        if self.reduction_watcher is not None:
-            call_watcher(self.reduction_watcher, "stop")
-            torch.distributed.barrier()
-            torch.cuda.synchronize()
+        # The device and GDA reduce paths run no watcher subprocess, so there is
+        # nothing to tear down. Kept for API compatibility with the callers.
+        pass
