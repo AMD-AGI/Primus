@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
 from typing import Tuple
 
 import torch
@@ -112,6 +113,39 @@ try:
     )
 
     _SPARSE_MLA_BACKENDS["flydsl_v1"] = (sparse_mla_fwd_v4_flydsl, sparse_mla_bwd_v4_flydsl)
+except Exception:  # noqa: BLE001
+    pass
+# gluon_v2: our aiter-gluon-inspired backend (guarded; skipped until present).
+try:
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._gluon_v2 import (
+        sparse_mla_bwd_v4_gluon_v2,
+        sparse_mla_fwd_v4_gluon_v2,
+    )
+
+    _SPARSE_MLA_BACKENDS["gluon_v2"] = (sparse_mla_fwd_v4_gluon_v2, sparse_mla_bwd_v4_gluon_v2)
+except Exception:  # noqa: BLE001
+    pass
+# aiter PR#3833 gluon sparse-MLA prefill (fwd-only) — OPTIONAL reference for
+# comparison. Lives under agent/workspace; set PRIMUS_V4_AITER_DIR to override.
+# Guarded so the benchmark is unchanged when the extracted adapter is absent.
+try:
+    _aiter_dir = os.environ.get(
+        "PRIMUS_V4_AITER_DIR",
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "agent",
+            "workspace",
+            "aiter_dsv4_prefill_20260706",
+        ),
+    )
+    _aiter_dir = os.path.abspath(_aiter_dir)
+    if _aiter_dir not in sys.path:
+        sys.path.insert(0, _aiter_dir)
+    from aiter_v4_adapter import sparse_mla_fwd_v4_aiter
+
+    _SPARSE_MLA_BACKENDS["aiter_gluon"] = (sparse_mla_fwd_v4_aiter, None)
 except Exception:  # noqa: BLE001
     pass
 
@@ -445,7 +479,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     # Backend table: native production Triton (separate K/V), then the fused
     # sparse-MLA backends (legacy `_flydsl_v0` gathered CSA is excluded).
     backends = [("triton", fwd_triton, bwd_triton)]
-    for _name in ("gluon", "triton_v2", "flydsl_v1"):
+    for _name in ("gluon", "triton_v2", "gluon_v2", "flydsl_v1", "aiter_gluon"):
         if _name in sparse_fb:
             backends.append((_name, sparse_fb[_name][0], sparse_fb[_name][1]))
 
