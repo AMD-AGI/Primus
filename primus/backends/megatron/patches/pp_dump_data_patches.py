@@ -30,14 +30,12 @@ def _make_wrapped_get_forward_backward_func(original_get_forward_backward_func):
     def wrapped_get_forward_backward_func():
         from megatron.training import get_args as get_megatron_args
 
-        from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
-            schedule_wrapper,
-        )
+        import primus.backends.megatron.core.pipeline_parallel.pp_visualizer as utils
 
         func = original_get_forward_backward_func()
         args = get_megatron_args()
         if getattr(args, "dump_pp_data", False):
-            func = schedule_wrapper(func)
+            func = utils.schedule_wrapper(func)
             func._pp_dump_schedule_wrapped = True  # noqa: B010
         return func
 
@@ -133,13 +131,11 @@ def patch_pp_dump_data_after_train(ctx: PatchContext):
         from megatron.core.num_microbatches_calculator import get_num_microbatches
         from megatron.training import get_args as get_megatron_args
 
-        from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
-            dump_pp_data,
-        )
+        import primus.backends.megatron.core.pipeline_parallel.pp_visualizer as utils
 
         args = get_megatron_args()
         pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
-        dump_pp_data(args, get_num_microbatches(), pp_data_dir)
+        utils.dump_pp_data(args, get_num_microbatches(), pp_data_dir)
         log_rank_0(f"[Patch:megatron.pp.dump_pp_data]   pp schedule data dumped to {pp_data_dir}")
     except Exception as e:
         log_rank_0(f"[Patch:megatron.pp.dump_pp_data]   WARNING: failed to dump pp data: {e}")
