@@ -266,6 +266,14 @@ export PROFILE=${PROFILE:-False}
 # each other's logs.
 export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_flash_proxy_pp${PRIMUS_PP}_ep${PRIMUS_EP}_seq${PRIMUS_SEQ_LENGTH}}
 
+# ---------- Launcher: single-node in-container by default -------------------
+# This proxy is the single-node 8-GPU smoke/perf runner, normally invoked from
+# INSIDE the training container. run_deepseek_v4.sh defaults PRIMUS_LAUNCHER to
+# `slurm` (which needs `srun` from a SLURM allocation and would fail in a bare
+# container). Default to `direct` here so the proxy just torchruns locally;
+# override with PRIMUS_LAUNCHER=slurm when launching from a cluster login node.
+export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-direct}
+
 # Defer to run_deepseek_v4.sh for the actual training launch — every
 # CLI flag and the primus-cli invocation lives there.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

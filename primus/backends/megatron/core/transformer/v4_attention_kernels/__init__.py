@@ -87,6 +87,29 @@ def load_gluon_attention_backends():
     return v4_attention_gluon, v4_csa_attention_gluon
 
 
+def load_gluon_v2_attention_backends():
+    """Lazily import the gluon_v2 sparse-MLA attention entries (:mod:`_gluon_v2`).
+
+    Second-generation Gluon backend (gfx950 / CDNA4): Gluon forward (rope-skip + exp2 +
+    MFMA K=32) + Gluon backward (rope-skip + K=32 + single-chunk RMW). Same lazy-import
+    rationale as :func:`load_gluon_attention_backends` (hard ``triton.experimental.gluon``
+    dependency). Returns ``(v4_attention_gluon_v2, v4_csa_attention_gluon_v2)``.
+    """
+    try:
+        from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_gluon_v2 import (
+            v4_attention_gluon_v2,
+            v4_csa_attention_gluon_v2,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "use_v4_attention_backend / use_v4_csa_attention_backend = 'gluon_v2' requires "
+            "the gluon_v2 sparse-MLA backend (triton.experimental.gluon, gfx950 / CDNA4 only), "
+            f"which failed to import: {exc}. Select a different backend "
+            "(eager | triton_v1 | triton_v2 | gluon), or run on a gfx950 build with Triton gluon support."
+        ) from exc
+    return v4_attention_gluon_v2, v4_csa_attention_gluon_v2
+
+
 def load_flydsl_attention_backends():
     """Lazily import the native-FlyDSL sparse-MLA attention entries.
 
@@ -131,6 +154,8 @@ __all__ = [
     "v4_csa_attention_v2",
     # gluon (fused single-latent sparse-MLA, gfx950) — lazily loaded
     "load_gluon_attention_backends",
+    # gluon_v2 (2nd-gen gluon fwd+bwd, gfx950) — lazily loaded
+    "load_gluon_v2_attention_backends",
     # flydsl_v1 (native FlyDSL fused single-latent sparse-MLA, gfx950) — lazily loaded
     "load_flydsl_attention_backends",
 ]
