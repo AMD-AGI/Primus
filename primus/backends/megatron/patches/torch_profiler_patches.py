@@ -31,8 +31,6 @@ def _is_called_from_training_train() -> bool:
 def _create_primus_prof(args, exp_name: str, original_profile):
     """
     Create torch profiler with Primus options.
-
-    Logic from primus/backends/megatron/pretrainer/trainer.py.
     """
     import torch
 

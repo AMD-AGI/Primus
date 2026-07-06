@@ -11,6 +11,55 @@ from primus.core.utils.module_utils import log_rank_0
 class MegatronPretrainTrainer(MegatronBaseTrainer):
     """Trainer for Megatron-LM pre-training."""
 
+    def build_model_for_benchmark(self):
+        """Initialize Megatron and build the model WITHOUT running the training loop.
+
+        This mirrors the front of ``megatron.training.pretrain`` (``initialize_megatron``
+        followed by ``setup_model_and_optimizer``) so that Primus performance
+        projection's layer benchmark can construct a model identical to the real
+        training path and measure per-layer kernels, without datasets or a train
+        loop.
+
+        Prerequisites (handled by the runtime before calling this): ``setup()``
+        has patched ``parse_args`` to return ``self.backend_args`` and set the
+        Primus global vars, and the build_args/setup/before_train patch phases
+        have been applied. Returns the built model (a list of model chunks, as
+        produced by megatron's ``get_model``) and also stores it on ``self.model``.
+        """
+        log_rank_0("Building Megatron model for benchmark (no training loop)...")
+
+        from megatron.core.enums import ModelType
+        from megatron.training.initialize import initialize_megatron
+        from megatron.training.training import setup_model_and_optimizer
+
+        from primus.core.utils.import_utils import get_model_provider
+
+        # Determine model type (gpt or mamba) from backend_args
+        model_type = getattr(self.backend_args, "model_type", "gpt")
+        log_rank_0(f"-detected model_type: {model_type}")
+
+        # parse_args was patched in setup() to return backend_args, so
+        # initialize_megatron consumes the Primus-configured arguments (same as
+        # the front of megatron's pretrain()).
+        initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+
+        # Get model provider with correct model_type (reuse the core runtime helper)
+        if model_type != "gpt":
+            model_provider = get_model_provider(model_type=model_type)
+        else:
+            model_provider = get_model_provider()
+        log_rank_0(f"-model_provider: {model_provider}")
+
+        model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+            model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
+        )
+        self.model = model
+        self.optimizer = optimizer
+        self.opt_param_scheduler = opt_param_scheduler
+
+        log_rank_0("Megatron model build for benchmark completed.")
+        return model
+
     def train(self):
         """Execute Megatron pre-training."""
         log_rank_0("Executing Megatron pretrain...")
