@@ -71,6 +71,10 @@ if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True
 fi
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 
+if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
+  export PRIMUS_BIAS_SWIGLU_FUSION=True
+fi
+
 # Plan-3 P23: Turbo DeepEP-related knobs.  Only emit these CLI flags
 # when USE_TURBO_DEEPEP=True so non-deepep runs don't carry unrelated
 # overrides.  Best-practice CU count: 64 (or 80) for EP=8, 32 for
@@ -299,4 +303,5 @@ fi
   --use_pytorch_profiler "$PROFILE" \
   --profile_step_end 7 \
   --profile_step_start 6 \
+  --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"
