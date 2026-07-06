@@ -324,21 +324,20 @@ def _install_train_loop_hooks():
     "megatron.fsdp.odc_torch_fsdp2_teardown",
     backend="megatron",
     phase="after_train",
-    description="Stop ODC reduction watcher after training so the GPU is released cleanly (ROCm/MORI).",
+    description="Tear down the ODC reduction service after training (ROCm/MORI).",
     condition=lambda ctx: os.environ.get("ODC_ENABLE", "0") == "1"
     and getattr(get_args(ctx), "use_torch_fsdp2", False),
 )
 def patch_odc_torch_fsdp2_teardown(ctx: PatchContext):
-    """Gracefully stop the ODC reduction watcher once training is done.
+    """Tear down the ODC reduction service once training is done.
 
-    ODC's ReductionWatcher runs in a spawned subprocess whose server_loop spins
-    until it receives an explicit "stop". Megatron/Primus never invoke ODC's
-    teardown, so without this hook the watcher stays alive after training, blocks
-    the parent rank on join() and holds the GPU. We call ONLY
-    ReductionService.stop() (sends "stop" + barrier + cuda sync) and deliberately
-    skip finalize_distributed() / SymmBufferRegistry.finalize() so we do not tear
-    down the process group before Primus' own cleanup runs. The daemon=True flag
-    on the watcher process is the crash-path backstop; this is the graceful path.
+    The device-side (single-node XGMI pull-sum) and GPU-direct (GDA) reduce
+    paths run no host-side subprocess, so ``ReductionService.stop()`` is a
+    no-op kept for API compatibility. This hook is retained as the single
+    teardown call site (harmless today) so Primus keeps a place to release ODC
+    resources; we deliberately skip finalize_distributed() /
+    SymmBufferRegistry.finalize() so we do not tear down the process group
+    before Primus' own cleanup runs.
     """
     from odc.fsdp import fsdp2 as odc_fsdp2
 
@@ -348,9 +347,9 @@ def patch_odc_torch_fsdp2_teardown(ctx: PatchContext):
         return
     try:
         rs.stop()
-        log_rank_0("[ODC.torch_fsdp2] reduction watcher stopped at after_train (GPU releases cleanly)")
+        log_rank_0("[ODC.torch_fsdp2] reduction service torn down at after_train")
     except Exception as e:  # noqa: BLE001
         warning_rank_0(
-            f"[ODC.torch_fsdp2] teardown stop() failed (non-fatal, daemon will reap): "
+            f"[ODC.torch_fsdp2] teardown stop() failed (non-fatal): "
             f"{type(e).__name__}: {e}"
         )
