@@ -1,0 +1,106 @@
+# Variables of the form ${<variable>} are substituted, currently the following
+# list is supported:
+#   - ${branch} (or {branch}) the name of the current branch
+#   - ${url} (or {url}) github url of the current project
+#   - ${project:<project_name>} base url of the documentation of <project_name>
+#     based on intersphinx_mapping.
+# These comments will also be removed.
+defaults:
+  numbered: false
+root: index.md
+subtrees:
+  - caption: Getting started
+    entries:
+      - file: 01-getting-started/overview.md
+        title: Overview
+      - file: 01-getting-started/quickstart.md
+        title: Quickstart
+      - file: 01-getting-started/installation.md
+        title: Installation and setup
+      - file: 01-getting-started/glossary.md
+        title: Glossary
+
+  - caption: User guide
+    entries:
+      - file: 02-user-guide/pretraining.md
+        title: Pretraining workflows
+      - file: 02-user-guide/posttraining.md
+        title: Post-training workflows
+      - file: 02-user-guide/training-recipes.md
+        title: Backend training recipes
+      - file: 02-user-guide/cli-reference.md
+        title: CLI reference
+      - file: 02-user-guide/preflight.md
+        title: Preflight diagnostics
+      - file: 02-user-guide/configuration-system.md
+        title: Configuration system
+      - file: 02-user-guide/projection.md
+        title: Memory and performance projection
+      - file: 02-user-guide/benchmarking.md
+        title: Benchmark suite
+
+  - caption: Configuration reference
+    entries:
+      - file: 03-configuration-reference/megatron-parameters.md
+        title: Megatron backend
+      - file: 03-configuration-reference/torchtitan-parameters.md
+        title: TorchTitan backend
+      - file: 03-configuration-reference/megatron-bridge-parameters.md
+        title: Megatron Bridge backend
+      - file: 03-configuration-reference/maxtext-parameters.md
+        title: MaxText backend
+      - file: 03-configuration-reference/environment-variables.md
+        title: Environment variables
+
+  - caption: Technical guides
+    entries:
+      - file: 04-technical-guides/parallelism-strategies.md
+        title: Parallelism strategies
+      - file: 04-technical-guides/parallelism-configuration.md
+        title: Parallelism configuration
+      - file: 04-technical-guides/multi-node-networking.md
+        title: Multi-node networking
+      - file: 04-technical-guides/collective-operations.md
+        title: Collective operations (NCCL/RCCL)
+      - file: 04-technical-guides/data-preparation.md
+        title: Data preparation
+      - file: 04-technical-guides/checkpoint-management.md
+        title: Checkpoint management
+      - file: 04-technical-guides/moe-training.md
+        title: MoE training
+      - file: 04-technical-guides/performance-tuning.md
+        title: Performance tuning
+      - file: 04-technical-guides/profiling-and-observability.md
+        title: Profiling and observability
+      - file: 04-technical-guides/logging-and-experiment-tracking.md
+        title: Logging and experiment tracking
+      - file: 04-technical-guides/fault-tolerance-and-elastic-training.md
+        title: Fault tolerance and elastic training
+      - file: 04-technical-guides/determinism-and-reproducibility.md
+        title: Determinism and reproducibility
+
+  - caption: Operations
+    entries:
+      - file: 05-operations/deployment.md
+        title: Deployment
+      - file: 05-operations/monitoring-logging.md
+        title: Monitoring and logging
+      - file: 05-operations/troubleshooting.md
+        title: Troubleshooting
+      - file: 05-operations/security.md
+        title: Security considerations
+
+  - caption: Developer guide
+    entries:
+      - file: 06-developer-guide/architecture.md
+        title: Architecture overview
+      - file: 06-developer-guide/contributing.md
+        title: Contributing
+      - file: 06-developer-guide/adding-models.md
+        title: Adding model configurations
+      - file: 06-developer-guide/extending-backends.md
+        title: Extending backends
+      - file: 06-developer-guide/model-support-matrix.md
+        title: Model support matrix
+      - file: 06-developer-guide/testing.md
+        title: Testing
