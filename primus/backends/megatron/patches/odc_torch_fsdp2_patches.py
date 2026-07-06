@@ -349,7 +349,4 @@ def patch_odc_torch_fsdp2_teardown(ctx: PatchContext):
         rs.stop()
         log_rank_0("[ODC.torch_fsdp2] reduction service torn down at after_train")
     except Exception as e:  # noqa: BLE001
-        warning_rank_0(
-            f"[ODC.torch_fsdp2] teardown stop() failed (non-fatal): "
-            f"{type(e).__name__}: {e}"
-        )
+        warning_rank_0(f"[ODC.torch_fsdp2] teardown stop() failed (non-fatal): " f"{type(e).__name__}: {e}")
