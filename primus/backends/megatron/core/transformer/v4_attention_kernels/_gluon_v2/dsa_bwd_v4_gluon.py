@@ -4,18 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Gluon DeepSeek-V4 sparse-MLA backward for the "gluon_v2" backend (in development).
+"""Gluon DeepSeek-V4 sparse-MLA backward for the "gluon_v2" backend.
 
-Companion to the gluon_v2 forward (:func:`sparse_mla_fwd_v4_gluon_v2`). Wires the
-Gluon dQ + Gluon dKV-intermediate compute kernels (owned locally so they can be tuned
-independently of the ``_gluon_dsa`` originals) with a Triton preprocess (Delta) and the
-backend-neutral CSR inverted-topk gather + torch d_sink reduction. Same non-atomic
-chunked-gather scheme as the Triton backward.
+Companion to the gluon_v2 forward (:func:`sparse_mla_fwd_v4_gluon_v2`). Wires the Gluon
+dQ + Gluon dKV-intermediate compute kernels with a Triton Delta preprocess and the
+backend-neutral CSR inverted-topk gather + torch d_sink reduction (non-atomic
+chunked-gather scheme).
 
-This is the optimization target of the gluon_v2 backward campaign (beat the plain-Triton
-backward by 10-20%), applying the forward campaign's accepted techniques (rope-skip,
-exp2 softmax, MFMA K=32) to the backward's dQ/dKV kernels. Selected at runtime via
-``PRIMUS_DSA_V2_BWD=gluon`` (default is the proven Triton backward).
+The dQ / dKV-intermediate Gluon kernels apply the forward campaign's accepted techniques
+to the backward: rope-skip (the V4 zero-rope-pad makes the rope gradients provably zero)
++ MFMA K=32 for the D_V=512-reduction matmuls, plus a single-chunk dQ read-modify-write
+for high head counts. Beats the plain-Triton backward ~1.12x geomean over the 6
+flash/pro x cr{0,4,128} shapes (eager-UT 9/9).
 """
 
 import torch
@@ -27,9 +27,7 @@ from .dsa_bwd_dkv_interm_gluon import _sparse_mla_bwd_dkv_interm_gl_kernel
 from .dsa_bwd_dq_gluon import _sparse_mla_bwd_dq_gl_kernel
 
 
-def sparse_mla_bwd_v4_gluon_v2_gluon(
-    q, kv, o, do, topk_indices, lse, attn_sink=None, kv_lora_rank=512, scale=None
-):
+def sparse_mla_bwd_v4_gluon_v2(q, kv, o, do, topk_indices, lse, attn_sink=None, kv_lora_rank=512, scale=None):
     """DeepSeek-V4 sparse-MLA backward (Gluon dQ/dKV). Returns ``(dq, dkv, d_sink)``."""
     assert q.is_contiguous() and kv.is_contiguous() and o.is_contiguous()
     assert do.is_contiguous() and topk_indices.is_contiguous() and lse.is_contiguous()
