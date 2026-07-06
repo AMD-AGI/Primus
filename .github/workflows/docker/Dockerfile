@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v26.2
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.3
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
@@ -6,6 +6,7 @@ ARG PRIMUS_TURBO_AITER_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
 ARG UCCL_COMMIT
+ARG TRITON_COMMIT
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -23,7 +24,7 @@ RUN rm -rf /var/lib/apt/lists/*
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 # ENV MPI_HOME=/opt/ompi
-# Use the system OpenMPI prefix from the v26.2 base image.
+# Use the system OpenMPI prefix from the v26.3 base image.
 ENV MPI_HOME=/usr/lib/x86_64-linux-gnu/openmpi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
@@ -55,9 +56,10 @@ RUN rm -rf /opt/rocSHMEM
 
 RUN pip3 uninstall aiter amd-aiter -y || true && \
     cd /opt && \
-    git clone --recursive https://github.com/ROCm/aiter.git && \
+    git clone https://github.com/ROCm/aiter.git && \
     cd aiter && \
-    git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git checkout -f ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git submodule sync && \
     git submodule update --init --recursive && \
     PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
@@ -72,6 +74,18 @@ RUN cd /opt && \
 RUN rm -rf /opt/Primus-Turbo
 
 # ---------------------------------------------------------------------------
+# Install Triton
+# ---------------------------------------------------------------------------
+RUN cd /opt && \
+    git clone -b release/3.7.x https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout ${TRITON_COMMIT} && \
+    pip3 install ninja cmake && \
+    pip3 install --no-build-isolation -v .
+
+RUN rm -rf /opt/triton
+
+# ---------------------------------------------------------------------------
 # Install UCCL-EP (skip for JAX framework)
 # ---------------------------------------------------------------------------
 RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
@@ -84,6 +98,24 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     pip3 install --no-build-isolation . -v && \
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v && \
     rm -rf /opt/uccl; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Install fixed origami (rocm-libraries@223648a) over the base image's bundled
+# 0.1.0. The bundled origami's rank_configs() raises
+# `ValueError: vector::reserve` during MoE grouped-gemm kernel selection and
+# crashes training (turbo's _safe_rank_configs only catches RuntimeError).
+# Skipped for JAX. TODO: drop once a base image ships origami with the fix.
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
+    rm -rf /tmp/rocm-libraries && \
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
+    cd /tmp/rocm-libraries && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set shared/origami && \
+    git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b && \
+    (pip uninstall -y origami || true) && \
+    pip install --no-cache-dir ./shared/origami/python && \
+    rm -rf /tmp/rocm-libraries; \
     fi
 
 # Set the default working directory

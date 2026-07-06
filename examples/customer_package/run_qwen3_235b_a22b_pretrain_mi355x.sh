@@ -108,7 +108,7 @@ for feature in "${MoE_Features[@]}"; do
         ;;
     2)
         ensure_primus_turbo
-        FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
+        FEATURE_ARGS+=("--use_turbo_grouped_gemm" "True")
         ;;
     3)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")

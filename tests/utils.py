@@ -10,11 +10,17 @@ import subprocess
 import sys
 import time
 import unittest
+import warnings
 from typing import Optional
 
 from primus.core.utils import logger
 
 TRAINING_COMPLETED_MARKER = "Training completed."
+
+# run_patcher's failure line ("[Patch] \u2717 Patch '<id>' failed..."); distinct
+# from a patch's own graceful "[SKIP]". run_patches doesn't fail training on it
+# (stop_on_error=False), so we surface it ourselves.
+PATCH_FAILURE_MARKER = "\u2717 Patch '"
 
 
 class PrimusUT(unittest.TestCase):
@@ -45,6 +51,25 @@ class PrimusUT(unittest.TestCase):
         pass
 
 
+def _warn_on_patch_failures(tag: str, stdout_output: str) -> None:
+    """Warn (don't fail) when patches failed to apply during training.
+
+    A failed patch doesn't crash training and a 3-step smoke run can't prove it
+    was harmless, so we emit a GitHub Actions warning to keep it visible without
+    blocking CI. No-op for backends that don't emit the marker.
+    """
+    if PATCH_FAILURE_MARKER not in stdout_output:
+        return
+    failed = [ln.strip() for ln in stdout_output.splitlines() if PATCH_FAILURE_MARKER in ln]
+    msg = (
+        f"[{tag}] {len(failed)} patch(es) failed to apply during training "
+        f"(training still completed): " + " | ".join(failed[:10])
+    )
+    # GitHub Actions annotation: shows on the run/PR without failing the job.
+    print(f"::warning title=Primus patch failed to apply::{msg}")
+    warnings.warn(msg)
+
+
 def run_training_script(
     tag: str,
     cmd: list[str],
@@ -71,6 +96,13 @@ def run_training_script(
     Raises:
         AssertionError: If training did not complete successfully.
     """
+    # Short-circuit Python / torchrun teardown on successful runs to save
+    # ~20s per end-to-end test. The marker we rely on ("Training completed.")
+    # is emitted well before cleanup(), so this does not affect assertions.
+    # Developers can opt out locally via PRIMUS_EXIT_FAST=0.
+    if env is not None:
+        env.setdefault("PRIMUS_EXIT_FAST", "1")
+
     try:
         logger.info(f"[{tag}] Begin run...")
         start = time.time()
@@ -96,6 +128,8 @@ def run_training_script(
                 f"not found in log output. Training may have failed silently.\n"
                 f"Log file: {train_log_path}"
             )
+
+        _warn_on_patch_failures(tag, stdout_output)
 
         return stdout_output, ""
 

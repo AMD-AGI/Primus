@@ -128,7 +128,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         3. **Activation function** — SwiGLU / GELU element-wise overhead.
 
         **Grouped GEMM performance model selection**:
-        When ``enable_primus_turbo`` and ``use_turbo_grouped_mlp`` are both
+        When ``enable_primus_turbo`` and ``use_turbo_grouped_gemm`` are both
         ``True`` in the training config, the expert GEMMs are modelled using
         Origami's *batched* GEMM path (``batch=num_local_experts``).  Primus
         Turbo's grouped-GEMM kernel achieves near-ideal batched execution,
@@ -172,7 +172,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # Legacy grouped_gemm executes experts more sequentially → model as
         # individual GEMM (batch=1) × num_local_experts.
         use_turbo = getattr(self.config.model_config, "enable_primus_turbo", False) and getattr(
-            self.config.model_config, "use_turbo_grouped_mlp", False
+            self.config.model_config, "use_turbo_grouped_gemm", False
         )
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
