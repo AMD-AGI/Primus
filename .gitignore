@@ -26,3 +26,6 @@ examples/megatron/configs/MI355X/*-verify.yaml
 examples/megatron/configs/MI355X/*-it50*.yaml
 examples/megatron/configs/MI355X/*-short30.yaml
 examples/megatron/configs/MI355X/*-cmp-fit-*.yaml
+# ODC one-off experiment sweep configs (underscore-prefixed): _ab200*, _dev200*,
+# _m18*, _sdr* ablation yamls are never committed.
+examples/megatron/configs/MI355X/_*.yaml
