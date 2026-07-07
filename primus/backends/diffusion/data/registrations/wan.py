@@ -29,7 +29,11 @@ class WanVideoProcessor:
         tokenizer_path = config.get("text_tokenizer")
         if not tokenizer_path:
             raise ValueError("Wan dataset processor requires `text_tokenizer`.")
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        trust_remote_code = bool(config.get("trust_remote_code", False))
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=trust_remote_code,
+        )
 
         extra_kwargs = config.get("extra_kwargs", {}) or {}
         size = extra_kwargs.get("size", {}) or {}
@@ -141,7 +145,7 @@ class WanVideoDataset(Dataset):
         prompt = sample.get("prompt") or sample.get("text") or sample.get("caption") or ""
         video_key = sample.get("video") or sample.get("video_path")
         if not video_key:
-            raise ValueError(f"Wan dataset sample missing `video`: index={index}")
+            raise KeyError(f"Wan dataset sample missing `video`: index={index}")
 
         item = self.processor.tokenize(str(prompt))
         item["video"] = self._read_video(self._resolve_video_path(str(video_key)))

@@ -35,7 +35,7 @@ class DiffusionPretrainTrainer(BaseTrainer):
 
         missing = [
             package
-            for package in ("torch", "loguru", "safetensors", "transformers", "PIL")
+            for package in ("torch", "loguru", "safetensors", "transformers", "PIL", "torchvision")
             if importlib.util.find_spec(package) is None
         ]
         video_backend = (dataset_cfg.get("config", {}) or {}).get("video_backend")
@@ -43,8 +43,6 @@ class DiffusionPretrainTrainer(BaseTrainer):
             missing.append("imageio")
         if video_backend == "decord" and importlib.util.find_spec("decord") is None:
             missing.append("decord")
-        if video_backend == "qwen_vl_utils" and importlib.util.find_spec("torchvision") is None:
-            missing.append("torchvision")
         if missing:
             raise RuntimeError(
                 "Diffusion backend missing required Python packages: "
