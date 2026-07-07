@@ -62,9 +62,7 @@ class WanFlowMatchTrainPipeline:
             try:
                 return int(os.environ["FIXED_SEED"])
             except ValueError as exc:
-                raise ValueError(
-                    f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}"
-                ) from exc
+                raise ValueError(f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}") from exc
         seed = batch.get("seed", None)
         if seed is None:
             return None
@@ -99,9 +97,7 @@ class WanFlowMatchTrainPipeline:
         if seed is not None:
             generator = torch.Generator(device="cpu")
             generator.manual_seed(seed)
-        noise = torch.randn(
-            x.shape, generator=generator, device="cpu", dtype=torch.float32
-        )
+        noise = torch.randn(x.shape, generator=generator, device="cpu", dtype=torch.float32)
         return noise.to(device=device, dtype=dtype)
 
     @staticmethod
@@ -135,9 +131,7 @@ class WanFlowMatchTrainPipeline:
         return latents, (height, width)
 
     @staticmethod
-    def _crop_latents(
-        latents: torch.Tensor, *, spatial_size: tuple[int, int]
-    ) -> torch.Tensor:
+    def _crop_latents(latents: torch.Tensor, *, spatial_size: tuple[int, int]) -> torch.Tensor:
         height, width = spatial_size
         return latents[..., :height, :width]
 
@@ -154,16 +148,12 @@ class WanFlowMatchTrainPipeline:
             try:
                 fixed_step = int(os.environ["FIXED_TIMESTEP"])
             except ValueError as exc:
-                raise ValueError(
-                    f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}"
-                ) from exc
+                raise ValueError(f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}") from exc
             max_step = int(scheduler.num_train_timesteps) - 1
             fixed_step = max(0, min(fixed_step, max_step))
             timestep_id = torch.tensor([fixed_step], device=device)
         else:
-            timestep_id = torch.randint(
-                0, int(scheduler.num_train_timesteps), (1,), device=device
-            )
+            timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,), device=device)
 
         # scheduler.timesteps live on CPU in this repo; `wan_new` indexes with cpu tensor.
         timestep = scheduler.timesteps[timestep_id.cpu()].float()
@@ -262,9 +252,7 @@ class WanFlowMatchTrainPipeline:
             pass
 
         with torch.no_grad():
-            input_latents = self._vae_encode(components.vae, video).to(
-                device=device, dtype=dtype
-            )
+            input_latents = self._vae_encode(components.vae, video).to(device=device, dtype=dtype)
         patch_size = self._get_dit_patch_size(model_config)
         input_latents, original_latent_spatial_size = self._pad_latents_for_dit(
             input_latents, patch_size=patch_size
@@ -273,9 +261,7 @@ class WanFlowMatchTrainPipeline:
         # 2) Sample timestep + noise (match `wan_new`: noise on CPU, timestep from scheduler.timesteps)
         timestep = self._select_timestep(scheduler, device=device)  # [1] (float)
         seed = self._get_seed_from_env_or_batch(batch)
-        noise = self._randn_like_on_cpu_then_to(
-            input_latents, seed=seed, dtype=dtype, device=device
-        )
+        noise = self._randn_like_on_cpu_then_to(input_latents, seed=seed, dtype=dtype, device=device)
 
         # 3) Diffusion target + noise injection (match `wan_new`)
         # Note: in this repo's FlowMatchScheduler, `training_target(sample, noise, t)` uses `noise - sample`.
@@ -285,9 +271,7 @@ class WanFlowMatchTrainPipeline:
 
         # 4) Text embeddings
         with torch.no_grad():
-            context = self._encode_prompt(
-                components.text_encoder, input_ids, attention_mask
-            )
+            context = self._encode_prompt(components.text_encoder, input_ids, attention_mask)
 
         # 5) DiT forward (official interface: List[Tensor] per-sample)
         x_list = [noisy_latents[i] for i in range(noisy_latents.shape[0])]
@@ -319,9 +303,7 @@ class WanFlowMatchTrainPipeline:
             sp_group=sp_group,
         )
         noise_pred = torch.stack(noise_pred_list)
-        noise_pred = self._crop_latents(
-            noise_pred, spatial_size=original_latent_spatial_size
-        )
+        noise_pred = self._crop_latents(noise_pred, spatial_size=original_latent_spatial_size)
         target = self._crop_latents(target, spatial_size=original_latent_spatial_size)
 
         # 6) Loss

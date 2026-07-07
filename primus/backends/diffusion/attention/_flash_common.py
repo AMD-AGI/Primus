@@ -101,17 +101,6 @@ def run_flash_attention_backend(
     max_sq = int(q_lens.max())
     max_sk = int(k_lens.max())
 
-    import os
-
-    import torch.distributed as dist
-
-    if os.environ.get("OMNIFLOW_DEBUG_ATTN") == "1" and (not dist.is_initialized() or dist.get_rank() == 0):
-        print(f"[DEBUG ATTN] q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
-        print(f"[DEBUG ATTN] q_lens={q_lens}, k_lens={k_lens}")
-        print(f"[DEBUG ATTN] cu_seqlens_q={cu_seqlens_q}, cu_seqlens_k={cu_seqlens_k}")
-        print(f"[DEBUG ATTN] max_seqlen_q={max_sq} (lq={lq}), max_seqlen_k={max_sk} (lk={lk})")
-        print(f"[DEBUG ATTN] q.dtype={q.dtype}, causal={causal}, window_size={call_window_size}")
-
     x = varlen_attention(
         q=q,
         k=k,
