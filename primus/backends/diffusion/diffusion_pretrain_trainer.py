@@ -112,13 +112,13 @@ class DiffusionPretrainTrainer(BaseTrainer):
 
             if getattr(wandb, "run", None) is not None:
                 wandb.finish(exit_code=1 if on_error else 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_rank_0(f"[Primus:Diffusion] wandb cleanup failed: {exc}")
 
         try:
             import torch.distributed as dist
 
             if dist.is_available() and dist.is_initialized():
                 dist.destroy_process_group()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_rank_0(f"[Primus:Diffusion] distributed cleanup failed: {exc}")

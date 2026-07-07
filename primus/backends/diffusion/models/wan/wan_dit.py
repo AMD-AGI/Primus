@@ -217,13 +217,29 @@ class WanSelfAttention(nn.Module):
 
 
 class WanCrossAttention(WanSelfAttention):
-    def forward(self, x, context, context_lens):
+    def forward(
+        self,
+        x,
+        seq_lens=None,
+        grid_sizes=None,
+        freqs=None,
+        sp_group: Optional[dist.ProcessGroup] = None,
+        context=None,
+        context_lens=None,
+    ):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
+            seq_lens/grid_sizes/freqs/sp_group: accepted for WanSelfAttention
+                signature compatibility; cross-attention uses text context only.
             context(Tensor): Shape [B, L2, C]
             context_lens(Tensor): Shape [B]
         """
+        if context is None:
+            # Backward-compatible positional form: forward(x, context, context_lens).
+            context = seq_lens
+            context_lens = grid_sizes if context_lens is None else context_lens
+
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         x = x.to(dtype=self.q.weight.dtype)
@@ -304,7 +320,11 @@ class WanAttentionBlock(nn.Module):
         # cross-attention + FFN (no SP communication needed:
         # each rank's visual queries attend to full text keys independently)
         def cross_attn_ffn(x_, context_, context_lens_, e_):
-            x_ = x_ + self.cross_attn(self.norm3(x_), context_, context_lens_)
+            x_ = x_ + self.cross_attn(
+                self.norm3(x_),
+                context=context_,
+                context_lens=context_lens_,
+            )
             ffn_in = self.norm2(x_) * (1 + e_[4].squeeze(2)) + e_[3].squeeze(2)
             y_ = self.ffn(ffn_in)
             x_ = x_ + y_ * e_[5].squeeze(2)
