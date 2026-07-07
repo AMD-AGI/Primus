@@ -15,3 +15,4 @@ mlflow==3.4.0
 pyrsmi
 plotext
 hip-python
+git+https://github.com/mlcommons/logging.git@6.0.0-rc5
