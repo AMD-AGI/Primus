@@ -62,10 +62,20 @@ class WanFlowMatchTrainPipeline:
         seed = batch.get("seed", None)
         if seed is None:
             return None
-        try:
-            return int(seed)
-        except Exception:
-            return None
+        if isinstance(seed, torch.Tensor):
+            flat_seed = seed.detach().reshape(-1).cpu()
+            if flat_seed.numel() == 0:
+                return None
+            if flat_seed.numel() > 1 and not bool((flat_seed == flat_seed[0]).all()):
+                raise ValueError("Per-sample dataset seeds are not supported; got different seeds in one batch.")
+            seed = flat_seed[0].item()
+        elif isinstance(seed, (list, tuple)):
+            if not seed:
+                return None
+            if len(seed) > 1 and any(value != seed[0] for value in seed):
+                raise ValueError("Per-sample dataset seeds are not supported; got different seeds in one batch.")
+            seed = seed[0]
+        return int(seed)
 
     @staticmethod
     def _randn_like_on_cpu_then_to(
@@ -138,7 +148,7 @@ class WanFlowMatchTrainPipeline:
         return timestep.to(device=device)
 
     @staticmethod
-    def _maybe_expand_seperated_timestep(
+    def _maybe_expand_separated_timestep(
         *,
         timestep: torch.Tensor,
         x_list: list[torch.Tensor],
@@ -173,7 +183,7 @@ class WanFlowMatchTrainPipeline:
         for i, x in enumerate(x_list):
             # x: [C, F, H, W] in latent space
             f, h, w = x.shape[1], x.shape[2], x.shape[3]
-            seq_len = f * (h // d_h) * (w // d_w)
+            seq_len = (f // d_f) * (h // d_h) * (w // d_w)
             t_seq = torch.full((seq_len,), timestep_b[i], device=timestep_b.device, dtype=timestep_b.dtype)
             spatial_patches = (h // d_h) * (w // d_w)
             t_seq[:spatial_patches] = 0
@@ -250,16 +260,16 @@ class WanFlowMatchTrainPipeline:
         x_list = [noisy_latents[i] for i in range(noisy_latents.shape[0])]
         context_list = [context[i] for i in range(context.shape[0])]
 
-        # seq_len computed like wan_new: based on latent shape and patch size
+        # seq_len matches DiT Conv3d patchification over [F, H, W].
         d_f, d_h, d_w = patch_size
         max_seq_len = 0
         for x in x_list:
-            seq_len = x.shape[1] * (x.shape[2] // d_h) * (x.shape[3] // d_w)
+            seq_len = (x.shape[1] // d_f) * (x.shape[2] // d_h) * (x.shape[3] // d_w)
             max_seq_len = max(max_seq_len, seq_len)
 
-        separated = bool(getattr(model_config, "seperated_timestep", False))
+        separated = bool(getattr(model_config, "separated_timestep", False))
         fuse_flag = bool(getattr(model_config, "fuse_vae_embedding_in_latents", False))
-        t = self._maybe_expand_seperated_timestep(
+        t = self._maybe_expand_separated_timestep(
             timestep=timestep,
             x_list=x_list,
             patch_size=(d_f, d_h, d_w),
