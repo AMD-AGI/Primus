@@ -36,6 +36,8 @@ In-depth technical documentation:
 - **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
  - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
  - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
+- **[Flux Diffusion Models](./backends/megatron/diffusion/README.md)** - Flux diffusion model architecture, training, and API reference
+- **[FP8 Training Guide](./backends/megatron/diffusion/fp8_training.md)** - FP8 precision training on AMD MI300X/MI355X: configuration, benchmarks, and tuning
 
 ### 💡 Help & Support
 
@@ -67,4 +69,4 @@ Get help and find answers:
 
 ---
 
-**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).
+**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AGI/Primus/issues).

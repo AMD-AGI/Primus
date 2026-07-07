@@ -455,7 +455,9 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
             json.dump(config_dict, f, indent=2)
 
 
-def _get_sync_free_moe_options(stage: int) -> dict:
+def _get_sync_free_moe_options(args) -> dict:
+    stage = args.turbo_sync_free_moe_stage
+
     if stage > 3 or stage < 0:
         raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
 
@@ -463,26 +465,50 @@ def _get_sync_free_moe_options(stage: int) -> dict:
         1: {
             "moe_use_fused_router_with_aux_score": True,
             "moe_permute_fusion": True,
-            "use_turbo_permute_padding": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
         },
         2: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
-            "use_turbo_permute_padding": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
-            "use_turbo_permute_padding": True,
+            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
             "use_turbo_fused_act_with_probs": True,
         },
     }
 
     return sync_free_moe[stage]
+
+
+# FSDP2 custom optimizer selection flags. Each one monkeypatches
+# get_megatron_optimizer at the same priority (50), so at most one may be set.
+_FSDP2_OPTIMIZER_FLAGS = (
+    "use_fsdp2_fp32_param_optimizer",
+    "use_fsdp2_bf16_master_weight_optimizer",
+)
+
+
+def validate_fsdp2_optimizer_exclusivity(args) -> None:
+    """Ensure at most one FSDP2 custom optimizer flag is enabled.
+
+    Enabling more than one would silently let whichever optimizer patch applies
+    last win the monkeypatch, so raise ValueError to fail loudly at
+    arg-validation time (before training starts).
+    """
+    enabled = [flag for flag in _FSDP2_OPTIMIZER_FLAGS if getattr(args, flag, False)]
+    if len(enabled) > 1:
+        raise ValueError(
+            "Conflicting FSDP2 optimizer selection: at most one of "
+            f"{list(_FSDP2_OPTIMIZER_FLAGS)} may be enabled, but got {enabled}. "
+            "Enable exactly one."
+        )
 
 
 def validate_args_on_rocm(args):
@@ -507,6 +533,9 @@ def validate_args_on_rocm(args):
     assert not getattr(
         args, "use_turbo_parallel_linear", False
     ), "use_turbo_parallel_linear has been removed; please use use_turbo_gemm instead."
+
+    validate_fsdp2_optimizer_exclusivity(args)
+
     use_turbo_gemm = getattr(args, "use_turbo_gemm", False)
     # Turbo FP8 linear check
     if args.fp8 and use_turbo_gemm:
@@ -554,7 +583,7 @@ def validate_args_on_rocm(args):
             raise ValueError(
                 "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedLinear, please set `use_turbo_grouped_gemm=True`"
             )
-        options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+        options = _get_sync_free_moe_options(args)
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )

@@ -1,0 +1,16 @@
+version: 2
+# Version updates for GitHub Actions only; CVEs are handled by Dependabot
+# security updates (enabled repo-wide).
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "github-actions"

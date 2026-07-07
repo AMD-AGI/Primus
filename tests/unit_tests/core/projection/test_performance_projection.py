@@ -38,15 +38,35 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _add_io_layer_timings,
     _calculate_min_gpus,
     _calculate_single_node_config,
+    _compute_ep_mlp_scale,
     _compute_micro_batches,
+    _estimate_a2a_per_layer_ms,
+    _estimate_ep_communication_overhead,
+    _estimate_pp_communication_overhead,
     _extract_layer_type_timings,
+    _get_deepep_overlap_efficiency,
+    _get_parameter_memory,
     _has_dense_layers,
     _layer_needs_recompute_fwd_in_bwd,
     _limit_layers_for_projection,
+    _load_artifact,
+    _load_profiling_results,
     _normalized_recompute_layer_ids,
     _recompute_layer_count,
+    _reduction_info_from_artifact_metadata,
+    _rescale_expert_parallelism,
+    _save_profiling_results,
+    _summarize_bench_training_config,
     _upgrade_artifact_to_v2,
+    calculate_collective_communication_time,
+    extract_single_node_time_from_profiling,
     load_hardware_config,
+)
+from primus.core.projection.training_config import (  # noqa: E402
+    ModelConfig,
+    ModelParallelConfig,
+    RuntimeConfig,
+    TrainingConfig,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -399,3 +419,360 @@ def test_single_node_config_reduces_ep_for_moe():
     assert info["benchmark_ep"] == 8
     # num_experts reduced proportionally (experts_per_rank preserved = 1).
     assert info["benchmark_num_experts"] == 8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _rescale_expert_parallelism (cap EP*TP at _MAX_EXPERT_PARALLEL_SIZE = 8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_rescale_ep_noop_within_limit():
+    cfg = SimpleNamespace(
+        expert_model_parallel_size=4, tensor_model_parallel_size=1, context_parallel_size=1, num_experts=8
+    )
+    assert _rescale_expert_parallelism(cfg) is None
+    assert cfg.expert_model_parallel_size == 4
+
+
+def test_rescale_ep_caps_and_scales_experts():
+    cfg = SimpleNamespace(
+        expert_model_parallel_size=16, tensor_model_parallel_size=1, context_parallel_size=1, num_experts=32
+    )
+    info = _rescale_expert_parallelism(cfg)
+    assert (info["ep_before"], info["ep_after"]) == (16, 8)
+    assert cfg.expert_model_parallel_size == 8
+    assert cfg.num_experts == 16  # experts_per_rank (32/16=2) preserved -> 8*2
+
+
+def test_rescale_ep_folds_tp_into_budget():
+    # EP=8 is within the limit alone, but EP*TP=16 > 8, so EP is rescaled to 4.
+    cfg = SimpleNamespace(
+        expert_model_parallel_size=8, tensor_model_parallel_size=2, context_parallel_size=1, num_experts=8
+    )
+    info = _rescale_expert_parallelism(cfg)
+    assert info["ep_after"] == 4
+    assert cfg.expert_model_parallel_size == 4
+
+
+def test_rescale_ep_handles_missing_num_experts():
+    cfg = SimpleNamespace(
+        expert_model_parallel_size=16, tensor_model_parallel_size=1, context_parallel_size=1, num_experts=None
+    )
+    info = _rescale_expert_parallelism(cfg)
+    assert info["ep_after"] == 8
+    assert info["num_experts_after"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _get_deepep_overlap_efficiency / _compute_ep_mlp_scale
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("stage,eff", [(0, 0.65), (1, 0.75), (2, 0.80), (3, 0.85), (5, 0.85)])
+def test_deepep_overlap_efficiency(stage, eff):
+    assert _get_deepep_overlap_efficiency(SimpleNamespace(turbo_sync_free_moe_stage=stage)) == eff
+
+
+def test_deepep_overlap_efficiency_default_when_missing():
+    assert _get_deepep_overlap_efficiency(SimpleNamespace()) == 0.65
+
+
+def test_ep_mlp_scale_unity_when_ep_unchanged():
+    assert _compute_ep_mlp_scale(SimpleNamespace(), 8, 8) == 1.0
+
+
+def test_ep_mlp_scale_unity_when_experts_per_rank_preserved():
+    assert (
+        _compute_ep_mlp_scale(
+            SimpleNamespace(),
+            benchmark_ep=8,
+            original_ep=16,
+            original_num_experts=32,
+            benchmark_num_experts=16,
+        )
+        == 1.0
+    )
+
+
+def test_ep_mlp_scale_unity_fallback_without_expert_counts():
+    assert _compute_ep_mlp_scale(SimpleNamespace(), benchmark_ep=8, original_ep=16) == 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Communication-time estimators (use the analytical collective model)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _comm_tc(**mp):
+    base_mp = dict(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=1,
+        context_model_parallel_size=1,
+    )
+    base_mp.update(mp)
+    return SimpleNamespace(
+        model_parallel_config=SimpleNamespace(**base_mp),
+        model_config=SimpleNamespace(hidden_size=512, moe_router_topk=2),
+        runtime_config=SimpleNamespace(micro_batch_size=1, sequence_length=128, global_batch_size=8),
+    )
+
+
+@pytest.fixture
+def _single_node_env(monkeypatch):
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("NNODES", "1")
+
+
+def test_pp_comm_overhead_zero_for_single_stage(_single_node_env):
+    assert _estimate_pp_communication_overhead(_comm_tc(), pp_size=1) == 0.0
+
+
+def test_pp_comm_overhead_positive_for_multistage(_single_node_env):
+    assert _estimate_pp_communication_overhead(_comm_tc(), pp_size=2) > 0
+
+
+def test_a2a_per_layer_zero_without_ep(_single_node_env):
+    assert _estimate_a2a_per_layer_ms(_comm_tc(), ep=1) == 0.0
+
+
+def test_a2a_per_layer_positive_with_ep(_single_node_env):
+    assert _estimate_a2a_per_layer_ms(_comm_tc(expert_model_parallel_size=2), ep=2) > 0
+
+
+def test_ep_comm_overhead_zero_when_not_scaling_up(_single_node_env):
+    assert _estimate_ep_communication_overhead(_comm_tc(), original_ep=4, benchmark_ep=8) == (0.0, 0.0)
+
+
+def test_ep_comm_overhead_symmetric_when_scaling_up(_single_node_env):
+    fwd, bwd = _estimate_ep_communication_overhead(_comm_tc(), original_ep=4, benchmark_ep=2)
+    assert fwd == bwd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _get_parameter_memory (param bytes/GB on a PP rank via the language-model spec)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _full_config(**mp):
+    return TrainingConfig(
+        model_config=ModelConfig(
+            num_layers=4,
+            hidden_size=512,
+            ffn_hidden_size=1024,
+            padded_vocab_size=32000,
+            num_attention_heads=8,
+            kv_channels=64,
+            num_query_groups=8,
+            swiglu=True,
+            num_experts=None,
+            moe_pattern=[0] * 4,
+        ),
+        runtime_config=RuntimeConfig(
+            global_batch_size=8, micro_batch_size=1, sequence_length=128, data_parallel_size=1
+        ),
+        model_parallel_config=ModelParallelConfig(**mp),
+    )
+
+
+def test_get_parameter_memory_positive_gb(_single_node_env, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
+    assert _get_parameter_memory(_full_config(), pp_rank=0) > 0
+
+
+def test_get_parameter_memory_rank_out_of_range_raises(_single_node_env, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
+    with pytest.raises(ValueError, match="out of range"):
+        _get_parameter_memory(_full_config(pipeline_model_parallel_size=2), pp_rank=5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# extract_single_node_time_from_profiling (extrapolate profiled layers -> model)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _profiling_tc(moe_pattern, **mp):
+    base_mp = dict(recompute_granularity=None, recompute_num_layers=0, recompute_layer_ids=None)
+    base_mp.update(mp)
+    return SimpleNamespace(
+        model_config=SimpleNamespace(moe_pattern=moe_pattern),
+        model_parallel_config=SimpleNamespace(**base_mp),
+    )
+
+
+def test_extract_single_node_time_dense_with_io():
+    tc = _profiling_tc([0, 0, 0, 0])
+    pr = {
+        0: {"forward_time_ms": 2, "backward_time_ms": 3, "type": "dense"},
+        "embedding": {"forward_time_ms": 0.5, "backward_time_ms": 0.5},
+        "output": {"forward_time_ms": 1, "backward_time_ms": 1},
+    }
+    # avg_dense=5 * 4 layers = 20; + embedding 1 + output 2 = 23
+    assert extract_single_node_time_from_profiling(pr, tc) == pytest.approx(23.0)
+
+
+def test_extract_single_node_time_dense_and_moe_buckets():
+    tc = _profiling_tc([0, 1, 1, 1])  # 1 dense + 3 MoE
+    pr = {
+        0: {"forward_time_ms": 1, "backward_time_ms": 1, "type": "dense"},
+        1: {"forward_time_ms": 2, "backward_time_ms": 2, "type": "moe"},
+    }
+    # dense 2 * 1 + moe 4 * 3 = 14
+    assert extract_single_node_time_from_profiling(pr, tc) == pytest.approx(14.0)
+
+
+def test_extract_single_node_time_adds_full_recompute_overhead():
+    tc = _profiling_tc([0, 0, 0, 0], recompute_granularity="full", recompute_num_layers=4)
+    pr = {0: {"forward_time_ms": 2, "backward_time_ms": 3, "type": "dense"}}
+    # base 5 * 4 = 20; recompute all 4 dense layers adds avg_dense_fwd(2) * 4 = 8 -> 28
+    assert extract_single_node_time_from_profiling(pr, tc) == pytest.approx(28.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# artifact metadata helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_reduction_info_from_metadata_marks_adjusted():
+    md = {
+        "benchmark_pp": 1,
+        "benchmark_tp": 2,
+        "benchmark_ep": 8,
+        "benchmark_gpus": 16,
+        "original_pp": 2,
+        "original_tp": 2,
+        "original_ep": 16,
+        "original_cp": 1,
+        "original_num_experts": 64,
+        "benchmark_num_experts": 32,
+    }
+    info = _reduction_info_from_artifact_metadata(md, gpus_per_node=8)
+    assert info["adjusted"] is True
+    assert (info["original_ep"], info["benchmark_ep"]) == (16, 8)
+    # min GPUs = TP*PP*EP = 2*2*16 = 64 -> 8 nodes
+    assert info["original_nodes_required"] == 8
+
+
+def test_reduction_info_from_metadata_not_adjusted_when_identical():
+    md = {
+        "benchmark_pp": 1,
+        "benchmark_tp": 1,
+        "benchmark_ep": 1,
+        "original_pp": 1,
+        "original_tp": 1,
+        "original_ep": 1,
+    }
+    assert _reduction_info_from_artifact_metadata(md, gpus_per_node=8)["adjusted"] is False
+
+
+def test_summarize_bench_training_config_normalizes_recompute_ids():
+    tc = SimpleNamespace(
+        model_config=SimpleNamespace(num_layers=4, moe_pattern=[0, 1, 0, 1], num_experts=8),
+        model_parallel_config=SimpleNamespace(
+            tensor_model_parallel_size=2,
+            pipeline_model_parallel_size=1,
+            recompute_granularity="full",
+            recompute_num_layers=2,
+            recompute_layer_ids="0,1",
+        ),
+        runtime_config=SimpleNamespace(micro_batch_size=1, sequence_length=128, global_batch_size=8),
+    )
+    s = _summarize_bench_training_config(tc)
+    assert s["num_layers"] == 4 and s["moe_pattern"] == [0, 1, 0, 1]
+    assert s["tensor_model_parallel_size"] == 2
+    assert s["recompute_layer_ids"] == [0, 1]  # parsed + sorted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# artifact save/load roundtrip
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_save_load_profiling_roundtrip(tmp_path):
+    pr = {
+        0: {"forward_time_ms": 1.0, "type": "dense"},
+        1: {"forward_time_ms": 2.0, "type": "moe"},
+        "_memory_benchmark": {"peak": 123},
+    }
+    path = str(tmp_path / "artifact.json")
+    _save_profiling_results(pr, {"benchmark_ep": 8, "benchmark_tp": 2, "original_ep": 16}, path)
+    loaded, metadata = _load_profiling_results(path)
+    assert 0 in loaded and 1 in loaded  # int keys restored from JSON strings
+    assert loaded["_memory_benchmark"] == {"peak": 123}  # hoisted then re-injected
+    assert metadata["benchmark_ep"] == 8 and metadata["original_ep"] == 16
+
+
+def test_load_artifact_upgrades_v1_payload(tmp_path):
+    import json
+
+    path = str(tmp_path / "v1.json")
+    with open(path, "w") as f:
+        json.dump({"profiling_results": {"0": {"forward_time_ms": 1}}}, f)
+    payload = _load_artifact(path)
+    assert payload["schema_version"] == 2
+    assert payload["memory_results"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# calculate_collective_communication_time (analytical comm breakdown)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _full_moe_config(**mp):
+    return TrainingConfig(
+        model_config=ModelConfig(
+            num_layers=4,
+            hidden_size=512,
+            ffn_hidden_size=1024,
+            moe_ffn_hidden_size=1024,
+            padded_vocab_size=32000,
+            num_attention_heads=8,
+            kv_channels=64,
+            num_query_groups=8,
+            swiglu=True,
+            num_experts=8,
+            moe_router_topk=2,
+            moe_pattern=[1] * 4,
+        ),
+        runtime_config=RuntimeConfig(
+            global_batch_size=8, micro_batch_size=1, sequence_length=128, data_parallel_size=1
+        ),
+        model_parallel_config=ModelParallelConfig(**mp),
+    )
+
+
+def test_collective_comm_zero_for_single_gpu(_single_node_env):
+    tc = _full_config()
+    total, breakdown, msg, per_layer = calculate_collective_communication_time(
+        tc, num_nodes=1, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=1
+    )
+    assert total == 0.0
+    assert breakdown["gradient_allreduce"] == 0.0 and breakdown["moe_a2a_fwd"] == 0.0
+    assert len(per_layer) == tc.model_config.num_layers
+
+
+def test_collective_comm_gradient_allreduce_with_dp(_single_node_env):
+    tc = _full_config()
+    _, breakdown, msg, _ = calculate_collective_communication_time(
+        tc, num_nodes=1, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=4
+    )
+    assert breakdown["gradient_allreduce"] > 0
+    assert msg["gradient_allreduce_size"] > 0
+
+
+def test_collective_comm_moe_all_to_all(_single_node_env):
+    tc = _full_moe_config()
+    _, breakdown, msg, _ = calculate_collective_communication_time(
+        tc, num_nodes=2, gpus_per_node=8, tp=1, pp=1, ep=2, cp=1, dp=8
+    )
+    assert breakdown["moe_a2a_fwd"] > 0
+    assert msg["num_moe_layers"] == 4
+
+
+def test_collective_comm_fsdp_breakdown(_single_node_env):
+    tc = _full_config(use_torch_fsdp2=True)
+    _, breakdown, msg, _ = calculate_collective_communication_time(
+        tc, num_nodes=1, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=4
+    )
+    assert breakdown["fsdp_allgather_fwd"] > 0
+    assert msg["fsdp_enabled"] is True

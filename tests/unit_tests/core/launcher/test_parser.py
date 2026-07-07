@@ -11,9 +11,13 @@ from types import SimpleNamespace
 
 from primus.core.launcher.parser import (
     PrimusParser,
+    _add_common_train_args,
     _check_keys_exist,
     _deep_merge_namespace,
     _parse_kv_overrides,
+    _split_known_unknown,
+    add_posttrain_parser,
+    add_pretrain_parser,
 )
 from primus.core.utils import logger
 from tests.utils import PrimusUT
@@ -112,6 +116,67 @@ class TestPrimusParser(PrimusUT):
         self.assertEqual(ns.a, 10)
         self.assertEqual(ns.b.c, 20)
         self.assertEqual(ns.flag, True)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # _split_known_unknown: split overrides into namespace-known vs delegated
+    # ─────────────────────────────────────────────────────────────────────
+
+    def test_split_known_unknown_flat(self):
+        ns = SimpleNamespace(a=1, b=2)
+        known, unknown = _split_known_unknown(ns, {"a": 10, "c": 30})
+        self.assertEqual(known, {"a": 10})
+        self.assertEqual(unknown, {"c": 30})
+
+    def test_split_known_unknown_nested_partial(self):
+        ns = SimpleNamespace(group=SimpleNamespace(x=1))
+        known, unknown = _split_known_unknown(ns, {"group": {"x": 2, "y": 3}})
+        self.assertEqual(known, {"group": {"x": 2}})
+        self.assertEqual(unknown, {"group": {"y": 3}})
+
+    def test_split_known_unknown_scalar_over_namespace_is_known(self):
+        # A scalar override on a namespace attribute is still "known" (no recursion).
+        ns = SimpleNamespace(group=SimpleNamespace(x=1))
+        known, unknown = _split_known_unknown(ns, {"group": 5})
+        self.assertEqual(known, {"group": 5})
+        self.assertEqual(unknown, {})
+
+    def test_split_known_unknown_empty_nested_not_propagated(self):
+        # If a nested dict has no known leaves, the parent key only lands in unknown.
+        ns = SimpleNamespace(group=SimpleNamespace(x=1))
+        known, unknown = _split_known_unknown(ns, {"group": {"y": 9}})
+        self.assertEqual(known, {})
+        self.assertEqual(unknown, {"group": {"y": 9}})
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Common train arg registration (--config/--exp, --data_path, ...)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def test_add_pretrain_parser_surface(self):
+        p = argparse.ArgumentParser()
+        add_pretrain_parser(p)
+        args = p.parse_args(["--config", "x"])
+        self.assertEqual(args.config, "x")
+        self.assertEqual(args.data_path, "./data")
+        self.assertIsNone(args.backend_path)
+        self.assertIsNone(args.export_config)
+
+    def test_add_pretrain_parser_exp_alias(self):
+        p = argparse.ArgumentParser()
+        add_pretrain_parser(p)
+        args = p.parse_args(["--exp", "y"])
+        self.assertEqual(args.config, "y")
+
+    def test_add_posttrain_parser_matches_pretrain(self):
+        p = argparse.ArgumentParser()
+        add_posttrain_parser(p)
+        args = p.parse_args(["--config", "x"])
+        self.assertEqual(args.data_path, "./data")
+
+    def test_common_train_args_without_data_path(self):
+        p = argparse.ArgumentParser()
+        _add_common_train_args(p, include_data_path=False)
+        args = p.parse_args(["--config", "x"])
+        self.assertFalse(hasattr(args, "data_path"))
 
     def test_export_and_parse_cycle_with_real_yaml(self):
         """

@@ -33,7 +33,7 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
