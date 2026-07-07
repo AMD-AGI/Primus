@@ -186,7 +186,9 @@ class WanSelfAttention(nn.Module):
             freqs(Tensor): Rope freqs
             sp_group: Ulysses SP process group (None = no SP)
         """
-        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        b, s = x.shape[:2]
+        n = self.num_heads
+        d = self.head_dim
 
         x_ = x.to(dtype=self.q.weight.dtype)
         q = self.norm_q(self.q(x_)).view(b, s, n, d)
