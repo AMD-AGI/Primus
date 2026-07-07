@@ -2,38 +2,49 @@
 #
 # See LICENSE for license information.
 
-"""ODC rocSHMEM host-API P2P backend (single-node / IPC-only).
+"""ODC rocSHMEM P2P backend, consuming the rocSHMEM ops from Primus-Turbo.
 
-Activated by ``ODC_P2P_BACKEND=rocshmem`` (the default is ``mori``). This
-backend uses ONLY rocSHMEM's *host* API (``librs_host5.so``:
-``rs_init_uid`` / ``rs_malloc`` / ``rs_ptr`` / ``rs_barrier`` / ``rs_finalize``)
-to manage the symmetric heap and resolve peer pointers. It deliberately does
-NOT link any rocSHMEM *device* bitcode into Triton — every on-device P2P op is
-plain Triton ``tl.load`` / ``tl.store`` / ``tl.atomic_*`` to XGMI-mapped peer
-addresses (see the ``rocshmem`` branch in ``shmem_triton.py``).
+Activated by ``ODC_P2P_BACKEND=rocshmem`` (the default is ``mori``). The
+rocSHMEM host/GDA surface is no longer loaded from an in-tree ``librs_host*.so``
+via ctypes; it is now provided by Primus-Turbo as two pybind submodules of
+``primus_turbo.pytorch._C``:
 
-Single-node only. The heavy gather / scatter data movement is host-side torch
-``.copy_()`` on peer-view tensors (XGMI peer load/store); the only device
-primitives exercised are ``int_p`` / ``int_wait_until_equals`` for the
-scatter-accumulate hand-shake. Those translate a local symmetric address to a
-peer address with a per-PE affine delta — ``rocshmem_ptr`` was empirically
-verified to be affine (``rs_ptr(x, pe) - x`` is constant across symmetric
-addresses ``x``), so a single ``delta[pe]`` resolves every symmetric pointer.
+  * ``odc_rocshmem_host`` — single-node host-API surface (XGMI IPC path):
+    ``rs_get_uid`` / ``rs_init_uid`` / ``rs_malloc`` / ``rs_ptr`` /
+    ``rs_barrier`` / ``rs_finalize``. Selected when ``ODC_ROCSHMEM_GDA`` != 1.
+  * ``odc_rocshmem_gda`` — multi-node GPU-direct (GDA) surface: the same
+    host-compatible ``rs_*`` bootstrap plus the device ``gda_gather`` /
+    ``gda_reduce_scatter_acc`` launchers. Selected when ``ODC_ROCSHMEM_GDA=1``.
 
-Host-API ABI (extern "C" in ``librs_host5.so``)::
+Single-node (host) path: this backend uses ONLY the host API to manage the
+symmetric heap and resolve peer pointers. It deliberately does NOT link any
+rocSHMEM *device* bitcode into Triton — every on-device P2P op is plain Triton
+``tl.load`` / ``tl.store`` / ``tl.atomic_*`` to XGMI-mapped peer addresses (see
+the ``rocshmem`` branch in ``shmem_triton.py``). The heavy gather / scatter data
+movement is host-side torch ``.copy_()`` on peer-view tensors (XGMI peer
+load/store); the only device primitives exercised are ``int_p`` /
+``int_wait_until_equals`` for the scatter-accumulate hand-shake. Those translate
+a local symmetric address to a peer address with a per-PE affine delta —
+``rocshmem_ptr`` was empirically verified to be affine (``rs_ptr(x, pe) - x`` is
+constant across symmetric addresses ``x``), so a single ``delta[pe]`` resolves
+every symmetric pointer.
+
+pybind surface consumed (see Primus-Turbo csrc/pytorch/dist/odc_rocshmem_*.cpp)::
 
     int       rs_uid_bytes();
-    void      rs_get_uid(char* out);
-    void      rs_init_uid(int rank, int nranks, const char* bytes);
+    bytes     rs_get_uid();                     # returns the uid as `bytes`
+    void      rs_init_uid(int rank, int nranks, bytes uid);
     int       rs_my_pe();
     int       rs_n_pes();
-    long long rs_malloc(size_t n);          // symmetric-heap device ptr
-    long long rs_ptr(long long p, int pe);  // peer mapping of symmetric ptr p
+    long long rs_malloc(size_t n);              # symmetric-heap device ptr
+    long long rs_ptr(long long p, int pe);      # peer mapping of symmetric ptr p
     void      rs_barrier();
     void      rs_finalize();
+    # GDA submodule only, device launchers (peers passed as a Python list):
+    int       gda_gather(target, src, nbytes, list peers, stride_bytes);
+    int       gda_reduce_scatter_acc(...);      # etc.
 """
 
-import ctypes
 import logging
 import os
 from functools import reduce
@@ -95,126 +106,36 @@ def _is_gda():
     return os.environ.get("ODC_ROCSHMEM_GDA", "0") == "1"
 
 
-def _default_host_lib():
-    """Project-relative fallback path to the rocSHMEM host binding.
+def _load_backend():
+    """Resolve the ODC rocSHMEM backend submodule from Primus-Turbo.
 
-    The binary ships inside the project at
-    ``primus/core/odc/rocshmem_runtime/host_bindings/librs_host5.so`` so the
-    backend works on any base image that mounts only the project directory
-    (no dependence on the container's ``/root`` layer). The multinode GPU-direct
-    binding lives next to it under ``gda_backend/librs_host_gda.so`` and is
-    selected when ``ODC_ROCSHMEM_GDA=1``.
+    ``ODC_ROCSHMEM_GDA=1`` selects the multi-node GPU-direct submodule
+    (``odc_rocshmem_gda``, which also exposes the host-compatible ``rs_*``
+    bootstrap); otherwise the single-node host submodule
+    (``odc_rocshmem_host``) is used. Both live under
+    ``primus_turbo.pytorch._C`` and are pybind-bound so no ctypes ABI
+    declarations are needed (pybind marshals bytes / std::vector<int> directly).
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    runtime = os.path.normpath(os.path.join(here, "..", "..", "rocshmem_runtime"))
-    if _is_gda():
-        return os.path.join(runtime, "gda_backend", "librs_host_gda.so")
-    return os.path.join(runtime, "host_bindings", "librs_host5.so")
-
-
-def _resolve_host_lib():
-    """Resolve the rocSHMEM host binding .so path.
-
-    Resolution order (first hit wins), so deployment can override without
-    touching code:
-      1. ``ODC_ROCSHMEM_LIB`` — explicit full path to the .so (back-compat).
-      2. ``ODC_RS_HOST_LIB``  — alias for the explicit full path.
-      3. ``ROCSHMEM_LIB_DIR``/librs_host[_gda].so — a directory holding the .so.
-      4. project-relative default under ``rocshmem_runtime/`` (see above).
-    """
-    for var in ("ODC_ROCSHMEM_LIB", "ODC_RS_HOST_LIB"):
-        v = os.environ.get(var)
-        if v:
-            return v
-    lib_dir = os.environ.get("ROCSHMEM_LIB_DIR")
-    if lib_dir:
-        name = "librs_host_gda.so" if _is_gda() else "librs_host5.so"
-        return os.path.join(lib_dir, name)
-    return _default_host_lib()
-
-
-def _load_lib():
-    so = _resolve_host_lib()
-    if not os.path.exists(so):
-        raise FileNotFoundError(
-            f"rocSHMEM host binding not found at {so}. Set ODC_ROCSHMEM_LIB "
-            f"(or ODC_RS_HOST_LIB) to the path of librs_host5.so, or "
-            f"ROCSHMEM_LIB_DIR to the directory containing it. The binary "
-            f"ships in the project at primus/core/odc/rocshmem_runtime/."
+    try:
+        import primus_turbo  # noqa: F401  -- package init (also loads the _C ext)
+        import primus_turbo.pytorch._C as _C
+    except ImportError as e:
+        raise ImportError(
+            "ODC rocSHMEM backend now consumes the rocSHMEM ops from Primus-Turbo "
+            "(primus_turbo.pytorch._C.odc_rocshmem_host / odc_rocshmem_gda). Install "
+            "Primus-Turbo built with the ODC rocSHMEM ops, or put its build tree on "
+            "PYTHONPATH so `import primus_turbo` resolves it."
+        ) from e
+    name = "odc_rocshmem_gda" if _is_gda() else "odc_rocshmem_host"
+    mod = getattr(_C, name, None)
+    if mod is None:
+        available = [n for n in dir(_C) if "odc" in n.lower()]
+        raise RuntimeError(
+            f"primus_turbo.pytorch._C has no submodule '{name}'. This primus_turbo "
+            f"build was compiled without the ODC rocSHMEM ops (DISABLE_ROCSHMEM). "
+            f"ODC submodules present: {available}"
         )
-    lib = ctypes.CDLL(so)
-    lib.rs_uid_bytes.restype = ctypes.c_int
-    lib.rs_get_uid.argtypes = [ctypes.c_char_p]
-    lib.rs_init_uid.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
-    lib.rs_my_pe.restype = ctypes.c_int
-    lib.rs_n_pes.restype = ctypes.c_int
-    lib.rs_malloc.restype = ctypes.c_longlong
-    lib.rs_malloc.argtypes = [ctypes.c_size_t]
-    lib.rs_ptr.restype = ctypes.c_longlong
-    lib.rs_ptr.argtypes = [ctypes.c_longlong, ctypes.c_int]
-    # GDA binding (librs_host_gda.so): device-kernel launchers. Host init reuses
-    # the same rs_get_uid / rs_init_uid unique-id bootstrap as the single-node
-    # binding (bound above); no MPI bootstrap is used.
-    if hasattr(lib, "gda_gather"):
-        lib.gda_gather.restype = ctypes.c_int
-        lib.gda_gather.argtypes = [
-            ctypes.c_longlong,
-            ctypes.c_longlong,
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_size_t,
-        ]
-        lib.gda_reduce_scatter_acc.restype = ctypes.c_int
-        lib.gda_reduce_scatter_acc.argtypes = [
-            ctypes.c_longlong,
-            ctypes.c_longlong,
-            ctypes.c_size_t,
-            ctypes.c_size_t,
-            ctypes.c_int,
-            ctypes.c_longlong,
-            ctypes.c_size_t,
-            ctypes.c_int,
-            ctypes.c_int,
-        ]
-        if hasattr(lib, "gda_stage_fence"):
-            lib.gda_stage_fence.restype = ctypes.c_int
-            lib.gda_stage_fence.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t]
-        if hasattr(lib, "gda_hdp_flush"):
-            lib.gda_hdp_init.restype = ctypes.c_int
-            lib.gda_hdp_init.argtypes = []
-            lib.gda_hdp_flush.restype = ctypes.c_int
-            lib.gda_hdp_flush.argtypes = []
-        if hasattr(lib, "gda_strided_touch"):
-            lib.gda_strided_touch.restype = ctypes.c_int
-            lib.gda_strided_touch.argtypes = [
-                ctypes.c_longlong,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_int,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_longlong,
-                ctypes.c_size_t,
-                ctypes.c_int,
-            ]
-        if hasattr(lib, "gda_reduce_scatter_acc_async"):
-            lib.gda_reduce_scatter_acc_async.restype = ctypes.c_int
-            lib.gda_reduce_scatter_acc_async.argtypes = lib.gda_reduce_scatter_acc.argtypes
-            lib.gda_rs_overlap_sync.restype = ctypes.c_int
-            lib.gda_rs_overlap_sync.argtypes = []
-        if hasattr(lib, "gda_gather_async"):
-            lib.gda_gather_async.restype = ctypes.c_int
-            lib.gda_gather_async.argtypes = [
-                ctypes.c_longlong,
-                ctypes.c_longlong,
-                ctypes.c_size_t,
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_size_t,
-                ctypes.c_longlong,
-            ]
-    return lib
+    return mod
 
 
 def _build_from_blob():
@@ -246,12 +167,12 @@ def init():
     """Bootstrap rocSHMEM from PyTorch's WORLD process group via a unique-id
     broadcast.
 
-    BOTH the single-node IPC backend (``librs_host5.so``) and the multi-node
-    GPU-direct backend (``librs_host_gda.so``) use the SAME unique-id bootstrap:
-    rank 0 generates the uid (``rs_get_uid``), it is broadcast over the torch
-    WORLD process group, and every rank calls ``rs_init_uid`` (which maps to
-    ``rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID)``). The GDA transport
-    exchanges the uid over a TCP socket bootstrap
+    BOTH the single-node host (``odc_rocshmem_host``) and the multi-node
+    GPU-direct (``odc_rocshmem_gda``) submodules use the SAME unique-id
+    bootstrap: rank 0 generates the uid (``rs_get_uid``, returned as ``bytes``),
+    it is broadcast over the torch WORLD process group, and every rank calls
+    ``rs_init_uid`` (which maps to ``rocshmem_init_attr(ROCSHMEM_INIT_WITH_UNIQUEID)``).
+    The GDA transport exchanges the uid over a TCP socket bootstrap
     (``ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME``), so NO MPI job / mpirun is required —
     the run can be launched with plain torchrun.
     """
@@ -259,7 +180,7 @@ def init():
     if _initialized:
         return
     assert dist.is_initialized(), "torch.distributed must be initialized first"
-    _lib = _load_lib()
+    _lib = _load_backend()
     _from_blob = _build_from_blob()
 
     _gda_enabled = _is_gda() and hasattr(_lib, "gda_gather")
@@ -271,17 +192,13 @@ def init():
 
     rank = dist.get_rank()
     world = dist.get_world_size()
-    n = _lib.rs_uid_bytes()
-    buf = (ctypes.c_char * n)()
-    uidb = None
-    if rank == 0:
-        _lib.rs_get_uid(buf)
-        uidb = bytes(buf)
+    # rs_get_uid() returns the uid as `bytes` (pybind); broadcast it as a python
+    # object and hand the raw bytes back to rs_init_uid on every rank.
+    uidb = _lib.rs_get_uid() if rank == 0 else None
     obj = [uidb]
     dist.broadcast_object_list(obj, src=0)
     uidb = obj[0]
-    ctypes.memmove(buf, uidb, n)
-    _lib.rs_init_uid(rank, world, buf)
+    _lib.rs_init_uid(rank, world, uidb)
 
     _my_pe = _lib.rs_my_pe()
     _n_pes = _lib.rs_n_pes()
@@ -397,11 +314,13 @@ def barrier():
 def gda_gather(target_ptr, src_ptr, nbytes, peers, stride_bytes):
     """Device gather: for each cross-node peer in ``peers`` (global PE/rank), pull
     its shard (at symmetric ``src_ptr``) into ``target_ptr + peer*stride_bytes``."""
-    n = len(peers)
-    if n == 0:
+    if len(peers) == 0:
         return
-    arr = (ctypes.c_int * n)(*[int(p) for p in peers])
-    rc = _lib.gda_gather(int(target_ptr), int(src_ptr), int(nbytes), arr, n, int(stride_bytes))
+    # pybind binds gda_gather(target, src, nbytes, std::vector<int> peers, stride)
+    # so the peer list is passed directly (size inferred) — no ctypes array / count.
+    rc = _lib.gda_gather(
+        int(target_ptr), int(src_ptr), int(nbytes), [int(p) for p in peers], int(stride_bytes)
+    )
     if rc != 0:
         raise RuntimeError(f"gda_gather hipError={rc}")
 
@@ -524,12 +443,15 @@ def gda_gather_async(target_ptr, src_ptr, nbytes, peers, stride_bytes, stream):
     """Approach 1: launch all-gather kernel on the given HIP `stream` WITHOUT syncing,
     so FSDP2 prefetch overlaps it with compute. Reassembly + consumer order via the
     same stream (gather reads stable params -> no settle/barrier needed)."""
-    n = len(peers)
-    if n == 0:
+    if len(peers) == 0:
         return
-    arr = (ctypes.c_int * n)(*[int(p) for p in peers])
     rc = _lib.gda_gather_async(
-        int(target_ptr), int(src_ptr), int(nbytes), arr, n, int(stride_bytes), int(stream)
+        int(target_ptr),
+        int(src_ptr),
+        int(nbytes),
+        [int(p) for p in peers],
+        int(stride_bytes),
+        int(stream),
     )
     if rc != 0:
         raise RuntimeError(f"gda_gather_async launch err={rc}")
