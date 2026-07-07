@@ -171,7 +171,8 @@ def convert_state_dict_keys_to_single_str(state_dict, with_shape=True):
                 if with_shape:
                     shape = "_".join(map(str, list(value.shape)))
                     keys.append(key + ":" + shape)
-                keys.append(key)
+                else:
+                    keys.append(key)
             elif isinstance(value, dict):
                 keys.append(key + "|" + convert_state_dict_keys_to_single_str(value, with_shape=with_shape))
     keys.sort()

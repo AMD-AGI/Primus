@@ -42,7 +42,7 @@ class WanVideoConfig:
         dit_has_image_pos_emb: bool = False,
         dit_has_ref_conv: bool = False,
         trainable_modules=None,
-        seperated_timestep: bool = True,
+        seperated_timestep: bool | None = None,
         require_clip_embedding: bool = False,
         require_vae_embedding: bool = False,
         fuse_vae_embedding_in_latents: bool = True,
@@ -50,6 +50,13 @@ class WanVideoConfig:
         vae_type: str = "wan_video_vae_38",
         **kwargs,
     ):
+        separated_timestep = kwargs.pop("separated_timestep", None)
+        if separated_timestep is not None and seperated_timestep is not None:
+            if bool(separated_timestep) != bool(seperated_timestep):
+                raise ValueError("`separated_timestep` and `seperated_timestep` must match when both are set.")
+        if seperated_timestep is None:
+            seperated_timestep = True if separated_timestep is None else bool(separated_timestep)
+
         # DiT configuration
         self.vae_type = vae_type
         self.dit_hidden_size = dit_hidden_size
@@ -67,7 +74,8 @@ class WanVideoConfig:
         self.dit_has_image_pos_emb = dit_has_image_pos_emb
         self.dit_has_ref_conv = dit_has_ref_conv
 
-        self.seperated_timestep = seperated_timestep
+        self.seperated_timestep = bool(seperated_timestep)
+        self.separated_timestep = self.seperated_timestep
         self.require_clip_embedding = require_clip_embedding
         self.require_vae_embedding = require_vae_embedding
         self.fuse_vae_embedding_in_latents = fuse_vae_embedding_in_latents

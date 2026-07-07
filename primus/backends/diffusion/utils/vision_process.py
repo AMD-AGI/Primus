@@ -42,9 +42,19 @@ FRAME_FACTOR = 2
 FPS_MIN_FRAMES = 4
 FPS_MAX_FRAMES = 768
 MAX_NUM_WORKERS_FETCH_VIDEO = 8
+REMOTE_FETCH_TIMEOUT = (5, 30)
 
 MODEL_SEQ_LEN = int(float(os.environ.get("MODEL_SEQ_LEN", 128000)))
 logger = logging.getLogger(__name__)
+
+VideoMetadata = Dict[str, Any]
+VideoReaderOutput = Tuple[torch.Tensor, VideoMetadata, float]
+FetchVideoOutput = Union[
+    torch.Tensor,
+    Tuple[torch.Tensor, VideoMetadata],
+    Tuple[torch.Tensor, float],
+    Tuple[Tuple[torch.Tensor, VideoMetadata], float],
+]
 
 
 def round_by_factor(number: int, factor: int) -> int:
@@ -112,7 +122,7 @@ def fetch_image(ele: Dict[str, Union[str, Image.Image]], image_patch_size: int =
     if isinstance(image, Image.Image):
         image_obj = image
     elif image.startswith("http://") or image.startswith("https://"):
-        with requests.get(image, stream=True) as response:
+        with requests.get(image, stream=True, timeout=REMOTE_FETCH_TIMEOUT) as response:
             response.raise_for_status()
             with BytesIO(response.content) as bio:
                 image_obj = copy.deepcopy(Image.open(bio))
@@ -196,7 +206,7 @@ def smart_nframes(
 
 def _read_video_torchvision(
     ele: Dict[str, Any],
-) -> Tuple[torch.Tensor, float]:
+) -> VideoReaderOutput:
     """read video using torchvision.io.read_video
 
     Args:
@@ -206,7 +216,7 @@ def _read_video_torchvision(
             - video_start: the start time of video.
             - video_end: the end time of video.
     Returns:
-        torch.Tensor: the video tensor with shape (T, C, H, W).
+        Tuple of video tensor (T, C, H, W), metadata, and sampled FPS.
     """
     video_path = ele["video"]
     if version.parse(torchvision.__version__) < version.parse("0.19.0"):
@@ -308,7 +318,7 @@ def calculate_video_frame_range(
 
 def _read_video_decord(
     ele: Dict[str, Any],
-) -> Tuple[torch.Tensor, float]:
+) -> VideoReaderOutput:
     """read video using decord.VideoReader
 
     Args:
@@ -318,12 +328,12 @@ def _read_video_decord(
             - video_start: the start time of video.
             - video_end: the end time of video.
     Returns:
-        torch.Tensor: the video tensor with shape (T, C, H, W).
+        Tuple of video tensor (T, C, H, W), metadata, and sampled FPS.
     """
     import decord
 
     video_path = ele["video"]
-    time.time()
+    st = time.time()
     vr = decord.VideoReader(video_path)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
     start_frame, end_frame, total_frames = calculate_video_frame_range(
@@ -335,7 +345,7 @@ def _read_video_decord(
     idx = torch.linspace(start_frame, end_frame, nframes).round().long().tolist()
     video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
-    # logger.info(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
+    logger.info(f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     sample_fps = nframes / max(total_frames, 1e-6) * video_fps
 
     video_metadata = dict(
@@ -355,7 +365,7 @@ def is_torchcodec_available() -> bool:
 
 def _read_video_torchcodec(
     ele: Dict[str, Any],
-) -> Tuple[torch.Tensor, float]:
+) -> VideoReaderOutput:
     """read video using torchcodec.decoders.VideoDecoder
 
     Args:
@@ -365,7 +375,7 @@ def _read_video_torchcodec(
             - video_start: the start time of video.
             - video_end: the end time of video.
     Returns:
-        torch.Tensor: the video tensor with shape (T, C, H, W).
+        Tuple of video tensor (T, C, H, W), metadata, and sampled FPS.
     """
     from torchcodec.decoders import VideoDecoder
 
@@ -424,7 +434,7 @@ def fetch_video(
     image_patch_size: int = 14,
     return_video_sample_fps: bool = False,
     return_video_metadata: bool = False,
-) -> Union[torch.Tensor, List[Image.Image]]:
+) -> FetchVideoOutput:
     image_factor = image_patch_size * SPATIAL_MERGE_SIZE
     VIDEO_FRAME_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * image_factor * image_factor
     VIDEO_FRAME_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * image_factor * image_factor
