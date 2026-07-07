@@ -9,6 +9,18 @@ With ODC, the synchronization frequency is reduced from per-iteration to per-min
 
 ODC is accepted in ICLR 2026! Check out the [paper](https://openreview.net/pdf?id=iIEEgI6WsF) for more details.
 
+## Attribution / Provenance
+
+This ODC code is ported from the upstream open-source project
+[sail-sg/odc](https://github.com/sail-sg/odc) (Sea AI Lab, ICLR 2026). Per its
+package metadata the upstream project is released under the MIT License
+(copyright held by the original authors, Sea AI Lab); the upstream repository
+does not ship a standalone `LICENSE` file or per-file license headers.
+
+This version has been adapted for the AMD ROCm / MI300X platform, including
+migrating the communication backend from nvshmem/CUDA to rocSHMEM/MORI + HIP,
+device-side reduce, and torchrun-based launching.
+
 ## ODC Primitives
 
 The key idea is to replace the collective all-gather and reduce-scatter with a on-demand point-to-point communication.
