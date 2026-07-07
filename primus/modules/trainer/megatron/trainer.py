@@ -621,13 +621,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             "FarSkip requires shared experts to be computed at the transformer layer level, "
             "not inside the token dispatcher."
         )
+        assert not (self.module_config.use_overlapped_farskip_layer
+                    and getattr(self.module_config, 'recompute_granularity', None) == 'full'), \
+            "Full activation checkpointing is not supported with use_overlapped_farskip_layer."
         self.patch_attention_split_forward()
         self.patch_async_moe_layer()
         self.patch_farskip_layer_specs()
 
         from megatron.core.transformer.transformer_block import TransformerBlock
-        from primus.backends.megatron.core.transformer.farskip_transformer_block import forward
+        from primus.backends.megatron.core.transformer.farskip_transformer_block import (
+            forward,
+            _checkpointed_forward,
+        )
         TransformerBlock.forward = forward
+        TransformerBlock._checkpointed_forward = _checkpointed_forward
 
     def patch_attention_split_forward(self):
         from primus.backends.megatron.core.transformer.attention_farskip import (
