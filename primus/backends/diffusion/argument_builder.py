@@ -163,6 +163,7 @@ class WanArgBuilder:
         optimizer = params.get("optimizer") or {}
         runtime = params.get("runtime") or {}
         metrics = params.get("metrics") or {}
+        scheduler = params.get("scheduler") or params.get("flow_matching") or {}
 
         training_map = {
             ("steps",): ("max_steps",),
@@ -243,6 +244,24 @@ class WanArgBuilder:
             value = self._get_any(runtime, *source_path)
             if value is not None:
                 self._set_nested(trainer_args, target_path, value)
+
+        scheduler_cfg = copy.deepcopy(runtime.get("flow_match_scheduler") or {})
+        scheduler_cfg.update(scheduler)
+        for key in (
+            "shift",
+            "sigma_min",
+            "sigma_max",
+            "extra_one_step",
+            "num_train_timesteps",
+            "inverse_timesteps",
+            "reverse_sigmas",
+            "exponential_shift",
+            "exponential_shift_mu",
+            "shift_terminal",
+        ):
+            value = scheduler_cfg.get(key)
+            if value is not None:
+                self._set_nested(trainer_args, ("flow_match_scheduler", key), value)
 
         log_freq = metrics.get("log_freq")
         if log_freq is not None:

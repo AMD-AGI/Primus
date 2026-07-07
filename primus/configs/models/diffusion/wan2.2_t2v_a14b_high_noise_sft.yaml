@@ -1,0 +1,10 @@
+extends:
+  - wan2.2_t2v_a14b.yaml
+
+# High-noise SFT stage, aligned with NeMo AutoModel Wan2.2-T2V-A14B:
+# trains the first Diffusers transformer on sigma in [boundary_ratio, 1.0].
+model:
+  config:
+    load_from_pretrained_path: ${INIT_CHECKPOINT:/models/Wan2.2-T2V-A14B-Diffusers}
+    config:
+      active_transformer: transformer

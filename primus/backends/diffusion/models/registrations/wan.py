@@ -52,15 +52,95 @@ def _load_state_dict(path: str) -> dict[str, torch.Tensor]:
     return obj
 
 
-def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
+def _resolve_dit_checkpoint_path(pretrained_path: str, active_transformer: str | None = None) -> str:
+    if os.path.isfile(pretrained_path):
+        return pretrained_path
+
+    model_index = os.path.join(pretrained_path, "model_index.json")
+    if os.path.exists(model_index):
+        transformer_name = active_transformer or "transformer"
+        if transformer_name not in ("transformer", "transformer_2"):
+            raise ValueError(
+                "Wan2.2 A14B Diffusers checkpoints support active_transformer="
+                f"'transformer' or 'transformer_2', got {transformer_name!r}"
+            )
+        checkpoint_path = os.path.join(pretrained_path, transformer_name)
+        if not os.path.isdir(checkpoint_path):
+            raise FileNotFoundError(
+                f"Diffusers checkpoint at {pretrained_path} does not contain {transformer_name!r}"
+            )
+        logger.info(f"Using Diffusers Wan transformer subfolder: {checkpoint_path}")
+        return checkpoint_path
+
+    return pretrained_path
+
+
+def _convert_diffusers_wan_dit_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Map Diffusers WanTransformer3DModel keys to Primus WanDiT keys."""
+    converted: dict[str, torch.Tensor] = {}
+    replacements = (
+        ("condition_embedder.text_embedder.linear_1.", "text_embedding.0."),
+        ("condition_embedder.text_embedder.linear_2.", "text_embedding.2."),
+        ("condition_embedder.time_embedder.linear_1.", "time_embedding.0."),
+        ("condition_embedder.time_embedder.linear_2.", "time_embedding.2."),
+        ("condition_embedder.time_proj.", "time_projection.1."),
+        ("proj_out.", "head.head."),
+        (".attn1.to_q.", ".self_attn.q."),
+        (".attn1.to_k.", ".self_attn.k."),
+        (".attn1.to_v.", ".self_attn.v."),
+        (".attn1.to_out.0.", ".self_attn.o."),
+        (".attn1.norm_q.", ".self_attn.norm_q."),
+        (".attn1.norm_k.", ".self_attn.norm_k."),
+        (".attn2.to_q.", ".cross_attn.q."),
+        (".attn2.to_k.", ".cross_attn.k."),
+        (".attn2.to_v.", ".cross_attn.v."),
+        (".attn2.to_out.0.", ".cross_attn.o."),
+        (".attn2.norm_q.", ".cross_attn.norm_q."),
+        (".attn2.norm_k.", ".cross_attn.norm_k."),
+        (".ffn.net.0.proj.", ".ffn.0."),
+        (".ffn.net.2.", ".ffn.2."),
+        (".norm2.", ".norm3."),
+        (".scale_shift_table", ".modulation"),
+    )
+
+    for key, value in state_dict.items():
+        if key == "scale_shift_table":
+            converted["head.modulation"] = value
+            continue
+        new_key = key
+        for old, new in replacements:
+            new_key = new_key.replace(old, new)
+        converted[new_key] = value
+    return converted
+
+
+def _maybe_convert_diffusers_wan_dit_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    if any(key.startswith("condition_embedder.") or ".attn1." in key for key in state_dict):
+        return _convert_diffusers_wan_dit_state_dict(state_dict)
+    return state_dict
+
+
+def _load_dit_weights_into_module(
+    dit: torch.nn.Module,
+    pretrained_path: str,
+    *,
+    active_transformer: str | None = None,
+):
     """
     Support two common cases:
     1) Wan training export: `dit_model.safetensors` with keys like `blocks.0...`
     2) Official-ish export: `*model*.safetensors|bin` possibly with keys like `dit.blocks.0...` or `blocks.0...`
     """
+    pretrained_path = _resolve_dit_checkpoint_path(pretrained_path, active_transformer)
+
     # Direct file
     if os.path.isfile(pretrained_path):
         state = _strip_module_prefix(_load_state_dict(pretrained_path))
+        state = _maybe_convert_diffusers_wan_dit_state_dict(state)
         # Accept either `dit.*` or plain keys.
         if any(k.startswith("dit.") for k in state):
             state = {k[len("dit.") :]: v for k, v in state.items() if k.startswith("dit.")}
@@ -92,6 +172,7 @@ def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
         part = _strip_module_prefix(_load_state_dict(ckpt))
         merged.update(part)
 
+    merged = _maybe_convert_diffusers_wan_dit_state_dict(merged)
     if any(k.startswith("dit.") for k in merged):
         merged = {k[len("dit.") :]: v for k, v in merged.items() if k.startswith("dit.")}
 
@@ -123,6 +204,10 @@ def build_wan_model(model_config: dict):
         import json
 
         cfg_path = os.path.join(pretrained_path, "config.json")
+        active_transformer = cfg_dict.get("active_transformer")
+        if not os.path.exists(cfg_path) and os.path.exists(os.path.join(pretrained_path, "model_index.json")):
+            transformer_name = active_transformer or "transformer"
+            cfg_path = os.path.join(pretrained_path, transformer_name, "config.json")
         if os.path.exists(cfg_path):
             logger.info(f"Loading config from {cfg_path}")
             with open(cfg_path) as f:
@@ -138,6 +223,13 @@ def build_wan_model(model_config: dict):
                 "out_dim": "dit_out_channels",
                 "freq_dim": "dit_freq_dim",
                 "text_len": "text_len",
+                "num_attention_heads": "dit_num_heads",
+                "ffn_dim": "dit_intermediate_size",
+                "in_channels": "dit_in_channels",
+                "out_channels": "dit_out_channels",
+                "patch_size": "dit_patch_size",
+                "text_dim": "dit_text_dim",
+                "eps": "dit_eps",
             }
 
             for k, v in loaded_cfg.items():
@@ -145,6 +237,14 @@ def build_wan_model(model_config: dict):
                 # Only infer values the user did not set explicitly in YAML.
                 if target_key is not None and target_key not in cfg_dict:
                     cfg_dict[target_key] = v
+            if (
+                "dit_hidden_size" not in cfg_dict
+                and "num_attention_heads" in loaded_cfg
+                and "attention_head_dim" in loaded_cfg
+            ):
+                cfg_dict["dit_hidden_size"] = int(loaded_cfg["num_attention_heads"]) * int(
+                    loaded_cfg["attention_head_dim"]
+                )
 
     # Build a WanVideoConfig-compatible object to maximize reuse of existing fields.
     model_cfg = WanVideoConfig(**cfg_dict)
@@ -200,7 +300,11 @@ def build_wan_model(model_config: dict):
     pretrained_path = model_config.get("load_from_pretrained_path")
     if pretrained_path:
         logger.info(f"Loading DiT weights from {pretrained_path}")
-        _load_dit_weights_into_module(dit, pretrained_path)
+        _load_dit_weights_into_module(
+            dit,
+            pretrained_path,
+            active_transformer=getattr(model_cfg, "active_transformer", None),
+        )
 
     components = WanComponents(dit=dit, vae=vae, text_encoder=text_encoder, image_encoder=None)
     pipeline = WanFlowMatchTrainPipeline()
