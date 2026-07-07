@@ -1,13 +1,10 @@
-### [50-iter back-to-back comparison, fit group] thd=true + cost_model=fit.
-### The only difference from deepseek1.5B-lbmini-cmp-linear.yaml: lb_mini_cost_model = fit.
-### Purpose: under fully identical conditions (same 50 iters, profiling off, back-to-back serial runs),
-### determine which of linear vs fit is better, eliminating the earlier noise from "different runs + only 20 iters".
-### The two yamls are identical except for cost_model.
-### The fit coefficients are the 1.5B fit from lb_mini_packing.py get_seq_costs_fit (1.982122/2.611821).
+### DeepSeek-R1-Distill-Qwen-14B ODC dual-node SFT example.
+### Sequence-length load balancing (LB-Mini) with the "fit" cost model on the
+### torch-FSDP2 + ODC path; packed (thd) attention enabled.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:deepseek1.5B-lbmini-cmp-fit}
+exp_name: ${PRIMUS_EXP_NAME:qwen14B-odc-dn}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -26,13 +23,13 @@ modules:
       sft_dataset_name: "zai-org/LongAlign-10k"
       sft_conversation_format: "messages"
 
-      # P0 enabled: thd segmented attention (same as main config). Shared by both groups.
+      # thd segmented (packed) attention.
       enable_packed_sequences: true
       use_packed_attention: true
-      # Variable for this group: fit cost model (attention-aware a*s^2+b*s, 1.5B coefficients).
+      # LB-Mini cost model: fit (attention-aware a*s^2 + b*s).
       lb_mini_cost_model: fit
 
-      wandb_project: "Primus_DeepSeek1.5B_LBMini_cmp"
+      wandb_project: "Primus_ODC_Qwen14B"
       stderr_sink_level: DEBUG
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 100
