@@ -31,7 +31,6 @@ from primus.backends.diffusion.utils.log import logger
 
 from .mesh import _ensure_process_group
 
-
 _META_FILENAME = "meta.json"
 
 

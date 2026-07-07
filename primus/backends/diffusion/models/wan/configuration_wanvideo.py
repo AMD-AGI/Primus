@@ -53,7 +53,9 @@ class WanVideoConfig:
         separated_timestep = kwargs.pop("separated_timestep", None)
         if separated_timestep is not None and seperated_timestep is not None:
             if bool(separated_timestep) != bool(seperated_timestep):
-                raise ValueError("`separated_timestep` and `seperated_timestep` must match when both are set.")
+                raise ValueError(
+                    "`separated_timestep` and `seperated_timestep` must match when both are set."
+                )
         if seperated_timestep is None:
             seperated_timestep = True if separated_timestep is None else bool(separated_timestep)
 

@@ -61,7 +61,9 @@ class WanVideoProcessor:
         video_cthw = video_tchw.permute(1, 0, 2, 3).contiguous()
         return (video_cthw - self.image_mean) / self.image_std
 
-    def prepare_batch(self, *, batch: dict[str, Any], device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
+    def prepare_batch(
+        self, *, batch: dict[str, Any], device: torch.device, dtype: torch.dtype
+    ) -> dict[str, Any]:
         return batch
 
 
