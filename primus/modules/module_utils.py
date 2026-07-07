@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -73,7 +73,14 @@ def log_kv_rank_0(key, value):
         log_func(key, value, module_name, function_name, line)
 
 
-def debug_rank_0(msg, *args, **kwargs):
+def debug_rank_0(*args, **kwargs):
+    if not args:
+        return
+    sep = kwargs.pop("sep", " ")
+    kwargs.pop("end", None)
+    kwargs.pop("file", None)
+    kwargs.pop("flush", None)
+    msg = sep.join(str(a) for a in args)
     log_func = logger.debug_with_caller
 
     caller = inspect.stack()[1]
@@ -86,7 +93,14 @@ def debug_rank_0(msg, *args, **kwargs):
         log_func(msg, module_name, function_name, line)
 
 
-def debug_rank_all(msg, *args, **kwargs):
+def debug_rank_all(*args, **kwargs):
+    if not args:
+        return
+    sep = kwargs.pop("sep", " ")
+    kwargs.pop("end", None)
+    kwargs.pop("file", None)
+    kwargs.pop("flush", None)
+    msg = sep.join(str(a) for a in args)
     log_func = logger.debug_with_caller
 
     caller = inspect.stack()[1]

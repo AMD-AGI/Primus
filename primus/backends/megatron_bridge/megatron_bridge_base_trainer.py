@@ -36,20 +36,21 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         - Handle Megatron-Bridge specific initialization and setup
     """
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, **kwargs):
         """
         Initialize Megatron-Bridge base trainer.
 
         Args:
             backend_args: Megatron-Bridge configuration as SimpleNamespace
                          (from MegatronBridgeArgBuilder)
+            **kwargs: Runtime context kwargs forwarded to BaseTrainer for filtering.
         """
         log_rank_0("=" * 80)
         log_rank_0("Initializing MegatronBridgeBaseTrainer...")
         log_rank_0("=" * 80)
 
         # Initialize BaseTrainer
-        super().__init__(backend_args=backend_args)
+        super().__init__(backend_args=backend_args, **kwargs)
         set_primus_global_variables(self.backend_args)
 
         import primus.backends.megatron.patches  # noqa: F401
