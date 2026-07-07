@@ -4,7 +4,7 @@ model:
     load_from_pretrained_path: ${PRETRAINED_PATH:/models/Wan2.2-TI2V-5B}
     config:
       model_type: ti2v
-      seperated_timestep: true
+      separated_timestep: true
       fuse_vae_embedding_in_latents: true
       trainable_modules: dit
       vae_type: wan_video_vae_38

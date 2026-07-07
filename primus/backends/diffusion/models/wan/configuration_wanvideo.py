@@ -42,7 +42,7 @@ class WanVideoConfig:
         dit_has_image_pos_emb: bool = False,
         dit_has_ref_conv: bool = False,
         trainable_modules=None,
-        seperated_timestep: bool = True,
+        separated_timestep: bool = True,
         require_clip_embedding: bool = False,
         require_vae_embedding: bool = False,
         fuse_vae_embedding_in_latents: bool = True,
@@ -67,7 +67,7 @@ class WanVideoConfig:
         self.dit_has_image_pos_emb = dit_has_image_pos_emb
         self.dit_has_ref_conv = dit_has_ref_conv
 
-        self.seperated_timestep = bool(seperated_timestep)
+        self.separated_timestep = bool(separated_timestep)
         self.require_clip_embedding = require_clip_embedding
         self.require_vae_embedding = require_vae_embedding
         self.fuse_vae_embedding_in_latents = fuse_vae_embedding_in_latents
