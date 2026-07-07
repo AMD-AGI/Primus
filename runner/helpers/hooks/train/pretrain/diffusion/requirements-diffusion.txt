@@ -3,6 +3,8 @@ loguru
 safetensors
 numpy
 pillow
+packaging
+requests
 decord
 imageio[ffmpeg]
 wandb

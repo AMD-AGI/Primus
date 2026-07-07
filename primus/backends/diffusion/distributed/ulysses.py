@@ -34,6 +34,15 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 
 
+def _require_divisible_dim(x: torch.Tensor, dim: int, divisor: int, op_name: str) -> None:
+    size = x.shape[dim]
+    if size % divisor != 0:
+        raise ValueError(
+            f"{op_name} requires tensor dimension {dim} (size={size}) to be divisible by "
+            f"sequence parallel size {divisor}. Got shape={tuple(x.shape)}."
+        )
+
+
 class _SeqAllToAll(torch.autograd.Function):
     """All-to-all with autograd.  Backward is the inverse (swap dims)."""
 
@@ -43,6 +52,7 @@ class _SeqAllToAll(torch.autograd.Function):
         ctx.scatter_dim = scatter_dim
         ctx.gather_dim = gather_dim
         sp_size = dist.get_world_size(group)
+        _require_divisible_dim(x, scatter_dim, sp_size, "_SeqAllToAll")
         input_list = [t.contiguous() for t in x.tensor_split(sp_size, scatter_dim)]
         output_list = [torch.empty_like(input_list[0]) for _ in range(sp_size)]
         dist.all_to_all(output_list, input_list, group=group)
@@ -68,6 +78,7 @@ class _SliceWithGather(torch.autograd.Function):
         sp_size = dist.get_world_size(group)
         sp_rank = dist.get_rank(group)
         ctx.sp_size = sp_size
+        _require_divisible_dim(x, dim, sp_size, "_SliceWithGather")
         chunk_size = x.shape[dim] // sp_size
         return x.narrow(dim, sp_rank * chunk_size, chunk_size).contiguous()
 

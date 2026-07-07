@@ -35,7 +35,16 @@ class DiffusionPretrainTrainer(BaseTrainer):
 
         missing = [
             package
-            for package in ("torch", "loguru", "safetensors", "transformers", "PIL", "torchvision")
+            for package in (
+                "torch",
+                "loguru",
+                "safetensors",
+                "transformers",
+                "PIL",
+                "torchvision",
+                "requests",
+                "packaging",
+            )
             if importlib.util.find_spec(package) is None
         ]
         video_backend = (dataset_cfg.get("config", {}) or {}).get("video_backend")
