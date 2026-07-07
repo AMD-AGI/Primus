@@ -1,0 +1,12 @@
+cu_num,M,N,K,kernelId,splitK,kernelName,errRatio
+256,4096,4096,16384,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,6144,4096,16384,50,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_192x256E,0.0
+256,16384,4096,4096,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,16384,4096,6144,45,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E,0.0
+256,16384,4096,14336,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,16384,4096,28672,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,28672,4096,16384,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,16384,6144,4096,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,4096,14336,16384,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,16384,14336,4096,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,16384,28672,4096,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0

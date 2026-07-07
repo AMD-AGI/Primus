@@ -2,15 +2,19 @@
 
 set -e
 
+# Create results directory
 mkdir -p /results
 
-export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
-export NNODES=${NNODES:-1}
-export NODE_RANK=${NODE_RANK:-0}
-export MASTER_ADDR=${MASTER_ADDR:-localhost}
-export MASTER_PORT=${MASTER_PORT:-29502}
-export EXP=${EXP:-/workspace/code/conf/llama3.1_8B-pretrain.yaml}
-export DATA_PATH=${DATA_PATH:-/data}
+cd ${PRIMUS_PATH}/examples/mlperf/llama3.1_8b
+
+# Under multi-node SLURM (run_with_docker_slurm.sh), inherit rendezvous + node
+# sizing from SLURM env so we can scale to N nodes without editing the config
+# file. Single-node SLURM jobs (NNODES=1) fall through to the config defaults
+# so torchrun doesn't try to do c10d rdzv against MASTER_ADDR=localhost.
+if [[ -n "${SLURM_NNODES:-}" && "${SLURM_NNODES}" -gt 1 ]]; then
+    NNODES="${SLURM_NNODES}"
+    NODE_RANK="${SLURM_NODEID:-0}"
+fi
 
 echo "============================================"
 echo "MLPerf LLama3.1 8B Training"
@@ -19,35 +23,36 @@ echo "Config: ${EXP}"
 echo "Data:   ${DATA_PATH}"
 echo "GPUs:   ${GPUS_PER_NODE}"
 echo "Nodes:  ${NNODES}"
-echo "Train iters: ${PRIMUS_TRAIN_ITERS}"
-echo "Eval interval: ${PRIMUS_EVAL_INTERVAL}"
-echo "Enable MLPerf logging: ${ENABLE_MLPERF}"
-echo "MLLOG_TRAIN_LOSS_LOG_FREQ: ${MLLOG_TRAIN_LOSS_LOG_FREQ}"
-echo "MLLOG_TARGET_EVAL_LOSS: ${MLLOG_TARGET_EVAL_LOSS}"
-echo "MLLOG_SUBMISSION_BENCHMARK: ${MLLOG_SUBMISSION_BENCHMARK}"
-echo "MLLOG_SUBMISSION_DIVISION: ${MLLOG_SUBMISSION_DIVISION}"
-echo "MLLOG_SUBMISSION_ORG: ${MLLOG_SUBMISSION_ORG}"
-echo "MLLOG_SUBMISSION_PLATFORM: ${MLLOG_SUBMISSION_PLATFORM}"
+echo "Rank:   ${NODE_RANK}"
+echo "Master: ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
 
+# Start timing
 start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)
 echo "STARTING TIMING RUN AT $start_fmt"
 
+# Launch distributed training and keep the real torchrun exit code even though
+# output is piped through tee.
+set +e
 torchrun \
     --nproc_per_node=${GPUS_PER_NODE} \
     --nnodes=${NNODES} \
     --node_rank=${NODE_RANK} \
     --master_addr=${MASTER_ADDR} \
     --master_port=${MASTER_PORT} \
-    src/train.py
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+    src/train.py 2>&1 | tee train.err.log
+ret_code=${PIPESTATUS[0]}
+set -e
 
-ret_code=$?
-
+# End timing
 end=$(date +%s)
 end_fmt=$(date +%Y-%m-%d\ %r)
 echo "ENDING TIMING RUN AT $end_fmt"
 
+# Report result
 result=$(( end - start ))
 result_name="LLAMA3.1_8B"
 echo "RESULT,$result_name,,$result,AMD,$start_fmt"
@@ -58,4 +63,3 @@ if [[ $ret_code != 0 ]]; then
 fi
 
 exit 0
-
