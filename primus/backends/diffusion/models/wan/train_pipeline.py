@@ -138,7 +138,7 @@ class WanFlowMatchTrainPipeline:
         return timestep.to(device=device)
 
     @staticmethod
-    def _maybe_expand_separated_timestep(
+    def _maybe_expand_seperated_timestep(
         *,
         timestep: torch.Tensor,
         x_list: list[torch.Tensor],
@@ -259,7 +259,7 @@ class WanFlowMatchTrainPipeline:
 
         separated = bool(getattr(model_config, "seperated_timestep", False))
         fuse_flag = bool(getattr(model_config, "fuse_vae_embedding_in_latents", False))
-        t = self._maybe_expand_separated_timestep(
+        t = self._maybe_expand_seperated_timestep(
             timestep=timestep,
             x_list=x_list,
             patch_size=(d_f, d_h, d_w),
