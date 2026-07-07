@@ -141,20 +141,20 @@ _HW_PROFILES: Dict[str, GPUHardwareSpec] = {
         n_xcd=8,
     ),
     "mi355x": GPUHardwareSpec(
-        peak_tflops_bf16=2384.0,
-        peak_tflops_fp16=2384.0,
-        peak_tflops_fp8=4768.0,
+        peak_tflops_bf16=2500.0,
+        peak_tflops_fp16=2500.0,
+        peak_tflops_fp8=5000.0,
         hbm_bandwidth_gbps=8000.0,
         n_cu=256,
-        n_xcd=4,
+        n_xcd=8,
     ),
     "gfx950": GPUHardwareSpec(  # same as MI355X
-        peak_tflops_bf16=2384.0,
-        peak_tflops_fp16=2384.0,
-        peak_tflops_fp8=4768.0,
+        peak_tflops_bf16=2500.0,
+        peak_tflops_fp16=2500.0,
+        peak_tflops_fp8=5000.0,
         hbm_bandwidth_gbps=8000.0,
         n_cu=256,
-        n_xcd=4,
+        n_xcd=8,
     ),
 }
 
