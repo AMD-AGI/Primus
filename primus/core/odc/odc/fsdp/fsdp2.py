@@ -1089,7 +1089,11 @@ _enable_hpz = None
 
 def patch_fsdp2(enable_hpz: bool = False) -> None:
     from torch.distributed._composable import replicate_with_fsdp
-    from torch.distributed.fsdp._fully_shard import _fsdp_init, _fsdp_param_group, _fully_shard
+    from torch.distributed.fsdp._fully_shard import (
+        _fsdp_init,
+        _fsdp_param_group,
+        _fully_shard,
+    )
 
     global _enable_hpz
     if _enable_hpz is None:

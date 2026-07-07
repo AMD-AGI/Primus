@@ -62,6 +62,7 @@ def _build_lb_mini_train_iterator(args):
     """Build the variable-length, KK-balanced LB-Mini train iterator."""
     from megatron.core import mpu
     from megatron.training import get_tokenizer
+
     from primus.backends.megatron.sft.lb_mini_dataset import (
         LBMiniDataIterator,
         build_varlen_samples,

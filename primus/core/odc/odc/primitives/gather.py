@@ -16,7 +16,13 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from odc.primitives import SHMEM_EXTERN_LIBS, __syncthreads, getmem_nbi_block, quiet, tid
+from odc.primitives import (
+    SHMEM_EXTERN_LIBS,
+    __syncthreads,
+    getmem_nbi_block,
+    quiet,
+    tid,
+)
 from odc.primitives.utils import (
     BufferSplitter,
     SymmBufferRegistry,
