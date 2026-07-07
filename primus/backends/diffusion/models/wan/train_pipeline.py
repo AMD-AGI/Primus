@@ -39,8 +39,6 @@ class WanFlowMatchTrainPipeline:
 
     def __init__(self, cfg: Optional[WanFlowMatchTrainPipelineConfig] = None):
         self.cfg = cfg or WanFlowMatchTrainPipelineConfig()
-        # Internal counter for optional per-step profiling logs.
-        self._profile_step: int = 0
 
     @staticmethod
     def _encode_prompt(text_encoder: torch.nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor):

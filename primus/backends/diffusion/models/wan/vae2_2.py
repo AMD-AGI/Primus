@@ -680,7 +680,7 @@ class Wan2_2_VAE:
         vae_pth=None,
         dim_mult=[1, 2, 4, 4],
         temperal_downsample=[False, True, True],
-        dtype=torch.float,
+        dtype=torch.bfloat16,
         device="cuda",
     ):
         self.dtype = dtype
@@ -812,16 +812,22 @@ class Wan2_2_VAE:
 
     # --- Wan trainer compatibility helpers (non-upstream) ---
     def to(self, *args, **kwargs):
-        self.model.to(*args, **kwargs)
-        if "dtype" in kwargs and kwargs["dtype"] is not None:
-            self.dtype = kwargs["dtype"]
+        dtype = kwargs.get("dtype", None)
+        if dtype is None:
+            dtype = self.dtype
+        else:
+            self.dtype = dtype
         device = kwargs.get("device", None)
         if device is None and len(args) > 0:
             device = args[0]
         if device is not None:
+            self.model.to(device=device, dtype=dtype)
+        else:
+            self.model.to(*args, **kwargs)
+        if device is not None:
             self.device = device
             dev = next(self.model.parameters()).device
-            self.scale = [t.to(device=dev) for t in self.scale]
+            self.scale = [t.to(device=dev, dtype=dtype) for t in self.scale]
         return self
 
     def eval(self):

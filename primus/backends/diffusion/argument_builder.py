@@ -173,6 +173,7 @@ class WanArgBuilder:
             ("save_steps",): ("save_steps",),
             ("run_name",): ("run_name",),
             ("num_train_epochs",): ("num_train_epochs",),
+            ("dataloader_num_workers",): ("dataloader_num_workers",),
             ("resume_from_checkpoint",): ("resume_from_checkpoint",),
         }
         for source_path, target_path in training_map.items():
@@ -228,6 +229,7 @@ class WanArgBuilder:
             ("attention_backend",): ("attention_backend",),
             ("report_to",): ("report_to",),
             ("seed",): ("seed",),
+            ("fsdp2_reshard_after_forward",): ("fsdp2_reshard_after_forward",),
         }
         for source_path, target_path in runtime_map.items():
             value = self._get_any(runtime, *source_path)
