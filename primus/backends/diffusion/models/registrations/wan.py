@@ -29,7 +29,9 @@ from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import count_parameters
 
 
-def _strip_module_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def _strip_module_prefix(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     out: dict[str, torch.Tensor] = {}
     for k, v in state_dict.items():
         if k.startswith("module."):
@@ -70,7 +72,11 @@ def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
 
     # Directory: prefer explicit Wan trainer file name, else fall back to pattern search
     candidates: list[str] = []
-    for fname in ("dit_model.safetensors", "diffusion_pytorch_model.safetensors", "model.safetensors"):
+    for fname in (
+        "dit_model.safetensors",
+        "diffusion_pytorch_model.safetensors",
+        "model.safetensors",
+    ):
         p = os.path.join(pretrained_path, fname)
         if os.path.exists(p):
             candidates.append(p)
@@ -93,17 +99,6 @@ def _load_dit_weights_into_module(dit: torch.nn.Module, pretrained_path: str):
     logger.info(
         f"Loaded DiT from dir. files={len(candidates)} missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}"
     )
-
-
-def _load_vae(vae: torch.nn.Module, ckpt_path: str | None):
-    if not ckpt_path:
-        return
-    logger.info(f"Loading VAE from {ckpt_path}")
-    state = _strip_module_prefix(_load_state_dict(ckpt_path))
-    # VAE wrapper may keep real module under `.model`
-    target = vae.model if hasattr(vae, "model") else vae
-    result = target.load_state_dict(state, strict=False)
-    logger.info(f"VAE loaded. missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}")
 
 
 def build_wan_model(model_config: dict):
@@ -206,9 +201,6 @@ def build_wan_model(model_config: dict):
     if pretrained_path:
         logger.info(f"Loading DiT weights from {pretrained_path}")
         _load_dit_weights_into_module(dit, pretrained_path)
-
-    # Load encoders (VAE weights loaded into `.model`)
-    _load_vae(vae, vae_ckpt)
 
     components = WanComponents(dit=dit, vae=vae, text_encoder=text_encoder, image_encoder=None)
     pipeline = WanFlowMatchTrainPipeline()
