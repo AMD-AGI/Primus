@@ -476,6 +476,8 @@ class BaseWanTrainer:
         local_samples_in_update = 0
         local_samples_since_log = 0
         update_steps_since_log = 0
+        update_loss_sum = 0.0
+        update_loss_count = 0
 
         for epoch in range(self.num_train_epochs):
             self.sampler.set_epoch(epoch)
@@ -485,11 +487,16 @@ class BaseWanTrainer:
                 local_samples_in_update += self._infer_local_batch_size(batch)
 
                 with self._grad_sync_context(is_update_step):
-                    loss = self.compute_loss(batch)
-                    loss = loss / max(1, self.grad_accum_steps)
+                    raw_loss = self.compute_loss(batch)
+                    update_loss_sum += raw_loss.detach().float().item()
+                    update_loss_count += 1
+                    loss = raw_loss / max(1, self.grad_accum_steps)
                     loss.backward()
 
                 if is_update_step:
+                    loss_val = update_loss_sum / max(1, update_loss_count)
+                    update_loss_sum = 0.0
+                    update_loss_count = 0
                     grad_norm = self._clip_grad_norm()
 
                     self.optimizer.step()
@@ -502,7 +509,6 @@ class BaseWanTrainer:
 
                     # Logging
                     if self.global_step % self.logging_steps == 0:
-                        loss_val = loss.detach().float().item() * max(1, self.grad_accum_steps)
                         now = time.time()
                         log_interval = now - last_log_time
                         step_time = log_interval / max(1, update_steps_since_log)

@@ -57,6 +57,11 @@ FetchVideoOutput = Union[
 ]
 
 
+def strip_file_uri(path: str) -> str:
+    """Return a filesystem path for local file URIs."""
+    return path[7:] if path.startswith("file://") else path
+
+
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
@@ -224,8 +229,7 @@ def _read_video_torchvision(
             warnings.warn(
                 "torchvision < 0.19.0 does not support http/https video path, please upgrade to 0.19.0."
             )
-        if "file://" in video_path:
-            video_path = video_path[7:]
+    video_path = strip_file_uri(video_path)
     st = time.time()
     video, audio, info = io.read_video(
         video_path,
@@ -332,7 +336,7 @@ def _read_video_decord(
     """
     import decord
 
-    video_path = ele["video"]
+    video_path = strip_file_uri(ele["video"])
     st = time.time()
     vr = decord.VideoReader(video_path)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
@@ -381,7 +385,7 @@ def _read_video_torchcodec(
 
     TORCHCODEC_NUM_THREADS = int(os.environ.get("TORCHCODEC_NUM_THREADS", 8))
     logger.info(f"set TORCHCODEC_NUM_THREADS: {TORCHCODEC_NUM_THREADS}")
-    video_path = ele["video"]
+    video_path = strip_file_uri(ele["video"])
     st = time.time()
     decoder = VideoDecoder(video_path, num_ffmpeg_threads=TORCHCODEC_NUM_THREADS)
     video_fps = decoder.metadata.average_fps

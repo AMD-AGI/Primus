@@ -17,7 +17,7 @@ from torch.utils.data import Dataset
 from torchvision.transforms import functional as F
 from transformers import AutoTokenizer
 
-from primus.backends.diffusion.utils.vision_process import fetch_video
+from primus.backends.diffusion.utils.vision_process import fetch_video, strip_file_uri
 
 
 class WanVideoProcessor:
@@ -108,6 +108,7 @@ class WanVideoDataset(Dataset):
     def _read_video_imageio(self, path: str) -> torch.Tensor:
         import imageio.v3 as iio
 
+        path = strip_file_uri(path)
         frames = []
         for frame in iio.imiter(path):
             image = Image.fromarray(frame).convert("RGB")
@@ -119,6 +120,7 @@ class WanVideoDataset(Dataset):
     def _read_video_decord(self, path: str) -> torch.Tensor:
         import decord
 
+        path = strip_file_uri(path)
         vr = decord.VideoReader(path)
         total_frames = len(vr)
         idx = torch.linspace(0, total_frames - 1, self.frame_num).round().long().tolist()
