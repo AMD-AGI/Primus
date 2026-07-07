@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 # =============================================================================
 # run_odc.sh — portable ODC LB-mini launcher (single-node)
 #

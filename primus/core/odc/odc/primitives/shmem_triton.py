@@ -1,3 +1,14 @@
+# Adapted from ODC (https://github.com/sail-sg/odc), whose upstream Triton
+# device API (odc/primitives/nvshmem_triton.py) this ROCm reimplementation is
+# derived from. ODC is distributed under the MIT License per its package
+# metadata (pyproject.toml / setup.py classifiers); the upstream repository
+# ships no LICENSE file or per-file copyright headers, and upstream copyright is
+# held by the ODC authors (Sea AI Lab).
+#
+# Modifications Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+
 """
 ODC Triton device API — ROCm implementation.
 

@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 ###############################################################################
 # LB-Mini (sequence-length load balancing) for Megatron's FSDP2 + ODC path.
 #
@@ -58,7 +62,6 @@ def _build_lb_mini_train_iterator(args):
     """Build the variable-length, KK-balanced LB-Mini train iterator."""
     from megatron.core import mpu
     from megatron.training import get_tokenizer
-
     from primus.backends.megatron.sft.lb_mini_dataset import (
         LBMiniDataIterator,
         build_varlen_samples,

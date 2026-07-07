@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 ###############################################################################
 # Chunked linear cross-entropy for Megatron GPTModel (avoid full-logits OOM).
 #
@@ -27,7 +31,6 @@
 import os
 
 import torch
-
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 

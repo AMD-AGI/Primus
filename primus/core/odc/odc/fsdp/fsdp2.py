@@ -1,3 +1,12 @@
+# Adapted from ODC (https://github.com/sail-sg/odc), which is distributed under
+# the MIT License per its package metadata (pyproject.toml / setup.py
+# classifiers). The upstream repository ships no LICENSE file or per-file
+# copyright headers; upstream copyright is held by the ODC authors (Sea AI Lab).
+#
+# Modifications Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+
 import dataclasses
 import logging
 import operator
@@ -1080,11 +1089,7 @@ _enable_hpz = None
 
 def patch_fsdp2(enable_hpz: bool = False) -> None:
     from torch.distributed._composable import replicate_with_fsdp
-    from torch.distributed.fsdp._fully_shard import (
-        _fsdp_init,
-        _fsdp_param_group,
-        _fully_shard,
-    )
+    from torch.distributed.fsdp._fully_shard import _fsdp_init, _fsdp_param_group, _fully_shard
 
     global _enable_hpz
     if _enable_hpz is None:

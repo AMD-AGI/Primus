@@ -1,3 +1,7 @@
+// Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+//
+// See LICENSE for license information.
+
 // Combined rocSHMEM GDA host binding + GPU-direct device kernels for ODC.
 //
 // ONE .so (rdc-linked with GDA librocshmem.a) holding BOTH host init/heap AND the

@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 # shellcheck disable=SC2009  # need full args column; pgrep can't match python -m patterns
 # Terminate all residual training/compile processes from the abandoned rocSHMEM
 # smoke in THIS container. Patterns live in this file (not in the invoking

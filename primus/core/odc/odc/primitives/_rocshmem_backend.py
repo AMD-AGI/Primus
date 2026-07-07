@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 """ODC rocSHMEM host-API P2P backend (single-node / IPC-only).
 
 Activated by ``ODC_P2P_BACKEND=rocshmem`` (the default is ``mori``). This

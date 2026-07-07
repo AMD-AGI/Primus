@@ -1,3 +1,12 @@
+# Adapted from ODC (https://github.com/sail-sg/odc), which is distributed under
+# the MIT License per its package metadata (pyproject.toml / setup.py
+# classifiers). The upstream repository ships no LICENSE file or per-file
+# copyright headers; upstream copyright is held by the ODC authors (Sea AI Lab).
+#
+# Modifications Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+
 import logging
 import math
 
@@ -7,13 +16,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from odc.primitives import (
-    SHMEM_EXTERN_LIBS,
-    __syncthreads,
-    getmem_nbi_block,
-    quiet,
-    tid,
-)
+from odc.primitives import SHMEM_EXTERN_LIBS, __syncthreads, getmem_nbi_block, quiet, tid
 from odc.primitives.utils import (
     BufferSplitter,
     SymmBufferRegistry,

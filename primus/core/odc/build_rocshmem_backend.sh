@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 # =============================================================================
 # build_rocshmem_backend.sh
 #

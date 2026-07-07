@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 ###############################################################################
 # ODC (On-Demand Communication) integration into Megatron's PyTorch-FSDP2 path.
 #

@@ -1,3 +1,12 @@
+# Adapted from ODC (https://github.com/sail-sg/odc), which is distributed under
+# the MIT License per its package metadata (pyproject.toml / setup.py
+# classifiers). The upstream repository ships no LICENSE file or per-file
+# copyright headers; upstream copyright is held by the ODC authors (Sea AI Lab).
+#
+# Modifications Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+
 from .shmem_triton import (
     LIB_SHMEM_PATH,
     SHMEM_EXTERN_LIBS,

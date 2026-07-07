@@ -1,3 +1,7 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
 """ODC early-init shim (auto-executed by Python's site machinery).
 
 Root cause (verified on MI300X + ROCm 7.2 + PyTorch 2.10a):
