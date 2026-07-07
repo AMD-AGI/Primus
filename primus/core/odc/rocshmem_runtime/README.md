@@ -1,5 +1,19 @@
 # rocshmem_runtime — the rocSHMEM backend runtime, built from source
 
+> **Migration note (ODC → Primus-Turbo).** The ODC Python backend
+> (`odc/primitives/_rocshmem_backend.py`) no longer loads an in-tree
+> `librs_host*.so` via ctypes. The rocSHMEM host/GDA ops are now provided by
+> Primus-Turbo as the `primus_turbo.pytorch._C.odc_rocshmem_host` /
+> `odc_rocshmem_gda` pybind submodules (their C++ sources were migrated from the
+> `host_bindings/rs_host.cpp` and `gda_backend/rs_host_gda.cpp` files here).
+> `build_rocshmem_backend.sh` has been removed. This directory is still used as
+> the **rocSHMEM library source** that Primus-Turbo compiles against: the Turbo
+> build points `ROCSHMEM_HOME` at `rocshmem_gda/` (headers + `librocshmem.a`).
+> The historical instructions below describe the old in-tree ctypes build and
+> are retained for reference on how the rocSHMEM static libs are produced.
+> TODO(primus-turbo): pin the Turbo merge commit (`PRIMUS_TURBO_COMMIT`) once the
+> ODC-ops PR merges.
+
 This directory only commits the **source** (`.cpp` bindings + build scripts). The
 `.so` / `.a` files needed at runtime are **not checked in**; before first use, build
 them from source inside the base image with `build_rocshmem_backend.sh`. This way the

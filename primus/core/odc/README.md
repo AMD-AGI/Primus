@@ -51,9 +51,16 @@ We highly recommend using a ROCm PyTorch base image (e.g. the
 ```
 pip install --no-build-isolation -e .
 ```
-ODC is a pure-Python package; the rocSHMEM host bindings (single-node XGMI IPC
-and multi-node GPU-direct GDA) are built from source via
-`build_rocshmem_backend.sh`.
+ODC is a pure-Python package. The rocSHMEM backend (single-node XGMI IPC host
+API and multi-node GPU-direct GDA) is provided by Primus-Turbo as the
+`primus_turbo.pytorch._C.odc_rocshmem_host` / `odc_rocshmem_gda` pybind
+submodules and consumed by `odc/primitives/_rocshmem_backend.py`; select it with
+`ODC_P2P_BACKEND=rocshmem` (and `ODC_ROCSHMEM_GDA=1` for the multi-node GDA
+path). Ensure a Primus-Turbo build with the ODC rocSHMEM ops is importable
+(installed, or on `PYTHONPATH`).
+
+> TODO(primus-turbo): pin the exact Primus-Turbo merge commit (`PRIMUS_TURBO_COMMIT`)
+> once the PR adding the ODC rocSHMEM ops is merged.
 
 ## Quick Start
 

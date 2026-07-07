@@ -7,10 +7,10 @@
 # run_odc.sh — portable ODC LB-mini launcher (single-node)
 #
 # Runs an ODC LB-mini training job. Default P2P backend is `mori`; passing
-# `rocshmem` switches to the rocSHMEM host-API backend that ships inside this
-# project (primus/core/odc/rocshmem_runtime/), so it works on any base image that
-# mounts ONLY the project directory — no dependence on the container `/root`
-# layer.
+# `rocshmem` switches to the rocSHMEM backend. The rocSHMEM ops are consumed
+# from Primus-Turbo (primus_turbo.pytorch._C.odc_rocshmem_host / _gda); set
+# PRIMUS_TURBO_PATH to a Primus-Turbo build tree if it is not already importable
+# in the environment (it is prepended to PYTHONPATH).
 #
 # usage: run_odc.sh <mori|rocshmem> <pad|nopad> <exp_yaml_relpath> <exp_name> [KEY=VAL ...]
 #   pad   -> LB_MINI_SAME_MICRO=1 ; nopad -> 0
@@ -18,7 +18,9 @@
 #
 # Overridable env (all have portable defaults):
 #   PRIMUS_ROOT            project root (auto-derived from this script's path)
-#   ODC_ROCSHMEM_LIB       full path to librs_host5.so (default: project copy)
+#   PRIMUS_TURBO_PATH      Primus-Turbo build tree to prepend to PYTHONPATH so
+#                          `import primus_turbo` (with the ODC rocSHMEM ops)
+#                          resolves; leave unset if already installed.
 #   HF_HOME                HF cache dir (default: /workspace/hf_cache)
 #   PRIMUS_PACK_CACHE_DIR  packed-sequence cache (default: $HOME/primus_packed)
 #   TRITON_CACHE_DIR       triton cache (rocshmem: fresh per-run unless pinned)
@@ -38,8 +40,9 @@ PRIMUS_ROOT="${PRIMUS_ROOT:-$(cd "$ODC_ROOT/../../.." && pwd)}"
 cd "$PRIMUS_ROOT" || exit 1
 
 export EXP=$EXP_REL
-# ODC arm env
-export PYTHONPATH="$ODC_ROOT/odc_early:$ODC_ROOT"
+# ODC arm env. Prepend a Primus-Turbo build tree if provided so the rocSHMEM
+# backend (primus_turbo.pytorch._C.odc_rocshmem_*) is importable.
+export PYTHONPATH="${PRIMUS_TURBO_PATH:+$PRIMUS_TURBO_PATH:}$ODC_ROOT/odc_early:$ODC_ROOT"
 export ODC_ENABLE=1 ODC_LB_MINI=1 ODC_PHASE=2 MORI_SHMEM_HEAP_SIZE=8G
 if [ "$PAD" = "pad" ]; then export LB_MINI_SAME_MICRO=1; else export LB_MINI_SAME_MICRO=0; fi
 # public env
@@ -53,10 +56,8 @@ mkdir -p "$PRIMUS_PACK_CACHE_DIR"
 # backend selection
 if [ "$BACKEND" = "rocshmem" ]; then
   export ODC_P2P_BACKEND=rocshmem
-  # Default to the project-shipped host binding. _rocshmem_backend.py applies
-  # the same project-relative default when ODC_ROCSHMEM_LIB is unset, so this
-  # export is belt-and-braces for child shells / subprocess inheritance.
-  export ODC_ROCSHMEM_LIB=${ODC_ROCSHMEM_LIB:-$RUNTIME_DIR/host_bindings/librs_host5.so}
+  # The rocSHMEM ops are consumed from Primus-Turbo (see PRIMUS_TURBO_PATH above);
+  # no in-tree librs_host*.so is loaded anymore.
   export ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=lo
   # rocSHMEM symmetric heap size, RAW BYTES (the env parser is decimal-only and
   # does NOT accept K/M/G suffixes). 8 GiB matches MORI_SHMEM_HEAP_SIZE.
@@ -81,6 +82,6 @@ TRAIN_LOG_TS=${TRAIN_LOG_TS:-$(date +%Y%m%d_%H%M%S)}
 TRAIN_LOG_DIR=${TRAIN_LOG_DIR:-$HOME/odc_logs}; mkdir -p "$TRAIN_LOG_DIR"
 export TRAIN_LOG="$TRAIN_LOG_DIR/runlog_${EXPNAME}_${TRAIN_LOG_TS}.log"
 echo "[run_odc] ROOT=$PRIMUS_ROOT BACKEND=$BACKEND PAD=$PAD P2P=$ODC_P2P_BACKEND SAME_MICRO=$LB_MINI_SAME_MICRO EXP=$EXP NAME=$EXPNAME TS=$TRAIN_LOG_TS"
-echo "[run_odc] LIB=${ODC_ROCSHMEM_LIB:-<mori>} TRITON_CACHE_DIR=$TRITON_CACHE_DIR LOG=$TRAIN_LOG"
+echo "[run_odc] TURBO_PATH=${PRIMUS_TURBO_PATH:-<installed>} TRITON_CACHE_DIR=$TRITON_CACHE_DIR LOG=$TRAIN_LOG"
 bash examples/run_pretrain.sh
 echo "[run_odc] DONE exit=$? log=$TRAIN_LOG"
