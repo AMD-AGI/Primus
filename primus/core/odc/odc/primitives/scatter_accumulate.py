@@ -44,7 +44,7 @@ def _official_push():
 
 
 class ReductionService:
-    """Reduce-scatter-accumulate service (device-side, watcher-free).
+    """Reduce-scatter-accumulate service (device-side, no host-polling subprocess).
 
     Two paths, both device-side and free of any host-polling subprocess:
       * single node  -> owner-side XGMI PULL + on-chip fp32 sum
@@ -78,7 +78,7 @@ class ReductionService:
             self._sdr_deferred_pg = {}
 
     def _gda_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
-        """GPU-direct pull-based reduce-scatter accumulate (race-free, no watcher).
+        """GPU-direct pull-based reduce-scatter accumulate (race-free, no host-polling subprocess).
 
         Stages this rank's full input into a symmetric buffer, barriers, then a
         device kernel pulls every PE's contribution to MY output shard and sums
@@ -412,7 +412,7 @@ class ReductionService:
             )
 
     def _single_device_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
-        """Single-node, watcher-FREE device-side reduce-scatter accumulate.
+        """Single-node device-side reduce-scatter accumulate (no host-polling subprocess).
 
         Mechanism (owner-side PULL + on-chip fp32 sum over same-node XGMI peer
         views): each PE stages its (locally pre-accumulated) full grad into a
@@ -575,6 +575,6 @@ class ReductionService:
         self.dispatched_tasks = 0
 
     def stop(self):
-        # The device and GDA reduce paths run no watcher subprocess, so there is
+        # The device and GDA reduce paths run no host-polling subprocess, so there is
         # nothing to tear down. Kept for API compatibility with the callers.
         pass

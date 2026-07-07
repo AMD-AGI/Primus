@@ -40,8 +40,6 @@ def custom_get_reduce_scatter_tensors(
     chunks = list(unsharded_grad.chunk(state.world_size))
     numel_to_pad = state.world_size * chunks[0].numel() - unsharded_grad.numel()
     padded_unsharded_grad = F.pad(unsharded_grad, [0, numel_to_pad]) if numel_to_pad > 0 else unsharded_grad
-    # new_sharded_grad = torch.empty_like(chunks[0])  # padded
-    # return padded_unsharded_grad, new_sharded_grad
     return padded_unsharded_grad
 
 
@@ -63,53 +61,23 @@ def _reduce_grad(state, handle) -> None:
     # gradient.
     unsharded_grad = flat_param.grad.data
     flat_param.grad = None
-    # print(f"unsharded_grad shape: {unsharded_grad.shape} dtype {unsharded_grad.dtype}")
-    # padded_unsharded_grad, new_sharded_grad = _get_reduce_scatter_tensors(state, unsharded_grad)
     padded_unsharded_grad = custom_get_reduce_scatter_tensors(state, unsharded_grad)
-    # print(state._comm_hook)
     assert state._comm_hook is None, "ODC does not support comm hook"
     if state._comm_hook is None:  # default path
         _div_if_needed(padded_unsharded_grad, state._gradient_predivide_factor)
         pg = handle._fake_process_group if handle._use_fake_reduce else state.process_group
-        # dist.reduce_scatter_tensor(
-        #     new_sharded_grad,
-        #     padded_unsharded_grad,
-        #     group=pg,
-        # )
 
         rs_func = get_reduction_service().scatter_accumulate
         rs_func(id(handle.flat_param), padded_unsharded_grad, pg)
         handle.flat_param._saved_grad_shard = get_reduction_service().get_accumulation(id(handle.flat_param))
 
         assert not uses_hybrid_sharded_strategy, "ODC does not support hybrid sharded strategy"
-        # if uses_hybrid_sharded_strategy:
-        #     # Don't wait during trace
-        #     if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
-        #         state._all_reduce_stream.wait_stream(state._post_backward_stream)
-        #     with state._device_handle.stream(state._all_reduce_stream):
-        #         # Since the new sharded gradient is produced in the post-
-        #         # backward stream and consumed in the all-reduce stream,
-        #         # inform the caching allocator
-        #         _no_dispatch_record_stream(new_sharded_grad, state._all_reduce_stream)
-        #         dist.all_reduce(new_sharded_grad, group=state._inter_node_pg)
-        #         _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
-        #         grad_to_offload = _accumulate_sharded_grad(
-        #             state, handle, new_sharded_grad
-        #         )
-        #         _post_reduce_grad_callback(state, handle, grad_to_offload)
-        #         return
-        # _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
     else:
         pass
-        # state._comm_hook(state._comm_hook_state, padded_unsharded_grad, new_sharded_grad)
         # NOTE: HSDP variants do not support communication hook.
 
-    # Already set below: handle.flat_param._saved_grad_shard = xxx
-    # grad_to_offload = _accumulate_sharded_grad(state, handle, new_sharded_grad)
-    # Not supported by ODC
     assert not handle._offload_params, "ODC does not support offloading"
     assert not handle._use_orig_params, "ODC does not support using original parameters"
-    # _post_reduce_grad_callback(state, handle, grad_to_offload)
 
 
 def prepare_gradient_for_optim(self):
@@ -142,7 +110,6 @@ def prepare_gradient_for_optim(self):
         # If no sharded gradient was computed this iteration, then there is
         # no need to forward `_saved_grad_shard` to `grad`
         if flat_param._post_backward_called:  # type: ignore[attr-defined]
-            # print(f"Rank {dist.get_rank()}: flat_param shape: {flat_param.shape}")
             flat_param.grad = None  # type: ignore[attr-defined]
             if flat_param.grad is not None:
                 cast_grad_to_param_dtype_if_needed(flat_param)
@@ -172,7 +139,6 @@ def all_gather_flat_param(self, padded_unsharded_flat_param):
         "Expects a process group and world size to have been set via `shard()`",
     )
     sharded_flat_param = self.flat_param.data
-    # print(f"sharded_flat_param.dtype: {sharded_flat_param.dtype}")
     expected_numel = sharded_flat_param.numel() * self.world_size
     _p_assert(
         padded_unsharded_flat_param.numel() == expected_numel,
@@ -257,23 +223,6 @@ def _use_low_precision_shard(self):
                 -> self._use_low_precision_shard()
     """
     self._check_low_precision_shard()
-    # flat_param = self.flat_param
-    # _alloc_storage(
-    #     flat_param._mp_shard,
-    #     flat_param._local_shard.size(),  # type: ignore[attr-defined]
-    # )
-    # # `copy_()` implicitly casts to the low precision
-    # flat_param._mp_shard.copy_(  # type: ignore[attr-defined]
-    #     flat_param._local_shard.to(  # type: ignore[attr-defined]
-    #         self.device, non_blocking=True
-    #     )
-    # )
-    # # Invariant: `_mp_shard` is always on the compute device.
-    # flat_param.data = flat_param._mp_shard  # type: ignore[attr-defined]
-    # flat_param.data = flat_param._local_shard.to(self.device, non_blocking=True)
-
-    # todo: need to check
-    # flat_param.data.copy_(flat_param._local_shard.to(self.device, non_blocking=True))
 
 
 def _free_low_precision_sharded_param(self):
@@ -286,18 +235,6 @@ def _free_low_precision_sharded_param(self):
                 -> self._free_low_precision_sharded_param()
     """
     self._check_low_precision_shard()
-    # `_mp_shard` is allocated in the pre-unshard stream, consumed in the
-    # unshard stream for sharded strategies, and consumed in both the
-    # unshard and default streams for `NO_SHARD`. For sharded strategies,
-    # the current stream here is the unshard stream, and for `NO_SHARD`,
-    # it is the default stream. For `NO_SHARD`, only recording for the
-    # default stream suffices since the default stream waits for the
-    # unshard stream.
-    # _no_dispatch_record_stream(
-    #     self.flat_param._mp_shard,
-    #     self._device_handle.current_stream(),  # type: ignore[attr-defined]
-    # )
-    # _free_storage(self.flat_param._mp_shard)  # type: ignore[attr-defined]
 
 
 def patch_fsdp1(reduce_dtype=None):
@@ -321,14 +258,11 @@ def pre_optimizer_step(fsdp_module):
     with torch.cuda.nvtx.range("scatter_accumulate_sync"):
         get_reduction_service().sync(fsdp_module.process_group)
 
-    # time.sleep(1)
     for acc in get_reduction_service().accumulations:
         if hasattr(fsdp_module, "_inter_node_pg"):
             dist.all_reduce(acc, group=fsdp_module._inter_node_pg)
         _div_if_needed(acc, fsdp_module._gradient_postdivide_factor)
-    # print(f"Model parameters: {[p.numel()/ 1e6 for p in fsdp_module.parameters()]}")
     for handle in fsdp_module._all_handles:
-        # print(f"Rank {dist.get_rank()}: cast_grad_to_param_dtype_if_needed shape: {handle.flat_param.shape}")
         handle.flat_param.grad = (
             get_reduction_service().get_accumulation(id(handle.flat_param)).to(handle.flat_param.dtype)
         )

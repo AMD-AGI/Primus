@@ -285,18 +285,6 @@ def foreach_all_gather(
         inp_split_sizes = [t.numel() for t in all_gather_inputs]
         input_size_sum = sum(inp_split_sizes)
         assert input_size_sum == all_gather_input.numel(), f"{input_size_sum=} != {all_gather_input.numel()}"
-        # all_gather_input_numel = sum(inp_split_sizes)
-        # all_gather_output = all_gather_comm.allocate(
-        #     (all_gather_input_numel * world_size,), dtype=dtype, device=device
-        # )
-        # original_all_gather_input, original_all_gather_output = torch.ops.fsdp.all_gather_copy_in(
-        #     all_gather_inputs,
-        #     all_gather_output,
-        #     inp_split_sizes,
-        #     all_gather_input_numel,
-        #     rank,
-        # )
-        # del param_all_gather_inputs
     all_gather_stream.wait_stream(all_gather_copy_in_stream)
     with device_handle.stream(all_gather_stream):
         all_gather_work = all_gather_comm(
@@ -561,8 +549,6 @@ def reshard(self, refresh_post_forward_data: bool = False):
         if not self._reshard_after_forward:
             return
         if self._use_post_forward_mesh:
-            # rank = dist.get_rank()
-            # print(f"[{rank}] reshard to post-forward in {self._training_state} state")
             self._to_sharded_post_forward(refresh_post_forward_data=refresh_post_forward_data)
             self._reshard_after_forward_event = self.device_handle.Event()
             if self._reshard_after_forward_event is not None:
@@ -663,7 +649,6 @@ def foreach_reduce(
 
     padded_unsharded_sizes = tuple(_get_dim0_padded_size(grad.size(), world_size) for grad in unsharded_grads)
     reduce_scatter_input_numel = sum(s.numel() for s in padded_unsharded_sizes)
-    # reduce_scatter_output_numel = reduce_scatter_input_numel // world_size
     reduce_scatter_input = reduce_scatter_comm.allocate(
         (reduce_scatter_input_numel,),
         dtype=reduce_dtype,
@@ -679,23 +664,7 @@ def foreach_reduce(
     all_reduce_event = None
 
     with device_handle.stream(reduce_scatter_stream):
-        # with torch.cuda.nvtx.range("reduce_scatter_output_allocate"):
-        #     reduce_output = reduce_scatter_comm.allocate(
-        #         (reduce_scatter_output_numel,),
-        #         dtype=reduce_dtype,
-        #         device=device,
-        #     )
         _div_if_needed(reduce_scatter_input, predivide_factor)
-        # if world_size > 1:
-        #     reduce_scatter_comm(
-        #         output_tensor=reduce_output,
-        #         input_tensor=reduce_scatter_input,
-        #         group=reduce_scatter_group,
-        #         op=reduce_scatter_op,
-        #     )
-        # else:
-        #     # For single GPU, just copy the input to output (no actual reduce-scatter needed)
-        #     reduce_output.copy_(reduce_scatter_input)
         key = id(fsdp_param_group)
         scatter = get_reduction_service()
         scatter.scatter_accumulate(key, reduce_scatter_input, reduce_scatter_group)
@@ -800,8 +769,6 @@ def update_gradients(fsdp_param_group: FSDPParamGroup):
     gradient_divide_factor = reduce_scatter_context.gradient_divide_factor
     all_reduce_group = reduce_scatter_context.all_reduce_group
     all_reduce_stream = reduce_scatter_context.all_reduce_stream
-    # all_reduce_grads = reduce_scatter_context.all_reduce_grads
-    # partial_reduce_output = reduce_scatter_context.partial_reduce_output
     all_reduce_hook = reduce_scatter_context.all_reduce_hook
     force_sum_reduction_for_comms = reduce_scatter_context.force_sum_reduction_for_comms
     padded_unsharded_sizes = reduce_scatter_context.padded_unsharded_sizes
@@ -836,28 +803,10 @@ def update_gradients(fsdp_param_group: FSDPParamGroup):
             reduce_output /= world_size
 
         if all_reduce_group is not None:  # HSDP
-            # ODC: all_reduce_grads is set to False during gradient accumulation in HSDP
-            # to defer all-reduce until the last microbatch.
-            # But this has been implemented in scatter-accumulate
-            # so we can remove this part from the original implementation.
-            #
-            # Accumulations must run in the reduce-scatter stream
-            # if not all_reduce_grads:
-            #     if partial_reduce_output is not None:
-            #         # partial_reduce_output += reduce_output
-            #         pass
-            #     else:
-            #         partial_reduce_output = reduce_output
-            #     return (
-            #         reduce_scatter_input,
-            #         reduce_scatter_event,
-            #         post_reduce_stream.record_event(),
-            #         all_reduce_input,
-            #         all_reduce_event,
-            #         partial_reduce_output,
-            #     )
-            # if partial_reduce_output is not None:
-            #     reduce_output += partial_reduce_output
+            # ODC defers the inter-node all-reduce during HSDP gradient
+            # accumulation (all_reduce_grads=False) inside scatter-accumulate, so
+            # the original implementation's partial-reduce bookkeeping is not
+            # needed here.
             post_reduce_stream = all_reduce_stream
             if world_size >= 1:
                 all_reduce_stream.wait_stream(reduce_scatter_stream)
@@ -869,8 +818,6 @@ def update_gradients(fsdp_param_group: FSDPParamGroup):
                     group=all_reduce_group,
                     op=all_reduce_op,
                 )
-                # all_reduce_input = reduce_output
-                # all_reduce_event = all_reduce_stream.record_event()
     # -- END: ops in reduce_scatter stream
 
     if all_reduce_hook is not None:
@@ -887,7 +834,7 @@ def update_gradients(fsdp_param_group: FSDPParamGroup):
         _div_if_needed(reduce_output, postdivide_factor)
         reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
         # View out and accumulate sharded gradients
-        flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
+        flat_grad_offset = 0
         for padded_unsharded_size, fsdp_param in zip(padded_unsharded_sizes, fsdp_params):
             # Assume even sharding for Shard(i), i > 0; otherwise would require
             # copy-out for contiguous strides
@@ -929,14 +876,6 @@ def update_gradients(fsdp_param_group: FSDPParamGroup):
     # stream (for optimizer). To ensure its memory is not reused for later
     # RSs, we do not need extra synchronization since the sharded parameters
     # hold refs through the end of backward.
-    # return (
-    #     reduce_scatter_input,
-    #     reduce_scatter_event,
-    #     post_reduce_event,
-    #     all_reduce_input,
-    #     all_reduce_event,
-    #     None,
-    # )
 
     # Synchronize the default stream with post_reduce_stream to ensure
     # gradient writes are visible before optimizer step
@@ -960,11 +899,6 @@ def to_sharded_post_forward(self, refresh_post_forward_data: bool = False) -> No
     shard_rank = self.post_forward_mesh_info.shard_mesh_rank
     # pyrefly: ignore  # unbound-name
     sharded_numel = numel // shard_world_size
-    # self._sharded_post_forward_param_data = (
-    #     self.all_gather_outputs[0].narrow(
-    #         0, sharded_numel * shard_rank, sharded_numel
-    #     )
-    # ).clone()  # clone to be able to free all-gather output
     # Don't replace the symmetric buffer _sharded_post_forward_param_data here.
 
     # If hpz is enabled, self._sharded_post_forward_param_data
@@ -1003,7 +937,6 @@ def to_unsharded(self) -> None:
         # is ensured without further synchronization.
         self._sharded_post_forward_param = None
         # Do not free the symmetric buffer for HPZ.
-        # self._sharded_post_forward_param_data = None  # free
     self.sharded_state = ShardedState.UNSHARDED
 
 
@@ -1072,8 +1005,6 @@ def _get_post_forward_mesh_info_no_convert(reshard_after_forward, mesh_info):
         # So it sets it to True.
         # For us, for easier development with just 1 node,
         # we disable this behavior.
-        # elif reshard_after_forward == shard_mesh_size:
-        #     reshard_after_forward = True
     post_forward_mesh_info = None
     if reshard_after_forward is True:
         post_forward_mesh_info = mesh_info
