@@ -15,7 +15,7 @@
 # Overridable env (all have portable defaults):
 #   PRIMUS_ROOT            project root (auto-derived from this script's path)
 #   ODC_ROCSHMEM_LIB       full path to librs_host5.so (default: project copy)
-#   HF_HOME                HF cache dir (default: /data/hf_cache_ablation)
+#   HF_HOME                HF cache dir (default: /workspace/hf_cache)
 #   PRIMUS_PACK_CACHE_DIR  packed-sequence cache (default: $HOME/primus_packed)
 #   TRITON_CACHE_DIR       triton cache (rocshmem: fresh per-run unless pinned)
 #   TRAIN_LOG_DIR          where to write runlog_*.log (default: $HOME/odc_logs)
@@ -39,7 +39,7 @@ export PYTHONPATH="$ODC_ROOT/odc_early:$ODC_ROOT"
 export ODC_ENABLE=1 ODC_LB_MINI=1 ODC_PHASE=2 MORI_SHMEM_HEAP_SIZE=8G
 if [ "$PAD" = "pad" ]; then export LB_MINI_SAME_MICRO=1; else export LB_MINI_SAME_MICRO=0; fi
 # public env
-export HF_HOME=${HF_HOME:-/data/hf_cache_ablation} DATA_PATH=${DATA_PATH:-/workspace}
+export HF_HOME=${HF_HOME:-/workspace/hf_cache} DATA_PATH=${DATA_PATH:-/workspace}
 export GLOO_SOCKET_IFNAME=lo NCCL_SOCKET_IFNAME=lo NCCL_IB_DISABLE=1
 export LB_MINI_PACKING=kk FUSED_LINEAR_CE=1
 export PRIMUS_PACK_CACHE_DIR=${PRIMUS_PACK_CACHE_DIR:-$HOME/primus_packed}

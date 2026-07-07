@@ -78,7 +78,10 @@ modules:
       gradient_accumulation_fusion: false
 
       finetune: true
-      pretrained_checkpoint: /home/botahu/primus_packed/megatron_checkpoints/DeepSeek-R1-Distill-Qwen-14B
+      # Megatron checkpoint to warm-start from. Set PRETRAINED_CKPT to your own
+      # converted DeepSeek-R1-Distill-Qwen-14B checkpoint dir; null trains from
+      # the HF weights only.
+      pretrained_checkpoint: ${PRETRAINED_CKPT:null}
       load: null
       save: null
       save_interval: 1000
