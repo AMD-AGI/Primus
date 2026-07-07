@@ -33,7 +33,7 @@ import weakref
 import torch
 
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 # Cache the identity decision keyed on the index tensor's ``id()``. The topology
 # index tensors persist for the dispatcher's lifetime, so caching by identity is
