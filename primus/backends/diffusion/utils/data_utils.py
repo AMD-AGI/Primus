@@ -16,19 +16,14 @@ FPS_MAX_FRAMES = 768
 def smart_nframes(
     total_frames: int,
     video_fps: int | float,
-    fps: int,
+    fps: int | float,
 ) -> int:
     """calculate the number of frames for video used for model inputs.
 
     Args:
-        ele (dict): a dict contains the configuration of video.
-            support either `fps` or `nframes`:
-                - nframes: the number of frames to extract for model inputs.
-                - fps: the fps to extract frames for model inputs.
-                    - min_frames: the minimum number of frames of the video, only used when fps is provided.
-                    - max_frames: the maximum number of frames of the video, only used when fps is provided.
         total_frames (int): the original total number of frames of the video.
         video_fps (int | float): the original fps of the video.
+        fps (int | float): the target sampling fps for model inputs.
 
     Raises:
         ValueError: nframes should in interval [FRAME_FACTOR, total_frames].
