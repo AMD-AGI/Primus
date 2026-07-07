@@ -283,19 +283,25 @@ class BaseWanTrainer:
         eps = float(self.args.get("adam_epsilon", 1e-8))
 
         params = [p for p in self.model.parameters() if p.requires_grad]
-        optimizer_kwargs = {"params": params, "lr": lr, "betas": betas, "eps": eps, "weight_decay": wd}
+        optimizer_kwargs = {
+            "params": params,
+            "lr": lr,
+            "betas": betas,
+            "eps": eps,
+            "weight_decay": wd,
+        }
 
         optimizer = None
         try:
             optimizer = torch.optim.AdamW(**optimizer_kwargs, fused=True)
             if self.rank == 0:
                 logger.info("Optimizer: torch.optim.AdamW(fused=True)")
-        except TypeError:
+        except (TypeError, RuntimeError):
             try:
                 optimizer = torch.optim.AdamW(**optimizer_kwargs, foreach=True)
                 if self.rank == 0:
                     logger.info("Optimizer: torch.optim.AdamW(foreach=True)")
-            except TypeError:
+            except (TypeError, RuntimeError):
                 optimizer = torch.optim.AdamW(**optimizer_kwargs)
                 if self.rank == 0:
                     logger.info("Optimizer: torch.optim.AdamW(default)")

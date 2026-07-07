@@ -198,9 +198,17 @@ class WanArgBuilder:
         height = data.get("height")
         width = data.get("width")
         if height is not None:
-            self._set_nested(dataset_cfg, ("processor_config", "extra_kwargs", "size", "height"), height)
+            self._set_nested(
+                dataset_cfg,
+                ("processor_config", "extra_kwargs", "size", "height"),
+                height,
+            )
         if width is not None:
-            self._set_nested(dataset_cfg, ("processor_config", "extra_kwargs", "size", "width"), width)
+            self._set_nested(
+                dataset_cfg,
+                ("processor_config", "extra_kwargs", "size", "width"),
+                width,
+            )
 
         parallelism_map = {
             ("sp_size",): ("sp_size",),
