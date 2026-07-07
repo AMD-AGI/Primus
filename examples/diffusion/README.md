@@ -39,7 +39,7 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 ```bash
 DATASET_PATH=/data/tiny-video-samples/meta.jsonl \
 DATA_FOLDER=/data/tiny-video-samples/data \
-ATTENTION_BACKEND=sdpa \
+ATTENTION_BACKEND=flash_attn_aiter \
 SP_SIZE=1 \
 MAX_STEPS=10 \
 torchrun \
