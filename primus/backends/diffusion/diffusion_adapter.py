@@ -36,6 +36,7 @@ class DiffusionAdapter(BackendAdapter):
         try:
             log_rank_0(f"[Primus:Diffusion] using in-tree backend package -> {resolved_str}")
         except Exception:
+            # Best-effort startup logging should not block backend setup.
             pass
 
         return resolved_str
@@ -49,6 +50,7 @@ class DiffusionAdapter(BackendAdapter):
         try:
             log_rank_0("[Primus:DiffusionAdapter] Converted Primus module params -> Wan args")
         except Exception:
+            # Standalone prepare hooks may run before the Primus logger is bound.
             pass
         return wan_args
 

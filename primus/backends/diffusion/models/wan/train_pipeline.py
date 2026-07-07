@@ -219,7 +219,9 @@ class WanFlowMatchTrainPipeline:
         components.text_encoder.eval()
         try:
             components.vae.eval()
-        except Exception:
+        except AttributeError:
+            # Some VAE compatibility wrappers may not expose eval(); real eval
+            # failures should still surface.
             pass
 
         with torch.no_grad():
