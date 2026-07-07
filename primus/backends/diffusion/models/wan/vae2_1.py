@@ -108,7 +108,9 @@ class Resample(nn.Module):
         else:
             self.resample = nn.Identity()
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=None):
+        if feat_idx is None:
+            feat_idx = [0]
         b, c, t, h, w = x.size()
         if self.mode == "upsample3d":
             if feat_cache is not None:
@@ -189,7 +191,9 @@ class ResidualBlock(nn.Module):
         )
         self.shortcut = CausalConv3d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=None):
+        if feat_idx is None:
+            feat_idx = [0]
         h = self.shortcut(x)
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
@@ -284,7 +288,9 @@ class Encoder3d(nn.Module):
             CausalConv3d(out_dim, z_dim, 3, padding=1),
         )
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=None):
+        if feat_idx is None:
+            feat_idx = [0]
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -376,7 +382,9 @@ class Decoder3d(nn.Module):
             CausalConv3d(out_dim, 3, 3, padding=1),
         )
 
-    def forward(self, x, feat_cache=None, feat_idx=[0]):
+    def forward(self, x, feat_cache=None, feat_idx=None):
+        if feat_idx is None:
+            feat_idx = [0]
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
