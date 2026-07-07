@@ -6,8 +6,8 @@
 
 from pathlib import Path
 
-import torch
 import pytest
+import torch
 
 from primus.backends.diffusion.models.registrations.wan import (
     _convert_diffusers_wan_dit_state_dict,
