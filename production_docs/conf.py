@@ -24,11 +24,10 @@ copyright = "Copyright (c) %Y Advanced Micro Devices, Inc. All rights reserved."
 # Theme-related configs
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "rocm",
+    "flavor": "ai-ecosystem",
     "link_main_doc": False,
 }
-html_title = f"AMD Primus"
-# suppress_warnings = ["etoc.toctree"]
+html_title = project
 
 # Sphinx extension-related configs
 extensions = ["rocm_docs"]
