@@ -400,7 +400,7 @@ PROXY_OVERRIDES="\
     --use_pytorch_profiler $PROFILE \
     --profile_step_start $PROFILE_STEP_START \
     --profile_step_end $PROFILE_STEP_END \
-    --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
+    --bias_swiglu_fusion $PRIMUS_BIAS_SWIGLU_FUSION \
     --torch_profiler_use_gzip True"
 
 ENV_ARGS=()

@@ -1028,7 +1028,10 @@ class PrimusTurboLinear(TELinear):
                         self.quantized_weight_buffer,
                         self.quantized_weight_t_buffer,
                     ) = _maybe_create_quantized_weight_buffers(
-                        weight, float4_e2m1fn_x2, quant_config, disable_parameter_transpose_cache=self.disable_parameter_transpose_cache
+                        weight,
+                        float4_e2m1fn_x2,
+                        quant_config,
+                        disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
                     )
 
                 x, quantized_weight = _bridge_weight_grad(
