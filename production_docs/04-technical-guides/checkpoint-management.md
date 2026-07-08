@@ -1,4 +1,4 @@
-# Checkpoint Management
+# Checkpoint management
 
 Checkpoints capture **model state**, **optimizer state**, and **training progress** (iteration or step counters, schedulers, and related metadata). They are essential for **fault tolerance** (resume after failure), **experiment management** (reproducibility and comparison), and **hand-offs** between pretraining, fine-tuning, and conversion workflows.
 
@@ -113,7 +113,7 @@ TorchTitan also defines `activation_checkpoint` (activation recomputation) separ
 
 ## 4. MaxText checkpoint configuration
 
-MaxText (JAX) uses configuration keys surfaced in Primus documentation and MaxText configs under `third_party/maxtext`. Primus overlay presets set the defaults shown below, while upstream MaxText `base.yml` is still loaded at runtime via `base_config: "base.yml"` and may define different upstream defaults. Typical training flags:
+MaxText (JAX) uses configuration keys surfaced in Primus documentation and MaxText configs under `third_party/maxtext`. Primus overlay presets set the defaults shown below, while upstream MaxText `base.yml` is still loaded at runtime via `base_config: "base.yml"` and might define different upstream defaults. Typical training flags:
 
 | Parameter | Typical default | Description |
 |-----------|-----------------|-------------|
@@ -129,7 +129,7 @@ See `production_docs/03-configuration-reference/maxtext-parameters.md` for the f
 | Format | Behavior | Notes |
 |--------|----------|--------|
 | `torch` | Classic PyTorch save/load; often **one file per rank** in distributed settings. | Simple but less flexible for topology changes. |
-| `torch_dist` | **Distributed** checkpoint format with **resharding** support (e.g., changing tensor/pipeline parallel degree between save and load). | **Recommended** for many production flows that may change parallelism. |
+| `torch_dist` | **Distributed** checkpoint format with **resharding** support (e.g., changing tensor/pipeline parallel degree between save and load). | **Recommended** for many production flows that might change parallelism. |
 | `zarr` | Zarr-backed checkpoint storage. | Useful when the stack and storage backend support it. |
 
 **Recommendation:** Prefer `torch_dist` for production when you need **flexibility across parallel layouts** and scalable I/O (see `ckpt_fully_parallel_save` / `ckpt_fully_parallel_load` in Megatron config).
@@ -170,8 +170,8 @@ The Megatron checkpoint benchmark lives in `benchmark/megatron/checkpoint/`.
 
 **Entry points**
 
-- `benchmark/megatron/checkpoint/ckpt_launch.py` — main launcher (requires a Primus YAML config).
-- `benchmark/megatron/checkpoint/ckpt_report.py` — reporting utility (can be run separately).
+- `benchmark/megatron/checkpoint/ckpt_launch.py`—main launcher (requires a Primus YAML config).
+- `benchmark/megatron/checkpoint/ckpt_report.py`—reporting utility (can be run separately).
 
 **Example** (from `benchmark/megatron/checkpoint/README.md`):
 

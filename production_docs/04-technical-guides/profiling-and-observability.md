@@ -1,4 +1,4 @@
-# Profiling & Observability
+# Profiling and observability
 
 This guide covers how to capture and analyze performance data in Primus: the PyTorch/Kineto profiler, GPU memory snapshots, AMD's TraceLens trace analysis, ROCm memory sampling, memory/performance projection, and pipeline-schedule visualization. Parameters are grounded in `primus/configs/modules/megatron/`, `primus/configs/modules/torchtitan/pre_trainer.yaml`, and `primus/configs/modules/maxtext/pre_trainer.yaml`.
 
@@ -32,7 +32,7 @@ Enable via CLI overrides on `train pretrain`:
   --disable_profiler_activity_cpu False
 ```
 
-Keep the capture window **short** (a few steps after warmup) — traces grow quickly, especially with `with_stack` and CPU activity enabled. Load the resulting trace in [Perfetto](https://ui.perfetto.dev/) to inspect CPU/GPU overlap, kernel launch delays, and idle gaps.
+Keep the capture window **short** (a few steps after warmup)—traces grow quickly, especially with `with_stack` and CPU activity enabled. Load the resulting trace in [Perfetto](https://ui.perfetto.dev/) to inspect CPU/GPU overlap, kernel launch delays, and idle gaps.
 
 ---
 
@@ -85,7 +85,7 @@ Related profiler/log uploads: `mlflow_upload_traces` (upload raw trace files) an
 - `perf/{rocm,hip}_current_mem_gb`, `perf/{rocm,hip}_mem_utilization_pct`
 - `perf/gpu_utilization_pct_rank{N}`, `perf/gpu_utilization_pct_avg`
 
-> GPU utilization collection uses an `all_gather` every `log_interval`, which synchronizes ranks — keep this in mind for throughput-sensitive runs.
+> GPU utilization collection uses an `all_gather` every `log_interval`, which synchronizes ranks—keep this in mind for throughput-sensitive runs.
 
 ---
 
@@ -132,7 +132,7 @@ Project resource usage **before** launching, without consuming a full cluster. E
 ./primus-cli direct -- projection performance --config <exp>.yaml --target-nodes 4
 ```
 
-Memory projection breaks VRAM down across parameters, gradients, activations, optimizer states, and mixed-precision overhead — invaluable for MoE/ultra-large models where activations dominate. See [Projection](../02-user-guide/projection.md) for the full reference.
+Memory projection breaks VRAM down across parameters, gradients, activations, optimizer states, and mixed-precision overhead—invaluable for MoE and ultra-large models where activations dominate. See [Projection](../02-user-guide/projection.md) for the full reference.
 
 ---
 
@@ -154,17 +154,17 @@ Configure `task_list` in `vis.py` to point at your dumped `log_path` and the ite
 
 ## 9. Recommended workflow
 
-1. **Project first** — run `projection memory` to confirm the config fits before booking GPUs.
-2. **Capture a short trace** — a few steps after warmup with `profile` + `use_pytorch_profiler`.
-3. **Inspect** — Perfetto for the timeline; TraceLens for automated hierarchical analysis and trace diffs.
-4. **Check memory** — `record_memory_history` / ROCm sampling for fragmentation and peaks.
-5. **Check pipelines** — `dump_pp_data` + `pp_vis` for bubbles and stage imbalance.
+1. **Project first**—run `projection memory` to confirm the config fits before booking GPUs.
+2. **Capture a short trace**—a few steps after warmup with `profile` + `use_pytorch_profiler`.
+3. **Inspect**—Perfetto for the timeline; TraceLens for automated hierarchical analysis and trace diffs.
+4. **Check memory**—`record_memory_history` / ROCm sampling for fragmentation and peaks.
+5. **Check pipelines**—`dump_pp_data` + `pp_vis` for bubbles and stage imbalance.
 
 ---
 
 ## See also
 
-- [Logging & experiment tracking](./logging-and-experiment-tracking.md) — WandB / TensorBoard / MLflow setup.
-- [MoE training deep-dive](./moe-training.md) — applying this workflow to sparse models.
-- [Performance tuning](./performance-tuning.md) — what to change once you've found the bottleneck.
+- [Logging & experiment tracking](./logging-and-experiment-tracking.md)—WandB, TensorBoard, and MLflow setup.
+- [MoE training deep-dive](./moe-training.md)—applying this workflow to sparse models.
+- [Performance tuning](./performance-tuning.md)—what to change once you've found the bottleneck.
 - [Projection](../02-user-guide/projection.md) and [Monitoring and logging](../05-operations/monitoring-logging.md).

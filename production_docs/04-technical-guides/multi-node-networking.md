@@ -1,4 +1,4 @@
-# Multi-Node Networking Guide
+# Multi-node networking guide
 
 Multi-node training depends on **high-bandwidth, low-latency** communication between GPUs. On AMD systems, **RCCL** (ROCm Collective Communications Library) provides GPU collectives with an API aligned to **NCCL**, so most **NCCL-prefixed** environment variables apply to RCCL as well.
 
@@ -63,7 +63,7 @@ RoCE reuses much of the **IB verb** stack; the same **`NCCL_IB_*`** knobs apply.
 |----------|-------------|
 | `NCCL_IB_ROCE_VERSION_NUM` | RoCE version (commonly **2** for RoCE v2). |
 
-GID selection (`NCCL_IB_GID_INDEX`) and traffic classes (`NCCL_IB_TC`, `NCCL_IB_FIFO_TC`) remain important on RoCE fabrics. Follow your network team’s mapping (often **GID index 1** for RoCE v2 vs **3** for some IB fabrics—your site may differ).
+GID selection (`NCCL_IB_GID_INDEX`) and traffic classes (`NCCL_IB_TC`, `NCCL_IB_FIFO_TC`) remain important on RoCE fabrics. Follow your network team’s mapping (often **GID index 1** for RoCE v2 vs **3** for some IB fabrics—your site might differ).
 
 ---
 
@@ -129,7 +129,7 @@ CPU-side and fallback socket traffic uses interface selection:
 |----------|--------------------------|---------|
 | `NCCL_PXN_DISABLE` | `1` | **PXN disabled** by default (saves GPU memory per comment in `base_env.sh`). |
 
-When **`NCCL_PXN_DISABLE=0`**, **PCIe cross-NIC** is enabled: GPUs may use NICs attached to **other** PCIe switches, which can improve **multi-rail** bandwidth at the cost of **higher GPU memory** use. `runner/use_ainic.yaml` sets `NCCL_PXN_DISABLE=0` for AINIC-oriented runs.
+When **`NCCL_PXN_DISABLE=0`**, **PCIe cross-NIC** is enabled: GPUs might use NICs attached to **other** PCIe switches, which can improve **multi-rail** bandwidth at the cost of **higher GPU memory** use. `runner/use_ainic.yaml` sets `NCCL_PXN_DISABLE=0` for AINIC-oriented runs.
 
 ---
 

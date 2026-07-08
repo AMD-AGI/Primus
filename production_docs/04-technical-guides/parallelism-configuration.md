@@ -1,4 +1,4 @@
-# Parallelism Configuration Guide
+# Parallelism configuration guide
 
 Primus is a YAML-driven training framework for AMD GPUs. Megatron-LM, TorchTitan, and MaxText each expose parallelism through different configuration namespaces. This guide explains how to set parallelism and batch-related parameters, how global batch size relates to micro batch size and data parallel width, and how to choose a parallel strategy for common model sizes.
 
@@ -124,14 +124,14 @@ MaxText (JAX) uses a **device mesh** with **ICI** (intra-node / “in-cluster in
 
 Examples include:
 
-- `ici_tensor_parallelism` — tensor parallelism within a node
-- `ici_fsdp_parallelism` — FSDP-style sharding on ICI (default `-1` for auto in many layouts)
-- `dcn_data_parallelism` — data parallelism across nodes (default `-1` for auto)
-- `dcn_fsdp_parallelism` — FSDP across DCN
+- `ici_tensor_parallelism`—tensor parallelism within a node
+- `ici_fsdp_parallelism`—FSDP-style sharding on ICI (default `-1` for auto in many layouts)
+- `dcn_data_parallelism`—data parallelism across nodes (default `-1` for auto)
+- `dcn_fsdp_parallelism`—FSDP across DCN
 
 ### Batch sizing
 
-- `per_device_batch_size` — primary knob for per-device batch (see `base.yml`).
+- `per_device_batch_size`—primary knob for per-device batch (see `base.yml`).
 
 Consult MaxText’s mesh documentation and your chosen model YAML for valid combinations of ICI/DCN axes.
 
@@ -156,7 +156,7 @@ Consult MaxText’s mesh documentation and your chosen model YAML for valid comb
 | Goal | What to change |
 |------|----------------|
 | Increase global batch without more per-GPU memory | Increase `gradient_accumulation_steps` (Megatron) or increase accumulation / GBS while keeping MBS fixed. |
-| Increase throughput per step | Increase `micro_batch_size` if memory allows; may require lowering accumulation to keep GBS fixed. |
+| Increase throughput per step | Increase `micro_batch_size` if memory allows; might require lowering accumulation to keep GBS fixed. |
 | Scale to more GPUs | Increase world size; often increase DP; keep GBS stable by adjusting accumulation. |
 
 ### Memory and convergence

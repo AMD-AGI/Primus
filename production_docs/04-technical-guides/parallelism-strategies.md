@@ -1,4 +1,4 @@
-# Parallelism Strategies for Distributed Training
+# Parallelism strategies for distributed training
 
 This guide explains the parallelism dimensions used when training large foundation models on AMD GPUs with Primus. It moves from basic data parallelism to advanced combinations of tensor, pipeline, context, and expert parallelism, including how Primus exposes these options through Megatron-LM and TorchTitan.
 
@@ -10,7 +10,7 @@ For Megatron YAML flags and environment tuning, see [Megatron parameters](../03-
 
 ### Why parallelism is needed
 
-Modern foundation models often exceed the memory of a single accelerator: parameters, activations, optimizer states, and KV caches cannot all reside on one device at useful batch sizes. Even when a model *fits*, training throughput may be too low without scaling across many GPUs. Parallelism splits the problem along several independent **dimensions** so that:
+Modern foundation models often exceed the memory of a single GPU: parameters, activations, optimizer states, and KV caches cannot all reside on one device at useful batch sizes. Even when a model *fits*, training throughput might be too low without scaling across many GPUs. Parallelism splits the problem along several independent **dimensions** so that:
 
 - **Memory** is shared across devices (sharding, pipeline stages, sequence splits).
 - **Compute** is scaled by processing more data in parallel or by overlapping communication with computation.
@@ -21,7 +21,7 @@ Modern foundation models often exceed the memory of a single accelerator: parame
 |-----------|----------------|--------------|
 | **Data parallelism (DP)** | Input batches | Throughput; same model on each GPU |
 | **FSDP / ZeRO** | Parameters, gradients, optimizer (by stage) | Memory; keep DP semantics |
-| **Tensor parallelism (TP)** | Individual weight matrices / matmuls | Memory per layer; needs fast links |
+| **Tensor parallelism (TP)** | Individual weight matrices and matmuls | Memory per layer; needs fast links |
 | **Sequence parallelism (SP)** | Sequence in non-TP regions | Activation memory with TP |
 | **Pipeline parallelism (PP)** | Layer groups across stages | Memory; depth-wise split |
 | **Context parallelism (CP)** | Sequence for attention (e.g. ring) | Very long contexts |
@@ -31,11 +31,11 @@ These can be **combined**. The product of parallel degrees must match how proces
 
 ---
 
-## 2. Data Parallelism (DP)
+## 2. Data parallelism (DP)
 
 In **classic data parallelism**, every GPU holds a **full copy** of the model. Each rank receives a **different mini-batch** of data. After the backward pass, **gradients are synchronized** so that all ranks apply the same update.
 
-```
+```text
   Batch shard 0     Batch shard 1     Batch shard 2     Batch shard 3
        |                  |                  |                  |
        v                  v                  v                  v
@@ -70,7 +70,7 @@ Here `num_GPUs_DP` is the **data-parallel group size** (not always the same as `
 
 ---
 
-## 3. Fully Sharded Data Parallel (FSDP / ZeRO)
+## 3. Fully sharded data parallel (FSDP / ZeRO)
 
 **ZeRO** (Zero Redundancy Optimizer) reduces redundant storage by **sharding** optimizer states, gradients, and/or parameters across data-parallel ranks.
 
@@ -102,17 +102,17 @@ Exact interactions with checkpoint formats and DDP are documented in [Megatron p
 
 ---
 
-## 4. Tensor Parallelism (TP)
+## 4. Tensor parallelism (TP)
 
-**Tensor parallelism** splits **individual layers** (usually linear / attention projections) across GPUs so **no single GPU stores the full weight matrix** for that layer.
+**Tensor parallelism** splits **individual layers** (usually linear and attention projections) across GPUs so **no single GPU stores the full weight matrix** for that layer.
 
 ### Column-parallel vs row-parallel
 
 Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel** splits \(W\) **along the output dimension** (columns). **Row-parallel** splits \(W\) **along the input dimension** (rows) and **splits \(X\)** so each rank’s matmul dimensions match.
 
-**Column-parallel linear** — each rank holds **disjoint columns** of \(W\); partial outputs have **half** the width per rank (for 2-way TP), then combine:
+**Column-parallel linear**—each rank holds **disjoint columns** of \(W\); partial outputs have **half** the width per rank (for 2-way TP), then combine:
 
-```
+```text
                     SAME full X replicated on each TP rank
                               |
             +-----------------+-----------------+
@@ -132,9 +132,9 @@ Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel*
                     full-width Y on each rank
 ```
 
-**Row-parallel linear** — each rank holds **disjoint rows** of \(W\); **input \(X\)** is **split** along the **input feature** dimension so each rank computes part of the reduction:
+**Row-parallel linear**—each rank holds **disjoint rows** of \(W\); **input \(X\)** is **split** along the **input feature** dimension so each rank computes part of the reduction:
 
-```
+```text
       Rank 0: X_0 @ W[0:r/2,:] ----+
                                    +-- AllReduce --> Y
       Rank 1: X_1 @ W[r/2:r,:] ----+
@@ -149,7 +149,7 @@ Typical **transformer block** pattern: **column-parallel** for one projection, t
 
 **When to use**
 
-- Best **within a node** (NVLink / high-bandwidth GPU–GPU paths). Multi-node TP is possible but latency-sensitive.
+- Best **within a node** (NVLink or other high-bandwidth GPU–GPU paths). Multi-node TP is possible but latency-sensitive.
 
 ### In Primus
 
@@ -160,14 +160,14 @@ Typical **transformer block** pattern: **column-parallel** for one projection, t
 
 ---
 
-## 5. Sequence Parallelism (SP)
+## 5. Sequence parallelism (SP)
 
 **Sequence parallelism** extends TP by splitting the **sequence dimension** in regions that are not covered by tensor-parallel matmuls—commonly **LayerNorm**, **dropout**, and sometimes **residual** paths—so **activation memory** scales better when **TP > 1**.
 
 **Interaction with TP**
 
 - After a **column-parallel** region, partial activations can be **ReduceScatter**d along the sequence.
-- Before a **row-parallel** region, activations may be **AllGather**d along the sequence.
+- Before a **row-parallel** region, activations might be **AllGather**d along the sequence.
 
 So SP trades **extra collectives** for **lower per-rank activation footprint** on long sequences.
 
@@ -180,11 +180,11 @@ So SP trades **extra collectives** for **lower per-rank activation footprint** o
 
 ---
 
-## 6. Pipeline Parallelism (PP)
+## 6. Pipeline parallelism (PP)
 
 **Pipeline parallelism** assigns **disjoint subsets of layers** to **stages** on different devices. Activations (and gradients) move **between stages** with **point-to-point** communication.
 
-```
+```text
   Microbatch 1:  Stage0 -> Stage1 -> Stage2 -> Stage3
   Microbatch 2:       Stage0 -> Stage1 -> Stage2 -> Stage3
   ...
@@ -198,9 +198,9 @@ If a stage waits for input while other stages compute, **idle time** appears (**
 
 | Schedule | Idea |
 |----------|------|
-| **1F1B** | One forward, one backward; classic **warmup / steady / cooldown** phases |
+| **1F1B** | One forward, one backward; classic **warmup, steady, and cooldown** phases |
 | **1F1B interleaved (VPP)** | **Virtual pipeline** stages: multiple chunks per device to improve utilization |
-| **Zero-bubble (ZB)** | Reorders / splits backward so **forward and backward** hide each other better; may separate **input-gradient** vs **weight-gradient** phases |
+| **Zero-bubble (ZB)** | Reorders and splits backward so **forward and backward** hide each other better; might separate **input-gradient** vs **weight-gradient** phases |
 | **V-Schedule / V-Half / V-Min** | Variants reducing bubbles further (names vary by codebase) |
 | **DualPipe** | Bidirectional pipeline scheduling (e.g. DeepSeek-style) to overlap forward/backward paths |
 
@@ -232,7 +232,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 7. Context Parallelism (CP)
+## 7. Context parallelism (CP)
 
 **Context parallelism** splits the **sequence length** across devices for long-context training. A common pattern is **ring attention**: each rank holds a **chunk** of queries/keys/values and participates in a **ring** of message passing so attention covers the full sequence without centralizing all activations on one GPU.
 
@@ -249,7 +249,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 8. Expert Parallelism (EP)
+## 8. Expert parallelism (EP)
 
 **Mixture-of-Experts (MoE)** models route each token to a small subset of **experts**. **Expert parallelism** assigns **different experts** to **different GPUs** so expert weights are not duplicated on every device.
 
@@ -270,7 +270,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 9. Combining Parallelism Strategies
+## 9. Combining parallelism strategies
 
 ### Common pattern
 
@@ -312,7 +312,7 @@ Always validate against **memory profiling**, **checkpoint sharding**, and **net
 
 ---
 
-## 10. Batch Size Relationships
+## 10. Batch size relationships
 
 Let:
 
@@ -353,6 +353,6 @@ Megatron-specific names for batch arguments appear in [Megatron parameters](../0
 
 ## See also
 
-- [NCCL/RCCL collective operations guide](./collective-operations.md) — which collectives each strategy uses.
+- [NCCL/RCCL collective operations guide](./collective-operations.md)—which collectives each strategy uses.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)

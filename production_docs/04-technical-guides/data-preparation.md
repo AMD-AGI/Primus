@@ -1,4 +1,4 @@
-# Data Preparation Guide
+# Data preparation guide
 
 Primus routes training through **Megatron-LM**, **TorchTitan**, and **MaxText**. Each backend expects its own data format and preprocessing pipeline. This guide summarizes how to prepare data, how to use **mock** data for smoke tests, and which environment variables commonly apply.
 
@@ -97,8 +97,8 @@ python3 examples/megatron/preprocess_data.py \
 
 ### BookCorpus example scripts
 
-- **`examples/megatron/prepare_bookcorpus_megatron_dataset.py`** — downloads BookCorpus to JSON via Hugging Face `datasets`, optional `--out-dir`.
-- **`examples/megatron/prepare.py`** — orchestrates download, train/valid split, and calls `preprocess_data.py` with tokenizer settings from Primus config; respects `TOKENIZED_TRAIN_DATA_PATH` / `TOKENIZED_EVAL_DATA_PATH` for output locations.
+- **`examples/megatron/prepare_bookcorpus_megatron_dataset.py`**—downloads BookCorpus to JSON via Hugging Face `datasets`, optional `--out-dir`.
+- **`examples/megatron/prepare.py`**—orchestrates download, train/valid split, and calls `preprocess_data.py` with tokenizer settings from Primus config; respects `TOKENIZED_TRAIN_DATA_PATH` / `TOKENIZED_EVAL_DATA_PATH` for output locations.
 
 ### Tokenizers
 
@@ -153,7 +153,7 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 ## Summary
 
-1. Use **mock** / **synthetic** data to validate configs and performance before investing in large preprocessing jobs.
+1. Use **mock or synthetic** data to validate configs and performance before investing in large preprocessing jobs.
 2. For **Megatron**, convert JSON/JSONL to `.bin`/`.idx` with `preprocess_data.py` and point `data_path` or split paths at the outputs.
 3. For **TorchTitan**, set `training.dataset` / `dataset_path` and run **`examples/torchtitan/prepare.py`** to fetch tokenizer assets.
 4. For **MaxText**, configure `dataset_type` and `per_device_batch_size` per upstream `base.yml` and model YAMLs.

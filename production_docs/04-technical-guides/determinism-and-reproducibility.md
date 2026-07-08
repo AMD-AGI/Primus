@@ -1,4 +1,4 @@
-# Determinism & Reproducibility
+# Determinism and reproducibility
 
 Reproducibility — getting bit-identical (or run-to-run stable) results — matters for debugging divergence, validating optimizations, and regression testing. This guide covers Primus's deterministic mode, the environment variables it sets, the per-backend seed/determinism knobs, and the performance trade-offs. Parameters and behavior are grounded in `examples/run_pretrain.sh`, `primus/configs/modules/megatron/trainer_base.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
 
@@ -8,8 +8,8 @@ Reproducibility — getting bit-identical (or run-to-run stable) results — mat
 
 There are two distinct goals:
 
-- **Reproducible (seeded)** — same seed + same config + same hardware/software gives the *same trajectory*. Achieved with fixed seeds; cheap.
-- **Bitwise-deterministic** — kernels avoid non-deterministic reductions/atomics and tuning so results don't vary between runs. Requires deterministic algorithms and disabling autotuning; **slower**.
+- **Reproducible (seeded)**—same seed + same config + same hardware/software gives the *same trajectory*. Achieved with fixed seeds; cheap.
+- **Bitwise-deterministic**—kernels avoid non-deterministic reductions/atomics and tuning so results don't vary between runs. Requires deterministic algorithms and disabling autotuning; **slower**.
 
 Full determinism also generally requires the **same world size, parallelism layout, and library versions**. Changing TP/PP/DP, GPU count, or ROCm/Megatron versions can change numerics even with everything else fixed.
 
@@ -32,7 +32,7 @@ export PRIMUS_TURBO_AUTO_TUNE=0            # disable Primus-Turbo autotuning (st
 
 Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning only runs when `PRIMUS_DETERMINISTIC != 1` *and* `PRIMUS_HIPBLASLT_TUNING=1` (`examples/run_pretrain.sh`). This prevents run-to-run kernel-selection differences. See [Performance tuning](./performance-tuning.md).
 
-`PRIMUS_DETERMINISTIC` is on the container passthrough whitelist (`runner/.primus.yaml`), so it reaches the training container. See [Environment variables](../03-configuration-reference/environment-variables.md).
+`PRIMUS_DETERMINISTIC` is on the container passthrough allowlist (`runner/.primus.yaml`), so it reaches the training container. See [Environment variables](../03-configuration-reference/environment-variables.md).
 
 ```bash
 export PRIMUS_DETERMINISTIC=1
@@ -88,7 +88,7 @@ Determinism is not free:
 | Setting | Cost |
 |---------|------|
 | `NCCL_ALGO=Ring` | Forgoes faster topology-aware collective algorithms. |
-| `ROCBLAS_DEFAULT_ATOMICS_MODE=0` | Disables atomic reductions — slower GEMMs. |
+| `ROCBLAS_DEFAULT_ATOMICS_MODE=0` | Disables atomic reductions—slower GEMMs. |
 | `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` | Restricts TE to deterministic (often slower) kernels. |
 | `TORCH_COMPILE_DISABLE=1` | No `torch.compile` fusion/codegen speedups. |
 | `PRIMUS_TURBO_AUTO_TUNE=0` | No Primus-Turbo kernel autotuning. |
@@ -101,19 +101,19 @@ Determinism is not free:
 
 ## 7. Reproducibility checklist
 
-1. **Pin the environment** — same container image, ROCm version, and backend (Megatron/TorchTitan) commit.
-2. **Fix seeds** — Megatron `seed`; TorchTitan `training.seed`.
-3. **Hold the layout constant** — same world size and TP/PP/DP/EP/CP degrees.
-4. **Enable determinism** — `PRIMUS_DETERMINISTIC=1` plus backend `deterministic_mode`/`deterministic`.
-5. **Disable autotuning** — automatic in deterministic mode (HipBLASLt tuning off).
-6. **Use mock or fixed data ordering** — ensure the data pipeline is seeded; see [Data preparation](./data-preparation.md).
-7. **Record everything** — log the full resolved config and env (see [Logging & experiment tracking](./logging-and-experiment-tracking.md)).
+1. **Pin the environment**—same container image, ROCm version, and backend (Megatron/TorchTitan) commit.
+2. **Fix seeds**—Megatron `seed`; TorchTitan `training.seed`.
+3. **Hold the layout constant**—same world size and TP/PP/DP/EP/CP degrees.
+4. **Enable determinism**—`PRIMUS_DETERMINISTIC=1` plus backend `deterministic_mode`/`deterministic`.
+5. **Disable autotuning**—automatic in deterministic mode (HipBLASLt tuning off).
+6. **Use mock or fixed data ordering**—ensure the data pipeline is seeded; see [Data preparation](./data-preparation.md).
+7. **Record everything**—log the full resolved config and env (see [Logging & experiment tracking](./logging-and-experiment-tracking.md)).
 
 ---
 
 ## See also
 
-- [Performance tuning](./performance-tuning.md) — HipBLASLt tuning and its interaction with deterministic mode.
-- [Environment variables](../03-configuration-reference/environment-variables.md) — `PRIMUS_DETERMINISTIC` and related flags.
-- [Data preparation](./data-preparation.md) — deterministic data ordering.
+- [Performance tuning](./performance-tuning.md)—HipBLASLt tuning and its interaction with deterministic mode.
+- [Environment variables](../03-configuration-reference/environment-variables.md)—`PRIMUS_DETERMINISTIC` and related flags.
+- [Data preparation](./data-preparation.md)—deterministic data ordering.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md) and [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md).

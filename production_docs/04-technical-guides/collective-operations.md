@@ -1,4 +1,4 @@
-# NCCL/RCCL Collective Operations Guide
+# NCCL/RCCL collective operations guide
 
 Distributed training spends a large fraction of wall time in **collective communication**: many GPUs must exchange gradients, parameters, or activations in coordinated patterns. On AMD GPUs, **RCCL** (ROCm Collective Communications Library) provides these operations with an API aligned to **NCCL** (NVIDIA Collective Communications Library), so most concepts and environment variables carry over between vendors.
 
@@ -30,7 +30,7 @@ Not every rank talks to every other rank in every step. **Process groups** defin
 
 ---
 
-## 2. Core Collective Operations
+## 2. Core collective operations
 
 Below, \(n\) is the number of ranks in the process group, and \(S\) is the size of the logical tensor being reduced or moved (per-rank message size in ring formulations). **Complexity** expressions are **standard ring-style** approximations for **amount of data moved per rank** relative to \(S\); real implementations pick algorithms based on message size, topology, and environment.
 
@@ -40,7 +40,7 @@ Below, \(n\) is the number of ranks in the process group, and \(S\) is the size 
 
 **What it does:** Each rank contributes a tensor; the **element-wise reduction** (typically **sum**) is applied across ranks, and the **full result** is **replicated** on every rank.
 
-```
+```text
 Rank 0: [a0]     Rank 1: [a1]     Rank 2: [a2]
         \           |           /
          \          |          /
@@ -59,7 +59,7 @@ Rank 0: [a0]     Rank 1: [a1]     Rank 2: [a2]
 
 **What it does:** Each rank holds **one shard**; every rank receives the **concatenation** (or stacked layout) of **all shards**.
 
-```
+```text
 Rank 0: [x0]  Rank 1: [x1]  Rank 2: [x2]
           \       |       /
            \      |      /
@@ -77,7 +77,7 @@ Each rank: [x0 | x1 | x2]
 
 **What it does:** Conceptually **AllReduce** then **split**: each rank ends with **one shard** of the reduced result (each rank’s shard is the reduction over corresponding positions from all ranks’ inputs).
 
-```
+```text
 Inputs per rank: full-sized chunks (partial sums local)
         |
    Reduce + partition
@@ -95,7 +95,7 @@ Rank i gets shard i of the fully reduced tensor
 
 **What it does:** Each rank sends a **distinct slice** to every other rank; every rank receives from every rank (matrix transpose of data ownership).
 
-```
+```text
         From rank 0..n-1
               |
     +---------+---------+
@@ -112,7 +112,7 @@ Each rank receives its column/row of the logical matrix
 
 **What it does:** One **root** rank’s tensor is copied to all other ranks.
 
-```
+```text
 Root: [w] ----copy----> all other ranks: [w]
 ```
 
@@ -128,11 +128,11 @@ Root: [w] ----copy----> all other ranks: [w]
 
 ---
 
-### Send / Recv (point-to-point)
+### Send and Recv (point-to-point)
 
 **What it does:** **One** rank sends a buffer to **one** other rank (possibly bidirectional with two ops).
 
-```
+```text
 Stage i ----Send/Recv----> Stage i+1
 ```
 
@@ -156,7 +156,7 @@ Exact fusion and overlap depend on the backend (Megatron vs TorchTitan) and flag
 
 ---
 
-## 4. Communication Patterns in Megatron-LM
+## 4. Communication patterns in Megatron-LM
 
 Primus trains with **Megatron-LM** patches and configurations. Typical patterns:
 
@@ -171,21 +171,21 @@ Primus trains with **Megatron-LM** patches and configurations. Typical patterns:
 
 Megatron integrates **communication/compute overlap** options such as:
 
-- `overlap_grad_reduce` — overlap gradient reduction with computation where supported.
-- `overlap_param_gather` — overlap parameter gathering (e.g. with distributed optimizer / FSDP-style paths) with computation.
+- `overlap_grad_reduce`—overlap gradient reduction with computation where supported.
+- `overlap_param_gather`—overlap parameter gathering (e.g. with distributed optimizer / FSDP-style paths) with computation.
 
 See [Megatron parameters](../03-configuration-reference/megatron-parameters.md) for defaults and compatibility with `use_distributed_optimizer`, `use_torch_fsdp2`, and checkpoint formats.
 
 ---
 
-## 5. Communication Patterns in TorchTitan
+## 5. Communication patterns in TorchTitan
 
 TorchTitan (used as a backend in Primus) relies on **PyTorch** distributed primitives and **DTensor**-style layouts:
 
 | Area | Pattern |
 |------|---------|
 | **FSDP / sharding** | **AllGather** / **ReduceScatter** orchestrated by **FSDP2** (`fully_shard` and related APIs) when `data_parallel_shard_degree` and sharding are enabled. |
-| **TP** | Tensor parallelism is integrated with **DTensor** and model parallel helpers; schedules may use **collectives** inside module forward/backward. |
+| **TP** | Tensor parallelism is integrated with **DTensor** and model parallel helpers; schedules might use **collectives** inside module forward/backward. |
 | **PP** | **Pipeline schedules** (`parallelism.pipeline_parallel_schedule`, `parallelism.pipeline_parallel_degree`) determine stage boundaries and buffering; communication is managed by the pipeline implementation. |
 
 ### Async tensor parallelism
@@ -194,30 +194,30 @@ Set `parallelism.enable_async_tensor_parallel: true` (where supported) to **over
 
 ---
 
-## 6. RCCL-Specific Features and Tuning
+## 6. RCCL-specific features and tuning
 
-The following appear in ROCm / AMD deployments and partner integrations; availability depends on your **driver**, **RCCL build**, and **network** stack.
+The following appear in ROCm and AMD deployments and partner integrations; availability depends on your **driver**, **RCCL build**, and **network** stack.
 
 | Feature | Notes |
 |---------|--------|
-| **MSCCL** | Microsoft Collective Communication Library: **custom algorithms** and patterns; may be used when the stack is built and configured for them. |
+| **MSCCL** | Microsoft Collective Communication Library: **custom algorithms** and patterns; might be used when the stack is built and configured for them. |
 | **MSCCL++** | User-space collective paths aimed at **lower latency** for specific patterns and hardware. |
-| **ANP (AMD Network Plugin)** | Network backend integration (e.g. **AINIC**-oriented paths). Example: `NCCL_NET_PLUGIN` may point to `librccl-anp.so` or similar when installed (see Primus `examples/run_pretrain.sh` patterns). |
+| **ANP (AMD Network Plugin)** | Network backend integration (e.g. **AINIC**-oriented paths). Example: `NCCL_NET_PLUGIN` might point to `librccl-anp.so` or similar when installed (see Primus `examples/run_pretrain.sh` patterns). |
 
 ### Environment variables
 
 Many deployments tune behavior with **NCCL-prefixed** variables (honored by RCCL for compatibility), for example:
 
-- `NCCL_PROTO` — protocol selection hints.
-- `NCCL_P2P_NET_CHUNKSIZE` — chunking for P2P/network paths.
-- `NCCL_IB_*` — InfiniBand / RDMA-related settings when applicable.
-- `NCCL_SOCKET_IFNAME` — **socket** interface selection for TCP fallback or hybrid setups.
+- `NCCL_PROTO`—protocol selection hints.
+- `NCCL_P2P_NET_CHUNKSIZE`—chunking for P2P/network paths.
+- `NCCL_IB_*`—InfiniBand / RDMA-related settings when applicable.
+- `NCCL_SOCKET_IFNAME`—**socket** interface selection for TCP fallback or hybrid setups.
 
 Document your cluster’s recommended values in [Environment variables](../03-configuration-reference/environment-variables.md).
 
 ---
 
-## 7. Benchmarking Collectives with Primus
+## 7. Benchmarking collectives with Primus
 
 Primus includes an **RCCL microbenchmark** suite to measure **latency and bandwidth** for common collectives across message sizes.
 
@@ -255,7 +255,7 @@ Use results to spot **unexpected drops** (wrong NIC, congestion, fallback to TCP
 
 ---
 
-## 8. Troubleshooting Communication Issues
+## 8. Troubleshooting communication issues
 
 | Symptom | Checks |
 |---------|--------|
@@ -284,6 +284,6 @@ Use this to confirm **RCCL/NCCL-related environment** snapshots and **connectivi
 
 ## See also
 
-- [Parallelism strategies](./parallelism-strategies.md) — how TP, PP, DP, FSDP, EP, and CP fit together.
+- [Parallelism strategies](./parallelism-strategies.md)—how TP, PP, DP, FSDP, EP, and CP fit together.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)
