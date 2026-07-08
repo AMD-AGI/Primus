@@ -1024,12 +1024,11 @@ class PrimusTurboLinear(TELinear):
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
                 if is_first_microbatch:
-                    need_cache_colwise = not self.disable_parameter_transpose_cache
                     (
                         self.quantized_weight_buffer,
                         self.quantized_weight_t_buffer,
                     ) = _maybe_create_quantized_weight_buffers(
-                        weight, float4_e2m1fn_x2, quant_config, need_cache_colwise=need_cache_colwise
+                        weight, float4_e2m1fn_x2, quant_config, disable_parameter_transpose_cache=self.disable_parameter_transpose_cache
                     )
 
                 x, quantized_weight = _bridge_weight_grad(

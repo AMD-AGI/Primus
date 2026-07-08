@@ -322,6 +322,10 @@ else
     export FP8_RECIPE=${FP8_RECIPE:-null}
 fi
 
+if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
+  export PRIMUS_BIAS_SWIGLU_FUSION=True
+fi
+
 if [ ! -d "$PRIMUS_PATH/third_party/Megatron-LM" ] || \
    [ -z "$(ls -A "$PRIMUS_PATH/third_party/Megatron-LM" 2>/dev/null)" ]; then
     echo "[ERROR] third_party/Megatron-LM missing/empty -> run: git submodule update --init --recursive" >&2
@@ -396,6 +400,7 @@ PROXY_OVERRIDES="\
     --use_pytorch_profiler $PROFILE \
     --profile_step_start $PROFILE_STEP_START \
     --profile_step_end $PROFILE_STEP_END \
+    --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
     --torch_profiler_use_gzip True"
 
 ENV_ARGS=()
