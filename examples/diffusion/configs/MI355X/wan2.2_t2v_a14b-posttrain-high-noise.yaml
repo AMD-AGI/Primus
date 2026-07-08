@@ -37,7 +37,7 @@ modules:
         dataset_path: ${DATASET_PATH:/data/tiny-video-samples/meta.jsonl}
         data_folder: ${DATA_FOLDER:/data/tiny-video-samples/data}
         frame_num: ${FRAME_NUM:81}
-        video_backend: imageio
+        video_backend: ${VIDEO_BACKEND:decord}
         text_tokenizer: ${TEXT_TOKENIZER:/models/Wan2.2-T2V-A14B-Diffusers/tokenizer}
         height: ${HEIGHT:480}
         width: ${WIDTH:832}

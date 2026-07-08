@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
@@ -32,6 +33,13 @@ class DiffusionPretrainTrainer(BaseTrainer):
         dataset_cfg = self._as_dict(self.backend_args.dataset)
         trainer_args = trainer_cfg.get("args", {})
         attention_backend = trainer_args.get("attention_backend")
+        blas_backend = os.environ.get("BLAS_BACKEND")
+
+        if blas_backend:
+            import torch
+
+            torch.backends.cuda.preferred_blas_library(blas_backend)
+            log_rank_0(f"[Primus:Diffusion] BLAS_BACKEND={blas_backend}")
 
         missing = [
             package
