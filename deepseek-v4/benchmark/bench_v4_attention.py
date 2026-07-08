@@ -14,6 +14,7 @@ every backend, so there is a single place to compare them (one row per backend,
 * ``gluon``     — fused single-latent (K==V) sparse-MLA, hand-tuned gfx950
 * ``triton_v2`` — fused single-latent sparse-MLA in plain Triton (tl.dot / MFMA)
 * ``flydsl_v1`` — fused single-latent sparse-MLA in native FlyDSL MFMA (fwd + bwd)
+* ``turbo_flydsl`` — extracted Primus-Turbo sparse_mla_v2 native FlyDSL MFMA
 
 The legacy ``_flydsl_v0_deprecated`` gathered-CSA backend (scalarized GEMV) is
 NOT benchmarked: it has known correctness issues and depends on the
@@ -115,6 +116,32 @@ try:
     _SPARSE_MLA_BACKENDS["flydsl_v1"] = (sparse_mla_fwd_v4_flydsl, sparse_mla_bwd_v4_flydsl)
 except Exception:  # noqa: BLE001
     pass
+try:
+    _flydsl_turbo_dir = os.environ.get(
+        "PRIMUS_V4_FLYDSL_TURBO_DIR",
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "agent",
+            "workspace",
+            "flydsl_turbo_dsv4_20260707",
+        ),
+    )
+    _flydsl_turbo_dir = os.path.abspath(_flydsl_turbo_dir)
+    if _flydsl_turbo_dir not in sys.path:
+        sys.path.insert(0, _flydsl_turbo_dir)
+    from flydsl_turbo_adapter import (
+        sparse_mla_bwd_v4_flydsl_turbo,
+        sparse_mla_fwd_v4_flydsl_turbo,
+    )
+
+    _SPARSE_MLA_BACKENDS["turbo_flydsl"] = (
+        sparse_mla_fwd_v4_flydsl_turbo,
+        sparse_mla_bwd_v4_flydsl_turbo,
+    )
+except Exception:  # noqa: BLE001
+    pass
 # gluon_v2: our aiter-gluon-inspired backend (guarded; skipped until present).
 try:
     from primus.backends.megatron.core.transformer.v4_attention_kernels._gluon_v2 import (
@@ -123,6 +150,16 @@ try:
     )
 
     _SPARSE_MLA_BACKENDS["gluon_v2"] = (sparse_mla_fwd_v4_gluon_v2, sparse_mla_bwd_v4_gluon_v2)
+except Exception:  # noqa: BLE001
+    pass
+# gluon_v3: active gfx950 optimization campaign backend.
+try:
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._gluon_v3 import (
+        sparse_mla_bwd_v4_gluon_v3,
+        sparse_mla_fwd_v4_gluon_v3,
+    )
+
+    _SPARSE_MLA_BACKENDS["gluon_v3"] = (sparse_mla_fwd_v4_gluon_v3, sparse_mla_bwd_v4_gluon_v3)
 except Exception:  # noqa: BLE001
     pass
 # aiter PR#3833 gluon sparse-MLA prefill (fwd-only) — OPTIONAL reference for
@@ -443,7 +480,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
         raise ValueError(f"unsupported cr={cr}")
 
     # Fused single-latent (K==V) sparse-MLA backends (gluon / triton_v2 /
-    # flydsl_v2): all on the SAME V4-form inputs (zero rope pad + [local ++ pool]
+    # turbo_flydsl): all on the SAME V4-form inputs (zero rope pad + [local ++ pool]
     # kv + [SWA window ++ pool] topk). Time each by swapping the kernel pair.
     sparse_fb = {}  # name -> (fwd_closure, bwd_closure)
     if _SPARSE_MLA_BACKENDS:
@@ -479,7 +516,7 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     # Backend table: native production Triton (separate K/V), then the fused
     # sparse-MLA backends (legacy `_flydsl_v0` gathered CSA is excluded).
     backends = [("triton", fwd_triton, bwd_triton)]
-    for _name in ("gluon", "triton_v2", "gluon_v2", "flydsl_v1", "aiter_gluon"):
+    for _name in ("gluon", "triton_v2", "gluon_v2", "gluon_v3", "flydsl_v1", "turbo_flydsl", "aiter_gluon"):
         if _name in sparse_fb:
             backends.append((_name, sparse_fb[_name][0], sparse_fb[_name][1]))
 
