@@ -281,7 +281,9 @@ torchrun \
 
 Useful runtime knobs:
 
-- `trainer.args.attention_backend`: defaults to `flash_attn_aiter` for Wan training; use `sdpa` as the portable fallback or baseline.
+- `trainer.args.attention_backend`: defaults to `flash_attn_aiter` for Wan
+  training on ROCm. Use `sdpa` as the portable fallback when AITER flash
+  attention is unavailable.
 - `trainer.args.sp_size`: Ulysses sequence parallel size. It must divide the
   model attention head count; for example Wan2.1-1.3B supports `sp_size=4` but
   not `sp_size=8`.

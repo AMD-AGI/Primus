@@ -5,11 +5,18 @@ import pytest
 import torch
 
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
+from primus.backends.diffusion.attention import (
+    get_attention_backend,
+    set_attention_backend,
+)
 from primus.backends.diffusion.data.flux_precomputed import (
     FluxPrecomputedProcessor,
     FluxRawImageTextDataset,
     FluxRawImageTextProcessor,
 )
+from primus.backends.diffusion.models.flux.math import apply_rope
+from primus.backends.diffusion.models.flux.math import attention as flux_attention
+from primus.backends.diffusion.models.flux.math import rope
 from primus.backends.diffusion.models.registrations.flux import build_flux_model
 
 
@@ -40,6 +47,7 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.dataset["config"]["processor_config"]["prompt_dropout_prob"] == 0.25
     assert args.trainer["args"]["max_steps"] == 7
     assert args.trainer["args"]["per_device_train_batch_size"] == 3
+    assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"
 
 
@@ -83,6 +91,27 @@ def test_flux_argument_builder_rejects_sequence_parallelism():
                 "parallelism": {"sp_size": 2},
             }
         )
+
+
+def test_flux_attention_dispatch_matches_sdpa_layout():
+    previous_backend = get_attention_backend()
+    set_attention_backend("sdpa")
+    try:
+        torch.manual_seed(7)
+        q = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
+        k = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
+        v = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
+        pos = torch.arange(5, dtype=torch.float32).repeat(2, 1)
+        pe = rope(pos, dim=4, theta=10000).unsqueeze(1)
+
+        actual = flux_attention(q, k, v, pe=pe)
+        q_rope, k_rope = apply_rope(q, k, pe)
+        expected = torch.nn.functional.scaled_dot_product_attention(q_rope, k_rope, v)
+        expected = expected.transpose(1, 2).flatten(2)
+
+        torch.testing.assert_close(actual, expected)
+    finally:
+        set_attention_backend(previous_backend)
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):

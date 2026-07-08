@@ -46,7 +46,7 @@ modules:
         weight_decay: 0.01
 
       runtime:
-        attention_backend: ${ATTENTION_BACKEND:sdpa}
+        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
         report_to: none

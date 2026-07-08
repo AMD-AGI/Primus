@@ -112,7 +112,7 @@ class DiffusionArgBuilder:
             "per_device_eval_batch_size": 1,
             "gradient_accumulation_steps": 1,
             "gradient_checkpointing": False,
-            "attention_backend": "sdpa",
+            "attention_backend": "flash_attn_aiter",
             "learning_rate": 2.0e-4,
             "lr_scheduler_type": "constant",
             "warmup_steps": 0,
