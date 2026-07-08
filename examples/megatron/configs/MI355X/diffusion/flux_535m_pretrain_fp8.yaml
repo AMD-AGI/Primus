@@ -1,0 +1,199 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 535M FP8 Pretraining Configuration (Testing/Development)
+#
+# This config is for testing FP8 functionality with the minimal Flux 535M model
+# before scaling to the full 12B model. Use this to validate:
+#   - FP8 setup and configuration
+#   - Numerical stability
+#   - Memory and speed improvements
+#   - Transformer Engine compatibility
+#
+# Target Hardware: Single AMD MI355X GPU with ROCm 6.0+
+# Requires: Transformer Engine 2.1.0+ with ROCm backend
+#
+# Usage:
+#   EXP=examples/megatron/configs/MI355X/diffusion/flux_535m_pretrain_fp8.yaml \
+#   GPUS_PER_NODE=1 bash examples/run_pretrain.sh
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_535m_pretrain_fp8}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_535m_fp8.yaml  # Use FP8-enabled 535M config
+
+    # Trainer class for diffusion models
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      # ============================================================================
+      # Model Configuration
+      # ============================================================================
+
+      model_type: diffusion_model
+
+      # ============================================================================
+      # Dataset Configuration — Synthetic / Mock Data (default)
+      # ============================================================================
+      #
+      # This 535M config defaults to in-memory synthetic data so it runs
+      # standalone for sanity checks, CI, and training-pipeline validation
+      # without a prepared Energon dataset. Samples are random tensors with
+      # Flux-correct shapes (latent_channels=16, T5 seq=512, CLIP pooled=768).
+      #
+      # To train on real data instead: set `mock_data: false` and point
+      # `data_path` at a prepared Energon dataset (see notes at the bottom).
+      mock_data: true
+      mock_dataset:
+        class: "primus.backends.megatron.data.synthetic.PreGeneratedMockFluxDataset"
+        params:
+          num_samples: 256         # In-memory synthetic samples (iterated cyclically)
+          image_size: 256          # 256 -> 32x32 latents (light/fast for testing)
+      # data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Batch configuration (can use larger batch with FP8)
+      micro_batch_size: 4          # Can increase from 2 to 4 with FP8 on 535M
+      global_batch_size: 32        # Small batch for quick testing
+      seq_length: 4096             # Sequence length for latent features
+
+      # DataLoader settings (used only with real Energon data, i.e. mock_data: false)
+      num_workers: 4               # Number of data loading workers per GPU
+      dataloader_type: external    # Required for Energon dataloaders
+
+      # ============================================================================
+      # Training Parameters (Quick Testing)
+      # ============================================================================
+
+      # Short training for validation
+      train_iters: 1000            # Just 1K steps for FP8 validation
+      eval_interval: 100           # Evaluate every 100 steps
+      eval_iters: 10               # Quick evaluation
+
+      # Logging
+      log_interval: 10             # Log every N steps
+      tensorboard_dir: output/tensorboard/flux_535m_pretrain_fp8
+      log_throughput: true
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+
+      # Checkpointing (disabled)
+      save_interval: 500           # Save more frequently for testing
+      save: null
+      load: null                   # Path to checkpoint for resuming (optional)
+      finetune: false
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Precision
+      bf16: true                   # Use bfloat16 for non-FP8 ops
+      fp16: false
+
+      # ============================================================================
+      # Optimizer Configuration
+      # ============================================================================
+
+      # Optimizer
+      optimizer: adam
+      lr: 1.0e-4                   # Peak learning rate
+      min_lr: 1.0e-5               # Minimum learning rate
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+
+      # Gradient clipping (important for FP8 stability)
+      clip_grad: 1.0
+
+      # ============================================================================
+      # Learning Rate Scheduler
+      # ============================================================================
+
+      lr_decay_style: cosine
+      lr_warmup_iters: 100         # Short warmup for testing
+      lr_decay_iters: 1000         # Match train_iters
+
+      # ============================================================================
+      # Distributed Training Configuration
+      # ============================================================================
+
+      # Single GPU configuration
+      tensor_model_parallel_size: 1    # No TP needed for 535M
+      pipeline_model_parallel_size: 1  # No PP needed
+      context_parallel_size: 1         # No CP needed
+
+      # Distributed settings
+      use_distributed_optimizer: false  # Not needed for single GPU
+      overlap_grad_reduce: false        # Not applicable for single GPU
+      use_flash_attn: true              # Use Flash Attention 2
+      distributed_timeout_minutes: 60
+
+      # ============================================================================
+      # Memory Optimization
+      # ============================================================================
+
+      # Activation checkpointing (not needed for 535M with FP8)
+      recompute_granularity: null       # No recompute needed
+      recompute_method: null
+      recompute_num_layers: null
+
+      # Sequence parallelism
+      sequence_parallel: false          # Not needed for single GPU
+
+      # ============================================================================
+      # Seed and Reproducibility
+      # ============================================================================
+
+      seed: 42
+
+      # ============================================================================
+      # Monitoring and Logging
+      # ============================================================================
+
+      wandb_project: flux_535m_pretrain_fp8
+      wandb_exp_name: flux_535m_fp8_test
+
+# ============================================================================
+# Notes - FP8 Validation with 535M
+# ============================================================================
+#
+# Hardware Requirements (with FP8):
+#   - Minimum: 1× MI355X 256GB
+#   - Memory per GPU: ~3-5GB (vs ~7-10GB BF16)
+#   - Training time: Minutes
+#
+# Validation Checklist:
+#   [ ] Setup FP8 environment (see docs/backends/megatron/diffusion/fp8_training.md)
+#   [ ] Verify TE FP8 support is available
+#   [ ] Run this config to validate FP8 training
+#   [ ] Check logs for NaN/Inf (should be none)
+#   [ ] Verify memory usage is ~50% of BF16
+#   [ ] Verify training speed is 1.5-2x faster than BF16
+#   [ ] Check loss decreases normally
+#
+# Expected Results:
+#   - Training completes 1000 steps in 5-15 minutes
+#   - No NaN/Inf in losses
+#   - Memory usage: ~3-5GB
+#   - Speed: ~10-50 steps/sec (depending on hardware)
+#   - Loss should decrease normally
+#
+# If validation passes, proceed to one of the 12B FP8 configs, e.g.:
+#   - flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml (TransformerEngine FP8)
+#   - flux_12b_fsdp2_energon_schnell_resample_local_spec_fp8.yaml (local-spec FP8)
+#
+# Troubleshooting:
+#   - If NaN/Inf: Check Transformer Engine FP8 support
+#   - If OOM: Reduce micro_batch_size
+#   - If slow: Verify ROCm FP8 tensor cores are being used
+#   - If unstable: Try fp8_wgrad: false in model config
+#
+# For more information: See docs/backends/megatron/diffusion/fp8_training.md

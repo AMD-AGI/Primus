@@ -1,0 +1,196 @@
+# Data Preprocessing Configuration for Diffusion Models
+#
+# This comprehensive config file shows all available preprocessing parameters.
+#
+# ============================================================================
+# Quick Start (Recommended - Single Command)
+# ============================================================================
+# Prepare and finalize dataset in one command:
+#
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# The default encoder model (FLUX.1-dev) is gated and requires a
+# HuggingFace token. Get one at https://huggingface.co/settings/tokens
+#
+# Finalization (dataset.yaml + energon prepare) runs automatically.
+# To skip it, pass --no-finalize.
+#
+# ============================================================================
+# Advanced Usage
+# ============================================================================
+# Override specific parameters:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --batch-size 16 \
+#     --output-dir /your/custom/path
+#
+# Priority: CLI arguments > YAML config > defaults
+# ============================================================================
+
+# ============================================================================
+# Path Configuration
+# ============================================================================
+# Default paths use Docker mounted paths that persist to host:
+#   /workspace/Primus/data/...  →  <your-repo>/data/... on host
+#
+# EASY OVERRIDE: Customize output with --output-dir flag:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /your/custom/path
+#
+# For /data/... paths, set: export DATA_PATH=/data (before starting container)
+# ============================================================================
+
+# ============================================================================
+# Source Configuration
+# ============================================================================
+source:
+  # Type of data source (required)
+  type: huggingface  # Options: huggingface, directory, webdataset
+
+  # HuggingFace source options (when type: huggingface)
+  hf_dataset: diffusers/pokemon-gpt4-captions  # HuggingFace dataset name
+  hf_split: train                              # Dataset split to use
+
+  # Directory source options (when type: directory)
+  # input_dir: /path/to/images  # Directory containing images and captions
+
+  # WebDataset source options (when type: webdataset)
+  # input_path: '/path/to/dataset/*.tar'  # Glob pattern for WebDataset tars
+
+# ============================================================================
+# Data Format Configuration (Optional)
+# ============================================================================
+# Specify how to extract image and caption from dataset samples.
+# If not specified, uses automatic detection with common field names:
+#   - Images: 'image', 'jpg', 'jpeg', 'png', 'img', 'photo'
+#   - Captions: 'caption', 'text', 'txt', 'description', 'prompt'
+#
+# Use this section for datasets with non-standard field names or JSON-encoded data.
+# data_format:
+#   # Single field names (simplest approach)
+#   image_key: jpg                  # e.g., images are in 'jpg' field
+#   caption_key: json.caption       # e.g., captions in JSON at 'caption' key
+#
+#   # Alternative: specify multiple fallback keys (tried in order)
+#   # image_keys: ['image', 'jpg', 'png']
+#   # caption_keys: ['caption', 'json.caption', 'json.text']
+#
+# Examples:
+#   # For text-to-image-2M dataset:
+#   data_format:
+#     image_key: jpg
+#     caption_key: json.caption
+#
+#   # For datasets with nested JSON metadata:
+#   data_format:
+#     image_key: image
+#     caption_key: json.metadata.description
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/encoded_pokemon  # Output directory (persisted to host)
+  shard_size: 1000                                    # Number of samples per output shard
+  max_samples: null                                   # Maximum samples to process (null = all)
+  compress: false                                     # Whether to compress output with gzip
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Base model path (HuggingFace repo or local path)
+  model_path: black-forest-labs/FLUX.1-dev
+
+  # Override individual encoder paths (null means use model_path)
+  vae_path: null    # Custom VAE path
+  t5_path: null     # Custom T5-XXL path
+  clip_path: null   # Custom CLIP-L path
+
+  # Model settings
+  precision: bf16   # Options: bf16, fp16, fp32
+  device: cuda      # Device for encoding
+  batch_size: 8     # Encoding batch size
+
+# ============================================================================
+# Image Preprocessing
+# ============================================================================
+image:
+  image_size: 1024    # Target image size (height and width)
+  center_crop: false  # Whether to center crop before resize
+
+# ============================================================================
+# Examples
+# ============================================================================
+#
+# Example 1: From HuggingFace with custom batch size
+# ---------------------------------------------------
+# source:
+#   type: huggingface
+#   hf_dataset: diffusers/pokemon-gpt4-captions
+# output:
+#   output_dir: /workspace/Primus/data/pokemon
+# model:
+#   batch_size: 16
+#   precision: bf16
+#
+# Example 2: From local directory
+# --------------------------------
+# source:
+#   type: directory
+#   input_dir: /data/raw_images
+# output:
+#   output_dir: /workspace/Primus/data/encoded_images
+# model:
+#   model_path: black-forest-labs/FLUX.1-dev
+#
+# Example 3: From WebDataset with custom encoders
+# ------------------------------------------------
+# source:
+#   type: webdataset
+#   input_path: '/data/dataset/*.tar'
+# output:
+#   output_dir: /workspace/Primus/data/encoded
+# model:
+#   vae_path: madebyollin/sdxl-vae-fp16-fix
+#   t5_path: google/t5-v1_1-xxl
+#   clip_path: openai/clip-vit-large-patch14
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+# Single GPU (uses config paths):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Multi-GPU (8 GPUs):
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Override output directory:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /workspace/Primus/data/my_output
+#
+# Override multiple values:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_base.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /your/custom/path \
+#     --batch-size 16 \
+#     --max-samples 1000
+#
+# For more examples, see:
+#   - example_huggingface.yaml  (HuggingFace dataset)
+#   - example_directory.yaml    (Local directory)
+#   - example_webdataset.yaml   (WebDataset input)
+#
