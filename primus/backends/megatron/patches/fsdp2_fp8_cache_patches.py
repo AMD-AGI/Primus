@@ -17,7 +17,7 @@ precompute_fp8_scales_for_fsdp(model[0]) after the original train_step returns.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _needs_fp8_cache_update(ctx: PatchContext) -> bool:

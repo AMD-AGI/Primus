@@ -15,8 +15,7 @@ from primus.core.utils.global_vars import (
     get_target_platform,
     set_global_variables,
 )
-
-from .module_utils import debug_rank_all, set_logging_rank
+from primus.core.utils.module_utils import debug_rank_all, set_logging_rank
 
 
 class BaseModule(ABC):

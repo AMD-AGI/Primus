@@ -188,7 +188,7 @@ class TestMegatronAdapterDynamicTrainerLoading:
 
         def side_effect(module_name, *args, **kwargs):
             import_calls.append(module_name)
-            if len(import_calls) <= 2:
+            if len(import_calls) <= 1:
                 raise ImportError(f"Path {len(import_calls)} failed")
             return mock_module
 
@@ -197,7 +197,7 @@ class TestMegatronAdapterDynamicTrainerLoading:
             result = adapter.load_trainer_class(trainer_class="CustomExperimentalTrainer")
 
         assert result == mock_trainer_class
-        assert len(import_calls) == 3
+        assert len(import_calls) == 2
         assert "primus.backends.megatron.customexperimentaltrainer" in import_calls[0].lower()
 
     @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
@@ -283,7 +283,7 @@ class TestMegatronAdapterDynamicTrainerLoading:
 class TestMegatronAdapterIntegration:
     """Integration tests for complete adapter workflow."""
 
-    @patch("primus.modules.module_utils.log_rank_0")
+    @patch("primus.core.utils.module_utils.log_rank_0")
     @patch("primus.backends.megatron.megatron_adapter.MegatronAdapter.detect_backend_version")
     @patch("primus.backends.megatron.megatron_adapter.MegatronArgBuilder")
     @patch("primus.backends.megatron.megatron_adapter.log_rank_0")

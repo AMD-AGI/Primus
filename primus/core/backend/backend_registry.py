@@ -20,7 +20,7 @@
 
 from typing import Callable, Dict, List, Type
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class BackendRegistry:

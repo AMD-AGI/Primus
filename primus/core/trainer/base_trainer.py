@@ -77,7 +77,7 @@ class BaseTrainer(ABC):
 
             # Cooperative multiple inheritance: pass kwargs to BaseModule if present in MRO,
             # otherwise call super().__init__() with no args to avoid object.__init__() error.
-            from primus.modules.base_module import BaseModule
+            from primus.core.base_module import BaseModule
 
             if BaseModule in type(self).__mro__:
                 super().__init__(**kwargs)

@@ -36,7 +36,7 @@ import sys
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 _LOG_PREFIX = "[Patch:megatron.turbo.aiter_deepbind]"
 _ENV_SWITCH = "PRIMUS_AITER_DEEPBIND"
