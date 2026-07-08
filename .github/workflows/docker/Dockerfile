@@ -72,6 +72,18 @@ RUN cd /opt && \
 RUN rm -rf /opt/Primus-Turbo
 
 # ---------------------------------------------------------------------------
+# Install Triton (compile from source)
+# ---------------------------------------------------------------------------
+RUN cd /opt && \
+    git clone https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout 09500db9 && \
+    pip3 install -r python/requirements.txt && \
+    MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
+
+RUN rm -rf /opt/triton
+
+# ---------------------------------------------------------------------------
 # Install UCCL-EP (skip for JAX framework)
 # ---------------------------------------------------------------------------
 RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
