@@ -207,15 +207,9 @@ class DiffusionTransformerBlock(TransformerBlock):
         )
 
         try:
-            pass
-
-            HAVE_TE = True
-        except ImportError:
-            HAVE_TE = False
-
-        te_checkpoint = None
-        if HAVE_TE:
             from megatron.core.extensions.transformer_engine import te_checkpoint
+        except ImportError:
+            te_checkpoint = None
 
         def custom(start: int, end: int):
             def custom_forward(
