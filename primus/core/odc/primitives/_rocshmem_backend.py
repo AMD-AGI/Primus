@@ -418,9 +418,7 @@ def gda_gather(target_ptr, src_ptr, nbytes, peers, stride_bytes):
     if _ctypes_gda_lib:
         n = len(peers)
         arr = (ctypes.c_int * n)(*[int(p) for p in peers])
-        rc = _lib.gda_gather(
-            int(target_ptr), int(src_ptr), int(nbytes), arr, n, int(stride_bytes)
-        )
+        rc = _lib.gda_gather(int(target_ptr), int(src_ptr), int(nbytes), arr, n, int(stride_bytes))
     else:
         # pybind binds gda_gather(target, src, nbytes, std::vector<int> peers, stride)
         rc = _lib.gda_gather(

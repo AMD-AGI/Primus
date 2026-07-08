@@ -45,7 +45,7 @@ export EXP=$EXP_REL
 # The `odc` package now lives directly at $ODC_ROOT (primus/core/odc/), so put
 # its PARENT (primus/core/) on PYTHONPATH for `import odc`; odc_early holds the
 # sitecustomize load-order shim.
-export PYTHONPATH="${PRIMUS_TURBO_PATH:+$PRIMUS_TURBO_PATH:}$ODC_ROOT/odc_early:$(dirname "$ODC_ROOT")"
+export PYTHONPATH="${PRIMUS_TURBO_PATH:+$PRIMUS_TURBO_PATH:}$ODC_ROOT/odc_early:${ODC_ROOT%/*}"
 export ODC_ENABLE=1 ODC_LB_MINI=1 ODC_PHASE=2 MORI_SHMEM_HEAP_SIZE=8G
 if [ "$PAD" = "pad" ]; then export LB_MINI_SAME_MICRO=1; else export LB_MINI_SAME_MICRO=0; fi
 # public env
