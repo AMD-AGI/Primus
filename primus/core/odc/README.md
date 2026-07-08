@@ -47,11 +47,16 @@ To support transparent on-demand communications, we implement RDMA based primiti
 We highly recommend using a ROCm PyTorch base image (e.g. the
 `tasimage/primus-odc` images, ROCm 7.2.0 based).
 
-### Install ODC
+### Enable ODC
+ODC ships as an **in-tree module of Primus** (no separate `pip install`; it has no
+compiled extension). Put its parent directory on `PYTHONPATH` so `import odc`
+resolves, plus the `odc_early` shim dir so the MORI/TE load-order fix runs at
+interpreter startup:
 ```
-pip install --no-build-isolation -e .
+export PYTHONPATH=<PRIMUS_ROOT>/primus/core:<PRIMUS_ROOT>/primus/core/odc/odc_early:$PYTHONPATH
 ```
-ODC is a pure-Python package. The rocSHMEM backend (single-node XGMI IPC host
+(The launcher `rocshmem_runtime/scripts/run_odc.sh` sets this up automatically.)
+ODC is pure Python. The rocSHMEM backend (single-node XGMI IPC host
 API and multi-node GPU-direct GDA) is provided by Primus-Turbo as the
 `primus_turbo.pytorch._C.odc_rocshmem_host` / `odc_rocshmem_gda` pybind
 submodules and consumed by `odc/primitives/_rocshmem_backend.py`; select it with

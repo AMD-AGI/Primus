@@ -45,6 +45,7 @@ pybind surface consumed (see Primus-Turbo csrc/pytorch/dist/odc_rocshmem_*.cpp):
     int       gda_reduce_scatter_acc(...);      # etc.
 """
 
+import ctypes
 import logging
 import os
 from functools import reduce
@@ -95,6 +96,7 @@ _allocations = []  # keep python tensor objects alive for the run
 _initialized = False
 
 _gda_enabled = False  # GPU-direct (GDA) device path: ODC_ROCSHMEM_GDA=1
+_ctypes_gda_lib = False  # True when ODC_ROCSHMEM_LIB overrides embedded turbo GDA
 
 
 def gda_enabled():
@@ -106,16 +108,100 @@ def _is_gda():
     return os.environ.get("ODC_ROCSHMEM_GDA", "0") == "1"
 
 
+def _load_ctypes_gda(so):
+    """Load proven in-tree librs_host_gda.so when ODC_ROCSHMEM_LIB is set.
+
+    The embedded turbo ``odc_rocshmem_gda`` path linked against rocshmem_combined
+    can fault on first device gather; this override uses the monolithic RDC .so
+    that matches the in-tree dual baseline.
+    """
+    lib = ctypes.CDLL(so)
+    lib.rs_uid_bytes.restype = ctypes.c_int
+    lib.rs_get_uid.argtypes = [ctypes.c_char_p]
+    lib.rs_init_uid.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
+    lib.rs_my_pe.restype = ctypes.c_int
+    lib.rs_n_pes.restype = ctypes.c_int
+    lib.rs_malloc.restype = ctypes.c_longlong
+    lib.rs_malloc.argtypes = [ctypes.c_size_t]
+    lib.rs_ptr.restype = ctypes.c_longlong
+    lib.rs_ptr.argtypes = [ctypes.c_longlong, ctypes.c_int]
+    lib.rs_barrier.restype = None
+    lib.rs_finalize.restype = None
+    if hasattr(lib, "gda_gather"):
+        lib.gda_gather.restype = ctypes.c_int
+        lib.gda_gather.argtypes = [
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_size_t,
+        ]
+        lib.gda_reduce_scatter_acc.restype = ctypes.c_int
+        lib.gda_reduce_scatter_acc.argtypes = [
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        if hasattr(lib, "gda_stage_fence"):
+            lib.gda_stage_fence.restype = ctypes.c_int
+            lib.gda_stage_fence.argtypes = [ctypes.c_longlong, ctypes.c_longlong, ctypes.c_size_t]
+        if hasattr(lib, "gda_hdp_flush"):
+            lib.gda_hdp_init.restype = ctypes.c_int
+            lib.gda_hdp_init.argtypes = []
+            lib.gda_hdp_flush.restype = ctypes.c_int
+            lib.gda_hdp_flush.argtypes = []
+        if hasattr(lib, "gda_strided_touch"):
+            lib.gda_strided_touch.restype = ctypes.c_int
+            lib.gda_strided_touch.argtypes = [
+                ctypes.c_longlong,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
+                ctypes.c_longlong,
+                ctypes.c_size_t,
+                ctypes.c_int,
+            ]
+        if hasattr(lib, "gda_reduce_scatter_acc_async"):
+            lib.gda_reduce_scatter_acc_async.restype = ctypes.c_int
+            lib.gda_reduce_scatter_acc_async.argtypes = lib.gda_reduce_scatter_acc.argtypes
+            lib.gda_rs_overlap_sync.restype = ctypes.c_int
+            lib.gda_rs_overlap_sync.argtypes = []
+        if hasattr(lib, "gda_gather_async"):
+            lib.gda_gather_async.restype = ctypes.c_int
+            lib.gda_gather_async.argtypes = [
+                ctypes.c_longlong,
+                ctypes.c_longlong,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_longlong,
+            ]
+    return lib
+
+
 def _load_backend():
     """Resolve the ODC rocSHMEM backend submodule from Primus-Turbo.
 
-    ``ODC_ROCSHMEM_GDA=1`` selects the multi-node GPU-direct submodule
-    (``odc_rocshmem_gda``, which also exposes the host-compatible ``rs_*``
-    bootstrap); otherwise the single-node host submodule
-    (``odc_rocshmem_host``) is used. Both live under
-    ``primus_turbo.pytorch._C`` and are pybind-bound so no ctypes ABI
-    declarations are needed (pybind marshals bytes / std::vector<int> directly).
+    When ``ODC_ROCSHMEM_LIB`` points at a GDA ``librs_host_gda.so``, load that
+    monolithic binding via ctypes instead of the embedded turbo GDA kernels.
     """
+    global _ctypes_gda_lib
+    so = os.environ.get("ODC_ROCSHMEM_LIB")
+    if so and os.path.isfile(so) and _is_gda():
+        _ctypes_gda_lib = True
+        logger.info("rocSHMEM GDA backend: ctypes override %s", so)
+        return _load_ctypes_gda(so)
+    _ctypes_gda_lib = False
     try:
         import primus_turbo  # noqa: F401  -- package init (also loads the _C ext)
         import primus_turbo.pytorch._C as _C
@@ -192,13 +278,26 @@ def init():
 
     rank = dist.get_rank()
     world = dist.get_world_size()
-    # rs_get_uid() returns the uid as `bytes` (pybind); broadcast it as a python
-    # object and hand the raw bytes back to rs_init_uid on every rank.
-    uidb = _lib.rs_get_uid() if rank == 0 else None
-    obj = [uidb]
-    dist.broadcast_object_list(obj, src=0)
-    uidb = obj[0]
-    _lib.rs_init_uid(rank, world, uidb)
+    if _ctypes_gda_lib:
+        n = _lib.rs_uid_bytes()
+        buf = (ctypes.c_char * n)()
+        uidb = None
+        if rank == 0:
+            _lib.rs_get_uid(buf)
+            uidb = bytes(buf)
+        obj = [uidb]
+        dist.broadcast_object_list(obj, src=0)
+        uidb = obj[0]
+        ctypes.memmove(buf, uidb, n)
+        _lib.rs_init_uid(rank, world, buf)
+    else:
+        # rs_get_uid() returns the uid as `bytes` (pybind); broadcast it as a python
+        # object and hand the raw bytes back to rs_init_uid on every rank.
+        uidb = _lib.rs_get_uid() if rank == 0 else None
+        obj = [uidb]
+        dist.broadcast_object_list(obj, src=0)
+        uidb = obj[0]
+        _lib.rs_init_uid(rank, world, uidb)
 
     _my_pe = _lib.rs_my_pe()
     _n_pes = _lib.rs_n_pes()
@@ -316,11 +415,17 @@ def gda_gather(target_ptr, src_ptr, nbytes, peers, stride_bytes):
     its shard (at symmetric ``src_ptr``) into ``target_ptr + peer*stride_bytes``."""
     if len(peers) == 0:
         return
-    # pybind binds gda_gather(target, src, nbytes, std::vector<int> peers, stride)
-    # so the peer list is passed directly (size inferred) — no ctypes array / count.
-    rc = _lib.gda_gather(
-        int(target_ptr), int(src_ptr), int(nbytes), [int(p) for p in peers], int(stride_bytes)
-    )
+    if _ctypes_gda_lib:
+        n = len(peers)
+        arr = (ctypes.c_int * n)(*[int(p) for p in peers])
+        rc = _lib.gda_gather(
+            int(target_ptr), int(src_ptr), int(nbytes), arr, n, int(stride_bytes)
+        )
+    else:
+        # pybind binds gda_gather(target, src, nbytes, std::vector<int> peers, stride)
+        rc = _lib.gda_gather(
+            int(target_ptr), int(src_ptr), int(nbytes), [int(p) for p in peers], int(stride_bytes)
+        )
     if rc != 0:
         raise RuntimeError(f"gda_gather hipError={rc}")
 
@@ -445,14 +550,27 @@ def gda_gather_async(target_ptr, src_ptr, nbytes, peers, stride_bytes, stream):
     same stream (gather reads stable params -> no settle/barrier needed)."""
     if len(peers) == 0:
         return
-    rc = _lib.gda_gather_async(
-        int(target_ptr),
-        int(src_ptr),
-        int(nbytes),
-        [int(p) for p in peers],
-        int(stride_bytes),
-        int(stream),
-    )
+    if _ctypes_gda_lib:
+        n = len(peers)
+        arr = (ctypes.c_int * n)(*[int(p) for p in peers])
+        rc = _lib.gda_gather_async(
+            int(target_ptr),
+            int(src_ptr),
+            int(nbytes),
+            arr,
+            n,
+            int(stride_bytes),
+            int(stream),
+        )
+    else:
+        rc = _lib.gda_gather_async(
+            int(target_ptr),
+            int(src_ptr),
+            int(nbytes),
+            [int(p) for p in peers],
+            int(stride_bytes),
+            int(stream),
+        )
     if rc != 0:
         raise RuntimeError(f"gda_gather_async launch err={rc}")
 

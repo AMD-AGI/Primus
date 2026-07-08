@@ -218,8 +218,9 @@ __marimo__/
 # Custom
 .DS_Store
 
-# rocSHMEM backend build artifacts (rebuilt from source via build_rocshmem_backend.sh)
-# Static libs are never committed; only source (.cpp/.hip) + the build script are.
+# rocSHMEM build artifacts. The ODC rocSHMEM ops now live in Primus-Turbo; the
+# rocSHMEM static library is an external dependency (ROCSHMEM_HOME), built
+# out-of-tree. Never commit any rocSHMEM install tree / static lib / build log.
 *.a
 rocshmem_runtime/rocshmem_src/
 rocshmem_runtime/rocshmem_single/

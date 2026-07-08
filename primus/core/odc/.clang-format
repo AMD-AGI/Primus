@@ -1,9 +1,0 @@
-# ODC C++/HIP style: 4-space indent, aligned with the Primus turbo C++ style.
-BasedOnStyle: Google
-IndentWidth: 4
-TabWidth: 4
-UseTab: Never
-ColumnLimit: 100
-AccessModifierOffset: -4
-DerivePointerAlignment: false
-PointerAlignment: Left
