@@ -1,6 +1,6 @@
 ###############################################################################
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -1072,6 +1072,14 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 checkpointing_context=self.checkpointing_context,
                 skip_load_to_model_and_opt=HAVE_FSDP2 and args.use_torch_fsdp2,
             )
+            if (
+                HAVE_FSDP2
+                and args.use_torch_fsdp2
+                and optimizer is not None
+                and hasattr(optimizer, "finalize_dist_ckpt_load")
+                and args.iteration > 0
+            ):
+                optimizer.finalize_dist_ckpt_load(args.iteration)
             timers("load-checkpoint").stop(barrier=True)
             timers.log(["load-checkpoint"])
             one_logger and one_logger.log_metrics(
@@ -1805,6 +1813,22 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 torch.cuda.nvtx.range_pop()
 
         timers("optimizer").stop()
+
+        if getattr(args, "use_fsdp2_fp8_all_gather", False):
+            from primus.backends.megatron.core.distributed.fsdp2_fp8_all_gather import (
+                precompute_fp8_scales_for_fsdp,
+            )
+
+            precompute_fp8_scales_for_fsdp(
+                model[0],
+                stochastic_rounding=getattr(args, "fp8_all_gather_stochastic_rounding", False),
+            )
+
+        # FSDP2FP32Optimizer returns grad_norm as a GPU tensor to avoid a
+        # torch.compile graph break inside the compiled optimizer.step().
+        # Materialize to float here, outside the compiled region.
+        if isinstance(grad_norm, torch.Tensor):
+            grad_norm = grad_norm.item()
 
         # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
         # so we must gather across mp ranks

@@ -1,3 +1,6 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
 from __future__ import annotations
 
 import argparse
@@ -275,6 +278,15 @@ class PrimusParser(object):
         for key in ("config", "model"):
             yaml_utils.check_key_in_namespace(module, key)
 
+        # ---- Preserve module-level attributes before loading presets ----
+        # Attributes like 'trainer_class' are at the module level in YAML
+        # and should be preserved even after loading config/model presets
+        preserved_attrs = {}
+        reserved_module_keys = {"name", "framework", "config", "model", "overrides", "params"}
+        for key, value in vars(module).items():
+            if key not in reserved_module_keys and not key.startswith("_"):
+                preserved_attrs[key] = value
+
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
 
@@ -282,6 +294,11 @@ class PrimusParser(object):
         module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
+
+        # Restore preserved module-level attributes
+        for key, value in preserved_attrs.items():
+            if not hasattr(module_config, key):  # Don't override if preset already has it
+                setattr(module_config, key, value)
 
         # ---- Load model config ----
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")

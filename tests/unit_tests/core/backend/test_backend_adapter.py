@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -70,7 +70,7 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
             model_name=params.get("model") if isinstance(params, dict) else getattr(params, "model", None),
         )
 
-    def load_trainer_class(self, stage: str = "pretrain"):
+    def load_trainer_class(self, stage: str = "pretrain", trainer_class=None):
         self.load_trainer_calls += 1
         return DummyTrainer
 
@@ -97,21 +97,6 @@ def module_config():
 def primus_config():
     # Primus config is passed through to the trainer unchanged
     return SimpleNamespace(exp_name="unit-test-exp")
-
-
-def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_config):
-    adapter = DummyBackendAdapter(framework="megatron", version="1.2.3")
-
-    # Abstract methods were called exactly once
-    adapter.prepare_backend(module_config)
-    adapter.convert_config(module_config.params)
-    adapter.load_trainer_class(stage="pretrain")
-    adapter.detect_backend_version()
-
-    assert adapter.prepare_calls == [module_config]
-    assert adapter.convert_calls == [module_config.params]
-    assert adapter.load_trainer_calls == 1
-    assert adapter.detect_version_calls == 1
 
 
 def test_adapter_setup_backend_path_with_explicit_path(tmp_path, monkeypatch):

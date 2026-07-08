@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -89,6 +89,7 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
+# shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
 LOG_INFO_RANK0 "Pip installing required packages ..."
@@ -117,7 +118,14 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
+if [ -z "${TRAIN_LOG:-}" ]; then
+    RUN_FOLDER=$(python3 -c "
+import yaml, sys
+d = yaml.safe_load(open(sys.argv[1]))
+print(f\"{d.get('workspace','./output')}/{d.get('work_group','default')}/{d.get('user_name','unknown')}/{d.get('exp_name','experiment')}\")
+" "$EXP" 2>/dev/null || echo "output")
+    TRAIN_LOG="${RUN_FOLDER}/train.log"
+fi
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
