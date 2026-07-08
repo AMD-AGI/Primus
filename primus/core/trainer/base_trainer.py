@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -45,26 +45,49 @@ class BaseTrainer(ABC):
         MegatronPretrainTrainer, TorchtitanPretrainTrainer, etc.
     """
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, *args, **kwargs):
         """
         Initialize base trainer.
 
         Args:
             backend_args: Backend-specific arguments (e.g., from MegatronArgBuilder)
+            *args, **kwargs: Additional arguments (filtered to prevent reaching object.__init__())
 
         Note:
             Distributed environment and logging should be initialized globally
             before creating trainer instances.
         """
-        self.backend_args = backend_args
+        # Filter backend_args from kwargs if not provided as positional/keyword argument
+        if backend_args is None:
+            backend_args = kwargs.pop("backend_args", None)
 
-        # Resolve distributed environment directly from torchrun-style env vars
-        dist_env = get_torchrun_env()
-        self.rank = dist_env["rank"]
-        self.world_size = dist_env["world_size"]
-        self.local_rank = dist_env["local_rank"]
-        self.master_addr = dist_env["master_addr"]
-        self.master_port = dist_env["master_port"]
+        try:
+            from abc import ABC
+
+            ABC.__init__(self)
+
+            self.backend_args = backend_args
+
+            dist_env = get_torchrun_env()
+            self.rank = dist_env["rank"]
+            self.world_size = dist_env["world_size"]
+            self.local_rank = dist_env["local_rank"]
+            self.master_addr = dist_env["master_addr"]
+            self.master_port = dist_env["master_port"]
+
+            # Cooperative multiple inheritance: pass kwargs to BaseModule if present in MRO,
+            # otherwise call super().__init__() with no args to avoid object.__init__() error.
+            from primus.core.base_module import BaseModule
+
+            if BaseModule in type(self).__mro__:
+                super().__init__(**kwargs)
+            else:
+                super().__init__()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            raise
 
     @abstractmethod
     def setup(self):

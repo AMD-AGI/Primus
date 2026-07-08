@@ -33,7 +33,7 @@ from typing import Any
 
 from primus.core.utils import logger
 from primus.core.utils.env import get_torchrun_env
-from primus.modules.module_utils import debug_rank_all, set_logging_rank
+from primus.core.utils.module_utils import debug_rank_all, set_logging_rank
 
 # from primus.core.utils.distributed_logging import debug_rank_all, set_logging_rank
 

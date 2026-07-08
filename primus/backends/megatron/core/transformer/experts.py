@@ -77,6 +77,18 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
+    @staticmethod
+    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+        if bias_parallel is None:
+            return intermediate_parallel
+
+        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
+        tokens_per_expert_cpu = tokens_per_expert.tolist()
+
+        return super()._apply_bias(
+            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
+        )
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -151,8 +163,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.
         if self.offload_moe_act:
             output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
-        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
-        output = self._apply_bias(output, output_bias, tokens_per_expert.tolist(), permuted_probs)
+        output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
         if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):

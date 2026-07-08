@@ -4,6 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
+# MLPerf log suppression must run before any heavy import (Megatron, TE,
+# aiter, ...) that may print/log at import time. Importing this module only
+# triggers the light ``primus/__init__.py`` and installs the FD-level filter
+# when ``PRIMUS_LOG_SUPPRESSION=1`` is set; it is a complete no-op otherwise.
+import primus.mlperf_log_suppression  # noqa: F401  # isort: skip
+
 import argparse
 import importlib
 import pkgutil

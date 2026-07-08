@@ -13,6 +13,7 @@ modules:
     overrides:
       # tokenizer_model: /model
       # --- Logging Config ---
+      stage: mlperf_pretrain
       disable_wandb: true
       disable_tensorboard: true
       stderr_sink_level: INFO

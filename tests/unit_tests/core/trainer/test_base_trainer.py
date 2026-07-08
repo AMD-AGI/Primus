@@ -1,95 +1,117 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for BaseTrainer."""
+"""
+Unit tests for BaseTrainer.
+
+Tests initialization, MRO handling, distributed environment setup, and
+backend_args handling for the universal base trainer class.
+"""
 
 from types import SimpleNamespace
+
+import pytest
 
 from primus.core.trainer.base_trainer import BaseTrainer
 
 
-class DummyTrainer(BaseTrainer):
-    """Minimal concrete implementation of BaseTrainer for testing."""
-
-    def __init__(self, backend_args=None):
-        super().__init__(backend_args=backend_args)
-        self.train_calls: int = 0
-        self.setup_calls: int = 0
-        self.init_calls: int = 0
-
-    def init(self, *args, **kwargs):
-        """No-op init for testing."""
-        self.init_calls += 1
-        return None
-
-    def setup(self, *args, **kwargs):
-        """No-op setup for testing."""
-        self.setup_calls += 1
-        return None
-
-    def train(self):
-        self.train_calls += 1
-
-
 class TestBaseTrainer:
-    """Verify BaseTrainer interface and lifecycle."""
+    """Tests for BaseTrainer initialization and behavior."""
 
-    def test_trainer_stores_backend_args(self):
-        """Backend args should be stored on the trainer instance."""
-        backend_args = SimpleNamespace(lr=1e-4, batch_size=32)
-        trainer = DummyTrainer(backend_args=backend_args)
+    def test_init_sets_distributed_environment(self, monkeypatch: pytest.MonkeyPatch):
+        """Test that distributed environment attributes are set correctly."""
+        mock_dist_env = {
+            "rank": 2,
+            "world_size": 8,
+            "local_rank": 1,
+            "master_addr": "192.168.1.1",
+            "master_port": 54321,
+        }
 
-        assert trainer.backend_args is backend_args
-        assert trainer.backend_args.lr == 1e-4
-        assert trainer.backend_args.batch_size == 32
+        monkeypatch.setattr(
+            "primus.core.trainer.base_trainer.get_torchrun_env",
+            lambda: mock_dist_env,
+        )
+        monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
+        monkeypatch.setattr("sys.stderr.write", lambda *args, **kwargs: None)
 
-    def test_trainer_allows_none_backend_args(self):
-        """Trainer should accept None as backend_args."""
-        trainer = DummyTrainer(backend_args=None)
-        assert trainer.backend_args is None
+        # Create a concrete subclass for testing
+        class ConcreteBaseTrainer(BaseTrainer):
+            def setup(self):
+                pass
 
-    def test_trainer_train_method_executes(self):
-        """The train() method should execute correctly."""
-        backend_args = SimpleNamespace(lr=1e-4)
-        trainer = DummyTrainer(backend_args=backend_args)
+            def init(self):
+                pass
 
-        trainer.train()
+            def train(self):
+                pass
 
-        assert trainer.train_calls == 1
+        trainer = ConcreteBaseTrainer(backend_args=SimpleNamespace())
 
-    def test_trainer_lifecycle_methods_exist(self):
-        """Trainer should have setup, init, train, cleanup methods."""
+        assert trainer.rank == 2
+        assert trainer.world_size == 8
+        assert trainer.local_rank == 1
+        assert trainer.master_addr == "192.168.1.1"
+        assert trainer.master_port == 54321
+
+    def test_init_mro_with_base_module(self, monkeypatch: pytest.MonkeyPatch):
+        """Test MRO handling when BaseModule IS in inheritance chain (legacy pattern)."""
+        from primus.core.base_module import BaseModule
+
+        # Create a class that inherits from both BaseTrainer and BaseModule
+        class LegacyTrainer(BaseTrainer, BaseModule):
+            def setup(self):
+                pass
+
+            def init(self):
+                pass
+
+            def train(self):
+                pass
+
+            def run(self):
+                pass  # BaseModule requires run() method
+
+        mock_dist_env = {
+            "rank": 0,
+            "world_size": 1,
+            "local_rank": 0,
+            "master_addr": "localhost",
+            "master_port": 12345,
+        }
+
+        monkeypatch.setattr(
+            "primus.core.trainer.base_trainer.get_torchrun_env",
+            lambda: mock_dist_env,
+        )
+        monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
+        monkeypatch.setattr("sys.stderr.write", lambda *args, **kwargs: None)
+
+        # Mock BaseModule.__init__ to track if it's called with kwargs and provide required args
+        base_module_init_called = []
+
+        def tracked_init(
+            self, module_name="test", primus_config=None, module_rank=0, module_world_size=1, **kwargs
+        ):
+            base_module_init_called.append(("kwargs", kwargs))
+            # Don't call original_init, just track the call
+
+        monkeypatch.setattr(BaseModule, "__init__", tracked_init)
+
         backend_args = SimpleNamespace()
-        trainer = DummyTrainer(backend_args=backend_args)
+        trainer = LegacyTrainer(
+            backend_args=backend_args,
+            some_kwarg="value",
+            module_name="test",
+            primus_config=SimpleNamespace(),
+            module_rank=0,
+            module_world_size=1,
+        )
 
-        # All lifecycle methods should be callable
-        trainer.setup()
-        trainer.init()
-        trainer.train()
-        trainer.cleanup()
-
-        assert trainer.setup_calls == 1
-        assert trainer.init_calls == 1
-        assert trainer.train_calls == 1
-
-    def test_cleanup_accepts_on_error_flag(self):
-        """cleanup() should accept on_error parameter."""
-        trainer = DummyTrainer(backend_args=None)
-
-        # Should not raise
-        trainer.cleanup(on_error=False)
-        trainer.cleanup(on_error=True)
-
-    def test_trainer_has_distributed_env_attributes(self):
-        """Trainer should expose distributed environment attributes."""
-        trainer = DummyTrainer(backend_args=None)
-
-        # These attributes should exist (values depend on env)
-        assert hasattr(trainer, "rank")
-        assert hasattr(trainer, "world_size")
-        assert hasattr(trainer, "local_rank")
-        assert hasattr(trainer, "master_addr")
-        assert hasattr(trainer, "master_port")
+        # Verify BaseModule.__init__ was called with kwargs
+        assert len(base_module_init_called) > 0
+        assert "some_kwarg" in base_module_init_called[0][1]
+        assert trainer.backend_args is backend_args

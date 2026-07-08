@@ -8,6 +8,9 @@ on:
     tags:
       - "v*"
   pull_request:
+    # Re-list the implicit defaults (opened/synchronize/reopened) and add
+    # ready_for_review so flipping a Draft PR to Ready triggers its first run.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
@@ -21,7 +24,7 @@ permissions:
 
 env:
   PRIMUS_TURBO_COMMIT: a04a233cbfb468dbe21600cbf9db70953428b25c # feat: force use nt layout gemm in bwd (#386)
-  PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # v0.14.0.post1
+  PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
@@ -69,6 +72,9 @@ jobs:
 
   build-docker:
     needs: [code-lint]
+    # Skip on Draft PRs (keep code-lint ungated); the event_name guard preserves
+    # push/tag and workflow_dispatch runs where github.event.pull_request is absent.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: build-docker
     strategy:
       matrix:
@@ -221,6 +227,7 @@ jobs:
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
     steps:
@@ -499,6 +506,7 @@ jobs:
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_docker_jax_ci/actions-runner
     needs: [code-lint]
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."

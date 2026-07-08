@@ -1625,9 +1625,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 weight = getattr(self, f"weight{i}")
                 buffer[i].copy_(weight)
 
-            weights = buffer.clone()
-
-        self.register_parameter("weights", torch.nn.Parameter(weights))
+        self.register_parameter("weights", torch.nn.Parameter(buffer))
 
         # Capture the per-expert weights' extra attributes BEFORE deleting them.
         saved_weight_attrs = [dict(getattr(self, f"weight{i}").__dict__) for i in range(self.num_gemms)]
@@ -1643,31 +1641,41 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             name = f"weight{i}"
             if name in self._parameters:
                 del self._parameters[name]
-        del buffer
 
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Re-expose each expert's slice as a zero-copy weight{i} Parameter view
-        # of self.weights, so existing code paths and checkpoints that look up
-        # weight{i} by name keep working without allocating a new buffer.
-        # ``requires_grad=False`` is required: self.weights is the canonical
-        # trainable Parameter and these views share its storage, so leaving
-        # them trainable would make the optimizer (and DDP) update / sync the
-        # same memory twice.  ``.detach()`` strips the view's autograd graph
-        # so each Parameter ends up as a leaf with ``_base is None`` (which is
-        # what Megatron's distributed-optimizer param-bucket re-mapping
-        # expects), while still aliasing the same underlying storage.
-        # We also restore each weight{i}'s saved extra attributes so checkpoint /
-        # state-dict code that inspects them keeps seeing the right markers.
-        for i in range(self.num_gemms):
-            weight_i = torch.nn.Parameter(self.weights[i].detach(), requires_grad=False)
-            for attr_name, attr_val in saved_weight_attrs[i].items():
-                setattr(weight_i, attr_name, attr_val)
-            self.register_parameter(f"weight{i}", weight_i)
+        # Defer weight{i} view registration until after DDP has remapped
+        # self.weights into the distributed-optimizer param buffer. Registering
+        # views here would pin the pre-remap storage and leave a duplicate copy
+        # of the consolidated weights resident on GPU.
+        self._saved_weight_attrs = saved_weight_attrs
+        self._weight_views_registered = False
+        self.register_forward_pre_hook(self._forward_pre_hook_ensure_weight_views)
 
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
         self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
+
+    def _ensure_weight_views(self) -> None:
+        """Register per-expert weight{i} views after DDP param-buffer remap."""
+        if self._weight_views_registered:
+            return
+
+        for i in range(self.num_gemms):
+            weight_i = torch.nn.Parameter(self.weights[i], requires_grad=False)
+            for attr_name, attr_val in self._saved_weight_attrs[i].items():
+                setattr(weight_i, attr_name, attr_val)
+            self.register_parameter(f"weight{i}", weight_i)
+
+        self._weight_views_registered = True
+
+    @staticmethod
+    def _forward_pre_hook_ensure_weight_views(module, _inputs):
+        module._ensure_weight_views()
+
+    def state_dict(self, *args, **kwargs):
+        self._ensure_weight_views()
+        return super().state_dict(*args, **kwargs)
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         _is_first_microbatch = self.is_first_microbatch

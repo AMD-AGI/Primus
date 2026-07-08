@@ -2,6 +2,7 @@ extends:
   - ../module_base.yaml
   - primus_megatron_module.yaml
   - primus_turbo.yaml
+  - torch_compile.yaml
   - zero_bubble.yaml
   - primus_pipeline.yaml
 
@@ -190,6 +191,7 @@ gradient_reduce_div_fusion: true
 suggested_communication_unit_size: 400000000 # int
 keep_fp8_transpose_cache_when_using_custom_fsdp: false
 num_distributed_optimizer_instances: 1 # int
+data_parallel_replicate_degree: 1
 use_torch_fsdp2: false
 nccl_communicator_config_path: null
 use_tp_pp_dp_mapping: false
@@ -235,6 +237,20 @@ data_args_path: null # str
 per_split_data_args_path: null # str
 data_cache_path: null
 mock_data: false
+# mock_dataset: Configuration for synthetic dataset (used when mock_data=true)
+#   class: Fully qualified class name (optional, defaults based on model_type)
+#   params: Dict of parameters passed to dataset constructor
+#   Example:
+#     mock_dataset:
+#       class: "primus.backends.megatron.data.synthetic.PreGeneratedMockFluxDataset"
+#       params:
+#         num_samples: 1000
+#         image_size: 512
+mock_dataset:
+  class: null
+  params:
+    num_samples: 1000
+    image_size: 512
 merge_file: null
 seq_length: 4096
 encoder_seq_length: null
@@ -269,6 +285,7 @@ log_avg_reset_interval: 10
 log_params_norm: false
 log_num_zeros_in_grad: false
 log_throughput: false
+wall_clock_step_timer: false
 log_progress: false
 timing_log_level: 0
 timing_log_option: minmax
