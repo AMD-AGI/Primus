@@ -12,7 +12,7 @@ components (configs, blocks, etc.) to integrate Primus-specific behavior.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 @register_patch(

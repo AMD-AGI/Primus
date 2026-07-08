@@ -44,7 +44,7 @@ Suggested evidence sources:
 - `third_party/Megatron-LM/requirements*`
 - `third_party/Megatron-LM/.github/workflows/*`
 - `primus/backends/megatron/*`
-- `primus/modules/trainer/megatron/*`
+- `primus/backends/megatron/pretrainer/*`
 - `docs/backends/megatron/patch-notes.md`
 
 Expected outputs:

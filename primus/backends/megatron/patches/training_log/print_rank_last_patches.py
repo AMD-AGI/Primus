@@ -31,8 +31,8 @@ import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils import logger as primus_logger
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
-from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 @dataclass

@@ -35,10 +35,12 @@ from megatron.core.timers import Timer
 from megatron.core.utils import get_model_config, get_model_type, get_model_xattn
 from megatron.training import get_args, print_rank_0
 
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    fwd_bwd_wrapper,
+)
 from primus.backends.megatron.training.training import RollbackDataIteratorWrapper
 from primus.backends.megatron.training.utils import is_second_last_pipeline_stage
-from primus.modules.module_utils import log_rank_0, log_rank_all
-from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
+from primus.core.utils.module_utils import log_rank_0, log_rank_all
 
 from .offload import ActivationStorePool, FakeActivationStore, partial_recompute
 from .scheduler import (
@@ -454,7 +456,7 @@ class TrainingIteration:
         cnt = (int(offload_time) + 1) * 3
         multi_chunks = get_virtual_pipeline_number() > 1
         conf = self.iteration_config
-        from primus.modules.trainer.megatron.pre_trainer import DataLoaderStore
+        from primus.backends.megatron.data_loader_store import DataLoaderStore
 
         count = len(DataLoaderStore.cache)
         for i in range(cnt):
@@ -478,7 +480,7 @@ class TrainingIteration:
     def load_all_batch(self):
         conf = self.iteration_config
         multi_chunks = get_virtual_pipeline_number() > 1
-        from primus.modules.trainer.megatron.pre_trainer import DataLoaderStore
+        from primus.backends.megatron.data_loader_store import DataLoaderStore
 
         assert len(DataLoaderStore.cache) == 0
         for scheduled_node in conf.schedules:
@@ -531,7 +533,7 @@ class TrainingIteration:
             mem_before = torch.cuda.memory_allocated()
 
         set_seq_split_idx(scheduled_node.seq_split_idx)
-        from primus.modules.trainer.megatron.pre_trainer import DataLoaderStore
+        from primus.backends.megatron.data_loader_store import DataLoaderStore
 
         if len(DataLoaderStore.cache) == 0:
             DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk], vp_stage=scheduled_node.chunk)

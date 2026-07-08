@@ -32,9 +32,9 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
         return "ok"
 
     # Provide a minimal `get_model` stub so that any code which expects
-    # `megatron.training.training.get_model` (e.g., Primus monkey patches in
-    # `primus.pretrain.load_backend_trainer`) can safely import and patch this
-    # fake training module during tests without raising AttributeError.
+    # `megatron.training.training.get_model` (e.g., Primus monkey patches)
+    # can safely import and patch this fake training module during tests
+    # without raising AttributeError.
     def fake_get_model(*args, **kwargs):
         return None
 

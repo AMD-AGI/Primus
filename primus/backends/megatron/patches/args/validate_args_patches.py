@@ -14,7 +14,7 @@ Registration order matters: the base wrapper is registered first so that
 import inspect
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # ---------------------------------------------------------------------------
 # Base wrapper — always active, must be registered first
@@ -34,7 +34,9 @@ def patch_validate_args(ctx: PatchContext):
     import megatron.training.arguments as megatron_args
     import megatron.training.initialize as megatron_init
 
-    from primus.modules.trainer.megatron.utils import validate_args_on_rocm
+    from primus.backends.megatron.patches.args.rocm_arg_validation import (
+        validate_args_on_rocm,
+    )
 
     megatron_args._primus_original_validate_args = megatron_args.validate_args
 

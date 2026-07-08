@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.patch_registry import PatchRegistry
-from primus.modules.module_utils import error_rank_0, log_rank_0
+from primus.core.utils.module_utils import error_rank_0, log_rank_0
 
 # -----------------------------------------------------------------------------
 # Parse PRIMUS_PATCHES Environment Variable
