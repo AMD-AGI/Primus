@@ -787,7 +787,6 @@ def _triton_fused_ln_modulate_backward_op(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if x.dim() != 3 or scale.dim() != 2 or x.shape[-1] > _FUSED_LN_MOD_MAX_H:
         grad_output = grad_output.to(x.dtype)
-        H = x.shape[-1]
         mean_r = mean.view(*x.shape[:-1], 1)
         rstd_r = rstd.view(*x.shape[:-1], 1)
         x_hat = (x.float() - mean_r) * rstd_r
