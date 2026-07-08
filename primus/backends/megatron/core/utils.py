@@ -29,12 +29,6 @@ def produce_attention_sharder(cp_comm_type: str):
 
 
 def shard_batch_on_this_cp_rank(sharder, batch):
-    # Import only when needed to avoid import errors if primus_turbo is not available
-    try:
-        pass
-    except ImportError:
-        raise ImportError("AttentionSharder not available. Ensure primus_turbo is properly installed.")
-
     cp_size = parallel_state.get_context_parallel_world_size()
     cp_group = parallel_state.get_context_parallel_group()
     if cp_size > 1:
