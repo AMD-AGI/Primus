@@ -1,0 +1,31 @@
+# Pre-encode COCO 2014 train (82,783 images) for Flux-Schnell training
+# 256px images, 256-token T5 sequences (pass --t5-max-length 256 on CLI)
+#
+# Dataset: AbdoTW/COCO_2014 train split (full COCO 2014 train2014)
+# Fields: image (PIL), caption (list[str] -> first caption taken automatically)
+#
+# Usage (4 GPU on devices 4-7):
+#   HIP_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 \
+#     /workspace/Primus/primus/cli/main.py data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/coco2014_train_schnell_256.yaml \
+#     --t5-max-length 256 --hf-token-file /workspace/Primus/.hf_token
+
+source:
+  type: huggingface
+  hf_dataset: AbdoTW/COCO_2014
+  hf_split: train
+
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/coco2014_train_schnell_256_encoded
+  shard_size: 1000
+  compress: false
+
+model:
+  model_path: black-forest-labs/FLUX.1-schnell
+  precision: bf16
+  device: cuda
+  batch_size: 8
+
+image:
+  image_size: 256
+  center_crop: false

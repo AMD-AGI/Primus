@@ -1,0 +1,130 @@
+# Preprocessing Configuration Example: Local Directory
+#
+# This example shows how to prepare a dataset from a local directory.
+#
+# ============================================================================
+# Quick Start (Recommended - Single Command)
+# ============================================================================
+# Prepare and finalize dataset in one command:
+#
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# The default encoder model (FLUX.1-dev) is gated and requires a
+# HuggingFace token. Get one at https://huggingface.co/settings/tokens
+#
+# Finalization (dataset.yaml + energon prepare) runs automatically.
+# To skip it, pass --no-finalize.
+#
+# ============================================================================
+# Advanced Usage
+# ============================================================================
+# Custom paths:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-dir /your/input/path \
+#     --output-dir /your/output/path
+# ============================================================================
+
+# ============================================================================
+# Path Configuration
+# ============================================================================
+# Default paths use Docker mounted paths that persist to host:
+#   /workspace/Primus/data/...  →  <your-repo>/data/... on host
+#
+# EASY OVERRIDE: Customize paths with command-line flags:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-dir /your/input/path \
+#     --output-dir /your/output/path
+#
+# For /data/... paths, set: export DATA_PATH=/data (before starting container)
+# ============================================================================
+
+# ============================================================================
+# Source Configuration (Directory)
+# ============================================================================
+source:
+  type: directory
+  input_dir: /data/raw_images  # Directory containing images and captions
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/encoded_images  # Output directory (persisted to host)
+  shard_size: 1000                                   # Number of samples per output shard
+  max_samples: null                                  # Maximum samples to process (null = all)
+  compress: false                                    # Whether to compress output with gzip
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Base model path (HuggingFace repo or local path)
+  model_path: black-forest-labs/FLUX.1-dev
+
+  # Override individual encoder paths (null means use model_path)
+  vae_path: null    # Custom VAE path
+  t5_path: null     # Custom T5-XXL path
+  clip_path: null   # Custom CLIP-L path
+
+  # Model settings
+  precision: bf16   # Options: bf16, fp16, fp32
+  device: cuda      # Device for encoding
+  batch_size: 8     # Encoding batch size
+
+# ============================================================================
+# Image Preprocessing
+# ============================================================================
+image:
+  image_size: 1024    # Target image size (height and width)
+  center_crop: false  # Whether to center crop before resize
+
+# ============================================================================
+# Input Directory Structure
+# ============================================================================
+#
+# Your input_dir should contain image-caption pairs:
+#
+# /data/raw_images/
+# ├── image_001.jpg
+# ├── image_001.txt
+# ├── image_002.jpg
+# ├── image_002.txt
+# └── ...
+#
+# Each .jpg file should have a corresponding .txt file with the same name.
+# Supported image formats: .jpg, .jpeg, .png, .webp
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+# Single GPU (uses config paths):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Multi-GPU (8 GPUs):
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Override paths:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-dir /your/input/path \
+#     --output-dir /your/output/path
+#
+# Override specific values:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_directory.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /workspace/Primus/data/my_output \
+#     --batch-size 16
+#
