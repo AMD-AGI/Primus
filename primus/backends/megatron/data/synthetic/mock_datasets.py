@@ -451,6 +451,7 @@ class MockFluxDataset(MockDiffusionDataset):
         seed: Optional[int] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
+        **kwargs,
     ):
         """
         Initialize mock Flux dataset.
@@ -471,6 +472,7 @@ class MockFluxDataset(MockDiffusionDataset):
             seed=seed,
             dtype=dtype,
             device=device,
+            **kwargs,
         )
 
         logger.info(f"Initialized MockFluxDataset with Flux preset on device={device}")
