@@ -1,6 +1,6 @@
-# 把 ODC（On-Demand Communication）搬到 AMD ROCm：用 rocSHMEM/MORI 在 MI300X + Primus 上复现按需通信
+# 使用ODC来加速amd sft训练
 
-> 面向做分布式训练的工程师。本文记录我们把 [sail-sg/odc](https://github.com/sail-sg/odc)（ICLR 2026 论文《On-Demand Communication for FSDP》，[OpenReview PDF](https://openreview.net/pdf?id=iIEEgI6WsF)）从 NVIDIA/NVSHMEM 移植到 AMD ROCm（MI300X, ROCm 7.2）、并在 [Primus](https://github.com/AMD-AGI/Primus) 框架里跑通单机 + 双机的全过程。所有加速比、trace 现象都来自真实实验日志，不达标的地方（小 batch 更慢、双机某些档不如 RCCL）也如实写出来。
+> 面向做分布式训练的工程师。本文记录我们把 [sail-sg/odc](https://github.com/sail-sg/odc)（ICLR 2026 论文《On-Demand Communication for FSDP》，[OpenReview PDF](https://openreview.net/pdf?id=iIEEgI6WsF)）从 NVIDIA/NVSHMEM 移植到 AMD ROCm（MI300X, ROCm 7.2）、并在 [Primus](https://github.com/AMD-AGI/Primus) 框架里跑通单机 + 双机的全过程。所有加速比、trace 现象都来自真实实验结果。
 
 ---
 
