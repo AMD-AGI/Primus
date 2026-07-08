@@ -246,11 +246,6 @@ class WanVideoDataset(BaseDataset):
             frames, sample_fps = fetch_video(video_dict, return_video_sample_fps=True)
             frames = frames.numpy()
 
-            # if is_even:
-            #     return frames, sample_fps
-            # else:
-            #     return frames[:-1], sample_fps
-
             # Enforce VAE divisibility constraint
             actual_n = len(frames)
             if actual_n > 1:

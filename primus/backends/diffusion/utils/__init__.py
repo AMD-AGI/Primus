@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Utility package for the Primus Wan backend.
+"""Utility package for the Primus diffusion backend.
 
 Heavy vision helpers are imported lazily by the qwen_vl_utils video path.
 """

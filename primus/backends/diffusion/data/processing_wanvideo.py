@@ -119,9 +119,14 @@ class WanVideoImageProcessor(BaseImageProcessor):
         width = max(self.width_division_factor, width)
         return {"height": height, "width": width}
 
-    def _resolve_sizes(self, image: Union[np.ndarray, Image.Image]) -> Tuple[Dict[str, int], Dict[str, int]]:
-        size = self.size
-        crop_size = self.crop_size
+    def _resolve_sizes(
+        self,
+        image: Union[np.ndarray, Image.Image],
+        size: Optional[Dict[str, int]] = None,
+        crop_size: Optional[Dict[str, int]] = None,
+    ) -> Tuple[Dict[str, int], Dict[str, int]]:
+        size = size if size is not None else self.size
+        crop_size = crop_size if crop_size is not None else self.crop_size
         if size is None and crop_size is None:
             size = self._dynamic_target_size(image)
             crop_size = dict(size)
@@ -234,7 +239,7 @@ class WanVideoImageProcessor(BaseImageProcessor):
                         elif frame.shape[-1] == 4:  # RGBA
                             frame = frame[..., :3]
 
-                    size_, crop_size_ = self._resolve_sizes(frame)
+                    size_, crop_size_ = self._resolve_sizes(frame, size=size, crop_size=crop_size)
                     if do_resize:
                         frame = self.resize(frame, size_)
                     if do_center_crop:
@@ -257,7 +262,7 @@ class WanVideoImageProcessor(BaseImageProcessor):
                     elif image.shape[-1] == 4:  # RGBA
                         image = image[..., :3]
 
-                size_, crop_size_ = self._resolve_sizes(image)
+                size_, crop_size_ = self._resolve_sizes(image, size=size, crop_size=crop_size)
                 if do_resize:
                     image = self.resize(image, size_)
                 if do_center_crop:
@@ -336,7 +341,7 @@ class WanVideoProcessor:
             try:
                 print("[Debug-processor], loading default tokenizer: google/umt5-xxl")
                 tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
-            except:
+            except Exception:
                 logger.warning("Could not load default tokenizer, using None")
                 tokenizer = None
 

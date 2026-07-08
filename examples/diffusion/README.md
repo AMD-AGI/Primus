@@ -1,8 +1,9 @@
-# Wan Examples
+# Diffusion Examples
 
-Wan examples exercise the independent PyTorch Diffusion backend under
-`primus/backends/diffusion`. For backend details, data/checkpoint layout, and minimal
-configs, see `primus/backends/diffusion/README.md`.
+These examples exercise the independent PyTorch diffusion backend under
+`primus/backends/diffusion`, including Wan video training and FLUX text-to-image
+training. For backend details, data/checkpoint layout, and minimal configs, see
+`primus/backends/diffusion/README.md`.
 
 ## Data
 

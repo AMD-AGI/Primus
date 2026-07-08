@@ -15,11 +15,11 @@ from primus.modules.module_utils import log_rank_0
 
 
 class DiffusionPretrainTrainer(BaseTrainer):
-    """Primus lifecycle wrapper for Wan diffusion training."""
+    """Primus lifecycle wrapper for diffusion backend training."""
 
     def __init__(self, backend_args: Any):
         super().__init__(backend_args=backend_args)
-        self.wan_trainer = None
+        self.diffusion_trainer = None
 
     @staticmethod
     def _as_dict(value: Any) -> dict:
@@ -57,7 +57,7 @@ class DiffusionPretrainTrainer(BaseTrainer):
         if missing:
             raise RuntimeError(
                 "Diffusion backend missing required Python packages: "
-                f"{', '.join(missing)}. Install the Wan diffusion training extras first."
+                f"{', '.join(missing)}. Install the diffusion training extras first."
             )
 
         if attention_backend:
@@ -101,7 +101,7 @@ class DiffusionPretrainTrainer(BaseTrainer):
         )
         model = get_model_builder(model_name)(model_config)
         dataset, processor = get_dataset_builder(dataset_name)(dataset_config)
-        self.wan_trainer = get_trainer_builder(trainer_name)(
+        self.diffusion_trainer = get_trainer_builder(trainer_name)(
             model=model,
             dataset=dataset,
             processor=processor,
@@ -109,11 +109,11 @@ class DiffusionPretrainTrainer(BaseTrainer):
         )
 
     def train(self):
-        if self.wan_trainer is None:
+        if self.diffusion_trainer is None:
             raise RuntimeError("DiffusionPretrainTrainer.init() must be called before train().")
 
-        self.wan_trainer.train()
-        self.wan_trainer.save_model()
+        self.diffusion_trainer.train()
+        self.diffusion_trainer.save_model()
 
     def cleanup(self, on_error: bool = False):
         try:

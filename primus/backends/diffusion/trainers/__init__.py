@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Trainer registrations for the Primus Wan backend."""
+"""Trainer registrations for the Primus diffusion backend."""
 
 from .fsdp2 import build_fsdp2_trainer
 
