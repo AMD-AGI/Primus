@@ -627,6 +627,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_attention_split_forward()
         self.patch_async_moe_layer()
         self.patch_farskip_layer_specs()
+        self.patch_gated_attention()
 
         from megatron.core.transformer.transformer_block import TransformerBlock
         from primus.backends.megatron.core.transformer.farskip_transformer_block import (
@@ -650,6 +651,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         Attention.forward_b = mha_forward_part_b
         MLASelfAttention.forward_a = mla_forward_part_a
         MLASelfAttention.forward_b = mla_forward_part_b
+
+    def patch_gated_attention(self):
+        if not getattr(self.module_config, "gated_attention", False):
+            return
+        from megatron.core.transformer.multi_latent_attention import MLASelfAttention
+        from primus.backends.megatron.core.transformer.attention_farskip import (
+            make_gated_mla_init,
+            mla_forward_combined,
+        )
+
+        MLASelfAttention.__init__ = make_gated_mla_init(MLASelfAttention.__init__)
+        MLASelfAttention.forward = mla_forward_combined
 
     def patch_async_moe_layer(self):
         from primus.backends.megatron.core.transformer.moe.async_moe_layer import (

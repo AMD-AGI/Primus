@@ -402,6 +402,33 @@ def mha_forward_part_b(
 
 
 
+def make_gated_mla_init(orig_init):
+    def _mla_init_with_gate(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+
+        from megatron.training.global_vars import get_args
+
+        self.gated_attention = getattr(get_args(), "gated_attention", False)
+
+        if self.gated_attention:
+            from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
+
+            q_proj_size = self.config.v_head_dim * self.config.num_attention_heads
+            self.linear_gate_proj = TEColumnParallelLinear(
+                self.config.hidden_size,
+                q_proj_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="gate_proj",
+            )
+
+    return _mla_init_with_gate
+
+
 def mla_forward_part_a(
         self,
         hidden_states,
@@ -469,7 +496,12 @@ def mla_forward_part_a(
     # Value is none during decode for absorption
     if value is not None:
         value = value.contiguous()
-    return query, key, value, attn_mask_type, block_table, inference_context
+
+    gate = None
+    if getattr(self, "gated_attention", False):
+        gate, _ = self.linear_gate_proj(hidden_states)
+
+    return query, key, value, attn_mask_type, block_table, gate, inference_context
 
 
 def mla_forward_part_b(
@@ -479,6 +511,7 @@ def mla_forward_part_b(
     value,
     attn_mask_type,
     block_table,
+    gate,
     attention_mask,
     key_value_states=None,
     inference_context=None,
@@ -571,13 +604,16 @@ def mla_forward_part_b(
     # =================
     # Output. [sq, b, h]
     # =================
+    if gate is not None:
+        core_attn_out = core_attn_out * torch.sigmoid(gate)
+
     output, bias = self.linear_proj(core_attn_out)
     return output, bias
 
 
 def mla_forward_combined(self, *args, **kwargs):
-    query, key, value, attn_mask_type, block_table, inference_context = self.forward_a(*args, **kwargs)
+    query, key, value, attn_mask_type, block_table, gate, inference_context = self.forward_a(*args, **kwargs)
     kwargs['inference_context'] = inference_context
-    args_forward_b = [query, key, value, attn_mask_type, block_table] + list(args[1:])
+    args_forward_b = [query, key, value, attn_mask_type, block_table, gate] + list(args[1:])
     forward_b_outputs = self.forward_b(*args_forward_b, **kwargs)
     return forward_b_outputs
