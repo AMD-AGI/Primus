@@ -64,6 +64,7 @@ model(s) you plan to train:
 | --- | --- | --- |
 | Wan2.1-T2V-1.3B | `wan2.1_t2v_1.3b.yaml` | [Wan-AI/Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
 | Wan2.2-TI2V-5B | `wan2.2_ti2v_5b.yaml` | [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
+| Wan2.2-T2V-A14B | `wan2.2_t2v_a14b.yaml` | [Wan-AI/Wan2.2-T2V-A14B-Diffusers](https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B-Diffusers) |
 | Wan2.1-T2V-14B | (no shipped preset) | [Wan-AI/Wan2.1-T2V-14B](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
 
 ```bash
@@ -74,6 +75,10 @@ huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B \
 # Wan2.2-TI2V-5B
 huggingface-cli download Wan-AI/Wan2.2-TI2V-5B \
   --local-dir /models/Wan2.2-TI2V-5B
+
+# Wan2.2-T2V-A14B Diffusers DiT pipeline
+huggingface-cli download Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --local-dir /models/Wan2.2-T2V-A14B-Diffusers
 ```
 
 A downloaded Wan repo looks like this (the T5 encoder, VAE, and tokenizer are
@@ -102,6 +107,20 @@ export VAE_CHECKPOINT=/models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth
 Pretrain presets use `PRETRAINED_PATH`; post-train SFT presets use
 `INIT_CHECKPOINT` for DiT initialization. For Wan2.2-5B use the matching
 `/models/Wan2.2-TI2V-5B` directory and `Wan2.2_VAE.pth`.
+
+Wan2.2-T2V-A14B is different: it is published as a Diffusers two-transformer
+pipeline. Primus selects the active DiT subfolder with
+`model.config.config.active_transformer`:
+
+- `transformer`: high-noise stage, trained on sigma `[boundary_ratio, 1.0]`.
+- `transformer_2`: low-noise stage, trained on sigma `[0.0, boundary_ratio]`.
+
+The shipped examples use `boundary_ratio=0.875` and `shift=3.0`, matching the
+NeMo AutoModel Wan2.2-T2V-A14B recipe. The native Primus Wan path still expects
+the frozen UMT5/VAE encoder assets in original Wan `.pth` format; the A14B
+presets default to the compatible Wan2.1-14B `models_t5_umt5-xxl-enc-bf16.pth`
+and `Wan2.1_VAE.pth`, while the tokenizer defaults to the A14B Diffusers
+`tokenizer` subfolder.
 
 ## Pre-flight validation
 

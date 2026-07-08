@@ -1,0 +1,62 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:wan2.2_t2v_a14b-posttrain-high-noise}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  post_trainer:
+    framework: diffusion
+    config: post_trainer.yaml
+
+    # Wan2.2-T2V-A14B high-noise stage. This matches AutoModel's
+    # model.stage=high_noise behavior: train Diffusers `transformer` on
+    # sigma in [boundary_ratio, 1.0].
+    model: wan2.2_t2v_a14b_high_noise_sft.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: DEBUG
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: 1
+        enable_wandb: false
+
+      training:
+        local_batch_size: 1
+        steps: ${MAX_STEPS:50}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/wan2.2_t2v_a14b-posttrain-high-noise}
+        save_steps: 0
+        run_name: wan2.2_t2v_a14b-posttrain-high-noise
+
+      data:
+        dataset_path: ${DATASET_PATH:/data/tiny-video-samples/meta.jsonl}
+        data_folder: ${DATA_FOLDER:/data/tiny-video-samples/data}
+        frame_num: ${FRAME_NUM:81}
+        video_backend: ${VIDEO_BACKEND:decord}
+        text_tokenizer: ${TEXT_TOKENIZER:/models/Wan2.2-T2V-A14B-Diffusers/tokenizer}
+        height: ${HEIGHT:480}
+        width: ${WIDTH:832}
+
+      parallelism:
+        sp_size: ${SP_SIZE:1}
+        dp_replicate: ${DP_REPLICATE:1}
+
+      optimizer:
+        lr: 5.0e-6
+        weight_decay: 0.01
+
+      scheduler:
+        shift: 3.0
+        sigma_min: ${SIGMA_MIN:0.875}
+        sigma_max: ${SIGMA_MAX:1.0}
+        extra_one_step: true
+        num_train_timesteps: 1000
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
+        report_to: none

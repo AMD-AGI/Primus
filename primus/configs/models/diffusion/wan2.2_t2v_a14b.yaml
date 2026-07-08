@@ -1,0 +1,32 @@
+model:
+  name: wan
+  config:
+    # Wan2.2-T2V-A14B is distributed as a Diffusers two-transformer pipeline.
+    # `active_transformer` selects which stage DiT to load:
+    #   - transformer: high-noise stage
+    #   - transformer_2: low-noise stage
+    load_from_pretrained_path: ${PRETRAINED_PATH:/models/Wan2.2-T2V-A14B-Diffusers}
+    config:
+      model_type: t2v
+      active_transformer: ${ACTIVE_TRANSFORMER:transformer}
+      boundary_ratio: ${BOUNDARY_RATIO:0.875}
+      separated_timestep: false
+      fuse_vae_embedding_in_latents: false
+      trainable_modules: dit
+      vae_type: wan_video_vae
+      dit_hidden_size: 5120
+      dit_num_layers: 40
+      dit_num_heads: 40
+      dit_intermediate_size: 13824
+      dit_patch_size: [1, 2, 2]
+      dit_in_channels: 16
+      dit_out_channels: 16
+      dit_freq_dim: 256
+      dit_text_dim: 4096
+      dit_eps: 1.0e-6
+    encoder:
+      # Wan2.2 A14B Diffusers ships VAE/T5 as Diffusers/Transformers components.
+      # Primus' native Wan path currently consumes the original Wan .pth encoder assets;
+      # Wan2.1-14B uses the compatible UMT5 encoder and z_dim=16 VAE.
+      t5_encoder: ${TEXT_ENCODER:/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth}
+      autoencoder: ${VAE_CHECKPOINT:/models/Wan2.1-T2V-14B/Wan2.1_VAE.pth}

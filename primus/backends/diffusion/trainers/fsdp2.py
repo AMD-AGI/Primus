@@ -80,7 +80,6 @@ class FSDP2Trainer(BaseWanTrainer):
 
         self.mesh = create_device_mesh(self.world_size, sp_size=sp_size, dp_replicate=dp_replicate)
         self.sp_group = self.mesh.get_group("ulysses") if (self.mesh is not None and sp_size > 1) else None
-        self.model.to(self.device)
 
         # Freeze non-trainable params BEFORE FSDP and optimizer creation
         if hasattr(self.model, "freeze_except"):
@@ -89,6 +88,11 @@ class FSDP2Trainer(BaseWanTrainer):
                 logger.info("FSDP2: Applied freeze_except (frozen non-trainable params)")
 
         self._apply_fsdp2()
+        if self.rank == 0:
+            logger.info(f"FSDP2: moving sharded model to {self.device}")
+        self.model.to(self.device)
+        if self.rank == 0:
+            logger.info(f"FSDP2: sharded model moved to {self.device}")
 
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""

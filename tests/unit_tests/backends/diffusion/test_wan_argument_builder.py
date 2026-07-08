@@ -88,6 +88,12 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
             "seed": 1234,
             "fsdp2_reshard_after_forward": False,
         },
+        "scheduler": {
+            "shift": 3.0,
+            "sigma_min": 0.875,
+            "sigma_max": 1.0,
+            "extra_one_step": True,
+        },
         "metrics": {
             "log_freq": 5,
             "enable_wandb": False,
@@ -137,6 +143,10 @@ def test_maps_primus_style_sections_to_wan_runtime_config():
     assert trainer_args["seed"] == 1234
     assert trainer_args["fsdp2_reshard_after_forward"] is False
     assert trainer_args["logging_steps"] == 5
+    assert trainer_args["flow_match_scheduler"]["shift"] == 3.0
+    assert trainer_args["flow_match_scheduler"]["sigma_min"] == 0.875
+    assert trainer_args["flow_match_scheduler"]["sigma_max"] == 1.0
+    assert trainer_args["flow_match_scheduler"]["extra_one_step"] is True
 
 
 def test_defaults_propagate_when_optional_sections_are_omitted():
