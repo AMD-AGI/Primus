@@ -14,28 +14,27 @@ at package-import time, which triggers their ``@register_patch`` side effects.
 This follows the same convention used by ``primus.backends.megatron.patches``.
 """
 
-import importlib
-import pkgutil
+_ALLOWED_PATCH_MODULES = [
+    "primus.backends.maxtext.patches.checkpoint_patches",
+    "primus.backends.maxtext.patches.config_patches",
+    "primus.backends.maxtext.patches.data_patches",
+    "primus.backends.maxtext.patches.model_patches",
+    "primus.backends.maxtext.patches.optimizer_patches",
+    "primus.backends.maxtext.patches.tokenizer_patches",
+]
 
 
 def _auto_import_patch_modules() -> None:
     """
-    Automatically import all patch modules under this package.
+    Import explicitly allowed patch modules under this package.
 
-    Any module whose fully-qualified name ends with ``"_patches"`` will be
-    imported, which in turn triggers its ``@register_patch`` side effects.
-
-    This allows adding new ``*_patches.py`` files without having to update
-    this ``__init__`` module.
+    Only whitelisted modules are imported, which triggers their
+    ``@register_patch`` side effects. This prevents arbitrary code
+    execution from untrusted files in the package directory.
     """
-    package_name = __name__
+    import importlib
 
-    for module_info in pkgutil.walk_packages(__path__, prefix=package_name + "."):
-        mod_name = module_info.name
-
-        if not (mod_name.endswith("_patches") or mod_name.endswith("_patch")):
-            continue
-
+    for mod_name in _ALLOWED_PATCH_MODULES:
         importlib.import_module(mod_name)
 
 
