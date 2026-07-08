@@ -47,15 +47,16 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
     # Task type identifier for logging
     TASK_TYPE = "Post-training (SFT/Instruction Tuning)"
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, **kwargs):
         """
         Initialize Megatron-Bridge posttrain trainer.
 
         Args:
             backend_args: Megatron-Bridge argument namespace (from MegatronBridgeArgBuilder)
+            **kwargs: Runtime context kwargs forwarded to BaseTrainer for filtering.
         """
         # Initialize MegatronBridgeBaseTrainer (which initializes BaseTrainer)
-        super().__init__(backend_args=backend_args)
+        super().__init__(backend_args=backend_args, **kwargs)
 
     def setup(self):
         """

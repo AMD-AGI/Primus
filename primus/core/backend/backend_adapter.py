@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -117,12 +117,18 @@ class BackendAdapter(ABC):
     # ============================================================================
 
     @abstractmethod
-    def load_trainer_class(self, stage: str = "pretrain"):
+    def load_trainer_class(self, stage: str = "pretrain", trainer_class: Optional[str] = None):
         """
         Return backend Trainer class registered in `BackendRegistry`.
 
+        Args:
+            stage: Training stage (e.g., "pretrain", "sft"). Defaults to "pretrain".
+            trainer_class: Optional specific trainer class name for dynamic loading.
+                          If provided, this takes precedence over stage-based selection.
+
         Default behavior:
-          - Lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
+          - If `trainer_class` is provided, attempt to dynamically load it
+          - Otherwise, lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
 
         Backends can override this method if they need special resolution rules.
         """

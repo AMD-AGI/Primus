@@ -41,8 +41,11 @@ class MaxTextPretrainTrainer(BaseTrainer):
     Trainer class for MaxText pre-training.
     """
 
-    def __init__(self, backend_args: Any):
-        super().__init__(backend_args=backend_args)
+    def __init__(self, backend_args: Any = None, **kwargs):
+        # The core runtime instantiates every trainer with BaseModule-style
+        # context kwargs (module_name, primus_config, module_rank, ...). MaxText
+        # does not need them; accept and forward so BaseTrainer can filter them.
+        super().__init__(backend_args=backend_args, **kwargs)
 
         # Training state (populated in init())
         self.train_config: Optional[Any] = None

@@ -8,6 +8,23 @@
 Megatron Patch Collection
 
 This module defines the public entrypoint for applying Megatron-specific patches.
+
+Registration vs. application (important for non-Flux / LLM users):
+    Importing this package eagerly imports every ``*_patches.py`` module, which
+    runs each module's ``@register_patch`` side effect. This registration is
+    GLOBAL: it happens for *every* Megatron job (LLM or diffusion), because
+    ``megatron_adapter`` imports this package unconditionally.
+
+    Registration only adds a patch to the registry; it does NOT apply it. Each
+    patch carries a ``condition=...`` predicate (typically gated on a config
+    flag such as ``torch_compile.enable``, ``use_fsdp2_fp8_all_gather``, or a
+    diffusion-specific arg) that is evaluated at ``run_patches`` time. A patch
+    whose condition is False is a no-op for that job.
+
+    Consequence: diffusion/Flux-specific patches are registered for LLM jobs but
+    should not take effect there. When adding a patch, make its ``condition``
+    precise so it cannot alter unrelated (e.g. non-Flux) training. An opt-in
+    "patch profile" mechanism could make this stricter in the future.
 """
 
 import importlib

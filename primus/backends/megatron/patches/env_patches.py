@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -25,6 +25,11 @@ from primus.core.utils.module_utils import log_kv_rank_0
     backend="megatron",
     phase="setup",
     description="Set CUDA_DEVICE_MAX_CONNECTIONS based on FSDP configuration",
+    condition=lambda ctx: not getattr(
+        getattr(ctx.extra.get("module_config"), "params", None),
+        "disable_env_patches",
+        False,
+    ),
 )
 def set_cuda_device_max_connections(ctx: PatchContext):
     """

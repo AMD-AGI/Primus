@@ -1,0 +1,141 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Configuration (Production/Standard Model)
+#
+# This is the full Flux configuration matching FLUX.1 [dev] and FLUX.1 [schnell]
+# from Black Forest Labs (black-forest-labs/FLUX.1-dev on Hugging Face).
+#
+# Use cases:
+#   - Production image generation
+#   - Large-scale training
+#   - Fine-tuning from pretrained weights
+#   - Research and benchmarking
+#   - High-quality image synthesis
+
+extends:
+  - flux_base.yaml
+
+# ==============================================================================
+# Architecture: Layer Counts (ONLY difference from base)
+# ==============================================================================
+
+num_joint_layers: 19       # Multimodal (joint) transformer blocks
+num_single_layers: 38      # Image-only transformer blocks
+num_layers: 57             # Total layers for Megatron compatibility (joint + single)
+
+# Total layers: 19 + 38 = 57 transformer blocks
+# Total parameters: ~12 billion
+# Model matches: FLUX.1 [dev] and FLUX.1 [schnell] architectures
+
+# ==============================================================================
+# Guidance Configuration (Optional Override)
+# ==============================================================================
+
+# guidance_embed: false    # Default from flux_base.yaml
+
+# To train FLUX.1 [dev] style (with CFG support):
+#   guidance_embed: true
+#
+# To train FLUX.1 [schnell] style (distilled, no CFG):
+#   guidance_embed: false  (default)
+
+# ==============================================================================
+# All Other Parameters Inherited from flux_base.yaml
+# ==============================================================================
+
+# The following are inherited and should NOT be redefined here:
+#   - hidden_size: 3072
+#   - num_attention_heads: 24
+#   - context_dim: 4096 (T5-XXL)
+#   - vec_in_dim: 768 (CLIP-L)
+#   - in_channels: 64 (VAE latents)
+#   - activation_func: openai_gelu (from FluxConfig default)
+#   - add_qkv_bias: true (from FluxConfig default)
+#   - All other architectural parameters
+
+# ==============================================================================
+# Hardware Requirements
+# ==============================================================================
+
+# Training:
+#   - Minimum: 8x H100 80GB or 8x MI300X 192GB
+#   - Recommended: 8x H100 80GB with NVLink
+#   - Batch size: Start with global_batch_size=256, micro_batch_size=1
+#   - Memory: ~70GB per GPU with micro_batch=1, TP=1
+
+# Inference:
+#   - Minimum: 1x H100 80GB or 1x MI300X 192GB
+#   - Typical: 1x A100 80GB works for batch_size=1
+#   - Memory: ~24GB for model weights + activations
+
+# ==============================================================================
+# Training Recommendations
+# ==============================================================================
+
+# Parallelism Strategy:
+#   - Data Parallel (DP): 8 (default, simplest)
+#   - Tensor Parallel (TP): 1-2 (use if memory constrained)
+#   - Pipeline Parallel (PP): 1 (Flux doesn't benefit from PP)
+#   - Sequence Parallel (SP): false (not needed for typical resolutions)
+
+# Training Duration:
+#   - From scratch: 100K-1M steps (weeks on 8x H100)
+#   - Fine-tuning: 10K-50K steps (hours to days)
+#   - LoRA adaptation: 1K-10K steps (hours)
+
+# Suggested Training Config:
+#   micro_batch_size: 1
+#   global_batch_size: 256
+#   learning_rate: 1.0e-4
+#   weight_decay: 0.01
+#   warmup_steps: 1000
+#   total_steps: 100000
+
+# ==============================================================================
+# Comparison with 535M Variant
+# ==============================================================================
+
+# Flux 535M (testing):
+#   - Layers: 1 joint + 1 single = 2 total
+#   - Parameters: ~535M
+#   - Training: Single GPU, minutes to hours
+#   - Use: Testing, debugging, quick iteration
+
+# Flux 12B (this config):
+#   - Layers: 19 joint + 38 single = 57 total
+#   - Parameters: ~12B
+#   - Training: Multi-GPU, days to weeks
+#   - Use: Production, research, deployment
+
+# ==============================================================================
+# NeMo Compatibility
+# ==============================================================================
+
+# This config matches NeMo's FluxConfig defaults:
+#   nemo/collections/diffusion/models/flux/model.py:74-114
+#
+#   @dataclass
+#   class FluxConfig(TransformerConfig, io.IOMixin):
+#       num_joint_layers: int = 19
+#       num_single_layers: int = 38
+#       hidden_size: int = 3072
+#       num_attention_heads: int = 24
+#       activation_func: Callable = openai_gelu
+#       add_qkv_bias: bool = True
+
+# Checkpoints are fully interoperable between Primus and NeMo
+
+# ==============================================================================
+# Pretrained Weights
+# ==============================================================================
+
+# Compatible with weights from:
+#   - black-forest-labs/FLUX.1-dev (HuggingFace)
+#   - black-forest-labs/FLUX.1-schnell (HuggingFace)
+#
+# Note: FLUX.1-dev is non-commercial license
+#       FLUX.1-schnell is Apache 2.0 license
+#
+# To load pretrained weights, use checkpoint conversion utilities in:
+#   primus/backends/megatron/core/models/diffusion/flux/checkpoint_converter.py
