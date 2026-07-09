@@ -26,7 +26,7 @@
 import os
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # Global handle so the schedule patch can reach the LB-Mini iterator that the
 # dataloader patch created. Stage-1 only drives the TRAIN iterator (eval_iters=0

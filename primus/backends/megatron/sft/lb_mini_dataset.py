@@ -39,7 +39,7 @@ from primus.backends.megatron.sft.lb_mini_packing import (
     plan_minibatch,
     resolve_cost_func,
 )
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _shift_labels_loss_mask(input_ids: np.ndarray, loss_mask: np.ndarray):
