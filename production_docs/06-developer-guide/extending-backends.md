@@ -1,4 +1,4 @@
-# Extending Backends
+# Extending backends
 
 This guide explains how to add a **new training backend** to Primus using the current runtime architecture. It complements the high-level picture in [Primus overview](../01-getting-started/overview.md): adapters sit under the unified CLI and configuration system ([Configuration system](../02-user-guide/configuration-system.md)), and each backend plugs in through the same lifecycle and hook points as Megatron-LM, TorchTitan, MaxText, and the other integrated stacks.
 

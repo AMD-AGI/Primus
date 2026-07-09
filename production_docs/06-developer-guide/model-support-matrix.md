@@ -1,4 +1,4 @@
-# Model Support Matrix
+# Model support matrix
 
 This document summarizes which model families Primus targets per backend and lists representative checked-in model presets and example experiment YAML under the repository. It distinguishes **curated examples** from **theoretical** support (a preset or upstream stack may exist without a matching `examples/` entry). Use the filesystem under `primus/configs/models/` and `examples/*/configs/` as the authoritative live inventory.
 

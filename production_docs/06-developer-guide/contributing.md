@@ -1,8 +1,8 @@
-# Contributing Guide
+# Contributing guide
 
-This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The repository root [CONTRIBUTING.md](../../CONTRIBUTING.md) repeats branch naming, commit style, and pull request steps in short form.
+This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The Primus repository root also contains the file [CONTRIBUTING.md](https://github.com/AMD-AGI/Primus/blob/main/CONTRIBUTING.md), which summarizes key contribution guidelines, such as branch naming conventions, commit message style, and pull request requirements.
 
-## 1. Development Setup
+## 1. Development setup
 
 1. **Clone the repository** (include submodules):
 
@@ -36,7 +36,7 @@ This guide summarizes how to set up a development environment, follow project co
    ./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
    ```
 
-## 2. Code Style
+## 2. Code style
 
 Configuration lives in `.pre-commit-config.yaml`. Hooks run automatically on `git commit` after `pre-commit install`.
 
@@ -58,7 +58,7 @@ autoflake --remove-all-unused-imports --remove-unused-variables --expand-star-im
 
 CI runs `pre-commit run --all-files --show-diff-on-failure`, so lint behavior follows `.pre-commit-config.yaml` rather than a separate hand-written list of formatter commands.
 
-## 3. Branch Naming Convention
+## 3. Branch naming convention
 
 Format:
 
@@ -75,7 +75,7 @@ Format:
 - `feat/model/implement-moe-routing`
 - `fix/engine/init-error`
 
-## 4. Commit Convention
+## 4. Commit convention
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
@@ -88,7 +88,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 - `feat(model): add MOE routing functionality`
 - `fix(engine): resolve initialization error`
 
-## 5. Testing Requirements
+## 5. Testing requirements
 
 Before opening a pull request, run the following from the repository root:
 
@@ -112,7 +112,7 @@ Before opening a pull request, run the following from the repository root:
   pre-commit run --all-files
   ```
 
-## 6. Pull Request Process
+## 6. Pull request process
 
 1. Fork the repository (unless you have write access and use a feature branch).
 2. Create a branch that follows the naming convention above.
@@ -124,7 +124,7 @@ Before opening a pull request, run the following from the repository root:
 8. Address review feedback.
 9. Ensure CI passes (lint and unit tests on the paths your PR triggers).
 
-## 7. CI Pipeline
+## 7. CI pipeline
 
 The workflow **`.github/workflows/ci.yaml`** defines how changes are validated.
 

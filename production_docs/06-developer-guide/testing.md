@@ -1,8 +1,8 @@
-# Testing Guide
+# Testing guide
 
 This guide describes where tests live, how to run them locally, and how they map to CI. For coding standards and PR workflow, see [Contributing Guide](contributing.md). The canonical CI definition is `.github/workflows/ci.yaml`.
 
-## 1. Test Organization
+## 1. Test organization
 
 Layout (simplified from the repository root):
 
@@ -34,7 +34,7 @@ Primus/
 
 `tests/runner/run_all_tests.sh` sources shared helpers from **`runner/lib/common.sh`** at the repository root (not under `tests/runner/`).
 
-## 2. Running Tests
+## 2. Running tests
 
 **Shell integration tests** (CLI behavior, config loading, hooks, environment):
 
@@ -48,7 +48,7 @@ bash ./tests/runner/run_all_tests.sh
 pytest tests/unit_tests/ --maxfail=1 -s
 ```
 
-**Trainer integration tests** (GPU and data; may require Hugging Face access):
+**Trainer integration tests** (GPU and data; might require Hugging Face access):
 
 ```bash
 # Megatron
@@ -75,19 +75,19 @@ python ./tests/run_unit_tests.py
 python ./tests/run_unit_tests.py --jax
 ```
 
-## 3. Test Types
+## 3. Test types
 
 - **Shell tests:** Exercise runner scripts, CLI wiring, configuration loading, hook execution, and environment setup. Implemented as bash scripts under `tests/runner/` and orchestrated by `run_all_tests.sh`.
 - **Unit tests:** Cover configuration parsing, preset loading, CLI behavior, patch registration, adapters, and other library logic under `tests/unit_tests/`.
 - **Trainer tests:** End-to-end training against real backends; require AMD GPUs and appropriate data paths (and sometimes tokens). See `.github/workflows/ci.yaml` for CI values such as `DATA_PATH`, `MASTER_PORT`, and `HSA_NO_SCRATCH_RECLAIM`.
 
-## 4. Writing New Tests
+## 4. Writing new tests
 
 - **Pytest:** Add files named `test_*.py` under `tests/unit_tests/`, following existing patterns and reusing fixtures from `conftest.py` where present.
 - **Shell:** Add scripts under `tests/runner/` or extend `tests/runner/run_all_tests.sh` to invoke new suites, consistent with existing `test_primus_cli*.sh` scripts.
 - **Backends:** Prefer `tests/unit_tests/backends/<backend>/` for adapter-focused tests.
 
-## 5. CI Pipeline Details
+## 5. CI pipeline details
 
 From `.github/workflows/ci.yaml`:
 
@@ -97,7 +97,7 @@ From `.github/workflows/ci.yaml`:
 
 The **`build-docker`** job builds images after lint passes; unit test jobs depend on **`code-lint`**, not on **`build-docker`**.
 
-## 6. Pre-commit Hooks
+## 6. Pre-commit hooks
 
 Install once per clone:
 

@@ -1,4 +1,4 @@
-# Adding Model Configurations
+# Adding model configurations
 
 This guide explains how to add **model configuration YAML** for each Primus training backend. Model presets live under `primus/configs/models/<framework>/` and are referenced from **experiment** YAML under `examples/<framework>/configs/...`. Backend-specific parameter references:
 
@@ -110,7 +110,7 @@ position_embedding_type: rope
 
 **4. Point an experiment at the new model**
 
-Copy an existing experiment (for example `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`) and set `model:` to your preset. Use **mock data** first for a quick sanity check:
+Copy an existing experiment (for example `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`) and set `model:` to your preset. Use **mock data** first for a quick smoke test:
 
 ```yaml
 work_group: ${PRIMUS_TEAM:amd}
