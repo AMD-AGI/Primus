@@ -233,7 +233,7 @@ class Flux(DiffusionModule):
         # pre-hook registration sees the final module tree.
         if config.torch_compile_replace_qk_rmsnorm and config.transformer_impl == "transformer_engine":
             try:
-                from primus.modules.module_utils import log_rank_0 as _log
+                from primus.core.utils.module_utils import log_rank_0 as _log
             except Exception:
                 _log = print
             self._replace_qk_rmsnorm(_log)
@@ -252,7 +252,7 @@ class Flux(DiffusionModule):
         - norm_out.norm: reset to default
         - proj_out: zero-init weight and bias
         """
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         # Embedders: Xavier uniform
         nn.init.xavier_uniform_(self.img_embed.weight)
@@ -326,7 +326,7 @@ class Flux(DiffusionModule):
             return
 
         try:
-            from primus.modules.module_utils import log_rank_0
+            from primus.core.utils.module_utils import log_rank_0
 
             log = log_rank_0
         except Exception:
@@ -770,7 +770,7 @@ class Flux(DiffusionModule):
         """
         from safetensors.torch import load_file as load_safetensors
 
-        from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
+        from primus.core.utils.module_utils import error_rank_0, log_rank_0, warning_rank_0
 
         if convert_from_hf:
             try:
