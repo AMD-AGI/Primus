@@ -74,13 +74,12 @@ except ImportError:
 
 # MXFP4 provider in a separate guard so a missing primus_turbo_mxfp4_local
 # doesn't break FP8 imports.
-PrimusTurboMXFP4LocalSpecProvider = None
 try:
     from primus.backends.megatron.core.extensions.primus_turbo_local_spec import (
         PrimusTurboMXFP4LocalSpecProvider,
     )
 except ImportError:
-    pass
+    PrimusTurboMXFP4LocalSpecProvider = None
 
 
 class MMDiTLayer(TransformerLayer):
