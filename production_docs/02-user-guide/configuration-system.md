@@ -1,4 +1,4 @@
-# Configuration System
+# Configuration system
 
 Primus experiments are described in YAML. The loader resolves **environment variables**, **`extends:` inheritance**, and **module/model/platform presets** before training starts. This document focuses on the Python configuration pipeline (`primus/core/config/` and `primus/core/launcher/parser.py`).
 

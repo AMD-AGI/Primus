@@ -1,4 +1,4 @@
-# Memory and Performance Projection
+# Memory and performance projection
 
 Primus projection tools estimate **per-GPU memory** and **training throughput** for large-scale distributed jobs without requiring the full target cluster. Two modes are available: analytical **memory** projection and **performance** projection that combines profiling with simulation.
 
@@ -142,7 +142,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 ### Assumptions (performance projection)
 
 1. **Data-parallel scaling** — Compute time scales with ideal weak-scaling assumptions versus data-parallel width.
-2. **Communication Model** — Uses simplified bandwidth and latency models (defaults such as efficiency factors may apply).
+2. **Communication model** — Uses simplified bandwidth and latency models (defaults such as efficiency factors may apply).
 3. **Pipeline scheduling** — Bubble and overlap behavior is modeled with fixed splits; real frameworks may differ.
 4. **Gradients and MoE** — Gradient all-reduce overlap and MoE all-to-all behavior follow the implemented model (for example overlap flags, EP scaling).
 

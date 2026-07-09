@@ -1,4 +1,4 @@
-# Megatron Backend Configuration Reference
+# Megatron backend configuration reference
 
 This page lists the flat configuration keys exposed by Primus when `framework: megatron`. Unless a section says otherwise, values are the defaults from `primus/configs/modules/megatron/trainer_base.yaml` and related model presets. The effective pretraining preset is `pre_trainer.yaml`, which extends `trainer_base.yaml` and overrides several high-impact training defaults.
 
