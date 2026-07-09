@@ -770,7 +770,11 @@ class Flux(DiffusionModule):
         """
         from safetensors.torch import load_file as load_safetensors
 
-        from primus.core.utils.module_utils import error_rank_0, log_rank_0, warning_rank_0
+        from primus.core.utils.module_utils import (
+            error_rank_0,
+            log_rank_0,
+            warning_rank_0,
+        )
 
         if convert_from_hf:
             try:

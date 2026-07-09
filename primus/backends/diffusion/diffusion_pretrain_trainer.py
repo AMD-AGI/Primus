@@ -10,8 +10,8 @@ import importlib.util
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 
 class DiffusionPretrainTrainer(BaseTrainer):
