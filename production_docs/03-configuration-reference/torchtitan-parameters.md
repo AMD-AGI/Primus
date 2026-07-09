@@ -1,4 +1,4 @@
-# TorchTitan Backend Configuration Reference
+# TorchTitan backend configuration reference
 
 This page lists Primus preset keys and common TorchTitan `JobConfig` fields used when `framework: torchtitan`. Defaults are taken from the TorchTitan module preset (`pre_trainer.yaml`), its `extends` chain (`module_base.yaml`, `quantize.yaml`), and the example model preset `llama3_8B.yaml`. It is not a complete upstream TorchTitan `JobConfig` reference.
 

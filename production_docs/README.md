@@ -1,4 +1,4 @@
-# Primus Documentation
+# Primus documentation
 
 Production-grade documentation for the Primus large-scale foundation model training framework on AMD GPUs.
 

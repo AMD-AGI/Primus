@@ -1,4 +1,4 @@
-# Megatron Bridge Backend Configuration Reference
+# Megatron Bridge backend configuration reference
 
 Megatron Bridge integrates [Megatron-Core](https://github.com/NVIDIA/Megatron-LM) training with Hugging Face–centric workflows. In Primus, the **`megatron_bridge`** framework is used for post-training with module preset `sft_trainer.yaml`, and the repository also ships a pretraining preset at `primus/configs/modules/megatron_bridge/pretrain_trainer.yaml`.
 

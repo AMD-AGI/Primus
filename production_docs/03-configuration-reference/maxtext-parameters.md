@@ -1,4 +1,4 @@
-# MaxText Backend Configuration Reference
+# MaxText backend configuration reference
 
 Primus routes experiment YAML into the [MaxText](https://maxtext.readthedocs.io/) stack (JAX / XLA). Configuration is a **flat map of keys** (no nested `training.`* trees like TorchTitan): Primus merges module and model presets, writes a temporary YAML, and MaxText’s `pyconfig.initialize` loads it on top of upstream defaults.
 

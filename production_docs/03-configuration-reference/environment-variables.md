@@ -1,4 +1,4 @@
-# Environment Variables Reference
+# Environment variables reference
 
 This document catalogs the main environment variables you might encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow). It is a practical reference, not a complete list of every variable accepted by upstream libraries.
 
