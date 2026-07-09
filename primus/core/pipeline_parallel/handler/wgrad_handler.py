@@ -8,8 +8,10 @@ from typing import Callable
 
 from megatron.training.global_vars import get_args
 
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    fwd_bwd_wrapper,
+)
 from primus.core.pipeline_parallel.scheduler.scheduler_node import SchedulerNode
-from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
 
 
 class WGradRunningCache:

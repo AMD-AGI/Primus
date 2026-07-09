@@ -14,7 +14,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
 from primus.backends.megatron.core.enums import Fp4Recipe
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -45,8 +45,7 @@ def _primus_turbo_enabled() -> bool:
 
         args = get_args()
         enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
-        use_turbo_fp4_autocast = bool(getattr(args, "use_turbo_fp4_autocast", False))
-        return enable_primus_turbo and use_turbo_fp4_autocast
+        return enable_primus_turbo
     except Exception:
         return False
 
