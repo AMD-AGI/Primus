@@ -135,7 +135,7 @@ Configuration file: `primus_megatron_module.yaml`
 
 **Startup behavior**
 
-Configuraiton file: `primus/backends/megatron/training/global_vars.py`
+Configuration file: `primus/backends/megatron/training/global_vars.py`
 
 - Logs training `args` as parameters.
 - Logs filtered environment variables with an `env__` prefix.
