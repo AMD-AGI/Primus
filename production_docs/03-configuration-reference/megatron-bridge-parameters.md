@@ -152,7 +152,7 @@ Model YAML files (`qwen3_8b.yaml`, `qwen3_32b.yaml`, `llama31_70b.yaml`) supply:
 | `hf_path` | `Qwen/Qwen3-8B`, `meta-llama/Meta-Llama-3.1-70B` | Hugging Face model id for weights/tokenizer flows. |
 | `dataset` | nested | Example: `dataset_name: "rajpurkar/squad"` for SQuAD-style fine-tuning. |
 
-**Logging (optional overrides in examples):** `wandb_project`, `wandb_entity`, `wandb_exp_name` may be set under `overrides` for experiment tracking when Weights & Biases is configured.
+**Logging (optional overrides in examples):** `wandb_project`, `wandb_entity`, `wandb_exp_name` might be set under `overrides` for experiment tracking when Weights & Biases is configured.
 
 ---
 

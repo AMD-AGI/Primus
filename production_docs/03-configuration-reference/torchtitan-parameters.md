@@ -40,7 +40,7 @@ modules:
 
 **Mapping to TorchTitan.** Keys are translated into TorchTitan’s `JobConfig` via `TorchTitanJobConfigBuilder` (same nested structure as upstream TorchForge/TorchTitan).
 
-**Upstream reference.** TorchForge / TorchTitan documentation: [https://meta-pytorch.org/torchforge/main/](https://meta-pytorch.org/torchforge/main/)
+**Upstream reference.** TorchForge and TorchTitan documentation: [https://meta-pytorch.org/torchforge/main/](https://meta-pytorch.org/torchforge/main/)
 
 ---
 

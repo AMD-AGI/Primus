@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-This document catalogs the main environment variables you may encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow). It is a practical reference, not a complete list of every variable accepted by upstream libraries.
+This document catalogs the main environment variables you might encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow). It is a practical reference, not a complete list of every variable accepted by upstream libraries.
 
 **Legend**
 
@@ -153,7 +153,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `HF_TOKEN` | (unset) | User, container passthrough | Hugging Face Hub | Auth for gated models. **Required** for private/gated assets. |
 | `TORCH_HOME` | under workspace | `primus/core/utils/env_setup.py` | PyTorch Hub | Torch Hub cache root. |
 | `TRANSFORMERS_CACHE` | aligned with HF layout | `primus/core/utils/env_setup.py` | `transformers` | Model cache for Transformers. |
-| `WANDB_API_KEY` | (unset) | User, container passthrough | WandB client, Megatron trainer checks | API key for logging. **Required** for WandB when enabled. |
+| `WANDB_API_KEY` | (unset) | User, container passthrough | Weights & Biases client, Megatron trainer checks | API key for logging. **Required** for Weights & Biases when enabled. |
 | `WANDB_PROJECT` | (unset) | User / TorchTitan patch | `primus/backends/torchtitan/patches/wandb_patches.py` | Project name. |
 | `WANDB_RUN_NAME` | (unset) | User / patches | Same | Run display name. |
 | `WANDB_TEAM` | (unset) | User | TorchTitan metrics (entity) | WandB team/entity. |
@@ -166,14 +166,14 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 ---
 
-## 9. HipBLASLt tuning
+## 9. hipBLASLt tuning
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `examples/run_pretrain.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
 | `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `examples/run_pretrain.sh` | Path to tuned-kernel override file for stage `3`. |
-| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `examples/run_pretrain.sh` | Number of benchmark runs per shape during TE HipBLASLt tuning. |
-| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `examples/run_pretrain.sh` | Transformer Engine HipBLASLt search breadth. |
+| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `examples/run_pretrain.sh` | Number of benchmark runs per shape during TE hipBLASLt tuning. |
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `examples/run_pretrain.sh` | Transformer Engine hipBLASLt search breadth. |
 | `TE_HIPBLASLT_TUNING_ALGO_FILE` | (unset) | User | TE + HipBLASLt | Algorithm file for TE tuning flows. |
 | `TE_HIPBLASLT_TUNING` | (unset) | User | `examples/run_pretrain.sh` | When set, interacts with deterministic mode and tuning stages (disable conflicting modes per script comments). |
 | `HIPBLASLT_LOG_LEVEL` | (unset) | User | HipBLASLt | Library log level. |
@@ -195,7 +195,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 ## 11. Container passthrough
 
-`runner/.primus.yaml` lists names forwarded from the host into training containers (`container.options.env`). Primus does not assign values here; it only whitelists keys for `--env` forwarding.
+`runner/.primus.yaml` lists names forwarded from the host into training containers (`container.options.env`). Primus does not assign values here; it only allowlists keys for `--env` forwarding.
 
 Forwarded keys:
 
@@ -209,7 +209,7 @@ Forwarded keys:
 |----------|---------|-----------|------------|-------------|
 | `SLURM_NNODES` / `SLURM_JOB_NUM_NODES` | job-dependent | Slurm | `primus-cli-slurm-entry.sh` (`NNODES` export), preflight probes | Node count for the allocation. |
 | `SLURM_NODEID` | job-dependent | Slurm | Mapped to `NODE_RANK` in `primus-cli-slurm-entry.sh` | Node index. |
-| `SLURM_PROCID` | job-dependent | Slurm | Fallback for `NODE_RANK` when `SLURM_NODEID` is unset | Process id within the Slurm step (entry script). |
+| `SLURM_PROCID` | job-dependent | Slurm | Fallback for `NODE_RANK` when `SLURM_NODEID` is unset | Process ID within the Slurm step (entry script). |
 | `SLURM_JOB_ID` | job-dependent | Slurm | `primus/tools/preflight/host/host_probe.py` | Job identifier string. |
 
 ---
@@ -236,4 +236,4 @@ Primus MaxText hooks print recommended values in `runner/helpers/hooks/train/pre
 | `DUMP_HLO_DIR` | `${PRIMUS_PATH}/output/xla_dump_hlo` (example) | User | XLA via `XLA_FLAGS` composition | Directory for HLO dumps when enabled. |
 | `DUMP_HLO` | `0` | User | Prepare hook → XLA flags | Gate HLO dumping (`1` enables in hook samples). |
 
-**Note:** MaxText also propagates many knobs through `XLA_FLAGS` and `LIBTPU_INIT_ARGS` upstream; see MaxText sources for the full matrix.
+**Note:** MaxText also propagates many knobs through `XLA_FLAGS` and `LIBTPU_INIT_ARGS` upstream; see MaxText sources for the full list.
