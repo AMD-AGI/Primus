@@ -1,4 +1,4 @@
-# Deployment Guide
+# Deployment guide
 
 This guide describes how to deploy Primus training across **container**, **direct (bare metal)**, and **Slurm** environments using the unified `primus-cli` launcher. For environment variable semantics, see [Environment variables](../03-configuration-reference/environment-variables.md). For YAML hierarchy and precedence, see [Configuration system](../02-user-guide/configuration-system.md).
 
@@ -225,7 +225,7 @@ Required variables for distributed training:
 | Shared data | Paths visible and consistent on all nodes |
 | Hugging Face | Set `HF_TOKEN` if using gated models |
 | Checkpoints | Save directory on shared or replicated storage with sufficient space |
-| Monitoring | Configure WandB or TensorBoard (see [Monitoring and Logging](./monitoring-logging.md)) |
+| Monitoring | Configure Weights & Biases or TensorBoard (see [Monitoring and Logging](./monitoring-logging.md)) |
 | Resources | Slurm time limits, partitions, and GPU counts match your YAML and hardware |
 
 ---
