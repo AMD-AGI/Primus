@@ -540,6 +540,44 @@ class InferencePerformanceProjector:
         per_token = ft.total_ms / max(1, q_len)
         return ft.total_ms + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
 
+    # -- DES event-duration kernel --------------------------------------------
+    # Public wrappers used by the discrete-event simulator (``des.py``) so that
+    # each simulated step's duration is drawn from this (possibly
+    # benchmark-calibrated) cost model — i.e. "benchmark calibration inside a
+    # DES". They mirror the pure/mixed step costs the steady-state
+    # ``_continuous_decode_metrics`` blends analytically.
+
+    def decode_step_latency_ms(self, batch: int, kv_len: int, q_len: int = 1) -> float:
+        """One pure-decode step over ``batch`` resident sequences."""
+        return self._decode_step_latency_ms(max(1, batch), max(1, kv_len), q_len)
+
+    def mixed_step_latency_ms(
+        self,
+        num_decode: int,
+        chunk_tokens: int,
+        decode_ctx: int,
+        prefill_kv_len: int,
+        q_len: int = 1,
+    ) -> float:
+        """One scheduler step carrying a prefill chunk plus ``num_decode``
+        concurrent decodes (``num_decode == 0`` → a pure prefill-chunk step)."""
+        penalty = max(0.0, self.cfg.request_config.resolved_mixed_batch_penalty())
+        ov = self._decode_step_overhead_ms()
+        chunk_tokens = max(1, int(chunk_tokens))
+        num_decode = max(0, int(num_decode))
+        if self._measured_mode:
+            spec = q_len if q_len > 1 else 1
+            prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
+            dec_piece = self._measured_decode_step_ms(num_decode) * spec if num_decode > 0 else 0.0
+            return (prefill_piece + dec_piece) * (1.0 + penalty) + ov
+        prefill_piece = self._forward_times(1, chunk_tokens, "prefill", max(1, prefill_kv_len)).total_ms
+        dec_piece = (
+            self._forward_times(num_decode, q_len, "decode", max(1, decode_ctx)).total_ms
+            if num_decode > 0
+            else 0.0
+        )
+        return (prefill_piece + dec_piece) * (1.0 + penalty) + ov
+
     def decode_total_ms(self, batch: int, input_len: int, output_len: int) -> float:
         """Integrate per-token decode latency over the growing KV cache.
 
@@ -709,7 +747,9 @@ class InferencePerformanceProjector:
         rate = float(req.request_rate or 0.0)
         model = (req.arrival_model or "closed").lower()
         osl = max(1, output_len)
-        if rate <= 0.0 or model == "closed":
+        # "none" is an alias of "closed"; "trace" has no closed-form rate and is
+        # handled by the DES, so the analytical queue is a no-op for both.
+        if rate <= 0.0 or model in ("closed", "none", "trace"):
             return {}
         mu = system_decode_tps / osl if system_decode_tps > 0 else 0.0
         if mu <= 0.0:

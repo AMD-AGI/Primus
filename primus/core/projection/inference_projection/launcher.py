@@ -16,7 +16,7 @@ from primus.core.projection.training_config import (
 )
 
 from .memory import project_inference_memory
-from .performance import project_inference_performance
+from .performance import InferencePerformanceProjector, project_inference_performance
 
 # Map CLI arg attribute names → InferenceRequestConfig field names.
 _ARG_TO_FIELD = {
@@ -234,6 +234,58 @@ def _print_performance(inference_config, perf) -> None:
     print("=" * 100)
 
 
+def _print_des(des: Dict[str, object]) -> None:
+    point = des["point"]
+    print("\n" + "=" * 100)
+    print("[Primus:Inference] Discrete-Event Simulation (arrival-driven)")
+    print("=" * 100)
+    sat = " [SATURATED]" if point.saturated else ""
+    print(
+        f"  Arrivals: {point.arrival_model} @ {point.offered_rate:g} req/s offered  "
+        f"(achieved {point.achieved_rate:.2f} req/s, "
+        f"utilization {point.utilization * 100:.0f}%){sat}"
+    )
+    print(
+        f"  Simulated: {point.num_requests} requests over {point.makespan_ms / 1000.0:.2f} s  "
+        f"→ system throughput {point.system_throughput_tps:.0f} tok/s"
+    )
+    print("-" * 100)
+    print(f"  {'metric':<22}{'mean':>12}{'p50':>12}{'p90':>12}{'p99':>12}")
+
+    def _row(label: str, d: Dict[str, float], unit: str = "ms") -> None:
+        print(
+            f"  {label:<22}"
+            f"{d.get('mean', 0.0):>10.2f} {unit:<1}"
+            f"{d.get('p50', 0.0):>10.2f} {unit:<1}"
+            f"{d.get('p90', 0.0):>10.2f} {unit:<1}"
+            f"{d.get('p99', 0.0):>10.2f} {unit:<1}"
+        )
+
+    _row("TTFT", point.ttft)
+    _row("TPOT (per token)", point.tpot)
+    _row("ITL (inter-token)", point.itl)
+    _row("End-to-end latency", point.e2e)
+
+    curve = des.get("curve")
+    if curve:
+        mu = des.get("max_sustainable_rate", 0.0)
+        print("-" * 100)
+        print(f"  Throughput–latency curve (max sustainable ≈ {mu:.2f} req/s):")
+        print(
+            f"  {'load(req/s)':>12}{'util%':>8}{'tok/s':>10}"
+            f"{'TTFT p50':>11}{'TTFT p99':>11}{'TPOT p50':>11}{'TPOT p99':>11}"
+        )
+        for r in curve:
+            flag = "*" if r.saturated else " "
+            print(
+                f"  {r.offered_rate:>11.2f}{flag}{r.utilization * 100:>7.0f}"
+                f"{r.system_throughput_tps:>10.0f}"
+                f"{r.ttft.get('p50', 0.0):>11.1f}{r.ttft.get('p99', 0.0):>11.1f}"
+                f"{r.tpot.get('p50', 0.0):>11.2f}{r.tpot.get('p99', 0.0):>11.2f}"
+            )
+    print("=" * 100)
+
+
 def launch_projection_from_cli(args, overrides):
     """Entry point for ``primus projection inference``."""
     cfg_path = Path(args.config)
@@ -297,10 +349,31 @@ def launch_projection_from_cli(args, overrides):
             inference_config, hbm_capacity_gb=hbm_gb, verbose=True
         )
     if mode in ("performance", "both"):
-        perf = project_inference_performance(
+        projector = InferencePerformanceProjector(
             inference_config, args=args, benchmark_layer_times=benchmark_layer_times
         )
+        perf = projector.project()
         _print_performance(inference_config, perf)
         results["performance"] = perf
+
+        # Phase 3: opt-in discrete-event simulation for arrival-driven
+        # percentiles. Reuses ``projector`` as the (possibly benchmark-
+        # calibrated) cost kernel for each step's duration.
+        req = inference_config.request_config
+        arrival_model = (getattr(req, "arrival_model", "closed") or "closed").lower()
+        if arrival_model in ("poisson", "deterministic") and (req.request_rate or 0) > 0:
+            from .des import run_des
+
+            des = run_des(
+                inference_config,
+                projector,
+                arrival_model=arrival_model,
+                rate_per_s=float(req.request_rate),
+                num_requests=int(getattr(args, "des_num_requests", 400) or 400),
+                seed=int(getattr(args, "des_seed", 0) or 0),
+                sweep=bool(getattr(args, "des_sweep", False)),
+            )
+            _print_des(des)
+            results["des"] = des
 
     return results

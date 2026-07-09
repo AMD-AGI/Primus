@@ -670,9 +670,31 @@ def _add_inference_args(parser):
         "--arrival-model",
         type=str,
         default=None,
-        choices=["closed", "poisson", "deterministic"],
-        help="Arrival process for --request-rate: 'closed' (no queue; default), "
-        "'poisson' (M/M/1 waiting time), or 'deterministic' (lighter queueing).",
+        choices=["closed", "none", "poisson", "deterministic"],
+        help="Arrival process for --request-rate. 'closed'/'none' (default): no "
+        "queue, steady-state only. 'poisson'/'deterministic': run the "
+        "discrete-event simulator (DES) for TTFT/TPOT/ITL percentiles. Both also "
+        "still report the analytical M/M/1 / D/M/1 mean.",
+    )
+    serv.add_argument(
+        "--des-num-requests",
+        type=int,
+        default=400,
+        help="DES: number of requests to simulate at the configured offered load "
+        "(--arrival-model poisson/deterministic). Default: 400.",
+    )
+    serv.add_argument(
+        "--des-seed",
+        type=int,
+        default=0,
+        help="DES: RNG seed for arrival/acceptance sampling (reproducible). Default: 0.",
+    )
+    serv.add_argument(
+        "--des-sweep",
+        action="store_true",
+        default=False,
+        help="DES: also sweep offered load (fractions of max-sustainable rate) and "
+        "emit a throughput-vs-latency curve (p50/p99 TTFT & TPOT per load).",
     )
     # ---- Kernel backend + fused ops + sparse attention + expert precision ----
     kern = parser.add_argument_group("inference kernel backend & ops")
