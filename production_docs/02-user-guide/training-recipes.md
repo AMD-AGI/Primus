@@ -1,4 +1,4 @@
-# Backend Training Recipes
+# Backend training recipes
 
 Task-oriented, copy-paste commands for launching pretraining runs with each Primus backend on AMD Instinct GPUs.
 
@@ -61,13 +61,13 @@ Image precedence is `DOCKER_IMAGE` env var > `--image` CLI arg > config file —
 
 These apply across all backends — set them up before running the recipes below.
 
-### Hugging Face token (gated models / real data)
+### Hugging Face token (gated models and real data)
 
 ```bash
 export HF_TOKEN=<your_hf_token>
 ```
 
-`runner/.primus.yaml` forwards `HF_TOKEN` into container mode automatically. MaxText configs may also read `${HF_TOKEN:""}` directly.
+`runner/.primus.yaml` forwards `HF_TOKEN` into container mode automatically. MaxText configs might also read `${HF_TOKEN:""}` directly.
 
 ### Mock vs. real data
 
@@ -91,7 +91,7 @@ For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_
 
 ## Megatron-LM
 
-**Image:** `rocm/primus`  |  **Configs:** `examples/megatron/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
+**Image:** `rocm/primus`  |  **Configs:** `examples/megatron/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
 
 ### 1. Launch the container
 
@@ -133,12 +133,12 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-Switch model/precision by changing the config filename (e.g. `llama3.1_70B-FP8-pretrain.yaml`, `mixtral_8x7B_v0.1-BF16-pretrain.yaml`). The full inventory is the `examples/megatron/configs/<ARCH>/` directory; see the parallelism table in [Pretraining](pretraining.md#example-configs-under-examplesmegatronconfigsmi300x).
+Switch model or precision by changing the config filename (e.g. `llama3.1_70B-FP8-pretrain.yaml`, `mixtral_8x7B_v0.1-BF16-pretrain.yaml`). The full inventory is the `examples/megatron/configs/<ARCH>/` directory; see the parallelism table in [Pretraining](pretraining.md#example-configs-under-examplesmegatronconfigsmi300x).
 
 **Model-specific notes:**
 
 - **Zebra-Llama** configs require the legacy runtime: prefix with `PRIMUS_TRAIN_RUNTIME=legacy`.
-- **MoE models** (DeepSeek-V2-Lite, Mixtral) may need extra grouped-GEMM/router flags; the AMD Megatron page lists the exact flags per model.
+- **MoE models** (DeepSeek-V2-Lite, Mixtral) might need extra grouped-GEMM/router flags; the AMD Megatron page lists the exact flags per model.
 
 ### 3. Multi-node (Slurm)
 
@@ -154,7 +154,7 @@ Scale batch size with node count and align `tensor_model_parallel_size` / `pipel
 
 ## TorchTitan (PyTorch)
 
-**Image:** `rocm/primus`  |  **Configs:** `examples/torchtitan/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
+**Image:** `rocm/primus`  |  **Configs:** `examples/torchtitan/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
 
 Use the same `rocm/primus` container as Megatron (step 1 above). TorchTitan parameters use a dotted namespace (e.g. `--training.local_batch_size`).
 
@@ -187,7 +187,7 @@ Available models include Llama 3.1 (8B/70B/405B), Llama 4, DeepSeek V3, and Qwen
 
 ## JAX MaxText
 
-**Image:** `rocm/jax-training:maxtext-...` (separate family)  |  **Configs:** `examples/maxtext/configs/<ARCH>/`
+**Image:** `rocm/jax-training:maxtext-...` (separate family)  |  **Configs:** `examples/maxtext/configs/<ARCH>/`
 
 MaxText uses a different Docker image than Megatron/TorchTitan, and it is **not** the default in `runner/.primus.yaml`. In container/Slurm mode you must point Primus at it explicitly.
 
@@ -240,7 +240,7 @@ MaxText parallelism is expressed with `ici_*` (intra-node) and `dcn_*` (inter-no
 
 ## Megatron Bridge (post-training)
 
-Megatron Bridge configs live under `examples/megatron_bridge/configs/<ARCH>/` and are primarily **SFT / LoRA post-training** recipes (e.g. `qwen3_32b_sft_posttrain.yaml`, `llama31_70b_lora_posttrain.yaml`). Launch with `train posttrain`:
+Megatron Bridge configs live under `examples/megatron_bridge/configs/<ARCH>/` and are primarily **SFT or LoRA post-training** recipes (e.g. `qwen3_32b_sft_posttrain.yaml`, `llama31_70b_lora_posttrain.yaml`). Launch with `train posttrain`:
 
 ```bash
 ./runner/primus-cli direct \
@@ -259,5 +259,4 @@ See [Post-Training](posttraining.md) for the full SFT/LoRA workflow.
 - [Post-Training](posttraining.md) — SFT and LoRA via Megatron Bridge.
 - [CLI Reference](cli-reference.md) — `direct` / `container` / `slurm` modes and flags.
 - [Configuration System](configuration-system.md) — YAML inheritance, overrides, image/env precedence.
-- [Performance Tuning](../04-technical-guides/performance-tuning.md) — HipBLASLt autotuning, Primus-Turbo, FP8, MoE.
-
+- [Performance Tuning](../04-technical-guides/performance-tuning.md) — hipBLASLt autotuning, Primus-Turbo, FP8, MoE.

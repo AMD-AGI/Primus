@@ -1,6 +1,6 @@
-# CLI Reference
+# CLI reference
 
-This document describes the unified Primus launcher (`runner/primus-cli`) and how it invokes the Python CLI (`primus/cli/main.py`). For deeper background, see the in-repo guide at `docs/cli/PRIMUS-CLI-GUIDE.md`.
+This section describes the unified Primus launcher (`runner/primus-cli`) and how it invokes the Python CLI (`primus/cli/main.py`). For more background, see the guide at `docs/cli/PRIMUS-CLI-GUIDE.md` in the [Primus repository](https://github.com/AMD-AGI/Primus). 
 
 **Related documentation**
 
@@ -22,7 +22,7 @@ primus-cli [global-options] <mode> [mode-args] -- [command]
 - **Mode** is one of `direct`, `container`, or `slurm`.
 - **`--` (required)** separates launcher options from the Primus Python CLI. Everything after the first `--` is passed to `primus/cli/main.py` (or another script if you override it in direct mode).
 
-From the repository root, invoke the launcher as `./runner/primus-cli` (or install/link it as `primus-cli` on your `PATH`).
+From the repository root, invoke the launcher as `./runner/primus-cli` (or install or link it as `primus-cli` on your `PATH`).
 
 ---
 
@@ -170,7 +170,7 @@ These run under `primus/cli/main.py` unless you change `--script` in direct mode
 | Subcommand | Purpose |
 | --- | --- |
 | `train pretrain --config <yaml>` | Pretraining (Megatron-LM, TorchTitan, MaxText, Megatron Bridge, etc., per experiment YAML). |
-| `train posttrain --config <yaml>` | Post-training (SFT / LoRA-style workflows; same top-level flags as pretrain in the parser). |
+| `train posttrain --config <yaml>` | Post-training (SFT or LoRA-style workflows; same top-level flags as pretrain in the parser). |
 | `benchmark <suite> [args]` | Performance microbenchmarks (see table below). |
 | `preflight [--host] [--gpu] [--network] [--perf-test]` | Cluster and node diagnostics. |
 | `projection memory --config <yaml>` | Memory estimation from a merged config. |

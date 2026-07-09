@@ -1,4 +1,4 @@
-# Post-Training Workflows
+# Post-training workflows
 
 Post-training (supervised fine-tuning) adapts a pre-trained foundation model to new tasks or domains. In Primus, post-training runs through the **Megatron Bridge** backend using the `train posttrain` subcommand. Example YAML configurations live under `examples/megatron_bridge/configs/`.
 

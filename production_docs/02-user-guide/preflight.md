@@ -1,4 +1,4 @@
-# Preflight Diagnostics
+# Preflight diagnostics
 
 `preflight` is Primus’s cluster diagnostic command. It can produce a **fast environment report** (host, GPU, and network facts) and optionally run **performance tests** (GEMM plus intra- and inter-node communication) to catch misconfiguration or outliers before large distributed training jobs.
 
@@ -113,7 +113,7 @@ The base `<name>` comes from `--report-file-name` (default: `preflight_report`).
 
 ## Interpreting results
 
-1. **Info report:** Confirm GPU count, model match expectations, and PCIe topology is sensible for your workload. Network sections should reflect the interfaces you intend for distributed training.
+1. **Info report:** Confirm that the GPU count and model match expectations, and that the PCIe topology is sensible for your workload. Network sections should reflect the interfaces you intend for distributed training.
 2. **Perf report:** Compare GEMM and collective results across nodes. Large outliers on one node often indicate driver, fabric, or process placement issues.
 3. **Timeouts:** If `--dist-timeout-sec` is exceeded, inspect firewall rules, interface bindings, and `MASTER_ADDR` / `MASTER_PORT` before scaling up training.
 
