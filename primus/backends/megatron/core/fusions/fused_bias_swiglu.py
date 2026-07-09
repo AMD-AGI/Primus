@@ -14,60 +14,187 @@ a single ``@jit_fuser`` forward/backward pair instead of separate ``chunk`` /
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
+import triton
+import triton.language as tl
 from megatron.core.fusions.fused_bias_swiglu import WeightedSwiGLUFunction
-from megatron.core.jit import jit_fuser
+
+# Column tile size for the elementwise kernels / reduction inner loop.
+_BLOCK_N = 1024
 
 
-@jit_fuser
+@triton.jit
+def _clamped_weighted_swiglu_fwd_kernel(
+    y_ptr,  # [M, 2*half] row-major: gate = [:, :half], up = [:, half:]
+    w_ptr,  # [M] per-token weights
+    out_ptr,  # [M, half] row-major output
+    half,
+    K,  # = 2 * half (row stride of y)
+    stride_w,
+    clamp_value,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = cols < half
+
+    y_row = y_ptr + pid_m * K
+    gate = tl.load(y_row + cols, mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(y_row + half + cols, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + pid_m * stride_w).to(tl.float32)
+
+    gate_c = tl.minimum(gate, clamp_value)
+    up_c = tl.minimum(tl.maximum(up, -clamp_value), clamp_value)
+    out = (gate_c * tl.sigmoid(gate_c)) * up_c * w
+
+    tl.store(out_ptr + pid_m * half + cols, out, mask=mask)
+
+
+@triton.jit
+def _clamped_swiglu_bwd_kernel(
+    g_ptr,  # [M, half] grad w.r.t. output
+    y_ptr,  # [M, 2*half] pre-clamp input
+    w_ptr,  # [M] per-token weights (only read if HAS_WEIGHTS)
+    dy_ptr,  # [M, 2*half] grad w.r.t. input
+    half,
+    K,
+    stride_gm,
+    stride_w,
+    clamp_value,
+    HAS_WEIGHTS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = cols < half
+
+    g = tl.load(g_ptr + pid_m * stride_gm + cols, mask=mask, other=0.0).to(tl.float32)
+    if HAS_WEIGHTS:
+        g = g * tl.load(w_ptr + pid_m * stride_w).to(tl.float32)
+
+    y_row = y_ptr + pid_m * K
+    gate = tl.load(y_row + cols, mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(y_row + half + cols, mask=mask, other=0.0).to(tl.float32)
+
+    gate_c = tl.minimum(gate, clamp_value)
+    up_c = tl.minimum(tl.maximum(up, -clamp_value), clamp_value)
+    sig = tl.sigmoid(gate_c)
+    silu = gate_c * sig
+
+    # d/d gate_c [SiLU(gate_c)] = sig * (1 + gate_c * (1 - sig))
+    dy_glu_c = g * sig * (1.0 + gate_c * (1.0 - sig)) * up_c
+    dy_linear_c = g * silu
+
+    # Straight-through the clamp: gradient passes only inside the (un)clamped region.
+    gate_keep = (gate <= clamp_value).to(tl.float32)
+    up_keep = ((up >= -clamp_value) & (up <= clamp_value)).to(tl.float32)
+
+    dy_row = dy_ptr + pid_m * K
+    tl.store(dy_row + cols, dy_glu_c * gate_keep, mask=mask)
+    tl.store(dy_row + half + cols, dy_linear_c * up_keep, mask=mask)
+
+
+@triton.jit
+def _clamped_swiglu_weights_grad_kernel(
+    g_ptr,  # [M, half] grad w.r.t. output
+    y_ptr,  # [M, 2*half] pre-clamp input
+    wg_ptr,  # [M] per-token weights grad
+    half,
+    K,
+    stride_gm,
+    clamp_value,
+    NUM_TILES: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    y_row = y_ptr + pid_m * K
+    g_row = g_ptr + pid_m * stride_gm
+
+    acc = tl.zeros([BLOCK_N], dtype=tl.float32)
+    for t in tl.static_range(NUM_TILES):
+        cols = t * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask = cols < half
+        g = tl.load(g_row + cols, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(y_row + cols, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(y_row + half + cols, mask=mask, other=0.0).to(tl.float32)
+        gate_c = tl.minimum(gate, clamp_value)
+        up_c = tl.minimum(tl.maximum(up, -clamp_value), clamp_value)
+        activation = (gate_c * tl.sigmoid(gate_c)) * up_c
+        acc += activation * g  # masked lanes contribute 0 (g == 0)
+
+    tl.store(wg_ptr + pid_m, tl.sum(acc, axis=0))
+
+
 def clamped_weighted_swiglu(y: torch.Tensor, weights: torch.Tensor, clamp_value: float) -> torch.Tensor:
-    """Clamped SwiGLU with per-token weights in one fused region.
+    """Clamped SwiGLU with per-token weights in one fused Triton kernel.
 
     Semantics match the eager path:
         gate_c = clamp(gate, max=alpha)
         up_c   = clamp(up, min=-alpha, max=alpha)
         out    = SiLU(gate_c) * up_c * weights
     """
-    half = y.shape[-1] // 2
-    y_glu = y[..., :half].clamp(max=clamp_value)
-    y_linear = y[..., half:].clamp(min=-clamp_value, max=clamp_value)
-    dtype = y.dtype
-    return (F.silu(y_glu) * y_linear * weights).to(dtype)
+    lead = y.shape[:-1]
+    K = y.shape[-1]
+    half = K // 2
+    y2 = y.reshape(-1, K).contiguous()
+    M = y2.shape[0]
+    w = weights.reshape(M).contiguous()
+
+    out = torch.empty((M, half), dtype=y.dtype, device=y.device)
+    grid = (M, triton.cdiv(half, _BLOCK_N))
+    _clamped_weighted_swiglu_fwd_kernel[grid](
+        y2, w, out, half, K, w.stride(0), float(clamp_value), BLOCK_N=_BLOCK_N
+    )
+    return out.reshape(*lead, half)
 
 
-@jit_fuser
 def clamped_swiglu_back(g: torch.Tensor, y: torch.Tensor, clamp_value: float) -> torch.Tensor:
     """Backward for clamped SwiGLU w.r.t. the pre-clamp concatenated input."""
-    half = y.shape[-1] // 2
-    y_glu = y[..., :half]
-    y_linear = y[..., half:]
-    y_glu_c = y_glu.clamp(max=clamp_value)
-    y_linear_c = y_linear.clamp(min=-clamp_value, max=clamp_value)
+    lead = y.shape[:-1]
+    K = y.shape[-1]
+    half = K // 2
+    y2 = y.reshape(-1, K).contiguous()
+    g2 = g.reshape(-1, half).contiguous()
+    M = y2.shape[0]
 
-    silu_glu = F.silu(y_glu_c)
-    sigmoid_glu = torch.sigmoid(y_glu_c)
-    dy_glu_c = g * sigmoid_glu * (1 + y_glu_c * (1 - sigmoid_glu)) * y_linear_c
-    dy_linear_c = g * silu_glu
+    dy = torch.empty((M, K), dtype=g.dtype, device=g.device)
+    grid = (M, triton.cdiv(half, _BLOCK_N))
+    _clamped_swiglu_bwd_kernel[grid](
+        g2, y2, g2, dy, half, K, g2.stride(0), 0, float(clamp_value),
+        HAS_WEIGHTS=False, BLOCK_N=_BLOCK_N,
+    )
+    return dy.reshape(*lead, K)
 
-    dy_glu = dy_glu_c * (y_glu <= clamp_value).to(dy_glu_c.dtype)
-    dy_linear = dy_linear_c * ((y_linear >= -clamp_value) & (y_linear <= clamp_value)).to(dy_linear_c.dtype)
-    return torch.cat((dy_glu, dy_linear), dim=-1)
 
-
-@jit_fuser
 def clamped_weighted_swiglu_back(g: torch.Tensor, y: torch.Tensor, weights: torch.Tensor, clamp_value: float):
     """Backward for :func:`clamped_weighted_swiglu`."""
     input_dtype = y.dtype
     w_dtype = weights.dtype
-    input_grad = clamped_swiglu_back(g * weights, y, clamp_value)
+    lead = y.shape[:-1]
+    K = y.shape[-1]
+    half = K // 2
+    y2 = y.reshape(-1, K).contiguous()
+    g2 = g.reshape(-1, half).contiguous()
+    M = y2.shape[0]
+    w = weights.reshape(M).contiguous()
 
-    half = y.shape[-1] // 2
-    y_glu_c = y[..., :half].clamp(max=clamp_value)
-    y_linear_c = y[..., half:].clamp(min=-clamp_value, max=clamp_value)
-    activation = F.silu(y_glu_c) * y_linear_c
-    weights_grad = activation * g.to(w_dtype)
-    weights_grad = torch.sum(weights_grad, dim=-1, keepdim=True)
-    return input_grad.to(input_dtype), weights_grad.to(w_dtype)
+    # input grad: reuse the clamped-swiglu backward kernel with grad pre-scaled by weights.
+    input_grad = torch.empty((M, K), dtype=input_dtype, device=y.device)
+    grid = (M, triton.cdiv(half, _BLOCK_N))
+    _clamped_swiglu_bwd_kernel[grid](
+        g2, y2, w, input_grad, half, K, g2.stride(0), w.stride(0), float(clamp_value),
+        HAS_WEIGHTS=True, BLOCK_N=_BLOCK_N,
+    )
+
+    # weights grad: sum over the feature dim of SiLU(gate_c) * up_c * g.
+    weights_grad = torch.empty((M,), dtype=w_dtype, device=y.device)
+    _clamped_swiglu_weights_grad_kernel[(M,)](
+        g2, y2, weights_grad, half, K, g2.stride(0), float(clamp_value),
+        NUM_TILES=triton.cdiv(half, _BLOCK_N), BLOCK_N=_BLOCK_N,
+    )
+
+    return input_grad.reshape(*lead, K), weights_grad.reshape(*weights.shape)
 
 
 class ClampedWeightedSwiGLUFunction(torch.autograd.Function):
