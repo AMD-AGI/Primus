@@ -118,7 +118,9 @@ class ReductionService:
         # PIPE (Deliverable 17): peer-pipeline batch depth. The pipelined rs_acc needs `pipe`
         # scratch slots PER BLOCK (issues `pipe` peers' nbi getmem concurrently), so
         # scratch grows pipe x and the main call passes scratch_stride = pipe*chunk.
-        pipe = int(os.environ.get("ODC_GDA_PIPE", "1"))
+        # This is a Primus-Turbo device-kernel knob (odc_rocshmem_gda.cu env_pipe); its
+        # name must match turbo's ENV_ODC_GDA_PIPE = "PRIMUS_TURBO_ODC_GDA_PIPE".
+        pipe = int(os.environ.get("PRIMUS_TURBO_ODC_GDA_PIPE", "1"))
         if pipe < 1:
             pipe = 1
         chunk = (shard_elems + nblk - 1) // nblk
