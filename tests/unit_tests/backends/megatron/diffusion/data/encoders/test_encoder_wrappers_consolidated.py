@@ -220,7 +220,7 @@ class TestEncoderPrecisionMapping:
                 encoder_cls = getattr(module, spec["encoder_cls_name"])
 
                 config = spec["config_cls"](**spec["config_kwargs"], precision=precision)
-                encoder = encoder_cls.from_pretrained("/path", config=config)
+                _ = encoder_cls.from_pretrained("/path", config=config)
 
                 # Check that from_pretrained was called with correct dtype
                 call_kwargs = mock_model_cls.from_pretrained.call_args[1]
