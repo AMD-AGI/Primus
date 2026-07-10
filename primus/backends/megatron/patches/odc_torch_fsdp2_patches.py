@@ -106,9 +106,20 @@ def _apply_patch_lazy_init(root_module):
     and getattr(get_args(ctx), "use_torch_fsdp2", False),
 )
 def patch_odc_torch_fsdp2(ctx: PatchContext):
-    import megatron.core.distributed.torch_fully_sharded_data_parallel as tfsdp_mod
+    # PR #808 (feat(flux): FSDP2 optimizers + fp8 all-gather) replaced Megatron's FSDP2
+    # wrapper with PrimusTorchFullyShardedDataParallel (installed as
+    # megatron.training.training.torch_FSDP), so the stock TorchFullyShardedDataParallel
+    # is never instantiated. We must hook the class the trainer actually uses, otherwise
+    # _ensure_odc_ready()/reduction_service never initializes and pre_minibatch_start
+    # crashes with 'NoneType' object has no attribute 'clear_accumulations'.
+    try:
+        from primus.backends.megatron.core.distributed.torch_fully_sharded_data_parallel import (
+            PrimusTorchFullyShardedDataParallel as TorchFSDP,
+        )
+    except ImportError:
+        import megatron.core.distributed.torch_fully_sharded_data_parallel as tfsdp_mod
 
-    TorchFSDP = tfsdp_mod.TorchFullyShardedDataParallel
+        TorchFSDP = tfsdp_mod.TorchFullyShardedDataParallel
     if getattr(TorchFSDP.__init__, "_odc_hooked", False):
         log_rank_0("[ODC.torch_fsdp2] __init__ already hooked, skip")
         return
@@ -128,7 +139,7 @@ def patch_odc_torch_fsdp2(ctx: PatchContext):
 
     odc_init._odc_hooked = True
     TorchFSDP.__init__ = odc_init
-    log_rank_0("[ODC.torch_fsdp2] hooked TorchFullyShardedDataParallel.__init__")
+    log_rank_0(f"[ODC.torch_fsdp2] hooked {TorchFSDP.__name__}.__init__")
 
     if phase == "2":
         _install_train_loop_hooks()
@@ -237,6 +248,7 @@ def _odc_grad_spike_guard(root):
     The all_reduce below is safe under DiffMicro: optimizer.step runs once per
     minibatch at a sync point where all ranks are aligned.
     """
+    import torch
     import torch.distributed as dist
 
     thr = float(os.environ.get("ODC_GRAD_SPIKE_THRESHOLD", "1000"))
@@ -251,10 +263,18 @@ def _odc_grad_spike_guard(root):
             g = g.to_local()
         s = g.detach().float().pow(2).sum()
         local_sq = s if local_sq is None else (local_sq + s)
+    # [ODC-FIX] Every rank MUST enter the all_reduce below in lockstep. Under odc_nopad
+    # (variable micro-batch counts) a rank can legitimately finish a minibatch with no
+    # local grad (local_sq is None). The old early-return made that rank skip the
+    # collective -> ncclDevKernel_Generic_2 spins forever on the other ranks -> GPU
+    # deadlock at optimizer.step (confirmed via rocgdb + HIP trace). Contribute a 0 so the
+    # barrier stays aligned; only bail out when there is truly no process group.
+    if dist.is_initialized():
+        if local_sq is None:
+            local_sq = torch.zeros((), device=next(root.parameters()).device, dtype=torch.float32)
+        dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
     if local_sq is None:
         return
-    if dist.is_initialized():
-        dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
     gnorm = local_sq.sqrt().item()
     if gnorm > thr:
         for p in root.parameters():
