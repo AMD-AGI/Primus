@@ -11,7 +11,6 @@ Reference:
     Megatron-LM examples/multimodal/dataloader_provider.py
 """
 
-import logging
 from typing import Any, Callable, List, Optional, Tuple
 
 from megatron.core import parallel_state
@@ -34,8 +33,6 @@ from megatron.energon import (
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.modules.module_utils import log_rank_0
-
-logger = logging.getLogger(__name__)
 
 
 class EnergonDatasetProvider(DatasetProvider):
