@@ -260,4 +260,3 @@ See [Post-Training](posttraining.md) for the full SFT/LoRA workflow.
 - [CLI Reference](cli-reference.md) — `direct` / `container` / `slurm` modes and flags.
 - [Configuration System](configuration-system.md) — YAML inheritance, overrides, image/env precedence.
 - [Performance Tuning](../04-technical-guides/performance-tuning.md) — HipBLASLt autotuning, Primus-Turbo, FP8, MoE.
-

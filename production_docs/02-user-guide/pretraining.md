@@ -133,7 +133,7 @@ The following files ship in the repository (sorted by name). Parallelism columns
 
 ### Mock data versus real data
 
-- **Mock data:** set `mock_data: true` and leave `train_data_path` / `valid_data_path` empty (as in `llama2_7B-BF16-pretrain.yaml`).  
+- **Mock data:** set `mock_data: true` and leave `train_data_path` / `valid_data_path` empty (as in `llama2_7B-BF16-pretrain.yaml`).
 - **Real data:** set `mock_data: false` and populate Megatron-compatible data paths (and tokenizer assets) in `overrides`. Use paths visible inside your container mounts.
 
 ### Multi-node training with Slurm
@@ -241,14 +241,14 @@ Set `mock_data: true` (Megatron/TorchTitan) or synthetic dataset settings (MaxTe
 
 ### Real training data
 
-- Megatron: configure `train_data_path` / `valid_data_path` and tokenizer assets in `overrides` once `mock_data` is false.  
-- Ensure host paths are mounted in **container** mode (`--volume` or `container.options.volume` in YAML).  
+- Megatron: configure `train_data_path` / `valid_data_path` and tokenizer assets in `overrides` once `mock_data` is false.
+- Ensure host paths are mounted in **container** mode (`--volume` or `container.options.volume` in YAML).
 - TorchTitan / MaxText: follow backend-specific dataset fields in the experiment `overrides` and presets.
 
 ### Scaling from single-node to multi-node
 
-- Use **Slurm** mode for allocation; keep **container** entry if you want the same image on every node.  
-- Set environment variables consistently (`NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, `GPUS_PER_NODE`); the Slurm entry script injects them when using `primus-cli slurm`.  
+- Use **Slurm** mode for allocation; keep **container** entry if you want the same image on every node.
+- Set environment variables consistently (`NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, `GPUS_PER_NODE`); the Slurm entry script injects them when using `primus-cli slurm`.
 - Increase parallelism fields (Megatron TP/PP/EP; TorchTitan `parallelism`; MaxText `ici_*` / `dcn_*`) to match topology.
 
 ### Hugging Face token for gated models

@@ -124,8 +124,8 @@ primus-cli container [options] -- <command>
 
 When using `runner/.primus.yaml`, the default container section includes:
 
-- `/dev/kfd` — ROCm kernel fusion driver  
-- `/dev/dri` — GPU render nodes  
+- `/dev/kfd` — ROCm kernel fusion driver
+- `/dev/dri` — GPU render nodes
 - `/dev/infiniband` — InfiniBand character devices (when present)
 
 ### Environment forwarding
@@ -196,8 +196,8 @@ The same file also registers an `attention` suite for attention microbenchmarks.
 
 Resolution is implemented in `runner/lib/config.sh` (`resolve_config_file` / `load_config_auto`):
 
-1. **`--config FILE`** on the command line (if given).  
-2. **`~/.primus.yaml`** if it exists.  
+1. **`--config FILE`** on the command line (if given).
+2. **`~/.primus.yaml`** if it exists.
 3. **`runner/.primus.yaml`** (system default).
 
 Within a chosen file, nested keys follow normal YAML structure; Slurm and container scripts merge CLI flags with their sections so that **explicit CLI arguments override file values** where applicable.

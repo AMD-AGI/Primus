@@ -144,4 +144,3 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 
 - [MaxText documentation](https://maxtext.readthedocs.io/) — full parameter reference and recipes.
 - Primus implementation: `primus/backends/maxtext/argument_builder.py`, `maxtext_pretrain_trainer.py`, `maxtext_adapter.py`.
-
