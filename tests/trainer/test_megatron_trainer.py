@@ -562,6 +562,38 @@ class TestMegatronTrainer(PrimusUT):
             Dataloader_mp_context_patch_log in stdout
         ), "Expected dataloader_mp_context patch log not found in stdout"
 
+    def test_sdma_allgather_fused_residual_norm(self):
+        # Neither patch runs in any other case here: SDMA param all-gather
+        # only activates with ENABLE_SDMA_ALLGATHER=1 (env var, not a --arg) +
+        # a distributed optimizer; fused residual+RMSNorm needs
+        # use_turbo_rms_norm=1 + PRIMUS_FUSED_RESIDUAL_NORM_V2=1. Confirmed via
+        # coverage instrumentation that both patches install and execute.
+        run_script(
+            self.__class__.__name__,
+            "sdma_allgather_fused_residual_norm",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_8B-BF16-pretrain.yaml",
+            env_override={
+                "ENABLE_SDMA_ALLGATHER": "1",
+                "PRIMUS_FUSED_RESIDUAL_NORM_V2": "1",
+            },
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+                "--use_turbo_rms_norm",
+                "1",
+                "--use_distributed_optimizer",
+                "1",
+                "--overlap_param_gather",
+                "1",
+            ],
+        )
+
     def test_deepseekv2_lite_uep(self):
         run_script(
             self.__class__.__name__,
