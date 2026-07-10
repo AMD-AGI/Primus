@@ -29,7 +29,6 @@ Patch 2 -- Grad-zero stream overlap + data HtoD prefetch:
 """
 
 import torch
-from megatron.core.enums import Fp8Recipe
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -100,6 +99,13 @@ def reset_prefetch_state():
 
 
 def _needs_delayed_scaling(ctx: PatchContext) -> bool:
+    # Imported lazily (not at module top-level) so that importing this patch
+    # module never depends on ``megatron`` being importable. A top-level
+    # ``from megatron...`` here can crash the patches package auto-import if
+    # megatron is momentarily unavailable (e.g. mid circular-import), which
+    # then leaves the package in a half-initialized state.
+    from megatron.core.enums import Fp8Recipe
+
     args = get_args(ctx)
     if args is None or not bool(getattr(args, "fp8", False)):
         return False
