@@ -86,6 +86,9 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
     DeepSeekV4TransformerConfig,
 )
 from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
+from primus.backends.megatron.core.transformer.moe.shared_experts import (
+    PrimusSharedExpertMLP,
+)
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
     DeepseekV4HashRouter,
 )
@@ -343,11 +346,15 @@ class DeepseekV4MoE(MegatronModule):
             shared_expert_spec, ModuleSpec
         ), "DeepSeek-V4 MoE requires shared_expert ModuleSpec in submodules."
         shared_expert_module = shared_expert_spec.module
-        assert shared_expert_module is SharedExpertMLP, "DeepSeek-V4 shared_expert must be SharedExpertMLP."
+        assert issubclass(
+            shared_expert_module, SharedExpertMLP
+        ), "DeepSeek-V4 shared_expert must be (a subclass of) SharedExpertMLP."
         if self.config is None or self.pg_collection is None:
             raise RuntimeError("DeepSeek-V4 MoE SharedExpertMLP requires config and pg_collection.")
 
-        # Shared experts must always run with clamped SwiGLU via SharedExpertMLP.
+        # Shared experts run with clamped SwiGLU. PrimusSharedExpertMLP fuses the
+        # clamp+SiLU+mul into a single Triton kernel (matching the routed experts),
+        # so we no longer need to force the un-fused eager path.
         shared_cfg = copy(self.config)
         shared_cfg.add_bias_linear = False
         shared_cfg.gated_linear_unit = True
@@ -365,16 +372,24 @@ class DeepseekV4MoE(MegatronModule):
                 int(intermediate_size),
             )
 
+        # Build the Primus fused-SwiGLU shared expert while keeping the spec's
+        # submodules (linear layers / activation). The state-dict layout is
+        # unchanged since PrimusSharedExpertMLP only overrides the activation.
+        fused_shared_expert_spec = ModuleSpec(
+            module=PrimusSharedExpertMLP,
+            submodules=shared_expert_spec.submodules,
+            params=shared_expert_spec.params,
+        )
         try:
             return build_module(
-                shared_expert_spec,
+                fused_shared_expert_spec,
                 config=shared_cfg,
                 pg_collection=self.pg_collection,
                 gate=bool(shared_cfg.moe_shared_expert_gate),
             )
         except Exception as exc:
             raise RuntimeError(
-                f"DeepSeek-V4 MoE shared expert build failed with SharedExpertMLP: {exc}"
+                f"DeepSeek-V4 MoE shared expert build failed with PrimusSharedExpertMLP: {exc}"
             ) from exc
 
     def _build_token_dispatcher(self) -> MoETokenDispatcher:

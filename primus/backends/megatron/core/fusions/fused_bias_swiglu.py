@@ -25,12 +25,13 @@ _BLOCK_N = 1024
 @triton.jit
 def _clamped_weighted_swiglu_fwd_kernel(
     y_ptr,  # [M, 2*half] row-major: gate = [:, :half], up = [:, half:]
-    w_ptr,  # [M] per-token weights
+    w_ptr,  # [M] per-token weights (only read if HAS_WEIGHTS)
     out_ptr,  # [M, half] row-major output
     half,
     K,  # = 2 * half (row stride of y)
     stride_w,
     clamp_value,
+    HAS_WEIGHTS: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -41,11 +42,12 @@ def _clamped_weighted_swiglu_fwd_kernel(
     y_row = y_ptr + pid_m * K
     gate = tl.load(y_row + cols, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(y_row + half + cols, mask=mask, other=0.0).to(tl.float32)
-    w = tl.load(w_ptr + pid_m * stride_w).to(tl.float32)
 
     gate_c = tl.minimum(gate, clamp_value)
     up_c = tl.minimum(tl.maximum(up, -clamp_value), clamp_value)
-    out = (gate_c * tl.sigmoid(gate_c)) * up_c * w
+    out = (gate_c * tl.sigmoid(gate_c)) * up_c
+    if HAS_WEIGHTS:
+        out = out * tl.load(w_ptr + pid_m * stride_w).to(tl.float32)
 
     tl.store(out_ptr + pid_m * half + cols, out, mask=mask)
 
@@ -144,7 +146,32 @@ def clamped_weighted_swiglu(y: torch.Tensor, weights: torch.Tensor, clamp_value:
     out = torch.empty((M, half), dtype=y.dtype, device=y.device)
     grid = (M, triton.cdiv(half, _BLOCK_N))
     _clamped_weighted_swiglu_fwd_kernel[grid](
-        y2, w, out, half, K, w.stride(0), float(clamp_value), BLOCK_N=_BLOCK_N
+        y2, w, out, half, K, w.stride(0), float(clamp_value),
+        HAS_WEIGHTS=True, BLOCK_N=_BLOCK_N,
+    )
+    return out.reshape(*lead, half)
+
+
+def clamped_swiglu(y: torch.Tensor, clamp_value: float) -> torch.Tensor:
+    """Clamped SwiGLU without per-token weights in one fused Triton kernel.
+
+    Semantics match the eager path used by ``mlp.MLP`` shared experts:
+        gate_c = clamp(gate, max=alpha)
+        up_c   = clamp(up, min=-alpha, max=alpha)
+        out    = SiLU(gate_c) * up_c
+    """
+    lead = y.shape[:-1]
+    K = y.shape[-1]
+    half = K // 2
+    y2 = y.reshape(-1, K).contiguous()
+    M = y2.shape[0]
+
+    out = torch.empty((M, half), dtype=y.dtype, device=y.device)
+    grid = (M, triton.cdiv(half, _BLOCK_N))
+    # w_ptr is unused when HAS_WEIGHTS=False; pass y2 as a valid placeholder.
+    _clamped_weighted_swiglu_fwd_kernel[grid](
+        y2, y2, out, half, K, 0, float(clamp_value),
+        HAS_WEIGHTS=False, BLOCK_N=_BLOCK_N,
     )
     return out.reshape(*lead, half)
 
@@ -229,5 +256,48 @@ def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp
         output = ClampedWeightedSwiGLUFunction.apply(input, weights, fp8_input_store, float(clamp_value))
     else:
         output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store)
+
+    return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
+
+
+class ClampedSwiGLUFunction(torch.autograd.Function):
+    """Autograd wrapper for clamped (non-weighted) SwiGLU."""
+
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, fp8_input_store: bool, clamp_value: float):
+        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input
+        ctx.save_for_backward(input_for_backward)
+        ctx.ori_input_dtype = input.dtype
+        ctx.fp8_input_store = fp8_input_store
+        ctx.clamp_value = float(clamp_value)
+        return clamped_swiglu(input, ctx.clamp_value)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (input,) = ctx.saved_tensors
+        input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
+        input_grad = clamped_swiglu_back(grad_output, input, ctx.clamp_value)
+        return input_grad, None, None
+
+
+def swiglu_impl(input, bias, fp8_input_store=False, clamp_value=None):
+    """Non-weighted SwiGLU fusion with optional clamped gate/up.
+
+    Mirrors ``megatron.core.fusions.fused_bias_swiglu.bias_swiglu_impl`` but
+    adds the DeepSeek-V4 pre-multiplication clamp when ``clamp_value`` is set.
+    Used by the shared-expert MLP path, which has no per-token weights.
+    """
+    ori_shape = input.shape
+    assert len(ori_shape) in [2, 3]
+    input = input.view(-1, ori_shape[-1])
+    if bias is not None:
+        raise NotImplementedError("Bias is not supported for clamped swiglu fusion")
+
+    if clamp_value is not None:
+        output = ClampedSwiGLUFunction.apply(input, fp8_input_store, float(clamp_value))
+    else:
+        from megatron.core.fusions.fused_bias_swiglu import SwiGLUFunction
+
+        output = SwiGLUFunction.apply(input, fp8_input_store, False)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
