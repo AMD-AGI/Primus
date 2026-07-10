@@ -230,7 +230,6 @@ def patch_grad_zero_and_data_prefetch(ctx: PatchContext):
     tp_size = getattr(args, "tensor_model_parallel_size", 1)
 
     _original_train_step = megatron_training.train_step
-    _original_zero_grad_buffer = DistributedDataParallel.zero_grad_buffer
     _zero_stream = torch.cuda.Stream()
     _prefetch_state: dict = {}
     # Expose the closure-local prefetch state so the MLPerf warmup hook can
