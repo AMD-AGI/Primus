@@ -499,7 +499,7 @@ class PreGeneratedMockFluxDataset(MockFluxDataset):
 
     def __init__(self, *args, **kwargs):
         """Initialize and pre-generate all samples."""
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         # Initialize parent class
         super().__init__(*args, **kwargs)
@@ -575,7 +575,7 @@ class PreGeneratedMockFluxSchnellDataset(MockFluxSchnellDataset):
     """
 
     def __init__(self, *args, **kwargs):
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         super().__init__(*args, **kwargs)
 

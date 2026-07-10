@@ -32,7 +32,7 @@ from megatron.energon import (
 
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class EnergonDatasetProvider(DatasetProvider):
