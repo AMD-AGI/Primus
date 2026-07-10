@@ -84,7 +84,59 @@ from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
+try:
+    import triton
+    import triton.language as tl
+
+    _HAVE_TRITON = True
+except (ImportError, ModuleNotFoundError):
+    _HAVE_TRITON = False
+
 _dummy_wgrads = {}
+
+
+if _HAVE_TRITON:
+
+    @triton.jit
+    def _inplace_add_kernel(dst_ptr, src_ptr, n_elements, BLOCK: tl.constexpr):
+        """In-place ``dst += src`` over a flat buffer, accumulating in fp32.
+
+        int64 offsets so a single launch covers tensors with > 2**31 elements
+        (e.g. the consolidated grouped-expert ``main_grad`` of [E, N, K]),
+        instead of Torch's ``add_`` which tiles into multiple ~528M-element
+        ``vectorized_elementwise_kernel`` launches.
+        """
+        pid = tl.program_id(axis=0).to(tl.int64)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n_elements
+        d = tl.load(dst_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        s = tl.load(src_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        tl.store(dst_ptr + offs, (d + s).to(dst_ptr.dtype.element_ty), mask=mask)
+
+
+def _triton_inplace_add_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """``dst.add_(src)`` via a single Triton launch (fp32 accumulate).
+
+    Falls back to Torch's ``add_`` when Triton is unavailable or the layout is
+    unsupported (non-contiguous / shape mismatch). The write is in-place on
+    ``dst``'s storage, so ``dst`` must be contiguous.
+    """
+    if (
+        not _HAVE_TRITON
+        or not dst.is_cuda
+        or not dst.is_contiguous()
+        or dst.numel() != src.numel()
+    ):
+        return dst.add_(src)
+
+    dst_flat = dst.view(-1)
+    # reshape (not view) so a non-contiguous grad is materialized contiguously.
+    src_flat = src.reshape(-1)
+    n_elements = dst_flat.numel()
+    BLOCK = 8192
+    grid = (triton.cdiv(n_elements, BLOCK),)
+    _inplace_add_kernel[grid](dst_flat, src_flat, n_elements, BLOCK=BLOCK)
+    return dst
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -165,7 +217,14 @@ def _bridge_weight_grad(
                 # returned grad_b=None, so there is nothing to add here -- just flag it.
                 weight.grad_added_to_main_grad = True
             else:
-                weight.main_grad.add_(grad_quantized_weight)
+                from primus_turbo.pytorch.core.utils import is_gfx1250
+
+                if is_gfx1250():
+                    # NOTE: The bandwith of torch's elementwise add kernel has issue. Use triton to temporary workaround for gfx1250. 
+                    _triton_inplace_add_(weight.main_grad, grad_quantized_weight)
+                else:
+                    weight.main_grad.add_(grad_quantized_weight)
+
                 weight.grad_added_to_main_grad = True
 
             return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None, None
