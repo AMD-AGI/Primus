@@ -44,7 +44,7 @@ import torch
 from torch import Tensor
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # Positional index of dropout_p inside FusedAttnFunc.forward's *args (i.e.
 # inside our captured _capture_tls.captured_args tuple, which excludes ctx).

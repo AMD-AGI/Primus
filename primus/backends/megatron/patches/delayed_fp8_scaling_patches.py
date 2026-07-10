@@ -32,7 +32,7 @@ import torch
 from megatron.core.enums import Fp8Recipe
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # Module-level handle so the MLPerf warmup hook (or any external code) can
 # reach the CudaPrefetchIterator state owned by
