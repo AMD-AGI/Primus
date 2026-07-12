@@ -120,7 +120,7 @@ MaxText (JAX) uses configuration keys surfaced in Primus documentation and MaxTe
 | `enable_checkpointing` | `false` | Enable Orbax (or configured) checkpoint saves. |
 | `async_checkpointing` | `false` | When checkpointing is enabled, use **async** checkpoint workers. |
 
-See `production_docs/03-configuration-reference/maxtext-parameters.md` for the full MaxText parameter table and interaction with training runs.
+See `docs/03-configuration-reference/maxtext-parameters.md` for the full MaxText parameter table and interaction with training runs.
 
 ---
 

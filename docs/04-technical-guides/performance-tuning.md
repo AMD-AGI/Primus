@@ -195,7 +195,7 @@ From `trainer_base.yaml` and model settings:
 
 ### Environment
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` is commonly required for **correct** overlap behavior in TP/PP stacks (see `production_docs/03-configuration-reference/environment-variables.md` and Megatron tests). Primus launch scripts or your cluster setup may set this.
+`CUDA_DEVICE_MAX_CONNECTIONS=1` is commonly required for **correct** overlap behavior in TP/PP stacks (see `docs/03-configuration-reference/environment-variables.md` and Megatron tests). Primus launch scripts or your cluster setup may set this.
 
 ---
 

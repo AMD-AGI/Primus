@@ -142,7 +142,7 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 | Variable | Usage |
 |----------|--------|
-| `TOKENIZED_DATA_PATH` / `PRIMUS_TOKENIZED_DATA_PATH` | Tokenized dataset locations for Megatron hooks and examples (see `production_docs/03-configuration-reference/environment-variables.md`). |
+| `TOKENIZED_DATA_PATH` / `PRIMUS_TOKENIZED_DATA_PATH` | Tokenized dataset locations for Megatron hooks and examples (see `docs/03-configuration-reference/environment-variables.md`). |
 | `TOKENIZED_TRAIN_DATA_PATH`, `TOKENIZED_EVAL_DATA_PATH` | Override output paths in `examples/megatron/prepare.py`. |
 | `DATA_PATH` | General data root used in scripts and CI-style launches. |
 | `HF_TOKEN` | **Required** for gated Hugging Face models and some datasets (TorchTitan `prepare.py`, Kubernetes examples in `examples/README.md`). |

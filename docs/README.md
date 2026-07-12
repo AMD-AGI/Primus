@@ -1,82 +1,139 @@
 # Primus Documentation
 
-Welcome to the Primus documentation! This guide will help you get started with training large-scale foundation models on AMD GPUs.
-
-> **Comprehensive Documentation**: For the complete production documentation set, see [`production_docs/`](../production_docs/README.md). It includes configuration references, parallelism guides, environment variable documentation, and more.
-
-## Documentation Structure
-
-### Getting Started
-
-Start here if you're new to Primus:
-
-- **[Quick Start Guide](./quickstart.md)** - Get up and running in 5 minutes
-- **[CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)** - Complete command-line reference
-- **[CLI Architecture](./cli/CLI-ARCHITECTURE.md)** - Design philosophy and deep dive
-
-### User Guides
-
-Guides for common workflows and features:
-
-- **[Configuration System](../production_docs/02-user-guide/configuration-system.md)** - YAML configuration, presets, overrides, and inheritance
-- **[Deployment Guide](../production_docs/05-operations/deployment.md)** - Container, Slurm, and Kubernetes deployment
-
-### Technical References
-
-In-depth technical documentation:
-
-- **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
-- **[Native SFT & LoRA Quick Start](./README_NATIVE_SFT_LORA_EN.md)** - Megatron-native SFT/LoRA launch guide (BF16/FP8/FP4), no Megatron-Bridge runtime dependency
-- **[Performance Projection](./projection.md)** - Project training performance and memory to multi-node configurations
-- **[Tuning Agent](./tuning_agent.md)** - LLM-driven search for an optimal training config — parallelism plus batching, schedule, memory, MoE-comm, and precision knobs (drives the projection tool as an oracle)
-- **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
-- **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
-- **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
-- **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
-- **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
- - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
- - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
-- **[Flux Diffusion Models](./backends/megatron/diffusion/README.md)** - Flux diffusion model architecture, training, and API reference
-- **[FP8 Training Guide](./backends/megatron/diffusion/fp8_training.md)** - FP8 precision training on AMD MI300X/MI355X: configuration, benchmarks, and tuning
-
-### Production Documentation
-
-For comprehensive coverage, see the [Production Documentation](../production_docs/README.md):
-
-- **[Configuration References](../production_docs/03-configuration-reference/megatron-parameters.md)** - Per-backend YAML parameter documentation
-- **[Environment Variables](../production_docs/03-configuration-reference/environment-variables.md)** - Complete environment variable reference
-- **[Parallelism Strategies](../production_docs/04-technical-guides/parallelism-strategies.md)** - Distributed training parallelism explained
-- **[Performance Tuning](../production_docs/04-technical-guides/performance-tuning.md)** - HipBLASLt, Primus-Turbo, FP8, MoE optimization
-- **[Troubleshooting](../production_docs/05-operations/troubleshooting.md)** - Common issues and solutions
-- **[Architecture](../production_docs/06-developer-guide/architecture.md)** - System design and code architecture
-
-### Help and Support
-
-- **[Troubleshooting Guide](../production_docs/05-operations/troubleshooting.md)** - Common issues and solutions
-- **[Examples](../examples/README.md)** - Real-world training examples and templates
-- **[Preflight Tool](../primus/tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
-
-## Quick Navigation by Use Case
-
-### I want to...
-
-- **Train a model locally** → [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
-- **Run distributed training on Slurm** → [Deployment Guide](../production_docs/05-operations/deployment.md)
-- **Configure my training run** → [Configuration System](../production_docs/02-user-guide/configuration-system.md)
-- **Look up YAML parameters** → [Configuration References](../production_docs/03-configuration-reference/megatron-parameters.md)
-- **Project performance to multi-node** → [Performance Projection](./projection.md)
-- **Auto-tune my training config (parallelism + knobs)** → [Tuning Agent](./tuning_agent.md)
-- **Benchmark performance** → [Benchmark Suite](./benchmark.md)
-- **Understand the CLI design** → [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
-- **Troubleshoot issues** → [Troubleshooting](../production_docs/05-operations/troubleshooting.md)
-
-## External Resources
-
-- [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) - High-performance operators and modules
-- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) - Stability and platform layer
-- [AMD ROCm Documentation](https://rocm.docs.amd.com/)
-- [TorchTitan Documentation](https://github.com/pytorch/torchtitan)
+Production-grade documentation for the Primus large-scale foundation model training framework on AMD GPUs.
 
 ---
 
-**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AGI/Primus/issues).
+## Quick Navigation by Audience
+
+| I am a... | Start here |
+|-----------|------------|
+| **New user** getting started | [Getting Started](./01-getting-started/overview.md) |
+| **User** running training jobs | [User Guide](./02-user-guide/pretraining.md) |
+| **User** writing YAML configs | [Configuration Reference](./03-configuration-reference/megatron-parameters.md) |
+| **Engineer** tuning performance | [Technical Guides](./04-technical-guides/performance-tuning.md) |
+| **Operator** deploying to production | [Operations](./05-operations/deployment.md) |
+| **Contributor** to the codebase | [Developer Guide](./06-developer-guide/architecture.md) |
+
+---
+
+## Documentation Structure
+
+### [01 - Getting Started](./01-getting-started/)
+
+Start here if you are new to Primus.
+
+- [Project Overview](./01-getting-started/overview.md) -- what Primus does, who it is for, key capabilities
+- [Installation Guide](./01-getting-started/installation.md) -- prerequisites, Docker/bare-metal/Slurm setup
+- [Quick Start](./01-getting-started/quickstart.md) -- first training run in 5 minutes
+- [Glossary](./01-getting-started/glossary.md) -- terms, acronyms, and domain concepts
+
+### [02 - User Guide](./02-user-guide/)
+
+Core workflows and day-to-day usage.
+
+- [CLI Reference](./02-user-guide/cli-reference.md) -- `primus-cli` modes, flags, and subcommands
+- [Configuration System](./02-user-guide/configuration-system.md) -- YAML config model, presets, overrides, inheritance
+- [Pretraining](./02-user-guide/pretraining.md) -- pretraining **concepts**: backends, YAML structure, parallelism, config inventory
+- [Backend Training Recipes](./02-user-guide/training-recipes.md) -- pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [Post-Training](./02-user-guide/posttraining.md) -- SFT and LoRA fine-tuning via Megatron Bridge
+- [Benchmarking](./02-user-guide/benchmarking.md) -- GEMM, RCCL, and dense-GEMM benchmark suites
+- [Preflight](./02-user-guide/preflight.md) -- cluster diagnostics and environment validation
+- [Projection](./02-user-guide/projection.md) -- memory and performance projection tools
+
+### [03 - Configuration Reference](./03-configuration-reference/)
+
+Parameter references for Primus presets, backend-facing keys, and commonly used environment variables.
+
+- [Megatron Parameters](./03-configuration-reference/megatron-parameters.md) -- Megatron-LM backend YAML parameters and Primus overrides
+- [TorchTitan Parameters](./03-configuration-reference/torchtitan-parameters.md) -- Primus TorchTitan preset keys and common JobConfig fields
+- [MaxText Parameters](./03-configuration-reference/maxtext-parameters.md) -- Primus MaxText overlay defaults and common fields
+- [Megatron Bridge Parameters](./03-configuration-reference/megatron-bridge-parameters.md) -- Megatron Bridge recipe, SFT, and pretraining fields surfaced through Primus
+- [Environment Variables](./03-configuration-reference/environment-variables.md) -- practical reference for commonly encountered environment variables
+
+### [04 - Technical Guides](./04-technical-guides/)
+
+Deep technical topics for advanced users.
+
+- [Parallelism Strategies](./04-technical-guides/parallelism-strategies.md) -- DP, TP, PP, SP, CP, EP, FSDP explained
+- [Parallelism Configuration](./04-technical-guides/parallelism-configuration.md) -- per-backend parallelism setup and batch size relationships
+- [Collective Operations](./04-technical-guides/collective-operations.md) -- NCCL/RCCL operations and their role in each parallelism strategy
+- [Performance Tuning](./04-technical-guides/performance-tuning.md) -- HipBLASLt, Primus-Turbo, FP8, MoE optimization
+- [MoE Training Deep-Dive](./04-technical-guides/moe-training.md) -- bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
+- [Data Preparation](./04-technical-guides/data-preparation.md) -- tokenization, data formats, mock data
+- [Checkpoint Management](./04-technical-guides/checkpoint-management.md) -- formats, save/load, distributed checkpointing
+- [Multi-Node Networking](./04-technical-guides/multi-node-networking.md) -- InfiniBand, RoCE, AINIC configuration
+- [Profiling & Observability](./04-technical-guides/profiling-and-observability.md) -- Torch profiler, TraceLens, memory snapshots, projection, pp_vis
+- [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) -- TensorBoard, WandB, MLflow setup per backend
+- [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) -- graceful exit, auto-resume, in-process restart, torchft
+- [Determinism & Reproducibility](./04-technical-guides/determinism-and-reproducibility.md) -- deterministic mode, seeds, trade-offs
+
+### [05 - Operations](./05-operations/)
+
+Production deployment and operational guidance.
+
+- [Deployment](./05-operations/deployment.md) -- container, Slurm, and Kubernetes deployment
+- [Monitoring and Logging](./05-operations/monitoring-logging.md) -- WandB, TensorBoard, MLflow, Primus logging
+- [Troubleshooting](./05-operations/troubleshooting.md) -- common failures, diagnostics, and fixes
+- [Security](./05-operations/security.md) -- secrets handling, container security, dependencies
+
+### [06 - Developer Guide](./06-developer-guide/)
+
+For contributors and maintainers.
+
+- [Architecture](./06-developer-guide/architecture.md) -- system design, runtime, backends, patch system
+- [Contributing](./06-developer-guide/contributing.md) -- development setup, code style, PR process
+- [Testing](./06-developer-guide/testing.md) -- test types, running tests, CI pipeline
+- [Extending Backends](./06-developer-guide/extending-backends.md) -- adding new training backends
+- [Adding Models](./06-developer-guide/adding-models.md) -- adding model configurations per backend
+- [Model Support Matrix](./06-developer-guide/model-support-matrix.md) -- supported models per backend and GPU
+
+### [Appendix](./appendix/)
+
+- [Documentation Gaps](./appendix/gaps-and-verification.md) -- items needing maintainer verification
+
+---
+
+## Quick Use-Case Navigation
+
+### I want to...
+
+| Goal | Document |
+|------|----------|
+| Understand what Primus is | [Overview](./01-getting-started/overview.md) |
+| Install Primus | [Installation](./01-getting-started/installation.md) |
+| Run my first training | [Quick Start](./01-getting-started/quickstart.md) |
+| Get an exact run command for my model/GPU | [Backend Training Recipes](./02-user-guide/training-recipes.md) |
+| Write a training YAML config | [Configuration System](./02-user-guide/configuration-system.md) |
+| Look up a Megatron parameter | [Megatron Parameters](./03-configuration-reference/megatron-parameters.md) |
+| Look up a TorchTitan parameter | [TorchTitan Parameters](./03-configuration-reference/torchtitan-parameters.md) |
+| Look up an environment variable | [Environment Variables](./03-configuration-reference/environment-variables.md) |
+| Understand parallelism strategies | [Parallelism Strategies](./04-technical-guides/parallelism-strategies.md) |
+| Configure parallelism for my model | [Parallelism Configuration](./04-technical-guides/parallelism-configuration.md) |
+| Tune training performance | [Performance Tuning](./04-technical-guides/performance-tuning.md) |
+| Train a Mixture-of-Experts model | [MoE Training Deep-Dive](./04-technical-guides/moe-training.md) |
+| Profile a training run | [Profiling & Observability](./04-technical-guides/profiling-and-observability.md) |
+| Track experiments (WandB/MLflow/TensorBoard) | [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) |
+| Survive node failures on long runs | [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) |
+| Reproduce results bit-for-bit | [Determinism & Reproducibility](./04-technical-guides/determinism-and-reproducibility.md) |
+| Prepare training data | [Data Preparation](./04-technical-guides/data-preparation.md) |
+| Deploy to a Slurm cluster | [Deployment](./05-operations/deployment.md) |
+| Debug a training failure | [Troubleshooting](./05-operations/troubleshooting.md) |
+| Contribute to Primus | [Contributing](./06-developer-guide/contributing.md) |
+| Understand the code architecture | [Architecture](./06-developer-guide/architecture.md) |
+| Add a new training backend | [Extending Backends](./06-developer-guide/extending-backends.md) |
+
+---
+
+## External Resources
+
+- [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) -- high-performance operators and kernels
+- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) -- external stability/platform layer; this repository does not include a production integration guide
+- [AMD ROCm Documentation](https://rocm.docs.amd.com/)
+- [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
+- [TorchTitan](https://github.com/pytorch/torchtitan)
+- [MaxText](https://github.com/google/maxtext)
+
+---
+
+**Need help?** Open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).

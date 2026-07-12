@@ -147,7 +147,7 @@ For multi-node (Slurm example):
 primus-cli slurm srun -N 4 -- preflight --host --gpu --network
 ```
 
-See `production_docs/02-user-guide/preflight.md` for flags, output locations (`output/preflight` by default), and interpretation.
+See `docs/02-user-guide/preflight.md` for flags, output locations (`output/preflight` by default), and interpretation.
 
 Set **`PRIMUS_EXPECT_IB=1`** when InfiniBand is **required** for validation; preflight uses this in `primus/tools/preflight/network/network_standard.py`.
 
@@ -157,7 +157,7 @@ Set **`PRIMUS_EXPECT_IB=1`** when InfiniBand is **required** for validation; pre
 primus-cli slurm srun -N 4 -- benchmark rccl --op all_reduce --min-bytes 1M --max-bytes 128M
 ```
 
-This exercises collective bandwidth and latency across a message-size sweep. See `production_docs/02-user-guide/benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
+This exercises collective bandwidth and latency across a message-size sweep. See `docs/02-user-guide/benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
 
 ### Verbose RCCL logs
 
@@ -191,7 +191,7 @@ Use for short, controlled runs; **TRACE** can be extremely verbose.
 | **Wrong interface** | Restrict with `NCCL_SOCKET_IFNAME=^docker0,lo` (exclude loopback and Docker bridges). |
 | **GID / RoCE issues** | `NCCL_IB_GID_INDEX` vs site documentation; RoCE v2 settings (`NCCL_IB_ROCE_VERSION_NUM`). |
 
-For a consolidated list of `NCCL_*` / `RCCL_*` variables, see `production_docs/03-configuration-reference/environment-variables.md` and the upstream [RCCL environment variables](https://rocm.docs.amd.com/projects/rccl/en/develop/api-reference/env-variables.html) documentation.
+For a consolidated list of `NCCL_*` / `RCCL_*` variables, see `docs/03-configuration-reference/environment-variables.md` and the upstream [RCCL environment variables](https://rocm.docs.amd.com/projects/rccl/en/develop/api-reference/env-variables.html) documentation.
 
 ---
 

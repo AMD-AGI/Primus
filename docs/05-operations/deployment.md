@@ -233,5 +233,5 @@ Required variables for distributed training:
 ## Related documentation
 
 - [CLI reference](../02-user-guide/cli-reference.md)
-- [Primus CLI user guide](../../docs/cli/PRIMUS-CLI-GUIDE.md) (upstream examples and troubleshooting)
+- [Primus CLI user guide](../../docs_deprecated/cli/PRIMUS-CLI-GUIDE.md) (upstream examples and troubleshooting)
 - [Multi-node networking](../04-technical-guides/multi-node-networking.md)
