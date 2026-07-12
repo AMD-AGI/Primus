@@ -35,7 +35,6 @@ from primus.core.utils.module_utils import (
     warning_rank_0,
 )
 
-
 # Primus-internal params that are not part of MaxText's config schema. MaxText
 # v26.4's pyconfig raises on unknown fields (v26.3 merely warns), so these must
 # be stripped before the config is handed to ``pyconfig.initialize``.
