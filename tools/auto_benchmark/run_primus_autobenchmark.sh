@@ -185,7 +185,8 @@ execute_benchmark_run() {
         echo -e " ${CHECK} Copied edited/overridden config to: ${CYAN}$cfg_file${RESET}"
     fi
 
-    export EXP="${BACKEND_BASE_DIR}/${DEVICE}/$(basename "$cfg_file")"
+    EXP="${BACKEND_BASE_DIR}/${DEVICE}/$(basename "$cfg_file")"
+    export EXP
     echo -e " ${CHECK} EXP set to: ${CYAN}$EXP${RESET}\n"
 
     echo -e " ${DOT} Changing to Primus root directory: ${CYAN}$PRIMUS_ROOT${RESET}"

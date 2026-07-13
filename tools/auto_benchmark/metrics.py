@@ -19,9 +19,7 @@ ERROR_STATUS = "Error found - check log"
 OK_STATUS = "OK"
 
 ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
-LOG_EXIT_CODE_REGEX = re.compile(
-    r"primus launcher exited with code (\d+)", re.IGNORECASE
-)
+LOG_EXIT_CODE_REGEX = re.compile(r"primus launcher exited with code (\d+)", re.IGNORECASE)
 
 LOG_ERROR_PATTERNS = (
     re.compile(r"Traceback \(most recent call last\)", re.IGNORECASE),
@@ -92,9 +90,7 @@ MEGATRON_ITERATION_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-MEGATRON_FILENAME_REGEX = re.compile(
-    r"(?P<model>.+?)_megatron_(?P<device>MI\d+X?)", re.IGNORECASE
-)
+MEGATRON_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_megatron_(?P<device>MI\d+X?)", re.IGNORECASE)
 
 TORCHTITAN_STEP_REGEX = re.compile(
     r"step:\s*(\d+).*?"
@@ -107,9 +103,7 @@ TORCHTITAN_STEP_REGEX = re.compile(
 TORCHTITAN_BS_REGEX = re.compile(r"training\.local_batch_size\s*\.{2,}\s*(\d+)")
 TORCHTITAN_SEQ_REGEX = re.compile(r"training\.seq_len\s*\.{2,}\s*(\d+)")
 
-TORCHTITAN_FILENAME_REGEX = re.compile(
-    r"(?P<model>.+?)_torchtitan_(?P<device>MI\d+X?)", re.IGNORECASE
-)
+TORCHTITAN_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_torchtitan_(?P<device>MI\d+X?)", re.IGNORECASE)
 
 PRECISION_REGEX = re.compile(r"(BF16|FP8)", re.IGNORECASE)
 
@@ -450,9 +444,7 @@ def megatron_collect_rows():
         records = megatron_parse_log_file(path)
         stats = megatron_compute_averages(records)
 
-        bs, seq, gbs = load_training_params(
-            "megatron", meta["device"], meta["model"], fname, log_dir
-        )
+        bs, seq, gbs = load_training_params("megatron", meta["device"], meta["model"], fname, log_dir)
 
         if has_error or not stats:
             if gbs == "-" and records:
@@ -474,9 +466,7 @@ def megatron_collect_rows():
             if gbs == "-":
                 gbs = stats["gbs"]
 
-            tokens_gpu = (
-                f"{stats['tokens_gpu']:.2f}" if stats["tokens_gpu"] is not None else "-"
-            )
+            tokens_gpu = f"{stats['tokens_gpu']:.2f}" if stats["tokens_gpu"] is not None else "-"
             values = [
                 OK_STATUS,
                 "megatron",
@@ -503,10 +493,7 @@ def megatron_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [
-        [entry["model"], entry["run"], *entry["values"]]
-        for entry in entries
-    ]
+    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
@@ -628,9 +615,7 @@ def torchtitan_collect_rows():
         steps = torchtitan_parse_log_file(path)
         stats = torchtitan_compute_averages(steps)
 
-        bs, seq, gbs = load_training_params(
-            "torchtitan", meta["device"], meta["model"], fname, log_dir
-        )
+        bs, seq, gbs = load_training_params("torchtitan", meta["device"], meta["model"], fname, log_dir)
         if bs == "-":
             log_bs, _ = torchtitan_parse_log_training_fallback(path)
             if log_bs is not None:
@@ -683,10 +668,7 @@ def torchtitan_collect_rows():
 
     assign_run_labels(entries)
 
-    rows = [
-        [entry["model"], entry["run"], *entry["values"]]
-        for entry in entries
-    ]
+    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
     rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), row[7]))
     return rows
 
