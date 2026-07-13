@@ -1923,20 +1923,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         self.hidden_shape = hidden_states.shape
         # view as [num_tokens, hidden_size]
         hidden_states = hidden_states.view(-1, self.config.hidden_size)
-        num_tokens = hidden_states.shape[0]
-
-        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
-        token_indices = None
-        if self.moe_router_force_load_balancing:
-            token_indices = (
-                torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
-                    num_tokens, self.config.moe_router_topk
-                )
-                % self.config.num_moe_experts
-            )
-
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
-            hidden_states, probs, routing_map, token_indices
+            hidden_states, probs, routing_map=routing_map
         )
         return hidden_states, probs
 

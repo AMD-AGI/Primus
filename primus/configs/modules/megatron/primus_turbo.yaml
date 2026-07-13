@@ -38,6 +38,10 @@ turbo_deepep_use_comm_stream: false
 # ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0
 
+# ===== Mega MoE =====
+# fully fused MoE layer replacement (EP-only/TP=1/bf16)
+use_turbo_mega_moe: false
+
 # ===== Layer Norm =====
 # operator switch
 use_turbo_rms_norm: false
