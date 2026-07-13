@@ -33,8 +33,6 @@ from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
     make_sharded_tensors_for_checkpoint,
 )
-
-from primus.modules.module_utils import log_rank_0
 from primus_turbo.pytorch.modules.moe.mega_moe import MegaMoE
 
 
@@ -50,9 +48,15 @@ class PrimusTurboMegaMoELayer(MegatronModule):
     ) -> None:
         super().__init__(config)
 
-        assert config.tensor_model_parallel_size == 1, "MegaMoE adapter requires tensor_model_parallel_size == 1 (EP-only)"
-        assert config.params_dtype == torch.bfloat16, "MegaMoE adapter only supports bf16 (params_dtype must be torch.bfloat16)"
-        assert pg_collection is not None and pg_collection.ep is not None, "MegaMoE adapter requires an expert-parallel process group"
+        assert (
+            config.tensor_model_parallel_size == 1
+        ), "MegaMoE adapter requires tensor_model_parallel_size == 1 (EP-only)"
+        assert (
+            config.params_dtype == torch.bfloat16
+        ), "MegaMoE adapter only supports bf16 (params_dtype must be torch.bfloat16)"
+        assert (
+            pg_collection is not None and pg_collection.ep is not None
+        ), "MegaMoE adapter requires an expert-parallel process group"
 
         self._assert_supported_config(config)
 
@@ -88,9 +92,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
             init_method=config.init_method,
             output_layer_init_method=config.output_layer_init_method,
             router_dtype=(torch.float64 if config.moe_router_dtype == "fp64" else torch.float32),
-            get_rng_state_tracker=(
-                get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
-            ),
+            get_rng_state_tracker=(get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None),
             rng_tracker_name=get_expert_parallel_rng_tracker_name(),
             device=torch.cuda.current_device() if torch.cuda.is_available() else None,
             dtype=torch.bfloat16,
@@ -121,45 +123,42 @@ class PrimusTurboMegaMoELayer(MegatronModule):
 
         # Tolerate configs where these newer fields are absent.
         assert not getattr(config, "moe_seq_aux_loss_coeff", None), (
-            "MegaMoE only supports the standard load_balancing aux loss; "
-            "set moe_seq_aux_loss_coeff=0."
+            "MegaMoE only supports the standard load_balancing aux loss; " "set moe_seq_aux_loss_coeff=0."
         )
         assert not getattr(config, "moe_global_aux_loss_coeff", None), (
-            "MegaMoE only supports the standard load_balancing aux loss; "
-            "set moe_global_aux_loss_coeff=0."
+            "MegaMoE only supports the standard load_balancing aux loss; " "set moe_global_aux_loss_coeff=0."
         )
-        assert not config.moe_z_loss_coeff, (
-            "MegaMoE does not implement router z-loss; set moe_z_loss_coeff=None/0."
-        )
+        assert (
+            not config.moe_z_loss_coeff
+        ), "MegaMoE does not implement router z-loss; set moe_z_loss_coeff=None/0."
         load_balancing_type = config.moe_router_load_balancing_type
         load_balancing_types = (
-            load_balancing_type
-            if isinstance(load_balancing_type, (list, tuple))
-            else [load_balancing_type]
+            load_balancing_type if isinstance(load_balancing_type, (list, tuple)) else [load_balancing_type]
         )
         assert "sinkhorn" not in load_balancing_types, "MegaMoE does not support sinkhorn load balancing."
-        assert not config.moe_input_jitter_eps, (
-            "MegaMoE does not implement moe_input_jitter_eps; set it to None."
-        )
-        assert config.moe_expert_capacity_factor is None, (
-            "MegaMoE is dropless; moe_expert_capacity_factor is not supported (set to None)."
-        )
+        assert (
+            not config.moe_input_jitter_eps
+        ), "MegaMoE does not implement moe_input_jitter_eps; set it to None."
+        assert (
+            config.moe_expert_capacity_factor is None
+        ), "MegaMoE is dropless; moe_expert_capacity_factor is not supported (set to None)."
         if config.moe_router_score_function == "softmax":
             assert config.moe_router_pre_softmax, (
                 "MegaMoE softmax routing matches Megatron only with "
                 "moe_router_pre_softmax=True; enable it or use score_function='sigmoid'."
             )
-        assert config.moe_router_dtype in (None, "fp32", "fp64"), (
-            f"unsupported moe_router_dtype {config.moe_router_dtype!r}"
-        )
+        assert config.moe_router_dtype in (
+            None,
+            "fp32",
+            "fp64",
+        ), f"unsupported moe_router_dtype {config.moe_router_dtype!r}"
 
         assert config.gated_linear_unit, (
             "MegaMoE hardcodes a gated SwiGLU MLP; set gated_linear_unit=True "
             "or use the non-fused MoE layer."
         )
         assert config.activation_func in (F.silu, torch.nn.SiLU), (
-            "MegaMoE hardcodes SiLU activation; set activation_func=F.silu "
-            "or use the non-fused MoE layer."
+            "MegaMoE hardcodes SiLU activation; set activation_func=F.silu " "or use the non-fused MoE layer."
         )
         assert not config.add_bias_linear, (
             "MegaMoE cannot apply expert FC biases (fused kernel has no bias); "
@@ -174,9 +173,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if padding_mask is not None:
             padding_mask = padding_mask.transpose(0, 1).bool()
-        output, aux_loss = self.mega_moe(
-            hidden_states, padding_mask=padding_mask, return_aux_loss=True
-        )
+        output, aux_loss = self.mega_moe(hidden_states, padding_mask=padding_mask, return_aux_loss=True)
         if aux_loss is not None:
             # tracker size incl. MTP layers to match Megatron indexing
             num_layers = self.config.num_layers
