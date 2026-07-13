@@ -1149,7 +1149,6 @@ class TestDualFP8Convergence(PrimusUT):
 
 _ATTN_DIM = 256
 _ATTN_HEADS = 4
-_ATTN_HEAD_DIM = _ATTN_DIM // _ATTN_HEADS  # 64
 _ATTN_SEQ = 32
 _ATTN_BATCH = 8
 _ATTN_N_STEPS = 200

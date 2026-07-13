@@ -50,7 +50,7 @@ import torch.nn as nn
 # attention backward binds the pinned ``aiter::mha_bwd`` instead of the stale one
 # vendored by transformer_engine below (ROCm/aiter#1332). Without it, attention
 # backward crashes on gfx942/gfx950.
-import transformer_engine.pytorch as te  # noqa: F401  (import side effects only)
+import transformer_engine.pytorch  # noqa: F401  (import side effects only)
 from megatron.core.extensions.transformer_engine import TEDotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import build_module
