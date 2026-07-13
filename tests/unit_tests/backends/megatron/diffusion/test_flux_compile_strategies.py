@@ -110,7 +110,7 @@ class TestFluxCompileStrategies(PrimusUT):
             output_lines.append(msg)
 
         with patch("torch.compile", side_effect=mock_compile), patch(
-            "primus.modules.module_utils.log_rank_0", side_effect=capture_log
+            "primus.core.utils.module_utils.log_rank_0", side_effect=capture_log
         ):
             model.compile_model()
 
