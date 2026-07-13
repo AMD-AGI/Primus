@@ -112,13 +112,8 @@ set -e
 # Cluster geometry (8 nodes x 8 GPUs = 64 GPUs)
 export NNODES=8
 
-export USING_AINIC="${USING_AINIC:-1}"
 export CLEAN_DOCKER_CONTAINER=1
 
-# Parallelism: EP-only compute + PP staging. DP = NNODES*GPUS_PER_NODE/(TP*PP) = 8
-export PRIMUS_TP=1
-export PRIMUS_PP=8
-export PRIMUS_EP=8
 export USING_AINIC=1
 
 # Toggle the fused MegaMoE layer + model config
@@ -134,6 +129,11 @@ bash examples/run_slurm_pretrain_cli.sh \
   --expert_model_parallel_size 8 \
   --moe_shared_expert_intermediate_size None \
   --mtp_num_layers 0 \
+  --moe_shared_expert_intermediate_size None \
+  --recompute_granularity full \
+  --recompute_method uniform \
+  --recompute_num_layers 1 \
+  --recompute_layer_ids null \
   --enable_primus_turbo True \
   --use_turbo_mega_moe True \
   --mock_data True
