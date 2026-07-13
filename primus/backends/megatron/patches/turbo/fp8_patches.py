@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -28,7 +28,9 @@ def _is_fp8_can_patch(ctx: PatchContext) -> bool:
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
-    condition=_is_fp8_can_patch,
+    condition=lambda ctx: (
+        _is_fp8_can_patch(ctx) and not getattr(get_args(ctx), "disable_fp8_context_patches", False)
+    ),
 )
 def patch_fp8_context(ctx: PatchContext):
     """
