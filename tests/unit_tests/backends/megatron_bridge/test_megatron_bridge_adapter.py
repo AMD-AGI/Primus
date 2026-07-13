@@ -29,13 +29,26 @@ def adapter():
 
 @pytest.fixture
 def sys_modules_guard(adapter):
-    """Drop any stub modules a test injected, keeping tests isolated."""
+    """Isolate stub-eligible modules for the duration of a test.
+
+    Drops any relevant modules BOTH before and after the test. The
+    before-drop matters because some entries (e.g. ``megatron.energon``) are
+    real, top-level packages that may already be installed and cached in
+    ``sys.modules`` from elsewhere in the session. If left in place, the stub
+    installer's ``if pkg_name in sys.modules: continue`` fast-path would skip
+    them, bypassing a test's forced-missing ``import_module`` mock and breaking
+    assertions that expect every package to be stubbed.
+    """
     prefixes = ("modelopt",) + adapter._BRIDGE_OPTIONAL_PACKAGES
-    before = set(sys.modules)
+
+    def _drop():
+        for key in list(sys.modules):
+            if any(key == p or key.startswith(p + ".") for p in prefixes):
+                sys.modules.pop(key, None)
+
+    _drop()
     yield
-    for key in set(sys.modules) - before:
-        if any(key == p or key.startswith(p + ".") for p in prefixes):
-            sys.modules.pop(key, None)
+    _drop()
 
 
 # ---------------------------------------------------------------------------
