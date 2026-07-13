@@ -83,6 +83,50 @@ def run_script(
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
+def run_posttrain_script(
+    ut_name: str,
+    tag: str,
+    exp_path: str,
+    env_override: dict = None,
+    extra_args: list[str] = None,
+):
+    """Like run_script, but for the "posttrain" suite (SFT/alignment).
+
+    SFT experiment configs declare a `modules.post_trainer` section (instead
+    of `modules.pre_trainer`), which the CLI only loads via `train posttrain`
+    (see primus/cli/subcommands/train.py). The "Training completed." marker
+    that run_training_script asserts on is emitted generically by
+    PrimusRuntime._run_trainer_lifecycle for any module, so it applies here
+    unchanged.
+    """
+    shell_entry = "./runner/primus-cli"
+    env = os.environ.copy()
+    if env_override:
+        env.update(env_override)
+    env["EXP"] = exp_path
+
+    ut_log_path = os.environ.get("UT_LOG_PATH", "ut_out")
+    train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
+    env["TRAIN_LOG"] = train_log_path
+
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "posttrain",
+        "--config",
+        exp_path,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
+
+
 class TestMegatronTrainer(PrimusUT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -592,6 +636,80 @@ class TestMegatronTrainer(PrimusUT):
                 "--overlap_param_gather",
                 "1",
             ],
+        )
+
+    def test_mamba_370M(self):
+        # Mamba (MambaStack) is the only case here exercising core/models/mamba/*.
+        # It doesn't run through Primus Turbo attention, so it goes through
+        # megatron-core's own attention probe on the default `auto` backend,
+        # which attention_backend_patches.py makes respect this image's baked
+        # NVTE_FLASH_ATTN=0 (stock megatron would assert-crash on it).
+        run_script(
+            self.__class__.__name__,
+            "mamba_370M",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mamba_370M-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "2",
+                "--global_batch_size",
+                "16",
+            ],
+        )
+
+    def test_zebra_llama_1B_hybrid(self):
+        # Zebra-Llama is Primus's hybrid Mamba+MLA architecture (HybridStack),
+        # a separate code path from both the GPT TransformerBlock and the
+        # pure-Mamba MambaStack above. num_layers=8 is the minimum that keeps
+        # HybridStack.allocate_layers's default hybrid_attention_ratio=0.25
+        # from allocating zero attention layers (which would divide by zero).
+        # Like Mamba, it relies on the ROCm-safe `auto` backend (see
+        # test_mamba_370M and attention_backend_patches.py).
+        run_script(
+            self.__class__.__name__,
+            "zebra_llama_1B_hybrid",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_llama_1B-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "8",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "2",
+                "--global_batch_size",
+                "16",
+            ],
+        )
+
+    def test_qwen2_sft_lora(self):
+        # Verified on a16-19 (MI300X x8, pure data parallelism). This is the only
+        # E2E test here exercising the "posttrain" CLI suite (MegatronSFTTrainer)
+        # and primus/backends/megatron/peft/*.py -- LoRA is activated via the
+        # `lora.enabled: true` block in test_megatron_trainer_sft_lora.yaml, and
+        # coverage-confirmed the base-checkpoint pre-wrap load, the LoRA wrap, and
+        # the module_matcher's TE-Linear path all run for real.
+        #
+        # The posttrain hook (01_convert_checkpoints.py) always HF->Megatron-
+        # converts `tokenizer_model` into the base checkpoint when
+        # pretrained_checkpoint/load are unset, so despite the name this uses a
+        # tiny stand-in checkpoint, not real Qwen2.5-7B weights -- see the yaml.
+        run_posttrain_script(
+            self.__class__.__name__,
+            "qwen2_sft_lora",
+            exp_path="tests/trainer/test_megatron_trainer_sft_lora.yaml",
+            env_override={},
+            # This tiny model's head_dim (hidden_size/num_attention_heads = 2) is
+            # below what the image's fused-attention CK kernel supports, so pin
+            # the unfused eager path. Passed as an arg (coerced to AttnBackend.
+            # unfused) so the test owns this regardless of the yaml;
+            # attention_backend_patches.py forces it over the image's baked
+            # NVTE_FUSED_ATTN=1.
+            extra_args=["--attention_backend", "unfused"],
         )
 
     def test_deepseekv2_lite_uep(self):
