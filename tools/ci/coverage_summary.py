@@ -86,7 +86,7 @@ def _tier(pct: float) -> str:
 NOTES = {
     "core": "\U0001F511 shared infra imported by every backend/training run",
     "backends/megatron": (
-        "100+ patches gated by fp8 / MoE routing / zero-bubble-pp / fsdp2 / muon flags; "
+        "100+ patches gated by fp8 / MoE routing / zero-bubble-pp / fsdp2 flags; "
         "CI E2E only runs 1-2 fixed configs"
     ),
     "backends/transformer_engine": "fp8 GEMM/attention-overlap kernels; only exercised when an E2E run enables fp8",

@@ -92,7 +92,7 @@ State only what the current code confirms; never invent a flag, patch, or upstre
 For "how do I use feature X" requests (deepep is one such example), locate it live instead of recalling it:
 
 ```bash
-rg -ni "<keyword>" primus/backends primus/configs   # e.g. deepep, fp8, zero_bubble, muon
+rg -ni "<keyword>" primus/backends primus/configs   # e.g. deepep, fp8, zero_bubble
 # no rg: grep -rni "<keyword>" primus/backends primus/configs --include=*.py
 ```
 
