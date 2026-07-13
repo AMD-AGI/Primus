@@ -12,7 +12,7 @@ fallback. The agent returns the configuration that maximizes `tokens/s/GPU`
 subject to a per-GPU memory safety margin. See [Knobs Searched](#knobs-searched)
 for the full set of levers it tunes.
 
-- **Package**: [`primus/agents/tuning_agent/`](../primus/agents/tuning_agent/)
+- **Package**: [`primus/agents/tuning_agent/`](../../primus/agents/tuning_agent/)
 - **Entry point**: `python -m primus.agents.tuning_agent`
 
 This document is both the **user/operator guide** (installation, configuration,
@@ -330,7 +330,7 @@ are consumed by the analytical communication model (see
 [`projection.md` → Communication Modeling](./projection.md#communication-modeling)).
 
 A complete example ships at
-[`examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml`](../examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml):
+[`examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml`](../../examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml):
 
 ```yaml
 target_cluster:
@@ -712,5 +712,5 @@ the agent small.
 
 - [Projection](./projection.md) — memory + performance projection internals,
   including the benchmark-based memory projection the agent relies on.
-- [Tuning Agent package README](../primus/agents/tuning_agent/README.md) —
+- [Tuning Agent package README](../../primus/agents/tuning_agent/README.md) —
   quickstart reference inside the source tree.

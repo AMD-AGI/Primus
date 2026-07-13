@@ -14,7 +14,7 @@ The codebase references an external `primus_turbo` Python package extensively, b
 
 ### Replay Feature Status
 
-The CLI Architecture document (`docs/cli/CLI-ARCHITECTURE.md`) describes a `--replay` feature for reproducing experiments from saved snapshots. It is unclear whether this feature is fully implemented or aspirational.
+The CLI Architecture document (`docs/06-developer-guide/cli-architecture.md`) describes a `--replay` feature for reproducing experiments from saved snapshots. It is unclear whether this feature is fully implemented or aspirational.
 
 **Action needed**: Verify if `--replay` is functional and document its current status.
 
@@ -58,13 +58,15 @@ The CLI Architecture document describes an auto-saved experiment snapshot struct
 
 **Action needed**: Verify the snapshot directory structure matches what the code actually produces.
 
-### Missing Documentation Pages
+### Missing Documentation Pages (legacy docs)
 
-The current stale links are in `docs/cli/README.md`, which references pages that do not exist:
-- `docs/configuration.md`
-- `docs/slurm-container.md`
+After the docs reorganization, these stale links live only in the deprecated docs at `docs_deprecated/cli/README.md`, which references pages that do not exist:
+- `docs_deprecated/configuration.md`
+- `docs_deprecated/slurm-container.md`
 
-**Action needed**: Either create these pages, remove the links, or redirect to corresponding `production_docs/` pages.
+The production docs under `docs/` neither contain these pages nor link to them, so this is now a legacy-only concern.
+
+**Action needed**: Optionally remove these dangling links from `docs_deprecated/`, since that folder is deprecated.
 
 ---
 
@@ -111,9 +113,9 @@ A small number of environment variables found in code may not be fully documente
 
 ### Test Coverage
 
-`tests/README.md` now contains a test overview and commands. Remaining work is to keep its directory layout and scope aligned with `production_docs/06-developer-guide/testing.md`.
+`tests/README.md` now contains a test overview and commands. Remaining work is to keep its directory layout and scope aligned with `docs/06-developer-guide/testing.md`.
 
-**Action needed**: Review whether `tools/README.md` or additional tool-specific docs are needed.
+**Action needed**: Review whether additional tool-specific docs are needed. A tooling index now exists at `docs/06-developer-guide/tooling.md`, linking the per-tool READMEs under `tools/`.
 
 ---
 

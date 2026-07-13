@@ -12,7 +12,7 @@ Start here if you're new to Primus:
 
 - **[Quick Start Guide](./quickstart.md)** - Get up and running in 5 minutes
 - **[CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)** - Complete command-line reference
-- **[CLI Architecture](./cli/CLI-ARCHITECTURE.md)** - Design philosophy and deep dive
+- **[CLI Architecture](../docs/06-developer-guide/cli-architecture.md)** - Design philosophy and deep dive
 
 ### User Guides
 
@@ -26,9 +26,9 @@ Guides for common workflows and features:
 In-depth technical documentation:
 
 - **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
-- **[Native SFT & LoRA Quick Start](./README_NATIVE_SFT_LORA_EN.md)** - Megatron-native SFT/LoRA launch guide (BF16/FP8/FP4), no Megatron-Bridge runtime dependency
+- **[Native SFT & LoRA Quick Start](../docs/04-technical-guides/native-sft-lora.md)** - Megatron-native SFT/LoRA launch guide (BF16/FP8/FP4), no Megatron-Bridge runtime dependency
 - **[Performance Projection](./projection.md)** - Project training performance and memory to multi-node configurations
-- **[Tuning Agent](./tuning_agent.md)** - LLM-driven search for an optimal training config — parallelism plus batching, schedule, memory, MoE-comm, and precision knobs (drives the projection tool as an oracle)
+- **[Tuning Agent](../docs/02-user-guide/tuning-agent.md)** - LLM-driven search for an optimal training config — parallelism plus batching, schedule, memory, MoE-comm, and precision knobs (drives the projection tool as an oracle)
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
@@ -36,8 +36,8 @@ In-depth technical documentation:
 - **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
  - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
  - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
-- **[Flux Diffusion Models](./backends/megatron/diffusion/README.md)** - Flux diffusion model architecture, training, and API reference
-- **[FP8 Training Guide](./backends/megatron/diffusion/fp8_training.md)** - FP8 precision training on AMD MI300X/MI355X: configuration, benchmarks, and tuning
+- **[Flux Diffusion Models](../docs/04-technical-guides/diffusion-models/README.md)** - Flux diffusion model architecture, training, and API reference
+- **[FP8 Training Guide](../docs/04-technical-guides/diffusion-models/fp8_training.md)** - FP8 precision training on AMD MI300X/MI355X: configuration, benchmarks, and tuning
 
 ### Production Documentation
 
@@ -65,9 +65,9 @@ For comprehensive coverage, see the [Production Documentation](../docs/README.md
 - **Configure my training run** → [Configuration System](../docs/02-user-guide/configuration-system.md)
 - **Look up YAML parameters** → [Configuration References](../docs/03-configuration-reference/megatron-parameters.md)
 - **Project performance to multi-node** → [Performance Projection](./projection.md)
-- **Auto-tune my training config (parallelism + knobs)** → [Tuning Agent](./tuning_agent.md)
+- **Auto-tune my training config (parallelism + knobs)** → [Tuning Agent](../docs/02-user-guide/tuning-agent.md)
 - **Benchmark performance** → [Benchmark Suite](./benchmark.md)
-- **Understand the CLI design** → [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
+- **Understand the CLI design** → [CLI Architecture](../docs/06-developer-guide/cli-architecture.md)
 - **Troubleshoot issues** → [Troubleshooting](../docs/05-operations/troubleshooting.md)
 
 ## External Resources

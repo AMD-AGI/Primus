@@ -626,7 +626,7 @@ Splitting the residual into these two terms is more robust than the older single
 
 With `--memory-mode both`, a side-by-side table shows the simulate vs. benchmark per-component deltas. A small delta (within ~10–20%) means the analytical model and the residual term are well-calibrated; a large positive delta (simulate ≫ benchmark) usually means simulate is over-counting unsharded components, while a large negative delta means the bench captured overhead the analytical model under-estimates.
 
-> The benchmark-based memory projection is what the [Tuning Agent](tuning_agent.md) uses for OOM-accurate feasibility filtering when a GPU is available, so its `tokens/s/GPU` rankings never include configs that would OOM on the real cluster.
+> The benchmark-based memory projection is what the [Tuning Agent](../docs/02-user-guide/tuning-agent.md) uses for OOM-accurate feasibility filtering when a GPU is available, so its `tokens/s/GPU` rankings never include configs that would OOM on the real cluster.
 
 ---
 

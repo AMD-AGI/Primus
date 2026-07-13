@@ -417,7 +417,8 @@ primus-cli direct -- train pretrain --config deepseek_v2.yaml
 
 ## 📚 Learn More
 
-- 📖 **User Guide**: [PRIMUS-CLI-GUIDE.md](./PRIMUS-CLI-GUIDE.md)
+- 📖 **CLI Reference (user guide)**: [cli-reference.md](../02-user-guide/cli-reference.md)
+- 🏛 **System Architecture**: [architecture.md](./architecture.md)
 - 🔧 **Quick Start**: `primus-cli --help`
 - 💬 **Issue Reporting**: GitHub Issues
 - 🌐 **ROCm Ecosystem**: [rocm.github.io](https://rocm.github.io)

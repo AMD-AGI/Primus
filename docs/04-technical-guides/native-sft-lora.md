@@ -439,6 +439,7 @@ done
 
 ## 6. References / Further Reading
 
+- **Post-training overview**: [Post-Training (SFT / LoRA / DPO)](../02-user-guide/posttraining.md) — how this native SFT LoRA path fits into the broader fine-tuning workflow.
 - **PR #701** — Full implementation of this native SFT stack:
   https://github.com/AMD-AGI/Primus/pull/701
 - **Megatron-LM FP4 design**:

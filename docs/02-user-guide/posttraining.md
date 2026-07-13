@@ -206,6 +206,7 @@ Paths are relative to `examples/megatron_bridge/configs/`.
 ## See also
 
 - [Megatron Bridge parameters](../03-configuration-reference/megatron-bridge-parameters.md)
+- [Native SFT / LoRA quick start](../04-technical-guides/native-sft-lora.md)
 - [Benchmark suite](./benchmarking.md)
 - [Preflight diagnostics](./preflight.md)
 - [Memory and performance projection](./projection.md)

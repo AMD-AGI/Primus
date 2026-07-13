@@ -982,7 +982,7 @@ export PRIMUS_LOG_LEVEL=DEBUG
 ## Reference Resources
 
 ### Related Documentation
-- [CLI Architecture](./CLI-ARCHITECTURE.md) - Primus CLI architecture deep dive
+- [CLI Architecture](../../docs/06-developer-guide/cli-architecture.md) - Primus CLI architecture deep dive
 - [Main Documentation](../README.md) - Complete Primus documentation index
 - [.primus.yaml](../../runner/.primus.yaml) - Default configuration example
 

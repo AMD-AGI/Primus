@@ -172,4 +172,5 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 - [Benchmark suite](./benchmarking.md)
 - [Preflight diagnostics](./preflight.md)
 - [Post-training workflows](./posttraining.md)
+- [Tuning agent](./tuning-agent.md)
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)

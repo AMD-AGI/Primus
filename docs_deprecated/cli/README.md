@@ -13,7 +13,7 @@ The Primus CLI provides a unified command-line interface for training, benchmark
   - Configuration files and options
   - Best practices and troubleshooting
 
-- **[Architecture Deep Dive](./CLI-ARCHITECTURE.md)**
+- **[Architecture Deep Dive](../../docs/06-developer-guide/cli-architecture.md)**
   - Design philosophy and principles
   - Three-layer architecture explained
   - Plugin system and extensibility
@@ -70,7 +70,7 @@ primus-cli direct -- data diffusion-ingest \
 ## 📖 Learn More
 
 - For detailed usage instructions, see the [User Guide](./PRIMUS-CLI-GUIDE.md)
-- For architecture and design details, see [Architecture Deep Dive](./CLI-ARCHITECTURE.md)
+- For architecture and design details, see [Architecture Deep Dive](../../docs/06-developer-guide/cli-architecture.md)
 - For the main Primus documentation, see [Primus README](../../README.md)
 
 ## 🔗 Related Documentation

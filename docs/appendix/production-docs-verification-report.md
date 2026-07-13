@@ -2,6 +2,15 @@
 
 Date: 2026-06-08
 
+> **Update note (documentation reorganization).** This report predates the docs
+> reorganization and is preserved as a dated snapshot. Since then the folders were
+> renamed: paths written below as `production_docs/…` now live under `docs/…`, and
+> the review-evidence paths written as `docs/…` (for example `docs/cli/…`,
+> `docs/quickstart.md`) now live under `docs_deprecated/…`. The file counts (for
+> example "35 Markdown files") reflect the corpus at review time and have grown
+> since. Finding bodies are kept verbatim; consult the current `docs/` tree for
+> live paths.
+
 ## Scope and Method
 
 Reviewed all 35 Markdown files under `production_docs/` against repository evidence: runner scripts, Python CLI code, config loaders, YAML presets, backend adapters and argument builders, examples, tests, CI, and reviewed documentation outside `production_docs/`.

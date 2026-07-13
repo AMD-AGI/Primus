@@ -40,6 +40,7 @@ Core workflows and day-to-day usage.
 - [Benchmarking](./02-user-guide/benchmarking.md) -- GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md) -- cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md) -- memory and performance projection tools
+- [Tuning Agent](./02-user-guide/tuning-agent.md) -- LLM-driven search for an optimal training config (uses projection as an oracle)
 
 ### [03 - Configuration Reference](./03-configuration-reference/)
 
@@ -67,6 +68,8 @@ Deep technical topics for advanced users.
 - [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) -- TensorBoard, WandB, MLflow setup per backend
 - [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) -- graceful exit, auto-resume, in-process restart, torchft
 - [Determinism & Reproducibility](./04-technical-guides/determinism-and-reproducibility.md) -- deterministic mode, seeds, trade-offs
+- [Diffusion Models](./04-technical-guides/diffusion-models/README.md) -- Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
+- [Native SFT & LoRA](./04-technical-guides/native-sft-lora.md) -- Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 
 ### [05 - Operations](./05-operations/)
 
@@ -87,6 +90,9 @@ For contributors and maintainers.
 - [Extending Backends](./06-developer-guide/extending-backends.md) -- adding new training backends
 - [Adding Models](./06-developer-guide/adding-models.md) -- adding model configurations per backend
 - [Model Support Matrix](./06-developer-guide/model-support-matrix.md) -- supported models per backend and GPU
+- [CLI Architecture](./06-developer-guide/cli-architecture.md) -- CLI internals: subcommand discovery, dispatch, and launch wrappers
+- [Backend Patch Notes](./06-developer-guide/backend-patch-notes.md) -- Primus-specific backend arguments and the files they patch
+- [Tooling](./06-developer-guide/tooling.md) -- auxiliary analysis, benchmarking, visualization, and diagnostics tools
 
 ### [Appendix](./appendix/)
 
@@ -112,6 +118,9 @@ For contributors and maintainers.
 | Configure parallelism for my model | [Parallelism Configuration](./04-technical-guides/parallelism-configuration.md) |
 | Tune training performance | [Performance Tuning](./04-technical-guides/performance-tuning.md) |
 | Train a Mixture-of-Experts model | [MoE Training Deep-Dive](./04-technical-guides/moe-training.md) |
+| Train a diffusion (Flux) model | [Diffusion Models](./04-technical-guides/diffusion-models/README.md) |
+| Fine-tune with native SFT / LoRA | [Native SFT & LoRA](./04-technical-guides/native-sft-lora.md) |
+| Auto-tune my training config | [Tuning Agent](./02-user-guide/tuning-agent.md) |
 | Profile a training run | [Profiling & Observability](./04-technical-guides/profiling-and-observability.md) |
 | Track experiments (WandB/MLflow/TensorBoard) | [Logging & Experiment Tracking](./04-technical-guides/logging-and-experiment-tracking.md) |
 | Survive node failures on long runs | [Fault Tolerance & Elastic Training](./04-technical-guides/fault-tolerance-and-elastic-training.md) |

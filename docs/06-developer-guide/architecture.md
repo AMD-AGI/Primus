@@ -116,4 +116,4 @@ If **`PRIMUS_TRAIN_RUNTIME`** is unset or invalid, the implementation **defaults
 | `primus/core/patches/patch_runner.py` | **`run_patches()`**, **`PRIMUS_PATCHES`** parsing |
 | `runner/primus-cli-*.sh` | Shell wrappers for direct, container, and Slurm launch |
 
-For day-to-day contribution workflows (style, tests, CI), see [Contributing Guide](contributing.md) and [Testing Guide](testing.md).
+For a deep dive on the CLI internals (subcommand discovery, dispatch, and the launch wrappers), see [CLI Architecture](cli-architecture.md). For day-to-day contribution workflows (style, tests, CI), see [Contributing Guide](contributing.md) and [Testing Guide](testing.md).

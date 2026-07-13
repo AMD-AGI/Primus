@@ -621,7 +621,7 @@ After preprocessing:
 
 See:
 - [Energon Integration](energon_integration.md) for TaskEncoder and dataloader details
-- [Config Directory Guide](../../../../primus/configs/data/megatron/diffusion/README.md) for config file reference
+- [Config Directory Guide](../../../primus/configs/data/megatron/diffusion/README.md) for config file reference
 - Example configs in `primus/configs/data/megatron/diffusion/preprocessing/`
 
 ---

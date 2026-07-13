@@ -230,6 +230,33 @@ model:
     - primus_turbo
 ```
 
+**Field meanings:**
+
+- **`job.dump_folder`** — where TorchTitan writes logs and checkpoints for the job.
+- **`job.description`** — free-form description shown in logs and metadata.
+- **`model.name` / `model.flavor`** — the TorchTitan family and size key; both must exist in the TorchTitan code.
+- **`model.hf_assets_path`** — Hugging Face repository used to load weights and tokenizer.
+- **`model.converters`** — extra TorchTitan converters; `primus_turbo` is the default used in the Primus examples.
+
+The architecture itself lives in TorchTitan code, not in this YAML. For example, Qwen3 8B is declared in `third_party/torchtitan/torchtitan/models/qwen3/__init__.py`:
+
+```python
+"8B": Qwen3ModelArgs(
+    vocab_size=151936,
+    max_seq_len=4096,
+    head_dim=128,
+    dim=4096,
+    n_layers=36,
+    n_heads=32,
+    n_kv_heads=8,
+    qk_norm=True,
+    hidden_dim=12288,
+    rope_theta=1000000,
+),
+```
+
+The Primus preset only selects and configures such a definition.
+
 **Experiment snippet** (copy from an existing TorchTitan example and change `model:`):
 
 ```yaml

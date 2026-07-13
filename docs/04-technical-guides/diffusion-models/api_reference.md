@@ -1054,6 +1054,6 @@ For more advanced examples, see `examples/run_pretrain.sh`.
 
 For issues or questions:
 1. Check this API reference
-2. Read architecture guide: `docs/backends/megatron/diffusion/flux_architecture.md`
+2. Read architecture guide: `docs/04-technical-guides/diffusion-models/flux_architecture.md`
 3. See examples in docstrings
 4. Check test files for usage patterns

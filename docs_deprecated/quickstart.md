@@ -87,7 +87,7 @@ primus-cli [options] <mode> [mode-args] -- [command]
 
 **Learn More:**
 - [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md) - Complete reference
-- [CLI Architecture](./cli/CLI-ARCHITECTURE.md) - Design deep dive
+- [CLI Architecture](../docs/06-developer-guide/cli-architecture.md) - Design deep dive
 - [Configuration Guide](./configuration.md) - YAML configuration
 - [Examples](../examples/README.md) - Real-world templates
 

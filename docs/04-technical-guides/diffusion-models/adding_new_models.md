@@ -702,7 +702,7 @@ Before submitting your new model:
 
 If you encounter issues:
 1. Review existing models (Flux) for patterns
-2. Check documentation in `docs/backends/megatron/diffusion/`
+2. Check documentation in `docs/04-technical-guides/diffusion-models/`
 3. Run tests in debug mode: `pytest --pdb`
 4. Consult architecture overview for design principles
 
