@@ -11,7 +11,7 @@ export MASTER_PORT=29502
 export PRIMUS_PATH=/apps/gpuperf/vidgoyal/Primus
 export PRIMUS_MLPERF=1
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
-export EXP=/apps/gpuperf/vidgoyal/Primus/examples/mlperf/llama3.1_8b/configs/MI355X/llama3.1_8B-pretrain-FP4.yaml
+export EXP=${PRIMUS_PATH}/examples/mlperf/llama3.1_8b/configs/MI355X/llama3.1_8B-pretrain-FP4.yaml
 export DATA_PATH=/data
 
 export PRIMUS_MICRO_BATCH_SIZE=2
@@ -59,7 +59,7 @@ export TOKENIZERS_PARALLELISM=false
 export NCCL_CHECKS_DISABLE=1
 export TORCH_NCCL_HIGH_PRIORITY=1
 
-export AITER_CONFIG_GEMM_A4W4=/apps/gpuperf/vidgoyal/Primus/examples/mlperf/llama3.1_8b/a4w4_tuned_gemms.csv
+export AITER_CONFIG_GEMM_A4W4=${PRIMUS_PATH}/examples/mlperf/llama3.1_8b/a4w4_tuned_gemms.csv
 export AITER_LOG_TUNED_CONFIG=0
 export LOG_AITER_GEMMS=0
 export AITER_LOG_LEVEL=ERROR

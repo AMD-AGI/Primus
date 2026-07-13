@@ -32,18 +32,13 @@ start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)
 echo "STARTING TIMING RUN AT $start_fmt"
 
-# Launch distributed training and keep the real torchrun exit code even though
-# output is piped through tee.
+# Launch through Primus CLI and keep the real exit code even though output is
+# piped through tee.
 set +e
-torchrun \
-    --nproc_per_node=${GPUS_PER_NODE} \
-    --nnodes=${NNODES} \
-    --node_rank=${NODE_RANK} \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-    src/train.py 2>&1 | tee train.err.log
+"${PRIMUS_PATH}/primus-cli" direct -- \
+    train pretrain \
+    --config "${EXP}" \
+    2>&1 | tee train.mlperfpretrain.exp.log
 ret_code=${PIPESTATUS[0]}
 set -e
 

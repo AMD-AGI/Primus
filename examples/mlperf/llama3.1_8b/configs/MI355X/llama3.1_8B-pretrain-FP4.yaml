@@ -16,8 +16,8 @@ modules:
       stage: mlperf_pretrain
       disable_wandb: true
       disable_tensorboard: true
-      stderr_sink_level: INFO
-      log_interval: 1
+      stderr_sink_level: ERROR
+      log_interval: 999999
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
       eval_iters: ${PRIMUS_EVAL_ITERS:32}  # 32 * GBS = 1024 eval samples
@@ -100,7 +100,7 @@ modules:
       cross_entropy_loss_fusion: true
 
       # --- Mixed Precision Config ---
-      fp4: true
+      fp4: e2m1
       fp4_recipe: mxfp4
       accumulate_allreduce_grads_in_fp32: false
       grad_reduce_in_bf16: true
