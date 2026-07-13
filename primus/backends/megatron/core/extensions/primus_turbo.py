@@ -1737,7 +1737,37 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 config=quant_config.data(),
             )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+            assert (
+                quant_config.mxfp4_scaling()
+            ), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+            if is_first_microbatch:
+                (
+                    self.quantized_weight_buffer,
+                    self.quantized_weight_t_buffer,
+                ) = _maybe_create_quantized_weight_buffers(
+                    weights,
+                    float4_e2m1fn_x2,
+                    quant_config,
+                    disable_parameter_transpose_cache=self.disable_parameter_transpose_cache,
+                )
+
+            x, quantized_weights = _bridge_weight_grad(
+                x,
+                weights,
+                PrimusTurboQuantizedTensorPair(
+                    data=self.quantized_weight_buffer, data_t=self.quantized_weight_t_buffer
+                ),
+            )
+
+            out = primus_turbo_torch.ops.grouped_gemm_fp4(
+                x,
+                quantized_weights,
+                m_splits,
+                trans_b=True,
+                config=quant_config.data(),
+            )
         else:
             out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
