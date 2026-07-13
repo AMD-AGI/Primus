@@ -101,7 +101,9 @@ def render(steps, title=None, min_seconds=5.0):
 def main():
     ap = argparse.ArgumentParser(description="Render this job's own step timings as a Markdown table.")
     ap.add_argument("--title", default=None, help="Optional section title (e.g. torch).")
-    ap.add_argument("--min-seconds", type=float, default=5.0, help="Hide steps shorter than this (default 5s).")
+    ap.add_argument(
+        "--min-seconds", type=float, default=5.0, help="Hide steps shorter than this (default 5s)."
+    )
     args = ap.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN")
