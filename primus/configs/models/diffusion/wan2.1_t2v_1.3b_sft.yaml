@@ -1,0 +1,8 @@
+extends:
+  - wan2.1_t2v_1.3b.yaml
+
+# SFT reuses the Wan2.1-T2V-1.3B preset and only swaps the DiT
+# initialization source to INIT_CHECKPOINT (post-train convention).
+model:
+  config:
+    load_from_pretrained_path: ${INIT_CHECKPOINT:/models/Wan2.1-T2V-1.3B}

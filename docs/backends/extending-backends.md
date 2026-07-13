@@ -95,7 +95,7 @@ from typing import Any, Dict
 
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DummyAdapter(BackendAdapter):
@@ -154,7 +154,7 @@ Key points:
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DummyPretrainTrainer(BaseTrainer):

@@ -6,7 +6,7 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import (
     PipelineParallelLayerLayout,
 )
 
-from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+from primus.backends.megatron.training.utils import is_v_schedule_enabled
 
 
 class PrimusPipelineParallelLayerLayout(PipelineParallelLayerLayout):

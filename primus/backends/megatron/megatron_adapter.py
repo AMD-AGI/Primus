@@ -11,7 +11,7 @@ import primus.backends.megatron.patches  # noqa: F401  # Register patches
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class MegatronAdapter(BackendAdapter):
@@ -82,7 +82,6 @@ class MegatronAdapter(BackendAdapter):
 
             possible_paths = [
                 f"primus.backends.megatron.{trainer_class.lower()}.{trainer_class}",
-                f"primus.modules.trainer.megatron.{trainer_class.lower()}.{trainer_class}",
                 f"primus.backends.megatron.{trainer_class}",
             ]
 

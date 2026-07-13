@@ -17,7 +17,7 @@ DataLoaderStore and uses its push/pop mechanism for batch retrieval.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _needs_forward_step_patch(ctx: PatchContext) -> bool:
@@ -49,7 +49,7 @@ def patch_forward_step_zero_bubble(ctx: PatchContext):
         if not args.patch_zero_bubble:
             return _original_forward_step(data_iterator, model, return_schedule_plan)
 
-        from primus.modules.trainer.megatron.pre_trainer import DataLoaderStore
+        from primus.backends.megatron.data_loader_store import DataLoaderStore
 
         timers = None
         try:

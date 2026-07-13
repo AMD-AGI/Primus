@@ -17,7 +17,7 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.utils import get_pg_rank, get_pg_size
 
-from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+from primus.backends.megatron.training.utils import is_v_schedule_enabled
 
 
 def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
