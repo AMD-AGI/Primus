@@ -29,13 +29,26 @@ def adapter():
 
 @pytest.fixture
 def sys_modules_guard(adapter):
-    """Drop any stub modules a test injected, keeping tests isolated."""
+    """Isolate stub-eligible modules for the duration of a test.
+
+    Drops any relevant modules BOTH before and after the test. The
+    before-drop matters because some entries (e.g. ``megatron.energon``) are
+    real, top-level packages that may already be installed and cached in
+    ``sys.modules`` from elsewhere in the session. If left in place, the stub
+    installer's ``if pkg_name in sys.modules: continue`` fast-path would skip
+    them, bypassing a test's forced-missing ``import_module`` mock and breaking
+    assertions that expect every package to be stubbed.
+    """
     prefixes = ("modelopt",) + adapter._BRIDGE_OPTIONAL_PACKAGES
-    before = set(sys.modules)
+
+    def _drop():
+        for key in list(sys.modules):
+            if any(key == p or key.startswith(p + ".") for p in prefixes):
+                sys.modules.pop(key, None)
+
+    _drop()
     yield
-    for key in set(sys.modules) - before:
-        if any(key == p or key.startswith(p + ".") for p in prefixes):
-            sys.modules.pop(key, None)
+    _drop()
 
 
 # ---------------------------------------------------------------------------
@@ -118,29 +131,34 @@ def test_install_bridge_optional_stubs_is_idempotent(adapter, monkeypatch, sys_m
 # ---------------------------------------------------------------------------
 # _install_transformers_stub (transformers must be importable)
 # ---------------------------------------------------------------------------
-def test_install_transformers_stub_adds_placeholders_for_missing(adapter):
+def test_install_transformers_stub_adds_placeholders_for_missing(adapter, monkeypatch):
     transformers = pytest.importorskip("transformers")
 
-    name, _used_by = adapter._TRANSFORMERS_PLACEHOLDER_CLASSES[0]
-    had_attr = hasattr(transformers, name)
-    original = getattr(transformers, name, None)
-    if had_attr:
-        delattr(transformers, name)
+    # Append a synthetic always-missing class to the real list to drive the
+    # "missing class" branch deterministically. Deleting a real class won't
+    # work: transformers' lazy module re-caches it before the installer's
+    # hasattr check, and newer transformers ship every class anyway.
+    fake_name = "_PrimusFakeMissingTransformersClass_ForUnitTest"
+    monkeypatch.setattr(
+        adapter,
+        "_TRANSFORMERS_PLACEHOLDER_CLASSES",
+        adapter._TRANSFORMERS_PLACEHOLDER_CLASSES + ((fake_name, "models/fake/fake_bridge.py"),),
+    )
+    assert not hasattr(transformers, fake_name)
     try:
         stubbed = adapter._install_transformers_stub()
-        assert name in stubbed
-        placeholder = getattr(transformers, name)
+        assert fake_name in stubbed
+        placeholder = getattr(transformers, fake_name)
         assert getattr(placeholder, "_primus_placeholder", False) is True
         with pytest.raises(RuntimeError, match="Primus placeholder"):
             placeholder()
     finally:
-        # restore: remove every placeholder we (or the call) injected
+        # Remove every placeholder the call injected: our synthetic entry plus
+        # any real classes that were genuinely missing in this environment.
         for cname, _ in adapter._TRANSFORMERS_PLACEHOLDER_CLASSES:
             obj = getattr(transformers, cname, None)
             if getattr(obj, "_primus_placeholder", False):
                 delattr(transformers, cname)
-        if had_attr:
-            setattr(transformers, name, original)
 
 
 def test_install_transformers_stub_skips_existing_classes(adapter):
