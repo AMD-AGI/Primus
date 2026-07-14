@@ -149,6 +149,32 @@ def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
     assert torch.count_nonzero(out["clip_encodings"]) == 0
 
 
+def test_flux_precomputed_processor_rejects_mismatched_empty_encoding(tmp_path):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    # Empty T5 encoding has sequence length 5, but the batch samples use length 3.
+    np.save(empty_dir / "t5_empty.npy", np.zeros((1, 5, 8), dtype=np.float32))
+    np.save(empty_dir / "clip_empty.npy", np.zeros((1, 4), dtype=np.float32))
+
+    processor = FluxPrecomputedProcessor(
+        {
+            "prompt_dropout_prob": 1.0,
+            "empty_encodings_path": str(empty_dir),
+        }
+    )
+    batch = [
+        {
+            "t5_encodings": torch.ones(3, 8),
+            "clip_encodings": torch.ones(4),
+            "mean": torch.zeros(1, 2, 2),
+            "logvar": torch.zeros(1, 2, 2),
+        }
+    ]
+
+    with pytest.raises(ValueError, match="empty T5 encoding shape"):
+        processor.prepare_batch(batch=batch, device=torch.device("cpu"), dtype=torch.float32)
+
+
 def test_flux_raw_processor_prepares_images_and_prompts():
     from PIL import Image
 
@@ -198,6 +224,52 @@ def test_tiny_flux_model_computes_precomputed_loss():
 
     assert outputs["loss"].ndim == 0
     assert torch.isfinite(outputs["loss"])
+
+
+def test_flux_position_ids_are_float32_regardless_of_model_dtype():
+    model = build_flux_model(
+        {
+            "config": {
+                "model_variant": "flux-dev",
+                "guidance": 1.0,
+                "params": {
+                    "in_channels": 4,
+                    "out_channels": 4,
+                    "vec_in_dim": 4,
+                    "context_in_dim": 8,
+                    "hidden_size": 12,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 2],
+                },
+            }
+        }
+    )
+    # Force a low-precision compute dtype; position ids must stay float32 so RoPE
+    # grid indices are not corrupted (bf16 only represents integers up to 256).
+    model.dit = model.dit.to(dtype=torch.bfloat16)
+
+    captured = {}
+    original_forward = model.dit.forward
+
+    def capturing_forward(*args, **kwargs):
+        captured["img_ids_dtype"] = kwargs["img_ids"].dtype
+        captured["txt_ids_dtype"] = kwargs["txt_ids"].dtype
+        return original_forward(*args, **kwargs)
+
+    model.dit.forward = capturing_forward
+    model.forward_train(
+        {
+            "t5_encodings": torch.randn(2, 3, 8, dtype=torch.bfloat16),
+            "clip_encodings": torch.randn(2, 4, dtype=torch.bfloat16),
+            "mean": torch.randn(2, 1, 2, 2, dtype=torch.bfloat16),
+            "logvar": torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16),
+        }
+    )
+
+    assert captured["img_ids_dtype"] == torch.float32
+    assert captured["txt_ids_dtype"] == torch.float32
 
 
 def test_tiny_flux_model_computes_raw_loss_with_dummy_encoders():

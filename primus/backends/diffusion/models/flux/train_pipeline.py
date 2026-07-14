@@ -38,6 +38,21 @@ class FluxFlowMatchTrainPipeline:
             raise ValueError(f"FLUX raw image-text training requires `{name}` to be configured.")
         return module
 
+    @staticmethod
+    def _align_module_dtype(module: torch.nn.Module, *, device: torch.device, dtype: torch.dtype) -> None:
+        """Move a frozen encoder to the target device/dtype only when it differs.
+
+        `nn.Module.to(dtype=...)` casts floating-point params/buffers only, leaving
+        integer buffers (e.g. token position ids) untouched. We inspect the first
+        floating-point parameter to avoid re-casting on every step.
+        """
+        current = next((p for p in module.parameters() if p.is_floating_point()), None)
+        if current is None:
+            module.to(device=device)
+            return
+        if current.dtype != dtype or current.device != device:
+            module.to(device=device, dtype=dtype)
+
     def _prepare_precomputed(
         self,
         *,
@@ -75,6 +90,12 @@ class FluxFlowMatchTrainPipeline:
         if not isinstance(prompts, list):
             raise ValueError("FLUX raw batch requires `prompts` as list[str].")
 
+        # The frozen encoders are built in bf16 regardless of the training compute
+        # dtype; align them with the DiT dtype so running them on `image`/inputs of
+        # `dtype` does not raise a dtype-mismatch error (e.g. for fp32 runs).
+        self._align_module_dtype(ae, device=device, dtype=dtype)
+        self._align_module_dtype(t5, device=device, dtype=dtype)
+        self._align_module_dtype(clip, device=device, dtype=dtype)
         ae.eval()
         t5.eval()
         clip.eval()
@@ -128,15 +149,19 @@ class FluxFlowMatchTrainPipeline:
         target = noise - labels
 
         _, _, latent_height, latent_width = noisy_latents.shape
+        # Position ids are integer grid indices consumed by RoPE; build them in
+        # float32 (independent of the model compute dtype) so that indices remain
+        # exactly representable. bf16 only represents integers up to 256 exactly,
+        # which would silently corrupt positions for larger latent grids.
         img_ids = create_position_encoding_for_latents(
             bsz,
             latent_height,
             latent_width,
             position_dim=3,
             device=device,
-            dtype=dtype,
+            dtype=torch.float32,
         )
-        txt_ids = torch.zeros(bsz, t5_encodings.shape[1], 3, device=device, dtype=dtype)
+        txt_ids = torch.zeros(bsz, t5_encodings.shape[1], 3, device=device, dtype=torch.float32)
         noisy_latents = pack_latents(noisy_latents)
         target = pack_latents(target)
 

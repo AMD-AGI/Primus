@@ -211,6 +211,26 @@ class FluxPrecomputedProcessor:
             return tensor[0]
         return tensor
 
+    def _check_empty_encoding_shapes(self, t5_encodings: torch.Tensor, clip_encodings: torch.Tensor) -> None:
+        # The empty encodings are broadcast-assigned into the per-sample encodings
+        # for dropped prompts, so their trailing (non-batch) shape must match the
+        # dataset encodings exactly. Fail fast with a clear message instead of a
+        # cryptic in-place assignment shape error mid-training.
+        assert self._empty_t5 is not None and self._empty_clip is not None
+        if self._empty_t5.shape != t5_encodings.shape[1:]:
+            raise ValueError(
+                "FLUX prompt dropout: empty T5 encoding shape "
+                f"{tuple(self._empty_t5.shape)} does not match the per-sample T5 encoding shape "
+                f"{tuple(t5_encodings.shape[1:])}. Regenerate t5_empty.npy with a matching "
+                "sequence length / hidden size."
+            )
+        if self._empty_clip.shape != clip_encodings.shape[1:]:
+            raise ValueError(
+                "FLUX prompt dropout: empty CLIP encoding shape "
+                f"{tuple(self._empty_clip.shape)} does not match the per-sample CLIP encoding shape "
+                f"{tuple(clip_encodings.shape[1:])}. Regenerate clip_empty.npy with a matching shape."
+            )
+
     def _load_empty_encodings(self):
         if self._empty_t5 is not None and self._empty_clip is not None:
             return
@@ -249,6 +269,7 @@ class FluxPrecomputedProcessor:
         if self.prompt_dropout_prob > 0.0:
             self._load_empty_encodings()
             assert self._empty_t5 is not None and self._empty_clip is not None
+            self._check_empty_encoding_shapes(tensors["t5_encodings"], tensors["clip_encodings"])
             bsz = tensors["t5_encodings"].shape[0]
             drop_mask = torch.rand((bsz,), device=device) < self.prompt_dropout_prob
             if drop_mask.any():
