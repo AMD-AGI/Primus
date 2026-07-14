@@ -16,7 +16,7 @@ export MASTER_PORT=29501
 # -----------------------------------------------------------------------------
 # Paths
 # -----------------------------------------------------------------------------
-export PRIMUS_PATH=/apps/gpuperf/vidgoyal/Primus
+export PRIMUS_PATH=/workspace/Primus
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
 export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
 export DATA_PATH=/data
