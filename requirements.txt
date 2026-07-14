@@ -19,4 +19,4 @@ git+https://github.com/mlcommons/logging.git@6.0.0-rc5
 megatron-energon==7.3.2
 webdataset==1.0.2
 tqdm==4.67.3
-pyarrow==21.0.0
+pyarrow==23.0.1
