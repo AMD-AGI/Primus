@@ -104,3 +104,8 @@ subtrees:
         title: Model support matrix
       - file: 06-developer-guide/testing.md
         title: Testing
+
+  - caption: About
+    entries:
+      - file: license.md
+        title: License
