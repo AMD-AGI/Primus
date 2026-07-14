@@ -9,9 +9,8 @@ build:
     python: "3.12"
 
 sphinx:
-   configuration: production_docs/conf.py
+  configuration: docs/conf.py
 
 python:
-   install:
-   - requirements: production_docs/sphinx/requirements.txt
-
+  install:
+    - requirements: docs/sphinx/requirements.txt
