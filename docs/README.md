@@ -41,6 +41,7 @@ Core workflows and day-to-day usage.
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md): memory and performance projection tools
 - [Tuning agent](./02-user-guide/tuning-agent.md): LLM-driven search for an optimal training configuration (uses projection as an oracle)
+- [Primus tools](./02-user-guide/primus-tools.md): catalog of all Primus tools and ecosystem projects with how-to starting points
 
 ### [Configuration reference](./03-configuration-reference/)
 
@@ -103,6 +104,7 @@ For contributors and maintainers.
 | Goal | Document |
 |------|----------|
 | Understand what Primus is | [Overview](./01-getting-started/overview.md) |
+| Browse all Primus tools | [Primus tools](./02-user-guide/primus-tools.md) |
 | Install Primus | [Installation](./01-getting-started/installation.md) |
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
 | Get an exact run command for my model/GPU | [Backend training recipes](./02-user-guide/training-recipes.md) |

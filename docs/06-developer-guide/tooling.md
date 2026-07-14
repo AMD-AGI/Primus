@@ -18,6 +18,7 @@ Primus ships a set of auxiliary tools for analysis, benchmarking, visualization,
 
 ## Related documentation
 
+- [Primus tools](../02-user-guide/primus-tools.md)—the full catalog of Primus tools (CLI, tuning agent, ecosystem) with how-to starting points.
 - [Tools overview](../../tools/README.md)—the top-level index maintained alongside the code.
 - [Profiling and observability](../04-technical-guides/profiling-and-observability.md)—how these tools fit into performance analysis.
 - [Benchmarking](../02-user-guide/benchmarking.md)—running the benchmark suites the tools summarize.

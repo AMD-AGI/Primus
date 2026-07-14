@@ -2,6 +2,7 @@
 
 Core workflows and day-to-day usage.
 
+- [Primus tools](primus-tools.md): start here—an at-a-glance catalog of all Primus tools and ecosystem projects with how-to starting points
 - [CLI reference](cli-reference.md): `primus-cli` modes, flags, and subcommands
 - [Configuration system](configuration-system.md): YAML configuration model, presets, overrides, inheritance
 - [Pretraining](pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
