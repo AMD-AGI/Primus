@@ -146,8 +146,15 @@ def clamped_weighted_swiglu(y: torch.Tensor, weights: torch.Tensor, clamp_value:
     out = torch.empty((M, half), dtype=y.dtype, device=y.device)
     grid = (M, triton.cdiv(half, _BLOCK_N))
     _clamped_weighted_swiglu_fwd_kernel[grid](
-        y2, w, out, half, K, w.stride(0), float(clamp_value),
-        HAS_WEIGHTS=True, BLOCK_N=_BLOCK_N,
+        y2,
+        w,
+        out,
+        half,
+        K,
+        w.stride(0),
+        float(clamp_value),
+        HAS_WEIGHTS=True,
+        BLOCK_N=_BLOCK_N,
     )
     return out.reshape(*lead, half)
 
@@ -170,8 +177,15 @@ def clamped_swiglu(y: torch.Tensor, clamp_value: float) -> torch.Tensor:
     grid = (M, triton.cdiv(half, _BLOCK_N))
     # w_ptr is unused when HAS_WEIGHTS=False; pass y2 as a valid placeholder.
     _clamped_weighted_swiglu_fwd_kernel[grid](
-        y2, y2, out, half, K, 0, float(clamp_value),
-        HAS_WEIGHTS=False, BLOCK_N=_BLOCK_N,
+        y2,
+        y2,
+        out,
+        half,
+        K,
+        0,
+        float(clamp_value),
+        HAS_WEIGHTS=False,
+        BLOCK_N=_BLOCK_N,
     )
     return out.reshape(*lead, half)
 
@@ -188,8 +202,17 @@ def clamped_swiglu_back(g: torch.Tensor, y: torch.Tensor, clamp_value: float) ->
     dy = torch.empty((M, K), dtype=g.dtype, device=g.device)
     grid = (M, triton.cdiv(half, _BLOCK_N))
     _clamped_swiglu_bwd_kernel[grid](
-        g2, y2, g2, dy, half, K, g2.stride(0), 0, float(clamp_value),
-        HAS_WEIGHTS=False, BLOCK_N=_BLOCK_N,
+        g2,
+        y2,
+        g2,
+        dy,
+        half,
+        K,
+        g2.stride(0),
+        0,
+        float(clamp_value),
+        HAS_WEIGHTS=False,
+        BLOCK_N=_BLOCK_N,
     )
     return dy.reshape(*lead, K)
 
@@ -210,15 +233,31 @@ def clamped_weighted_swiglu_back(g: torch.Tensor, y: torch.Tensor, weights: torc
     input_grad = torch.empty((M, K), dtype=input_dtype, device=y.device)
     grid = (M, triton.cdiv(half, _BLOCK_N))
     _clamped_swiglu_bwd_kernel[grid](
-        g2, y2, w, input_grad, half, K, g2.stride(0), w.stride(0), float(clamp_value),
-        HAS_WEIGHTS=True, BLOCK_N=_BLOCK_N,
+        g2,
+        y2,
+        w,
+        input_grad,
+        half,
+        K,
+        g2.stride(0),
+        w.stride(0),
+        float(clamp_value),
+        HAS_WEIGHTS=True,
+        BLOCK_N=_BLOCK_N,
     )
 
     # weights grad: sum over the feature dim of SiLU(gate_c) * up_c * g.
     weights_grad = torch.empty((M,), dtype=w_dtype, device=y.device)
     _clamped_swiglu_weights_grad_kernel[(M,)](
-        g2, y2, weights_grad, half, K, g2.stride(0), float(clamp_value),
-        NUM_TILES=triton.cdiv(half, _BLOCK_N), BLOCK_N=_BLOCK_N,
+        g2,
+        y2,
+        weights_grad,
+        half,
+        K,
+        g2.stride(0),
+        float(clamp_value),
+        NUM_TILES=triton.cdiv(half, _BLOCK_N),
+        BLOCK_N=_BLOCK_N,
     )
 
     return input_grad.reshape(*lead, K), weights_grad.reshape(*weights.shape)
