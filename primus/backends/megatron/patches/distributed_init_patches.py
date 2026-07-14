@@ -35,7 +35,19 @@ from primus.core.utils.module_utils import log_rank_0
         "prevent RCCL device mapping deadlocks on MI355X (FSDP2 only)."
     ),
     priority=10,
-    condition=lambda ctx: getattr(get_args(ctx), "use_torch_fsdp2", False),
+    # ODC (ODC_ENABLE=1) drives gradient exchange over rocSHMEM P2P, not RCCL, and
+    # relies on those P2P copy streams overlapping with compute in the backward pass.
+    # The device_id injection here eagerly creates the world + ~26 sub-group RCCL
+    # communicators, whose resident streams/DMA queues serialize ODC's XGMI copy
+    # streams onto the critical path (profiled: cross-stream overlap 120ms -> 2.4ms,
+    # ~+128ms/step on single-node 1.5B). nccl_pad is unaffected (it uses these RCCL
+    # comms as its native reduce-scatter). So skip the eager-RCCL device_id patch
+    # under ODC. Safe on MI300X (the MI355X deadlock this guards does not trigger
+    # here; commits before this patch existed ran ODC correctly).
+    condition=lambda ctx: (
+        getattr(get_args(ctx), "use_torch_fsdp2", False)
+        and os.environ.get("ODC_ENABLE", "0") != "1"
+    ),
 )
 def patch_init_process_group_device_id(ctx: PatchContext):
     """
