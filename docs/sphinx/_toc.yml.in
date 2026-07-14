@@ -7,12 +7,10 @@
 # These comments will also be removed.
 defaults:
   numbered: false
-root: index.md
+root: 01-getting-started/overview.md
 subtrees:
   - caption: Getting started
     entries:
-      - file: 01-getting-started/overview.md
-        title: Overview
       - file: 01-getting-started/quickstart.md
         title: Quickstart
       - file: 01-getting-started/installation.md
@@ -38,6 +36,10 @@ subtrees:
         title: Memory and performance projection
       - file: 02-user-guide/benchmarking.md
         title: Benchmark suite
+      - file: 02-user-guide/primus-tools.md
+        title: Primus tools
+      - file: 02-user-guide/tuning-agent.md
+        title: Tuning agent
 
   - caption: Configuration reference
     entries:
@@ -78,6 +80,26 @@ subtrees:
         title: Fault tolerance and elastic training
       - file: 04-technical-guides/determinism-and-reproducibility.md
         title: Determinism and reproducibility
+      - file: 04-technical-guides/native-sft-lora.md
+        title: Native SFT LoRA
+      - file: 04-technical-guides/diffusion-models/architecture_overview.md
+        title: Diffusion model architecture
+        subtrees:
+          - entries:
+              - file: 04-technical-guides/diffusion-models/flux_architecture.md
+                title: Flux architecture
+              - file: 04-technical-guides/diffusion-models/fp8_training.md
+                title: FP8 training
+              - file: 04-technical-guides/diffusion-models/mxfp4_training.md
+                title: MXFP4 training
+              - file: 04-technical-guides/diffusion-models/data_preprocessing.md
+                title: Data preprocessing
+              - file: 04-technical-guides/diffusion-models/energon_integration.md
+                title: Energon integration
+              - file: 04-technical-guides/diffusion-models/adding_new_models.md
+                title: Adding new models
+              - file: 04-technical-guides/diffusion-models/api_reference.md
+                title: API reference
 
   - caption: Operations
     entries:
@@ -94,6 +116,8 @@ subtrees:
     entries:
       - file: 06-developer-guide/architecture.md
         title: Architecture overview
+      - file: 06-developer-guide/cli-architecture.md
+        title: CLI architecture
       - file: 06-developer-guide/contributing.md
         title: Contributing
       - file: 06-developer-guide/adding-models.md
@@ -104,6 +128,10 @@ subtrees:
         title: Model support matrix
       - file: 06-developer-guide/testing.md
         title: Testing
+      - file: 06-developer-guide/tooling.md
+        title: Tooling
+      - file: 06-developer-guide/backend-patch-notes.md
+        title: Backend patch notes
 
   - caption: About
     entries:
