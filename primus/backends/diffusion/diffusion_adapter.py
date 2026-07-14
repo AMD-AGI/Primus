@@ -11,7 +11,7 @@ from typing import Any
 
 from primus.backends.diffusion.argument_builder import DiffusionArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DiffusionAdapter(BackendAdapter):
