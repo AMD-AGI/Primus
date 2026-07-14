@@ -18,7 +18,7 @@ Primus/
 │   │   ├── common/diffusion_module/         # DiffusionModule base class
 │   │   │   └── diffusion_module.py
 │   │   └── diffusion/                      # Diffusion models (Megatron-Core convention)
-│   │       ├── common/                     # Shared components (MMDiT layers, attention)
+│   │       ├── common/                     # Shared building blocks (config, embeddings, normalization)
 │   │       │   ├── __init__.py
 │   │       │   ├── config.py               # ✓ BaseDiffusionConfig
 │   │       │   ├── embeddings.py           # ✓ TimeStepEmbedder, MLPEmbedder
@@ -31,7 +31,6 @@ Primus/
 │   │       │   ├── layer_spec.py           # ✓ get_flux_layer_spec, get_flux_*_spec_for_backend, MMDiTLayer
 │   │       │   ├── attention.py            # ✓ JointSelfAttention, FluxSingleAttention
 │   │       │   ├── utils.py                # ✓ generate_image_position_ids
-│   │       │   ├── checkpoint_utils.py     # ✓ Checkpoint utilities
 │   │       │   └── checkpoint_converter.py # ✓ HF <-> Megatron conversion
 │   │       └── __init__.py
 │   │
@@ -182,8 +181,8 @@ Primus/
 
 ### 2. Shared components in `common/`
 - Standard approach stores shared code in model-specific directories
-- Primus: `common/` for MMDiT layers, attention, shared utilities
-- Flux-specific: Only `EmbedND` and Flux model class
+- Primus: `common/` for shared config, embeddings, and normalization
+- Flux-specific: model class, MMDiT/single-block layer specs, joint attention, and `EmbedND`
 
 ### 3. Hierarchical encoder structure
 - `encoders/image/vae/`, `encoders/text/t5/`, `encoders/text/clip/`
@@ -195,10 +194,9 @@ Primus/
 - `data/diffusion/task_encoders/` for diffusion-specific TaskEncoders
 - Traditional approach nests Energon under model-specific directories
 
-### 5. Mock data in tests
-- `tests/fixtures/diffusion/` (not production code)
-- Traditional approach mixes test utilities with production code
-- Follows pytest best practices
+### 5. Synthetic (mock) data
+- Synthetic datasets live in `primus/backends/megatron/data/synthetic/mock_datasets.py`, wired through `primus/backends/megatron/data/synthetic_dataset_provider.py`, so training can run without real data
+- Unit tests exercise them under `tests/unit_tests/backends/megatron/diffusion/data/`
 
 ### 6. No PyTorch lightning
 - Pure Megatron patterns (no PTL DataModules)

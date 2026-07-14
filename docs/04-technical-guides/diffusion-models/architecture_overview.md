@@ -34,7 +34,7 @@ This document provides a detailed overview of the diffusion model architecture i
 | Shared Code | Dedicated `common/` directory |
 | Encoders | Hierarchical `encoders/{type}/{variant}/` |
 | Energon | Shared `data/energon/` for all models |
-| Mock Data | Separated in `tests/fixtures/` |
+| Mock Data | Synthetic providers under `data/synthetic/` |
 | Framework | Pure Megatron (no PyTorch Lightning dependency) |
 
 ---
@@ -60,23 +60,27 @@ Following Megatron-Core convention (`megatron/core/models/gpt/`, `megatron/core/
 
 ```
 core/models/diffusion/
-├── common/                         # Shared across all diffusion models
+├── common/                         # Shared building blocks
 │   ├── __init__.py
 │   ├── config.py                   # BaseDiffusionConfig
-│   ├── attention.py                # JointSelfAttention, FluxSingleAttention
-│   └── layers.py                   # MMDiTLayer, FluxSingleTransformerBlock
+│   ├── embeddings.py               # TimeStepEmbedder, Timesteps, MLPEmbedder
+│   └── normalization.py            # RMSNorm, AdaLN, AdaLNContinuous
 │
 └── flux/                           # Flux-specific components
     ├── __init__.py
     ├── config.py                   # FluxConfig
     ├── model.py                    # Flux (main model class)
-    └── layers.py                   # EmbedND (3D RoPE), embedders
+    ├── layer_spec.py               # MMDiTLayer, FluxSingleTransformerBlock
+    ├── attention.py                # JointSelfAttention, FluxSingleAttention
+    ├── layers.py                   # EmbedND (RoPE), embedders
+    ├── checkpoint_converter.py     # HF <-> Megatron conversion
+    └── utils.py                    # image position ids, helpers
 ```
 
 **Rationale**:
-- `common/`: Shared MMDiT patterns (used by both DiT and Flux)
-- `flux/`: Only truly Flux-specific code (3D RoPE, Flux model class)
-- Clear distinction enables easy DiT implementation (reuse `common/`)
+- `common/`: shared building blocks (base config, timestep/positional embeddings, normalization) reusable across diffusion models
+- `flux/`: Flux-specific code (model class, MMDiT and single-block layer specs, joint attention, RoPE embedders)
+- Clear separation keeps model-specific code isolated and shared code reusable for future models
 
 #### 2. Training (`training/diffusion/`)
 
@@ -225,14 +229,12 @@ class EncodedDiffusionTaskEncoder:
 
 ### Decision 5: Model provider at adapter level
 
-**Choice**: `diffusion_model_provider.py` at `primus/backends/megatron/`
-**Not**: Under `core/`
+**Choice**: construct the model through provider functions in the Megatron trainer/adapter layer under `primus/backends/megatron/`, above `core/models/`.
 
 **Reasoning**:
-- Follows existing pattern (`primus/backends/megatron/model_provider.py`)
-- Model providers are adapter/wrapper functions
-- Sit above core models to add Primus-specific functionality
-- Example: Wrap model with logit softcapping, custom loss, etc.
+- Model providers are adapter/wrapper functions rather than a standalone module; they live alongside the trainers (for example `primus/backends/megatron/megatron_pretrain_trainer.py`)
+- They sit above the core models to add Primus-specific functionality
+- Example: wrap the model with a custom loss, precision handling, or checkpoint logic
 
 ### Decision 6: No PyTorch lightning
 
