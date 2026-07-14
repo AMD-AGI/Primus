@@ -91,10 +91,12 @@ model:
 `autoencoder` accepts either a local safetensors path or `repo_id/filename`;
 for example `black-forest-labs/FLUX.1-dev/ae.safetensors`.
 
-The shipped precomputed example expects these paths through environment
-variables:
+The shipped precomputed example uses random DiT initialization unless
+`PRETRAINED_PATH` points at FLUX DiT weights. It expects preprocessed data and,
+when prompt dropout is enabled, empty prompt encodings:
 
 ```text
+PRETRAINED_PATH=/path/to/flux1-dev.safetensors   # optional
 DATASET_PATH=/path/to/cc12m_preprocessed
 EMPTY_ENCODINGS_PATH=/path/to/empty_encodings
 ```
@@ -132,11 +134,19 @@ DATASET=cc12m-test
 DATASET_PATH=/path/to/cc12m_test
 ```
 
-The raw FLUX example is:
+The raw FLUX example loads frozen encoders online. The defaults use Hugging Face
+IDs for T5/CLIP/AE, but each value can also be a local path:
 
 ```text
-examples/diffusion/configs/MI355X/flux.1_dev_t2i-raw-pretrain.yaml
+DATASET=cc12m-test
+DATASET_PATH=/path/to/cc12m_test
+T5_ENCODER=google/t5-v1_1-xxl
+CLIP_ENCODER=openai/clip-vit-large-patch14
+VAE_CHECKPOINT=black-forest-labs/FLUX.1-dev/ae.safetensors
 ```
+
+The raw example config is
+`examples/diffusion/configs/MI355X/flux.1_dev_t2i-raw-pretrain.yaml`.
 
 Raw FLUX data can also be a local JSONL file:
 
@@ -254,9 +264,9 @@ for debugging.
 ## Launch
 
 Training runs through the Primus CLI (`primus.cli.main train <pretrain|posttrain>`)
-under `torchrun`. Single-node and multi-node share **one** launch command: the
-same `torchrun` invocation runs on every node, parameterized by the standard
-rendezvous variables. The defaults below give a single-node 8-GPU run.
+under `torchrun`. Single-node and multi-node share one launch shape; choose the
+config path for the workload you want to run. The defaults below give a
+single-node 8-GPU FLUX precomputed run.
 
 ```bash
 # distributed knobs (defaults = single node, 8 GPUs)
@@ -266,27 +276,32 @@ export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export MASTER_PORT=${MASTER_PORT:-29500}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
+# FLUX precomputed. Set DATASET_PATH and EMPTY_ENCODINGS_PATH first.
+export CONFIG=examples/diffusion/configs/MI355X/flux.1_dev_t2i-pretrain.yaml
+
 torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
   --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
   --nproc_per_node="$GPUS_PER_NODE" \
-  -m primus.cli.main train pretrain --config /path/to/wan_config.yaml
+  -m primus.cli.main train pretrain --config "$CONFIG"
 ```
 
 - **Single node**: run as-is (the defaults above).
 - **Multi-node**: run the same command on each node with a shared
   `MASTER_ADDR`/`MASTER_PORT` (a routable IP of node rank 0) and a distinct
   `NODE_RANK` per node. World size is `NNODES * GPUS_PER_NODE`.
-- **Post-train**: identical command with `train posttrain` and a posttrain config.
+- **FLUX raw image-text**: set `CONFIG` to
+  `examples/diffusion/configs/MI355X/flux.1_dev_t2i-raw-pretrain.yaml` and set
+  `DATASET_PATH`, `T5_ENCODER`, `CLIP_ENCODER`, and `VAE_CHECKPOINT` as needed.
+- **Wan/post-train**: use the same command with the matching Wan config; for
+  post-train use `train posttrain` and a posttrain config.
 
 Useful runtime knobs:
 
-- `trainer.args.attention_backend`: defaults to `flash_attn_aiter` for Wan
-  training on ROCm. Use `sdpa` as the portable fallback when AITER flash
-  attention is unavailable.
-- `trainer.args.sp_size`: Ulysses sequence parallel size. It must divide the
-  model attention head count; for example Wan2.1-1.3B supports `sp_size=4` but
-  not `sp_size=8`.
+- `trainer.args.attention_backend`: defaults to `flash_attn_aiter` on ROCm. Use
+  `sdpa` as the portable fallback when AITER flash attention is unavailable.
+- `trainer.args.sp_size`: Ulysses sequence parallel size for Wan. FLUX currently
+  requires `sp_size=1`.
 - `trainer.args.dp_replicate`: data parallel replication size.
 - `FIXED_TIMESTEP` and `FIXED_SEED`: optional debug variables for reproducible
   loss-alignment checks.
@@ -303,9 +318,11 @@ export AMD_COMGR_CACHE_DIR=/path/to/large/cache/comgr
 ## Primus-Style Configs
 
 New examples should use Primus-style override sections and let the diffusion
-adapter normalize them into Wan args. See:
+adapter normalize them into diffusion model/dataset/trainer args. See:
 
 ```text
+examples/diffusion/configs/MI355X/flux.1_dev_t2i-pretrain.yaml
+examples/diffusion/configs/MI355X/flux.1_dev_t2i-raw-pretrain.yaml
 examples/diffusion/configs/MI355X/wan2.1_t2v_1.3b-pretrain.yaml
 examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-pretrain.yaml
 examples/diffusion/configs/MI355X/wan2.1_t2v_1.3b-posttrain.yaml
