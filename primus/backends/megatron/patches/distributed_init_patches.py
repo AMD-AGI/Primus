@@ -45,8 +45,7 @@ from primus.core.utils.module_utils import log_rank_0
     # under ODC. Safe on MI300X (the MI355X deadlock this guards does not trigger
     # here; commits before this patch existed ran ODC correctly).
     condition=lambda ctx: (
-        getattr(get_args(ctx), "use_torch_fsdp2", False)
-        and os.environ.get("ODC_ENABLE", "0") != "1"
+        getattr(get_args(ctx), "use_torch_fsdp2", False) and os.environ.get("ODC_ENABLE", "0") != "1"
     ),
 )
 def patch_init_process_group_device_id(ctx: PatchContext):
