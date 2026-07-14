@@ -321,60 +321,99 @@ bash "$RUN" rocshmem nopad "$EXP" odc_nopad
 
 ### 6.6 双机 14B（16 卡，GDA）
 
-双机在**每个节点各起一个 rank 组**（NODE_RANK 0/1，各 8 卡 → 共 16 rank），rocSHMEM 用 **uid-over-socket** bootstrap（PR #864 后不再用 MPI，纯 torchrun 起）。整条链路仍是 `run_odc.sh` → `examples/run_pretrain.sh` → `torchrun`，与单机同一入口，只是多了一组跨节点 GDA/RoCE 环境变量。
+双机在**每个节点各起一个 rank 组**（NODE_RANK 0/1，各 8 卡 → 共 16 rank），rocSHMEM 用 **uid-over-socket** bootstrap（PR #864 后不再用 MPI，纯 torchrun 起）。**双机拉起现已用 `primus-cli slurm` 跑通验证**（16 rank、rocSHMEM GDA `n_pes=16`、`ODC_PHASE=2`、loss 逐步下降、全程 0 nan，在一对 RoCE 相邻节点上实测）——这是本文推荐的**最简双机路径**，取代早期的 `srun --overlap` + `docker exec` + `run_odc.sh` 编排。
 
-**(a) 每节点的 per-rank 入口（`rank_node.sh` 的等价物，在各自容器内执行）**：
+#### 主路径：`primus-cli slurm` 一行拉起（已验证）
 
-```bash
-# 每个节点各跑一次；NODE_RANK 分别取 0 / 1，MASTER_ADDR 指向 node0 的真实 IP
-export PRIMUS_TURBO_PATH=/home/botahu/0701_ODC_primus/full_exp/pydeps:/home/botahu/0701_ODC_primus/Primus-Turbo  # 多机 GDA 版(lto=1)
-export NNODES=2 GPUS_PER_NODE=8 NODE_RANK=<0|1>
-export MASTER_ADDR=<node0-ip> MASTER_PORT=29635
-export HF_HOME=/home/botahu/primus_packed/hf_home HF_HUB_CACHE=/home/botahu/primus_packed/hf_models
-export HF_HUB_OFFLINE=1 PRIMUS_SKIP_PIP=1
-export LD_LIBRARY_PATH=/opt/rocm/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/openmpi/lib:${LD_LIBRARY_PATH:-}
-
-# --- 公共 KV（必须覆盖 run_odc.sh 的单机 lo / IB-disable 默认）---
-COMMON_KV="NCCL_SOCKET_IFNAME=eth0 GLOO_SOCKET_IFNAME=eth0 NCCL_IB_DISABLE=0 NCCL_IB_GID_INDEX=3 TRAIN_LOG_DIR=/tmp/odc_trainlog"
-
-# --- GDA / RoCE 部署环境（按集群 NIC 调整 HCA_LIST）---
-# DEFER_REDUCE=1 + PIPE=1 是 nopad 跨节点正确性所必需：把逐微批的 reduce-scatter
-# 结算延迟到 minibatch 末的一次 rendezvous，避免 nopad 变长微批数在跨节点 barrier 死锁。
-# PIPE 同时用新旧两个名字（turbo .so 读旧的 ODC_GDA_PIPE，primus 读新的 PRIMUS_TURBO_ODC_GDA_PIPE）。
-HCA=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9
-GDA_KV="ODC_ROCSHMEM_GDA=1 ROCSHMEM_GDA_PROVIDER=mlx5 ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0 \
-  ROCSHMEM_HEAP_SIZE=8589934592 ROCSHMEM_HCA_LIST=$HCA \
-  ODC_GDA_WARMUP_MODE=strided ODC_GDA_STRIDE_BYTES=65536 \
-  ODC_GDA_DEFER_REDUCE=1 ODC_GDA_PIPE=1 PRIMUS_TURBO_ODC_GDA_PIPE=1 \
-  ROCSHMEM_IB_GID_INDEX=3 ROCSHMEM_ROCE_GID_INDEX=3 ROCSHMEM_GID_INDEX=3"
-
-cd /home/botahu/0701_ODC_primus/Primus
-RUN=primus/core/odc/rocshmem_runtime/scripts/run_odc.sh
-EXP=examples/megatron/configs/MI355X/qwen14B-odc-dn.yaml   # 相对 Primus 根；gbs 由 yaml 的 global_batch_size 决定
-
-# 基线：跨节点 RCCL（ODC_ENABLE=0 → 第 1 参 backend 被忽略，rocshmem 仅占位；与 mori 无关）
-bash "$RUN" rocshmem pad   "$EXP" dual_nccl_pad  $COMMON_KV ODC_ENABLE=0 LB_MINI_FORCE_DATA=1
-# ODC：pad / nopad（GDA）
-bash "$RUN" rocshmem pad   "$EXP" dual_odc_pad   $COMMON_KV $GDA_KV
-bash "$RUN" rocshmem nopad "$EXP" dual_odc_nopad $COMMON_KV $GDA_KV
-```
-
-**(b) 两节点的编排（如何"同时"起两边）**：本文实测用的是 **Slurm `srun --overlap` + `docker exec`** 把上面的 per-rank 入口分别送进两节点常驻容器（NODE_RANK 0 在 node0＝master、1 在 node1），一条命令拉起 16-rank 的单个 torchrun 作业：
+`primus-cli slurm srun` 会把作业**同时 fan-out 到两节点**，各自做一次 `docker run --rm` 起全新容器、再驱动 `torchrun`——**无需常驻容器（odc_dev200）、无需 `rank_node.sh`**。关键在于：它**不经过 `run_odc.sh`**，所以 `run_odc.sh` 平时自动 export 的整套 ODC 环境，这里必须**逐条用 `--env` 手工注入**（约 40 个）。下面是实测通过的命令（占位符 `<nodeA>/<nodeB>`＝RoCE 相邻的两节点，`<PRIMUS_ROOT>`＝含 #864 的 Primus 工作树）：
 
 ```bash
-# 在登录/编排节点。JOB 为已持有这两节点的 Slurm 作业号；MASTER_ADDR 用 node0 真实 IP
-MASTER_ADDR=$(getent ahostsv4 "$NODE0" | awk 'NR==1{print $1}')
-for RANK in 0 1; do
-  NODE=$([ $RANK -eq 0 ] && echo "$NODE0" || echo "$NODE1")
-  srun --jobid=$JOB --overlap -w "$NODE" -N1 -n1 \
-    docker exec -e NODE_RANK=$RANK -e MASTER_ADDR="$MASTER_ADDR" -e MASTER_PORT=29635 \
-      <container> bash rank_node.sh &     # rank_node.sh = 上面 (a) 的封装
-done; wait
+# 在编排节点。JOB＝已持有这两节点的 Slurm 作业号（keepalive）
+JOB=<slurm_jobid>; PORT=29604
+ROOT=<PRIMUS_ROOT>                                            # 含 #864 的 Primus 工作树
+TURBO=/home/botahu/0701_ODC_primus/Primus-Turbo               # 多机 GDA 版 Turbo（lto=1）
+PYDEPS=/home/botahu/0701_ODC_primus/full_exp/pydeps           # flydsl 等
+SP=/opt/venv/lib/python3.12/site-packages
+HCA=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9   # 按集群 NIC 调整
+
+# 先在共享 NFS 上预置 SFT 跳过 prep 的 .done 标志（见下方坑③）
+touch /home/botahu/primus_packed/pcli_notok_bookcorpus.done
+
+cd "$ROOT"
+./primus-cli slurm srun --jobid="$JOB" --overlap -N2 --ntasks-per-node=1 \
+  -p amd-rccl --nodelist=<nodeA>,<nodeB> \
+  -- --image tasimage/primus-odc:v26.2 --clean \
+     --privileged --network host --ipc host --shm-size 64G \
+     --device /dev/kfd --device /dev/dri --device /dev/infiniband \
+     --group-add video --cap-add SYS_PTRACE --cap-add CAP_SYS_ADMIN \
+     --security-opt seccomp=unconfined \
+     --volume /home/botahu:/home/botahu \
+     `# --- PYTHONPATH / turbo / linker（primus-cli 不跑 run_pretrain 的 setup_pythonpath，必须补全）---` \
+     --env PYTHONPATH="$ROOT:$PYDEPS:$TURBO:$ROOT/primus/core/odc/odc_early:$ROOT/primus/core:$SP" \
+     --env PRIMUS_TURBO_PATH="$PYDEPS:$TURBO" \
+     --env LD_LIBRARY_PATH=/opt/rocm/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/openmpi/lib \
+     `# --- ODC 核心开关（run_odc.sh 平时设的）---` \
+     --env ODC_ENABLE=1 --env ODC_LB_MINI=1 --env ODC_PHASE=2 --env LB_MINI_SAME_MICRO=0 \
+     --env ODC_P2P_BACKEND=rocshmem --env LB_MINI_PACKING=kk --env FUSED_LINEAR_CE=1 \
+     --env MORI_SHMEM_HEAP_SIZE=8G --env ROCSHMEM_HEAP_SIZE=8589934592 \
+     --env TRITON_CACHE_DIR=/tmp/tcache_rocshmem_pcli \
+     `# --- 多机控制面（覆盖 run_odc 的单机 lo / IB-off 默认）---` \
+     --env NCCL_SOCKET_IFNAME=eth0 --env GLOO_SOCKET_IFNAME=eth0 \
+     --env NCCL_IB_DISABLE=0 --env NCCL_IB_GID_INDEX=3 \
+     `# --- rocSHMEM GDA 多机 ---` \
+     --env ODC_ROCSHMEM_GDA=1 --env ROCSHMEM_GDA_PROVIDER=mlx5 \
+     --env ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0 --env ROCSHMEM_HCA_LIST="$HCA" \
+     --env ODC_GDA_WARMUP_MODE=strided --env ODC_GDA_STRIDE_BYTES=65536 \
+     --env ODC_GDA_DEFER_REDUCE=1 --env ODC_GDA_PIPE=1 --env PRIMUS_TURBO_ODC_GDA_PIPE=1 \
+     --env MORI_IB_GID_INDEX=3 --env ROCSHMEM_IB_GID_INDEX=3 \
+     --env ROCSHMEM_ROCE_GID_INDEX=3 --env ROCSHMEM_GID_INDEX=3 \
+     `# --- HF 离线缓存 + 节点本地缓存 ---` \
+     --env HF_HOME=/home/botahu/primus_packed/hf_home \
+     --env HF_HUB_CACHE=/home/botahu/primus_packed/hf_models \
+     --env HF_DATASETS_CACHE=/home/botahu/primus_packed/hf_home/datasets \
+     --env HF_HUB_OFFLINE=1 --env DATA_PATH=/workspace \
+     --env PRIMUS_PACK_CACHE_DIR=/home/botahu/primus_packed \
+     --env PRIMUS_PACK_LOCK_DIR=/tmp/primus_lock \
+     --env PRIMUS_CACHE_ROOT=/tmp/primus_cache_pcli \
+     --env PRIMUS_SKIP_PIP=1 \
+     `# --- 绕过内置 pretrain hook 的 SFT prep（见坑③）---` \
+     --env TOKENIZED_DATA_PATH=/home/botahu/primus_packed/pcli_notok_bookcorpus \
+     --env HF_TOKEN=hf_offline_dummy \
+  -- -- train pretrain --config examples/megatron/configs/MI355X/qwen14B-odc-dn.yaml \
+     --backend_path "$ROOT/third_party/Megatron-LM" \
+     --train_iters 50 --global_batch_size 128 --micro_batch_size 1 \
+     --use_torch_fsdp2 True --manual_gc True \
+     --profile false --use_pytorch_profiler false \
+     --disable_wandb True --disable_tensorboard True --disable_last_saving True
 ```
 
-> 为什么用 `docker exec` 进常驻容器、而不是每次 `docker run`：ODC 双机依赖节点上预置的 GDA Turbo 构建、rocSHMEM 库与 HF/packed 缓存（都在共享 NFS `/home/botahu` 上、并已 mount 进常驻容器）；常驻容器 + `docker exec` 让每个 arm 复用同一环境、`srun --overlap` 又能把作业塞进**已持有这两节点的 Slurm 分配**里，不必另开新作业。
+`primus-cli slurm srun` 里三段 `--` 依次分隔：**slurm/srun 参数** ｜ **docker/容器参数（含全部 `--env`）** ｜ **`train pretrain` 训练参数**。`slurm-entry` 会自动把 `MASTER_ADDR/MASTER_PORT/NNODES/NODE_RANK/GPUS_PER_NODE` 注入每个节点，无需手工传。
 
-> **关于 `primus-cli slurm`（如 `run_deepseek_v4.sh` 的一行式）能不能直接拉起 ODC 双机？** 结论：**目前不建议、也不是本文的双机路径**，原因有二：① `primus-cli slurm -N 2` 会**自行 `srun` 申请一份新的 Slurm 作业**（其入口再 `docker run` 全新容器），这与"复用已持有节点的分配"相冲突（可用 `srun --overlap --jobid=<现有作业>` 绕过，但已偏离其常规用法）；② 它的 `train pretrain` 路径**不经过 `run_odc.sh`**，而是走自己的 hook / env 链（`primus-env.sh`、`execute_hooks` 等），因此 ODC 的整套启动环境（`ODC_ENABLE=1`、`ODC_P2P_BACKEND=rocshmem`、`ODC_ROCSHMEM_GDA=1`、rocSHMEM 堆 / HCA / bootstrap、DEFER/PIPE/warmup 旋钮、双 Turbo 的 `PYTHONPATH`（含 `odc_early`）、`LD_LIBRARY_PATH`、uid-over-socket bootstrap）都得由使用者**手工用约 30 个 `--env` 逐条注入**，脆弱且未经验证。`primus-cli` 的 `--env` 确实能透传到内层 `torchrun`（`train pretrain` 与 `run_pretrain.sh` 是同一 Python 入口），所以理论上可行；但在跑通、可复现之前，双机请用上面 (b) 的 `srun --overlap` + `docker exec` + `run_odc.sh` 路径。
+**`--env` 里 ODC 关键项一句话说明**（这些正是 `primus-cli` 绕过 `run_odc.sh` 后必须手补的）：
+
+- `ODC_ROCSHMEM_GDA=1`：切到多机 GPU-Direct RDMA 路径（`odc_rocshmem_gda`），而非单机 host/XGMI-IPC。
+- `ODC_GDA_DEFER_REDUCE=1`（+ `ODC_GDA_PIPE=1`/`PRIMUS_TURBO_ODC_GDA_PIPE=1`）：把逐微批 reduce-scatter 结算延迟到 minibatch 末的一次 rendezvous，避免 nopad 变长微批数在跨节点 barrier 死锁；PIPE 用新旧两个名字兼容 turbo 与 primus 两端读取。
+- `ROCSHMEM_HCA_LIST=$HCA`：RoCE NIC 白名单（本集群 8 张 mlx5，`mlx5_1/_6` 是 eth 管理口需排除）。
+- `ROCSHMEM_BOOTSTRAP_SOCKET_IFNAME=eth0` + `ODC_P2P_BACKEND=rocshmem`：rocSHMEM 走 **uid-over-socket** bootstrap（ODC 自带、不用 MPI）在 eth0 上交换 uid。
+- `PYTHONPATH`（含 `$TURBO`＝GDA 版 Turbo 与 `odc_early`）：让 `import primus_turbo`（GDA ops）与 `import odc` 都解析到多机构建；这是 primus-cli 直连路径最容易漏、也最致命的一项。
+
+#### 正确性要点（三条不可省）
+
+- **RoCE 相邻节点**：`<nodeA>/<nodeB>` 务必选同一 leaf 交换机下、RoCE 互通的相邻节点——不相邻的节点对常卡在首个跨节点 GDA warmup（长时间无 `iteration`）。
+- **device-LTO 单分区**：GDA 版 Turbo 必须以 `-Xoffload-linker --lto-partitions=1` 构建（PR #409 已内置），否则跨节点 `getmem` 读到 0 → **双机 `grad_norm=0`**。
+- **双 Turbo（GDA-linked `Primus-Turbo`）**：双机用 relink 到 `rocshmem_gda` 的那份 Turbo（`$TURBO`），与单机 IPC 版 `Primus-Turbo-single` 分开——两者对称堆/连接后端不同，混用会在 symmetric-heap 打架。
+
+#### `primus-cli` 的 3 个坑 + 2 个注意（均来自这次跑通）
+
+1. **`--volume` 必须写 `src:dst`**：`--volume /home/botahu:/home/botahu`。若只写裸路径 `--volume /home/botahu`，docker 会建一个**匿名空卷**盖住该路径 → 容器里看不到代码/缓存。
+2. **`PYTHONPATH` 必须整条注入**：primus-cli 直连路径**跳过了 `run_pretrain.sh` 的 `setup_pythonpath`**，不补全（repo + pydeps + GDA Turbo + `odc/odc_early` + `primus/core` + site-packages）就 `import odc` / `import primus_turbo` 失败。
+3. **内置 pretrain hook 缺 SFT skip**：primus-cli 走的内置 runner hook（`train/pretrain/megatron/prepare.py`）**没有** `examples/megatron/prepare.py` 里的 `stage=='sft'` 跳过分支，会去要 `HF_TOKEN` + 下载 bookcorpus。临时解法是把 `TOKENIZED_DATA_PATH` 指向一个**预先 `touch` 好的 `.done` 标志**让 hook 跳过 prep（产生的 `--train_data_path` 对 SFT dataset provider 无害，它只认 `sft_dataset_name`）；**更干净的做法是上游给该 hook 补上 `stage=='sft'` skip**。
+- **注意 A（`slurm-entry` 的 MASTER_ADDR）**：`slurm-entry` 会强制 `MASTER_ADDR=`短主机名。当 `/etc/hosts` 里 `127.0.1.1` 那行被注释掉时工作正常；若集群把主机名映射到 loopback（`127.0.1.1 <hostname>`），rendezvous 会绑到本地回环 → 跨节点连不上，此时改用下方 `srun --overlap` 兜底路径更稳。
+- **注意 B（全部 ODC env 走 `--env`）**：因为不经 `run_odc.sh`，任何漏掉的 ODC 变量都不会被自动补，务必对齐上面的完整清单。
+
+#### 稳健兜底：`srun --overlap` + `docker exec` harness
+
+若集群主机名映射到 loopback、或需要复用常驻容器里预置的环境，可退回旧的 **`srun --overlap` + `docker exec` + `run_odc.sh`** 编排（每节点 `run_odc.sh rocshmem nopad qwen14B-odc-dn.yaml ...` + `COMMON_KV`/`GDA_KV`，两 rank 各送进常驻容器），它对 hostname/loopback 更鲁棒；封装见 `full_exp/matrix_dual_harness/`。但**首选、已验证**的双机路径现在是上面的 `primus-cli slurm`。
 
 三个要点：
 
