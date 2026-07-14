@@ -137,6 +137,36 @@ def load_flydsl_attention_backends():
     return v4_attention_flydsl, v4_csa_attention_flydsl
 
 
+def load_turbo_attention_backends():
+    """Lazily import the Primus-Turbo native-FlyDSL sparse-MLA attention entries.
+
+    The ``turbo`` backend (:mod:`_turbo_flydsl`) binds to the installed
+    ``primus_turbo`` flydsl sparse-MLA v2 kernels (the "turbo API" integration),
+    which hard-depend on the installed ``primus_turbo`` (with the flydsl attention
+    submodule) and the ``flydsl`` pip package (gfx950 / CDNA4). Deferred so
+    selecting any other backend never pays that import — and never crashes on a
+    build / GPU arch without it. Call it only when a layer selects ``turbo``.
+
+    Returns ``(v4_attention_turbo, v4_csa_attention_turbo)``. Raises
+    :class:`ImportError` with an actionable message when the dependency is missing.
+    """
+    try:
+        from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_csa_attention_turbo_flydsl import (
+            v4_attention_turbo,
+            v4_csa_attention_turbo,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "use_v4_attention_backend / use_v4_csa_attention_backend = 'turbo' requires the "
+            "Primus-Turbo native-FlyDSL sparse-MLA backend (the installed `primus_turbo` with its "
+            "flydsl sparse-MLA attention, plus the `flydsl` pip package, gfx950 / CDNA4), "
+            f"which failed to import: {exc}. Select a different backend "
+            "(eager | triton_v1 | triton_v2 | gluon | gluon_v2 | flydsl_v1), or install a "
+            "primus_turbo build carrying primus_turbo.flydsl.attention on a gfx950 build."
+        ) from exc
+    return v4_attention_turbo, v4_csa_attention_turbo
+
+
 __all__ = [
     # eager reference
     "eager_v4_attention",
@@ -158,4 +188,6 @@ __all__ = [
     "load_gluon_v2_attention_backends",
     # flydsl_v1 (native FlyDSL fused single-latent sparse-MLA, gfx950) — lazily loaded
     "load_flydsl_attention_backends",
+    # turbo (Primus-Turbo native-FlyDSL sparse-MLA via the turbo API, gfx950) — lazily loaded
+    "load_turbo_attention_backends",
 ]

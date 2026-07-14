@@ -121,12 +121,7 @@ def _triton_inplace_add_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     unsupported (non-contiguous / shape mismatch). The write is in-place on
     ``dst``'s storage, so ``dst`` must be contiguous.
     """
-    if (
-        not _HAVE_TRITON
-        or not dst.is_cuda
-        or not dst.is_contiguous()
-        or dst.numel() != src.numel()
-    ):
+    if not _HAVE_TRITON or not dst.is_cuda or not dst.is_contiguous() or dst.numel() != src.numel():
         return dst.add_(src)
 
     dst_flat = dst.view(-1)
@@ -217,10 +212,20 @@ def _bridge_weight_grad(
                 # returned grad_b=None, so there is nothing to add here -- just flag it.
                 weight.grad_added_to_main_grad = True
             else:
-                from primus_turbo.pytorch.core.utils import is_gfx1250
+                # `is_gfx1250` only exists in newer primus_turbo builds (it gates a
+                # gfx1250-specific elementwise-add workaround). Older / feature-branch
+                # primus_turbo that predate it (e.g. the flydsl sparse-MLA attention branch)
+                # don't define it; treat a missing symbol as False so those builds still work
+                # on non-gfx1250 archs (gfx942 / gfx950) instead of raising ImportError.
+                try:
+                    from primus_turbo.pytorch.core.utils import is_gfx1250
 
-                if is_gfx1250():
-                    # NOTE: The bandwith of torch's elementwise add kernel has issue. Use triton to temporary workaround for gfx1250. 
+                    _use_triton_inplace_add = is_gfx1250()
+                except ImportError:
+                    _use_triton_inplace_add = False
+
+                if _use_triton_inplace_add:
+                    # NOTE: The bandwith of torch's elementwise add kernel has issue. Use triton to temporary workaround for gfx1250.
                     _triton_inplace_add_(weight.main_grad, grad_quantized_weight)
                 else:
                     weight.main_grad.add_(grad_quantized_weight)

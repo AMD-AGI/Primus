@@ -114,11 +114,12 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # ---- DeepSeek-V4 attention backend selection (unified string selectors) ----
     # ``use_v4_attention_backend`` selects the dense (cr=0) / HCA (cr=128) kernel;
     # ``use_v4_csa_attention_backend`` selects the CSA (cr=4) kernel:
-    #   dense/HCA: eager | triton_v1 | triton_v2 | gluon
-    #   CSA:       eager | triton_v0 | triton_v1 | triton_v2 | gluon | flydsl_v0
+    #   dense/HCA: eager | triton_v1 | triton_v2 | gluon | gluon_v2 | flydsl_v1 | turbo
+    #   CSA:       eager | triton_v0 | triton_v1 | triton_v2 | gluon | gluon_v2 | flydsl_v0 | flydsl_v1 | turbo
     # (triton_v0 = deprecated gathered; flydsl_v0 = deprecated legacy FlyDSL,
-    #  fwd-only). ``use_turbo_attention`` (when a ``core_attention`` module is
-    # built) still takes precedence for the dense path.
+    #  fwd-only; ``turbo`` = Primus-Turbo native-FlyDSL sparse-MLA via the turbo
+    #  API, primus_turbo.flydsl.attention). ``use_turbo_attention`` (when a
+    # ``core_attention`` module is built) still takes precedence for the dense path.
     use_v4_attention_backend: str = "triton_v1"
     use_v4_csa_attention_backend: str = "triton_v1"
 

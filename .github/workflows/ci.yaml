@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: 231db3911323ac4d87f1203c4dbc7fe8d52f2135
+  PRIMUS_TURBO_COMMIT: 350ec3f594a35c835a3f9ec53e97285f7bd8e7a7 # dev/kyle/flydsl_attn_deepseekv4 (dsv4 sparse-MLA attention + cr=4 fixes)
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)

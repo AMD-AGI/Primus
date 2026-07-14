@@ -15,6 +15,9 @@ every backend, so there is a single place to compare them (one row per backend,
 * ``triton_v2`` — fused single-latent sparse-MLA in plain Triton (tl.dot / MFMA)
 * ``flydsl_v1`` — fused single-latent sparse-MLA in native FlyDSL MFMA (fwd + bwd)
 * ``turbo_flydsl`` — extracted Primus-Turbo sparse_mla_v2 native FlyDSL MFMA
+* ``_turbo_flydsl`` — the INTEGRATED in-tree Primus-Turbo backend via the turbo API
+  (``primus_turbo.flydsl.attention``); the ``turbo`` model backend
+  (``use_v4_attention_backend`` / ``use_v4_csa_attention_backend = "turbo"``)
 
 The legacy ``_flydsl_v0_deprecated`` gathered-CSA backend (scalarized GEMV) is
 NOT benchmarked: it has known correctness issues and depends on the
@@ -139,6 +142,23 @@ try:
     _SPARSE_MLA_BACKENDS["turbo_flydsl"] = (
         sparse_mla_fwd_v4_flydsl_turbo,
         sparse_mla_bwd_v4_flydsl_turbo,
+    )
+except Exception:  # noqa: BLE001
+    pass
+# _turbo_flydsl: the INTEGRATED Primus-Turbo sparse-MLA backend, via the turbo API
+# (primus_turbo.flydsl.attention). Not an agent/workspace extraction — this is the
+# in-tree `_turbo_flydsl` backend (enabled in the model via
+# use_v4_attention_backend / use_v4_csa_attention_backend = "turbo"). Requires an
+# installed primus_turbo carrying primus_turbo.flydsl.attention.
+try:
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._turbo_flydsl import (
+        sparse_mla_bwd_v4_turbo_flydsl,
+        sparse_mla_fwd_v4_turbo_flydsl,
+    )
+
+    _SPARSE_MLA_BACKENDS["_turbo_flydsl"] = (
+        sparse_mla_fwd_v4_turbo_flydsl,
+        sparse_mla_bwd_v4_turbo_flydsl,
     )
 except Exception:  # noqa: BLE001
     pass
@@ -516,7 +536,16 @@ def _bench_cr(variant: str, cr: int, *, B: int, S: int, warmup: int, iters: int)
     # Backend table: native production Triton (separate K/V), then the fused
     # sparse-MLA backends (legacy `_flydsl_v0` gathered CSA is excluded).
     backends = [("triton", fwd_triton, bwd_triton)]
-    for _name in ("gluon", "triton_v2", "gluon_v2", "gluon_v3", "flydsl_v1", "turbo_flydsl", "aiter_gluon"):
+    for _name in (
+        "gluon",
+        "triton_v2",
+        "gluon_v2",
+        "gluon_v3",
+        "flydsl_v1",
+        "turbo_flydsl",
+        "_turbo_flydsl",
+        "aiter_gluon",
+    ):
         if _name in sparse_fb:
             backends.append((_name, sparse_fb[_name][0], sparse_fb[_name][1]))
 
