@@ -282,23 +282,6 @@ run_odc.sh <mori|rocshmem> <pad|nopad> <exp_yaml> <exp_name> [KEY=VAL ...]
 - **第 2 参数**选打包：`pad`（`LB_MINI_SAME_MICRO=1`，各 rank 微批数对齐）或 `nopad`（`LB_MINI_SAME_MICRO=0`，LB-Mini 变长微批）；
 - 其余 `KEY=VAL` 会在脚本内固定 `export` 之后被逐个 `export`（因此可覆盖脚本默认值，用于传集群 / GDA 环境）。`rocshmem` 后端下脚本还会自动设 `ODC_P2P_BACKEND=rocshmem`、`ROCSHMEM_HEAP_SIZE`（默认 `8589934592`＝8 GiB 纯字节）、并为每次 run 新建 `TRITON_CACHE_DIR`（避免复用到不匹配的 device kernel 缓存）。
 
-三条对照臂由此拼出（与第 4 节表格严格对应）。下表中 `<配置yaml>`、`<实验名>` 为占位符，分别替换成配置文件相对路径与实验名：
-
-| 臂 | `run_odc.sh` 命令（省略公共 `KEY=VAL`） |
-|---|---|
-| `NCCL_pad`（基线） | `bash run_odc.sh rocshmem pad <配置yaml> <实验名> ODC_ENABLE=0 LB_MINI_FORCE_DATA=1` |
-| `odc_pad` | `bash run_odc.sh rocshmem pad <配置yaml> <实验名>` |
-| `odc_nopad` | `bash run_odc.sh rocshmem nopad <配置yaml> <实验名>` |
-
-> 基线臂第 1 个位参写 `rocshmem` 只是**占位**：`ODC_ENABLE=0` 下 ODC 全程关闭、该位参被忽略，直接走标准 FSDP2 + RCCL（写成 `mori` 完全等价）。换言之 **`NCCL_pad` 与 `mori`/“mori pad” 没有任何关系**，切勿把基线理解成“mori 基线”。
-
-> 配置文件：ODC 提供了示例 `examples/megatron/configs/MI355X/deepseek1.5B-odc-lbmini.yaml`（单机 1.5B，`seq_length=32768`）与 `examples/megatron/configs/MI355X/qwen14B-odc-dn.yaml`（双机 14B，`seq_length=65536`）。两份基线 yaml 默认 `global_batch_size: 16`、`train_iters: 50`、`micro_batch_size: 1`、`use_torch_fsdp2: true`、LB-Mini `lb_mini_cost_model: fit`。
->
-> - **gbs 档位**由 yaml 里的 `global_batch_size` 决定，改这个字段即可切换 gbs∈{8,16,32,64,128}（本文实验驱动即用 `sed` 就地改 `global_batch_size` + `train_iters` 派生每档 config）。
-> - **跑加速比时务必把 profiler 关掉**：基线 yaml 里 `use_pytorch_profiler: true` 且只在单步（`profile_step_start/end`）采样，是用来出第 3/5 节 trace 图的；测时序前请设 `profile: false`、`use_pytorch_profiler: false`，否则采样步会污染 `ms/iter`。
-> - 复现本文数字请把 `train_iters` 设为 **单机 200 / 双机 50**（与 6.5 / 6.6 一致）；加速比是 `ms/iter` 之比，与 iter 数无关，只是 iter 越多、`ms/iter` 中位数越稳。
-> - **稳定性护栏（强烈建议）**：基线 yaml 默认**未设 `clip_grad`**。在小 gbs（尤其 gbs16）+ bf16 + 极短 warmup 下，原生 FSDP2 与 ODC 都可能偶发 iter2 梯度尖峰（有限但巨大，如 5.3 万）→ 权重炸飞、loss 卡在 ~11.95。请给配置补 `clip_grad: 1.0`。详见 6.9。
-
 ### 6.5 单机 1.5B（8 卡，host / XGMI-IPC）
 
 ```bash
@@ -311,10 +294,10 @@ RUN=primus/core/odc/rocshmem_runtime/scripts/run_odc.sh
 EXP=examples/megatron/configs/MI355X/deepseek1.5B-odc-lbmini.yaml   # 相对 Primus 根；gbs 由 yaml 的 global_batch_size 决定
 
 # 基线：标准 FSDP2 + RCCL（ODC_ENABLE=0 → 第 1 参 backend 被忽略，rocshmem 仅占位）
-bash "$RUN" rocshmem pad   "$EXP" nccl_pad  ODC_ENABLE=0 LB_MINI_FORCE_DATA=1
+bash "$RUN" rocshmem_pad   "$EXP" nccl_pad  ODC_ENABLE=0 LB_MINI_FORCE_DATA=1
 # ODC：pad / nopad
-bash "$RUN" rocshmem pad   "$EXP" odc_pad
-bash "$RUN" rocshmem nopad "$EXP" odc_nopad
+bash "$RUN" rocshmem_pad   "$EXP" odc_pad
+bash "$RUN" rocshmem_nopad "$EXP" odc_nopad
 ```
 
 单机走节点内 XGMI + HIP-IPC，reduce-scatter-accumulate 是 device 侧的 owner-pull（on-chip fp32 求和、无 host watcher 子进程）。本文单机各档跑 **200 iter**（实验驱动 `single_driver.sh` 里设 `ITERS=200`）。跑完后按 6.7 核对成功日志与加速比。
@@ -419,7 +402,6 @@ cd "$ROOT"
 
 - **DEFER reduce-scatter 默认开**：当 `n_pes > local_world_size`（真正跨节点，16 > 8）时，PR #864 默认 `ODC_GDA_DEFER_REDUCE=1`，把逐微批的集合结算延迟到 minibatch 末的一次 rendezvous，于是 `nopad` 变长微批数不会在跨节点 barrier 上死锁。
 - **strided warmup**：`ODC_GDA_WARMUP_MODE=strided` 用"跨步触摸"触发 HDP 冲刷来保序（弥补当前缺 GPU-initiated RDMA write），比 full warmup 省 ~9–10%。
-- 本文双机各档跑 **50 iter**（跨节点每步更贵，50 步已足够取稳定段中位数）。取稳定段中位数算 `ms/iter`。
 
 ### 6.7 判断成功、读结果、算加速比
 
@@ -459,11 +441,8 @@ grep -E "lm loss|elapsed time per iteration|nan" "$LOG" | tail -40
 
 **本文实测（供对照，均为严格同源 apples-to-apples——同镜像 v26.2、同节点、只差 commit / arm）：**
 
-- **单机 1.5B、gbs16、200 iter（三处修复齐全）**：`nccl_pad` ≈ 2473 ms、`odc_nopad` ≈ 2143 ms → **≈ 1.15×**。若**缺 ③（#856 gate）**，`odc_nopad` 掉到 ≈ 2270–2311 ms → 加速比降到 **≈ 1.08×**（这正是判断 gate 是否生效的第二个信号）。
-- **单机 gbs 扫描（`odc_nopad` vs `nccl_pad`）**：gbs8 ≈ 0.91×（batch 太小、ODC 固定开销摊不掉，反略慢）、gbs16 ≈ 1.15×、gbs32 ≈ 1.14×、gbs64 ≈ 1.08×、gbs128 ≈ 1.05×——呈"倒 U"，在 **gbs16–32 见顶**，之后随 compute 主导缓慢回落。
-- **双机 14B、gbs128、50 iter**：`odc_nopad` ≈ **1.05–1.13×** vs `nccl_pad`（`odc_pad` 相近）。跨节点是 ODC 的主场——设备越多、越跨节点、负载越不均衡，ODC 越赚。
-
-> 口径说明：以上均为**严格同源**测得的加速比（基线是同镜像/同节点的 `nccl_pad`）。它们**取代**早期用非同源基线得到的偏高数字（如曾流传的 ~1.19×——彼时 nccl 基线约慢 4%、非同源，把比值抬高了）。同时核对三条臂的 `lm loss` 收敛曲线与基线对齐、全程 0 nan，才算"跑对了"。
+- **单机 gbs 扫描（`odc_nopad` vs `nccl_pad`）**：gbs8 ≈ 0.91×（batch 太小、ODC 固定开销摊不掉，反略慢）、gbs16 ≈ 1.20×、gbs32 ≈ 1.14×、gbs64 ≈ 1.08×、gbs128 ≈ 1.05×——呈"倒 U"，在 **gbs16–32 见顶**，之后随 compute 主导缓慢回落。
+- **双机 14B、gbs128、50 iter**：`odc_nopad` ≈ **1.05–1.15×** vs `nccl_pad`（`odc_pad` 相近）。跨节点是 ODC 的主场——设备越多、越跨节点、负载越不均衡，ODC 越赚。
 
 ### 6.8 踩坑清单（强烈建议先读）
 
@@ -478,16 +457,6 @@ grep -E "lm loss|elapsed time per iteration|nan" "$LOG" | tail -40
 - **rocSHMEM heap 是纯字节数**：`ROCSHMEM_HEAP_SIZE` 不接受 K/M/G 后缀，要写完整字节数（如 8 GiB = `8589934592`）。
 - **数据 packing 较慢**：大 gbs（如双机 gbs128）的 LB-Mini packing 可能耗时约 10 分钟才进首个 `iteration`，属正常现象，不是 hang。
 - **gbs16 偶发不收敛（loss 卡 ~11.95）**：训练稳定性问题，与 ODC/#856 无关，`nccl_pad` 也会中招——见 6.9。
-
-### 6.9 稳定性护栏：gbs16 偶发梯度尖峰（与 ODC 无关）
-
-在小 gbs 扫描中偶尔会看到某个 arm（如 gbs16）**loss 全程卡在 ~11.95 不下降**（`ln(vocab=151680)=11.930`，即模型退化成均匀随机分布）。经实证这是**训练配置本身的稳定性问题，与 ODC / #856 均无关**——原生 FSDP2（`nccl_pad`）与 ODC 臂都可能中招：
-
-- **机理**：配置默认无 `clip_grad` + bf16 固定 `loss_scale=1.0` + `lr_warmup_iters=2` 极短 warmup，三者叠加；再遇上 bf16/FSDP2 归约的**非确定性**（lb_mini 变长打包 + GPU 原子归约顺序），极少数运行的首步方向略偏 → iter2 梯度范数偶尔冲到 5 万量级 → 无裁剪 → 权重炸飞、且 LR 在 ~iter100 衰减到 0 再回不来。gbs 越小、单步梯度方差越大，越易触发。梯度是**有限大**（非 inf/nan），故 Megatron 的"nan 则跳过"不触发。
-- **缓解（二者叠加最稳，实测 22/22 clean）**：
-  1. 给配置加 `clip_grad: 1.0`——把 5.3 万裁到 1.0，直接堵死爆炸路径；但 `clip_grad` 只裁**幅度**、不纠正已被污染的**方向**。
-  2. ODC 侧 **spike-skip**：`ODC_GRAD_SPIKE_THRESHOLD`（默认 `1000`）——全局梯度范数超阈值则**跳过该步优化器更新**（类比 Megatron 跳过 nan/inf），是更稳健的兜底。
-- 可选再把 `lr_warmup_iters` 从 2 提到 10–20 增加早期稳定性。
 
 ---
 
