@@ -1,14 +1,6 @@
-# CLI Reference
+# CLI reference
 
-This document describes the unified Primus launcher (`runner/primus-cli`) and how it invokes the Python CLI (`primus/cli/main.py`). For deeper background, see the in-repo guide at `docs/cli/PRIMUS-CLI-GUIDE.md`.
-
-**Related documentation**
-
-| Topic | Location |
-| --- | --- |
-| Installation and first steps | [Getting started: Quickstart](../01-getting-started/quickstart.md) |
-| YAML experiment configuration | [Configuration System](configuration-system.md) |
-| Pretraining workflows | [Pretraining Workflows](pretraining.md) |
+This section describes the unified Primus launcher (`runner/primus-cli`) and how it invokes the Python CLI (`primus/cli/main.py`). For deeper background, see [CLI architecture](../06-developer-guide/cli-architecture.md).
 
 ---
 
@@ -18,7 +10,7 @@ This document describes the unified Primus launcher (`runner/primus-cli`) and ho
 primus-cli [global-options] <mode> [mode-args] -- [command]
 ```
 
-- **Global options** apply before the mode name and affect config loading and logging for the whole run.
+- **Global options** go before the mode name and they affect configuration loading and logging for the whole run.
 - **Mode** is one of `direct`, `container`, or `slurm`.
 - **`--` (required)** separates launcher options from the Primus Python CLI. Everything after the first `--` is passed to `primus/cli/main.py` (or another script if you override it in direct mode).
 
@@ -28,11 +20,11 @@ From the repository root, invoke the launcher as `./runner/primus-cli` (or insta
 
 ## Global options
 
-These flags are parsed in `runner/primus-cli` before the mode is dispatched to `runner/primus-cli-<mode>.sh`.
+These flags are parsed in `runner/primus-cli` before the mode name is read and passed on to `runner/primus-cli-<mode>.sh`.
 
 | Option | Description |
 | --- | --- |
-| `--config FILE` | Load a YAML file for launcher defaults (see [Configuration precedence](#configuration-precedence)). |
+| `--config FILE` | Load a YAML file for launcher defaults (see [Configuration precedence](#configuration-precedence-launcher-yaml)). |
 | `--debug` | Verbose logging; sets `PRIMUS_LOG_LEVEL=DEBUG`. |
 | `--dry-run` | Print the command that would run and exit without executing the mode script. |
 | `--version` | Print the CLI version and exit. |
@@ -70,9 +62,9 @@ primus-cli direct [options] -- <command>
 
 | Option | Description |
 | --- | --- |
-| `--config FILE` | Launcher YAML (same resolution as [global `--config`](#configuration-precedence)). |
+| `--config FILE` | Launcher YAML (same resolution as [global `--config`](#configuration-precedence-launcher-yaml)). |
 | `--debug` | Debug logging for the direct launcher. |
-| `--dry-run` | Show the resolved launch command without running training. |
+| `--dry-run` | Show the resolved command that would be launched without running training. |
 | `--single` | Run with `python3` instead of `torchrun` (single process). |
 | `--script PATH` | Python entry script (default: `primus/cli/main.py`). |
 | `--env KEY=VALUE` | Set an environment variable before launch (repeatable). A path without `=` is treated as an env file (`--env_file`), loaded later in the launch sequence. |
@@ -83,7 +75,7 @@ primus-cli direct [options] -- <command>
 
 ### Distributed environment variables
 
-For multi-node or multi-process runs, set these (via `export` or `--env`):
+For multi-node or multi-process runs, set these via `export` or `--env`:
 
 | Variable | Role | Typical default |
 | --- | --- | --- |
@@ -109,7 +101,7 @@ primus-cli container [options] -- <command>
 
 | Option | Description |
 | --- | --- |
-| `--image NAME` | Image tag (default from config: `rocm/primus:v26.2`). |
+| `--image NAME` | Image tag (default from config: `rocm/primus:v26.3`). |
 | `--volume HOST[:CONTAINER]` | Bind mount (repeatable). |
 | `--env KEY=VALUE` | Pass into the **inner** `primus-cli direct` as `--env` (repeatable). |
 | `--device PATH` | Extra device nodes (repeatable; defaults include GPU/RDMA devices). |
@@ -124,9 +116,9 @@ primus-cli container [options] -- <command>
 
 When using `runner/.primus.yaml`, the default container section includes:
 
-- `/dev/kfd` — ROCm kernel fusion driver
-- `/dev/dri` — GPU render nodes
-- `/dev/infiniband` — InfiniBand character devices (when present)
+- `/dev/kfd`—ROCm kernel fusion driver
+- `/dev/dri`—GPU render nodes
+- `/dev/infiniband`—InfiniBand character devices (when present)
 
 ### Environment forwarding
 
@@ -136,7 +128,7 @@ When using `runner/.primus.yaml`, the default container section includes:
 
 ## Slurm mode
 
-Launch distributed jobs with `srun` or `sbatch`. The Slurm launcher builds `srun`/`sbatch` flags, merges them with `slurm.*` entries from the loaded YAML, then runs `runner/primus-cli-slurm-entry.sh` on allocated nodes.
+Launch distributed jobs with `srun` or `sbatch`. The Slurm launcher builds `srun` or `sbatch` flags, merges them with `slurm.*` entries from the loaded YAML, then runs `runner/primus-cli-slurm-entry.sh` on allocated nodes.
 
 ### Syntax
 
@@ -169,12 +161,13 @@ These run under `primus/cli/main.py` unless you change `--script` in direct mode
 
 | Subcommand | Purpose |
 | --- | --- |
-| `train pretrain --config <yaml>` | Pretraining (Megatron-LM, TorchTitan, MaxText, Megatron Bridge, etc., per experiment YAML). |
-| `train posttrain --config <yaml>` | Post-training (SFT / LoRA-style workflows; same top-level flags as pretrain in the parser). |
+| `train pretrain --config <yaml>` | Pretraining (Megatron-LM, TorchTitan, MaxText, Megatron Bridge, etc., per configuration YAML). |
+| `train posttrain --config <yaml>` | Post-training (SFT or LoRA-style workflows; same top-level flags as pretrain in the parser). |
 | `benchmark <suite> [args]` | Performance microbenchmarks (see table below). |
 | `preflight [--host] [--gpu] [--network] [--perf-test]` | Cluster and node diagnostics. |
 | `projection memory --config <yaml>` | Memory estimation from a merged config. |
 | `projection performance --config <yaml>` | Performance projection from a merged config. |
+| `projection both --config <yaml>` | Single benchmark → both performance and memory projections (cluster sizing). |
 
 ### Benchmark suites
 
@@ -194,15 +187,15 @@ The same file also registers an `attention` suite for attention microbenchmarks.
 
 ## Configuration precedence (launcher YAML)
 
-Resolution is implemented in `runner/lib/config.sh` (`resolve_config_file` / `load_config_auto`):
+Resolution is implemented in `runner/lib/config.sh` (functions `resolve_config_file` and `load_config_auto`):
 
 1. **`--config FILE`** on the command line (if given).
 2. **`~/.primus.yaml`** if it exists.
 3. **`runner/.primus.yaml`** (system default).
 
-Within a chosen file, nested keys follow normal YAML structure; Slurm and container scripts merge CLI flags with their sections so that **explicit CLI arguments override file values** where applicable.
+Within a chosen file, nested keys follow normal YAML structure. Slurm and container scripts merge CLI flags with their sections so that **explicit CLI arguments override file values** where applicable.
 
-**Note:** This precedence applies to the **shell launcher** YAML. Training YAML merge order for experiments is documented in [Configuration System](configuration-system.md).
+**Note:** This precedence applies to the **shell launcher** YAML. Training YAML merge order for configurations is documented in [Configuration system](configuration-system.md).
 
 ---
 
@@ -230,3 +223,11 @@ From `runner/primus-cli`:
 | 1 | Library or dependency failure |
 | 2 | Invalid arguments or configuration |
 | 3 | Runtime execution failure |
+
+---
+
+## Related documentation
+
+- [Getting started: Quickstart](../01-getting-started/quickstart.md): installation and first steps
+- [Configuration system](configuration-system.md): YAML configuration model, presets, overrides, inheritance
+- [Pretraining](pretraining.md): pretraining workflows and backend notes

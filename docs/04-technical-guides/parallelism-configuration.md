@@ -1,4 +1,4 @@
-# Parallelism Configuration Guide
+# Parallelism configuration guide
 
 Primus is a YAML-driven training framework for AMD GPUs. Megatron-LM, TorchTitan, and MaxText each expose parallelism through different configuration namespaces. This guide explains how to set parallelism and batch-related parameters, how global batch size relates to micro batch size and data parallel width, and how to choose a parallel strategy for common model sizes.
 
@@ -124,14 +124,14 @@ MaxText (JAX) uses a **device mesh** with **ICI** (intra-node / “in-cluster in
 
 Examples include:
 
-- `ici_tensor_parallelism` — tensor parallelism within a node
-- `ici_fsdp_parallelism` — FSDP-style sharding on ICI (default `-1` for auto in many layouts)
-- `dcn_data_parallelism` — data parallelism across nodes (default `-1` for auto)
-- `dcn_fsdp_parallelism` — FSDP across DCN
+- `ici_tensor_parallelism`—tensor parallelism within a node
+- `ici_fsdp_parallelism`—FSDP-style sharding on ICI (default `-1` for auto in many layouts)
+- `dcn_data_parallelism`—data parallelism across nodes (default `-1` for auto)
+- `dcn_fsdp_parallelism`—FSDP across DCN
 
 ### Batch sizing
 
-- `per_device_batch_size` — primary knob for per-device batch (see `base.yml`).
+- `per_device_batch_size`—primary knob for per-device batch (see `base.yml`).
 
 Consult MaxText’s mesh documentation and your chosen model YAML for valid combinations of ICI/DCN axes.
 
@@ -181,7 +181,7 @@ Assume TP=1, PP=1, EP=1, so DP equals world size.
 
 ---
 
-## 5. Decision guide: choosing parallelism
+## 5. Decision guide: Choosing parallelism
 
 | Situation | Suggested direction |
 |-----------|----------------------|
@@ -220,7 +220,7 @@ micro_batch_size: 2
 global_batch_size: 128
 ```
 
-### Megatron: tensor + pipeline + data parallel
+### Megatron: Tensor + pipeline + data parallel
 
 ```yaml
 tensor_model_parallel_size: 8

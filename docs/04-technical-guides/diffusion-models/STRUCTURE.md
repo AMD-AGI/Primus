@@ -1,4 +1,4 @@
-# Flux Diffusion Infrastructure - Directory Structure
+# Flux diffusion infrastructure - directory structure
 
 **Created**: December 5, 2025
 **Status**: ✓ Implementation Complete
@@ -9,7 +9,7 @@ This document describes the directory structure created for Flux diffusion model
 
 ---
 
-## Directory Tree
+## Directory tree
 
 ```
 Primus/
@@ -74,9 +74,8 @@ Primus/
 │           │
 │           └── __init__.py
 │
-├── primus/modules/trainer/megatron/
-│   └── diffusion/                          # Diffusion trainer
-│       └── __init__.py                     # ✓ DiffusionTrainer
+├── primus/backends/megatron/
+│   └── megatron_pretrain_trainer.py        # ✓ Shared Megatron pretrain trainer (drives diffusion pretraining)
 │
 ├── primus/configs/models/megatron/
 │   └── diffusion/                          # YAML configs
@@ -135,9 +134,9 @@ Primus/
 
 ---
 
-## Completed Components
+## Completed components
 
-### ✓ Base Classes
+### ✓ Base classes
 
 1. **DiffusionModule** (`core/models/common/diffusion_module/diffusion_module.py`)
    - Base class for all diffusion models (extends MegatronModule)
@@ -167,7 +166,7 @@ Primus/
    - Linear interpolation: `x_t = (1-t)*noise + t*data`
    - Velocity target: `v = data - noise`
 
-### ✓ Directory Structure
+### ✓ Directory structure
 
 - **25 `__init__.py` files** with comprehensive docstrings
 - **Multiple implementation files** (models, configs, schedulers, data pipeline)
@@ -175,39 +174,39 @@ Primus/
 
 ---
 
-## Architectural Decisions
+## Architectural decisions
 
 ### 1. Models under `core/models/`
 - Follows Megatron-Core convention (`megatron/core/models/gpt/`, etc.)
 - Easier upstream tracking when Megatron-Core adds diffusion support
 
-### 2. Shared Components in `common/`
+### 2. Shared components in `common/`
 - Standard approach stores shared code in model-specific directories
 - Primus: `common/` for MMDiT layers, attention, shared utilities
 - Flux-specific: Only `EmbedND` and Flux model class
 
-### 3. Hierarchical Encoder Structure
+### 3. Hierarchical encoder structure
 - `encoders/image/vae/`, `encoders/text/t5/`, `encoders/text/clip/`
 - Registry pattern for config-driven selection
 - Easy to add new encoder variants (5+ planned per modality)
 
-### 4. Shared Energon Infrastructure
+### 4. Shared Energon infrastructure
 - `data/energon/` for cross-model utilities (VLM, diffusion, future)
 - `data/diffusion/task_encoders/` for diffusion-specific TaskEncoders
 - Traditional approach nests Energon under model-specific directories
 
-### 5. Mock Data in Tests
+### 5. Mock data in tests
 - `tests/fixtures/diffusion/` (not production code)
 - Traditional approach mixes test utilities with production code
 - Follows pytest best practices
 
-### 6. No PyTorch Lightning
+### 6. No PyTorch lightning
 - Pure Megatron patterns (no PTL DataModules)
 - Better integration with Megatron training loop
 
 ---
 
-## Import Examples
+## Import examples
 
 ```python
 # Base classes
@@ -235,7 +234,7 @@ timesteps = scheduler.sample_timesteps(batch_size=8, device='cuda')
 
 ---
 
-## Validation Status
+## Validation status
 
 ✓ All Python files syntactically correct
 ✓ No linter errors detected
@@ -245,7 +244,7 @@ timesteps = scheduler.sample_timesteps(batch_size=8, device='cuda')
 
 ---
 
-## Files Summary
+## Files summary
 
 All infrastructure files, model implementations, data pipeline components, tests, and documentation are complete and ready for production use.
 

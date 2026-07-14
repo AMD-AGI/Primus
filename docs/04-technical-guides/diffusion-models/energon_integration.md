@@ -1,19 +1,19 @@
-# Energon Integration Guide
+# Energon integration guide
 
 This guide explains how Megatron-Energon is integrated with Primus diffusion models, including the Cooker/TaskEncoder pattern, dataloader configuration, and dataset format.
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [Overview](#overview)
-2. [Energon Architecture](#energon-architecture)
-3. [Dataset Format](#dataset-format)
-4. [TaskEncoder and Cooker Pattern](#taskencoder-and-cooker-pattern)
-5. [Dataloader Setup](#dataloader-setup)
-6. [Dataset Configuration](#dataset-configuration)
-7. [Implementation Examples](#implementation-examples)
-8. [Best Practices](#best-practices)
+2. [Energon architecture](#energon-architecture)
+3. [Dataset format](#dataset-format)
+4. [TaskEncoder and cooker pattern](#taskencoder-and-cooker-pattern)
+5. [Dataloader setup](#dataloader-setup)
+6. [Dataset configuration](#dataset-configuration)
+7. [Implementation examples](#implementation-examples)
+8. [Best practices](#best-practices)
 
 ---
 
@@ -28,14 +28,14 @@ Megatron-Energon is NVIDIA's data loading framework for large-scale multimodal t
 - **Deterministic iteration**: Reproducible training
 - **Checkpoint resumption**: Resume from any step
 
-### Why Energon for Diffusion?
+### Why Energon for diffusion?
 
 - **Proven at scale**: Used by NVIDIA for LLM and multimodal training
 - **Flexible**: Supports various data formats and transformations
 - **Efficient**: Optimized for multi-GPU training
 - **Compatible**: Works with Megatron parallelism (TP, PP, DP)
 
-### Primus Integration Strategy
+### Primus integration strategy
 
 ```
 Shared Infrastructure (data/)
@@ -53,9 +53,9 @@ Model-Specific TaskEncoders (data/diffusion/task_encoders/)
 
 ---
 
-## Energon Architecture
+## Energon architecture
 
-### Component Stack
+### Component stack
 
 ```
 Training Loop
@@ -71,7 +71,7 @@ Megatron-Energon Core
 .tar Shards (CrudeWebdataset format)
 ```
 
-### Data Flow
+### Data flow
 
 ```
 1. Load from .tar shard
@@ -101,7 +101,7 @@ Megatron-Energon Core
 
 ---
 
-## Dataset Format
+## Dataset format
 
 ### CrudeWebdataset
 
@@ -120,7 +120,7 @@ The `subflavors.encoding` field tells the TaskEncoder which Cooker to use:
 - `preencoded`: Uses `cook_preencoded_diffusion` -- loads pre-encoded tensors
 - `raw`: Uses `cook_raw_images` -- loads raw images and text
 
-### Pre-encoded Shard Contents
+### Pre-encoded shard contents
 
 Each tar shard contains samples with these keys:
 
@@ -131,14 +131,14 @@ Each tar shard contains samples with these keys:
 | `pooled_prompt_embeds.pth` | Tensor | `[768]` | CLIP-L pooled embeddings |
 | `caption.txt` | str | N/A | Original caption text |
 
-### Raw Shard Contents
+### Raw shard contents
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `jpg` / `png` / `webp` | bytes | Preprocessed image |
 | `txt` | str | Caption text |
 
-### Known Energon CLI Limitations
+### Known Energon CLI limitations
 
 The standard Energon CLI tools have issues with `CrudeWebdataset`:
 - `energon info` raises `KeyError: 'sample_type'`
@@ -149,11 +149,11 @@ Primus includes custom validation (`primus.backends.megatron.data.diffusion.prep
 
 ---
 
-## TaskEncoder and Cooker Pattern
+## TaskEncoder and cooker pattern
 
 Primus uses Energon's Cooker pattern rather than the older `encode_sample()` approach. Cookers are `@stateless` functions that transform raw sample dicts into typed dataclass instances, dispatched based on `subflavors`.
 
-### DiffusionSample Dataclass
+### DiffusionSample dataclass
 
 Location: `primus/backends/megatron/data/diffusion/task_encoders/image.py`
 
@@ -176,7 +176,7 @@ class DiffusionSample(Sample):
     caption: str = ""
 ```
 
-### Cooker Functions
+### Cooker functions
 
 Cookers are `@stateless` functions registered with a `Cooker` wrapper that specifies which `subflavors` they handle:
 
@@ -275,7 +275,7 @@ class RawDiffusionTaskEncoder(DefaultTaskEncoder):
         }
 ```
 
-### How Cooker Dispatch Works
+### How cooker dispatch works
 
 The Cooker framework matches samples to cooker functions based on `subflavors`:
 
@@ -289,7 +289,7 @@ This decouples data format (what's in the tar) from data loading logic (how to i
 
 ---
 
-## Dataloader Setup
+## Dataloader setup
 
 ### MegatronDataloaderWrapper
 
@@ -308,7 +308,7 @@ wrapper = MegatronDataloaderWrapper(pytorch_or_energon_loader)
 
 Note: Originally named `EnergonDataloader`, renamed to `MegatronDataloaderWrapper` to reflect its generic nature (it has no Energon dependencies). The old name is available as a deprecated alias.
 
-### Usage Example
+### Usage example
 
 ```python
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
@@ -330,9 +330,9 @@ for batch in dataloader:
 
 ---
 
-## Dataset Configuration
+## Dataset configuration
 
-### Per-Dataset dataset.yaml
+### Per-dataset dataset.yaml
 
 Each dataset directory has a `.nv-meta/dataset.yaml` that specifies the Energon dataset type:
 
@@ -345,7 +345,7 @@ subflavors:
 
 This file is auto-generated by Primus during finalization. See [Data Preprocessing Guide](data_preprocessing.md#finalization).
 
-### Metadataset (Multi-Dataset Mixing)
+### Metadataset (multi-dataset mixing)
 
 For combining multiple datasets with different weights:
 
@@ -366,9 +366,9 @@ Energon samples proportionally to weights (70% from LAION, 30% from COCO).
 
 ---
 
-## Implementation Examples
+## Implementation examples
 
-### Example 1: Pre-encoded Training
+### Example 1: Pre-encoded training
 
 ```python
 from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
@@ -387,7 +387,7 @@ for batch in dataloader:
     )
 ```
 
-### Example 2: Raw Data Training (On-the-Fly Encoding)
+### Example 2: Raw data training (on-the-fly encoding)
 
 ```python
 from primus.backends.megatron.data.diffusion.task_encoders import RawDiffusionTaskEncoder
@@ -403,7 +403,7 @@ for batch in dataloader:
     # Model handles VAE/T5/CLIP encoding in forward_step
 ```
 
-### Example 3: Multi-GPU Training
+### Example 3: Multi-GPU training
 
 ```python
 import torch.distributed as dist
@@ -419,25 +419,25 @@ for batch in dataloader:
 
 ---
 
-## Best Practices
+## Best practices
 
-### 1. Pre-encoded Mode
+### 1. Pre-encoded mode
 - **Always use for production training**: 5-10x faster
 - **Validate first**: Test with small dataset using `quickstart_pokemon.yaml`
 - **Version datasets**: Track which preprocessing config produced each dataset
 
-### 2. Cooker Design
+### 2. Cooker design
 - **Use `@stateless`**: Cookers must be stateless and side-effect-free
 - **Use `basic_sample_keys()`**: Always forward `__key__`, `__restore_key__`, `__subflavors__`
 - **Keep it simple**: Cookers should only deserialize and restructure data, not transform it
 - **Use subflavors for dispatch**: Let the framework choose the right cooker
 
-### 3. TaskEncoder Design
+### 3. TaskEncoder design
 - **Single responsibility**: One task encoder per data format family
 - **Minimal `batch()`**: Only stack tensors, avoid computation in the batch method
 - **Separate concerns**: Data loading in Cooker, encoding in model forward_step
 
-### 4. Dataloader Configuration
+### 4. Dataloader configuration
 - **Num workers**: Match CPU cores (typically 4-8)
 - **Batch size**: Max out GPU memory
 - **Shuffle**: Always true for training
@@ -450,9 +450,9 @@ for batch in dataloader:
 
 ---
 
-## Customization Patterns
+## Customization patterns
 
-### Custom Cooker Function
+### Custom cooker function
 
 Add a new cooker for a different data format:
 
@@ -487,7 +487,7 @@ class CustomDiffusionTaskEncoder(DefaultTaskEncoder[DiffusionSample, DiffusionSa
         }
 ```
 
-### Multiple Cookers in One TaskEncoder
+### Multiple cookers in one TaskEncoder
 
 A single TaskEncoder can register multiple cookers for different subflavors:
 

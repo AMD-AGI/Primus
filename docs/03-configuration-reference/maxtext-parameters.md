@@ -1,8 +1,8 @@
-# MaxText Backend Configuration Reference
+# MaxText backend configuration reference
 
 Primus routes experiment YAML into the [MaxText](https://maxtext.readthedocs.io/) stack (JAX / XLA). Configuration is a **flat map of keys** (no nested `training.`* trees like TorchTitan): Primus merges module and model presets, writes a temporary YAML, and MaxText’s `pyconfig.initialize` loads it on top of upstream defaults.
 
-The Primus overlay keeps `base_config: "base.yml"` so MaxText loads its own `[configs/base.yml](https://github.com/google/maxtext)` at runtime. This page lists **Primus-defined defaults and commonly overridden Primus fields**. For the full upstream parameter set (hundreds of keys), see the [MaxText documentation](https://maxtext.readthedocs.io/) and upstream `base.yml`.
+The Primus overlay keeps `base_config: "base.yml"` so MaxText loads its own [`configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) at runtime. This page lists **Primus-defined defaults and commonly overridden Primus fields**. For the full upstream parameter set (hundreds of keys), see the [MaxText documentation](https://maxtext.readthedocs.io/) and upstream `base.yml`.
 
 ---
 
@@ -142,5 +142,5 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 
 ## Related reading
 
-- [MaxText documentation](https://maxtext.readthedocs.io/) — full parameter reference and recipes.
+- [MaxText documentation](https://maxtext.readthedocs.io/)—full parameter reference and recipes.
 - Primus implementation: `primus/backends/maxtext/argument_builder.py`, `maxtext_pretrain_trainer.py`, `maxtext_adapter.py`.

@@ -1,4 +1,4 @@
-# 🚀 From Chaos to Order: Building a Unified Entry Point for AMD GPU LLM Training
+# 🚀 From chaos to order: Building a unified entry point for AMD GPU LLM training
 
 > ⚠️ **NOTE**: This is a draft version and not the final release.
 >
@@ -8,7 +8,7 @@
 
 ---
 
-## 📖 The Beginning: Pain Points in Training Workflows
+## 📖 The beginning: Pain points in training workflows
 
 Imagine this scenario:
 
@@ -41,7 +41,7 @@ The traditional approach is to use a large number of Bash scripts to handle thes
 
 ---
 
-## 💡 Design Philosophy: One Command, Done
+## 💡 Design philosophy: One command, done
 
 Our core philosophy is simple: **One command, from environment configuration to training launch, fully automated.**
 
@@ -50,7 +50,7 @@ Our core philosophy is simple: **One command, from environment configuration to 
 primus-cli direct -- train pretrain --config deepseek_v2.yaml
 ```
 
-### 🏗️ Three-Layer Architecture Design
+### 🏗️ Three-layer architecture design
 
 Primus CLI adopts a clear **three-layer structure + plugin system**:
 
@@ -74,7 +74,7 @@ Primus CLI adopts a clear **three-layer structure + plugin system**:
 └─────────────────────────────────────────────────────┘
 ```
 
-### 🎯 Four Design Goals
+### 🎯 Four design goals
 
 | Goal | Implementation | User Benefits |
 |------|---------------|---------------|
@@ -85,9 +85,9 @@ Primus CLI adopts a clear **three-layer structure + plugin system**:
 
 ---
 
-## 🔍 Deep Dive: Architecture Dissection
+## 🔍 Deep dive: Architecture dissection
 
-### ⚙️ Layer 1: Intelligent Runtime Abstraction
+### ⚙️ Layer 1: Intelligent runtime abstraction
 
 Different scenarios require different runtime environments, but users shouldn't have to worry about these details. Primus CLI provides three seamlessly switchable runtime modes:
 
@@ -114,7 +114,7 @@ primus-cli slurm srun -N 8 -- benchmark gemm -M 4096
 
 ---
 
-### 🔁 Layer 2: Hook & Patch System
+### 🔁 Layer 2: Hook and patch system
 
 Training is more than just running a Python script. You might need to:
 - 🗂️ Preprocess datasets before training
@@ -147,7 +147,7 @@ This is especially useful when you need to quickly apply temporary fixes or make
 
 ---
 
-### 🧩 Layer 3: Task Execution Layer
+### 🧩 Layer 3: Task execution layer
 
 This layer is responsible for executing specific business logic—training, testing, environment checks, and other actual tasks. Remember we said "zero-intrusion extension"? How is this achieved?
 
@@ -185,15 +185,15 @@ This plugin-based design allows Primus CLI to quickly respond to new requirement
 
 ---
 
-## 🌐 The Magic Behind: Intelligent Environment Detection
+## 🌐 The magic behind: Intelligent environment detection
 
 This is probably the most "black tech" part of Primus CLI.
 
-### Problem: Different GPUs Need Different Configurations
+### Problem: Different GPUs need different configurations
 
 AMD's GPU family is rich: MI300X, MI250X, MI210... Each GPU has its optimal ROCm configuration and environment variable settings. The traditional approach is to let users manually select configurations, but this is both error-prone and insufficiently automated.
 
-### Solution: Three-Step Auto-Configuration
+### Solution: Three-step auto-configuration
 
 **Step 1: Load Common Environment**
 
@@ -226,7 +226,7 @@ Now, `MI300X.sh` can contain all best practices for this GPU model:
 
 **Users don't need to worry about these details at all - everything is automatic.**
 
-### Real-World Example
+### Real-world example
 
 ```bash
 # On MI300X cluster
@@ -242,7 +242,7 @@ primus-cli direct -- train pretrain --config config.yaml
 
 ---
 
-## 🧪 Foundation of Scientific Experiments: Reproducibility
+## 🧪 Foundation of scientific experiments: Reproducibility
 
 In machine learning research, reproducibility is crucial. But reality is harsh:
 
@@ -250,7 +250,7 @@ In machine learning research, reproducibility is crucial. But reality is harsh:
 
 Does this sound familiar? Primus CLI completely solves this problem with an **automated snapshot mechanism**.
 
-### Auto-Record Everything
+### Auto-record everything
 
 Every time training starts, Primus CLI automatically saves the complete runtime context:
 
@@ -270,7 +270,7 @@ output/exp_2025_11_10_134522/
 └── metadata.json                # Runtime metadata
 ```
 
-### One-Click Reproduction
+### One-click reproduction
 
 Three months later, when you want to reproduce this experiment:
 
@@ -285,7 +285,7 @@ Primus CLI will automatically:
 3. Verify GPU and system environment
 4. Start training (if environment is compatible)
 
-### Real-World Value
+### Real-world value
 
 | Scenario | Traditional Approach | Using Primus CLI |
 |----------|---------------------|------------------|
@@ -297,11 +297,11 @@ Primus CLI will automatically:
 
 ---
 
-## 📊 Real-World Case: From Development to Production
+## 📊 Real-world case: From development to production
 
 Let's see how Primus CLI simplifies the entire workflow through a real scenario.
 
-### Scenario: Training DeepSeek-V2 Model
+### Scenario: Training DeepSeek-V2 model
 
 **Step 1: Local Development & Validation** 🖥️
 
@@ -346,7 +346,7 @@ primus-cli slurm sbatch \
   -- train pretrain --config configs/deepseek_v2_prod.yaml
 ```
 
-### Key Insight
+### Key insight
 
 Notice? **From development to production, the core command structure remains unchanged**:
 ```
@@ -357,7 +357,7 @@ Only the runtime environment (`direct` → `container` → `slurm`) changes - ev
 
 ---
 
-## 🎯 Core Advantages Summary
+## 🎯 Core advantages summary
 
 After the detailed introduction above, let's summarize the core value Primus CLI brings:
 
@@ -373,11 +373,11 @@ After the detailed introduction above, let's summarize the core value Primus CLI
 
 ---
 
-## 🛣️ Future Roadmap
+## 🛣️ Future roadmap
 
 Primus CLI continues to evolve, and our near-term plans include:
 
-### Short-Term Goals (2025)
+### Short-term goals (2025)
 - 🎯 **Python Hook API**: Support writing Hooks in Python scripts for more flexible extension capabilities
 - 🎯 **Intelligent Preflight**: Auto-check GPU health, network topology, InfiniBand connectivity before launch
 - 🎯 **Configuration Template System**: Built-in best practice config templates for common models
@@ -386,12 +386,12 @@ Primus CLI continues to evolve, and our near-term plans include:
 - 🎯 **Extended Framework Support**: Improve support for more training frameworks like TorchTitan, JAX/Flax
 - 🎯 **CI/CD Integration**: Provide standardized testing and validation workflows, support automated regression testing
 
-### Long-Term Vision
+### Long-term vision
 - 🌟 Become the **standard training entry point for the ROCm ecosystem**
 
 ---
 
-## 🎓 Summary: The Power of One Command
+## 🎓 Summary: The power of one command
 
 Back to the question at the beginning: How do we make large model training go from complex to simple?
 
@@ -415,7 +415,7 @@ primus-cli direct -- train pretrain --config deepseek_v2.yaml
 
 ---
 
-## 📚 Learn More
+## 📚 Learn more
 
 - 📖 **CLI Reference (user guide)**: [cli-reference.md](../02-user-guide/cli-reference.md)
 - 🏛 **System Architecture**: [architecture.md](./architecture.md)

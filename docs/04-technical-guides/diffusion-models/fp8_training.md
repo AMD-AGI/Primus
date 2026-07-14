@@ -1,4 +1,4 @@
-# FP8 Training for Flux Models
+# FP8 training for Flux models
 
 Complete guide for training Flux diffusion models with FP8 (8-bit floating point) precision on AMD MI300X GPUs using Transformer Engine's delayed scaling recipe.
 
@@ -11,28 +11,28 @@ FP8 training provides significant memory and speed improvements while maintainin
 - **Maintains numerical stability** via delayed scaling
 - **Enables larger batch sizes** or higher resolutions
 
-## Table of Contents
+## Table of contents
 
 - [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
+- [Quick start](#quick-start)
 - [Configuration](#configuration)
-- [Performance Benchmarks](#performance-benchmarks)
+- [Performance benchmarks](#performance-benchmarks)
 - [Troubleshooting](#troubleshooting)
-- [Best Practices](#best-practices)
-- [AMD MI300X Specific](#amd-mi300x-specific)
+- [Best practices](#best-practices)
+- [AMD MI300X specific](#amd-mi300x-specific)
 
 ---
 
 ## Prerequisites
 
-### Hardware Requirements
+### Hardware requirements
 
 - **AMD MI300X GPUs** with ROCm 6.0+ support
 - **Minimum GPUs:**
   - Flux 535M: 1x MI300X (testing)
   - Flux 12B: 2x MI300X with TP=2 (can train with FP8)
 
-### Software Requirements
+### Software requirements
 
 1. **ROCm 6.0+** with FP8 tensor core support
 2. **Transformer Engine 2.1.0+** with ROCm backend
@@ -47,9 +47,9 @@ Verify your environment has:
 
 ---
 
-## Quick Start
+## Quick start
 
-### Test FP8 with Flux 535M (Recommended First Step)
+### Test FP8 with Flux 535M (recommended first step)
 
 ```bash
 # 1. Prepare test dataset (or use existing)
@@ -61,7 +61,7 @@ GPUS_PER_NODE=1 \
 bash examples/run_pretrain.sh
 ```
 
-### Production Training with Flux 12B
+### Production training with Flux 12B
 
 ```bash
 # After validating with 535M, scale to 12B (TransformerEngine FP8)
@@ -81,7 +81,7 @@ bash examples/run_slurm_pretrain.sh
 
 ## Configuration
 
-### FP8 Model Configuration
+### FP8 model configuration
 
 FP8 is configured at the model level. Two pre-configured files are available:
 
@@ -113,7 +113,7 @@ fp8_dot_product_attention: false  # Keep attention in higher precision
 fp8_multi_head_attention: false   # Keep MHA in higher precision
 ```
 
-### Training Configuration Adjustments
+### Training configuration adjustments
 
 **Batch Sizes with FP8:**
 
@@ -148,9 +148,9 @@ context_parallel_size: 1
 
 ---
 
-## Performance Benchmarks
+## Performance benchmarks
 
-### Memory Usage
+### Memory usage
 
 | Model | Precision | Memory/GPU | Batch Size | Notes |
 |-------|-----------|------------|------------|-------|
@@ -159,7 +159,7 @@ context_parallel_size: 1
 | Flux 12B | BF16 | ~40-50GB | 1 | TP=2 required |
 | Flux 12B | FP8 | ~20-25GB | 2 | TP=2, ~50% reduction |
 
-### Training Speed
+### Training speed
 
 | Model | Precision | Steps/sec | Speedup | Hardware |
 |-------|-----------|-----------|---------|----------|
@@ -168,7 +168,7 @@ context_parallel_size: 1
 | Flux 12B | BF16 | ~0.5-1.0 | 1.0x | 32x MI300X |
 | Flux 12B | FP8 | ~0.8-1.5 | 1.5-2x | 32x MI300X |
 
-### Expected Results
+### Expected results
 
 - **Memory:** ~50% reduction vs BF16
 - **Speed:** 1.5-2x faster training
@@ -179,7 +179,7 @@ context_parallel_size: 1
 
 ## Troubleshooting
 
-### NaN or Inf in Losses
+### NaN or inf in losses
 
 **Problem:** Training becomes unstable with NaN/Inf values
 
@@ -212,7 +212,7 @@ context_parallel_size: 1
    num_layers_at_end_in_bf16: 2
    ```
 
-### Out of Memory Even with FP8
+### Out of memory even with FP8
 
 **Problem:** Still hitting OOM errors with FP8 enabled
 
@@ -239,7 +239,7 @@ context_parallel_size: 1
    seq_length: 2048  # if applicable
    ```
 
-### FP8 Not Available
+### FP8 not available
 
 **Problem:** Setup script shows "FP8 not available"
 
@@ -269,7 +269,7 @@ context_parallel_size: 1
    print(te.fp8.is_fp8_available())  # Should be True
    ```
 
-### Slower Than Expected
+### Slower than expected
 
 **Problem:** FP8 training is not faster than BF16
 
@@ -295,9 +295,9 @@ context_parallel_size: 1
 
 ---
 
-## Best Practices
+## Best practices
 
-### Recommended Workflow
+### Recommended workflow
 
 1. **Start with 535M:**
    - Validate FP8 works correctly
@@ -314,7 +314,7 @@ context_parallel_size: 1
    - Watch for numerical issues
    - Compare checkpoints with BF16
 
-### Training Configuration
+### Training configuration
 
 **Conservative (stable):**
 ```yaml
@@ -370,7 +370,7 @@ fp8_wgrad: true
 
 ---
 
-## Autotune (Local Spec FP8)
+## Autotune (local spec FP8)
 
 > **Scope:** This section covers the **local-spec** FP8 path (`PrimusTurboFloat8LocalSpecProvider`, no TransformerEngine), e.g. `flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml`. The TransformerEngine prerequisites and checks elsewhere in this guide (`te.fp8.is_fp8_available()`, "FP8 Not Available") do **not** apply here -- this path quantizes via Primus Turbo directly.
 
@@ -396,9 +396,9 @@ For MXFP4/FP4 + AITER with a tuned CSV, do the **opposite**: leave `PRIMUS_TURBO
 
 ---
 
-## AMD MI300X Specific
+## AMD MI300X specific
 
-### Environment Variables
+### Environment variables
 
 ```bash
 # Optional: set for better performance
@@ -407,7 +407,7 @@ export NCCL_DEBUG=INFO  # For debugging
 export HSA_ENABLE_SDMA=0  # Disable SDMA for stability
 ```
 
-### ROCm Optimization
+### ROCm optimization
 
 1. **HipBLASLt tuning:**
    ```bash
@@ -426,7 +426,7 @@ export HSA_ENABLE_SDMA=0  # Disable SDMA for stability
    export HSA_OVERRIDE_GFX_VERSION=9.4.2  # For MI300X
    ```
 
-### Known Issues
+### Known issues
 
 1. **Transformer Engine ROCm support:**
    - Verify TE version supports ROCm FP8
@@ -444,7 +444,7 @@ export HSA_ENABLE_SDMA=0  # Disable SDMA for stability
 
 ## Testing
 
-### Integration Test
+### Integration test
 
 ```bash
 # Quick 100-step validation run
@@ -453,7 +453,7 @@ GPUS_PER_NODE=1 \
 bash examples/run_pretrain.sh
 ```
 
-### Convergence Test
+### Convergence test
 
 1. Train both BF16 and FP8 for 5000 steps
 2. Compare loss curves (should be within 5%)
@@ -468,7 +468,7 @@ To set expectations for external users, the precision/convergence claims in this
 codebase fall into two tiers:
 
 - **Backed by in-repo tests** (CI-runnable on supported hardware): structural and
-  convention checks — attention TE-vs-local-spec equivalence, RNG/seed
+  convention checks—attention TE-vs-local-spec equivalence, RNG/seed
   determinism, chimera init, VAE resample reproducibility, fused delayed-scale
   update, and MLPerf warmup FP8 state.
 - **Asserted, not yet backed by an in-repo test:** end-to-end *tensor parity*

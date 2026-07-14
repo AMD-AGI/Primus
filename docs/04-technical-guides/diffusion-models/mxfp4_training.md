@@ -1,4 +1,4 @@
-# MXFP4 Training for Flux Models
+# MXFP4 training for Flux models
 
 Guide for training Flux diffusion models in **MXFP4** (E2M1 mantissa + E8M0 block-of-32 scales) on AMD MI355X GPUs using Primus's local-spec MXFP4 implementation backed by Primus-Turbo and AITER.
 
@@ -6,20 +6,20 @@ Guide for training Flux diffusion models in **MXFP4** (E2M1 mantissa + E8M0 bloc
 
 MXFP4 stores activations and weights in 4-bit microscale floating-point with one E8M0 exponent shared per block of 32 elements. The Primus integration:
 
-- Uses a **local spec** (`PrimusTurboMXFP4LocalSpecProvider`) with **no Transformer Engine dependency** — MXFP4 linear layers are self-contained autograd `Function`s that call Primus-Turbo's `gemm_fp4_impl` directly, so the path is `torch.compile`-friendly with minimal graph breaks.
+- Uses a **local spec** (`PrimusTurboMXFP4LocalSpecProvider`) with **no Transformer Engine dependency**—MXFP4 linear layers are self-contained autograd `Function`s that call Primus-Turbo's `gemm_fp4_impl` directly, so the path is `torch.compile`-friendly with minimal graph breaks.
 - Keeps **attention, optimizer state / main params, and inter-rank communication in BF16**. Only the MMA inputs of the column- and row-parallel linears are quantized.
 - Supports two backward modes via `mxfp4_backward_precision`: pure **MXFP4** (default) or **FP8** hybrid (E5M2 backward with tensorwise scaling on HipBLASLt).
 - Dispatches the FP4 GEMM through Primus-Turbo's pluggable backend layer, which can route to either AITER (recommended for MI355X) or HipBLASLt.
 
-## Table of Contents
+## Table of contents
 
 - [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
+- [Quick start](#quick-start)
 - [Configuration](#configuration)
-- [Primus-Turbo Backend Selection](#primus-turbo-backend-selection)
+- [Primus-Turbo backend selection](#primus-turbo-backend-selection)
 - [Tuned GEMMs](#tuned-gemms)
 - [Troubleshooting](#troubleshooting)
-- [Verification Status](#verification-status)
+- [Verification status](#verification-status)
 
 ---
 
@@ -38,7 +38,7 @@ MXFP4 stores activations and weights in 4-bit microscale floating-point with one
 
 ---
 
-## Quick Start
+## Quick start
 
 The verified MXFP4 config is `examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_mxfp4.yaml`. Launch with the AITER backend and the pre-tuned GEMM CSV:
 
@@ -91,7 +91,7 @@ gradient_accumulation_fusion: false
 
 ---
 
-## Primus-Turbo Backend Selection
+## Primus-Turbo backend selection
 
 The FP4 GEMM call is routed by `GEMMFP4KernelDispatcher` in `Primus-Turbo/primus_turbo/pytorch/kernels/gemm/gemm_fp4_impl.py`. Backends are selected with the precision-scoped env var `PRIMUS_TURBO_GEMM_BACKEND` (declared in `Primus-Turbo/primus_turbo/common/constants.py`):
 
@@ -141,7 +141,7 @@ shape is M:16384, N:9216, K:3072, found padded_M: 16384, N:9216, K:3072 is tuned
 shape is M:..., N:..., K:..., not found tuned config in /path/to/flux_12b.csv, will use default config!
 ```
 
-Any miss line means the CSV needs re-tuning for that shape — follow the runbook in `tuned_gemm_configs/README.md`.
+Any miss line means the CSV needs re-tuning for that shape—follow the runbook in `tuned_gemm_configs/README.md`.
 
 ### First-run JIT compile
 
@@ -157,7 +157,7 @@ The (M, N, K) shape is missing from your CSV. AITER will fall back to its compil
 
 ### Slow first iteration (~minutes), normal afterwards
 
-Expected — the first call to a CK-based `a4w4_blockscale_*` kernel triggers JIT compilation. Cached `.so` files are reused on subsequent starts.
+Expected—the first call to a CK-based `a4w4_blockscale_*` kernel triggers JIT compilation. Cached `.so` files are reused on subsequent starts.
 
 ### `User specified backend AITER cannot handle the given inputs`
 
@@ -185,7 +185,7 @@ If NaNs persist, also try `mxfp4_gradient_stochastic_rounding: true`.
 
 ---
 
-## Verification Status
+## Verification status
 
 The public config has been smoke-tested end-to-end: 1000 iters on 8x MI355X (single node, micro-batch 64 / global 512, sequence length 512) completes in ~16-20 minutes with `PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER` and the tuned CSV. No errors across ranks; `pretrain() completed successfully`.
 
@@ -193,7 +193,7 @@ Formal A/B benchmarks vs BF16 and FP8 (delayed and tensorwise) are pending and w
 
 ---
 
-## Source Code Pointers
+## Source code pointers
 
 - MXFP4 spec provider: [`primus/backends/megatron/core/extensions/primus_turbo_local_spec.py`](../../../primus/backends/megatron/core/extensions/primus_turbo_local_spec.py) (`PrimusTurboMXFP4LocalSpecProvider`).
 - MXFP4 linear-layer autograd / fwd-bwd: [`primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py`](../../../primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py).
@@ -203,8 +203,8 @@ Formal A/B benchmarks vs BF16 and FP8 (delayed and tensorwise) are pending and w
 - AITER tuned-config loader: `aiter/jit/core.py` (`AITER_CONFIG_GEMM_A4W4`).
 - AITER A4W4 dispatch + hit/miss logging: `aiter/ops/gemm_op_a4w4.py`.
 
-## Related Documentation
+## Related documentation
 
-- [FP8 Training Guide](fp8_training.md) — companion guide for FP8.
+- [FP8 Training Guide](fp8_training.md)—companion guide for FP8.
 - [Diffusion Architecture / Developer Guide](README.md).
 - [Diffusion Examples README](../../../examples/megatron/diffusion/README.md).

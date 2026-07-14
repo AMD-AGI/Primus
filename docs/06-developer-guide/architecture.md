@@ -1,8 +1,8 @@
-# Architecture Overview
+# Architecture overview
 
 This document describes how the Primus training framework is structured: CLI and configuration, the core runtime orchestrator, backend adapters, trainer lifecycle, and the patch system.
 
-## 1. System Overview
+## 1. System overview
 
 Primus is organized into three conceptual layers: runtime launch (how processes and GPUs are started), hooks and patches (environment and in-process adjustments), and task execution (CLI subcommands that drive training and utilities).
 
@@ -24,14 +24,14 @@ Primus is organized into three conceptual layers: runtime launch (how processes 
 
 The repository also provides shell entrypoints under `runner/` (for example `primus-cli-direct.sh`, `primus-cli-container.sh`, `primus-cli-slurm.sh`) that prepare the environment and invoke the Python CLI.
 
-## 2. CLI and Plugin System
+## 2. CLI and plugin system
 
 - **Entry point:** `primus/cli/main.py` is the unified CLI entry. It discovers subcommand modules under `primus/cli/subcommands/` with `pkgutil.walk_packages`, skipping modules whose leaf name starts with `_`.
 - **Registration contract:** Each subcommand module exposes `register_subcommand(subparsers)` and must return the configured parser. The parser must call `set_defaults(func=run)` so `main()` can dispatch to the handler.
 - **Parsing:** The CLI uses the standard library `argparse` only (no Click or Typer).
 - **Unknown arguments:** `main()` calls `parse_known_args()`. For selected subcommands (`train`, `projection`, `preflight`), trailing tokens are passed through to the handler as overrides; for other commands, unknown arguments are rejected.
 
-## 3. Configuration Pipeline
+## 3. Configuration pipeline
 
 Configuration flows from experiment YAML to a resolved structure consumed by the runtime.
 
@@ -47,7 +47,7 @@ Configuration flows from experiment YAML to a resolved structure consumed by the
 
 The object returned from `load_primus_config()` is a lightweight `SimpleNamespace` (not `PrimusConfig`), with `modules` as a **list** of module configs, each tagged with a `.name` field.
 
-## 4. Core Runtime (PrimusRuntime)
+## 4. Core runtime (PrimusRuntime)
 
 `primus/core/runtime/train_runtime.py` defines **`PrimusRuntime`**, the main orchestrator for the new core training path. Execution for a single module follows this flow:
 
@@ -57,7 +57,7 @@ The object returned from `load_primus_config()` is a lightweight `SimpleNamespac
 4. **`_initialize_distributed_context()`** reads torchrun-style rank and master information via **`get_torchrun_env()`**.
 5. **`_initialize_logging()`** initializes worker logging.
 6. **`BackendRegistry.get_adapter(framework)`** resolves the **`BackendAdapter`** (lazy-importing `primus.backends.<name>` if needed).
-7. **`adapter.setup_backend_path()`** inserts the backend tree on `sys.path` (CLI `--backend_path`, then `BACKEND_PATH`, then `third_party/<dir>` under the repo root).
+7. **`adapter.setup_backend_path()`** inserts the backend tree on `sys.path`. Resolution order: CLI `--backend_path`, then the `BACKEND_PATH` env var, then the default—`third_party/<dir>` under the repo root, followed by `$PRIMUS_THIRDPARTY_DIR` or `~/.cache/Primus/third_party` (the `primus-cli deps sync` location).
 8. **`adapter.prepare_backend()`** runs backend setup hooks (via **`BackendRegistry.run_setup()`** by default).
 9. **`adapter.convert_config(module_config.params)`** produces **`backend_args`** for the trainer.
 10. **`run_patches(phase="build_args", ...)`** runs registered patches; backend version detection runs when patches first need it (**`adapter.detect_backend_version()`** via **`_get_backend_version()`**).
@@ -68,20 +68,20 @@ The object returned from `load_primus_config()` is a lightweight `SimpleNamespac
 15. **`run_patches(phase="before_train")`** then **`trainer.train()`** then **`run_patches(phase="after_train")`** then **`trainer.cleanup()`**.
 16. On failure, **`_safe_cleanup()`** calls **`trainer.cleanup(on_error=True)`** when possible.
 
-## 5. Backend System
+## 5. Backend system
 
 - **`BackendAdapter`** (`primus/core/backend/backend_adapter.py`) is the abstract integration surface. Subclasses implement **`convert_config()`**, **`load_trainer_class()`**, and **`detect_backend_version()`**. Shared behavior includes **`setup_backend_path()`** and a default **`prepare_backend()`** that runs registered setup hooks.
 - **`BackendRegistry`** (`primus/core/backend/backend_registry.py`) maps backend names to adapter classes, supports **lazy import** of `primus.backends.<backend>`, and stores optional **setup hooks** per backend.
 - **Registered adapters** (via each backend package’s `__init__.py` calling **`BackendRegistry.register_adapter()`**): **`megatron`**, **`torchtitan`**, **`maxtext`**, **`megatron_bridge`**, **`hummingbirdxt`**.
 - Backend code lives under **`primus/backends/<name>/`**. Importing the package registers the adapter and any trainers or hooks that package defines.
 
-## 6. Trainer Lifecycle
+## 6. Trainer lifecycle
 
-- **`BaseTrainer`** (`primus/core/trainer/base_trainer.py`) defines the abstract lifecycle: **`setup()`**, **`init()`**, **`train()`**, and **`cleanup(on_error=False)`**. The constructor stores **`backend_args`** and reads distributed settings from **`get_torchrun_env()`**.
+- **`BaseTrainer`** (`primus/core/trainer/base_trainer.py`) defines the lifecycle. **`setup()`**, **`init()`**, and **`train()`** are **abstract** (subclasses must implement them); **`cleanup(on_error=False)`** is **optional**—it ships a default (no-op) implementation that subclasses may override. The constructor stores **`backend_args`** and reads distributed settings from **`get_torchrun_env()`**.
 - Concrete trainers (for example Megatron or TorchTitan pretrain classes) subclass **`BaseTrainer`** and implement the abstract methods.
-- **`PrimusRuntime`** drives **`setup` → `init` → `train` → `cleanup`**, with patch phases inserted around **`setup`**, **`train`**, and **`cleanup`** as described above.
+- **`PrimusRuntime`** drives **`setup` → `init` → `train` → `cleanup`**, with patch phases **`build_args`** (before the trainer is created), **`setup`**, and **`before_train`/`after_train`** (around `train`). No patch phase runs around `cleanup`—`after_train` fires before `cleanup` (see §4).
 
-## 7. Patch System
+## 7. Patch system
 
 - **`PatchRegistry`** (`primus/core/patches/patch_registry.py`) stores **`FunctionPatch`** objects keyed by backend and phase, with wildcard buckets (`None`) for patches that apply broadly.
 - The **`@register_patch`** decorator registers a patch with metadata (priority, optional version patterns, tags).
@@ -92,13 +92,13 @@ The object returned from `load_primus_config()` is a lightweight `SimpleNamespac
 - **Phases** used by the core runtime include **`build_args`**, **`setup`**, **`before_train`**, and **`after_train`**.
 - Patch implementations are typically colocated with backends under **`primus/backends/<backend>/patches/`**.
 
-## 8. Legacy Runtime
+## 8. Legacy runtime
 
-Setting **`PRIMUS_TRAIN_RUNTIME=legacy`** selects the legacy pretrain path for **`primus train pretrain`**. That path uses **`primus/pretrain.py`** (**`launch_pretrain_from_cli()`**) and the **`primus/modules/`** stack (**`BaseModule`**-style composition).
+The legacy pretrain path—previously selected with **`PRIMUS_TRAIN_RUNTIME=legacy`** and backed by the **`primus/modules/`** stack (**`BaseModule`**-style composition)—has been **removed**. `primus/modules/` no longer contains any source code, and **`primus/cli/subcommands/train.py`** no longer reads `PRIMUS_TRAIN_RUNTIME` or resolves a legacy-vs-core runtime.
 
-If **`PRIMUS_TRAIN_RUNTIME`** is unset or invalid, the implementation **defaults to `core`** for pretrain (the **`PrimusRuntime`** path). The docstring on **`_resolve_pretrain_runtime()`** mentions a possible framework-specific default; the current code applies **`core`** uniformly when the environment variable is not set to `legacy` or `core`.
+All training now runs exclusively through the **core runtime**: both `primus train pretrain` and `primus train posttrain` construct a **`PrimusRuntime`** (**`primus/core/runtime/train_runtime.py`**). **`primus/pretrain.py`** now only provides shared backend-path / environment helpers (for example **`setup_backend_path()`**) used by the training and projection entry points; it no longer defines a `launch_pretrain_from_cli()` legacy launcher.
 
-## 9. Key Source Files
+## 9. Key source files
 
 | Path | Role |
 |------|------|

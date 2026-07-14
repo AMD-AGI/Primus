@@ -1,8 +1,8 @@
-# Fault Tolerance & Elastic Training
+# Fault tolerance and elastic training
 
 Large-scale jobs run for days across thousands of GPUs, where hardware faults, NIC flaps, and node loss are routine. This guide covers the mechanisms Primus exposes to survive and recover from failures: graceful exit + checkpoint-based resume, Megatron's fault-tolerance package and in-process restart, and TorchTitan's [torchft](https://github.com/pytorch/torchft)-based elastic training. Parameters are grounded in `primus/configs/modules/megatron/trainer_base.yaml`, `primus_megatron_module.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
 
-The foundation of all recovery is checkpointing — read [Checkpoint management](./checkpoint-management.md) first.
+The foundation of all recovery is checkpointing—read [Checkpoint management](./checkpoint-management.md) first.
 
 ---
 
@@ -10,20 +10,20 @@ The foundation of all recovery is checkpointing — read [Checkpoint management]
 
 There are three layers, from simplest to most advanced:
 
-1. **Checkpoint + restart** — periodically save state; on failure, relaunch the job and resume from the last checkpoint. Works on every backend; relies on the scheduler (Slurm `--requeue`, Kubernetes restart policy) to relaunch.
-2. **Graceful exit** — detect a signal or time/iteration budget, save a final checkpoint, and exit cleanly so the restart resumes with no lost work.
-3. **In-job fault tolerance / elastic** — detect a failed rank and restart in-process (Megatron) or continue with a reduced/replaced replica group (TorchTitan + torchft) without tearing down the whole job.
+1. **Checkpoint + restart**—periodically save state; on failure, relaunch the job and resume from the last checkpoint. Works on every backend; relies on the scheduler (Slurm `--requeue`, Kubernetes restart policy) to relaunch.
+2. **Graceful exit**—detect a signal or time/iteration budget, save a final checkpoint, and exit cleanly so the restart resumes with no lost work.
+3. **In-job fault tolerance / elastic**—detect a failed rank and restart in-process (Megatron) or continue with a reduced/replaced replica group (TorchTitan + torchft) without tearing down the whole job.
 
 ---
 
-## 2. Graceful exit & auto-resume (Megatron)
+## 2. Graceful exit and auto-resume (Megatron)
 
 Controls in `trainer_base.yaml` let a run stop cleanly at a boundary so the next launch resumes seamlessly:
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | `exit_signal_handler` | `false` | Install a signal handler that saves a checkpoint and exits gracefully on SIGTERM (e.g. Slurm preemption). |
-| `exit_duration_in_mins` | `null` | Exit (after saving) once the job has run this many minutes — useful to fit scheduler time limits. |
+| `exit_duration_in_mins` | `null` | Exit (after saving) once the job has run this many minutes—useful to fit scheduler time limits. |
 | `exit_interval` | `null` | Exit after this many iterations. |
 | `adlr_autoresume` | `false` | Enable ADLR auto-resume integration. |
 | `adlr_autoresume_interval` | `1000` | Iterations between auto-resume checks. |
@@ -39,7 +39,7 @@ Primus-level continuation (`primus_megatron_module.yaml`):
 
 ---
 
-## 3. Megatron fault-tolerance package & in-process restart
+## 3. Megatron fault-tolerance package and in-process restart
 
 Megatron integrates an optional fault-tolerance package and in-process restart (`trainer_base.yaml`):
 
@@ -83,7 +83,7 @@ TorchTitan supports semi-synchronous, replica-based fault tolerance via [torchft
 | `min_replica_size` | `1` | Minimum replicas required to keep training. |
 | `semi_sync_method` | `null` | Semi-synchronous algorithm (e.g. DiLoCo-style), `null` = standard. |
 
-With replica groups, the loss of one replica can be tolerated as long as `min_replica_size` is still satisfied — training continues while the failed replica recovers/rejoins, rather than crashing the whole job.
+With replica groups, the loss of one replica can be tolerated as long as `min_replica_size` is still satisfied—training continues while the failed replica recovers/rejoins, rather than crashing the whole job.
 
 **Install** the optional dependencies before enabling (`requirements-torchft.txt`):
 
@@ -99,25 +99,25 @@ TorchTitan also exposes communication timeouts under `comm:` (`init_timeout_seco
 
 In-job mechanisms still need the scheduler to relaunch on full-job failure:
 
-- **Slurm** — submit with `--requeue` so preempted/failed jobs are re-queued; pair with `exit_signal_handler` to checkpoint on SIGTERM. See [Deployment](../05-operations/deployment.md).
-- **Kubernetes** — use a restart policy / operator that recreates pods; mount checkpoint storage on a shared/persistent volume.
-- **Shared checkpoint storage** — all ranks must read the same checkpoint directory after relaunch (NFS, Lustre, or object storage). See [Checkpoint management](./checkpoint-management.md).
+- **Slurm**—submit with `--requeue` so preempted/failed jobs are re-queued; pair with `exit_signal_handler` to checkpoint on SIGTERM. See [Deployment](../05-operations/deployment.md).
+- **Kubernetes**—use a restart policy / operator that recreates pods; mount checkpoint storage on a shared/persistent volume.
+- **Shared checkpoint storage**—all ranks must read the same checkpoint directory after relaunch (NFS, Lustre, or object storage). See [Checkpoint management](./checkpoint-management.md).
 
 ---
 
 ## 7. Recommended setup
 
-1. **Always checkpoint** — set a `save_interval` matched to your mean-time-between-failures; use async/distributed checkpointing to keep overhead low.
-2. **Exit cleanly** — `exit_signal_handler: true` (+ `exit_duration_in_mins` for time-boxed allocations).
-3. **Resume automatically** — `auto_continue_train: true` (Megatron) and `--requeue` (Slurm).
-4. **Reduce recovery time at scale** — `enable_ft_package` + `inprocess_restart` (Megatron) or torchft replica groups (TorchTitan).
-5. **Guard numerics** — keep `check_for_nan_in_loss_and_grad` on; consider spiky/large-grad checks for unstable configs.
+1. **Always checkpoint**—set a `save_interval` matched to your mean-time-between-failures; use async/distributed checkpointing to keep overhead low.
+2. **Exit cleanly**—`exit_signal_handler: true` (+ `exit_duration_in_mins` for time-boxed allocations).
+3. **Resume automatically**—`auto_continue_train: true` (Megatron) and `--requeue` (Slurm).
+4. **Reduce recovery time at scale**—`enable_ft_package` + `inprocess_restart` (Megatron) or torchft replica groups (TorchTitan).
+5. **Guard numerics**—keep `check_for_nan_in_loss_and_grad` on; consider spiky/large-grad checks for unstable configs.
 
 ---
 
-## See also
+## Related documentation
 
-- [Checkpoint management](./checkpoint-management.md) — save/load formats, async and distributed checkpointing.
-- [Deployment](../05-operations/deployment.md) — Slurm/Kubernetes restart and requeue.
-- [Multi-node networking](./multi-node-networking.md) — NIC faults and collective timeouts.
+- [Checkpoint management](./checkpoint-management.md)—save/load formats, async and distributed checkpointing.
+- [Deployment](../05-operations/deployment.md)—Slurm/Kubernetes restart and requeue.
+- [Multi-node networking](./multi-node-networking.md)—NIC faults and collective timeouts.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md) and [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md).

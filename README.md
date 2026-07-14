@@ -93,7 +93,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # For Megatron-LM and TorchTitan backends
     docker pull rocm/primus:v26.3
     # For MaxText backend
-    docker pull rocm/jax-training:v26.3
+    docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
     ```
 
 2. **Clone the repository**

@@ -1,4 +1,4 @@
-# Primus Native SFT LoRA — Quick Start
+# Primus native SFT LoRA—quick start
 
 > **Branch**: `feat/megatron/support-sft-native` (PR701)
 > **Backend**: Megatron-LM **native** (no Megatron-Bridge runtime dependency)
@@ -38,13 +38,13 @@ Entry point: `primus/backends/megatron/megatron_sft_trainer.py` (`MegatronSFTTra
 
 ---
 
-## 2. Runtime Environment
+## 2. Runtime environment
 
 ### 2.1 Docker container
 
 | Container | Image | Notes |
 |---|---|---|
-| **`sft_primus_0507_native`** | `rocm/primus:v26.2` | Recommended; verified |
+| **`sft_primus_0507_native`** | `rocm/primus:v26.3` | Recommended; verified |
 
 Container mounts (set once at container start):
 
@@ -63,13 +63,13 @@ export EXP_NAME="llama2_70b_native_$(date +%Y%m%d_%H%M%S)"
 ```
 
 Set automatically inside the container by `examples/run_pretrain.sh` (you don't need to touch these):
-- `TRITON_CACHE_DIR`, `MIOPEN_USER_DB_PATH`, `PRIMUS_CACHE_ROOT` — persistent JIT cache
-- `NCCL_*` / `RCCL_*` — communication tuning
-- `HSA_*` / `GPU_MAX_HW_QUEUES` — AMD GPU performance tuning
+- `TRITON_CACHE_DIR`, `MIOPEN_USER_DB_PATH`, `PRIMUS_CACHE_ROOT`—persistent JIT cache
+- `NCCL_*` / `RCCL_*`—communication tuning
+- `HSA_*` / `GPU_MAX_HW_QUEUES`—AMD GPU performance tuning
 
 ---
 
-## 3. Launch Commands (verified)
+## 3. Launch commands (verified)
 
 ### 3.1 BF16 / FP8 (existing yaml configs, ready to run)
 
@@ -130,7 +130,7 @@ The plumbing is already in place:
 
 Hard constraints:
 
-1. **TransformerEngine ≥ 2.7.0.dev0** required (the `rocm/primus:v26.2` image already satisfies this)
+1. **TransformerEngine ≥ 2.7.0.dev0** required (the `rocm/primus:v26.3` image already satisfies this)
 2. **FP4 and FP8 are mutually exclusive**: `args.fp4 and args.fp8` raises in Megatron (`arguments.py:885-887`)
 3. **`fp4_param` must be paired with `fp4`**: enabling `fp4_param` alone raises (`arguments.py:889-891`)
 
@@ -310,7 +310,7 @@ modules:
       # =====================================================================
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
       use_turbo_rms_norm: false
 
       # ---------- Cross-entropy fusion ----
@@ -403,11 +403,11 @@ grep -E "throughput per GPU" "$RANK0" | head -5
 
 ### Q1: `--fp4-format requires Transformer Engine >= 2.7.0.dev0`
 
-Upgrade TE inside the container, or switch to image `rocm/primus:v26.2`+.
+Upgrade TE inside the container, or switch to image `rocm/primus:v26.3`+.
 
 ### Q2: `--fp4-format and --fp8-format cannot be used simultaneously`
 
-Leftover `fp8: hybrid` / `fp8: e4m3` in the yaml — must be removed.
+Leftover `fp8: hybrid` / `fp8: e4m3` in the yaml—must be removed.
 
 ### Q3: `--fp4-param-gather must be used together with --fp4-format`
 
@@ -437,10 +437,10 @@ done
 
 ---
 
-## 6. References / Further Reading
+## 6. References / further reading
 
-- **Post-training overview**: [Post-Training (SFT / LoRA / DPO)](../02-user-guide/posttraining.md) — how this native SFT LoRA path fits into the broader fine-tuning workflow.
-- **PR #701** — Full implementation of this native SFT stack:
+- **Post-training overview**: [Post-Training (SFT / LoRA / DPO)](../02-user-guide/posttraining.md)—how this native SFT LoRA path fits into the broader fine-tuning workflow.
+- **PR #701**—Full implementation of this native SFT stack:
   https://github.com/AMD-AGI/Primus/pull/701
 - **Megatron-LM FP4 design**:
   `third_party/Megatron-LM/megatron/core/fp4_utils.py` +
@@ -455,6 +455,6 @@ done
 
 ## 7. Maintainers
 
-- @wenxie-amd  — PR #701 main author
-- @Xiaoming-AMD — co-author (trainer + dataset core)
-- @botaohu001  — packing / mlperf-aligned recipe / diagnostic tools
+- @wenxie-amd—PR #701 main author
+- @Xiaoming-AMD—co-author (trainer + dataset core)
+- @botaohu001—packing / mlperf-aligned recipe / diagnostic tools

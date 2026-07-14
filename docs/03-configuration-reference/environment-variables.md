@@ -1,4 +1,4 @@
-# Environment Variables Reference
+# Environment variables reference
 
 This document catalogs the main environment variables you may encounter when running Primus on AMD GPUs: distributed launchers, Primus runners and CLI, YAML substitution, libraries (NCCL/RCCL, ROCm, PyTorch, JAX), and optional integrations (Hugging Face, WandB, MLflow). It is a practical reference, not a complete list of every variable accepted by upstream libraries.
 
@@ -17,11 +17,11 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `MASTER_ADDR` | `localhost` (direct / `base_env.sh`) | User, Slurm entry (`primus-cli-slurm-entry.sh`), or validation fallback (`runner/lib/validation.sh`) | `primus/pretrain.py`, `primus/modules/base_module.py`, `primus/core/utils/env.py`, `primus/tools/preflight/network/network_probe.py`, PyTorch rendezvous | Rendezvous hostname or IP for process group initialization. **Required** for multi-node if not using Slurm auto-detection. |
+| `MASTER_ADDR` | `localhost` (direct / `base_env.sh`) | User, Slurm entry (`primus-cli-slurm-entry.sh`), or validation fallback (`runner/lib/validation.sh`) | `primus/pretrain.py`, `primus/core/base_module.py`, `primus/core/utils/env.py`, `primus/tools/preflight/network/network_probe.py`, PyTorch rendezvous | Rendezvous hostname or IP for process group initialization. **Required** for multi-node if not using Slurm auto-detection. |
 | `MASTER_PORT` | `1234` (direct), `29500` in some Python defaults | Config / CLI / user | Same as `MASTER_ADDR`; `validation.sh` enforces 1024–65535 | TCP port for the store backing `torch.distributed`. |
 | `RANK` | `0` if unset in helpers | `torchrun` | `primus/tools/utils.py`, `primus/tools/preflight/global_vars.py`, projection and profiler code | Global rank index. |
-| `WORLD_SIZE` | `1` | `torchrun` | Preflight, projection, `primus/modules/base_module.py` | Total number of processes. |
-| `LOCAL_RANK` | `0` | `torchrun` | `primus/modules/base_module.py`, GPU selection in benchmarks and trainers | GPU index on this node. |
+| `WORLD_SIZE` | `1` | `torchrun` | Preflight, projection, `primus/core/base_module.py` | Total number of processes. |
+| `LOCAL_RANK` | `0` | `torchrun` | `primus/core/base_module.py`, GPU selection in benchmarks and trainers | GPU index on this node. |
 | `LOCAL_WORLD_SIZE` | `1` (Python) / `8` in benchmarks default | `torchrun` | `primus/tools/preflight/*.py`, `strided_allgather_bench.py` | Processes (GPUs) per node. |
 | `NODE_RANK` | `0` | `primus-cli-direct` / `primus-cli-slurm-entry.sh` | `primus/pretrain.py`, logging in `runner/lib/common.sh` | Zero-based node index in multi-node jobs. |
 | `NNODES` | `1` | Direct config (`runner/.primus.yaml`), `primus-cli-slurm-entry.sh` | `primus/pretrain.py`, `primus/core/projection/training_config.py` | Number of nodes in the job. |
@@ -33,7 +33,6 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `PRIMUS_TRAIN_RUNTIME` | (empty → `"core"`) | User | `primus/cli/subcommands/train.py` | Selects pretrain runtime: `"core"` (default) or `"legacy"`. Invalid values are ignored with a stderr warning. |
 | `PRIMUS_PATCHES` | `""` / `"all"` | User | `primus/core/patches/patch_runner.py` | `"all"` or empty enables all patches; `"none"` disables; comma list enables subset. |
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
@@ -49,7 +48,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_PREFLIGHT_MIN_FREE_MEM_GB` | `1` | User | `primus/tools/preflight/gpu/utils.py` | Minimum free GPU memory (GB) for preflight checks. |
 | `PRIMUS_PREFLIGHT_MIN_TFLOPS` | `10.0` | User | `primus/tools/preflight/gpu/utils.py` | Minimum TFLOPS threshold for preflight GEMM checks. |
 | `PRIMUS_TURBO_AUTO_TUNE` | (unset) | User / tests | `tests/trainer/test_megatron_trainer.py` (integration) | Enables Turbo auto-tuning in supported Turbo/Megatron test flows; not referenced in core `primus/` Python outside tests. **Optional**. |
-| `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/modules/trainer/megatron/utils.py`, `examples/run_pretrain.sh`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
+| `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `examples/run_pretrain.sh`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
 
 ---
 
@@ -121,7 +120,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `HSA_ENABLE_SDMA` | `1` | `base_env.sh` | ROCm runtime | Enable SDMA engines for copies. |
 | `HSA_NO_SCRATCH_RECLAIM` | `1` | `base_env.sh`, container passthrough | ROCm runtime; documented for MoE stability | `1` keeps scratch allocated (often used for MoE stability). See [ROCR environment](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-7.1.1/environment_variables.html). |
 | `HIP_VISIBLE_DEVICES` | `0..GPUS_PER_NODE-1` | `base_env.sh` | ROCm device visibility | Restricts which GPU indices ROCm exposes. |
-| `ROCBLAS_DEFAULT_ATOMICS_MODE` | (unset) | User | `primus/modules/trainer/megatron/utils.py` | Read for deterministic / accuracy-sensitive GEMM behavior. |
+| `ROCBLAS_DEFAULT_ATOMICS_MODE` | (unset) | User | `primus/backends/megatron/patches/args/rocm_arg_validation.py` | Read for deterministic / accuracy-sensitive GEMM behavior. |
 
 ---
 
@@ -129,12 +128,12 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | `base_env.sh`; Megatron trainer may adjust | `primus/modules/trainer/megatron/trainer.py`, Megatron patches | Limits concurrent CUDA connections; often `1` for TP/PP overlap. |
-| `TORCH_COMPILE_DISABLE` | `0` | User | `primus/modules/trainer/megatron/utils.py` | Disable `torch.compile` when `1`. |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | `base_env.sh`; Megatron patches may adjust | `primus/backends/megatron/patches/env_patches.py`, Megatron patches | Limits concurrent CUDA connections; often `1` for TP/PP overlap. |
+| `TORCH_COMPILE_DISABLE` | `0` | User | `primus/backends/megatron/patches/args/rocm_arg_validation.py` | Disable `torch.compile` when `1`. |
 
 ---
 
-## 7. Transformer Engine
+## 7. Transformer engine
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
@@ -157,7 +156,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `WANDB_PROJECT` | (unset) | User / TorchTitan patch | `primus/backends/torchtitan/patches/wandb_patches.py` | Project name. |
 | `WANDB_RUN_NAME` | (unset) | User / patches | Same | Run display name. |
 | `WANDB_TEAM` | (unset) | User | TorchTitan metrics (entity) | WandB team/entity. |
-| `DATABRICKS_HOST` | (unset) | User | `primus/modules/trainer/megatron/trainer.py` | Required for Databricks-hosted MLflow when MLflow logging is enabled. |
+| `DATABRICKS_HOST` | (unset) | User | `mlflow` client (via `primus/backends/megatron/training/global_vars.py` MLflow setup) | Required for Databricks-hosted MLflow when MLflow logging is enabled. |
 | `DATABRICKS_TOKEN` | (unset) | User | Databricks APIs | Auth token paired with host. |
 | `MLFLOW_TRACKING_URI` | (unset) | User | `mlflow` (via Megatron integrations) | MLflow tracking server URI. **Optional** unless using MLflow. |
 | `MLFLOW_REGISTRY_URI` | (unset) | User | MLflow | Model registry endpoint. |
@@ -170,6 +169,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
+| `PRIMUS_HIPBLASLT_TUNING` | `0` | User | `examples/run_pretrain.sh` | **Master switch** for the HipBLASLt tuning flow (`1` enables). Must be set before `PRIMUS_HIPBLASLT_TUNING_STAGE` takes effect, and is mutually exclusive with deterministic mode (`PRIMUS_DETERMINISTIC=1`). |
 | `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `examples/run_pretrain.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
 | `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `examples/run_pretrain.sh` | Path to tuned-kernel override file for stage `3`. |
 | `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `examples/run_pretrain.sh` | Number of benchmark runs per shape during TE HipBLASLt tuning. |
@@ -218,7 +218,7 @@ Forwarded keys:
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `DUMP_PP_DIR` | `output/pp_data` | User | `primus/modules/trainer/megatron/trainer.py` | Directory for pipeline-parallel debug dumps. |
+| `DUMP_PP_DIR` | `output/pp_data` | User | `primus/backends/megatron/megatron_pretrain_trainer.py`, `primus/backends/megatron/patches/pp_dump_data_patches.py` | Directory for pipeline-parallel debug dumps. |
 | `DEBUG_SIMULATOR` | `0` | User | `primus/core/projection/performance_projection/simulator.py` | `1` enables verbose projection simulator logging. |
 | `RECORD_OFFLOAD_MEMORY_INFO` | `0` | User | `primus/core/pipeline_parallel/handler/offload_handler.py` | Record offload memory stats when `1`. |
 | `RECORD_OFFLOAD_MEMORY_INFO_DIR` | `output` | User | `primus/core/pipeline_parallel/scheduler/scheduler.py` | Output directory for offload memory logs. |

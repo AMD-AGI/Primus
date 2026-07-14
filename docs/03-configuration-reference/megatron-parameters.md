@@ -1,4 +1,4 @@
-# Megatron Backend Configuration Reference
+# Megatron backend configuration reference
 
 This page lists the flat configuration keys exposed by Primus when `framework: megatron`. Unless a section says otherwise, values are the defaults from `primus/configs/modules/megatron/trainer_base.yaml` and related model presets. The effective pretraining preset is `pre_trainer.yaml`, which extends `trainer_base.yaml` and overrides several high-impact training defaults.
 
@@ -379,7 +379,7 @@ models:
 | `recompute_granularity` | `null` | `full` or `selective` checkpointing. |
 | `recompute_method` | `null` | `uniform` or `block` selective recomputation. |
 | `recompute_num_layers` | `null` | Layers to recompute per block / schedule. |
-| `recompute_layer_ids` | `null` | *Primus:* explicit layer indices to recompute within each PP stage (`0 … num_layers_per_pp_stage-1`). |
+| `recompute_layer_ids` | `null` | *Primus:* explicit **global** layer indices to recompute (`0 … num_layers-1`). |
 | `distribute_saved_activations` | `false` | Distribute saved activations across TP/PP for memory balance. |
 | `checkpoint_activations` | `false` | Deprecated alias for activation checkpointing. |
 | `moe_layer_recompute` | `false` | Recompute MoE layer activations (model preset). |
@@ -547,7 +547,7 @@ models:
 | `bias_dropout_fusion` | `true` | Fuse bias + dropout. |
 | `apply_rope_fusion` | `true` | Fused RoPE kernels. |
 
-### 10.5 Multi-Latent Attention (MLA)
+### 10.5 Multi-latent attention (MLA)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -561,7 +561,7 @@ models:
 | `mscale` | `1.0` | Yarn / scaling m-factor. |
 | `mscale_all_dim` | `1.0` | Yarn scaling on all dims. |
 
-### 10.6 Mixture-of-Experts (MoE)
+### 10.6 Mixture-of-experts (MoE)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -627,7 +627,7 @@ models:
 | `sink_window_even_layers_only` | `true` | Apply the sliding window only to even layers (GPT-OSS pattern). |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
 | `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
-| `use_turbo_grouped_mlp` | `false` | Deprecated alias; prefer `use_turbo_grouped_gemm`. |
+| `use_turbo_grouped_mlp` | *(removed)* | Removed—use `use_turbo_grouped_gemm`. Passing this key now raises an assertion error (`use_turbo_grouped_mlp has been removed; please use use_turbo_grouped_gemm instead`). |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary scores. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention (spacing in YAML is normalized to this key). |
 | `use_turbo_deepep` | `false` | Turbo DeepEP expert communication. |
@@ -847,7 +847,7 @@ models:
 
 ---
 
-### See also
+### Related documentation
 
 - Megatron-LM argument definitions: [`megatron/training/arguments.py`](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/arguments.py)
 - Primus Megatron presets: `primus/configs/modules/megatron/`

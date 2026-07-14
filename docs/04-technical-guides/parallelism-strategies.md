@@ -1,4 +1,4 @@
-# Parallelism Strategies for Distributed Training
+# Parallelism strategies for distributed training
 
 This guide explains the parallelism dimensions used when training large foundation models on AMD GPUs with Primus. It moves from basic data parallelism to advanced combinations of tensor, pipeline, context, and expert parallelism, including how Primus exposes these options through Megatron-LM and TorchTitan.
 
@@ -31,7 +31,7 @@ These can be **combined**. The product of parallel degrees must match how proces
 
 ---
 
-## 2. Data Parallelism (DP)
+## 2. Data parallelism (DP)
 
 In **classic data parallelism**, every GPU holds a **full copy** of the model. Each rank receives a **different mini-batch** of data. After the backward pass, **gradients are synchronized** so that all ranks apply the same update.
 
@@ -70,7 +70,7 @@ Here `num_GPUs_DP` is the **data-parallel group size** (not always the same as `
 
 ---
 
-## 3. Fully Sharded Data Parallel (FSDP / ZeRO)
+## 3. Fully sharded data parallel (FSDP / ZeRO)
 
 **ZeRO** (Zero Redundancy Optimizer) reduces redundant storage by **sharding** optimizer states, gradients, and/or parameters across data-parallel ranks.
 
@@ -102,7 +102,7 @@ Exact interactions with checkpoint formats and DDP are documented in [Megatron p
 
 ---
 
-## 4. Tensor Parallelism (TP)
+## 4. Tensor parallelism (TP)
 
 **Tensor parallelism** splits **individual layers** (usually linear / attention projections) across GPUs so **no single GPU stores the full weight matrix** for that layer.
 
@@ -110,7 +110,7 @@ Exact interactions with checkpoint formats and DDP are documented in [Megatron p
 
 Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel** splits \(W\) **along the output dimension** (columns). **Row-parallel** splits \(W\) **along the input dimension** (rows) and **splits \(X\)** so each rank’s matmul dimensions match.
 
-**Column-parallel linear** — each rank holds **disjoint columns** of \(W\); partial outputs have **half** the width per rank (for 2-way TP), then combine:
+**Column-parallel linear**—each rank holds **disjoint columns** of \(W\); each rank's output is a **disjoint column shard** (half the width for 2-way TP). To recover the full-width tensor the shards are **concatenated (All-Gather along the output dim)**—this is only done when the full tensor is actually needed:
 
 ```
                     SAME full X replicated on each TP rank
@@ -126,13 +126,16 @@ Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel*
             |                                   |
             +-----------------+-----------------+
                               |
-                    AllReduce on output dim
+             All-Gather (concatenate) on output dim
+            (only when the full tensor is needed; with
+             gather_output=False the output stays column-
+             sharded and feeds the next layer with no comm)
                               |
                               v
-                    full-width Y on each rank
+              full-width Y (concatenation of shards)
 ```
 
-**Row-parallel linear** — each rank holds **disjoint rows** of \(W\); **input \(X\)** is **split** along the **input feature** dimension so each rank computes part of the reduction:
+**Row-parallel linear**—each rank holds **disjoint rows** of \(W\); **input \(X\)** is **split** along the **input feature** dimension so each rank computes part of the reduction:
 
 ```
       Rank 0: X_0 @ W[0:r/2,:] ----+
@@ -141,7 +144,7 @@ Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel*
       (X split along features)     (partial sums add to full Y)
 ```
 
-Typical **transformer block** pattern: **column-parallel** for one projection, then **row-parallel** for the next so that the **AllReduce** cost is balanced across the stack.
+Typical **transformer block** pattern: **column-parallel** for the first projection—its column-sharded output is fed directly into the next layer **without communication**—then **row-parallel** for the second projection, which performs the single **AllReduce** that reconstructs the full output. Column-parallel itself only communicates when `gather_output=True`.
 
 **Communication**
 
@@ -160,7 +163,7 @@ Typical **transformer block** pattern: **column-parallel** for one projection, t
 
 ---
 
-## 5. Sequence Parallelism (SP)
+## 5. Sequence parallelism (SP)
 
 **Sequence parallelism** extends TP by splitting the **sequence dimension** in regions that are not covered by tensor-parallel matmuls—commonly **LayerNorm**, **dropout**, and sometimes **residual** paths—so **activation memory** scales better when **TP > 1**.
 
@@ -180,7 +183,7 @@ So SP trades **extra collectives** for **lower per-rank activation footprint** o
 
 ---
 
-## 6. Pipeline Parallelism (PP)
+## 6. Pipeline parallelism (PP)
 
 **Pipeline parallelism** assigns **disjoint subsets of layers** to **stages** on different devices. Activations (and gradients) move **between stages** with **point-to-point** communication.
 
@@ -232,7 +235,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 7. Context Parallelism (CP)
+## 7. Context parallelism (CP)
 
 **Context parallelism** splits the **sequence length** across devices for long-context training. A common pattern is **ring attention**: each rank holds a **chunk** of queries/keys/values and participates in a **ring** of message passing so attention covers the full sequence without centralizing all activations on one GPU.
 
@@ -249,7 +252,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 8. Expert Parallelism (EP)
+## 8. Expert parallelism (EP)
 
 **Mixture-of-Experts (MoE)** models route each token to a small subset of **experts**. **Expert parallelism** assigns **different experts** to **different GPUs** so expert weights are not duplicated on every device.
 
@@ -270,7 +273,7 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 ---
 
-## 9. Combining Parallelism Strategies
+## 9. Combining parallelism strategies
 
 ### Common pattern
 
@@ -312,7 +315,7 @@ Always validate against **memory profiling**, **checkpoint sharding**, and **net
 
 ---
 
-## 10. Batch Size Relationships
+## 10. Batch size relationships
 
 Let:
 
@@ -351,8 +354,8 @@ Megatron-specific names for batch arguments appear in [Megatron parameters](../0
 
 ---
 
-## See also
+## Related documentation
 
-- [NCCL/RCCL collective operations guide](./collective-operations.md) — which collectives each strategy uses.
+- [NCCL/RCCL collective operations guide](./collective-operations.md)—which collectives each strategy uses.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)

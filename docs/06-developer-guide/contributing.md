@@ -1,13 +1,13 @@
-# Contributing Guide
+# Contributing guide
 
 This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The repository root [CONTRIBUTING.md](../../CONTRIBUTING.md) repeats branch naming, commit style, and pull request steps in short form.
 
-## 1. Development Setup
+## 1. Development setup
 
 1. **Clone the repository** (include submodules):
 
    ```bash
-   git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+   git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
    cd Primus
    ```
 
@@ -24,7 +24,7 @@ This guide summarizes how to set up a development environment, follow project co
    pre-commit install
    ```
 
-4. **Optional — JAX / MaxText work:**
+4. **Optional—JAX / MaxText work:**
 
    ```bash
    pip install -r requirements-jax.txt
@@ -36,7 +36,7 @@ This guide summarizes how to set up a development environment, follow project co
    ./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
    ```
 
-## 2. Code Style
+## 2. Code style
 
 Configuration lives in `.pre-commit-config.yaml`. Hooks run automatically on `git commit` after `pre-commit install`.
 
@@ -58,7 +58,7 @@ autoflake --remove-all-unused-imports --remove-unused-variables --expand-star-im
 
 CI runs `pre-commit run --all-files --show-diff-on-failure`, so lint behavior follows `.pre-commit-config.yaml` rather than a separate hand-written list of formatter commands.
 
-## 3. Branch Naming Convention
+## 3. Branch naming convention
 
 Format:
 
@@ -75,7 +75,7 @@ Format:
 - `feat/model/implement-moe-routing`
 - `fix/engine/init-error`
 
-## 4. Commit Convention
+## 4. Commit convention
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
@@ -88,7 +88,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 - `feat(model): add MOE routing functionality`
 - `fix(engine): resolve initialization error`
 
-## 5. Testing Requirements
+## 5. Testing requirements
 
 Before opening a pull request, run the following from the repository root:
 
@@ -112,7 +112,7 @@ Before opening a pull request, run the following from the repository root:
   pre-commit run --all-files
   ```
 
-## 6. Pull Request Process
+## 6. Pull request process
 
 1. Fork the repository (unless you have write access and use a feature branch).
 2. Create a branch that follows the naming convention above.
@@ -124,7 +124,7 @@ Before opening a pull request, run the following from the repository root:
 8. Address review feedback.
 9. Ensure CI passes (lint and unit tests on the paths your PR triggers).
 
-## 7. CI Pipeline
+## 7. CI pipeline
 
 The workflow **`.github/workflows/ci.yaml`** defines how changes are validated.
 
@@ -132,10 +132,10 @@ The workflow **`.github/workflows/ci.yaml`** defines how changes are validated.
 
 **Jobs (high level):**
 
-- **`code-lint`:** Ubuntu, Python 3.12 — installs `pre-commit` and runs `pre-commit run --all-files --show-diff-on-failure`, so the checks (black, isort, autoflake, shellcheck, and the `pre-commit-hooks` set) follow `.pre-commit-config.yaml` exactly.
+- **`code-lint`:** Ubuntu, Python 3.12—installs `pre-commit` and runs `pre-commit run --all-files --show-diff-on-failure`, so the checks (black, isort, autoflake, shellcheck, and the `pre-commit-hooks` set) follow `.pre-commit-config.yaml` exactly.
 - **`build-docker`:** Builds and pushes Docker images (depends on `code-lint`).
-- **`run-unittest-torch`:** Self-hosted GPU runner — installs dependencies (including Primus-Turbo and AITER as defined in the workflow), runs `bash ./tests/runner/run_all_tests.sh`, `pytest` on `tests/unit_tests/` (with a few deselected tests), then Megatron and TorchTitan trainer tests with `DATA_PATH`, `MASTER_PORT`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` where required.
-- **`run-unittest-jax`:** JAX runner — installs `requirements-jax.txt`, runs shell tests and `python ./tests/run_unit_tests.py --jax` with CI-specific environment variables.
+- **`run-unittest-torch`:** Self-hosted GPU runner—installs dependencies (including Primus-Turbo and AITER as defined in the workflow), runs `bash ./tests/runner/run_all_tests.sh`, `pytest` on `tests/unit_tests/` (with a few deselected tests), then Megatron and TorchTitan trainer tests with `DATA_PATH`, `MASTER_PORT`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` where required.
+- **`run-unittest-jax`:** JAX runner—installs `requirements-jax.txt`, runs shell tests and `python ./tests/run_unit_tests.py --jax` with CI-specific environment variables.
 
 Lint checks mirror the pre-commit stack. Trainer jobs require GPU resources and shared secrets (for example `HF_TOKEN`) in the hosted environment.
 

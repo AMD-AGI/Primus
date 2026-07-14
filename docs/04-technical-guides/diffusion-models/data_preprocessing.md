@@ -1,19 +1,19 @@
-# Data Preprocessing Guide
+# Data preprocessing guide
 
 This guide explains how to prepare datasets for Flux and other diffusion models in Primus, including pre-encoding of VAE latents and text embeddings into Energon WebDataset format.
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [Overview](#overview)
-2. [Quick Start](#quick-start)
-3. [Two Pipelines](#two-pipelines)
-4. [Running Preprocessing](#running-preprocessing)
+2. [Quick start](#quick-start)
+3. [Two pipelines](#two-pipelines)
+4. [Running preprocessing](#running-preprocessing)
 5. [Configuration](#configuration)
 6. [Authentication](#authentication)
 7. [Finalization](#finalization)
-8. [Output Format](#output-format)
+8. [Output format](#output-format)
 9. [Validation](#validation)
 10. [Troubleshooting](#troubleshooting)
 
@@ -26,7 +26,7 @@ Diffusion models require three types of encodings:
 2. **Text embeddings**: Captions encoded with T5-XXL (sequence)
 3. **Pooled embeddings**: Captions encoded with CLIP-L (pooled)
 
-### Why Pre-encode?
+### Why pre-encode?
 
 **Benefits**:
 - 5-10x faster training (no online encoding)
@@ -46,7 +46,7 @@ Diffusion models require three types of encodings:
 
 ---
 
-## Quick Start
+## Quick start
 
 Preprocess the Pokemon dataset with a single command:
 
@@ -66,11 +66,11 @@ The default encoder model (`black-forest-labs/FLUX.1-dev`) is gated and requires
 
 ---
 
-## Two Pipelines
+## Two pipelines
 
 Primus provides two preprocessing pipelines via the `primus data` CLI:
 
-### `diffusion-encoded` (Recommended for Training)
+### `diffusion-encoded` (recommended for training)
 
 Pre-encodes images with VAE and text with T5/CLIP. Produces larger datasets but enables faster training since encoders are not needed at training time.
 
@@ -104,9 +104,9 @@ primus-cli direct -- data diffusion-raw \
 
 ---
 
-## Running Preprocessing
+## Running preprocessing
 
-### Using a Config File (Recommended)
+### Using a config file (recommended)
 
 The `--config` flag is supported by `diffusion-encoded` only. The simplest approach uses a YAML config file:
 
@@ -127,7 +127,7 @@ Available example configs in `primus/configs/data/megatron/diffusion/preprocessi
 | `example_base.yaml` | N/A | Comprehensive reference with all fields |
 | `text_to_image_2m_10k.yaml` | HuggingFace | 10K subset of text-to-image-2M (1024px) |
 
-### Using CLI Arguments Directly
+### Using CLI arguments directly
 
 All config values can be provided as CLI arguments:
 
@@ -142,7 +142,7 @@ primus-cli direct -- data diffusion-encoded \
   --hf-token-file /path/to/.hf_token
 ```
 
-### CLI Overrides Config Values
+### CLI overrides config values
 
 When using both `--config` and CLI arguments, CLI arguments take priority:
 
@@ -160,7 +160,7 @@ Priority order (highest to lowest):
 2. YAML config file values
 3. CLI default values
 
-### Multi-GPU Processing
+### Multi-GPU processing
 
 Use `--nproc-per-node` for data-parallel preprocessing across multiple GPUs:
 
@@ -176,7 +176,7 @@ Each GPU processes a subset of the data. Shards are named to avoid conflicts acr
 
 ## Configuration
 
-### YAML Config Structure
+### YAML config structure
 
 Preprocessing configs have four sections:
 
@@ -206,7 +206,7 @@ image:
   center_crop: false
 ```
 
-### Source Types
+### Source types
 
 **HuggingFace** (`type: huggingface`):
 ```yaml
@@ -244,7 +244,7 @@ source:
   input_path: /data/existing_shards/*.tar
 ```
 
-### Model Configuration
+### Model configuration
 
 The `model_path` defaults to `black-forest-labs/FLUX.1-dev`, which downloads VAE, T5-XXL, and CLIP-L encoders from HuggingFace. This model is gated and requires authentication (see [Authentication](#authentication)).
 
@@ -264,7 +264,7 @@ model:
 
 The default encoder model (`FLUX.1-dev`) is gated on HuggingFace and requires authentication. Primus supports three authentication methods, checked in priority order:
 
-### 1. Token File (Recommended)
+### 1. Token file (recommended)
 
 ```bash
 primus-cli direct -- data diffusion-encoded \
@@ -279,14 +279,14 @@ echo "hf_your_token_here" > /path/to/.hf_token
 chmod 600 /path/to/.hf_token
 ```
 
-### 2. Environment Variable
+### 2. Environment variable
 
 ```bash
 export HF_TOKEN=hf_your_token_here
 primus-cli direct -- data diffusion-encoded --config your_config.yaml
 ```
 
-### 3. HuggingFace CLI Login
+### 3. HuggingFace CLI login
 
 ```bash
 huggingface-cli login
@@ -305,7 +305,7 @@ Finalization is **automatic by default**. After preprocessing completes, Primus 
 2. **Runs `energon prepare`** to index the tar shards and create split assignments
 3. **Validates the dataset** using Primus's custom validation (metadata checks, sample count verification, energon API spot-check)
 
-### Skipping Finalization
+### Skipping finalization
 
 To skip automatic finalization (e.g., for manual post-processing):
 
@@ -316,7 +316,7 @@ primus-cli direct -- data diffusion-encoded \
   --no-finalize
 ```
 
-### Custom Train/Val/Test Splits
+### Custom train/val/test splits
 
 By default, 100% of data goes to the training split. To create validation and test splits:
 
@@ -331,9 +331,9 @@ This creates an 80% train / 10% val / 10% test split.
 
 ---
 
-## Output Format
+## Output format
 
-### Directory Structure
+### Directory structure
 
 After preprocessing and finalization, the output directory contains:
 
@@ -349,7 +349,7 @@ encoded_pokemon/
     └── .info.json           # Shard counts and sample counts
 ```
 
-### Pre-encoded Shard Contents (`diffusion-encoded`)
+### Pre-encoded shard contents (`diffusion-encoded`)
 
 Each tar shard contains samples with these keys:
 
@@ -369,7 +369,7 @@ Tensor shapes:
 - `prompt_embeds.pth`: `[seq_len, 4096]` (T5-XXL hidden dim)
 - `pooled_prompt_embeds.pth`: `[768]` (CLIP-L pooled dim)
 
-### Raw Shard Contents (`diffusion-raw`)
+### Raw shard contents (`diffusion-raw`)
 
 ```
 000000.tar:
@@ -395,7 +395,7 @@ subflavors:
 
 ## Validation
 
-### Automatic Validation
+### Automatic validation
 
 Validation runs automatically as part of finalization. It performs four checks:
 
@@ -404,7 +404,7 @@ Validation runs automatically as part of finalization. It performs four checks:
 3. **Sample load check**: Loads one sample through Energon's Python API (same code path as training)
 4. **Summary report**: Prints dataset statistics (encoding, total samples, splits, data shapes, size)
 
-### Standalone Validation
+### Standalone validation
 
 To validate a dataset independently:
 
@@ -415,7 +415,7 @@ python -m primus.backends.megatron.data.diffusion.preprocessing.validate /path/t
 python -m primus.backends.megatron.data.diffusion.preprocessing.validate /path/to/dataset --encoding raw
 ```
 
-### Programmatic Validation
+### Programmatic validation
 
 ```python
 from primus.backends.megatron.data.diffusion.preprocessing.validate import validate_energon_dataset
@@ -423,7 +423,7 @@ from primus.backends.megatron.data.diffusion.preprocessing.validate import valid
 ok = validate_energon_dataset('/path/to/dataset', encoding='preencoded')
 ```
 
-### Known Energon CLI Limitations
+### Known Energon CLI limitations
 
 The standard Energon CLI tools (`energon info`, `energon preview`, `energon lint`) do **not** work correctly with `CrudeWebdataset` format. Primus uses custom validation instead:
 
@@ -437,7 +437,7 @@ Use Primus's built-in validation or the standalone script above.
 
 ## Troubleshooting
 
-### HuggingFace Authentication Failure
+### HuggingFace authentication failure
 
 **Symptoms**: Error mentioning "token", "gated", "401", or "403" when downloading encoders.
 
@@ -447,7 +447,7 @@ Use Primus's built-in validation or the standalone script above.
 3. Run `huggingface-cli login`
 4. Accept the model's license on https://huggingface.co/black-forest-labs/FLUX.1-dev
 
-### Out of Memory During Preprocessing
+### Out of memory during preprocessing
 
 **Symptoms**: CUDA out of memory error during encoding.
 
@@ -457,7 +457,7 @@ Use Primus's built-in validation or the standalone script above.
 3. Use fp16 precision: `--precision fp16`
 4. Use multi-GPU to distribute work: `--nproc-per-node=8`
 
-### Missing Dependencies
+### Missing dependencies
 
 **Symptoms**: `ModuleNotFoundError` for `webdataset`, `megatron-energon`, `tqdm`, etc.
 
@@ -468,7 +468,7 @@ pip install -r requirements.txt
 
 Or set `PRIMUS_AUTO_INSTALL=1` in the container to auto-install missing packages.
 
-### Finalization Fails
+### Finalization fails
 
 **Symptoms**: Error during `energon prepare` or validation after preprocessing.
 
@@ -477,7 +477,7 @@ Or set `PRIMUS_AUTO_INSTALL=1` in the container to auto-install missing packages
 2. Ensure `megatron-energon` is installed (`pip install megatron-energon`)
 3. Re-run with `--no-finalize`, then manually inspect the output before finalizing
 
-### Slow Preprocessing
+### Slow preprocessing
 
 **Symptoms**: Low throughput (< 10 samples/sec).
 
@@ -489,7 +489,7 @@ Or set `PRIMUS_AUTO_INSTALL=1` in the container to auto-install missing packages
 
 ---
 
-## Best Practices
+## Best practices
 
 1. **Always pre-encode for production training**: 5-10x speedup is worth the storage
 2. **Test on small dataset first**: Use `--max-samples 100` to verify the pipeline works
@@ -500,7 +500,7 @@ Or set `PRIMUS_AUTO_INSTALL=1` in the container to auto-install missing packages
 
 ---
 
-## Flux-Specific Data Preparation (torchrun)
+## Flux-specific data preparation (torchrun)
 
 This section covers preparing datasets for Flux training using `torchrun` directly
 inside a Docker container, as an alternative to the `primus-cli` workflow above.
@@ -521,7 +521,7 @@ Override the image with `DOCKER_IMAGE`:
 DOCKER_IMAGE=docker.io/rocm/primus:v26.1 bash tools/docker/start_container.sh
 ```
 
-### Input Directory Structure
+### Input directory structure
 
 When using `--source-type directory`, organize your data as follows:
 
@@ -545,7 +545,7 @@ Other supported source types:
 - **huggingface** -- Load directly from HuggingFace Hub. Requires `--hf-dataset`.
 - **webdataset** -- Read from existing WebDataset tar archives. Requires `--input-path`.
 
-### Image Sizing
+### Image sizing
 
 **Fixed size (default):** Every image is resized to `--image-size` pixels square
 (default 1024). Use `--center-crop` to control center-cropping.
@@ -555,7 +555,7 @@ longest side to `--max-size` (default 1024) and rounding dimensions to multiples
 of 16. Only use this when all images share the same dimensions -- mixed tensor
 sizes cause load imbalance across GPUs.
 
-### Key Parameters
+### Key parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -613,7 +613,7 @@ your images have various sizes.
 
 ---
 
-## Next Steps
+## Next steps
 
 After preprocessing:
 1. **Training**: Use the preprocessed dataset path in your training config

@@ -1,15 +1,15 @@
-# Flux Architecture Deep Dive
+# Flux architecture deep dive
 
-## Table of Contents
+## Table of contents
 
 1. [Overview](#overview)
-2. [Architecture Principles](#architecture-principles)
-3. [Model Components](#model-components)
-4. [Data Flow](#data-flow)
-5. [Mathematical Formulation](#mathematical-formulation)
-6. [Implementation Details](#implementation-details)
-7. [Megatron-Core Integration](#megatron-core-integration)
-8. [Performance Optimizations](#performance-optimizations)
+2. [Architecture principles](#architecture-principles)
+3. [Model components](#model-components)
+4. [Data flow](#data-flow)
+5. [Mathematical formulation](#mathematical-formulation)
+6. [Implementation details](#implementation-details)
+7. [Megatron-core integration](#megatron-core-integration)
+8. [Performance optimizations](#performance-optimizations)
 
 ---
 
@@ -17,14 +17,14 @@
 
 Flux is a **flow-based diffusion model** for high-quality text-to-image generation. It uses an innovative **MMDiT (Multimodal Diffusion Transformer)** architecture that jointly processes image and text tokens through shared transformer blocks.
 
-### Key Innovations
+### Key innovations
 
 1. **Flow Matching**: Uses rectified flow instead of traditional diffusion
 2. **MMDiT Architecture**: Joint image-text attention in early layers
 3. **3D RoPE**: Multi-dimensional rotary position embeddings for spatial awareness
 4. **Two-Stage Processing**: Joint layers followed by image-only layers
 
-### Model Variants
+### Model variants
 
 | Variant | Joint Layers | Single Layers | Parameters | Use Case |
 |---------|--------------|---------------|------------|----------|
@@ -33,9 +33,9 @@ Flux is a **flow-based diffusion model** for high-quality text-to-image generati
 
 ---
 
-## Architecture Principles
+## Architecture principles
 
-### 1. Flow Matching Framework
+### 1. Flow matching framework
 
 Unlike traditional diffusion (which adds Gaussian noise), Flux uses **rectified flow**:
 
@@ -58,7 +58,7 @@ v_θ(z_t, t, c) ≈ z_1 - z_0
 - Faster sampling (fewer steps needed)
 - Better training stability
 
-### 2. MMDiT (Multimodal Diffusion Transformer)
+### 2. MMDiT (multimodal diffusion transformer)
 
 Traditional DiT processes image tokens independently. MMDiT jointly processes image and text:
 
@@ -87,7 +87,7 @@ Traditional DiT processes image tokens independently. MMDiT jointly processes im
 - Richer cross-modal interactions
 - Improved compositional understanding
 
-### 3. Two-Stage Processing
+### 3. Two-stage processing
 
 Flux uses a unique two-stage architecture:
 
@@ -103,11 +103,11 @@ Flux uses a unique two-stage architecture:
 
 ---
 
-## Model Components
+## Model components
 
-### 1. Input Embeddings
+### 1. Input embeddings
 
-#### Image Path
+#### Image path
 
 ```
 Image (RGB) → VAE Encoder → Latents [B, 64, H/8, W/8]
@@ -123,7 +123,7 @@ Image (RGB) → VAE Encoder → Latents [B, 64, H/8, W/8]
 
 **Linear Projection**: Maps 64 channels → 3072 hidden dim
 
-#### Text Path
+#### Text path
 
 ```
 Caption → T5-XXL Encoder → Embeddings [B, S, 4096]
@@ -159,7 +159,7 @@ Timestep t ∈ [0, 1] → Sinusoidal Encoding → [B, 256]
 vec = timestep_emb + clip_pooled_emb + [guidance_emb]
 ```
 
-### 2. Position Embeddings (3D RoPE)
+### 2. Position embeddings (3D RoPE)
 
 Flux uses **3D Rotary Position Embeddings** for spatial awareness:
 
@@ -191,7 +191,7 @@ sin_freq = sin(freqs)
 - Encodes channel relationships
 - Works for any resolution (generalization)
 
-### 3. MMDiT Layer (Double Block)
+### 3. MMDiT layer (double block)
 
 Each MMDiT layer performs:
 
@@ -234,7 +234,7 @@ Output: img [B, H*W, D], txt [B, S, D]
 - **Adaptive gating**: Timestep-conditioned residual connections
 - **Separate MLPs**: Modality-specific processing
 
-### 4. Flux Single Block
+### 4. Flux single block
 
 After joint processing, image tokens go through single blocks:
 
@@ -270,7 +270,7 @@ Output: img [B, H*W, D]  (text tokens discarded)
 - Output focuses on image generation
 - More efficient than full joint processing
 
-### 5. Output Processing
+### 5. Output processing
 
 ```
 Image Tokens [B, H*W, D]
@@ -288,9 +288,9 @@ Image Tokens [B, H*W, D]
 
 ---
 
-## Data Flow
+## Data flow
 
-### Complete Forward Pass
+### Complete forward pass
 
 ```
                             Input
@@ -355,7 +355,7 @@ Image Tokens [B, H*W, D]
    Predicted Velocity
 ```
 
-### Training Data Flow
+### Training data flow
 
 ```
 Original Image
@@ -386,9 +386,9 @@ Original Image
 
 ---
 
-## Mathematical Formulation
+## Mathematical formulation
 
-### Flow Matching Objective
+### Flow matching objective
 
 **Forward Process**:
 ```
@@ -411,7 +411,7 @@ where:
   v_θ = Flux model                    # Predicted velocity
 ```
 
-### Sampling (Inference)
+### Sampling (inference)
 
 **Euler Integration** (first-order ODE solver):
 ```
@@ -425,7 +425,7 @@ for t in [1.0, 0.9, ..., 0.1, 0.0]:
 - Heun's method (2nd order)
 - DPM-Solver (adaptive)
 
-### Classifier-Free Guidance
+### Classifier-free guidance
 
 During inference, use guidance scale `w`:
 
@@ -443,7 +443,7 @@ where:
 config = FluxConfig(guidance_embed=True, guidance_scale=3.5)
 ```
 
-### 3D RoPE Mathematics
+### 3D RoPE mathematics
 
 For position `(h, w)` in image:
 
@@ -470,9 +470,9 @@ k_rot = [k[:d/2] * cos(freq) - k[d/2:] * sin(freq),
 
 ---
 
-## Implementation Details
+## Implementation details
 
-### Memory Layout
+### Memory layout
 
 Megatron-Core uses **sequence-first format**: `[seq, batch, hidden]`
 
@@ -491,7 +491,7 @@ img_tokens = linear(img_seq)  # [B, H*W, 3072]
 img_megatron = rearrange(img_tokens, 'b s d -> s b d')
 ```
 
-### Adaptive Layer Normalization
+### Adaptive layer normalization
 
 **Standard AdaLN**:
 ```python
@@ -514,7 +514,7 @@ x_attn = attention(x_norm)
 x = x + gate * x_attn  # Gated residual
 ```
 
-### Attention Implementation
+### Attention implementation
 
 **Using Megatron SelfAttention**:
 ```python
@@ -546,7 +546,7 @@ txt_out = joint_output[seq_img:]
 
 ---
 
-## Megatron-Core Integration
+## Megatron-core integration
 
 ### TransformerConfig
 
@@ -568,7 +568,7 @@ config = TransformerConfig(
 )
 ```
 
-### Layer Specs
+### Layer specs
 
 Flux provides factory functions for layer specs:
 
@@ -589,7 +589,7 @@ single_spec = get_flux_single_transformer_spec_for_backend(backend)
 layer_specs = get_flux_layer_spec(config, backend=backend)
 ```
 
-### Distributed Training Support
+### Distributed training support
 
 Flux inherits Megatron's parallelism:
 
@@ -610,9 +610,9 @@ at config construction).
 
 ---
 
-## Performance Optimizations
+## Performance optimizations
 
-### 1. Transformer Engine
+### 1. Transformer engine
 
 Flux uses NVIDIA Transformer Engine for FP8 training:
 
@@ -632,7 +632,7 @@ linear_proj = TERowParallelLinear(...)
 - Fused operations (LayerNorm + Linear)
 - Automatic scaling for numerical stability
 
-### 2. Flash Attention
+### 2. Flash attention
 
 Enabled via Megatron:
 
@@ -644,7 +644,7 @@ config = TransformerConfig(
 
 **Speedup**: 2-3x faster attention, 4x less memory
 
-### 3. Gradient Checkpointing
+### 3. Gradient checkpointing
 
 For large models:
 
@@ -658,7 +658,7 @@ config = TransformerConfig(
 
 **Memory Savings**: ~40% reduction, ~20% slower
 
-### 4. Fused Operations
+### 4. Fused operations
 
 ```python
 config = TransformerConfig(
@@ -668,7 +668,7 @@ config = TransformerConfig(
 )
 ```
 
-### 5. Mixed Precision
+### 5. Mixed precision
 
 ```python
 from primus.backends.megatron.training.diffusion.loss_computation import compute_flow_matching_loss
@@ -688,7 +688,7 @@ scaler.update()
 
 ---
 
-## Comparison with Other Models
+## Comparison with other models
 
 ### Flux vs DiT
 
@@ -699,7 +699,7 @@ scaler.update()
 | Position Encoding | Learned 2D | 3D RoPE |
 | Diffusion Type | DDPM | Flow matching |
 
-### Flux vs Stable Diffusion
+### Flux vs stable diffusion
 
 | Aspect | Stable Diffusion (UNet) | Flux (Transformer) |
 |--------|-------------------------|---------------------|
@@ -710,9 +710,9 @@ scaler.update()
 
 ---
 
-## Design Decisions
+## Design decisions
 
-### Why Two-Stage (Joint + Single)?
+### Why two-stage (joint + single)?
 
 **Joint Blocks**:
 - Deep semantic understanding
@@ -726,7 +726,7 @@ scaler.update()
 
 **Alternative**: All joint blocks → slower, marginal quality gain
 
-### Why Flow Matching?
+### Why flow matching?
 
 **Advantages over DDPM**:
 1. **Simpler training**: Straight-line interpolation (no schedule design)
@@ -746,9 +746,9 @@ scaler.update()
 
 ---
 
-## Primus Implementation Highlights
+## Primus implementation highlights
 
-### TransformerBlock Architecture
+### TransformerBlock architecture
 
 Primus's key architectural enhancement is the use of Megatron-Core's **TransformerBlock with heterogeneous layer specifications**:
 
@@ -774,7 +774,7 @@ graph TD
 2. **Future-Proof**: Native support for new Megatron-Core features
 3. **Cleaner Code**: No manual iteration over separate block lists
 
-### Layer Specification Pattern
+### Layer specification pattern
 
 ```python
 # Primus approach
@@ -794,7 +794,7 @@ transformer = TransformerBlock(
 # No manual offset calculation needed
 ```
 
-### Checkpoint Format Comparison
+### Checkpoint format comparison
 
 **Traditional Format**:
 ```
@@ -816,9 +816,9 @@ Benefits: Simpler distributed checkpointing, easier layer inspection, consistent
 
 ---
 
-## Future Enhancements
+## Future enhancements
 
-### Planned Features
+### Planned features
 
 1. **ControlNet Support**:
    - Spatial conditioning (pose, depth, edges)
@@ -836,7 +836,7 @@ Benefits: Simpler distributed checkpointing, easier layer inspection, consistent
    - Low-rank adaptation for custom styles
    - Efficient personalization
 
-### Research Directions
+### Research directions
 
 - **Sparse Attention**: Reduce quadratic complexity for high-res
 - **Mixture of Experts**: Conditional computation for efficiency
@@ -854,7 +854,7 @@ Benefits: Simpler distributed checkpointing, easier layer inspection, consistent
 4. **RoPE**: Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding", 2021
 5. **Transformer Engine**: NVIDIA, "Transformer Engine: Accelerating Transformer Training", 2022
 
-### Code References
+### Code references
 
 - **Primus Flux**: `primus/backends/megatron/core/models/diffusion/flux/`
 - **Megatron-Core**: `megatron/core/transformer/`
@@ -865,7 +865,7 @@ Benefits: Simpler distributed checkpointing, easier layer inspection, consistent
 
 ## Appendix: Hyperparameters
 
-### Flux 535M Training
+### Flux 535M training
 
 ```yaml
 model:
@@ -890,7 +890,7 @@ optimization:
   gradient_clip: 1.0
 ```
 
-### Flux 12B Training
+### Flux 12B training
 
 ```yaml
 model:

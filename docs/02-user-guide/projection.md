@@ -1,4 +1,4 @@
-# Memory and Performance Projection
+# Memory and performance projection
 
 Primus projection tools estimate **per-GPU memory** and **training throughput** for large-scale distributed jobs without requiring the full target cluster. Two modes are available: analytical **memory** projection and **performance** projection that combines profiling with simulation.
 
@@ -8,6 +8,7 @@ Primus projection tools estimate **per-GPU memory** and **training throughput** 
 |------|---------|------|
 | **Memory** | `projection memory` | Estimates per-GPU memory (parameters, optimizer state, activations) using analytical formulas. |
 | **Performance** | `projection performance` | Benchmarks on a single node (or sub-node), then projects training time to multi-node configurations. |
+| **Both** | `projection both` | Runs a single benchmark and produces **both** the performance and (benchmark-anchored) memory projections from it. Recommended for cluster-sizing workflows. |
 
 **Core logic**
 
@@ -103,7 +104,7 @@ export PRIMUS_EP=8
 ### Syntax
 
 ```bash
-primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance} [options]
+primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance,both} [options]
 ```
 
 ### Shared options (both modes)
@@ -141,17 +142,17 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 
 ### Assumptions (performance projection)
 
-1. **Data-parallel scaling** — Compute time scales with ideal weak-scaling assumptions versus data-parallel width.
-2. **Communication Model** — Uses simplified bandwidth and latency models (defaults such as efficiency factors may apply).
-3. **Pipeline scheduling** — Bubble and overlap behavior is modeled with fixed splits; real frameworks may differ.
-4. **Gradients and MoE** — Gradient all-reduce overlap and MoE all-to-all behavior follow the implemented model (for example overlap flags, EP scaling).
+1. **Data-parallel scaling**—Compute time scales with ideal weak-scaling assumptions versus data-parallel width.
+2. **Communication Model**—Uses simplified bandwidth and latency models (defaults such as efficiency factors may apply).
+3. **Pipeline scheduling**—Bubble and overlap behavior is modeled with fixed splits; real frameworks may differ.
+4. **Gradients and MoE**—Gradient all-reduce overlap and MoE all-to-all behavior follow the implemented model (for example overlap flags, EP scaling).
 
 ### Limitations
 
-1. **Single-node benchmark accuracy** — Reduced PP/EP on the benchmark GPU count may not capture every production behavior.
-2. **Contention** — Network contention between jobs is not modeled.
-3. **Memory vs speed** — Activation recomputation reduces memory but adds compute; performance projection may not fully reflect that trade-off unless modeled.
-4. **Heterogeneity** — Assumes homogeneous nodes; GPU frequency drift across nodes is not modeled.
+1. **Single-node benchmark accuracy**—Reduced PP/EP on the benchmark GPU count may not capture every production behavior.
+2. **Contention**—Network contention between jobs is not modeled.
+3. **Memory vs speed**—Activation recomputation reduces memory but adds compute; performance projection may not fully reflect that trade-off unless modeled.
+4. **Heterogeneity**—Assumes homogeneous nodes; GPU frequency drift across nodes is not modeled.
 
 ---
 
@@ -167,7 +168,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 
 ---
 
-## See also
+## Related documentation
 
 - [Benchmark suite](./benchmarking.md)
 - [Preflight diagnostics](./preflight.md)

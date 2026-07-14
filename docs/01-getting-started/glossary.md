@@ -6,7 +6,7 @@ Alphabetical reference for terms used in Primus documentation and configuration.
 
 ### AINIC
 
-**AMD Pensando™ Pollara 400 AI NICs** — AMD’s high-performance network interface for multi-node GPU communication.
+**AMD AI NIC**—AMD’s AI-optimized network interface for multi-node GPU communication (for example, the **AMD Pensando™ Pollara 400 AI NIC**).
 
 ---
 
@@ -40,13 +40,13 @@ Floating-point precisions: **Brain Float 16**, **IEEE half**, **8-bit float**, a
 
 ---
 
-### CP (Context Parallelism)
+### CP (context parallelism)
 
 Parallelism that **splits the sequence dimension** across devices for long-context training.
 
 ---
 
-### DP (Data Parallelism)
+### DP (data parallelism)
 
 Replicates the model across GPUs; each rank processes **different data batches**.
 
@@ -54,17 +54,17 @@ Replicates the model across GPUs; each rank processes **different data batches**
 
 ### DeepEP
 
-**Deep Expert Parallelism** — Primus-Turbo’s acceleration path for **MoE token dispatch** and related expert-parallel work.
+**Deep Expert Parallelism**—Primus-Turbo’s acceleration path for **MoE token dispatch** and related expert-parallel work.
 
 ---
 
-### EP (Expert Parallelism)
+### EP (expert parallelism)
 
 Distributes **Mixture-of-Experts** expert networks across devices.
 
 ---
 
-### Experiment Config
+### Experiment config
 
 Top-level **YAML** describing `work_group`, **modules**, and **overrides** for a training run.
 
@@ -72,17 +72,17 @@ Top-level **YAML** describing `work_group`, **modules**, and **overrides** for a
 
 ### FSDP
 
-**Fully Sharded Data Parallel** — shards parameters, gradients, and optimizer states across devices (PyTorch FSDP and similar concepts per backend).
+**Fully Sharded Data Parallel**—shards parameters, gradients, and optimizer states across devices (PyTorch FSDP and similar concepts per backend).
 
 ---
 
-### GBS (Global Batch Size)
+### GBS (global batch size)
 
 Total **batch size across all data-parallel ranks** for one optimizer step (may combine micro-batching and gradient accumulation).
 
 ---
 
-### Gradient Accumulation
+### Gradient accumulation
 
 Accumulates gradients over **multiple micro-batches** before an optimizer update.
 
@@ -102,35 +102,35 @@ Shell or Python scripts under `runner/helpers/hooks/` executed at defined **life
 
 ### LoRA
 
-**Low-Rank Adaptation** — parameter-efficient fine-tuning that trains small adapter matrices.
+**Low-Rank Adaptation**—parameter-efficient fine-tuning that trains small adapter matrices.
 
 ---
 
-### MBS (Micro Batch Size)
+### MBS (micro batch size)
 
 Batch size **per GPU** (per rank) for **one forward/backward pass** within a gradient-accumulation window.
 
 ---
 
-### MLA (Multi-Latent Attention)
+### MLA (multi-latent attention)
 
 Compressed **KV-cache** attention architecture used in models such as DeepSeek.
 
 ---
 
-### MoE (Mixture of Experts)
+### MoE (mixture of experts)
 
 Architecture with **multiple expert** sub-networks and a **router** that assigns tokens to experts.
 
 ---
 
-### Model Config
+### Model config
 
 YAML **preset** describing architecture (hidden size, layers, attention heads, and so on).
 
 ---
 
-### Module Config
+### Module config
 
 YAML **preset** for training behavior: learning rate, batch sizes, optimizer, schedules.
 
@@ -138,11 +138,11 @@ YAML **preset** for training behavior: learning rate, batch sizes, optimizer, sc
 
 ### NCCL / RCCL
 
-**NVIDIA Collective Communications Library** / **ROCm** equivalent — libraries for **GPU collective** operations in distributed training.
+**NVIDIA Collective Communications Library** / **ROCm** equivalent—libraries for **GPU collective** operations in distributed training.
 
 ---
 
-### PP (Pipeline Parallelism)
+### PP (pipeline parallelism)
 
 Splits **model layers** into **stages** on different devices.
 
@@ -160,7 +160,7 @@ Registry of **phase-aware** patches (for example `build_args`, `setup`, `before_
 
 ---
 
-### Platform Config
+### Platform config
 
 YAML describing **cluster environment** mappings (for example `platform_azure.yaml`): env vars, paths, and scheduler hints.
 
@@ -186,7 +186,7 @@ Core **orchestrator**: loads configuration, resolves the backend, applies patche
 
 ### Primus-SaFE
 
-**Stability and Fault-tolerance Engine** — external ecosystem component for **cluster management** and resilience. This repository references it in auxiliary tooling but does not include a production integration guide.
+**Stability and Fault-tolerance Engine**—external ecosystem component for **cluster management** and resilience. This repository references it in auxiliary tooling but does not include a production integration guide.
 
 ---
 
@@ -204,47 +204,47 @@ Tools that **estimate memory** and **training performance** without requiring a 
 
 ### ROCm
 
-**Radeon Open Compute** — AMD’s GPU computing platform (drivers, compilers, libraries).
+**Radeon Open Compute**—AMD’s GPU computing platform (drivers, compilers, libraries).
 
 ---
 
-### SFT (Supervised Fine-Tuning)
+### SFT (supervised fine-tuning)
 
 Supervised fine-tuning that typically **updates all** (or a defined subset of) model parameters, as opposed to adapter-only methods.
 
 ---
 
-### SP (Sequence Parallelism)
+### SP (sequence parallelism)
 
 Parallelism that extends tensor-parallel regions to **non-TP** parts of the model to **reduce activation memory**.
 
 ---
 
-### TP (Tensor Parallelism)
+### TP (tensor parallelism)
 
 Splits **layer weights** across GPUs within a node (or defined process group).
 
 ---
 
-### Transformer Engine (TE)
+### Transformer engine (TE)
 
 Library stack for **FP8** and related training optimizations (availability depends on backend and build).
 
 ---
 
-### VPP (Virtual Pipeline Parallelism)
+### VPP (virtual pipeline parallelism)
 
 **Interleaved** pipeline parallelism with **multiple virtual stages** per device to improve utilization.
 
 ---
 
-### Zero-Bubble
+### Zero-bubble
 
 Pipeline scheduling that **reduces or eliminates pipeline bubbles** (idle time between micro-batches).
 
 ---
 
-## See also
+## Related documentation
 
 - [Overview](./overview.md)
 - [Configuration system](../02-user-guide/configuration-system.md)

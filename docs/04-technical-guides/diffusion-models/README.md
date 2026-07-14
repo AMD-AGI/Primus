@@ -1,4 +1,4 @@
-# Diffusion Models in Primus - Developer & Architecture Guide
+# Diffusion models in Primus - developer and architecture guide
 
 **Purpose:** Developer-focused documentation for understanding Primus diffusion architecture, design decisions, and implementation details.
 
@@ -8,7 +8,7 @@
 
 ---
 
-## Architecture Philosophy
+## Architecture philosophy
 
 Primus diffusion models are built as **Megatron-Core native implementations**, designed for:
 - Production-scale distributed training
@@ -16,7 +16,7 @@ Primus diffusion models are built as **Megatron-Core native implementations**, d
 - Advanced checkpoint management with heterogeneous layers
 - Clean separation of concerns (no framework dependencies like PyTorch Lightning)
 
-### Key Design Decisions
+### Key design decisions
 
 **1. Megatron-Core Integration**
 - Models in `core/models/diffusion/` follow Megatron-Core patterns
@@ -43,9 +43,9 @@ Primus diffusion models are built as **Megatron-Core native implementations**, d
 
 ---
 
-## Supported Models
+## Supported models
 
-### Flux ✅ Production Ready
+### Flux ✅ production ready
 Flow-based diffusion model with MMDiT (Multimodal Diffusion Transformer) architecture.
 
 - **Architecture**: Dual-stream with joint and single transformer blocks
@@ -53,14 +53,14 @@ Flow-based diffusion model with MMDiT (Multimodal Diffusion Transformer) archite
 - **Reference**: [Black Forest Labs FLUX.1](https://huggingface.co/black-forest-labs/FLUX.1-dev)
 - **Status**: Fully implemented and tested (390 tests)
 
-### Future Models ⏳ Planned
+### Future models ⏳ planned
 - **DiT**: Diffusion Transformer for image generation
 - **MovieGen**: Video diffusion models
 - **Custom Models**: Extensible framework for new architectures
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 primus/backends/megatron/
@@ -129,9 +129,9 @@ docs/04-technical-guides/diffusion-models/   # This directory
 
 ---
 
-## Key Technical Features
+## Key technical features
 
-### 1. DiffusionModule Base Class
+### 1. DiffusionModule base class
 
 All diffusion models inherit from `DiffusionModule`, which provides:
 - Megatron-Core integration (process groups, parallelism)
@@ -151,7 +151,7 @@ Configuration class extending `TransformerConfig`:
 
 **Location:** `primus/backends/megatron/core/models/diffusion/common/config.py`
 
-### 3. Hierarchical Encoder Registry
+### 3. Hierarchical encoder registry
 
 Organized by modality → type → variant:
 ```
@@ -173,7 +173,7 @@ Benefits:
 - Lazy loading (encoders loaded only when needed)
 - Shared base classes for common functionality
 
-### 4. Training Utilities Structure
+### 4. Training utilities structure
 
 **Noise Application** (`noise_utils.py`):
 - `apply_flow_matching_noise()`: For flow matching models (Flux)
@@ -192,7 +192,7 @@ Benefits:
 - `ModeSampler`: Mode-focused sampling
 - Base class for custom samplers
 
-### 5. Shared Energon Infrastructure
+### 5. Shared Energon infrastructure
 
 Located in `data/energon/` for reusability across models:
 - Shared data loading utilities
@@ -200,7 +200,7 @@ Located in `data/energon/` for reusability across models:
 - WebDataset integration
 - Model-specific TaskEncoders in `data/diffusion/task_encoders/`
 
-### 6. Precalculated Data Support
+### 6. Precalculated data support
 
 **Performance**: 5-10x faster training than on-the-fly encoding
 
@@ -219,7 +219,7 @@ Located in `data/energon/` for reusability across models:
 - Lower GPU memory (no encoders loaded during training)
 - Better reproducibility
 
-### 7. MLPerf Streaming Ingest Pipeline
+### 7. MLPerf streaming ingest pipeline
 
 **Location:** `data/diffusion/preprocessing/pipelines/ingest.py`
 
@@ -245,9 +245,9 @@ The `StreamingIngestPipeline` downloads Apache Arrow IPC files from MLCommons R2
 
 ---
 
-## Implementation Status
+## Implementation status
 
-### Core Infrastructure ✅
+### Core infrastructure ✅
 - ✅ Directory structure with 25+ directories
 - ✅ Base classes (DiffusionModule, BaseDiffusionConfig, BaseScheduler)
 - ✅ DiffusionModule with Megatron-Core integration
@@ -257,7 +257,7 @@ The `StreamingIngestPipeline` downloads Apache Arrow IPC files from MLCommons R2
 - ✅ Testing framework (390 tests)
 - ✅ Comprehensive documentation
 
-### Flux Model Implementation ✅
+### Flux model implementation ✅
 - ✅ Flux model architecture (dual-stream MMDiT)
 - ✅ MMDiT layers and attention (joint + single blocks)
 - ✅ Embeddings (3D RoPE, timestep, vector)
@@ -268,9 +268,9 @@ The `StreamingIngestPipeline` downloads Apache Arrow IPC files from MLCommons R2
 
 ---
 
-## Documentation Map
+## Documentation map
 
-### Core Guides
+### Core guides
 
 📖 **[Architecture Overview](architecture_overview.md)**
 High-level design, directory structure, and architectural decisions.
@@ -287,7 +287,7 @@ Megatron-Energon patterns and TaskEncoder implementation.
 📖 **[Adding New Models](adding_new_models.md)**
 Step-by-step guide for implementing new diffusion models.
 
-### Advanced Documentation
+### Advanced documentation
 
 📖 **[Flux Architecture Deep Dive](flux_architecture.md)**
 Mathematical formulation, detailed component descriptions, and performance optimizations.
@@ -298,7 +298,7 @@ Complete API documentation with function signatures and usage examples.
 📖 **[FP8 Training Guide](fp8_training.md)**
 FP8 precision training on AMD MI300X: configuration, benchmarks, tuning recipes, and troubleshooting.
 
-### Related Documentation
+### Related documentation
 
 📖 **[Training Guide](../../../examples/megatron/diffusion/README.md)**
 User-facing guide for training Flux models (quick start, configurations, troubleshooting).
@@ -308,7 +308,7 @@ Test suite for diffusion models.
 
 ---
 
-## Testing Architecture
+## Testing architecture
 
 **Test Organization** (following Megatron-LM patterns):
 - One comprehensive file per model (`test_flux_model.py`)
@@ -322,14 +322,14 @@ See [tests/unit_tests/backends/megatron/diffusion/](../../../tests/unit_tests/ba
 
 ---
 
-## Hardware Requirements
+## Hardware requirements
 
-### Flux 535M (Testing)
+### Flux 535M (testing)
 - **Training**: 1x MI300X 192GB (compatible with H100/A100)
 - **Inference**: 1x MI300X 192GB
 - **Batch Size**: 1-8 per GPU
 
-### Flux 12B (Production)
+### Flux 12B (production)
 - **Training**: 8x MI300X 192GB (recommended) or 4x MI300X 192GB with TP=2
 - **Inference**: 1x MI300X 192GB
 - **Batch Size**: 1-2 per GPU for training, 1-4 for inference

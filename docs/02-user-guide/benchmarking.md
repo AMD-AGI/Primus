@@ -1,4 +1,4 @@
-# Benchmark Suite
+# Benchmark suite
 
 Primus ships microbenchmarks for GPU compute and distributed communication. They are exposed as the `benchmark` subcommand of the Primus CLI. Use them to sanity-check a node or cluster before long training jobs.
 
@@ -148,7 +148,7 @@ RCCL collective benchmark: sweeps message sizes and reports bandwidth and latenc
 
 | Argument | Description |
 |----------|-------------|
-| `--op` | One or more of: `all_reduce`, `broadcast`, `reduce_scatter`, `all_gather`, `alltoall` (default: `allreduce`). |
+| `--op` | One or more of: `all_reduce`, `broadcast`, `reduce_scatter`, `all_gather`, `alltoall` (default: `all_reduce`). |
 | `--sizes` | Explicit size list (for example `1K,2K,4K,8K,1M`). Overrides generated sweep. |
 | `--min-bytes` | Minimum message size for generated sweep (default: `1K`). |
 | `--max-bytes` | Maximum message size (default: `128M`). |
@@ -169,7 +169,7 @@ RCCL collective benchmark: sweeps message sizes and reports bandwidth and latenc
 | `--trace-limit` | Max iterations to record per `(op, size)`; `0` means all. |
 | `--trace-ops` | Comma-separated ops to include in trace (empty = all). |
 | `--trace-sizes` | Comma-separated sizes to include in trace (empty = all). |
-| `--cluster` | Label for the report preamble (default: `PRIMUS_CLUSTER` or `amd-aig-poolside`). |
+| `--cluster` | Label for the report preamble. Defaults to `$PRIMUS_CLUSTER`, falling back to a built-in placeholder (`amd-aig-poolside`) when it is unset—set `PRIMUS_CLUSTER` or pass `--cluster` to record your own cluster name. |
 
 **Example**
 
@@ -196,7 +196,7 @@ primus-cli slurm srun -N 4 -- benchmark rccl --op all_reduce --min-bytes 1M --ma
 
 ---
 
-## See also
+## Related documentation
 
 - [Preflight diagnostics](./preflight.md)
 - [Memory and performance projection](./projection.md)

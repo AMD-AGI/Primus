@@ -16,8 +16,8 @@ Primus ships a set of auxiliary tools for analysis, benchmarking, visualization,
 | **Docker Helpers** | `tools/docker/` | Container startup and proxy scripts. | — |
 | **Profile Trace** | `tools/profile_trace/` | Trace-file merging utility. | — |
 
-## See also
+## Related documentation
 
-- [Tools overview](../../tools/README.md) — the top-level index maintained alongside the code.
-- [Profiling and observability](../04-technical-guides/profiling-and-observability.md) — how these tools fit into performance analysis.
-- [Benchmarking](../02-user-guide/benchmarking.md) — running the benchmark suites the tools summarize.
+- [Tools overview](../../tools/README.md)—the top-level index maintained alongside the code.
+- [Profiling and observability](../04-technical-guides/profiling-and-observability.md)—how these tools fit into performance analysis.
+- [Benchmarking](../02-user-guide/benchmarking.md)—running the benchmark suites the tools summarize.

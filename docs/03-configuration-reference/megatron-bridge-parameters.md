@@ -1,4 +1,4 @@
-# Megatron Bridge Backend Configuration Reference
+# Megatron Bridge backend configuration reference
 
 Megatron Bridge integrates [Megatron-Core](https://github.com/NVIDIA/Megatron-LM) training with Hugging Face–centric workflows. In Primus, the **`megatron_bridge`** framework is used for post-training with module preset `sft_trainer.yaml`, and the repository also ships a pretraining preset at `primus/configs/modules/megatron_bridge/pretrain_trainer.yaml`.
 
@@ -127,7 +127,7 @@ From `sft_trainer.yaml` (defaults shown).
 | `enable_primus_turbo` | `true` | Master flag for Primus-Turbo optimized kernels and paths. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
 | `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
-| `use_turbo_grouped_mlp` | `false` | Turbo grouped GEMM/MLP flag for MoE paths (the preset ships this key; in the Megatron preset it is a deprecated alias of `use_turbo_grouped_gemm`). |
+| `use_turbo_grouped_gemm` | `false` | Turbo grouped GEMM flag for MoE paths (the preset ships this key). The former `use_turbo_grouped_mlp` alias has been removed. |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary loss handling. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention. |
 | `use_turbo_deepep` | `false` | DeepEP-style expert-parallel integration. |
@@ -137,7 +137,7 @@ From `sft_trainer.yaml` (defaults shown).
 | `use_turbo_fused_act_with_probs` | `false` | Fuse activation with probability tensors where applicable. |
 | `use_turbo_rms_norm` | `false` | Turbo RMSNorm path. |
 
-**Environment:** `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` (default `TURBO`) is read in `primus/modules/trainer/megatron/utils.py` to select MoE dispatch/combine behavior when Turbo MoE is active.
+**Environment:** `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` (default `TURBO`) is read in `primus/backends/megatron/patches/args/rocm_arg_validation.py` to select MoE dispatch/combine behavior when Turbo MoE is active.
 
 ---
 

@@ -1,4 +1,4 @@
-# TorchTitan Backend Configuration Reference
+# TorchTitan backend configuration reference
 
 This page lists Primus preset keys and common TorchTitan `JobConfig` fields used when `framework: torchtitan`. Defaults are taken from the TorchTitan module preset (`pre_trainer.yaml`), its `extends` chain (`module_base.yaml`, `quantize.yaml`), and the example model preset `llama3_8B.yaml`. It is not a complete upstream TorchTitan `JobConfig` reference.
 
@@ -38,9 +38,9 @@ modules:
 - Module presets: `primus/configs/modules/torchtitan/` (main entry: `pre_trainer.yaml`).
 - Model presets: `primus/configs/models/torchtitan/` (example: `llama3_8B.yaml`).
 
-**Mapping to TorchTitan.** Keys are translated into TorchTitan’s `JobConfig` via `TorchTitanJobConfigBuilder` (same nested structure as upstream TorchForge/TorchTitan).
+**Mapping to TorchTitan.** Keys are translated into TorchTitan’s `JobConfig` via `TorchTitanJobConfigBuilder` (same nested structure as upstream TorchTitan).
 
-**Upstream reference.** TorchForge / TorchTitan documentation: [https://meta-pytorch.org/torchforge/main/](https://meta-pytorch.org/torchforge/main/)
+**Upstream reference.** TorchTitan repository and documentation: [https://github.com/pytorch/torchtitan](https://github.com/pytorch/torchtitan) (vendored as the `third_party/torchtitan` submodule).
 
 ---
 
@@ -355,8 +355,8 @@ modules:
 
 ---
 
-### See also
+### Related documentation
 
-- TorchForge documentation: [https://meta-pytorch.org/torchforge/main/](https://meta-pytorch.org/torchforge/main/)
+- TorchTitan repository and documentation: [https://github.com/pytorch/torchtitan](https://github.com/pytorch/torchtitan)
 - Primus TorchTitan presets: `primus/configs/modules/torchtitan/`
 - Primus TorchTitan model presets: `primus/configs/models/torchtitan/`

@@ -1,4 +1,4 @@
-# Adding Model Configurations
+# Adding model configurations
 
 This guide explains how to add **model configuration YAML** for each Primus training backend. Model presets live under `primus/configs/models/<framework>/` and are referenced from **experiment** YAML under `examples/<framework>/configs/...`. Backend-specific parameter references:
 
@@ -9,13 +9,13 @@ This guide explains how to add **model configuration YAML** for each Primus trai
 
 ---
 
-## Overview: three-layer configuration
+## Overview: Three-layer configuration
 
 For each backend, Primus composes configuration in three layers:
 
-1. **Experiment config** (entry point): `examples/<backend>/configs/<GPU SKU>/<name>.yaml` — selects `framework`, `config` (module preset), `model` (model preset), and `overrides`.
-2. **Module config** (trainer defaults): `primus/configs/modules/<framework>/<module>.yaml` — training loop defaults, logging, optimizer blocks, and backend-specific knobs.
-3. **Model config** (architecture and assets): `primus/configs/models/<framework>/<model>.yaml` — architecture fields and tokenizer or Hugging Face paths, shaped differently per backend (see sections below).
+1. **Experiment config** (entry point): `examples/<backend>/configs/<GPU SKU>/<name>.yaml`—selects `framework`, `config` (module preset), `model` (model preset), and `overrides`.
+2. **Module config** (trainer defaults): `primus/configs/modules/<framework>/<module>.yaml`—training loop defaults, logging, optimizer blocks, and backend-specific knobs.
+3. **Model config** (architecture and assets): `primus/configs/models/<framework>/<model>.yaml`—architecture fields and tokenizer or Hugging Face paths, shaped differently per backend (see sections below).
 
 At runtime, `modules.<module>.model: <file>.yaml` resolves to `primus/configs/models/<framework>/<file>.yaml` and is merged into module parameters before the backend adapter converts them.
 
@@ -38,7 +38,7 @@ At runtime, `modules.<module>.model: <file>.yaml` resolves to `primus/configs/mo
        model: llama3.1_8B.yaml            # model config name
    ```
 
-2. **Module config** (trainer-level defaults): `primus/configs/modules/megatron/pre_trainer.yaml` — extends shared bases and sets Megatron training defaults.
+2. **Module config** (trainer-level defaults): `primus/configs/modules/megatron/pre_trainer.yaml`—extends shared bases and sets Megatron training defaults.
 
 3. **Model config** (architecture + tokenizer):
 
@@ -59,9 +59,9 @@ At runtime, `modules.pre_trainer.model: llama3.1_8B.yaml` resolves to `primus/co
 
 | Artifact | Purpose |
 | -------- | ------- |
-| **Model preset** (required) | New YAML under `primus/configs/models/megatron/` — architecture, tokenizer, and optional `extends`. |
-| **Experiment config** (required) | New or copied YAML under `examples/megatron/configs/MI300X/` or `MI355X/` — points `model:` at your preset and sets `overrides` (batch size, precision, parallelism, `mock_data`, and so on). |
-| **Module preset** (optional) | Only if you need trainer defaults that differ from `pre_trainer.yaml` — new file under `primus/configs/modules/megatron/` and reference it as `config:` in the experiment. |
+| **Model preset** (required) | New YAML under `primus/configs/models/megatron/`—architecture, tokenizer, and optional `extends`. |
+| **Experiment config** (required) | New or copied YAML under `examples/megatron/configs/MI300X/` or `MI355X/`—points `model:` at your preset and sets `overrides` (batch size, precision, parallelism, `mock_data`, and so on). |
+| **Module preset** (optional) | Only if you need trainer defaults that differ from `pre_trainer.yaml`—new file under `primus/configs/modules/megatron/` and reference it as `config:` in the experiment. |
 
 ### Example: TinyLlama 1.1B from Hugging Face
 
@@ -178,9 +178,9 @@ Confirm in logs that `framework` is `megatron`, the resolved model file is `tiny
            steps: 50
    ```
 
-2. **Module config**: `primus/configs/modules/torchtitan/pre_trainer.yaml` — training defaults, quantization fragments, and TorchTitan-oriented structure.
+2. **Module config**: `primus/configs/modules/torchtitan/pre_trainer.yaml`—training defaults, quantization fragments, and TorchTitan-oriented structure.
 
-3. **Model config** — `job` and `model` sections consumed by the TorchTitan launcher:
+3. **Model config**—`job` and `model` sections consumed by the TorchTitan launcher:
 
    ```yaml
    # primus/configs/models/torchtitan/llama3.1_8B.yaml
@@ -203,13 +203,13 @@ At runtime, `modules.pre_trainer.model: llama3.1_8B.yaml` resolves to `primus/co
 You need:
 
 - **Model family** (`model.name`): must match a family implemented in TorchTitan (for example `llama3`, `qwen3`, `deepseek_v3`).
-- **Flavor** (`model.flavor`): a size key defined in TorchTitan code (for example `8B`, `70B`, `1.7b`) — see `third_party/torchtitan/torchtitan/models/<family>/`.
+- **Flavor** (`model.flavor`): a size key defined in TorchTitan code (for example `8B`, `70B`, `1.7b`)—see `third_party/torchtitan/torchtitan/models/<family>/`.
 - **Hugging Face assets** (`model.hf_assets_path`): repository used to load weights and tokenizer.
 
 **Important limitations**
 
 - TorchTitan can only train models that are **implemented in the TorchTitan codebase**. The YAML under `primus/configs/models/torchtitan/` does **not** define new architectures; it selects and configures existing `*ModelArgs` entries.
-- If a family or flavor is missing in TorchTitan, you cannot enable it with YAML alone — extend TorchTitan first, then add a Primus preset.
+- If a family or flavor is missing in TorchTitan, you cannot enable it with YAML alone—extend TorchTitan first, then add a Primus preset.
 
 ### Example pattern: Qwen3 8B preset
 
@@ -232,11 +232,11 @@ model:
 
 **Field meanings:**
 
-- **`job.dump_folder`** — where TorchTitan writes logs and checkpoints for the job.
-- **`job.description`** — free-form description shown in logs and metadata.
-- **`model.name` / `model.flavor`** — the TorchTitan family and size key; both must exist in the TorchTitan code.
-- **`model.hf_assets_path`** — Hugging Face repository used to load weights and tokenizer.
-- **`model.converters`** — extra TorchTitan converters; `primus_turbo` is the default used in the Primus examples.
+- **`job.dump_folder`**—where TorchTitan writes logs and checkpoints for the job.
+- **`job.description`**—free-form description shown in logs and metadata.
+- **`model.name` / `model.flavor`**—the TorchTitan family and size key; both must exist in the TorchTitan code.
+- **`model.hf_assets_path`**—Hugging Face repository used to load weights and tokenizer.
+- **`model.converters`**—extra TorchTitan converters; `primus_turbo` is the default used in the Primus examples.
 
 The architecture itself lives in TorchTitan code, not in this YAML. For example, Qwen3 8B is declared in `third_party/torchtitan/torchtitan/models/qwen3/__init__.py`:
 
@@ -323,7 +323,7 @@ modules:
 
 **Supported architectures**
 
-For the authoritative list of model names and architectures MaxText supports, see the [MaxText](https://github.com/google/maxtext) repository and upstream documentation. Primus examples under `examples/maxtext/configs/MI300X/` and `MI355X/` illustrate which presets are exercised in this tree.
+For the authoritative list of model names and architectures MaxText supports, see the [MaxText](https://github.com/AI-Hypercomputer/maxtext) repository and upstream documentation. Primus examples under `examples/maxtext/configs/MI300X/` and `MI355X/` illustrate which presets are exercised in this tree.
 
 ---
 

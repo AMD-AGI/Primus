@@ -1,10 +1,10 @@
-# Monitoring and Logging
+# Monitoring and logging
 
 This page summarizes how Primus configures application logging, experiment tracking (Weights and Biases, TensorBoard, MLflow), training metrics, profilers, ROCm memory probes, and how to capture a reproducible configuration snapshot.
 
 ---
 
-## 1. Primus Logging System
+## 1. Primus logging system
 
 Primus uses **loguru** for structured logging. Initialization wires **file sinks** (per log level) and a **stderr** sink, binds experiment and distributed context (`team`, `user`, `exp`, `module_name`, `node_ip`, `rank`, `world_size`), and installs an **intercept handler** so legacy `logging` output from frameworks such as Megatron is forwarded to loguru with consistent formatting.
 
@@ -37,7 +37,7 @@ Primus uses **loguru** for structured logging. Initialization wires **file sinks
 
 ---
 
-## 2. Weights and Biases
+## 2. Weights and biases
 
 ### Megatron (`primus/configs/modules/megatron/trainer_base.yaml`, `primus_megatron_module.yaml`)
 
@@ -53,7 +53,7 @@ Defaults in `primus_megatron_module.yaml` disable WandB; trainer fields in `trai
 
 **Environment**
 
-- `WANDB_API_KEY` is **required** when WandB is enabled; the Megatron trainer emits a warning if it is missing (`primus/modules/trainer/megatron/trainer.py`).
+- `WANDB_API_KEY` is **required** when WandB is enabled; Primus emits a warning if it is missing (`primus/backends/megatron/patches/args/wandb_config_patches.py`).
 
 ### TorchTitan (`primus/configs/modules/torchtitan/pre_trainer.yaml`)
 
@@ -137,7 +137,7 @@ MLflow integration is **Megatron-only** in the paths described here.
 
 ---
 
-## 5. Training Metrics
+## 5. Training metrics
 
 ### Megatron (`trainer_base.yaml`)
 
@@ -193,7 +193,7 @@ MLflow integration is **Megatron-only** in the paths described here.
 
 ---
 
-## 7. ROCm Memory Monitoring
+## 7. ROCm memory monitoring
 
 Configured in `primus/configs/modules/megatron/primus_megatron_module.yaml` and applied in the Megatron trainer when logging throughput.
 
@@ -202,11 +202,11 @@ Configured in `primus/configs/modules/megatron/primus_megatron_module.yaml` and 
 | `use_rocm_mem_info` | `false` | When `true`, collect ROCm memory information via `rocm-smi` on **every** iteration that hits the throughput logging branch. |
 | `use_rocm_mem_info_iters` | `[1, 2]` | When `use_rocm_mem_info` is `false`, `rocm-smi` runs only on these iteration numbers (same branch). |
 
-Collection is evaluated where `log_throughput` drives the extended iteration log (see `primus/modules/trainer/megatron/trainer.py`): enable `log_throughput` in `trainer_base.yaml` (or overrides) when you need ROCm memory lines in the training log.
+Collection is evaluated where `log_throughput` drives the extended iteration log (see `primus/backends/megatron/patches/training_log/print_rank_last_patches.py`): enable `log_throughput` in `trainer_base.yaml` (or overrides) when you need ROCm memory lines in the training log.
 
 ---
 
-## 8. Experiment Snapshots
+## 8. Experiment snapshots
 
 **On disk (every run)**
 

@@ -1,4 +1,4 @@
-# NCCL/RCCL Collective Operations Guide
+# NCCL/RCCL collective operations guide
 
 Distributed training spends a large fraction of wall time in **collective communication**: many GPUs must exchange gradients, parameters, or activations in coordinated patterns. On AMD GPUs, **RCCL** (ROCm Collective Communications Library) provides these operations with an API aligned to **NCCL** (NVIDIA Collective Communications Library), so most concepts and environment variables carry over between vendors.
 
@@ -30,7 +30,7 @@ Not every rank talks to every other rank in every step. **Process groups** defin
 
 ---
 
-## 2. Core Collective Operations
+## 2. Core collective operations
 
 Below, \(n\) is the number of ranks in the process group, and \(S\) is the size of the logical tensor being reduced or moved (per-rank message size in ring formulations). **Complexity** expressions are **standard ring-style** approximations for **amount of data moved per rank** relative to \(S\); real implementations pick algorithms based on message size, topology, and environment.
 
@@ -140,7 +140,7 @@ Stage i ----Send/Recv----> Stage i+1
 
 ---
 
-## 3. Which Collectives Are Used in Each Parallelism Strategy
+## 3. Which collectives are used in each parallelism strategy
 
 | Parallelism | Forward Pass | Backward Pass | Optimizer Step |
 |---------------|--------------|----------------|----------------|
@@ -156,7 +156,7 @@ Exact fusion and overlap depend on the backend (Megatron vs TorchTitan) and flag
 
 ---
 
-## 4. Communication Patterns in Megatron-LM
+## 4. Communication patterns in Megatron-LM
 
 Primus trains with **Megatron-LM** patches and configurations. Typical patterns:
 
@@ -171,14 +171,14 @@ Primus trains with **Megatron-LM** patches and configurations. Typical patterns:
 
 Megatron integrates **communication/compute overlap** options such as:
 
-- `overlap_grad_reduce` — overlap gradient reduction with computation where supported.
-- `overlap_param_gather` — overlap parameter gathering (e.g. with distributed optimizer / FSDP-style paths) with computation.
+- `overlap_grad_reduce`—overlap gradient reduction with computation where supported.
+- `overlap_param_gather`—overlap parameter gathering (e.g. with distributed optimizer / FSDP-style paths) with computation.
 
 See [Megatron parameters](../03-configuration-reference/megatron-parameters.md) for defaults and compatibility with `use_distributed_optimizer`, `use_torch_fsdp2`, and checkpoint formats.
 
 ---
 
-## 5. Communication Patterns in TorchTitan
+## 5. Communication patterns in TorchTitan
 
 TorchTitan (used as a backend in Primus) relies on **PyTorch** distributed primitives and **DTensor**-style layouts:
 
@@ -194,7 +194,7 @@ Set `parallelism.enable_async_tensor_parallel: true` (where supported) to **over
 
 ---
 
-## 6. RCCL-Specific Features and Tuning
+## 6. RCCL-specific features and tuning
 
 The following appear in ROCm / AMD deployments and partner integrations; availability depends on your **driver**, **RCCL build**, and **network** stack.
 
@@ -208,16 +208,16 @@ The following appear in ROCm / AMD deployments and partner integrations; availab
 
 Many deployments tune behavior with **NCCL-prefixed** variables (honored by RCCL for compatibility), for example:
 
-- `NCCL_PROTO` — protocol selection hints.
-- `NCCL_P2P_NET_CHUNKSIZE` — chunking for P2P/network paths.
-- `NCCL_IB_*` — InfiniBand / RDMA-related settings when applicable.
-- `NCCL_SOCKET_IFNAME` — **socket** interface selection for TCP fallback or hybrid setups.
+- `NCCL_PROTO`—protocol selection hints.
+- `NCCL_P2P_NET_CHUNKSIZE`—chunking for P2P/network paths.
+- `NCCL_IB_*`—InfiniBand / RDMA-related settings when applicable.
+- `NCCL_SOCKET_IFNAME`—**socket** interface selection for TCP fallback or hybrid setups.
 
 Document your cluster’s recommended values in [Environment variables](../03-configuration-reference/environment-variables.md).
 
 ---
 
-## 7. Benchmarking Collectives with Primus
+## 7. Benchmarking collectives with Primus
 
 Primus includes an **RCCL microbenchmark** suite to measure **latency and bandwidth** for common collectives across message sizes.
 
@@ -255,7 +255,7 @@ Use results to spot **unexpected drops** (wrong NIC, congestion, fallback to TCP
 
 ---
 
-## 8. Troubleshooting Communication Issues
+## 8. Troubleshooting communication issues
 
 | Symptom | Checks |
 |---------|--------|
@@ -264,7 +264,7 @@ Use results to spot **unexpected drops** (wrong NIC, congestion, fallback to TCP
 | IB / RDMA not used | Confirm **`NCCL_IB_*`**, HCA names, and permissions; run **preflight** (below). |
 | Slow AllReduce | Compare **`benchmark rccl`** to baseline; check **topology** (NVLink vs network), **contention**, **message sizes**. |
 
-### Preflight: network validation
+### Preflight: Network validation
 
 Primus **preflight** can aggregate host/GPU/network info:
 
@@ -282,8 +282,8 @@ Use this to confirm **RCCL/NCCL-related environment** snapshots and **connectivi
 
 ---
 
-## See also
+## Related documentation
 
-- [Parallelism strategies](./parallelism-strategies.md) — how TP, PP, DP, FSDP, EP, and CP fit together.
+- [Parallelism strategies](./parallelism-strategies.md)—how TP, PP, DP, FSDP, EP, and CP fit together.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)

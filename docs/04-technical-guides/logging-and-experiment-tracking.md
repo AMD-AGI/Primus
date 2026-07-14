@@ -1,6 +1,6 @@
-# Logging & Experiment Tracking
+# Logging and experiment tracking
 
-This guide covers how Primus emits training metrics and logs, and how to wire up the supported experiment trackers — **TensorBoard**, **Weights & Biases (WandB)**, and **MLflow** (including Databricks-hosted MLflow) — across the Megatron and TorchTitan backends. Parameters are grounded in `primus/configs/modules/megatron/trainer_base.yaml`, `primus_megatron_module.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
+This guide covers how Primus emits training metrics and logs, and how to wire up the supported experiment trackers—**TensorBoard**, **Weights & Biases (WandB)**, and **MLflow** (including Databricks-hosted MLflow)—across the Megatron and TorchTitan backends. Parameters are grounded in `primus/configs/modules/megatron/trainer_base.yaml`, `primus_megatron_module.yaml`, and `primus/configs/modules/torchtitan/pre_trainer.yaml`.
 
 For an operations-oriented overview, see [Monitoring and logging](../05-operations/monitoring-logging.md). For required credentials/keys, see [Environment variables](../03-configuration-reference/environment-variables.md).
 
@@ -16,7 +16,7 @@ disable_wandb: true
 disable_mlflow: true
 ```
 
-Set the relevant `disable_*` to `false` to enable a tracker. Primus performs sanity checks at startup — e.g. it warns if WandB is enabled but `WANDB_API_KEY` is unset, and if MLflow is enabled but `DATABRICKS_HOST` is unset (`primus/modules/trainer/megatron/trainer.py`).
+Set the relevant `disable_*` to `false` to enable a tracker. Primus performs sanity checks at startup—e.g. it warns if WandB is enabled but `WANDB_API_KEY` is unset (`primus/backends/megatron/patches/args/wandb_config_patches.py`). MLflow logging is initialized in `primus/backends/megatron/training/global_vars.py`; Databricks-hosted MLflow additionally requires `DATABRICKS_HOST` (read by the `mlflow` client).
 
 ---
 
@@ -58,7 +58,7 @@ Enable with `disable_tensorboard: false` and set an output directory:
 
 ---
 
-## 4. Weights & Biases (Megatron)
+## 4. Weights and biases (Megatron)
 
 Enable with `disable_wandb: false`. Configuration:
 
@@ -109,7 +109,7 @@ export DATABRICKS_TOKEN=...
 
 ---
 
-## 6. One-Logger (Megatron)
+## 6. One-logger (Megatron)
 
 NVIDIA One-Logger telemetry is enabled by default in `trainer_base.yaml`:
 
@@ -123,7 +123,7 @@ NVIDIA One-Logger telemetry is enabled by default in `trainer_base.yaml`:
 
 ---
 
-## 7. Metrics & logging (TorchTitan)
+## 7. Metrics and logging (TorchTitan)
 
 Configured under `metrics:` in `primus/configs/modules/torchtitan/pre_trainer.yaml`:
 
@@ -148,16 +148,16 @@ MaxText logging cadence is controlled by `log_period` (`primus/configs/modules/m
 
 ## 9. Recommended setup
 
-1. **Local-only:** enable TensorBoard (`disable_tensorboard: false`, set `tensorboard_dir`) — no credentials required.
+1. **Local-only:** enable TensorBoard (`disable_tensorboard: false`, set `tensorboard_dir`)—no credentials required.
 2. **Team tracking:** enable WandB (`disable_wandb: false`) + export `WANDB_API_KEY` and `wandb_project`/`wandb_entity`.
 3. **Enterprise / scaling studies:** enable MLflow (`disable_mlflow: false`) + `MLFLOW_TRACKING_URI` (or Databricks host/token), and turn on `mlflow_upload_performance_metrics` for throughput/memory/utilization dashboards.
-4. **Keep `WANDB_API_KEY` and tokens out of YAML** — pass them as environment variables (whitelisted for container passthrough). See [Security](../05-operations/security.md).
+4. **Keep `WANDB_API_KEY` and tokens out of YAML**—pass them as environment variables (whitelisted for container passthrough). See [Security](../05-operations/security.md).
 
 ---
 
-## See also
+## Related documentation
 
-- [Monitoring and logging](../05-operations/monitoring-logging.md) — operational view of trackers.
-- [Profiling & observability](./profiling-and-observability.md) — traces, TraceLens, perf metrics.
-- [Environment variables](../03-configuration-reference/environment-variables.md) — credentials and passthrough.
+- [Monitoring and logging](../05-operations/monitoring-logging.md)—operational view of trackers.
+- [Profiling & observability](./profiling-and-observability.md)—traces, TraceLens, perf metrics.
+- [Environment variables](../03-configuration-reference/environment-variables.md)—credentials and passthrough.
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md) and [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md).

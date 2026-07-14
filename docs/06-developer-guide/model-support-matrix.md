@@ -1,4 +1,4 @@
-# Model Support Matrix
+# Model support matrix
 
 This document summarizes which model families Primus targets per backend and lists representative checked-in model presets and example experiment YAML under the repository. It distinguishes **curated examples** from **theoretical** support (a preset or upstream stack may exist without a matching `examples/` entry). Use the filesystem under `primus/configs/models/` and `examples/*/configs/` as the authoritative live inventory.
 
@@ -6,7 +6,7 @@ For how to add presets, see [Adding model configurations](./adding-models.md). B
 
 ---
 
-## Overview: supported model families (high level)
+## Overview: Supported model families (high level)
 
 The following aligns with the backend overview and the configs present in this tree.
 
@@ -14,7 +14,7 @@ The following aligns with the backend overview and the configs present in this t
 | ------- | ---------------------------------------------- |
 | **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite) and DeepSeek-V3, Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA, Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
-| **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/google/maxtext). |
+| **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
 | **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
@@ -26,7 +26,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For Megatron and TorchTitan, the **MI300X** and **MI325X** example directories carry the same model set, and **MI355X** is a superset (it adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`). A row marked "MI300X, MI325X, MI355X" therefore has a curated example under each of those three SKUs.
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (21 configs each). For **Megatron**, MI300X and MI325X are nearly identical **except** that MI325X omits `qwen3_5_35B_A3B` (BF16 and FP8)—so MI300X has 70 example configs while MI325X has 68—and **MI355X** is a superset (99 configs; it adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`). Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |

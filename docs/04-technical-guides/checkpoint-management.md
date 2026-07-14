@@ -1,4 +1,4 @@
-# Checkpoint Management
+# Checkpoint management
 
 Checkpoints capture **model state**, **optimizer state**, and **training progress** (iteration or step counters, schedulers, and related metadata). They are essential for **fault tolerance** (resume after failure), **experiment management** (reproducibility and comparison), and **hand-offs** between pretraining, fine-tuning, and conversion workflows.
 
@@ -76,7 +76,7 @@ Related keys in `trainer_base.yaml` for non-persistent checkpoints include `non_
 
 ### Primus extensions
 
-Defined in `primus/configs/modules/megatron/primus_megatron_module.yaml` and implemented in `primus/modules/trainer/megatron/trainer.py` and `primus/backends/megatron/patches/checkpoint_patches.py`.
+Defined in `primus/configs/modules/megatron/primus_megatron_module.yaml` and implemented in `primus/backends/megatron/patches/checkpoint_patches.py` and `primus/backends/megatron/patches/args/checkpoint_path_patches.py`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -152,7 +152,7 @@ See `docs/03-configuration-reference/maxtext-parameters.md` for the full MaxText
 **Auto-resume (Primus Megatron extension)**
 
 - Set `auto_continue_train: true` in the Megatron module config.
-- Primus searches for the latest checkpoint under `save` and aligns load/optimizer flags; see `primus/modules/trainer/megatron/trainer.py` for behavior details.
+- Primus searches for the latest checkpoint under `save` and aligns load/optimizer flags; see `primus/backends/megatron/patches/checkpoint_patches.py` for behavior details.
 
 **Convert checkpoint format**
 
@@ -170,8 +170,8 @@ The Megatron checkpoint benchmark lives in `benchmark/megatron/checkpoint/`.
 
 **Entry points**
 
-- `benchmark/megatron/checkpoint/ckpt_launch.py` — main launcher (requires a Primus YAML config).
-- `benchmark/megatron/checkpoint/ckpt_report.py` — reporting utility (can be run separately).
+- `benchmark/megatron/checkpoint/ckpt_launch.py`—main launcher (requires a Primus YAML config).
+- `benchmark/megatron/checkpoint/ckpt_report.py`—reporting utility (can be run separately).
 
 **Example** (from `benchmark/megatron/checkpoint/README.md`):
 

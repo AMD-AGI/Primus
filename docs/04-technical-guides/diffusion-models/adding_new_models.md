@@ -1,17 +1,17 @@
-# Adding New Diffusion Models
+# Adding new diffusion models
 
 This guide explains how to add new diffusion models to Primus, following the established patterns and architecture.
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [Overview](#overview)
 2. [Prerequisites](#prerequisites)
-3. [Step-by-Step Guide](#step-by-step-guide)
+3. [Step-by-step guide](#step-by-step-guide)
 4. [Example: Adding DiT](#example-adding-dit)
-5. [Testing Your Model](#testing-your-model)
-6. [Best Practices](#best-practices)
+5. [Testing your model](#testing-your-model)
+6. [Best practices](#best-practices)
 
 ---
 
@@ -45,9 +45,9 @@ Before adding a new model, ensure you have:
 
 ---
 
-## Step-by-Step Guide
+## Step-by-step guide
 
-### Step 1: Create Model Directory
+### Step 1: Create model directory
 
 Create a directory for your model under `core/models/diffusion/`:
 
@@ -64,7 +64,7 @@ touch model.py
 touch layers.py  # If model-specific layers needed
 ```
 
-### Step 2: Implement Configuration
+### Step 2: Implement configuration
 
 **File**: `config.py`
 
@@ -161,7 +161,7 @@ class DiTConfig(BaseDiffusionConfig):
         return cls(**defaults)
 ```
 
-### Step 3: Implement Model Class
+### Step 3: Implement model class
 
 **File**: `model.py`
 
@@ -340,11 +340,11 @@ class DiTBlock(nn.Module):
         pass
 ```
 
-### Step 4: Add Model-Specific Layers (If Needed)
+### Step 4: Add model-specific layers (if needed)
 
 If your model has unique layers not shared with other models, add them to `layers.py`.
 
-### Step 5: Export Model
+### Step 5: Export model
 
 **File**: `__init__.py`
 
@@ -363,7 +363,7 @@ __all__ = [
 ]
 ```
 
-### Step 6: Create Configuration Files
+### Step 6: Create configuration files
 
 **File**: `primus/configs/models/megatron/diffusion/dit_xl_2.yaml`
 
@@ -407,7 +407,7 @@ global_batch_size: 256
 learning_rate: 1.0e-4
 ```
 
-### Step 7: Write Tests
+### Step 7: Write tests
 
 **File**: `tests/unit_tests/backends/megatron/diffusion/test_dit_model.py`
 
@@ -492,13 +492,13 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 ```
 
-### Step 8: Update Documentation
+### Step 8: Update documentation
 
 1. Add model to `README.md` supported models list
 2. Update `architecture_overview.md` with model-specific details
 3. Create model-specific training guide (e.g., `dit_training.md`)
 
-### Step 9: Add Example Scripts
+### Step 9: Add example scripts
 
 **File**: Use `examples/run_pretrain.sh` with appropriate config
 
@@ -544,9 +544,9 @@ See the complete example in the step-by-step guide above.
 
 ---
 
-## Testing Your Model
+## Testing your model
 
-### Unit Tests
+### Unit tests
 
 Run tests to verify implementation:
 
@@ -558,7 +558,7 @@ pytest tests/unit_tests/backends/megatron/diffusion/test_dit_model.py -v
 pytest tests/unit_tests/backends/megatron/diffusion/test_dit_model.py::TestDiTModel::test_dit_forward_shapes -v
 ```
 
-### Integration Tests
+### Integration tests
 
 Test with actual data:
 
@@ -576,9 +576,9 @@ Compare with reference implementation:
 
 ---
 
-## Best Practices
+## Best practices
 
-### 1. Code Organization
+### 1. Code organization
 - ✅ Separate configuration from model code
 - ✅ Reuse shared components from `common/`
 - ✅ Keep model-specific code minimal
@@ -590,7 +590,7 @@ Compare with reference implementation:
 - ✅ Implement validation
 - ✅ Document all parameters
 
-### 3. Model Implementation
+### 3. Model implementation
 - ✅ Extend `DiffusionModule` from `primus.backends.megatron.core.models.common.diffusion_module.diffusion_module`
 - ✅ Implement required method: `forward()`
 - ✅ Use standalone loss functions from `loss_computation.py`
@@ -619,9 +619,9 @@ Compare with reference implementation:
 
 ---
 
-## Common Pitfalls
+## Common pitfalls
 
-### 1. Import Errors
+### 1. Import errors
 ❌ **Wrong**: Absolute imports
 ```python
 from primus.backends.megatron.core.models.common.diffusion_module.diffusion_module import DiffusionModule
@@ -632,7 +632,7 @@ from primus.backends.megatron.core.models.common.diffusion_module.diffusion_modu
 from ...common.diffusion_module.diffusion_module import DiffusionModule
 ```
 
-### 2. Configuration Validation
+### 2. Configuration validation
 ❌ **Wrong**: No validation
 ```python
 class DiTConfig(BaseDiffusionConfig):
@@ -647,7 +647,7 @@ def validate(self):
         raise ValueError(f"num_layers must be positive")
 ```
 
-### 3. Shape Mismatches
+### 3. Shape mismatches
 ❌ **Wrong**: Assuming fixed shapes
 ```python
 def forward(self, x):
@@ -698,7 +698,7 @@ Before submitting your new model:
 
 ---
 
-## Getting Help
+## Getting help
 
 If you encounter issues:
 1. Review existing models (Flux) for patterns

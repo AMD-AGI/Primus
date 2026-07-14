@@ -1,4 +1,4 @@
-# Extending Backends
+# Extending backends
 
 This guide explains how to add a **new training backend** to Primus using the current runtime architecture. It complements the high-level picture in [Primus overview](../01-getting-started/overview.md): adapters sit under the unified CLI and configuration system ([Configuration system](../02-user-guide/configuration-system.md)), and each backend plugs in through the same lifecycle and hook points as Megatron-LM, TorchTitan, MaxText, and the other integrated stacks.
 
@@ -23,7 +23,7 @@ primus train pretrain --config <exp.yaml>
 
 the runtime (`PrimusRuntime`) does roughly:
 
-1. Load `PrimusConfig` and the selected `module_config`
+1. Load the experiment config—`load_primus_config()` returns a lightweight `SimpleNamespace` (not a `PrimusConfig`)—and select the `module_config`
 2. Apply CLI overrides to `module_config.params`
 3. Initialize environment (HF, logging, distributed environment, data directory)
 4. Resolve backend adapter via `BackendRegistry.get_adapter(framework)`
@@ -46,7 +46,8 @@ the runtime (`PrimusRuntime`) does roughly:
 9. Execute the trainer lifecycle (with patches around it). Backend version detection is lazy during patch handling through `adapter.detect_backend_version()` rather than a separate pre-trainer step:
 
     ```python
-    # PrimusRuntime:
+    # PrimusRuntime (the "build_args" patches from step 7 already ran
+    # before the trainer was constructed):
     run_patches(phase="setup",        backend_args=backend_args)
     trainer.setup()
 
@@ -62,7 +63,7 @@ the runtime (`PrimusRuntime`) does roughly:
 So a complete backend must provide:
 
 - An **adapter** subclassing `BackendAdapter`
-- A **trainer** subclassing `BaseTrainer` and implementing `setup`, `init`, `train`, and `cleanup`
+- A **trainer** subclassing `BaseTrainer` and implementing `setup`, `init`, and `train` (and optionally overriding `cleanup`, which has a default no-op implementation)
 - A small `primus.backends.<name>.__init__` that calls `BackendRegistry.register_adapter(...)`
 
 ---
@@ -94,7 +95,7 @@ from typing import Any
 
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DummyAdapter(BackendAdapter):
@@ -156,7 +157,7 @@ Key points:
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DummyPretrainTrainer(BaseTrainer):
@@ -365,7 +366,7 @@ Once these are in place, your backend is fully integrated into the Primus runtim
 
 ---
 
-## Advanced: backend-specific setup with train hooks
+## Advanced: Backend-specific setup with train hooks
 
 For more advanced scenarios (for example installing extra Python packages or configuring backend-specific environment variables at runtime), you can use **train hooks** under `runner/helpers/hooks`.
 

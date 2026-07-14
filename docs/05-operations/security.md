@@ -1,4 +1,4 @@
-# Security Considerations
+# Security considerations
 
 This document describes security-relevant properties of Primus as a **YAML-driven training framework** for AMD GPUs (ROCm, RCCL, containers). It is intended for operators, platform engineers, and security reviewers. It does not replace organizational policies, threat models, or vendor hardening guides.
 

@@ -1,14 +1,14 @@
-# Backend Patch Notes
+# Backend patch notes
 
 Primus integrates several large-model backends (Megatron-LM, TorchTitan, JAX MaxText, …) and applies a lightweight patch layer to keep configuration flags consistent with the Primus CLI. This page captures those backend-specific switches so they live alongside the rest of the documentation (instead of the historical `primus/README_patch.md` file).
 
 ## How to read these notes
 
-- Start with the **Base Module Parameters** table below — every backend module inherits these knobs.
+- Start with the **Base Module Parameters** table below—every backend module inherits these knobs.
 - Jump to the backend-specific section for details on extra CLI/config options and links to the patched source files.
 - When editing configs or CLI presets, cross-reference the [Primus CLI Reference](../02-user-guide/cli-reference.md) so command examples and backend parameters stay in sync.
 
-## Supported Models
+## Supported models
 
 This section lists, at a high level, the model families Primus currently targets on each backend. For more details and configuration examples, refer to the backend-specific patch notes below.
 
@@ -33,7 +33,7 @@ This section lists, at a high level, the model families Primus currently targets
 - **MoE / Mixtral**: Mixtral-8x7B
 - **Other models**: Grok1 and additional MaxText-supported transformers (see MaxText docs for the full list)
 
-## Base Module Parameters
+## Base module parameters
 
 All modules inherit the options defined in [`primus/configs/modules/module_base.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/modules/module_base.yaml):
 
@@ -46,19 +46,19 @@ All modules inherit the options defined in [`primus/configs/modules/module_base.
 
 ### Backend index
 
-- [Megatron-LM Patch Notes](#megatron-lm-patch-notes)
-- [TorchTitan Patch Notes](#torchtitan-patch-notes)
-- [JAX MaxText Patch Notes](#jax-maxtext-patch-notes)
+- [Megatron-LM patch notes](#megatron-lm-patch-notes)
+- [TorchTitan patch notes](#torchtitan-patch-notes)
+- [JAX MaxText patch notes](#jax-maxtext-patch-notes)
 
 ---
 
-## Megatron-LM Patch Notes
+## Megatron-LM patch notes
 
 Primus keeps a curated patch layer on top of upstream Megatron-LM so CLI presets and configs can expose additional controls. Use this section with the [Base Module Parameters](#base-module-parameters) above for shared module parameters, and the [Primus CLI Reference](../02-user-guide/cli-reference.md) for CLI/config usage patterns.
 
 > ℹ️ The **Version** column maps to Primus internal patch tags (v0.x.y) so you know when a flag landed.
 
-### 1. Module-Level Parameters
+### 1. Module-level parameters
 
 These arguments are introduced in the Megatron module logic (e.g., training loop, logging, resume logic). They are defined via patching and can be configured to control training behavior and logging utilities.
 
@@ -83,7 +83,7 @@ These arguments are introduced in the Megatron module logic (e.g., training loop
 
 ---
 
-### 2. Model-Definition Parameters
+### 2. Model-definition parameters
 
 These arguments affect the internal architecture or layer implementations. They are patched into the model construction logic and used for tuning or debugging specific variants.
 
@@ -95,7 +95,7 @@ These arguments affect the internal architecture or layer implementations. They 
 | `moe_permute_fusion`   | `false`       | v0.1.0  | Permutation and unpermutation fusion. | `megatron.core.extensions.transformer_engine`, `megatron.core.transformer.moe.moe_utils`                                                                                                                                                                                                                                                                               | Fuse permutation and unpermutation in moe layer.         |
 | `moe_use_fused_router_with_aux_score`   | `false`       | v0.2.0  | Fused router topk and calculation of moe aux loss score. Need Primus turbo backend | `megatron.core.transformer.moe.router.TopKRouter`                                                                                                                                                                                                                                                                               | Used to reduce launch overhead of the small kernels in router.         |
 
-### 3. Primus-Turbo Related Options
+### 3. Primus-Turbo related options
 
 | New Argument                        | Default Value | Version | Description                                                               | Patched Files                                                                                                                                                                                                                                                                                                                   | Notes                                       |
 | ----------------------------------- | ------------- | ------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
@@ -109,7 +109,7 @@ These arguments affect the internal architecture or layer implementations. They 
 
 ---
 
-## TorchTitan Patch Notes
+## TorchTitan patch notes
 
 TorchTitan integration uses the same Primus configuration surface (CLI flags + YAML) but exposes a few extra knobs via patches. Pair this with the [Base Module Parameters](#base-module-parameters) above for shared module parameters.
 
@@ -119,9 +119,9 @@ TorchTitan integration uses the same Primus configuration surface (CLI flags + Y
 
 ---
 
-## JAX MaxText Patch Notes
+## JAX MaxText patch notes
 
-Primus integrates JAX MaxText as a backend for running LLaMA and related transformer models on AMD GPUs. At the moment, Primus does not apply any additional patch-layer arguments on top of MaxText — the MaxText configuration surface (YAML + CLI) is used as-is.
+Primus integrates JAX MaxText as a backend for running LLaMA and related transformer models on AMD GPUs. At the moment, Primus does not apply any additional patch-layer arguments on top of MaxText—the MaxText configuration surface (YAML + CLI) is used as-is.
 
 Use this section together with:
 
@@ -129,7 +129,7 @@ Use this section together with:
 - The [Primus CLI Reference](../02-user-guide/cli-reference.md) for Primus CLI usage patterns
 - The official MaxText documentation for the full set of MaxText-specific arguments
 
-### MaxText-Specific Notes
+### MaxText-specific notes
 
 - Primus currently wires MaxText via `primus/configs/models/maxtext` and `primus/configs/modules/maxtext`.
 - Model families currently exercised in examples include:

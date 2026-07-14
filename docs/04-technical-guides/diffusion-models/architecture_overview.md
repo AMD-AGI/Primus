@@ -1,23 +1,23 @@
-# Architecture Overview
+# Architecture overview
 
 This document provides a detailed overview of the diffusion model architecture in Primus, including design decisions, directory structure, and implementation patterns.
 
 ---
 
-## Table of Contents
+## Table of contents
 
-1. [Design Philosophy](#design-philosophy)
-2. [Directory Structure](#directory-structure)
-3. [Architectural Decisions](#architectural-decisions)
-4. [Component Hierarchy](#component-hierarchy)
-5. [Data Flow](#data-flow)
-6. [Comparison with Alternative Implementations](#comparison-with-alternative-implementations)
+1. [Design philosophy](#design-philosophy)
+2. [Directory structure](#directory-structure)
+3. [Architectural decisions](#architectural-decisions)
+4. [Component hierarchy](#component-hierarchy)
+5. [Data flow](#data-flow)
+6. [Comparison with alternative implementations](#comparison-with-alternative-implementations)
 
 ---
 
-## Design Philosophy
+## Design philosophy
 
-### Core Principles
+### Core principles
 
 1. **Megatron-Core Native**: Built on Megatron-Core patterns and conventions
 2. **Extensibility**: Easy to add new models (DiT, MovieGen, custom)
@@ -25,7 +25,7 @@ This document provides a detailed overview of the diffusion model architecture i
 4. **Reusability**: Shared components across multiple models
 5. **Performance**: Support for precalculated data and multi-GPU training
 
-### Architectural Advantages
+### Architectural advantages
 
 | Aspect | Primus Design Choice |
 |--------|---------------------|
@@ -39,9 +39,9 @@ This document provides a detailed overview of the diffusion model architecture i
 
 ---
 
-## Directory Structure
+## Directory structure
 
-### High-Level Organization
+### High-level organization
 
 ```
 primus/backends/megatron/
@@ -52,9 +52,9 @@ primus/backends/megatron/
     └── diffusion/                  # Diffusion-specific data
 ```
 
-### Detailed Breakdown
+### Detailed breakdown
 
-#### 1. Core Models (`core/models/diffusion/`)
+#### 1. Core models (`core/models/diffusion/`)
 
 Following Megatron-Core convention (`megatron/core/models/gpt/`, `megatron/core/models/multimodal/`):
 
@@ -97,7 +97,7 @@ training/diffusion/
 - Separate from model code for clarity
 - Easy to add new schedulers (DDPM, EDM, etc.)
 
-#### 3. Data Pipeline (`data/`)
+#### 3. Data pipeline (`data/`)
 
 ```
 data/
@@ -145,9 +145,9 @@ data/
 
 ---
 
-## Architectural Decisions
+## Architectural decisions
 
-### Decision 1: Models Under `core/models/`
+### Decision 1: Models under `core/models/`
 
 **Choice**: `primus/backends/megatron/core/models/diffusion/`
 **Not**: `primus/backends/megatron/models/diffusion/`
@@ -158,7 +158,7 @@ data/
 - Clear that these are Megatron-Core compatible
 - Consistent with existing Primus structure (`core/models/gpt/`)
 
-### Decision 2: Separate `common/` Directory
+### Decision 2: Separate `common/` directory
 
 **Choice**: Shared components in `common/`
 **Not**: Everything in `flux/` or flat structure
@@ -179,7 +179,7 @@ data/
 - `EmbedND`: 3D RoPE position embedding (Flux-specific)
 - `Flux` model class
 
-### Decision 3: Hierarchical Encoder Structure
+### Decision 3: Hierarchical encoder structure
 
 **Choice**: `encoders/image/vae/`, `encoders/text/t5/`, `encoders/text/clip/`
 **Not**: Flat `encoders/conditioner.py`
@@ -200,7 +200,7 @@ t5 = get_encoder('t5_xxl', config=t5_config)
 clip = get_encoder('clip_l', config=clip_config)
 ```
 
-### Decision 4: Shared Energon Infrastructure
+### Decision 4: Shared Energon infrastructure
 
 **Choice**: `data/energon/` for shared utilities
 **Not**: Nested under `data/diffusion/`
@@ -223,7 +223,7 @@ class EncodedDiffusionTaskEncoder:
     pass
 ```
 
-### Decision 5: Model Provider at Adapter Level
+### Decision 5: Model provider at adapter level
 
 **Choice**: `diffusion_model_provider.py` at `primus/backends/megatron/`
 **Not**: Under `core/`
@@ -234,7 +234,7 @@ class EncodedDiffusionTaskEncoder:
 - Sit above core models to add Primus-specific functionality
 - Example: Wrap model with logit softcapping, custom loss, etc.
 
-### Decision 6: No PyTorch Lightning
+### Decision 6: No PyTorch lightning
 
 **Choice**: Pure Megatron patterns
 **Not**: PyTorch Lightning DataModules
@@ -247,9 +247,9 @@ class EncodedDiffusionTaskEncoder:
 
 ---
 
-## Component Hierarchy
+## Component hierarchy
 
-### 1. Model Hierarchy
+### 1. Model hierarchy
 
 ```
 nn.Module (PyTorch)
@@ -266,7 +266,7 @@ nn.Module (PyTorch)
             └── EmbedND (Flux-specific, 3D RoPE)
 ```
 
-### 2. Configuration Hierarchy
+### 2. Configuration hierarchy
 
 ```
 TransformerConfig (Megatron-Core)
@@ -276,7 +276,7 @@ TransformerConfig (Megatron-Core)
         └── flux_12b() factory
 ```
 
-### 3. Scheduler Hierarchy
+### 3. Scheduler hierarchy
 
 ```
 BaseScheduler (abstract)
@@ -286,7 +286,7 @@ BaseScheduler (abstract)
 └── EulerDiscreteScheduler (future)
 ```
 
-### 4. Encoder Hierarchy
+### 4. Encoder hierarchy
 
 ```
 BaseEncoder (abstract)
@@ -305,9 +305,9 @@ BaseEncoder (abstract)
 
 ---
 
-## Data Flow
+## Data flow
 
-### Training Pipeline
+### Training pipeline
 
 ```
 Raw Data (images + captions)
@@ -348,7 +348,7 @@ Loss Computation: MSE(v_pred, v_target)
 Backward Pass & Optimizer Step
 ```
 
-### Inference Pipeline
+### Inference pipeline
 
 ```
 Text Prompt
@@ -373,31 +373,31 @@ Generated Image [1, 3, H*8, W*8]
 
 ---
 
-## Comparison with Alternative Implementations
+## Comparison with alternative implementations
 
-### Primus Architectural Advantages
+### Primus architectural advantages
 
-#### 1. TransformerBlock Architecture (Primus Innovation)
+#### 1. TransformerBlock architecture (Primus innovation)
 - **Primus**: Unified `TransformerBlock` with heterogeneous layer specs
 - **Others**: Separate `nn.ModuleList` containers for double/single blocks
 - **Benefit**: Better PP slicing, unified checkpointing, future-proof
 
-#### 2. Megatron-Core Native
+#### 2. Megatron-core native
 - **Primus**: Pure Megatron-Core, no framework dependencies
 - **Others**: Often integrated with PyTorch Lightning or other frameworks
 - **Benefit**: Tighter integration, simpler training loops
 
-#### 3. Checkpoint Format
+#### 3. Checkpoint format
 - **Primus**: Unified `transformer.layers.{0-56}` structure
 - **Others**: Separate `double_blocks.{i}` and `single_blocks.{j}`
 - **Benefit**: Simpler distributed checkpointing
 
-#### 4. Encoder Architecture
+#### 4. Encoder architecture
 - **Primus**: Registry-based, hierarchical organization
 - **Others**: Direct imports from monolithic files
 - **Benefit**: Easy extensibility for new encoder variants
 
-### File Organization Comparison
+### File organization comparison
 
 | Component | Standard Location | Primus Location | Improvement |
 |-----------|------------------|-----------------|-------------|
@@ -408,9 +408,9 @@ Generated Image [1, 3, H*8, W*8]
 
 ---
 
-## Implementation Status
+## Implementation status
 
-### Core Infrastructure ✅
+### Core infrastructure ✅
 - ✅ Directory structure
 - ✅ Base classes (DiffusionModule, BaseDiffusionConfig, BaseScheduler)
 - ✅ DiffusionModule with Megatron-Core integration
@@ -420,7 +420,7 @@ Generated Image [1, 3, H*8, W*8]
 - ✅ Testing framework (290+ tests)
 - ✅ Documentation structure
 
-### Flux Model Implementation ✅
+### Flux model implementation ✅
 - ✅ Flux model architecture
 - ✅ MMDiT layers and attention
 - ✅ Embeddings (RoPE, timestep, vector)
@@ -430,9 +430,9 @@ Generated Image [1, 3, H*8, W*8]
 
 ---
 
-## Extension Points
+## Extension points
 
-### Adding a New Model (e.g., DiT)
+### Adding a new model (e.g., DiT)
 
 1. **Create model directory**: `core/models/diffusion/dit/`
 2. **Add config**: Extend `BaseDiffusionConfig`
@@ -444,7 +444,7 @@ Generated Image [1, 3, H*8, W*8]
 5. **Add tests**: `tests/unit_tests/backends/megatron/diffusion/test_dit_model.py`
 6. **Update configs**: Add `dit_config.yaml`
 
-### Adding a New Encoder Variant
+### Adding a new encoder variant
 
 1. **Create encoder file**: e.g., `data/diffusion/encoders/text/t5/t5_large.py`
 2. **Implement encoder class**: Extend `BaseEncoder`
@@ -452,7 +452,7 @@ Generated Image [1, 3, H*8, W*8]
 4. **Add config**: Update `encoders.yaml`
 5. **Add tests**: Test in `tests/unit_tests/backends/megatron/diffusion/data/encoders/`
 
-### Adding a New Scheduler
+### Adding a new scheduler
 
 1. **Create scheduler file**: `training/diffusion/schedulers/ddpm.py`
 2. **Implement**: Extend `BaseScheduler`
@@ -462,21 +462,21 @@ Generated Image [1, 3, H*8, W*8]
 
 ---
 
-## Performance Considerations
+## Performance considerations
 
-### Memory Optimization
+### Memory optimization
 - **Precalculated data**: 5-10x faster, lower memory
 - **Frozen encoders**: Only train diffusion model
 - **Gradient checkpointing**: Trade compute for memory
 - **Mixed precision**: bf16 on MI300X (compatible with H100/A100)
 
-### Multi-GPU Scaling
+### Multi-GPU scaling
 - **Tensor Parallelism**: Split model across GPUs
 - **Pipeline Parallelism**: Split layers across GPUs
 - **Data Parallelism**: Replicate model, split data
 - **Sequence Parallelism**: For very long sequences
 
-### Best Practices
+### Best practices
 1. Use precalculated mode for training
 2. Freeze encoders (standard practice)
 3. Use bf16 on modern hardware

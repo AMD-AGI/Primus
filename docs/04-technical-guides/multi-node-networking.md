@@ -1,8 +1,8 @@
-# Multi-Node Networking Guide
+# Multi-node networking guide
 
 Multi-node training depends on **high-bandwidth, low-latency** communication between GPUs. On AMD systems, **RCCL** (ROCm Collective Communications Library) provides GPU collectives with an API aligned to **NCCL**, so most **NCCL-prefixed** environment variables apply to RCCL as well.
 
-This guide summarizes how Primus configures networking, how **InfiniBand**, **RoCE**, and **AINIC (AMD Infinity NIC)** fit in, and how to validate and troubleshoot cluster connectivity.
+This guide summarizes how Primus configures networking, how **InfiniBand**, **RoCE**, and **AINIC (AMD AI NIC)** fit in, and how to validate and troubleshoot cluster connectivity.
 
 **Primary sources in this repository**
 
@@ -55,7 +55,7 @@ AINIC-oriented configs often override `NCCL_IB_GID_INDEX` to `1` (see `runner/us
 
 ---
 
-## 3. RoCE (RDMA over Converged Ethernet)
+## 3. RoCE (RDMA over converged ethernet)
 
 RoCE reuses much of the **IB verb** stack; the same **`NCCL_IB_*`** knobs apply.
 
@@ -67,9 +67,9 @@ GID selection (`NCCL_IB_GID_INDEX`) and traffic classes (`NCCL_IB_TC`, `NCCL_IB_
 
 ---
 
-## 4. AINIC (AMD Infinity NIC)
+## 4. AINIC (AMD AI NIC)
 
-**AINIC** refers to AMD’s high-performance NIC path used in some clusters. Enabling it is a combination of **environment**, **container image**, and **device pass-through**.
+**AINIC** refers to AMD’s AI-optimized NIC path (for example, the **AMD Pensando™ Pollara 400 AI NIC**) used in some clusters. Enabling it is a combination of **environment**, **container image**, and **device pass-through**.
 
 ### Enable AINIC
 

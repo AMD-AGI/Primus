@@ -1,11 +1,11 @@
-# Tuning Agent
+# Tuning agent
 
 The **Tuning Agent** is an LLM-driven search for a near-optimal Primus
-**training configuration** — the full parallelism strategy *plus* the coupled
+**training configuration**—the full parallelism strategy *plus* the coupled
 batching, pipeline-schedule, memory, MoE-communication, and precision knobs —
 on a target GPU cluster, **without running the workload at scale**. It drives
 the [Primus Projection](./projection.md) tool as an evaluation oracle. Projection
-provides two estimates — **memory** and **performance** — each of which runs
+provides two estimates—**memory** and **performance**—each of which runs
 **benchmark-anchored by default** (measuring what fits on a sub-node run and
 scaling the rest analytically) with a fully analytical **no-GPU `simulate`**
 fallback. The agent returns the configuration that maximizes `tokens/s/GPU`
@@ -22,36 +22,36 @@ features) for the agent.
 
 ---
 
-## Table of Contents
+## Table of contents
 
-1. [Why a Tuning Agent](#why-a-tuning-agent)
-2. [How It Works](#how-it-works)
-3. [Knobs Searched](#knobs-searched)
+1. [Why a tuning agent](#why-a-tuning-agent)
+2. [How it works](#how-it-works)
+3. [Knobs searched](#knobs-searched)
 4. [Installation](#installation)
-5. [LLM Setup](#llm-setup)
+5. [LLM setup](#llm-setup)
 6. [Quickstart](#quickstart)
-7. [Execution Modes](#execution-modes)
-8. [CLI Reference](#cli-reference)
-9. [Target-Cluster YAML](#target-cluster-yaml)
-10. [The Search Loop](#the-search-loop)
-11. [Evaluator and Projection Modes](#evaluator-and-projection-modes)
-12. [Output Artefacts](#output-artefacts)
-13. [Worked Example](#worked-example)
+7. [Execution modes](#execution-modes)
+8. [CLI reference](#cli-reference)
+9. [Target-cluster YAML](#target-cluster-yaml)
+10. [The search loop](#the-search-loop)
+11. [Evaluator and projection modes](#evaluator-and-projection-modes)
+12. [Output artefacts](#output-artefacts)
+13. [Worked example](#worked-example)
 14. [Troubleshooting](#troubleshooting)
 15. [Limitations](#limitations)
-16. [Design Notes & Future Features](#design-notes--future-features)
+16. [Design notes and future features](#design-notes-and-future-features)
 
 ---
 
-## Why a Tuning Agent
+## Why a tuning agent
 
 Choosing a training configuration for a large training (or inference) workload
 is a combinatorial problem. The configuration is the joint choice of the
 parallelism dimensions:
 
-- **Data Parallel (DP)** — derived from world size and the other axes,
+- **Data Parallel (DP)**—derived from world size and the other axes,
 - **Tensor Parallel (TP)**,
-- **Expert Parallel (EP)** — for MoE models,
+- **Expert Parallel (EP)**—for MoE models,
 - **Context Parallel (CP)**,
 - **Pipeline Parallel (PP)**, with virtual pipeline (**VPP**) and the
   **pipeline schedule** (1F1B / interleaved / zero-bubble / ZBV-\* /
@@ -62,7 +62,7 @@ dimensions translate into in-flight work and memory pressure: global batch
 size (**GBS**), micro batch size (**MBS**), activation recomputation
 (`recompute_granularity`, `recompute_num_layers`), the overlap flags
 (`overlap_grad_reduce`, `overlap_param_gather`), and a set of higher-impact
-levers — FP8 precision, MoE DeepEP / sync-free communication, fused
+levers—FP8 precision, MoE DeepEP / sync-free communication, fused
 cross-entropy, and optimizer-state sharding (distributed optimizer / FSDP2).
 The full set is enumerated in [Knobs Searched](#knobs-searched).
 
@@ -77,7 +77,7 @@ legal configuration within a user-specified budget.
 
 ---
 
-## How It Works
+## How it works
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -108,7 +108,7 @@ recompute for MBS, whether CP helps a given MoE shape).
 
 ---
 
-## Knobs Searched
+## Knobs searched
 
 The agent sweeps far more than the five parallelism dimensions. Its trial
 configuration (`TrialConfig` in `legality.py`) carries the full set of knobs
@@ -117,7 +117,7 @@ agent leaves it unset) or **overridden for a trial** and translated into the
 corresponding `projection` flags by the evaluator. Each is legality-checked in
 code before it ever reaches the projection tool.
 
-### Parallelism & batching
+### Parallelism and batching
 
 | Knob | Legal values | What it controls |
 |------|--------------|------------------|
@@ -143,11 +143,11 @@ code before it ever reaches the projection tool.
 |------|--------------|------------------|
 | `recompute_granularity` | `none` / `selective` / `full` | Activation recomputation strategy |
 | `recompute_num_layers` | int (≤ layers per VPP stage) | Layers recomputed per stage under `full` |
-| `cross_entropy_loss_fusion` | `true` / `false` / inherit | Fused cross-entropy — large-vocab memory + compute win |
+| `cross_entropy_loss_fusion` | `true` / `false` / inherit | Fused cross-entropy—large-vocab memory + compute win |
 | `use_distributed_optimizer` | `true` / `false` / inherit | ZeRO-1 optimizer-state sharding across DP |
 | `use_torch_fsdp2` | `true` / `false` / inherit | FSDP2 sharding (mutually exclusive with `use_distributed_optimizer`) |
 
-### MoE communication — *MoE only, high impact*
+### MoE communication—*MoE only, high impact*
 
 | Knob | Legal values | What it controls |
 |------|--------------|------------------|
@@ -155,11 +155,11 @@ code before it ever reaches the projection tool.
 | `sync_free_stage` | `0` / `1` / `2` / `3` | Sync-free MoE pipelining; stage ≥ 2 auto-enables DeepEP |
 | `target_ep_size` | positive int / inherit | EP override used for All-to-All modeling |
 
-### Precision — *high impact*
+### Precision—*high impact*
 
 | Knob | Legal values | What it controls |
 |------|--------------|------------------|
-| `fp8` | `none` / `hybrid` (also `e4m3`, `delayed`) | FP8 on linear layers — roughly 2× compute on GEMMs |
+| `fp8` | `none` / `hybrid` (also `e4m3`, `delayed`) | FP8 on linear layers—roughly 2× compute on GEMMs |
 
 ### Coupling rules enforced in code
 
@@ -206,10 +206,10 @@ Origami) are only needed by the evaluator paths you actually use:
 
 ---
 
-## LLM Setup
+## LLM setup
 
 The agent uses [DSPy](https://dspy.ai), which routes LLM calls through
-[LiteLLM](https://docs.litellm.ai/docs/providers) internally — **no separate
+[LiteLLM](https://docs.litellm.ai/docs/providers) internally—**no separate
 proxy process is required**. Set credentials for whichever provider you use:
 
 ```bash
@@ -266,7 +266,7 @@ python -m primus.agents.tuning_agent \
 
 ---
 
-## Execution Modes
+## Execution modes
 
 The agent has two orthogonal mode switches: **what the evaluator does**
 (`--mode`) and **whether the LLM stage runs** (`--seed-only` / `--agent-only`).
@@ -293,7 +293,7 @@ The agent has two orthogonal mode switches: **what the evaluator does**
 
 ---
 
-## CLI Reference
+## CLI reference
 
 ```bash
 python -m primus.agents.tuning_agent \
@@ -322,12 +322,12 @@ python -m primus.agents.tuning_agent \
 
 ---
 
-## Target-Cluster YAML
+## Target-cluster YAML
 
 A thin wrapper around the existing Primus `hardware_config` convention, so no
 new networking format has to be invented; topology, bandwidths, and latencies
 are consumed by the analytical communication model (see
-[`projection.md` → Communication Modeling](./projection.md#communication-modeling)).
+[`projection.md` → Assumptions (performance projection)](./projection.md#assumptions-performance-projection)).
 
 A complete example ships at
 [`examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml`](../../examples/agents/tuning_agent/target_cluster_mi355x_4nodes.yaml):
@@ -396,7 +396,7 @@ agent:
 
 ---
 
-## The Search Loop
+## The search loop
 
 1. **Resolve the workload.** Load the workload YAML, follow
    `modules.pre_trainer.model` into `primus/configs/models/megatron/<model>.yaml`,
@@ -437,7 +437,7 @@ agent:
 
 ---
 
-## Evaluator and Projection Modes
+## Evaluator and projection modes
 
 The evaluator wraps the Primus Projection CLI behind a uniform interface, so
 the agent does not need to know which mode produced a number:
@@ -463,21 +463,21 @@ pre-filter to reject infeasible configs before paying for a performance call,
 then `simulate` (or `benchmark` for promising candidates when a GPU is
 available). The tool belt exposed to the LLM mirrors this:
 
-- `evaluate_memory_only(config_json)` — cheap pre-filter
-- `evaluate_simulate(config_json)` — primary scoring path
-- `evaluate_with_benchmark(config_json)` — only if `has_gpu: true`
+- `evaluate_memory_only(config_json)`—cheap pre-filter
+- `evaluate_simulate(config_json)`—primary scoring path
+- `evaluate_with_benchmark(config_json)`—only if `has_gpu: true`
 - `get_history`, `get_best`, `get_legal_axes`, `get_architecture`,
   `get_cluster`, `get_budget_status`
 - `note_to_scratchpad`, `read_scratchpad`
-- `query_llm(prompt, system?)` — one-shot "LLM-inside-LLM" consultation
+- `query_llm(prompt, system?)`—one-shot "LLM-inside-LLM" consultation
 
-For the underlying projection math — memory components, the simulate vs.
+For the underlying projection math—memory components, the simulate vs.
 benchmark trade-off, and the benchmark-based memory projection the agent uses
-for OOM-accurate feasibility — see [`projection.md`](./projection.md).
+for OOM-accurate feasibility—see [`projection.md`](./projection.md).
 
 ---
 
-## Output Artefacts
+## Output artefacts
 
 Everything lands in `--out-dir`:
 
@@ -509,7 +509,7 @@ The run also prints the best configuration and ready-to-paste exports:
 
 ---
 
-## Worked Example
+## Worked example
 
 Search for the best Mixtral 8×22B configuration on a 4-node MI355X pod, with a
 single idle 8-GPU node available for benchmarking:
@@ -566,17 +566,17 @@ These are honest caveats, not future features:
    `memory_safety_margin` compensates conservatively; the benchmark-based
    memory path (see `projection.md`) closes most of this gap.
 3. **Search-space explosion** with all axes on. The agent mitigates with an
-   impact-ordered deterministic seed plan — high-leverage levers first
+   impact-ordered deterministic seed plan—high-leverage levers first
    (recompute, MoE DeepEP / sync-free, FP8, then schedule and VPP/MBS
    neighbors), with the broad TP×PP×EP×CP grid evaluated last and capped by
-   `--seed-budget` — so the LLM starts from an informed incumbent and spends
+   `--seed-budget`—so the LLM starts from an informed incumbent and spends
    its budget on polish.
 4. **Cluster-description lossiness**: averaged bandwidth/latency cannot capture
    contention or per-rail asymmetry.
 
 ---
 
-## Design Notes & Future Features
+## Design notes and future features
 
 > This section captures the design rationale and the paper-ready problem
 > statement, plus the list of features deliberately deferred from v1.
@@ -584,8 +584,8 @@ These are honest caveats, not future features:
 ### Problem statement (paper-ready)
 
 We address the problem of **automatically selecting a near-optimal
-training configuration — the parallelism strategy plus the coupled batching,
-schedule, memory, MoE-communication, and precision knobs — for a large-scale
+training configuration—the parallelism strategy plus the coupled batching,
+schedule, memory, MoE-communication, and precision knobs—for a large-scale
 distributed training workload on a target GPU cluster, without executing the
 workload at scale**. The
 configuration space is combinatorial: for each axis only a small set of values
@@ -608,7 +608,7 @@ We formulate the search as **LLM-as-policy over a hybrid analytical /
 benchmark-driven evaluator**. The evaluator is the Primus Projection tool,
 which provides three calls of increasing fidelity and cost: (i) a **memory
 projection** that runs either analytically (no GPU) or, by default,
-benchmark-anchored — measuring the real per-rank peak on a sub-node run and
+benchmark-anchored—measuring the real per-rank peak on a sub-node run and
 extrapolating it for an OOM-accurate estimate; (ii) a fully analytical
 **performance projection** built on the Origami GEMM model and an SDPA
 simulator; and (iii) a **hybrid benchmark** that measures per-layer compute on
@@ -622,7 +622,7 @@ to a configurable per-GPU memory safety margin.
 The contribution is a configuration-search methodology that exploits an LLM's
 ability to reason over architectural priors (topk dominance of MoE activations,
 the impact of MQA on attention activation, the inter-node/intra-node boundary
-for All-to-All) to direct an analytical oracle — replacing exhaustive sweeps on
+for All-to-All) to direct an analytical oracle—replacing exhaustive sweeps on
 real hardware with a small number of informed analytical evaluations. The
 system runs either entirely on a CPU-only host (simulate backend only) or in a
 mixed mode where a small number of real-hardware benchmark runs calibrate the
@@ -640,7 +640,7 @@ analytical predictions.
 4. Agent search over **all** parallelism and coupled axes (TP, PP, EP, CP, MBS,
    GBS, VPP, pipeline schedule, recompute, overlap flags) plus the higher-impact
    levers (FP8, MoE DeepEP / sync-free, fused cross-entropy,
-   distributed-optimizer / FSDP2) — restricted by per-architecture legality.
+   distributed-optimizer / FSDP2)—restricted by per-architecture legality.
    See [Knobs Searched](#knobs-searched) for the complete list.
 5. Two evaluator paths: a **no-GPU path** (`projection memory --memory-mode
    simulate` + `projection performance --profiling-mode simulate`), always
@@ -657,60 +657,60 @@ analytical predictions.
 These are recorded so they are not lost; they are deliberately left out to keep
 the agent small.
 
-- **F1. Multi-objective Pareto** — replace the scalar `tokens/s/GPU` objective
+- **F1. Multi-objective Pareto**—replace the scalar `tokens/s/GPU` objective
   with a Pareto frontier over (throughput, MFU, memory headroom, projected
   $/token, projected energy/token).
-- **F2. Online cluster-spec retrieval** — pull the cluster description from an
+- **F2. Online cluster-spec retrieval**—pull the cluster description from an
   internal registry or known-archs catalog (MI300X / MI325X / MI355X reference
   pods) and fall back to user overrides; optionally infer topology from a small
   DCGM / ROCm-SMI dump.
-- **F3. Persistent memory / configuration cache** — cache
+- **F3. Persistent memory / configuration cache**—cache
   `(model_signature, cluster_signature) → best_known_configs` across runs;
   invalidate when ROCm / hipBLASLt / framework versions change.
-- **F4. Agent-proposed scale-downs and microbenchmarks** — let the agent
+- **F4. Agent-proposed scale-downs and microbenchmarks**—let the agent
   *propose* reduced-model proxies and targeted microbenchmarks to reduce the
   uncertainty of its current top-k (reusing the `moe_proxy_single_node.yaml`
   pattern).
-- **F5. Telemetry plug-ins (rocprofiler / TraceLens / Magpie)** — after a
+- **F5. Telemetry plug-ins (rocprofiler / TraceLens / Magpie)**—after a
   benchmark run, optionally extract per-kernel time, GEMM efficiency, A2A bytes,
   NIC utilization to calibrate the analytical models and explain
   underperformance back to the agent. Exposed as a `SKILL.md`-described plug-in.
   References: [TraceLens](https://github.com/AMD-AGI/TraceLens-internal),
   [Magpie](https://github.com/AMD-AGI/Magpie).
-- **F6. Calibration learning** — under `--profiling-mode both`, record
+- **F6. Calibration learning**—under `--profiling-mode both`, record
   per-(model, arch, dim) residuals between simulate and benchmark, fit a small
   correction model, and report a confidence band on subsequent simulate runs.
-- **F7. Robustness / sensitivity report** — for the winning config, sweep ±1
+- **F7. Robustness / sensitivity report**—for the winning config, sweep ±1
   step on each axis and report whether the optimum is a sharp peak or a broad
   basin (cheap; only `simulate` calls).
-- **F8. Cross-axis priors as DSPy modules** — a library of tunable "rules of
+- **F8. Cross-axis priors as DSPy modules**—a library of tunable "rules of
   thumb" that DSPy's optimizer can refine over time using the trial logs.
-- **F9. Sub-agent "test-proposer"** — delegate targeted experiments (e.g. a
+- **F9. Sub-agent "test-proposer"**—delegate targeted experiments (e.g. a
   2-layer scale-down forward+backward microbenchmark, or a stand-alone A2A probe
   at the proposed EP × hidden_size × topk), profiling the *test* with explicit
   synchronisation rather than the sandbox. A `run_proposed_experiment(plan,
   code)` tool can be added to `tools.py` without restructuring the loop.
-- **F10. Sub-LLM expert router** — extend the existing `query_llm` tool into a
+- **F10. Sub-LLM expert router**—extend the existing `query_llm` tool into a
   *named expert* router (`query_llm(expert='moe', …)`).
 
 ### Known design holes
 
-1. **Simulator-vs-reality gap** — see Limitations above; in no-GPU mode the
+1. **Simulator-vs-reality gap**—see Limitations above; in no-GPU mode the
    agent reports a confidence caveat.
-2. **Memory-projection blind spots** — A2A buffers, allocator fragmentation,
+2. **Memory-projection blind spots**—A2A buffers, allocator fragmentation,
    and comm scratch are not modeled analytically; the benchmark-based memory
    projection closes most of this gap by anchoring on a measured peak.
-3. **Search-space explosion** — mitigated by an impact-ordered deterministic
+3. **Search-space explosion**—mitigated by an impact-ordered deterministic
    seed plan (high-leverage levers first, broad parallelism grid last) plus
    LLM-guided search from the seed incumbent.
-4. **Cluster-description lossiness** — averaged bandwidth/latency cannot capture
+4. **Cluster-description lossiness**—averaged bandwidth/latency cannot capture
    contention or per-rail asymmetry.
 
 ---
 
-## Related Documentation
+## Related documentation
 
-- [Projection](./projection.md) — memory + performance projection internals,
+- [Projection](./projection.md)—memory + performance projection internals,
   including the benchmark-based memory projection the agent relies on.
 - [Tuning Agent package README](../../primus/agents/tuning_agent/README.md) —
   quickstart reference inside the source tree.

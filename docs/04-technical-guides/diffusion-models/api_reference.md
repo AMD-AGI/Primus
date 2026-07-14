@@ -1,4 +1,4 @@
-# Flux Model API Reference
+# Flux model API reference
 
 ## Overview
 
@@ -6,7 +6,7 @@ This document provides comprehensive API reference for the Flux diffusion model 
 
 ---
 
-## Base Classes
+## Base classes
 
 ### DiffusionModule
 
@@ -37,9 +37,9 @@ from primus.backends.megatron.core.models.common.diffusion_module import Diffusi
 
 ---
 
-## Model Architecture
+## Model architecture
 
-### Flux Class
+### Flux class
 
 **Location**: `primus/backends/megatron/core/models/diffusion/flux/model.py`
 
@@ -52,7 +52,7 @@ config = FluxConfig.flux_535m()
 model = Flux(config)
 ```
 
-#### Architecture Diagram
+#### Architecture diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -134,7 +134,7 @@ model = Flux(config)
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### Parameter Counts
+#### Parameter counts
 
 | Variant | Joint Layers | Single Layers | Total Parameters | Use Case |
 |---------|-------------|---------------|------------------|----------|
@@ -151,7 +151,7 @@ model = Flux(config)
 
 Complete configuration class for Flux models, inheriting from `BaseDiffusionConfig`.
 
-#### Key Parameters
+#### Key parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -174,7 +174,7 @@ Complete configuration class for Flux models, inheriting from `BaseDiffusionConf
 | `hidden_dropout` | float | 0.0 | Hidden layer dropout rate |
 | `attention_dropout` | float | 0.0 | Attention dropout rate |
 
-#### Configuration Examples
+#### Configuration examples
 
 **Flux 535M (Testing)**:
 ```python
@@ -254,7 +254,7 @@ embedded = embedder(clip_pooled)  # [B, 3072]
 
 ### Normalization
 
-#### AdaLN (Adaptive Layer Normalization)
+#### AdaLN (adaptive layer normalization)
 
 **Location**: `primus/backends/megatron/core/models/diffusion/common/normalization.py`
 
@@ -304,7 +304,7 @@ x_norm = norm(x)
 
 ---
 
-### Position Embeddings
+### Position embeddings
 
 #### EmbedND (3D RoPE)
 
@@ -340,7 +340,7 @@ rope_freqs = embed_nd(img_ids)  # [3, B, H*W, 3072]
 
 ---
 
-### Attention Mechanisms
+### Attention mechanisms
 
 #### JointSelfAttention
 
@@ -388,7 +388,7 @@ output = single_attn(img_tokens, attention_mask=None)
 
 ---
 
-### Layer Specifications
+### Layer specifications
 
 #### MMDiTLayer
 
@@ -442,9 +442,9 @@ output, _ = single_block(img_tokens, emb=emb)
 
 ---
 
-## Training Utilities
+## Training utilities
 
-### Noise Application
+### Noise application
 
 **Location**: `primus/backends/megatron/training/diffusion/noise_utils.py`
 
@@ -496,7 +496,7 @@ noisy = apply_ddpm_noise(clean, noise, alpha_bar)
 
 ---
 
-### Loss Computation
+### Loss computation
 
 **Location**: `primus/backends/megatron/training/diffusion/loss_computation.py`
 
@@ -572,7 +572,7 @@ loss = compute_v_prediction_loss(prediction, clean, noise, sigma)
 
 ---
 
-### Timestep Sampling
+### Timestep sampling
 
 **Location**: `primus/backends/megatron/training/diffusion/timestep_sampling.py`
 
@@ -651,7 +651,7 @@ sampler = create_timestep_sampler("mode", mode_scale=1.5)
 
 ---
 
-### Training Workflow Example
+### Training workflow example
 
 Complete training step using the utilities:
 
@@ -724,9 +724,9 @@ for batch in dataloader:
 
 ---
 
-## Usage Examples
+## Usage examples
 
-### Basic Inference
+### Basic inference
 
 ```python
 import torch
@@ -764,7 +764,7 @@ with torch.no_grad():
 print(f"Output shape: {predicted_velocity.shape}")  # [1, 64, 128, 128]
 ```
 
-### Training Step
+### Training step
 
 ```python
 import torch
@@ -816,7 +816,7 @@ optimizer.step()
 print(f"Loss: {loss.item():.4f}")
 ```
 
-### With Guidance (Classifier-Free Guidance)
+### With guidance (classifier-free guidance)
 
 ```python
 # Enable guidance in config
@@ -839,7 +839,7 @@ with torch.no_grad():
     )
 ```
 
-### Different Resolutions
+### Different resolutions
 
 ```python
 # Flux can handle different resolutions
@@ -861,7 +861,7 @@ for height, width in resolutions:
 
 ---
 
-## Methods Reference
+## Methods reference
 
 ### Flux.forward()
 
@@ -880,7 +880,7 @@ def forward(
 ) -> Tensor:                        # Returns: [B, C, H, W] Predicted velocity
 ```
 
-## Loss Computation
+## Loss computation
 
 Loss is computed using standalone functions from `loss_computation.py`:
 
@@ -909,7 +909,7 @@ def get_num_params(
 
 ## Testing
 
-### Running Tests
+### Running tests
 
 ```bash
 # Run all Flux tests
@@ -927,7 +927,7 @@ pytest tests/unit_tests/backends/megatron/diffusion/test_flux_layer_spec_backend
 pytest tests/unit_tests/backends/megatron/diffusion/ --cov=primus.backends.megatron.core.models.diffusion --cov-report=html
 ```
 
-### Test Coverage
+### Test coverage
 
 - **Component tests**: 80+ tests covering all components
 - **Model tests**: 17+ tests for full model
@@ -935,22 +935,22 @@ pytest tests/unit_tests/backends/megatron/diffusion/ --cov=primus.backends.megat
 
 ---
 
-## Performance Considerations
+## Performance considerations
 
-### Memory Usage
+### Memory usage
 
 | Configuration | Model Weights | Training (bf16) | Training (fp32) |
 |--------------|---------------|-----------------|-----------------|
 | Flux 535M | ~2 GB | ~6-8 GB | ~10-12 GB |
 | Flux 12B | ~24 GB | ~60-80 GB | ~100-120 GB |
 
-### Throughput (Estimated)
+### Throughput (estimated)
 
 On MI300X (192GB):
 - **Flux 535M**: ~5-10 samples/sec (depends on resolution)
 - **Flux 12B**: ~0.5-1 samples/sec (requires multi-GPU)
 
-### Optimization Tips
+### Optimization tips
 
 1. **Use mixed precision**: `torch.autocast(device_type='cuda', dtype=torch.bfloat16)`
 2. **Enable CUDA graphs**: Set `enable_cuda_graph=True` in config
@@ -959,9 +959,9 @@ On MI300X (192GB):
 
 ---
 
-## Common Issues
+## Common issues
 
-### Issue: Import Errors
+### Issue: Import errors
 
 ```python
 # Old import style
@@ -971,7 +971,7 @@ from some_other_library import Flux
 from primus.backends.megatron.core.models.diffusion.flux.model import Flux
 ```
 
-### Issue: Position ID Shape Mismatch
+### Issue: Position ID shape mismatch
 
 ```python
 # Position IDs must be [B, seq, 3] for 3D RoPE
@@ -979,7 +979,7 @@ img_ids = generate_image_position_ids(batch_size, height, width)
 # Not: img_ids = torch.randn(batch_size, height * width, 2)  # Wrong!
 ```
 
-### Issue: Timestep Range
+### Issue: Timestep range
 
 ```python
 # Flux expects timesteps in [0, 1]
@@ -989,9 +989,9 @@ timesteps = torch.rand(batch_size)  # Correct: [0, 1]
 
 ---
 
-## API Compatibility
+## API compatibility
 
-### Primus Architecture Features
+### Primus architecture features
 
 | Aspect | Primus Implementation |
 |--------|----------------------|
@@ -1002,7 +1002,7 @@ timesteps = torch.rand(batch_size)  # Correct: [0, 1]
 | Checkpoint format | `transformer.layers.{0-56}` unified namespace |
 | Process groups | Via `pg_collection` parameter |
 
-### Key Design Choices
+### Key design choices
 
 **TransformerBlock Architecture**:
 - Primus uses Megatron-Core's `TransformerBlock` with heterogeneous layer specifications
@@ -1035,14 +1035,14 @@ For more advanced examples, see `examples/run_pretrain.sh`.
 - **RoPE**: "RoFormer: Enhanced Transformer with Rotary Position Embedding"
 - **DiT**: "Scalable Diffusion Models with Transformers" (Peebles & Xie, 2023)
 
-### Source Code
+### Source code
 - **Primus Implementation**: `primus/backends/megatron/core/models/diffusion/flux/`
 - **Megatron-Core**: `megatron/core/transformer/`
 - **Official Flux**: Black Forest Labs (HuggingFace)
 
 ---
 
-## Version Information
+## Version information
 
 - **Primus Version**: Current
 - **Megatron-Core Version**: Latest

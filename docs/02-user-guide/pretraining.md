@@ -1,22 +1,14 @@
-# Pretraining Workflows
+# Pretraining workflows
 
-Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge), point `train pretrain` at an **experiment YAML**, and launch with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI Reference](cli-reference.md) and [Configuration System](configuration-system.md).
+Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge), point `train pretrain` at a **configuration YAML**, and launch Primus with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI reference](cli-reference.md) and [Configuration system](configuration-system.md).
 
-> **Pretraining has two docs — pick the one that matches your question:**
-> - **Use this doc** to understand the *why*: how backends work, YAML structure and inheritance, parallelism vocabulary, and the full per-backend config inventory.
-> - **Use [Backend Training Recipes](training-recipes.md)** when you already know *what* you want to run and just need the exact, GPU-arch-specific command.
-
-**Related documentation**
-
-| Topic | Location |
-| --- | --- |
-| Launcher usage | [CLI Reference](cli-reference.md) |
-| YAML merge rules | [Configuration System](configuration-system.md) |
-| Backend knobs | [Megatron parameters](../03-configuration-reference/megatron-parameters.md), [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md), [MaxText parameters](../03-configuration-reference/maxtext-parameters.md) |
+This section helps you understand concepts related to the Primus workflow: how backends work, YAML structure and inheritance, parallelism vocabulary, the full per-backend configuration inventory, and so on. If you already understand the concepts and just need the specific commands to run your training with Primus, see [Backend training recipes](training-recipes.md).
 
 ---
 
 ## Overview
+
+The following table describes the four backend types supported by Primus and their typical uses.
 
 | Backend | Framework | Typical use |
 | --- | --- | --- |
@@ -25,36 +17,24 @@ Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (M
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
 
+> Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
+
 ---
 
 ## Megatron-LM pretraining
 
 ### Quick start (container mode)
 
-From the repository root, with Docker or Podman available:
+From the root of the clone of the [Primus repository](https://github.com/AMD-AGI/Primus), with Docker or Podman available, the following command starts the training in container mode:
 
 ```bash
 ./runner/primus-cli container -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
-This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.2` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
+This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.3` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
 
-### Example walkthrough: `llama2_7B-BF16-pretrain.yaml`
-
-Path: `examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml`
-
-| Section | Role |
-| --- | --- |
-| `work_group`, `user_name`, `exp_name`, `workspace` | Run identity and output root (supports `${VAR:default}` substitution). |
-| `modules.pre_trainer.framework` | `megatron` selects Megatron-LM integration. |
-| `config: pre_trainer.yaml` | Module preset under `primus/configs/modules/megatron/`. |
-| `model: llama2_7B.yaml` | Model preset under `primus/configs/models/megatron/` (extends `llama2_base.yaml` → …). |
-| `overrides` | Experiment-specific training knobs: iterations, batching, LR, **parallelism** (`tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`), data paths, checkpoints, Primus Turbo flags, etc. |
-
-The sample sets `mock_data: true` and `train_data_path: null` so you can validate the stack without real corpora.
-
-### Example configs under `examples/megatron/configs/MI300X/`
+### Example configurations under `examples/megatron/configs/MI300X/`
 
 The following files ship in the repository (sorted by name). Parallelism columns are taken from `tensor_model_parallel_size` / `pipeline_model_parallel_size` / `expert_model_parallel_size` in each file (literals or `${PRIMUS_TP:…}` defaults).
 
@@ -131,10 +111,24 @@ The following files ship in the repository (sorted by name). Parallelism columns
 | `zebra_llama_3B-pretrain.yaml` | `1` | `1` | `1` |
 | `zebra_llama_8B-pretrain.yaml` | `1` | `1` | `1` |
 
+### Sample YAML file (`llama2_7B-BF16-pretrain.yaml`) explained
+
+Path: `examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml`
+
+| Section | Role |
+| --- | --- |
+| `work_group`, `user_name`, `exp_name`, `workspace` | Run identity and output root (supports `${VAR:default}` substitution). |
+| `modules.pre_trainer.framework` | `megatron` selects Megatron-LM integration. |
+| `config: pre_trainer.yaml` | Module preset under `primus/configs/modules/megatron/`. |
+| `model: llama2_7B.yaml` | Model preset under `primus/configs/models/megatron/` (extends `llama2_base.yaml` → …). |
+| `overrides` | Run-specific training knobs: iterations, batching, LR, **parallelism** (`tensor_model_parallel_size`, `pipeline_model_parallel_size`, `expert_model_parallel_size`), data paths, checkpoints, Primus Turbo flags, etc. |
+
+The sample sets `mock_data: true` and `train_data_path: null` so you can validate the stack without real corpora.
+
 ### Mock data versus real data
 
-- **Mock data:** set `mock_data: true` and leave `train_data_path` / `valid_data_path` empty (as in `llama2_7B-BF16-pretrain.yaml`).
-- **Real data:** set `mock_data: false` and populate Megatron-compatible data paths (and tokenizer assets) in `overrides`. Use paths visible inside your container mounts.
+- **Mock data:** Set `mock_data: true` and leave `train_data_path` / `valid_data_path` empty (as in `llama2_7B-BF16-pretrain.yaml`).
+- **Real data:** Set `mock_data: false` and populate Megatron-compatible data paths (and tokenizer assets) in `overrides`. Use paths visible inside your container mounts.
 
 ### Multi-node training with Slurm
 
@@ -156,20 +150,7 @@ The following files ship in the repository (sorted by name). Parallelism columns
   --config examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-### Example walkthrough
-
-Path: `examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
-
-| Section | Role |
-| --- | --- |
-| `framework: torchtitan` | Selects the TorchTitan integration. |
-| `config: pre_trainer.yaml` | Module preset under `primus/configs/modules/torchtitan/`. |
-| `model: llama3.1_8B.yaml` | Model preset under `primus/configs/models/torchtitan/`. |
-| `overrides.training`, `lr_scheduler`, `activation_checkpoint`, `primus_turbo` | Run-specific batching, steps, checkpointing, and Turbo options. |
-
-Some experiments omit an explicit `parallelism:` block; in that case defaults come from the **module and model presets** (`primus/configs/modules/torchtitan/pre_trainer.yaml` and the chosen model YAML). Other examples (for example DeepSeek and Qwen) set `parallelism:` inline with `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, etc.
-
-### Example configs under `examples/torchtitan/configs/MI300X/`
+### Example configurations under `examples/torchtitan/configs/MI300X/`
 
 | File |
 | --- |
@@ -195,6 +176,19 @@ Some experiments omit an explicit `parallelism:` block; in that case defaults co
 | `qwen3_4B-pretrain.yaml` |
 | `qwen3_8B-pretrain.yaml` |
 
+### Sample YAML file (`llama3.1_8B-BF16-pretrain.yaml`) explained
+
+Path: `examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
+
+| Section | Role |
+| --- | --- |
+| `framework: torchtitan` | Selects the TorchTitan integration. |
+| `config: pre_trainer.yaml` | Module preset under `primus/configs/modules/torchtitan/`. |
+| `model: llama3.1_8B.yaml` | Model preset under `primus/configs/models/torchtitan/`. |
+| `overrides.training`, `lr_scheduler`, `activation_checkpoint`, `primus_turbo` | Run-specific batching, steps, checkpointing, and Turbo options. |
+
+Some configurations omit an explicit `parallelism:` block; in that case the default values come from the **module and model presets** (`primus/configs/modules/torchtitan/pre_trainer.yaml` and the chosen model YAML). Other examples (for example DeepSeek and Qwen) set `parallelism:` inline with `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, etc.
+
 ---
 
 ## MaxText (JAX) pretraining
@@ -214,7 +208,7 @@ Install JAX/MaxText dependencies from the repository root:
 pip install -r requirements-jax.txt
 ```
 
-### Example configs under `examples/maxtext/configs/MI300X/`
+### Example configurations under `examples/maxtext/configs/MI300X/`
 
 | File | Key parallelism (`ici_*` intra-node, `dcn_*` inter-node) |
 | --- | --- |
@@ -237,23 +231,23 @@ The `llama2_7B-pretrain.yaml` example also sets `dataset_type: "synthetic"` and 
 
 ### Testing with mock data
 
-Set `mock_data: true` (Megatron/TorchTitan) or synthetic dataset settings (MaxText) to validate configs and infrastructure without I/O-heavy datasets.
+Set `mock_data: true` (Megatron/TorchTitan) or synthetic dataset settings (MaxText) to validate the configurations and infrastructure without I/O-heavy datasets.
 
 ### Real training data
 
-- Megatron: configure `train_data_path` / `valid_data_path` and tokenizer assets in `overrides` once `mock_data` is false.
-- Ensure host paths are mounted in **container** mode (`--volume` or `container.options.volume` in YAML).
-- TorchTitan / MaxText: follow backend-specific dataset fields in the experiment `overrides` and presets.
+- Megatron: Configure `train_data_path` / `valid_data_path` and tokenizer assets in `overrides` once `mock_data` is false.
+- For **all backends**, ensure host paths are mounted in **container** mode (`--volume` or `container.options.volume` in YAML).
+- TorchTitan/MaxText: Follow backend-specific dataset fields in the `overrides` and presets.
 
 ### Scaling from single-node to multi-node
 
-- Use **Slurm** mode for allocation; keep **container** entry if you want the same image on every node.
+- Use **Slurm** mode for allocation; keep the **container** entry if you want the same image on every node.
 - Set environment variables consistently (`NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, `GPUS_PER_NODE`); the Slurm entry script injects them when using `primus-cli slurm`.
-- Increase parallelism fields (Megatron TP/PP/EP; TorchTitan `parallelism`; MaxText `ici_*` / `dcn_*`) to match topology.
+- Increase values in the parallelism fields (Megatron TP/PP/EP; TorchTitan `parallelism`; MaxText `ici_*` / `dcn_*`) to match topology.
 
 ### Hugging Face token for gated models
 
-Export `HF_TOKEN` on the host before launching **container** mode; `runner/.primus.yaml` lists `HF_TOKEN` under `container.options.env` so it can be forwarded into the container. MaxText configs may reference `${HF_TOKEN:""}` directly.
+Export `HF_TOKEN` on the host before launching **container** mode; `runner/.primus.yaml` lists `HF_TOKEN` under `container.options.env` so it can be forwarded into the container. MaxText configurations may reference `${HF_TOKEN:""}` directly.
 
 ### HipBLASLt autotuning (three stages)
 
@@ -276,9 +270,9 @@ export PRIMUS_HIPBLASLT_TUNING_STAGE=1
 
 ---
 
-## Supported models (summary)
+## Supported models
 
-The tables in the Megatron, TorchTitan, and MaxText sections are curated MI300X examples from this repository. Use the filesystem under `examples/<backend>/configs/` as the authoritative inventory because new presets and hardware-specific examples may be added without a full rewrite of this guide.
+The tables above in the Megatron, TorchTitan, and MaxText sections are curated MI300X examples from the [Primus repository](https://github.com/AMD-AGI/Primus). Use `examples/<backend>/configs/` in the repository as the authoritative inventory, as new presets and hardware-specific examples may be added there before this document is updated to reflect their additions.
 
 | Backend | Example region | Parallelism vocabulary |
 | --- | --- | --- |
@@ -287,3 +281,11 @@ The tables in the Megatron, TorchTitan, and MaxText sections are curated MI300X 
 | MaxText | `examples/maxtext/configs/MI300X/` | `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_fsdp_parallelism`, `dcn_data_parallelism`. |
 
 For scripting patterns that predate `primus-cli`, the repository still documents `examples/run_local_pretrain.sh` and `examples/run_slurm_pretrain.sh` in `examples/README.md`; equivalent launches are shown above using `./runner/primus-cli`.
+
+---
+
+## Related documentation
+
+- [CLI reference](cli-reference.md): launcher usage
+- [Configuration system](configuration-system.md): YAML merge rules
+- Backend parameter references: [Megatron parameters](../03-configuration-reference/megatron-parameters.md), [TorchTitan parameters](../03-configuration-reference/torchtitan-parameters.md), [MaxText parameters](../03-configuration-reference/maxtext-parameters.md)

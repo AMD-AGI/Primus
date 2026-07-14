@@ -1,4 +1,4 @@
-# Performance Tuning Guide
+# Performance tuning guide
 
 This guide covers AMD-focused performance work in Primus: HipBLASLt autotuning for GEMMs, **Primus-Turbo** optional kernels, mixed precision, activation recomputation, communication overlap, memory settings, and MoE-specific flags. It references Primus examples and Megatron module YAMLs.
 
@@ -18,7 +18,7 @@ No tuning:
 export PRIMUS_HIPBLASLT_TUNING_STAGE=0  # default
 ```
 
-### Stage 1: dump GEMM shapes
+### Stage 1: Dump GEMM shapes
 
 Run a **short** training job so shapes are collected during real forward/backward passes. Reduce `train_iters` (or equivalent) for faster shape collection.
 
@@ -33,7 +33,7 @@ Output layout (from `examples/README.md`):
 
 - `./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_shape`
 
-### Stage 2: offline tuning
+### Stage 2: Offline tuning
 
 Runs offline tuning from dumped shapes (often 10–30 minutes depending on model and shapes):
 
@@ -48,7 +48,7 @@ Expected output:
 
 - `./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_tune/tune_hipblas_gemm_results.txt`
 
-### Stage 3: train with tuned kernels
+### Stage 3: Train with tuned kernels
 
 Point the runtime at the tuned override file:
 
@@ -95,9 +95,9 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | `use_turbo_attention` | Optimized attention kernels. |
 | `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
 | `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
-| `use_turbo_grouped_mlp` | Deprecated alias retained in configs; prefer `use_turbo_grouped_gemm`. |
+| `use_turbo_grouped_mlp` | Removed—use `use_turbo_grouped_gemm` (passing this key now raises an error). |
 | `use_turbo_rms_norm` | Optimized RMSNorm. |
-| `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see `docs/backends/megatron/patch-notes.md`). |
+| `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see [Backend Patch Notes](../06-developer-guide/backend-patch-notes.md)). |
 | `use_turbo_deepep` | DeepEP token dispatcher; set with `enable_primus_turbo: true`. |
 | `turbo_deepep_num_cu` | Compute units for DeepEP (patch notes suggest practices such as 64 or 80 for EP8, 32 for EP16–64). |
 | `turbo_sync_free_moe_stage` | Sync-free MoE stages (`0`–`3`; `0` disables, stage `2` recommended for performance per patch notes). See [MoE training deep-dive](./moe-training.md). |
@@ -120,7 +120,7 @@ primus_turbo:
 
 ### Documentation
 
-Extended Megatron arguments and Turbo-related behavior are summarized in `docs/backends/megatron/patch-notes.md`.
+Extended Megatron arguments and Turbo-related behavior are summarized in [Backend Patch Notes](../06-developer-guide/backend-patch-notes.md).
 
 ---
 
@@ -163,7 +163,7 @@ From `primus/configs/models/megatron/language_model.yaml`:
 | `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
 | `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
 | `recompute_num_layers` | integer | Layers to recompute when using selective/uniform strategies. |
-| `recompute_layer_ids` | list or null | Primus extension: per-pipeline-stage layer indices from `0` to `num_layers_per_pp_stage - 1`. Use with `recompute_granularity: full` and supported recompute methods. |
+| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices from `0` to `num_layers - 1` (the patch resolves block-local indices to global ids via `layer_offset`). Use with `recompute_granularity: full` and supported recompute methods. |
 
 ### TorchTitan
 
