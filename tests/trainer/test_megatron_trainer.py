@@ -639,11 +639,8 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     def test_mamba_370M(self):
-        # Mamba (MambaStack) is the only case here exercising core/models/mamba/*.
-        # It doesn't run through Primus Turbo attention, so it goes through
-        # megatron-core's own attention probe on the default `auto` backend,
-        # which attention_backend_patches.py makes respect this image's baked
-        # NVTE_FLASH_ATTN=0 (stock megatron would assert-crash on it).
+        # Default `auto` attention backend exercises attention_backend_patches:
+        # megatron-core's probe must respect the image's baked NVTE_FLASH_ATTN=0.
         run_script(
             self.__class__.__name__,
             "mamba_370M",
@@ -662,13 +659,9 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     def test_zebra_llama_1B_hybrid(self):
-        # Zebra-Llama is Primus's hybrid Mamba+MLA architecture (HybridStack),
-        # a separate code path from both the GPT TransformerBlock and the
-        # pure-Mamba MambaStack above. num_layers=8 is the minimum that keeps
-        # HybridStack.allocate_layers's default hybrid_attention_ratio=0.25
-        # from allocating zero attention layers (which would divide by zero).
-        # Like Mamba, it relies on the ROCm-safe `auto` backend (see
-        # test_mamba_370M and attention_backend_patches.py).
+        # Hybrid Mamba+MLA (HybridStack) path. num_layers=8 is the minimum that
+        # keeps the default hybrid_attention_ratio=0.25 from allocating zero
+        # attention layers (division by zero).
         run_script(
             self.__class__.__name__,
             "zebra_llama_1B_hybrid",
@@ -686,29 +679,41 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_mamba_130M_bridge_pretrain(self):
+        # Only E2E covering the megatron_bridge backend (mamba/zebra above use
+        # the megatron backend). extra_args pin a tiny shape so the test doesn't
+        # depend on the example yaml's sizes. Don't override seq_length: the
+        # recipe feeds it to both model and dataset but a CLI override reaches
+        # only the dataset, and Bridge asserts the two match.
+        run_script(
+            self.__class__.__name__,
+            "mamba_130M_bridge_pretrain",
+            exp_path=f"examples/megatron_bridge/configs/{GPU_PLATFORM}/mamba_130M_pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+            ],
+        )
+
     def test_qwen2_sft_lora(self):
-        # Verified on a16-19 (MI300X x8, pure data parallelism). This is the only
-        # E2E test here exercising the "posttrain" CLI suite (MegatronSFTTrainer)
-        # and primus/backends/megatron/peft/*.py -- LoRA is activated via the
-        # `lora.enabled: true` block in test_megatron_trainer_sft_lora.yaml, and
-        # coverage-confirmed the base-checkpoint pre-wrap load, the LoRA wrap, and
-        # the module_matcher's TE-Linear path all run for real.
-        #
-        # The posttrain hook (01_convert_checkpoints.py) always HF->Megatron-
-        # converts `tokenizer_model` into the base checkpoint when
-        # pretrained_checkpoint/load are unset, so despite the name this uses a
-        # tiny stand-in checkpoint, not real Qwen2.5-7B weights -- see the yaml.
+        # Only E2E covering the "posttrain" suite (MegatronSFTTrainer) and
+        # peft/*.py; LoRA is enabled in test_megatron_trainer_sft_lora.yaml.
+        # The posttrain hook HF->Megatron-converts `tokenizer_model` into the
+        # base checkpoint when pretrained_checkpoint/load are unset, so this
+        # uses a tiny stand-in checkpoint, not real Qwen2.5-7B weights.
         run_posttrain_script(
             self.__class__.__name__,
             "qwen2_sft_lora",
             exp_path="tests/trainer/test_megatron_trainer_sft_lora.yaml",
             env_override={},
-            # This tiny model's head_dim (hidden_size/num_attention_heads = 2) is
-            # below what the image's fused-attention CK kernel supports, so pin
-            # the unfused eager path. Passed as an arg (coerced to AttnBackend.
-            # unfused) so the test owns this regardless of the yaml;
-            # attention_backend_patches.py forces it over the image's baked
-            # NVTE_FUSED_ATTN=1.
+            # head_dim (2) is below the image's fused-attention CK kernel minimum,
+            # so pin the unfused path; attention_backend_patches forces it over
+            # the image's baked NVTE_FUSED_ATTN=1.
             extra_args=["--attention_backend", "unfused"],
         )
 

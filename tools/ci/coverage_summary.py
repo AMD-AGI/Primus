@@ -42,7 +42,7 @@ def classify(path: str):
     DETAILED_GROUPS (e.g. "core/projection"). detail=None means "counted
     toward group's total, no row of its own" -- true for every
     non-DETAILED_GROUPS group, and for a bare file with no sub-package of its
-    own (pretrain.py -> folds into "(top-level)"; core/base_module.py ->
+    own (pretrain.py -> folds into "primus (top-level)"; core/base_module.py ->
     folds into "core"). Folding is by path *depth*, not filename, so a future
     file added the same way folds the same way for free.
 
@@ -53,7 +53,7 @@ def classify(path: str):
     if seg[-1] == "__init__.py":
         return None
     if len(seg) <= 2:  # outside primus/ entirely, or primus/<file>.py directly (no sub-package)
-        return "(top-level)", None
+        return "primus (top-level)", None
     if seg[1] in DETAILED_GROUPS:
         if len(seg) == 3:  # primus/<group>/<file>.py directly: no sub-package of its own
             return seg[1], None
@@ -83,19 +83,20 @@ def _tier(pct: float) -> str:
 # matters more than its size suggests, and low-coverage areas with a known,
 # persistent cause, so it isn't re-litigated every read. Keyed like the table
 # (group, or "<group>/<detail>"); update alongside any fix or new finding.
+# <br> forces cell wrapping so one long note can't stretch the whole column.
 NOTES = {
-    "core": "\U0001F511 shared infra imported by every backend/training run",
+    "primus (top-level)": "loose primus/ modules, no sub-package;<br>auto-folded by path depth",
+    "core": "\U0001F511 shared infra;<br>imported by every run",
     "backends/megatron": (
-        "100+ patches gated by fp8 / MoE routing / zero-bubble-pp / fsdp2 flags; "
-        "CI E2E only runs 1-2 fixed configs"
+        "100+ patches gated by fp8 / MoE /<br>zero-bubble-pp / fsdp2 flags;<br>"
+        "CI E2E runs only 1-2 configs"
     ),
-    "backends/transformer_engine": "fp8 GEMM/attention-overlap kernels; only exercised when an E2E run enables fp8",
-    "backends/megatron_bridge": "no E2E trainer suite wired up yet (unit-tested only)",
-    "backends/diffusion": "no E2E trainer suite wired up yet (unit-tested only)",
+    "backends/transformer_engine": "fp8 GEMM / attn-overlap kernels;<br>only hit when an E2E enables fp8",
+    "backends/diffusion": "no E2E trainer suite yet<br>(unit-tested only)",
 }
 
 _LEGEND = (
-    "\U0001F7E2 >=50% / \U0001F7E1 >=25% / \U0001F534 <25% (headline column) "
+    "\U0001F7E2 >=50% / \U0001F7E1 >=25% / \U0001F534 <25% (next to module) "
     "&nbsp;\u00b7&nbsp; \U0001F511 widely-shared infra\n"
 )
 
@@ -128,15 +129,20 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
         return max((sa.get(group, {}).get(key, [0])[0] for sa in sas), default=0) if two else 0
 
     def row(label, key, cov, stmts, e2e, bold=False):
-        # Tier marker only on the headline (rightmost) percentage, not every cell.
+        # Tier dot rides next to the module name (leftmost), so it reads as a
+        # per-module health mark and leaves the right-aligned % columns clean.
+        # It goes *after* any &emsp; indent so detail-row dots stay indented.
         headline = _pct(e2e if two else cov, stmts)
-        tier = _tier(headline) + " " if stmts else ""
+        dot = _tier(headline) + " " if stmts else ""
         if two:
-            vals = [format(stmts, ","), "%.1f%%" % _pct(cov, stmts), tier + "%.1f%%" % _pct(e2e, stmts)]
+            vals = [format(stmts, ","), "%.1f%%" % _pct(cov, stmts), "%.1f%%" % _pct(e2e, stmts)]
         else:
-            vals = [format(cov, ","), format(stmts, ","), tier + "%.1f%%" % _pct(cov, stmts)]
+            vals = [format(cov, ","), format(stmts, ","), "%.1f%%" % _pct(cov, stmts)]
         w = "**" if bold else ""
-        cells = ["%s%s%s" % (w, x, w) for x in [label] + vals]
+        indent = "&emsp;" if label.startswith("&emsp;") else ""
+        rest = label[len(indent) :]
+        label_cell = "%s%s%s%s%s" % (indent, dot, w, rest, w)
+        cells = [label_cell] + ["%s%s%s" % (w, x, w) for x in vals]
         cells.append(NOTES.get(key, ""))
         return "| " + " | ".join(cells) + " |"
 
