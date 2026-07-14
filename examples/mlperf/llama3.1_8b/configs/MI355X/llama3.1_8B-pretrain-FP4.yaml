@@ -11,7 +11,6 @@ modules:
     # model to run
     model: llama3.1_8B.yaml
     overrides:
-      # tokenizer_model: /model
       # --- Logging Config ---
       stage: mlperf_pretrain
       disable_wandb: true
@@ -41,7 +40,7 @@ modules:
       eod_mask_loss: false
       init_method_std: 0.02
       norm_epsilon: 1.0e-5
-      adam_eps: 1.0e-5 
+      adam_eps: 1.0e-5
       check_for_nan_in_loss_and_grad: false # default true
       check_for_spiky_loss: false # default false, but setting it here explicitly
       check_for_large_grads: false # default false, but setting it here explicitly
@@ -62,8 +61,6 @@ modules:
       train_data_path: "/apps/gpuperf/vidgoyal/data/c4-train.en_6_text_document"
       valid_data_path: "/apps/gpuperf/vidgoyal/data/c4-validation-91205-samples.en_text_document"
       test_data_path: null
-      seq_length: 8192
-      data_cache_path: /npy_indices
       mmap_bin_files: true
       data_cache_path: null
 
@@ -114,5 +111,3 @@ modules:
       use_turbo_grouped_mlp: false
       moe_use_fused_router_with_aux_score: false
       enable_turbo_attention_float8 : false
-
-

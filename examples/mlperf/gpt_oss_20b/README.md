@@ -52,7 +52,7 @@ After download, you should see files with the following naming conventions:
 
 The data directory is approximately **80 GB** and model directory is approximately **30 GB**.
 
-### How to run 
+### How to run
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>

@@ -32,8 +32,7 @@ def _is_mlperf_enabled(ctx):
     backend="megatron",
     phase="before_train",
     description=(
-        "Fix validation sample count to eval_iters * global_batch_size "
-        "instead of scaling with train_iters"
+        "Fix validation sample count to eval_iters * global_batch_size " "instead of scaling with train_iters"
     ),
     condition=_is_mlperf_enabled,
 )
@@ -103,7 +102,6 @@ def patch_validation_data_loader(ctx: PatchContext):
     args.consumed_valid_samples).
     """
     import torch.utils.data
-
     from megatron.core import mpu
     from megatron.core.datasets.utils import Split
 

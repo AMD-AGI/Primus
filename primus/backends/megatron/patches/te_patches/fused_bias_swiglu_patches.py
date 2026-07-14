@@ -31,12 +31,9 @@ def patch_te_fused_bias_swiglu(ctx: PatchContext):
 
     Activated when USE_TE_SWIGLU=1 is set in the environment.
     """
-    from transformer_engine.pytorch.cpp_extensions import (
-        dswiglu as te_dswiglu,
-        swiglu as te_swiglu,
-    )
-
     from megatron.core.fusions.fused_bias_swiglu import SwiGLUFunction
+    from transformer_engine.pytorch.cpp_extensions import dswiglu as te_dswiglu
+    from transformer_engine.pytorch.cpp_extensions import swiglu as te_swiglu
 
     @staticmethod
     def new_forward(ctx, input, fp8_input_store, cpu_offload_input):

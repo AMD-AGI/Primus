@@ -142,7 +142,8 @@ export MLLOG_PIPELINE_PARALLELISM=1
 export MLLOG_CONTEXT_PARALLELISM=1
 export MLLOG_EXPERT_PARALLELISM=1
 export MLLOG_MICRO_BATCH_SIZE=4
-export MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
+MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
+export MLLOG_CONFIG_FILENAME
 export MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR='fp8'
 
 # -----------------------------------------------------------------------------

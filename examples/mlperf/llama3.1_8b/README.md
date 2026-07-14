@@ -41,7 +41,7 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
     -d data https://training.mlcommons-storage.org/metadata/llama-3-1-8b-preprocessed-c4-dataset.uri
 ```
 
-### How to run 
+### How to run
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>

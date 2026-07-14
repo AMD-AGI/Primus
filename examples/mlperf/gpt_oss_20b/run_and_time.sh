@@ -5,7 +5,7 @@ set -e
 # Create results directory
 mkdir -p /results
 
-cd ${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b
+cd "${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b"
 
 # Under multi-node SLURM (run_with_docker_slurm.sh), inherit rendezvous + node
 # sizing from SLURM env so we can scale to N nodes without editing the config
@@ -54,7 +54,7 @@ echo "RESULT,$result_name,,$result,AMD,$start_fmt"
 
 if [[ $ret_code != 0 ]]; then
     echo "Training failed with exit code: $ret_code"
-    exit $ret_code
+    exit "$ret_code"
 fi
 
 exit 0
