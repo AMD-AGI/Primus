@@ -1902,6 +1902,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         self._comm_manager = self.deepep_dispatcher
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
+        # "even" -> deterministic round-robin token assignment (constant per-expert
+        # counts / constant M_total); "uniform" -> Megatron-LM original random-logits
+        # balancing (handled upstream in the router, token_indices stays None here).
+        self.moe_router_force_load_balancing_type = getattr(
+            args, "moe_router_force_load_balancing_type", "uniform"
+        )
 
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
@@ -1925,9 +1931,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         hidden_states = hidden_states.view(-1, self.config.hidden_size)
         num_tokens = hidden_states.shape[0]
 
-        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
+        # when force_load_balancing with type "even", we use round-robin token_indices
+        # to make sure each expert gets the same (deterministic) number of tokens.
+        # type "uniform" keeps token_indices=None and relies on the router's upstream
+        # random-logits balancing.
         token_indices = None
-        if self.moe_router_force_load_balancing:
+        if self.moe_router_force_load_balancing and self.moe_router_force_load_balancing_type == "even":
             token_indices = (
                 torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
                     num_tokens, self.config.moe_router_topk
