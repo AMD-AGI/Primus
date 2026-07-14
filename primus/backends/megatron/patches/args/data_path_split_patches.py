@@ -5,7 +5,7 @@
 ###############################################################################
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_kv_rank_0
+from primus.core.utils.module_utils import log_kv_rank_0
 
 
 def _normalize_data_path(path_value):

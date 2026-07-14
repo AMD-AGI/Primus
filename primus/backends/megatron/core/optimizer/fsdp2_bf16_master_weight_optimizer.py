@@ -34,7 +34,7 @@ from megatron.core.dist_checkpointing.optimizer import (
 from megatron.core.optimizer.optimizer import MegatronOptimizer, _zero_grad_group_helper
 from megatron.core.optimizer.optimizer_config import OptimizerConfig
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 if TYPE_CHECKING:
     from megatron.core.process_groups_config import ProcessGroupCollection

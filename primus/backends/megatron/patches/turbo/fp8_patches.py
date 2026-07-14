@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -13,7 +13,7 @@ to use Primus-specific implementations for better ROCm compatibility.
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _is_fp8_can_patch(ctx: PatchContext) -> bool:
@@ -28,7 +28,9 @@ def _is_fp8_can_patch(ctx: PatchContext) -> bool:
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
-    condition=_is_fp8_can_patch,
+    condition=lambda ctx: (
+        _is_fp8_can_patch(ctx) and not getattr(get_args(ctx), "disable_fp8_context_patches", False)
+    ),
 )
 def patch_fp8_context(ctx: PatchContext):
     """

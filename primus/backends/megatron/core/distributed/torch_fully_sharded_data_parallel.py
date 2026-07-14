@@ -22,7 +22,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from torch.distributed import ProcessGroup
 
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 try:
     from torch.distributed import DeviceMesh
@@ -102,7 +102,7 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
         # Build DeviceMesh from Megatron's process groups
         from megatron.training import get_args
 
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         args = get_args()
         replicate_degree = getattr(args, "data_parallel_replicate_degree", 1)
@@ -385,7 +385,7 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
         the actual model (e.g., Flux) and calls its compile_model() if present.
         Skipped if enable_torch_compile is False or no compile_model method is found.
         """
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         try:
             from megatron.training import get_args

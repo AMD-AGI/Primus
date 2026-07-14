@@ -5,11 +5,61 @@
 ###############################################################################
 
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class MegatronPretrainTrainer(MegatronBaseTrainer):
     """Trainer for Megatron-LM pre-training."""
+
+    def setup_model_only(self):
+        """Initialize Megatron and build the model WITHOUT running the training loop.
+
+        A general, training-neutral capability: mirrors the front of
+        ``megatron.training.pretrain`` (``initialize_megatron`` followed by
+        ``setup_model_and_optimizer``) to construct a model identical to the real
+        training path, but stops before datasets / the train loop. Useful for any
+        "build the model only" scenario (offline profiling, layer benchmarking,
+        model inspection); performance/memory projection is the current consumer.
+
+        Prerequisites (handled by the runtime before calling this): ``setup()``
+        has patched ``parse_args`` to return ``self.backend_args`` and set the
+        Primus global vars, and the build_args/setup/before_train patch phases
+        have been applied. Returns the built model (a list of model chunks, as
+        produced by megatron's ``get_model``) and also stores it on ``self.model``.
+        """
+        log_rank_0("Setting up Megatron model only (no training loop)...")
+
+        from megatron.core.enums import ModelType
+        from megatron.training.initialize import initialize_megatron
+        from megatron.training.training import setup_model_and_optimizer
+
+        from primus.core.utils.import_utils import get_model_provider
+
+        # Determine model type (gpt or mamba) from backend_args
+        model_type = getattr(self.backend_args, "model_type", "gpt")
+        log_rank_0(f"-detected model_type: {model_type}")
+
+        # parse_args was patched in setup() to return backend_args, so
+        # initialize_megatron consumes the Primus-configured arguments (same as
+        # the front of megatron's pretrain()).
+        initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+
+        # Get model provider with correct model_type (reuse the core runtime helper)
+        if model_type != "gpt":
+            model_provider = get_model_provider(model_type=model_type)
+        else:
+            model_provider = get_model_provider()
+        log_rank_0(f"-model_provider: {model_provider}")
+
+        model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+            model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
+        )
+        self.model = model
+        self.optimizer = optimizer
+        self.opt_param_scheduler = opt_param_scheduler
+
+        log_rank_0("Megatron model-only setup completed.")
+        return model
 
     def get_forward_step(self):
         """
@@ -151,7 +201,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             try:
                 m_args = get_megatron_args()
                 if getattr(m_args, "dump_pp_data", False):
-                    from primus.modules.trainer.megatron.utils import (
+                    from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
                         schedule_wrapper,
                         set_dump_pp_data_patch,
                     )
@@ -194,7 +244,9 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
                     get_num_microbatches,
                 )
 
-                from primus.modules.trainer.megatron.utils import dump_pp_data
+                from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+                    dump_pp_data,
+                )
 
                 pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
                 dump_pp_data(megatron_args, get_num_microbatches(), pp_data_dir)

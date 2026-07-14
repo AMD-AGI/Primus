@@ -26,12 +26,12 @@ from primus.core.runtime.logging import init_worker_logger
 from primus.core.runtime.runtime_state import RuntimeState
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     merge_namespace,
     nested_namespace_to_dict,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 
 # ---------------------------------------------------------------------------
 # Context & Hooks
@@ -111,6 +111,64 @@ class PrimusRuntime:
             self._safe_cleanup(error=e)
             raise RuntimeError(f"Training execution failed: {e}") from e
 
+    def setup_model_only(
+        self,
+        module_name: str = "pre_trainer",
+        overrides: Optional[List[str]] = None,
+        primus_config: Any = None,
+    ) -> Any:
+        """Run the runtime pipeline but stop after building the model (no training).
+
+        A general, training-neutral entry that mirrors :meth:`run_train_module`
+        except it replaces the training step with a model-only build. Reuses the
+        full runtime initialization pipeline (config → environment → distributed →
+        logging → backend adapter → args conversion → build_args patches → trainer
+        setup/init → before_train patches) and then asks the trainer to build only
+        the model via ``setup_model_only``. Useful for any "build the model only"
+        scenario (offline profiling, layer benchmarking, model inspection);
+        performance/memory projection is the current consumer.
+
+        Args:
+            module_name: training module to build (default ``pre_trainer``).
+            overrides: CLI-style overrides to merge into the module params.
+            primus_config: optional pre-loaded (runtime-shaped) PrimusConfig. When
+                provided, config is not re-loaded from ``self.args.config`` — this
+                lets callers (e.g. projection) apply their own config mutations
+                before building.
+
+        Returns:
+            The trainer instance whose ``.model`` has been built.
+        """
+        overrides = overrides or []
+
+        # 1) Configuration (optionally injected, so callers can pre-mutate it)
+        self._initialize_configuration(module_name, overrides, primus_config=primus_config)
+        # 2) Runtime environment (paths, distributed, logging)
+        self._initialize_runtime_environment()
+        # 3) Backend adapter + trainer (convert config, build_args patches, instantiate)
+        self._initialize_adapter()
+        self._initialize_trainer()
+
+        assert self.ctx is not None and self.ctx.trainer is not None
+        trainer = self.ctx.trainer
+
+        # 4) Setup + init + before_train patches (mirror _run_trainer_lifecycle up
+        #    to, but excluding, the training step).
+        self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
+        trainer.setup()
+        trainer.init()
+        self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
+
+        # 5) Build only the model (no datasets / no train loop).
+        build_fn = getattr(trainer, "setup_model_only", None)
+        if build_fn is None:
+            raise NotImplementedError(
+                f"Trainer '{type(trainer).__name__}' for framework "
+                f"'{self.ctx.framework}' does not implement setup_model_only()."
+            )
+        build_fn()
+        return trainer
+
     # --------------------------- Internal Steps --------------------------- #
 
     def _initialize_runtime_environment(self) -> None:
@@ -173,11 +231,22 @@ class PrimusRuntime:
         # setup_training_env expects a string path.
         setup_training_env(str(data_path), setup_hf=True)
 
-    def _initialize_configuration(self, module_name: str, overrides: Optional[List[str]] = None) -> None:
-        cfg_path = Path(self.args.config)
-        assert cfg_path.exists(), f"[Primus:TrainRuntime] Config file not found: {cfg_path}"
-
-        primus_cfg = load_primus_config(cfg_path, self.args)
+    def _initialize_configuration(
+        self,
+        module_name: str,
+        overrides: Optional[List[str]] = None,
+        primus_config: Any = None,
+    ) -> None:
+        # Resolve a config path for diagnostics/context (falls back to args.config
+        # when a pre-loaded config is injected and args may lack a usable path).
+        cfg_path = Path(getattr(self.args, "config", None) or getattr(primus_config, "config_file", "") or "")
+        if primus_config is not None:
+            # Caller supplied a pre-loaded (and possibly mutated) runtime config;
+            # skip re-loading from disk so those mutations are preserved.
+            primus_cfg = primus_config
+        else:
+            assert cfg_path.exists(), f"[Primus:TrainRuntime] Config file not found: {cfg_path}"
+            primus_cfg = load_primus_config(cfg_path, self.args)
 
         # Reuse the legacy PrimusConfig that load_primus_config already parsed
         # (exposed as `_legacy`) instead of re-parsing the YAML a second time.

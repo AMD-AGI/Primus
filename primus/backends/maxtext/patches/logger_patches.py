@@ -15,7 +15,7 @@ import logging
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils import checker
 from primus.core.utils.logger import _logger as primus_logger
-from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import error_rank_0, log_rank_0, warning_rank_0
 
 
 @register_patch(
