@@ -4,7 +4,7 @@
       "name": "torchtitan",
       "path": "third_party/torchtitan",
       "url": "https://github.com/pytorch/torchtitan.git",
-      "commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021"
+      "commit": "73a0e6979dd10b6b1904098eb3c8f62c18ab87ce"
     },
     {
       "name": "Megatron-LM",

@@ -77,7 +77,9 @@ def test_gpt_oss_example_defaults_turbo_on(machine, size, precision):
     pre = cfg["modules"]["pre_trainer"]
     assert pre["framework"] == "torchtitan"
 
-    expected_model = f"gpt_oss_{size.lower()}.yaml" if precision == "BF16" else f"gpt_oss_{size.lower()}-fp8.yaml"
+    expected_model = (
+        f"gpt_oss_{size.lower()}.yaml" if precision == "BF16" else f"gpt_oss_{size.lower()}-fp8.yaml"
+    )
     assert pre["model"] == expected_model
 
     turbo = pre["overrides"]["primus_turbo"]

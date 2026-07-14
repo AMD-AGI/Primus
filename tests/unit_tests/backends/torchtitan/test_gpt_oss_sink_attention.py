@@ -115,7 +115,9 @@ class TestSinkAttentionMirror:
         import torch
         import torch.nn as nn
 
-        from primus.backends.torchtitan.models.gpt_oss.model.model import TransformerBlock
+        from primus.backends.torchtitan.models.gpt_oss.model.model import (
+            TransformerBlock,
+        )
 
         captured = {}
 
