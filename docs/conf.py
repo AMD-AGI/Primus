@@ -7,12 +7,14 @@
 import re
 from pathlib import Path
 
+
 def _get_version():
     init = Path(__file__).parent.parent / "primus" / "__init__.py"
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init.read_text(), re.MULTILINE)
     if not match:
         raise ValueError("Could not find __version__ in primus/__init__.py")
     return match.group(1)
+
 
 # Project info
 version = _get_version()
