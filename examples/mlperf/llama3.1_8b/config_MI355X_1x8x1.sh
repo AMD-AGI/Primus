@@ -8,7 +8,7 @@ export NODE_RANK=0
 export MASTER_ADDR=localhost
 export MASTER_PORT=29502
 
-export PRIMUS_PATH=/apps/gpuperf/vidgoyal/Primus
+export PRIMUS_PATH=/workspace/Primus
 export PRIMUS_MLPERF=1
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
 export EXP=${PRIMUS_PATH}/examples/mlperf/llama3.1_8b/configs/MI355X/llama3.1_8B-pretrain-FP4.yaml

@@ -98,9 +98,9 @@ modules:
       # data
       mock_data: false
       num_workers: ${PRIMUS_NUM_WORKERS:0}
-      train_data_path: "10 /apps/gpuperf/vidgoyal/data/c4-train.en_6_text_document"
-      valid_data_path: "/apps/gpuperf/vidgoyal/data/c4-validation-91205-samples.en_text_document"
-      test_data_path: "/apps/gpuperf/vidgoyal/data/c4-validation-91205-samples.en_text_document"
+      train_data_path: "10 /data/c4-train.en_6_text_document"
+      valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
+      test_data_path: "/data/c4-validation-91205-samples.en_text_document"
       # Avoid copying a dense (B, 1, S, S) CPU attention mask every step.
       # TE receives causal/sliding-window metadata from attn_mask_type + window_size.
       # Use numeric 0/1 because Primus env expansion only type-casts numbers.
