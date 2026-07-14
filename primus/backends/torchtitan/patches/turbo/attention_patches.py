@@ -16,7 +16,7 @@ expressed as a backend patch so it can be managed via the Primus patch system.
 """
 
 from primus.core.patches import PatchContext, get_param, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 @register_patch(
@@ -35,7 +35,7 @@ def patch_turbo_attention(ctx: PatchContext) -> None:
     """
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_attention] "
-        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3...",
+        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3/Qwen3...",
     )
 
     # ******* LLaMA3 Attention Model *******
@@ -65,8 +65,17 @@ def patch_turbo_attention(ctx: PatchContext) -> None:
 
     torchtitan.models.deepseek_v3.model.model.Attention = DeepSeekV3Attention
 
+    # ******* Qwen3 Attention Model *******
+    import torchtitan.models.qwen3.model.model
+
+    from primus.backends.torchtitan.models.qwen3.model.model import (
+        Attention as Qwen3Attention,
+    )
+
+    torchtitan.models.qwen3.model.model.Attention = Qwen3Attention
+
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_attention] "
         "Primus-Turbo Attention successfully installed "
-        "for LLaMA3, LLaMA4 and DeepSeek-V3.",
+        "for LLaMA3, LLaMA4, DeepSeek-V3 and Qwen3.",
     )

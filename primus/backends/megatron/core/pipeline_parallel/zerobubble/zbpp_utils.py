@@ -15,7 +15,9 @@ from contextlib import contextmanager
 from megatron.core import parallel_state
 from megatron.training import get_args
 
-from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    fwd_bwd_wrapper,
+)
 
 
 def add_zero_bubble_args(parser):

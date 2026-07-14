@@ -15,7 +15,7 @@ PP warmup runs once immediately before the first call to ``train()``.
 import torch
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def run_pp_warmup(forward_step_func, model, optimizer, config):
@@ -49,6 +49,8 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
       reductions are suppressed via `no_sync()`, so no warmup gradient or
       stale all-reduce can leak into the first real step.
     * MoE aux-loss trackers are cleared at the end of warmup.
+    * The per-module `is_first_microbatch` flag (which the first forward flips
+      to False to prime FP8 / transpose caches) is snapshotted and restored.
     * `rerun_state_machine` validation is disabled during warmup so the dummy
       loss does not pollute NaN/Inf/spiky-loss checks.
     * The optimizer step is never called.
@@ -99,6 +101,15 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
     if hasattr(args, "check_for_spiky_loss"):
         args.check_for_spiky_loss = False
     args.curr_iteration = -1  # signal "not a real iteration" to anything that inspects this
+
+    # Snapshot the turbo/TE per-module ``is_first_microbatch`` flag. It is a
+    # persistent attribute that the first forward flips True->False.
+    saved_is_first_microbatch = [
+        (m, m.is_first_microbatch)
+        for model_chunk in model
+        for m in model_chunk.modules()
+        if hasattr(m, "is_first_microbatch")
+    ]
 
     # --- 2. Zero any existing grad state -----------------------------------------
     for model_chunk in model:
@@ -247,6 +258,10 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
             delattr(args, "curr_iteration")
     else:
         args.curr_iteration = saved_curr_iteration
+
+    # (d5) Restore the per-module is_first_microbatch flags consumed by warmup.
+    for m, v in saved_is_first_microbatch:
+        m.is_first_microbatch = v
 
     # (e) Optional: release cached memory to avoid warmup inflating the long-term
     #     watermark (the real iter-1 will re-allocate what it needs).

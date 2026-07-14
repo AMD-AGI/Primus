@@ -53,7 +53,7 @@ def _install_fake_megatron(monkeypatch: pytest.MonkeyPatch):
     """Create fake ``megatron.*`` modules sufficient for validate_args patches.
 
     Includes ``megatron.core.parallel_state`` and ``megatron.training.global_vars``
-    so that transitive imports from ``primus.modules.trainer.megatron.utils`` succeed.
+    so that transitive imports from ``primus.backends.megatron.patches.args.rocm_arg_validation`` succeed.
     """
     import sys
 
@@ -120,7 +120,7 @@ def _make_args(**overrides):
         fp4=False,
         fp8_recipe=None,
         fp4_recipe=None,
-        use_turbo_parallel_linear=False,
+        use_turbo_gemm=False,
         dump_pp_data=False,
         pipeline_model_parallel_size=1,
         turbo_sync_free_moe_stage=0,
@@ -149,7 +149,7 @@ class TestBaseValidateArgsPatch:
         args_mod, init_mod = _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: setattr(args, "_rocm_validated", True),
         )
 
@@ -167,7 +167,7 @@ class TestBaseValidateArgsPatch:
         _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: setattr(args, "_rocm_validated", True),
         )
 
@@ -190,7 +190,7 @@ class TestBaseValidateArgsPatch:
         args_mod, _ = _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: None,
         )
 
@@ -212,7 +212,7 @@ class TestPipelineSplitPatch:
         _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: None,
         )
 
@@ -252,7 +252,7 @@ class TestFp4Patch:
         _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: None,
         )
 
@@ -288,7 +288,7 @@ class TestFp4Patch:
         _install_fake_megatron(monkeypatch)
         _silence_logging(monkeypatch)
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: None,
         )
 
@@ -314,7 +314,7 @@ class TestEndToEnd:
 
         rocm_calls = []
         monkeypatch.setattr(
-            "primus.modules.trainer.megatron.utils.validate_args_on_rocm",
+            "primus.backends.megatron.patches.args.rocm_arg_validation.validate_args_on_rocm",
             lambda args: rocm_calls.append(True),
         )
 

@@ -1,6 +1,7 @@
 __pycache__
 *.so
 build
+dist/
 .coverage_*
 *.egg-info
 *~
@@ -10,5 +11,5 @@ local/
 .gitmodules
 output
 experiment
-data
+/data/*
 pp_simulation_result

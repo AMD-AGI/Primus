@@ -10,13 +10,13 @@ Primus Turbo MoE Dispatcher Patches
 Patches for replacing MoE token dispatcher with PrimusTurbo DeepEP implementation.
 """
 
-import importlib.util
 
+from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
-def _is_turbo_deepep_enabled(ctx: PatchContext) -> bool:
+def _is_turbo_deepep_can_patch(ctx: PatchContext) -> bool:
     """
     Check if PrimusTurbo DeepEP MoE dispatcher is enabled.
 
@@ -26,16 +26,10 @@ def _is_turbo_deepep_enabled(ctx: PatchContext) -> bool:
       - enable_primus_turbo == True
       - use_turbo_deepep == True
     """
-    # Check if primus_turbo package is available
-    if importlib.util.find_spec("primus_turbo") is None:
-        return False
-
     args = get_args(ctx)
-    tp_size = getattr(args, "tensor_model_parallel_size", 1)
-    enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
     use_turbo_deepep = bool(getattr(args, "use_turbo_deepep", False))
 
-    return tp_size == 1 and enable_primus_turbo and use_turbo_deepep
+    return use_turbo_deepep and is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
@@ -43,7 +37,7 @@ def _is_turbo_deepep_enabled(ctx: PatchContext) -> bool:
     backend="megatron",
     phase="before_train",
     description="Replace MoE token dispatcher with PrimusTurbo DeepEP implementation",
-    condition=_is_turbo_deepep_enabled,
+    condition=_is_turbo_deepep_can_patch,
 )
 def patch_moe_dispatcher(ctx: PatchContext):
     """

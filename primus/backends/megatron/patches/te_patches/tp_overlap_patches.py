@@ -18,7 +18,7 @@ from primus.backends.megatron.patches.te_patches.utils import (
     is_te_v2_or_above,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:

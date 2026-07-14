@@ -43,12 +43,28 @@ If you're running from the Primus repo root (after `git clone ... && cd Primus`)
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
+### Data Preparation Commands
+
+```bash
+# Prepare a raw WebDataset (smaller, on-the-fly encoding during training)
+primus-cli direct -- data diffusion-raw \
+  --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml
+
+# Prepare a pre-encoded dataset from HuggingFace
+primus-cli direct -- data diffusion-encoded \
+  --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml
+
+# Ingest MLPerf Flux1 pre-encoded data (streaming download + conversion)
+primus-cli direct -- data diffusion-ingest \
+  --config primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1.yaml
+```
+
 ## 🎯 Three Execution Modes
 
 | Mode | Use Case | Command Example |
 |------|----------|-----------------|
 | **Direct** | Local development, quick validation | `primus-cli direct -- train pretrain` |
-| **Container** | Environment isolation, dependency management | `primus-cli container --image rocm/primus:v26.2 -- train pretrain` |
+| **Container** | Environment isolation, dependency management | `primus-cli container --image rocm/primus:v26.3 -- train pretrain` |
 | **Slurm** | Multi-node distributed training | `primus-cli slurm srun -N 8 -- train pretrain` |
 
 ## 📖 Learn More

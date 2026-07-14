@@ -8,8 +8,10 @@ from typing import Callable
 
 from megatron.training.global_vars import get_args
 
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    fwd_bwd_wrapper,
+)
 from primus.core.pipeline_parallel.scheduler.scheduler_node import SchedulerNode
-from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
 
 
 class WGradRunningCache:
@@ -22,6 +24,11 @@ class WGradRunningCache:
     def set_current_minibatch_and_chunk(cls, minibatch: int, chunk: int):
         cls.cur_minibatch = minibatch
         cls.cur_chunk = chunk
+
+    @classmethod
+    def clear_current_minibatch_and_chunk(cls):
+        cls.cur_minibatch = None
+        cls.cur_chunk = None
 
     @classmethod
     def append(cls, wgrad_func: Callable):
@@ -44,6 +51,11 @@ class WGradRunningCache:
             cls.cache[minibatch][chunk][idx] = None  # release memory
 
         del cls.cache[minibatch][chunk]
+        # Drop the empty outer minibatch entry so the class-level ``cache``
+        # dict does not accumulate empty {minibatch: {}} placeholders across
+        # training steps.
+        if not cls.cache[minibatch]:
+            del cls.cache[minibatch]
 
     @classmethod
     def is_empty(cls):

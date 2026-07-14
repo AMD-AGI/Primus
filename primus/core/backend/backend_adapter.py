@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,7 +14,7 @@ class BackendAdapter(ABC):
 
     BackendAdapter is responsible for four main tasks:
         1. Backend initialization (env, patching, paths)
-        2. Convert Primus TypedConfig → backend native config / args
+        2. Convert Primus TypedConfig -> backend native config / args
         3. Build Trainer class or call backend launcher
         4. Optional hooks (patch, override behavior)
     """
@@ -40,7 +40,7 @@ class BackendAdapter(ABC):
         beyond `BackendRegistry.run_setup(self.framework)`.
         """
         from primus.core.backend.backend_registry import BackendRegistry
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         BackendRegistry.run_setup(self.framework)
         log_rank_0(f"[Primus:{self.framework}] Backend prepared")
@@ -57,7 +57,7 @@ class BackendAdapter(ABC):
         import sys
         from pathlib import Path
 
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         def _use_path(path: str, error_msg: str) -> str:
             norm_path = os.path.abspath(os.path.normpath(str(path)))
@@ -65,7 +65,7 @@ class BackendAdapter(ABC):
                 if norm_path not in sys.path:
                     sys.path.insert(0, norm_path)
                     try:
-                        log_rank_0(f"[Primus:{self.framework}] sys.path.insert → {norm_path}")
+                        log_rank_0(f"[Primus:{self.framework}] sys.path.insert -> {norm_path}")
                     except Exception:
                         # Logger may not be initialized yet; sys.path is already updated.
                         pass
@@ -93,29 +93,42 @@ class BackendAdapter(ABC):
             resolved = _use_path(env_path, env_error)
             return resolved
 
-        # 3) Default: <repo_root>/third_party/<dir_name> must exist.
+        # 3) Default: try the source-tree third_party/<name> first, then the
+        #    deps-sync location used by installed wheels (`primus-cli deps sync`):
+        #    $PRIMUS_THIRDPARTY_DIR or ~/.cache/Primus/third_party.
         dir_name = self.third_party_dir_name or self.framework
-        repo_root = Path(__file__).resolve().parents[3]
-        default_path = repo_root / "third_party" / dir_name
-        default_error = (
+        tp_root = os.getenv("PRIMUS_THIRDPARTY_DIR") or str(Path.home() / ".cache" / "Primus" / "third_party")
+        candidates = [
+            Path(__file__).resolve().parents[3] / "third_party" / dir_name,  # source tree / submodule
+            Path(tp_root) / dir_name,  # primus-cli deps sync
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return _use_path(str(candidate), "")
+        assert False, (
             f"No valid backend path for '{self.framework}'.\n"
-            f"Tried default path: {default_path}\n"
-            f"Hint: Install backend to third_party/{dir_name} or provide a valid --backend_path/BACKEND_PATH."
+            f"Tried: {[str(c) for c in candidates]}\n"
+            f"Hint: run `primus-cli deps sync`, install backend to third_party/{dir_name}, "
+            f"or provide a valid --backend_path/BACKEND_PATH."
         )
-        resolved = _use_path(str(default_path), default_error)
-        return resolved
 
     # ============================================================================
     # Abstract Methods (Must be implemented by subclasses)
     # ============================================================================
 
     @abstractmethod
-    def load_trainer_class(self, stage: str = "pretrain"):
+    def load_trainer_class(self, stage: str = "pretrain", trainer_class: Optional[str] = None):
         """
         Return backend Trainer class registered in `BackendRegistry`.
 
+        Args:
+            stage: Training stage (e.g., "pretrain", "sft"). Defaults to "pretrain".
+            trainer_class: Optional specific trainer class name for dynamic loading.
+                          If provided, this takes precedence over stage-based selection.
+
         Default behavior:
-          - Lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
+          - If `trainer_class` is provided, attempt to dynamically load it
+          - Otherwise, lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
 
         Backends can override this method if they need special resolution rules.
         """

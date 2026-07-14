@@ -16,7 +16,7 @@ from megatron.training.utils import is_last_rank
 
 from primus.backends.megatron.training.global_vars import get_train_start_time
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def primus_evaluate(
@@ -104,6 +104,10 @@ def primus_evaluate(
                         # there is one dict per microbatch. in new reporting, we average
                         # over the total number of tokens across the global batch.
                         if isinstance(val, tuple) or isinstance(val, list):
+                            numerator += val[0]
+                            denominator += val[1]
+                        elif isinstance(val, torch.Tensor) and val.numel() == 2:
+                            # [loss, num_tokens] from pretrain_gpt loss_func (Megatron default)
                             numerator += val[0]
                             denominator += val[1]
                         else:

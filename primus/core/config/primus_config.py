@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc.
+# Copyright (c) 2026, Advanced Micro Devices, Inc.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -53,7 +53,7 @@ def _normalize_module_for_runtime(module_cfg: SimpleNamespace, module_name: str)
     if not getattr(normalized, "name", None):
         setattr(normalized, "name", module_name)
 
-    reserved_keys = {"name", "framework", "config", "model", "params"}
+    reserved_keys = {"name", "framework", "config", "model", "params", "trainer_class"}
     # Start from any existing params dict/namespace if provided.
     existing_params = getattr(normalized, "params", {})
     params = _to_plain_dict(existing_params)
@@ -121,10 +121,25 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
     cfg.platform = platform_config
 
     # Build modules list from legacy PrimusConfig.module_keys/get_module_config.
-    cfg.modules = [
+    #
+    # `_normalize_module_for_runtime` deepcopies each module namespace before
+    # reshaping it, so `legacy_cfg` itself is left pristine. This is what makes
+    # it safe to expose `legacy_cfg` via `cfg._legacy` below: the legacy
+    # `PrimusConfig` that downstream consumers (e.g. `BaseModule`) read through
+    # `get_module_config(...)` keeps its original module shape.
+    modules: list[SimpleNamespace] = [
         _normalize_module_for_runtime(legacy_cfg.get_module_config(module_name), module_name)
         for module_name in getattr(legacy_cfg, "module_keys", [])
     ]
+
+    cfg.modules = modules
+
+    # Expose the underlying legacy PrimusConfig (additive, non-breaking) so the
+    # core runtime can reuse it instead of re-parsing the YAML a second time.
+    # BaseModule (inherited) still needs the PrimusConfig class interface
+    # (get_module_config method, set_global_variables, exp_* properties) that the
+    # SimpleNamespace above does not provide. `legacy_cfg` is pristine (see above).
+    cfg._legacy = legacy_cfg
 
     return cfg
 
@@ -132,13 +147,24 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
 def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace | None:
     """
     Fetch a single module config from `cfg.modules` by name.
+
+    SFT yamls only declare ``post_trainer``; the train CLI still asks for
+    ``pre_trainer`` (and vice-versa). Both names expand from the same
+    ``sft_trainer.yaml`` with overrides, so swap them when only one of
+    the two is present.
     """
     modules = getattr(cfg, "modules", None) or []
+    alias_map = {"pre_trainer": "post_trainer", "post_trainer": "pre_trainer"}
+    alias = alias_map.get(module_name)
+    fallback: SimpleNamespace | None = None
     for m in modules:
-        if getattr(m, "name", None) == module_name:
+        name = getattr(m, "name", None)
+        if name == module_name:
             return m
+        if alias is not None and name == alias:
+            fallback = m
 
-    return None
+    return fallback
 
 
 def get_module_names(cfg: SimpleNamespace) -> list[str]:

@@ -1,0 +1,21 @@
+# Tuning agent runtime requirements.
+# Install with:
+#     python3 -m venv ~/code/Primus/.venv-agent
+#     source ~/code/Primus/.venv-agent/bin/activate
+#     pip install -r primus/agents/tuning_agent/requirements.txt
+
+# Core
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# Plotting (optional but recommended)
+matplotlib>=3.7
+
+# DSPy — the LLM agent stack. Brings LiteLLM as a dependency, which handles
+# all provider routing (OpenAI, Anthropic, Ollama, Azure, etc.) without a
+# separate proxy process.
+dspy>=3.0
+
+# Origami is required for `projection performance --profiling-mode simulate`.
+# Install it separately when you need the simulate path:
+#     pip install git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python

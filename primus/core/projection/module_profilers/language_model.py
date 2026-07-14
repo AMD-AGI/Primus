@@ -54,17 +54,25 @@ def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
 
 
 def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
+    sub_profiler_specs = {
+        "embedding": EmbeddingProfiler,
+        "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
+    }
+    # Only build the MoE sub-tree when the model actually has experts. Dense
+    # models (num_experts unset) must neither instantiate nor walk the MoE
+    # branch: the hierarchy printer iterates every sub-profiler unconditionally,
+    # so an always-built MoE tree would be evaluated on dense models. All
+    # compute paths guard MoE access with `is_moe` / `key in sub_profilers`,
+    # so omitting it here is safe.
+    if config.model_config.num_experts:
+        sub_profiler_specs["moe_transformer_layer"] = get_moe_transformer_layer_profiler_spec(config)
+    sub_profiler_specs["final_layernorm"] = LayerNormProfiler
+    sub_profiler_specs["output_layer"] = OutputLayerProfiler
+    sub_profiler_specs["calc_loss"] = LossProfiler
     return ModuleProfilerSpec(
         profiler=LanguageModelProfiler,
         config=config,
-        sub_profiler_specs={
-            "embedding": EmbeddingProfiler,
-            "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
-            "moe_transformer_layer": get_moe_transformer_layer_profiler_spec(config),
-            "final_layernorm": LayerNormProfiler,
-            "output_layer": OutputLayerProfiler,
-            "calc_loss": LossProfiler,
-        },
+        sub_profiler_specs=sub_profiler_specs,
     )
 
 
@@ -229,6 +237,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
             out = self.sub_profilers["output_layer"]
             if gemm_backend is not None and hasattr(out, "set_gemm_backend"):
                 out.set_gemm_backend(gemm_backend)
+
+        # Propagate GEMM backend to loss profiler (needs HBM bandwidth).
+        if "calc_loss" in self.sub_profilers and self.sub_profilers["calc_loss"] is not None:
+            loss_p = self.sub_profilers["calc_loss"]
+            if gemm_backend is not None and hasattr(loss_p, "set_gemm_backend"):
+                loss_p.set_gemm_backend(gemm_backend)
 
     def get_layers_for_rank(
         self,
@@ -410,22 +424,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
     def get_dp_size(self) -> int:
         num_nodes = int(os.getenv("NNODES", "1"))
-        if num_nodes == 1:
-            # Calculate the minimum number of needed nodes
-            num_nodes = (
-                self.config.model_parallel_config.tensor_model_parallel_size
-                * self.config.model_parallel_config.context_model_parallel_size
-                * self.config.model_parallel_config.pipeline_model_parallel_size
-                * self.config.model_parallel_config.expert_model_parallel_size
-                // int(os.getenv("GPUS_PER_NODE", "8"))
-            )
-        world_size = num_nodes * int(os.getenv("GPUS_PER_NODE", "8"))
-        dp_size = (
-            world_size
-            // self.config.model_parallel_config.expert_model_parallel_size
-            // self.config.model_parallel_config.pipeline_model_parallel_size
+        gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+        mp = self.config.model_parallel_config
+        parallel_gpus = (
+            mp.tensor_model_parallel_size
+            * mp.context_model_parallel_size
+            * mp.pipeline_model_parallel_size
+            * mp.expert_model_parallel_size
         )
-        return dp_size
+        if num_nodes == 1:
+            # Minimum nodes to host the model-parallel mesh (ceil division).
+            # Plain ``parallel_gpus // gpus_per_node`` is 0 when mesh fits on
+            # one node (e.g. TP=PP=EP=CP=1), which breaks activation scaling.
+            num_nodes = max(1, (parallel_gpus + gpus_per_node - 1) // gpus_per_node)
+        world_size = num_nodes * gpus_per_node
+        dp_size = world_size // mp.expert_model_parallel_size // mp.pipeline_model_parallel_size
+        return max(1, dp_size)
 
     def get_num_bytes_per_param(self) -> float:
         dp_size = self.get_dp_size()
@@ -687,11 +701,24 @@ class LanguageModelProfiler(BaseModuleProfiler):
                         f"bwd: {out_backward:.2f} ms, "
                         f"act: {out_mem / (1024**2):.2f} MB"
                     )
+
+                loss_profiler = self.sub_profilers["calc_loss"]
+                loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
+                loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
+                loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
+                if is_rank_0:
+                    fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
+                    print(
+                        f"  Loss {fused_label} -> fwd: {loss_fwd:.2f} ms, "
+                        f"bwd: {loss_bwd:.2f} ms, "
+                        f"act: {loss_mem / (1024**2):.2f} MB"
+                    )
+
                 output_stats = {
                     "type": "output",
-                    "forward_time_ms": out_forward,
-                    "backward_time_ms": out_backward,
-                    "activation_memory_bytes": out_mem,
+                    "forward_time_ms": out_forward + loss_fwd,
+                    "backward_time_ms": out_backward + loss_bwd,
+                    "activation_memory_bytes": out_mem + loss_mem,
                 }
 
         # ==============================================================================

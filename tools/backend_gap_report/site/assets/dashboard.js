@@ -1,7 +1,19 @@
 "use strict";
 
 const BACKEND_GAP_DATA_URL = "./dashboard-data/index.json";
-const WEEKLY_DATA_URL = "./weekly-reports-data/index.json";
+// Unified weekly + monthly index. The `weekly` namespace below renders all
+// periodic engineering reports regardless of cadence; cadence is a data field.
+const REPORTS_DATA_URL = "./reports-data/index.json";
+
+const CADENCE_LABELS = { weekly: "Weekly", monthly: "Monthly" };
+
+function cadenceLabel(cadence) {
+  if (CADENCE_LABELS[cadence]) return CADENCE_LABELS[cadence];
+  if (typeof cadence === "string" && cadence) {
+    return cadence.charAt(0).toUpperCase() + cadence.slice(1);
+  }
+  return "Report";
+}
 
 const state = {
   backendGap: {
@@ -18,21 +30,19 @@ const el = (id) => document.getElementById(id);
 
 const elements = {
   heroChips: el("hero-chips"),
-  tabs: document.querySelectorAll(".section-tab"),
-  tabWeeklySub: el("tab-weekly-sub"),
-  tabGapSub: el("tab-gap-sub"),
-  sectionPanels: document.querySelectorAll("[data-section-panel]"),
 
   weekly: {
     statRow: el("weekly-stat-row"),
     featured: el("weekly-featured"),
     featuredTitle: el("weekly-featured-title"),
+    featuredCadence: el("weekly-featured-cadence"),
     featuredWindow: el("weekly-featured-window"),
-    featuredLink: el("weekly-featured-link"),
     featuredPrs: el("weekly-featured-prs"),
     featuredCategories: el("weekly-featured-categories"),
     featuredRecommendations: el("weekly-featured-recommendations"),
     featuredFindings: el("weekly-featured-findings"),
+    filterRow: el("weekly-filter-row"),
+    cadenceFilter: el("weekly-cadence-filter"),
     recommendationFilter: el("weekly-recommendation-filter"),
     searchFilter: el("weekly-search-filter"),
     resultCount: el("weekly-result-count"),
@@ -44,11 +54,11 @@ const elements = {
 
   backendGap: {
     statRow: el("gap-stat-row"),
+    filterRow: el("gap-filter-row"),
     totalReports: null,
     backendFilter: el("backend-filter"),
-    statusFilter: el("status-filter"),
     searchFilter: el("search-filter"),
-    resultCount: el("result-count"),
+    resultCount: el("gap-result-count"),
     loadingState: el("loading-state"),
     errorState: el("error-state"),
     emptyState: el("empty-state"),
@@ -130,74 +140,73 @@ function heroChip(label, value) {
   return chip;
 }
 
-// ---------- Section switching ----------
-
-function activateSection(sectionKey) {
-  elements.tabs.forEach((tab) => {
-    const isActive = tab.dataset.section === sectionKey;
-    tab.classList.toggle("is-active", isActive);
-    tab.setAttribute("aria-selected", isActive ? "true" : "false");
-  });
-  elements.sectionPanels.forEach((panel) => {
-    const hidden = panel.dataset.sectionPanel !== sectionKey;
-    if (hidden) {
-      panel.setAttribute("hidden", "");
-    } else {
-      panel.removeAttribute("hidden");
-    }
-  });
-}
-
-function attachSectionTabs() {
-  elements.tabs.forEach((tab) => {
-    tab.addEventListener("click", () => activateSection(tab.dataset.section));
-  });
+function recommendationCounts(summary) {
+  const counts = summary && summary.recommendation_counts ? summary.recommendation_counts : {};
+  return {
+    urgent: counts["urgent sync"] || 0,
+    plan: counts["plan sync"] || 0,
+    monitor: counts.monitor || 0,
+  };
 }
 
 // ---------- Weekly Reports ----------
 
-function renderHeroChips(weeklyPayload, gapPayload) {
+function renderHeroChips(reportsPayload, gapPayload) {
   elements.heroChips.innerHTML = "";
-  const weeklySummary = weeklyPayload && weeklyPayload.summary ? weeklyPayload.summary : {};
+  const summary = reportsPayload && reportsPayload.summary ? reportsPayload.summary : {};
   const gapSummary = gapPayload && gapPayload.summary ? gapPayload.summary : {};
+  const recCounts = recommendationCounts(summary);
 
-  if (weeklySummary.latest_report_id) {
-    elements.heroChips.append(heroChip("Latest week", weeklySummary.latest_report_id));
+  if (summary.latest_report_id) {
+    const cadence = summary.latest_cadence ? ` (${cadenceLabel(summary.latest_cadence)})` : "";
+    elements.heroChips.append(heroChip("Latest report", `${summary.latest_report_id}${cadence}`));
   }
-  if (weeklySummary.latest_merged_pr_count !== undefined) {
+  if (summary.latest_merged_pr_count !== undefined) {
     elements.heroChips.append(
-      heroChip("Merged PRs in latest week", formatNumber(weeklySummary.latest_merged_pr_count))
+      heroChip("Merged PRs in latest report", formatNumber(summary.latest_merged_pr_count))
     );
   }
-  if (weeklySummary.total_reports !== undefined) {
-    elements.heroChips.append(
-      heroChip("Weekly reports tracked", formatNumber(weeklySummary.total_reports))
-    );
+  if (summary.total_reports !== undefined) {
+    elements.heroChips.append(heroChip("Reports tracked", formatNumber(summary.total_reports)));
+  }
+  if (recCounts.urgent) {
+    elements.heroChips.append(heroChip("Urgent sync", formatNumber(recCounts.urgent)));
+  }
+  if (recCounts.plan) {
+    elements.heroChips.append(heroChip("Plan sync", formatNumber(recCounts.plan)));
   }
   if (gapSummary.total_reports !== undefined) {
-    elements.heroChips.append(
-      heroChip("Backend gap reports", formatNumber(gapSummary.total_reports))
-    );
+    elements.heroChips.append(heroChip("Backend reports", formatNumber(gapSummary.total_reports)));
   }
 }
 
 function renderWeeklyStatRow(payload) {
   elements.weekly.statRow.innerHTML = "";
   const summary = payload && payload.summary ? payload.summary : {};
+  const recCounts = recommendationCounts(summary);
+  const latestSub = [
+    summary.latest_cadence ? cadenceLabel(summary.latest_cadence) : null,
+    formatDate(summary.latest_generated_at),
+  ]
+    .filter(Boolean)
+    .join(" · ");
   elements.weekly.statRow.append(
-    statTile("Total weekly reports", formatNumber(summary.total_reports || 0))
+    statTile("Total reports", formatNumber(summary.total_reports || 0))
   );
   elements.weekly.statRow.append(
-    statTile("Latest week", summary.latest_report_id || "-", formatDate(summary.latest_generated_at))
+    statTile("Latest report", summary.latest_report_id || "-", latestSub)
   );
   elements.weekly.statRow.append(
     statTile("Merged PRs (latest)", formatNumber(summary.latest_merged_pr_count || 0))
   );
   elements.weekly.statRow.append(
-    statTile(
-      "Tracked drift targets",
-      formatNumber((summary.tracked_drift_targets || []).length)
-    )
+    statTile("Urgent sync", formatNumber(recCounts.urgent))
+  );
+  elements.weekly.statRow.append(
+    statTile("Plan sync", formatNumber(recCounts.plan))
+  );
+  elements.weekly.statRow.append(
+    statTile("Monitor", formatNumber(recCounts.monitor))
   );
 }
 
@@ -209,19 +218,22 @@ function renderWeeklyFeatured(report) {
   elements.weekly.featured.hidden = false;
   elements.weekly.featuredTitle.textContent = report.title || report.report_id;
 
+  if (elements.weekly.featuredCadence) {
+    if (report.cadence) {
+      elements.weekly.featuredCadence.textContent = cadenceLabel(report.cadence);
+      elements.weekly.featuredCadence.dataset.cadence = report.cadence;
+      elements.weekly.featuredCadence.hidden = false;
+    } else {
+      elements.weekly.featuredCadence.hidden = true;
+    }
+  }
+
   const tw = report.time_window || {};
   const windowLabel =
     tw.start && tw.end
       ? `${formatDateTime(tw.start)} → ${formatDateTime(tw.end)} (${tw.timezone || "UTC"})`
       : "-";
   elements.weekly.featuredWindow.textContent = `${report.report_id} · ${windowLabel}`;
-
-  if (report.report_github_url) {
-    elements.weekly.featuredLink.href = report.report_github_url;
-    elements.weekly.featuredLink.hidden = false;
-  } else {
-    elements.weekly.featuredLink.hidden = true;
-  }
 
   elements.weekly.featuredPrs.textContent = formatNumber(report.merged_pr_count);
 
@@ -261,6 +273,7 @@ function renderWeeklyFeatured(report) {
     li.textContent = finding;
     elements.weekly.featuredFindings.append(li);
   });
+
 }
 
 function buildWeeklyCard(report) {
@@ -270,9 +283,21 @@ function buildWeeklyCard(report) {
   const header = document.createElement("div");
   header.className = "weekly-card__header";
 
+  const idGroup = document.createElement("div");
+  idGroup.className = "weekly-card__id-group";
+
   const idEl = document.createElement("h3");
   idEl.className = "weekly-card__id";
   idEl.textContent = report.report_id;
+  idGroup.append(idEl);
+
+  if (report.cadence) {
+    const cadenceTag = document.createElement("span");
+    cadenceTag.className = "cadence-tag cadence-tag--sm";
+    cadenceTag.dataset.cadence = report.cadence;
+    cadenceTag.textContent = cadenceLabel(report.cadence);
+    idGroup.append(cadenceTag);
+  }
 
   const tw = report.time_window || {};
   const windowEl = document.createElement("span");
@@ -283,7 +308,7 @@ function buildWeeklyCard(report) {
     windowEl.textContent = report.generated_at ? formatDate(report.generated_at) : "";
   }
 
-  header.append(idEl, windowEl);
+  header.append(idGroup, windowEl);
 
   const meta = document.createElement("div");
   meta.className = "weekly-card__meta";
@@ -345,6 +370,19 @@ function buildWeeklyCard(report) {
 
 function renderWeeklyList(reports) {
   elements.weekly.list.innerHTML = "";
+  if (elements.weekly.filterRow) {
+    elements.weekly.filterRow.hidden = state.weekly.reports.length <= 1;
+  }
+  // The cadence filter is only meaningful once both weekly and monthly reports
+  // are present; otherwise it is dead UI, so hide it.
+  const cadenceField =
+    elements.weekly.cadenceFilter && elements.weekly.cadenceFilter.closest(".field");
+  if (cadenceField) {
+    const distinctCadences = new Set(
+      state.weekly.reports.map((report) => report.cadence).filter(Boolean)
+    );
+    cadenceField.hidden = distinctCadences.size <= 1;
+  }
   elements.weekly.resultCount.textContent = `${reports.length} report${
     reports.length === 1 ? "" : "s"
   }`;
@@ -363,10 +401,13 @@ function renderWeeklyList(reports) {
 }
 
 function applyWeeklyFilters() {
+  const cadence = elements.weekly.cadenceFilter ? elements.weekly.cadenceFilter.value : "all";
   const rec = elements.weekly.recommendationFilter.value;
   const search = elements.weekly.searchFilter.value.trim().toLowerCase();
 
   state.weekly.filteredReports = state.weekly.reports.filter((report) => {
+    const cadenceMatch = cadence === "all" || report.cadence === cadence;
+
     const recs = Object.values(report.recommendations || {}).map((v) =>
       (v || "").toLowerCase()
     );
@@ -375,66 +416,28 @@ function applyWeeklyFilters() {
     const haystackParts = [
       report.report_id,
       report.title,
+      report.cadence,
       ...(report.key_findings || []),
       ...Object.values(report.recommendations || {}),
       ...Object.keys(report.category_breakdown || {}),
     ];
     const haystack = haystackParts.join(" ").toLowerCase();
     const searchMatch = !search || haystack.includes(search);
-    return recMatch && searchMatch;
+    return cadenceMatch && recMatch && searchMatch;
   });
 
   renderWeeklyList(state.weekly.filteredReports);
 }
 
 function attachWeeklyFilters() {
+  if (elements.weekly.cadenceFilter) {
+    elements.weekly.cadenceFilter.addEventListener("change", applyWeeklyFilters);
+  }
   elements.weekly.recommendationFilter.addEventListener("change", applyWeeklyFilters);
   elements.weekly.searchFilter.addEventListener("input", applyWeeklyFilters);
 }
 
 // ---------- Backend Gap ----------
-
-function buildBadge(label, className) {
-  const span = document.createElement("span");
-  span.className = `badge ${className}`;
-  span.textContent = label;
-  return span;
-}
-
-function buildMetric(label, value) {
-  const wrapper = document.createElement("div");
-  wrapper.className = "metric";
-
-  const labelNode = document.createElement("span");
-  labelNode.className = "metric__label";
-  labelNode.textContent = label;
-
-  const valueNode = document.createElement("strong");
-  valueNode.textContent = value;
-
-  wrapper.append(labelNode, valueNode);
-  return wrapper;
-}
-
-function createDetailBlock(title, rows) {
-  const block = document.createElement("section");
-  block.className = "detail-block";
-
-  const heading = document.createElement("h3");
-  heading.textContent = title;
-
-  const list = document.createElement("dl");
-  rows.forEach(([label, value]) => {
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    dd.textContent = value || "-";
-    list.append(dt, dd);
-  });
-
-  block.append(heading, list);
-  return block;
-}
 
 function createArtifactLink(artifact) {
   const link = document.createElement("a");
@@ -446,6 +449,84 @@ function createArtifactLink(artifact) {
     link.rel = "noopener noreferrer";
   }
   return link;
+}
+
+function compactFact(label, value, tone) {
+  const item = document.createElement("div");
+  item.className = `compact-fact${tone ? ` compact-fact--${tone}` : ""}`;
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "compact-fact__label";
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement("strong");
+  valueEl.className = "compact-fact__value";
+  valueEl.textContent = value || "-";
+
+  item.append(labelEl, valueEl);
+  return item;
+}
+
+function driftTone(commitGap) {
+  if (commitGap >= 500) return "danger";
+  if (commitGap >= 100) return "warning";
+  return "success";
+}
+
+function buildBackendFocusItems(report) {
+  const summary = report.dashboard_summary || {};
+  if (Array.isArray(summary.why_it_matters) && summary.why_it_matters.length) {
+    return summary.why_it_matters.slice(0, 5);
+  }
+
+  const items = [];
+  const commitGap = report.stats && report.stats.commit_gap;
+  const backendLabel = report.backend && report.backend.label ? report.backend.label : "Backend";
+
+  if (commitGap !== undefined) {
+    items.push(
+      `${backendLabel} is ${formatNumber(commitGap)} upstream commits behind; review upgrade scope before syncing.`
+    );
+  }
+
+  if (report.local && report.upstream) {
+    items.push(
+      `Version position: Primus ${report.local.version || "-"} vs upstream ${
+        report.upstream.version || "-"
+      }.`
+    );
+  }
+
+  (report.highlights || []).forEach((highlight) => items.push(highlight));
+
+  if (report.integration && report.integration.integration_model) {
+    items.push(`Integration surface: ${report.integration.integration_model}.`);
+  }
+
+  return items.slice(0, 5);
+}
+
+function listSection(title, items) {
+  if (!Array.isArray(items) || !items.length) {
+    return null;
+  }
+
+  const section = document.createElement("section");
+  section.className = "backend-card__insight";
+
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+
+  const list = document.createElement("ul");
+  list.className = "compact-list";
+  items.slice(0, 5).forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item;
+    list.append(li);
+  });
+
+  section.append(heading, list);
+  return section;
 }
 
 function renderBackendGapStats(payload) {
@@ -465,9 +546,108 @@ function renderBackendGapStats(payload) {
   );
 }
 
+function buildBackendDeepDiveCard(report) {
+  const card = document.createElement("article");
+  card.className = "backend-card";
+
+  const backendLabel = report.backend && report.backend.label ? report.backend.label : "Backend";
+  const stats = report.stats || {};
+  const integration = report.integration || {};
+  const summary = report.dashboard_summary || {};
+
+  const header = document.createElement("header");
+  header.className = "backend-card__header";
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "backend-card__title-group";
+
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "backend-card__eyebrow";
+  eyebrow.textContent = backendLabel;
+
+  const title = document.createElement("h3");
+  title.textContent = report.title || backendLabel;
+
+  const scope = document.createElement("p");
+  scope.className = "backend-card__scope";
+  scope.textContent = summary.headline || report.scope || "";
+
+  titleGroup.append(eyebrow, title, scope);
+
+  const gapBadge = document.createElement("div");
+  gapBadge.className = `commit-gap-badge commit-gap-badge--${driftTone(stats.commit_gap || 0)}`;
+  const gapValue = document.createElement("strong");
+  gapValue.textContent = formatNumber(stats.commit_gap);
+  const gapLabel = document.createElement("span");
+  gapLabel.textContent = "commits behind";
+  gapBadge.append(gapValue, gapLabel);
+
+  header.append(titleGroup, gapBadge);
+
+  const facts = document.createElement("div");
+  facts.className = "backend-card__facts";
+  facts.append(
+    compactFact("Primus baseline", report.local && report.local.version),
+    compactFact("Upstream version", report.upstream && report.upstream.version),
+    compactFact("Recommendation", summary.recommendation || report.status),
+    compactFact("Integration files", formatNumber(integration.backend_files))
+  );
+
+  const focus = document.createElement("section");
+  focus.className = "backend-card__focus";
+  const focusTitle = document.createElement("h4");
+  focusTitle.textContent = "What matters";
+  const focusList = document.createElement("ul");
+  focusList.className = "findings-list";
+  buildBackendFocusItems(report).forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item;
+    focusList.append(li);
+  });
+  focus.append(focusTitle, focusList);
+
+  const insights = document.createElement("div");
+  insights.className = "backend-card__insights";
+  [
+    listSection("New upstream capabilities", summary.feature_deltas),
+    listSection("Dependency shift", summary.dependency_deltas),
+    listSection("Primus integration risk", summary.integration_risks),
+  ]
+    .filter(Boolean)
+    .forEach((section) => insights.append(section));
+
+  const footer = document.createElement("footer");
+  footer.className = "backend-card__footer";
+  const meta = document.createElement("span");
+  meta.className = "backend-card__meta";
+  meta.textContent = `Updated ${report.generated_at || "-"} · ${report.status || "unknown"}`;
+  footer.append(meta);
+
+  const artifactBar = document.createElement("div");
+  artifactBar.className = "artifacts";
+  (report.artifacts || [])
+    .filter((artifact) => artifact.format === "pdf")
+    .forEach((artifact) => {
+      artifactBar.append(createArtifactLink(artifact));
+    });
+  footer.append(artifactBar);
+
+  card.append(header, facts, focus);
+  if (insights.children.length) {
+    card.append(insights);
+  }
+  card.append(footer);
+  return card;
+}
+
 function renderBackendGapReports(reports) {
   const list = elements.backendGap.reportList;
   list.innerHTML = "";
+  if (elements.backendGap.filterRow) {
+    // Backend/search filters add little value for a handful of self-evident
+    // deep-dive cards; surface them only once the set grows.
+    elements.backendGap.filterRow.hidden = state.backendGap.reports.length <= 3;
+  }
   elements.backendGap.resultCount.textContent = `${reports.length} report${
     reports.length === 1 ? "" : "s"
   }`;
@@ -482,108 +662,38 @@ function renderBackendGapReports(reports) {
   list.hidden = false;
 
   reports.forEach((report) => {
-    const card = document.createElement("article");
-    card.className = "report-card";
-
-    const header = document.createElement("div");
-    header.className = "report-card__header";
-
-    const titleGroup = document.createElement("div");
-    titleGroup.className = "report-card__title-group";
-
-    const title = document.createElement("h2");
-    title.textContent = report.title;
-
-    const scope = document.createElement("p");
-    scope.className = "report-card__scope";
-    scope.textContent = report.scope;
-
-    titleGroup.append(title, scope);
-
-    const badges = document.createElement("div");
-    badges.className = "badges";
-    badges.append(
-      buildBadge(report.backend.label, "badge--backend"),
-      buildBadge(report.status, `badge--${report.status}`)
-    );
-
-    header.append(titleGroup, badges);
-
-    const metrics = document.createElement("div");
-    metrics.className = "metrics";
-    metrics.append(
-      buildMetric("Generated", report.generated_at),
-      buildMetric("Commit Gap", formatNumber(report.stats.commit_gap)),
-      buildMetric("Diff Files", formatNumber(report.stats.diff_files)),
-      buildMetric(
-        "Diff Size",
-        `+${formatNumber(report.stats.insertions)} / -${formatNumber(report.stats.deletions)}`
-      )
-    );
-
-    const detailGrid = document.createElement("div");
-    detailGrid.className = "detail-grid";
-    detailGrid.append(
-      createDetailBlock("Local", [
-        ["Source", report.local.source_path],
-        ["Version", report.local.version],
-        ["Commit", report.local.commit],
-        ["Date", report.local.commit_date],
-      ]),
-      createDetailBlock("Upstream", [
-        ["Repository", report.upstream.repo],
-        ["Ref", report.upstream.ref],
-        ["Version", report.upstream.version],
-        ["Commit", report.upstream.commit],
-      ]),
-      createDetailBlock("Integration", [
-        ["Model", (report.integration && report.integration.integration_model) || "-"],
-        ["Backend Files", formatNumber(report.integration && report.integration.backend_files)],
-        ["Tracked Files", formatNumber(report.integration && report.integration.tracked_files)],
-        ["Status", report.status],
-      ])
-    );
-
-    const highlightList = document.createElement("ul");
-    highlightList.className = "highlights";
-    (report.highlights || []).forEach((highlight) => {
-      const item = document.createElement("li");
-      item.textContent = highlight;
-      highlightList.append(item);
-    });
-
-    const artifactBar = document.createElement("div");
-    artifactBar.className = "artifacts";
-    (report.artifacts || []).forEach((artifact) => {
-      artifactBar.append(createArtifactLink(artifact));
-    });
-
-    card.append(header, metrics, detailGrid, highlightList, artifactBar);
-    list.append(card);
+    list.append(buildBackendDeepDiveCard(report));
   });
 }
 
 function applyBackendGapFilters() {
   const backendValue = elements.backendGap.backendFilter.value;
-  const statusValue = elements.backendGap.statusFilter.value;
   const searchValue = elements.backendGap.searchFilter.value.trim().toLowerCase();
 
   state.backendGap.filteredReports = state.backendGap.reports.filter((report) => {
     const backendMatch = backendValue === "all" || report.backend.key === backendValue;
-    const statusMatch = statusValue === "all" || report.status === statusValue;
 
     const haystack = [
       report.title,
       report.scope,
-      report.backend.label,
-      report.backend.key,
+      report.backend && report.backend.label,
+      report.backend && report.backend.key,
+      report.local && report.local.version,
+      report.upstream && report.upstream.version,
+      report.integration && report.integration.integration_model,
+      report.dashboard_summary && report.dashboard_summary.headline,
+      report.dashboard_summary && report.dashboard_summary.recommendation,
+      ...((report.dashboard_summary && report.dashboard_summary.why_it_matters) || []),
+      ...((report.dashboard_summary && report.dashboard_summary.feature_deltas) || []),
+      ...((report.dashboard_summary && report.dashboard_summary.dependency_deltas) || []),
+      ...((report.dashboard_summary && report.dashboard_summary.integration_risks) || []),
       ...(report.highlights || []),
     ]
       .join(" ")
       .toLowerCase();
 
     const searchMatch = !searchValue || haystack.includes(searchValue);
-    return backendMatch && statusMatch && searchMatch;
+    return backendMatch && searchMatch;
   });
 
   renderBackendGapReports(state.backendGap.filteredReports);
@@ -600,7 +710,6 @@ function populateBackendFilter(backends) {
 
 function attachBackendGapFilters() {
   elements.backendGap.backendFilter.addEventListener("change", applyBackendGapFilters);
-  elements.backendGap.statusFilter.addEventListener("change", applyBackendGapFilters);
   elements.backendGap.searchFilter.addEventListener("input", applyBackendGapFilters);
 }
 
@@ -620,44 +729,25 @@ async function fetchJsonOptional(url) {
 }
 
 async function loadDashboard() {
-  attachSectionTabs();
   attachWeeklyFilters();
   attachBackendGapFilters();
 
-  const weeklyResult = await fetchJsonOptional(WEEKLY_DATA_URL);
+  const reportsResult = await fetchJsonOptional(REPORTS_DATA_URL);
   const gapResult = await fetchJsonOptional(BACKEND_GAP_DATA_URL);
 
   // Hero chips (best effort — show whatever loaded)
-  renderHeroChips(weeklyResult.payload, gapResult.payload);
+  renderHeroChips(reportsResult.payload, gapResult.payload);
 
-  // Tab subtitles
-  if (weeklyResult.ok && weeklyResult.payload) {
-    const summary = weeklyResult.payload.summary || {};
-    const latest = summary.latest_report_id || "no data";
-    const total = summary.total_reports || 0;
-    elements.tabWeeklySub.textContent = `${total} reports · latest ${latest}`;
-  } else {
-    elements.tabWeeklySub.textContent = "no data";
-  }
-  if (gapResult.ok && gapResult.payload) {
-    const summary = gapResult.payload.summary || {};
-    elements.tabGapSub.textContent = `${summary.total_reports || 0} reports · ${
-      summary.total_backends || 0
-    } backends`;
-  } else {
-    elements.tabGapSub.textContent = "no data";
-  }
-
-  // --- Weekly reports section ---
+  // --- Engineering reports section (weekly + monthly) ---
   elements.weekly.loadingState.hidden = true;
-  if (weeklyResult.ok && weeklyResult.payload) {
-    state.weekly.reports = weeklyResult.payload.reports || [];
-    renderWeeklyStatRow(weeklyResult.payload);
+  if (reportsResult.ok && reportsResult.payload) {
+    state.weekly.reports = reportsResult.payload.reports || [];
+    renderWeeklyStatRow(reportsResult.payload);
     renderWeeklyFeatured(state.weekly.reports[0]);
     applyWeeklyFilters();
   } else {
     elements.weekly.errorState.hidden = false;
-    elements.weekly.errorState.textContent = `Unable to load weekly reports. ${weeklyResult.error || ""}`.trim();
+    elements.weekly.errorState.textContent = `Unable to load engineering reports. ${reportsResult.error || ""}`.trim();
     elements.weekly.list.hidden = true;
     elements.weekly.resultCount.textContent = "0 reports";
     elements.weekly.featured.hidden = true;
@@ -676,9 +766,6 @@ async function loadDashboard() {
     elements.backendGap.reportList.hidden = true;
     elements.backendGap.resultCount.textContent = "0 reports";
   }
-
-  // Default section
-  activateSection(state.weekly.reports.length ? "weekly" : "backend-gap");
 }
 
 loadDashboard();
