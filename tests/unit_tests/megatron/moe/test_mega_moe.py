@@ -30,6 +30,7 @@ from torch.testing._internal.common_utils import (
 
 from primus.backends.megatron.core.extensions.mega_moe import PrimusTurboMegaMoELayer
 
+
 def _create_args():
     args = SimpleNamespace()
     args.sequence_parallel = False
@@ -68,8 +69,8 @@ def _build_config(ep_size, num_moe_experts, moe_router_topk):
         moe_router_topk_scaling_factor=2.5,
         moe_router_score_function="sigmoid",
         moe_router_pre_softmax=False,
-        # noaux_tc bias-based balancing; bias stays 0 in this test so routing is
-        # pure sigmoid group-topk (mega's fused router ignores expert_bias).
+        # noaux_tc bias-based balancing; bias zeroed in the test so routing is
+        # pure sigmoid group-topk shared by both layers' routers.
         moe_router_enable_expert_bias=True,
         # aux loss off: keeps every weight's grad a clean fwd/bwd parity check
         moe_router_load_balancing_type="aux_loss",
@@ -103,36 +104,37 @@ def _build_layers(config, num_moe_experts, num_layers):
         _set_random_seed(seed_=123 + layer_idx, data_parallel_random_init=False)
 
         spec = get_gpt_layer_local_spec(num_experts=num_moe_experts, moe_grouped_gemm=False)
-        moe_layer = MoELayer(config, spec.submodules.mlp.submodules).cuda().to(torch.bfloat16)
+        submodules = spec.submodules.mlp.submodules
+        moe_layer = MoELayer(config, submodules).cuda().to(torch.bfloat16)
         moe_layer.set_layer_number(layer_idx)
 
+        # mega layer reuses the same router/shared-expert submodules
         mega_layer = PrimusTurboMegaMoELayer(
-            config, layer_number=layer_idx, pg_collection=pg_collection
+            config, submodules, layer_number=layer_idx, pg_collection=pg_collection
         ).cuda()
 
-        mega = mega_layer.mega_moe
         experts = moe_layer.experts.local_experts
-        assert len(experts) == mega.w1.shape[0]
+        assert len(experts) == mega_layer.w1.shape[0]
         with torch.no_grad():
-            # match routing: copy gate weight, drop base router bias (mega has none)
-            mega.gate_weight.copy_(moe_layer.router.weight.to(mega.gate_weight.dtype))
-            if moe_layer.router.bias is not None:
-                moe_layer.router.bias.zero_()
-            # zero noaux_tc expert bias -> baseline selection == pure sigmoid group-topk
-            if getattr(moe_layer.router, "expert_bias", None) is not None:
-                moe_layer.router.expert_bias.zero_()
+            # match routing: copy router gate weight into mega's own router
+            mega_layer.router.weight.copy_(moe_layer.router.weight)
+            for r in (moe_layer.router, mega_layer.router):
+                if getattr(r, "bias", None) is not None:
+                    r.bias.zero_()
+                # zero noaux_tc expert bias -> selection == pure sigmoid group-topk
+                if getattr(r, "expert_bias", None) is not None:
+                    r.expert_bias.zero_()
+            # routed experts: grouped fc1/fc2 -> packed w1/w2
             for i, expert in enumerate(experts):
-                assert expert.linear_fc1.weight.shape == mega.w1[i].shape
-                assert expert.linear_fc2.weight.shape == mega.w2[i].shape
-                mega.w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
-                mega.w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
-            # shared expert: copy fc1/fc2 (no shared gate in this config)
-            if mega.shared_w1 is not None:
-                se = moe_layer.shared_experts
-                assert se.linear_fc1.weight.shape == mega.shared_w1.shape
-                assert se.linear_fc2.weight.shape == mega.shared_w2.shape
-                mega.shared_w1.copy_(se.linear_fc1.weight.to(torch.bfloat16))
-                mega.shared_w2.copy_(se.linear_fc2.weight.to(torch.bfloat16))
+                assert expert.linear_fc1.weight.shape == mega_layer.w1[i].shape
+                assert expert.linear_fc2.weight.shape == mega_layer.w2[i].shape
+                mega_layer.w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
+                mega_layer.w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
+            # shared expert: same SharedExpertMLP module, copy fc1/fc2
+            if mega_layer.shared_experts is not None:
+                se_ref, se_mega = moe_layer.shared_experts, mega_layer.shared_experts
+                se_mega.linear_fc1.weight.copy_(se_ref.linear_fc1.weight)
+                se_mega.linear_fc2.weight.copy_(se_ref.linear_fc2.weight)
         moe_layers.append(moe_layer)
         mega_layers.append(mega_layer)
     return moe_layers, mega_layers
@@ -160,8 +162,8 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
         store = dist.FileStore(self.file_name, self.world_size)
         dist.init_process_group(backend="nccl", world_size=self.world_size, rank=self.rank, store=store)
         set_args(_create_args())
-        # standalone harness has no Primus logger; attach a plain one so the
-        # adapter's log_rank_0 (enable_expert_bias warning) doesn't crash
+        # standalone harness has no Primus logger; attach a plain one so any
+        # log_rank_0 call in the code path doesn't crash
         import logging
 
         from primus.core.utils import logger as _primus_logger
@@ -198,7 +200,6 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
             moe_layer, mega_layer = moe_layers[0], mega_layers[0]
             moe_layer.train(True)
             mega_layer.train(True)
-            mega = mega_layer.mega_moe
             experts = moe_layer.experts.local_experts
             se = moe_layer.shared_experts
             seq, batch = 8192, 1
@@ -237,22 +238,26 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
                 _check(f"ga{step} dx", dx_cos[step])
 
             # accumulated per-weight grad parity: every trainable weight
-            dgate = _cosine(mega.gate_weight.grad, moe_layer.router.weight.grad)
+            dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
             _check("router", dgate)
-            dsw1 = _cosine(mega.shared_w1.grad, se.linear_fc1.weight.grad)
-            dsw2 = _cosine(mega.shared_w2.grad, se.linear_fc2.weight.grad)
+            dsw1 = _cosine(mega_layer.shared_experts.linear_fc1.weight.grad, se.linear_fc1.weight.grad)
+            dsw2 = _cosine(mega_layer.shared_experts.linear_fc2.weight.grad, se.linear_fc2.weight.grad)
             _check("shared dW1", dsw1)
             _check("shared dW2", dsw2)
             # routed experts: full w1/w2 grad tensors (norm-weighted over all local
             # experts); per-expert min is thin-token bf16 noise, informational only.
             ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
             ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
-            dW1 = _cosine(mega.w1.grad, ref_dw1)
-            dW2 = _cosine(mega.w2.grad, ref_dw2)
+            dW1 = _cosine(mega_layer.w1.grad, ref_dw1)
+            dW2 = _cosine(mega_layer.w2.grad, ref_dw2)
             _check("experts dW1", dW1)
             _check("experts dW2", dW2)
-            dw1_min = min(_cosine(mega.w1.grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
-            dw2_min = min(_cosine(mega.w2.grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
+            dw1_min = min(
+                _cosine(mega_layer.w1.grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts)
+            )
+            dw2_min = min(
+                _cosine(mega_layer.w2.grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts)
+            )
             self._rank0(
                 f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
                 f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
