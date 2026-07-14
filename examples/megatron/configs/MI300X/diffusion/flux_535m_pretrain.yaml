@@ -1,0 +1,170 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 535M Pretraining Configuration (Pre-encoded Data Mode)
+#
+# This config demonstrates Flux 535M training with pre-encoded features.
+# Pre-encoded mode is faster and recommended for production training.
+#
+# Usage:
+#   EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml \
+#   bash examples/run_pretrain.sh
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_535m_pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_535m.yaml
+
+    # Trainer class for diffusion models
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      # ============================================================================
+      # Model Configuration
+      # ============================================================================
+
+      model_type: diffusion_model
+
+      # ============================================================================
+      # Dataset Configuration — Synthetic / Mock Data (default)
+      # ============================================================================
+      #
+      # This 535M config defaults to in-memory synthetic data so it runs
+      # standalone for sanity checks, CI, and training-pipeline validation
+      # without a prepared Energon dataset. Samples are random tensors with
+      # Flux-correct shapes (latent_channels=16, T5 seq=512, CLIP pooled=768).
+      #
+      # To train on real data instead: set `mock_data: false` and point
+      # `data_path` at a prepared Energon dataset (see notes at the bottom).
+      mock_data: true
+      mock_dataset:
+        class: "primus.backends.megatron.data.synthetic.PreGeneratedMockFluxDataset"
+        params:
+          num_samples: 256         # In-memory synthetic samples (iterated cyclically)
+          image_size: 256          # 256 -> 32x32 latents (light/fast for testing)
+      # data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Batch configuration
+      micro_batch_size: 2          # Per-GPU batch size (adjust based on VRAM)
+      global_batch_size: 16        # Total batch size across all GPUs
+      seq_length: 4096             # Sequence length for latent features
+
+      # DataLoader settings (used only with real Energon data, i.e. mock_data: false)
+      num_workers: 4               # Number of data loading workers per GPU
+      dataloader_type: external    # Required for Energon dataloaders
+
+      # ============================================================================
+      # Training Parameters
+      # ============================================================================
+
+      # Total training steps
+      train_iters: 100000          # Total training iterations
+      eval_interval: 1000          # Evaluate every N steps
+      eval_iters: 50               # Number of evaluation iterations
+
+      # Logging
+      log_interval: 10             # Log every N steps
+      tensorboard_dir: output/tensorboard/flux_535m_pretrain
+      log_throughput: true
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+
+      # Checkpointing (disabled)
+      save_interval: 5000          # Save checkpoint every N steps
+      save: null
+      load: null                   # Path to checkpoint for resuming (optional)
+      finetune: false
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Precision
+      bf16: true                   # Use bfloat16 (recommended for AMD MI300X)
+      fp16: false
+
+      # ============================================================================
+      # Optimizer Configuration
+      # ============================================================================
+
+      # Optimizer
+      optimizer: adam
+      lr: 1.0e-4                   # Peak learning rate
+      min_lr: 1.0e-5               # Minimum learning rate
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+
+      # Gradient clipping
+      clip_grad: 1.0
+
+      # ============================================================================
+      # Learning Rate Scheduler
+      # ============================================================================
+
+      lr_decay_style: cosine
+      lr_warmup_iters: 1000        # Warmup iterations
+      lr_decay_iters: 100000       # Total decay steps (typically = train_iters)
+
+      # ============================================================================
+      # Distributed Training Configuration
+      # ============================================================================
+
+      # Parallelism settings (Flux 535M fits on 1 GPU, but can use DP for speed)
+      tensor_model_parallel_size: 1    # Tensor parallelism (no need for 535M)
+      pipeline_model_parallel_size: 1  # Pipeline parallelism
+
+      # Advanced settings
+      overlap_grad_reduce: true         # Overlap gradient communication
+      use_flash_attn: true              # Use Flash Attention 2
+      distributed_timeout_minutes: 60
+
+      # ============================================================================
+      # Seed and Reproducibility
+      # ============================================================================
+
+      seed: 42
+
+      # ============================================================================
+      # Monitoring and Logging
+      # ============================================================================
+
+      wandb_project: flux_535m_pretrain
+      wandb_exp_name: flux_535m_preencoded
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# Dataset Preparation:
+#   1. Prepare pre-encoded dataset:
+#      tools/docker/primus data diffusion-encoded \
+#        --source-type directory --input-dir /data/raw \
+#        --output-dir /data/encoded --model-path black-forest-labs/FLUX.1-dev
+#   2. Copy dataset template to output directory:
+#      cp primus/configs/data/megatron/diffusion/templates/dataset_preencoded.yaml \
+#         /data/encoded/dataset.yaml
+#   3. Run Energon indexing:
+#      energon prepare /data/encoded --num-workers 8
+#   4. Update data_path above to: /data/encoded/dataset.yaml
+#
+# For more information, see:
+#   - primus/configs/data/megatron/diffusion/README.md
+#   - examples/megatron/diffusion/README.md
+#
+# Single-node training (8 GPUs):
+#   EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml \
+#   GPUS_PER_NODE=8 bash examples/run_pretrain.sh
+#
+# Multi-node training (4 nodes, 8 GPUs each):
+#   EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml \
+#   NNODES=4 bash examples/run_slurm_pretrain.sh
+#

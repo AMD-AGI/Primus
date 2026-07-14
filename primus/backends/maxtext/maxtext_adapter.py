@@ -24,7 +24,7 @@ from typing import Any
 import primus.backends.maxtext.patches  # noqa: F401  # Register patches
 from primus.backends.maxtext.argument_builder import MaxTextConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 class MaxTextAdapter(BackendAdapter):

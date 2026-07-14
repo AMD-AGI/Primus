@@ -11,7 +11,7 @@ from megatron.core.dist_checkpointing.strategies.filesystem_async import (
     FileSystemWriterAsync,
 )
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class PrimusFileSystemWriterAsync(FileSystemWriterAsync):
