@@ -1,0 +1,377 @@
+[2026-07-13 21:55:48] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [main] Loaded config: /apps/gpuperf/vidgoyal/Primus/runner/.primus.yaml
+[2026-07-13 21:55:48] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [main] Would execute: bash /apps/gpuperf/vidgoyal/Primus/runner/primus-cli-direct.sh -- train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:48] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [main] Executing: bash /apps/gpuperf/vidgoyal/Primus/runner/primus-cli-direct.sh -- train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] -----------------------------------------------
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] primus-cli-direct.sh
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] -----------------------------------------------
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] PRE_PARSE_ARGS (runner options): 
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] PRIMUS_ARGS (python module args): train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] Combined args for second pass: -- train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] Loaded config: /apps/gpuperf/vidgoyal/Primus/runner/.primus.yaml
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== Training Cluster Info ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     MASTER_ADDR=localhost
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     MASTER_PORT=29501
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NNODES=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NODE_RANK=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     GPUS_PER_NODE=8
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== Python Path and Data Paths ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PRIMUS_PATH=/apps/gpuperf/vidgoyal/Primus
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PRIMUS_IMPORT_ROOT=/apps/gpuperf/vidgoyal/Primus
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     DATA_PATH=/data
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     HF_HOME=/data/huggingface
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PYTHONPATH=/apps/gpuperf/vidgoyal/Primus:/opt/venv/lib/python3.12/site-packages:/apps/gpuperf/vidgoyal/Primus:/apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM:/apps/gpuperf/vidgoyal/Primus:/apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM:/workspace/Primus:/workspace/Primus/third_party/Megatron-LM:/workspace/Primus:/workspace/Primus/third_party/Megatron-LM:/apps/gpuperf/vidgoyal/Primus:/apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM:/apps/gpuperf/vidgoyal/Primus:/apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM:
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== NCCL and Network Settings ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_DEBUG=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_CHECKS_DISABLE=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_IB_GID_INDEX=3
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_CROSS_NIC=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_IB_HCA=ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     IP_INTERFACE=fenic
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_SOCKET_IFNAME=fenic
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     GLOO_SOCKET_IFNAME=fenic
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== RCCL Settings ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     RCCL_MSCCL_ENABLE=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     RCCL_MSCCLPP_ENABLE=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     RCCL_MSCCLPP_FORCE_ENABLE=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     RCCL_MSCCLPP_THRESHOLD=1073741824
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== AMD GPU Optimizations ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     HSA_ENABLE_SDMA=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     HSA_NO_SCRATCH_RECLAIM=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== General Performance Tuning ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     GPU_MAX_HW_QUEUES=2
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     ENABLE_NUMA_BINDING=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     HSA_KERNARG_POOL_SIZE=12582912
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     CUDA_DEVICE_MAX_CONNECTIONS=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     TORCH_NCCL_HIGH_PRIORITY=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_PXN_DISABLE=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_P2P_NET_CHUNKSIZE=524288
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== Transformer Engine Optimizations ==========
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_USE_CAST_TRANSPOSE_TRITON=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_CK_USES_BWD_V3=1
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_DEBUG=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_DEBUG_LEVEL=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_FUSED_ATTN_LOG_CONFIG=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PATCH_TE_FLASH_ATTN=0
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PRIMUS_DETERMINISTIC=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NCCL_ALGO=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     NVTE_ALLOW_NONDETERMINISTIC_ALGO=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     ROCBLAS_DEFAULT_ATOMICS_MODE=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     TORCH_COMPILE_DISABLE=<unset>
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO]     PRIMUS_TURBO_DEEPEP_TIMEOUT=600
+
+[2026-07-13 21:55:49] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] === Loading Primus Environment Configuration ===
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Detected GPU model: MI355X
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Loading GPU-specific configuration: /apps/gpuperf/vidgoyal/Primus/runner/helpers/envs/MI355X.sh
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Loading MI355X-specific optimizations...
+
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] === Validating Configuration ===
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ✓ Configuration validation passed
+
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] === Environment Configuration Complete ===
+
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Detected hooks directory: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/00_rebuild_primus_turbo.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/00_rebuild_primus_turbo.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/02_rebuild_bnxt.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/02_rebuild_bnxt.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_detect_nccl_ib_tc.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_detect_nccl_ib_tc.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_enable_ainic.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_enable_ainic.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_enable_aiter.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] exported env from hook: AITER_LOG_LEVEL=ERROR
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/03_enable_aiter.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/04_rebuild_uep.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/04_rebuild_uep.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_check_primus_requirements.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+
+[WARN] Primus requirements not satisfied. Missing packages:
+         - git+https://github.com/mlcommons/logging.git@6.0.0-rc5
+
+       To install:  pip install -r /apps/gpuperf/vidgoyal/Primus/requirements.txt
+
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_check_primus_requirements.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_deterministic.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_deterministic.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_using_uep.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] exported env from hook: PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/05_using_uep.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/06_enable_sdma_all_gather.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/06_enable_sdma_all_gather.sh finished in 0s
+[2026-07-13 21:55:55] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/06_fix_aiter_asm_dir.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[fix_aiter_asm_dir] No symlinks needed (already present or gfx950/ not found)
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/06_fix_aiter_asm_dir.sh finished in 14s
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/10_auto_nccl_net.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/10_auto_nccl_net.sh finished in 0s
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Detected hooks directory: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/prepare_experiment.sh train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] prepare_experiment.sh: patch args file: /tmp/primus_patch_args.txt
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] prepare_experiment.sh: executing shell hook 00_install_requirements.sh
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Using pip cache: ./data//pip_cache
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Installing Megatron dependencies...
+Requirement already satisfied: flash-linear-attention~=0.4.0 in /opt/venv/lib/python3.12/site-packages (from -r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.4.2)
+Requirement already satisfied: causal-conv1d~=1.5 in /opt/venv/lib/python3.12/site-packages (from -r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 4)) (1.5.0.post8)
+Requirement already satisfied: fla-core==0.4.2 in /opt/venv/lib/python3.12/site-packages (from flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.4.2)
+Requirement already satisfied: transformers in /opt/venv/lib/python3.12/site-packages (from flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (4.55.0)
+Requirement already satisfied: torch in /opt/venv/lib/python3.12/site-packages (from fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2.12.0+rocm7.15.0a20260706)
+Requirement already satisfied: einops in /opt/venv/lib/python3.12/site-packages/einops-0.9.0.dev0-py3.12.egg (from fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.9.0.dev0)
+Requirement already satisfied: packaging in /opt/venv/lib/python3.12/site-packages (from causal-conv1d~=1.5->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 4)) (25.0)
+Requirement already satisfied: ninja in /opt/venv/lib/python3.12/site-packages (from causal-conv1d~=1.5->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 4)) (1.11.1.3)
+Requirement already satisfied: filelock in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.29.1)
+Requirement already satisfied: typing-extensions>=4.10.0 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (4.16.0)
+Requirement already satisfied: setuptools<82 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (75.1.0)
+Requirement already satisfied: sympy>=1.13.3 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (1.14.0)
+Requirement already satisfied: networkx>=2.5.1 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.6.1)
+Requirement already satisfied: jinja2 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.1.6)
+Requirement already satisfied: fsspec>=0.8.5 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2025.3.0)
+Requirement already satisfied: rocm==7.15.0a20260706 in /opt/venv/lib/python3.12/site-packages (from rocm[libraries]==7.15.0a20260706->torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (7.15.0a20260706)
+Requirement already satisfied: triton==3.7.0+gitb4e20bbe.rocm7.15.0a20260706 in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.7.0+gitb4e20bbe.rocm7.15.0a20260706)
+Requirement already satisfied: rocm-bootstrap in /opt/venv/lib/python3.12/site-packages (from torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.1.0)
+Requirement already satisfied: rocm-sdk-core==7.15.0a20260706 in /opt/venv/lib/python3.12/site-packages (from rocm==7.15.0a20260706->rocm[libraries]==7.15.0a20260706->torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (7.15.0a20260706)
+Requirement already satisfied: rocm-sdk-libraries==7.15.0a20260706 in /opt/venv/lib/python3.12/site-packages (from rocm[libraries]==7.15.0a20260706->torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (7.15.0a20260706)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /opt/venv/lib/python3.12/site-packages (from sympy>=1.13.3->torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /opt/venv/lib/python3.12/site-packages (from jinja2->torch->fla-core==0.4.2->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.0.3)
+Requirement already satisfied: huggingface-hub<1.0,>=0.34.0 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.36.2)
+Requirement already satisfied: numpy>=1.17 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2.5.1)
+Requirement already satisfied: pyyaml>=5.1 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (6.0.3)
+Requirement already satisfied: regex!=2019.12.17 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2026.6.28)
+Requirement already satisfied: requests in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2.34.2)
+Requirement already satisfied: tokenizers<0.22,>=0.21 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.21.4)
+Requirement already satisfied: safetensors>=0.4.3 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (0.8.0)
+Requirement already satisfied: tqdm>=4.27 in /opt/venv/lib/python3.12/site-packages (from transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (4.67.3)
+Requirement already satisfied: hf-xet<2.0.0,>=1.1.3 in /opt/venv/lib/python3.12/site-packages (from huggingface-hub<1.0,>=0.34.0->transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (1.5.1)
+Requirement already satisfied: charset_normalizer<4,>=2 in /opt/venv/lib/python3.12/site-packages (from requests->transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.4.9)
+Requirement already satisfied: idna<4,>=2.5 in /opt/venv/lib/python3.12/site-packages (from requests->transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (3.18)
+Requirement already satisfied: urllib3<3,>=1.26 in /opt/venv/lib/python3.12/site-packages (from requests->transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2.7.0)
+Requirement already satisfied: certifi>=2023.5.7 in /opt/venv/lib/python3.12/site-packages (from requests->transformers->flash-linear-attention~=0.4.0->-r /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/requirements-megatron.txt (line 3)) (2026.6.17)
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [SUCCESS] Megatron dependencies installed
+[2026-07-13 21:56:09] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] prepare_experiment.sh: framework=megatron script=/apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/megatron/prepare.py
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] ========== Prepare Megatron dataset ==========
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] BACKEND_PATH None
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] PRIMUS_PATH is set to: /apps/gpuperf/vidgoyal/Primus
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] DATA_PATH is set to: /apps/gpuperf/vidgoyal/Primus/data
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] EXP is set to: /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] PATCH-ARGS is set to: /tmp/primus_patch_args.txt (unused in megatron prepare hook)
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] No backend_path provided, falling back to: /apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM
+[NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] Building Megatron dataset helper in /apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM/megatron/core/datasets
+make: Nothing to be done for 'default'.
+[Primus] candidate_paths: ['/apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM', '/root/.cache/Primus/third_party/Megatron-LM']
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] exported env from hook: TE_HIPBLASLT_TUNING_RUN_COUNT=0
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] exported env from hook: TE_HIPBLASLT_TUNING_ALGO_COUNT=0
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] extra arg from hook: --backend_path /apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/prepare_experiment.sh finished in 1s
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Executing hook: /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/utils.py train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] Hook /apps/gpuperf/vidgoyal/Primus/runner/helpers/hooks/train/pretrain/utils.py finished in 0s
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [Hooks] All hooks executed successfully
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] Default script 'primus/cli/main.py' not found in CWD; using installed module 'python -m primus.cli.main'
+[2026-07-13 21:56:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] NUMA binding: AUTO (default OFF)
+
+==========================================
+  Primus Direct Launch Configuration
+==========================================
+  Run Mode        : torchrun
+  Script Path     : -m primus.cli.main
+  Config File     : <none>
+  Log File        : logs/log_20260713_215549.txt
+  NUMA Binding    : auto
+  Patch Scripts   : <none>
+  Primus Args     : train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml --backend_path /apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM
+
+  Distributed Settings:
+    NNODES          : 1
+    NODE_RANK       : 0
+    GPUS_PER_NODE   : 8
+    MASTER_ADDR     : localhost
+    MASTER_PORT     : 29501
+
+========== System Information ==========
+    Hostname: smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com
+    Kernel: 6.8.0-107-generic
+    CPUs: 1
+    Memory: 3023 GB
+    Container: Yes
+    Slurm Job: No
+    GPUs: 8
+  Full Command:
+    Executing: torchrun --nproc_per_node 8 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 29501 --local-ranks-filter 0 -m primus.cli.main train pretrain --config /apps/gpuperf/vidgoyal/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml --backend_path /apps/gpuperf/vidgoyal/Primus/third_party/Megatron-LM 2>&1 | tee logs/log_20260713_215549.txt
+
+==========================================
+  
+==========================================
+Created path: './output/amd/root/gpt_oss_20b'
+[Primus:Env] HF_HOME already set: /data/huggingface
+[Primus:Env] rank=0, world_size=8, local_rank=0, master=localhost:29501
+:::MLLOG {"namespace": "", "time_ms": 1783979788475, "event_type": "POINT_IN_TIME", "key": "cache_clear", "value": true, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_logger.py", "lineno": 44}}
+:::MLLOG {"namespace": "", "time_ms": 1783979788476, "event_type": "POINT_IN_TIME", "key": "init_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_logger.py", "lineno": 44}}
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_7
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_6
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_5
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_4
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_3
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_2
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_1
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_0
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_7
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_6
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_5
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_4
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_3
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_2
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_1
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_0
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_7
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_6
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_5
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_4
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_3
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_2
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_1
+libibverbs: Warning: Driver ionic does not support the kernel ABI of 4 (supports 1 to 1) for device /sys/class/infiniband/ionic_0
+:::MLLOG {"namespace": "", "time_ms": 1783979802622, "event_type": "POINT_IN_TIME", "key": "global_batch_size", "value": 32, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802622, "event_type": "POINT_IN_TIME", "key": "gradient_accumulation_steps", "value": 1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "max_sequence_length", "value": 8192, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "train_samples", "value": 38400000, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "eval_samples", "value": 1024, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "seed", "value": 1234, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "init_checkpoint_step", "value": 0, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_name", "value": "adamw", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_base_learning_rate", "value": 0.0008, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_adamw_beta_1", "value": 0.9, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_adamw_beta_2", "value": 0.95, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_adamw_epsilon", "value": 1e-05, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_adamw_weight_decay", "value": 0.1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_gradient_clip_norm", "value": 1.0, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_end_learning_rate", "value": 8e-05, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_learning_rate_warmup_steps", "value": 128, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_learning_rate_decay_steps", "value": 1199872, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "opt_learning_rate_decay_schedule", "value": "cosine with linear warmup", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "max_steps", "value": 1200000, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "submission_benchmark", "value": "gpt_oss_20b", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "submission_division", "value": "closed", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "submission_status", "value": "", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "submission_org", "value": "AMD", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "submission_platform", "value": "MI355X", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "tensor_parallelism", "value": 1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "pipeline_parallelism", "value": 1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "context_parallelism", "value": 1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "expert_parallelism", "value": 1, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "micro_batch_size", "value": 4, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "config_filename", "value": "config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "POINT_IN_TIME", "key": "lowest_numerical_precision_linear", "value": "fp8", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 165}}
+:::MLLOG {"namespace": "", "time_ms": 1783979802623, "event_type": "INTERVAL_END", "key": "init_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 166}}
+/app/TransformerEngine/transformer_engine/common/normalization/common_hip.h:308 in function getKernel: Falling back to general normalization kernel because no tuned kernel is available for this config. norm_type=RMSNorm, hidden_size=2880, wtype=bf16, itype=bf16, otype=bf16, ctype=fp32
+/app/TransformerEngine/transformer_engine/common/normalization/common_hip.h:308 in function getKernel: Falling back to general normalization kernel because no tuned kernel is available for this config. norm_type=RMSNorm, hidden_size=2880, wtype=bf16, itype=bf16, otype=bf16, ctype=fp32
+:::MLLOG {"namespace": "", "time_ms": 1783979839756, "event_type": "INTERVAL_START", "key": "run_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 195}}
+:::MLLOG {"namespace": "", "time_ms": 1783979839756, "event_type": "INTERVAL_START", "key": "epoch_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 197, "samples_count": 0}}
+:::MLLOG {"namespace": "", "time_ms": 1783979839756, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 198, "samples_count": 0}}
+USDT:2026-07-13 21:57:40 154181:154181 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-07-13 21:58:05 154181:154181 ActivityProfilerController.cpp:455] profiler_stop
+[rank0]:[W713 21:58:11.929604404 collection.cpp:1182] Warning: ROCTracer produced duplicate flow start: 37457 (function operator())
+:::MLLOG {"namespace": "", "time_ms": 1783980355039, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 12288}}
+:::MLLOG {"namespace": "", "time_ms": 1783980355040, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 12288}}
+:::MLLOG {"namespace": "", "time_ms": 1783980368796, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 5.263166904449463, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 12288}}
+:::MLLOG {"namespace": "", "time_ms": 1783980368797, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 12288}}
+:::MLLOG {"namespace": "", "time_ms": 1783980368797, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 12288}}
+:::MLLOG {"namespace": "", "time_ms": 1783980837954, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 24576}}
+:::MLLOG {"namespace": "", "time_ms": 1783980837955, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 24576}}
+:::MLLOG {"namespace": "", "time_ms": 1783980850208, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 4.518275737762451, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 24576}}
+:::MLLOG {"namespace": "", "time_ms": 1783980850208, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 24576}}
+:::MLLOG {"namespace": "", "time_ms": 1783980850208, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 24576}}
+:::MLLOG {"namespace": "", "time_ms": 1783981319357, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 36864}}
+:::MLLOG {"namespace": "", "time_ms": 1783981319357, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 36864}}
+:::MLLOG {"namespace": "", "time_ms": 1783981331716, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 4.237526893615723, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 36864}}
+:::MLLOG {"namespace": "", "time_ms": 1783981331716, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 36864}}
+:::MLLOG {"namespace": "", "time_ms": 1783981331716, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 36864}}
+:::MLLOG {"namespace": "", "time_ms": 1783981800940, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 49152}}
+:::MLLOG {"namespace": "", "time_ms": 1783981800941, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 49152}}
+:::MLLOG {"namespace": "", "time_ms": 1783981813298, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 4.031311511993408, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 49152}}
+:::MLLOG {"namespace": "", "time_ms": 1783981813299, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 49152}}
+:::MLLOG {"namespace": "", "time_ms": 1783981813299, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 49152}}
+:::MLLOG {"namespace": "", "time_ms": 1783982281823, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 61440}}
+:::MLLOG {"namespace": "", "time_ms": 1783982281824, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 61440}}
+:::MLLOG {"namespace": "", "time_ms": 1783982294208, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.8796048164367676, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 61440}}
+:::MLLOG {"namespace": "", "time_ms": 1783982294208, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 61440}}
+:::MLLOG {"namespace": "", "time_ms": 1783982294208, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 61440}}
+:::MLLOG {"namespace": "", "time_ms": 1783982763675, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 73728}}
+:::MLLOG {"namespace": "", "time_ms": 1783982763676, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 73728}}
+:::MLLOG {"namespace": "", "time_ms": 1783982775939, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.7690651416778564, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 73728}}
+:::MLLOG {"namespace": "", "time_ms": 1783982775940, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 73728}}
+:::MLLOG {"namespace": "", "time_ms": 1783982775940, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 73728}}
+:::MLLOG {"namespace": "", "time_ms": 1783983244440, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 86016}}
+:::MLLOG {"namespace": "", "time_ms": 1783983244441, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 86016}}
+:::MLLOG {"namespace": "", "time_ms": 1783983256795, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.6936755180358887, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 86016}}
+:::MLLOG {"namespace": "", "time_ms": 1783983256796, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 86016}}
+:::MLLOG {"namespace": "", "time_ms": 1783983256796, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 86016}}
+:::MLLOG {"namespace": "", "time_ms": 1783983728879, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 98304}}
+:::MLLOG {"namespace": "", "time_ms": 1783983728880, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 98304}}
+:::MLLOG {"namespace": "", "time_ms": 1783983741265, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.6328928470611572, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 98304}}
+:::MLLOG {"namespace": "", "time_ms": 1783983741266, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 98304}}
+:::MLLOG {"namespace": "", "time_ms": 1783983741266, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 98304}}
+:::MLLOG {"namespace": "", "time_ms": 1783984211111, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 110592}}
+:::MLLOG {"namespace": "", "time_ms": 1783984211112, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 110592}}
+:::MLLOG {"namespace": "", "time_ms": 1783984223534, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.5838422775268555, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 110592}}
+:::MLLOG {"namespace": "", "time_ms": 1783984223534, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 110592}}
+:::MLLOG {"namespace": "", "time_ms": 1783984223534, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 110592}}
+:::MLLOG {"namespace": "", "time_ms": 1783984693502, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 122880}}
+:::MLLOG {"namespace": "", "time_ms": 1783984693503, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 122880}}
+:::MLLOG {"namespace": "", "time_ms": 1783984705845, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.540584087371826, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 122880}}
+:::MLLOG {"namespace": "", "time_ms": 1783984705845, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 122880}}
+:::MLLOG {"namespace": "", "time_ms": 1783984705846, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 122880}}
+:::MLLOG {"namespace": "", "time_ms": 1783985174644, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 135168}}
+:::MLLOG {"namespace": "", "time_ms": 1783985174645, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 135168}}
+:::MLLOG {"namespace": "", "time_ms": 1783985187017, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.50659441947937, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 135168}}
+:::MLLOG {"namespace": "", "time_ms": 1783985187018, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 135168}}
+:::MLLOG {"namespace": "", "time_ms": 1783985187018, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 135168}}
+:::MLLOG {"namespace": "", "time_ms": 1783985657618, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 147456}}
+:::MLLOG {"namespace": "", "time_ms": 1783985657619, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 147456}}
+:::MLLOG {"namespace": "", "time_ms": 1783985669990, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.4729714393615723, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 147456}}
+:::MLLOG {"namespace": "", "time_ms": 1783985669990, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 147456}}
+:::MLLOG {"namespace": "", "time_ms": 1783985669990, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 147456}}
+:::MLLOG {"namespace": "", "time_ms": 1783986140575, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 159744}}
+:::MLLOG {"namespace": "", "time_ms": 1783986140576, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 159744}}
+:::MLLOG {"namespace": "", "time_ms": 1783986152917, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.4490013122558594, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 159744}}
+:::MLLOG {"namespace": "", "time_ms": 1783986152917, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 159744}}
+:::MLLOG {"namespace": "", "time_ms": 1783986152917, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 159744}}
+:::MLLOG {"namespace": "", "time_ms": 1783986621663, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 172032}}
+:::MLLOG {"namespace": "", "time_ms": 1783986621664, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 172032}}
+:::MLLOG {"namespace": "", "time_ms": 1783986633905, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.427293062210083, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 172032}}
+:::MLLOG {"namespace": "", "time_ms": 1783986633905, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 172032}}
+:::MLLOG {"namespace": "", "time_ms": 1783986633905, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 172032}}
+:::MLLOG {"namespace": "", "time_ms": 1783987103349, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 184320}}
+:::MLLOG {"namespace": "", "time_ms": 1783987103350, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 184320}}
+:::MLLOG {"namespace": "", "time_ms": 1783987115787, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.403501510620117, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 184320}}
+:::MLLOG {"namespace": "", "time_ms": 1783987115788, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 184320}}
+:::MLLOG {"namespace": "", "time_ms": 1783987115788, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 184320}}
+:::MLLOG {"namespace": "", "time_ms": 1783987583716, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 196608}}
+:::MLLOG {"namespace": "", "time_ms": 1783987583716, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 196608}}
+:::MLLOG {"namespace": "", "time_ms": 1783987596037, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.379060745239258, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 196608}}
+:::MLLOG {"namespace": "", "time_ms": 1783987596037, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 196608}}
+:::MLLOG {"namespace": "", "time_ms": 1783987596037, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 196608}}
+:::MLLOG {"namespace": "", "time_ms": 1783988064112, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 208896}}
+:::MLLOG {"namespace": "", "time_ms": 1783988064113, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 208896}}
+:::MLLOG {"namespace": "", "time_ms": 1783988076475, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.3609695434570312, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 208896}}
+:::MLLOG {"namespace": "", "time_ms": 1783988076475, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 208896}}
+:::MLLOG {"namespace": "", "time_ms": 1783988076475, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 208896}}
+:::MLLOG {"namespace": "", "time_ms": 1783988545861, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 221184}}
+:::MLLOG {"namespace": "", "time_ms": 1783988545862, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 221184}}
+:::MLLOG {"namespace": "", "time_ms": 1783988558081, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.3435428142547607, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 221184}}
+:::MLLOG {"namespace": "", "time_ms": 1783988558081, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 221184}}
+:::MLLOG {"namespace": "", "time_ms": 1783988558081, "event_type": "INTERVAL_START", "key": "block_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 360, "samples_count": 221184}}
+:::MLLOG {"namespace": "", "time_ms": 1783989027071, "event_type": "INTERVAL_END", "key": "block_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 318, "samples_count": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989027072, "event_type": "INTERVAL_START", "key": "eval_start", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 321, "samples_count": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039436, "event_type": "POINT_IN_TIME", "key": "eval_accuracy", "value": 3.3296899795532227, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 336, "samples_count": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039453, "event_type": "INTERVAL_END", "key": "eval_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 355, "samples_count": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039476, "event_type": "INTERVAL_END", "key": "epoch_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 211, "samples_count": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039476, "event_type": "INTERVAL_END", "key": "run_stop", "value": null, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 216, "samples_count": 233472, "status": "success"}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039476, "event_type": "POINT_IN_TIME", "key": "run_duration", "value": "9199.68s -> 153.33 minutes", "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 237, "samples": 233472}}
+:::MLLOG {"namespace": "", "time_ms": 1783989039476, "event_type": "POINT_IN_TIME", "key": "overall_throughput", "value": 25.38, "metadata": {"file": "/apps/gpuperf/vidgoyal/Primus/primus/backends/megatron/mlperf/mlperf_pretrain_trainer.py", "lineno": 242, "samples": 233472}}
+[rank0]:[W714 00:30:52.164838118 ProcessGroupNCCL.cpp:1647] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[2026-07-14 00:31:10] [NODE-0(smci355-ccs-aus-n01-29.prov.aus.ccs.cpe.ice.amd.com)] [INFO] [direct] torchrun finished successfully (code 0)

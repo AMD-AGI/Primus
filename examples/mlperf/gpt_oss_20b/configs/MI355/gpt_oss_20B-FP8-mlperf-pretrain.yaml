@@ -1,0 +1,222 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:gpt_oss_20b}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:gpt_oss_20B}.yaml
+    overrides:
+
+      # Activate the migrated MLPerf pretrain trainer (mllog + MLPerf hooks).
+      stage: mlperf_pretrain
+
+      # tokenizer
+      tokenizer_type: Llama3Tokenizer
+      tokenizer_model: ${MODEL:meta-llama/Llama-3.1-8B}
+
+      # model
+      num_layers: 24
+      hidden_size: 2880
+      ffn_hidden_size: 2880
+      num_attention_heads: 64
+      num_query_groups: 8  # Group Query Attention (GQA) - matches HF num_key_value_heads
+      num_experts: 32
+      activation_func: swiglu  # SiLU activation (matches HF hidden_act: "silu")
+
+      # rotary
+      position_embedding_type: rope
+      rotary_base: 150000
+
+      # mixed-precision
+      attention_softmax_in_fp32: false
+      grad_reduce_in_bf16: ${PRIMUS_GRAD_REDUCE_IN_BF16:true}
+
+      # log
+      wandb_project: "Primus_GPT_OSS_20B"
+      stderr_sink_level: ERROR
+      log_interval: 999999
+
+      # debug
+      # moe_router_force_load_balancing: true
+      # log_avg_skip_iterations: 2
+      # log_avg_reset_interval: 50
+
+      # profile
+      profile: ${PRIMUS_PROFILE:false}
+      use_pytorch_profiler: ${PRIMUS_PROFILE:false}
+      profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
+      profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
+      profile_ranks: [0,1,2,3,4,5,6,7]
+
+      # enable fp8 training
+      fp8: e4m3
+      fp8_recipe: tensorwise
+      clip_grad: 1.0  # Gradient clipping (already default, but explicit)
+      check_for_nan_in_loss_and_grad: false
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:1200000}
+      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:2}
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:8192}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
+      seed: ${SEED:1234}  # Random seed for reproducibility
+      lr: ${PRIMUS_LR:8.0e-4}  # Reduced from 8e-4 for FP8 stability
+      min_lr: ${PRIMUS_MIN_LR:8.0e-5}  # Set to 10% of max LR
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:128}
+      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:1199872}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      optimizer: adam
+      use_distributed_optimizer: true # use distributed optimizer
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-5
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+      layernorm_epsilon: 1.0e-05  # RMSNorm epsilon (matches HF rms_norm_eps)
+
+      # Dropout (disabled for training)
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      ddp_num_buckets: 8
+      ddp_average_in_collective: true
+
+      # data
+      mock_data: false
+      num_workers: ${PRIMUS_NUM_WORKERS:0}
+      train_data_path: "10 /apps/gpuperf/vidgoyal/data/c4-train.en_6_text_document"
+      valid_data_path: "/apps/gpuperf/vidgoyal/data/c4-validation-91205-samples.en_text_document"
+      test_data_path: "/apps/gpuperf/vidgoyal/data/c4-validation-91205-samples.en_text_document"
+      # Avoid copying a dense (B, 1, S, S) CPU attention mask every step.
+      # TE receives causal/sliding-window metadata from attn_mask_type + window_size.
+      # Use numeric 0/1 because Primus env expansion only type-casts numbers.
+      create_attention_mask_in_dataloader: ${PRIMUS_CREATE_ATTENTION_MASK_IN_DATALOADER:0}
+
+      # fusion
+      moe_permute_fusion: true
+      gradient_accumulation_fusion: true
+      moe_use_legacy_grouped_gemm: false # Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True
+      moe_use_fused_router_with_aux_score: true
+      multi_latent_attention: false # Flag config.ENABLE_EXPERIMENTAL not enabled
+      apply_rope_fusion: true
+
+
+      # sliding window attention (GPT-OSS-20B model definition; matches HF sliding_window: 128)
+      # use_turbo_attention is false so non-turbo attention (which supports sliding window) is used.
+      # Pattern: alternating sliding_attention (1) and full_attention (0) for 24 layers
+      # window_size must be a tuple (left_window, right_window) for Transformer Engine
+      # For causal attention: left = past tokens, right = 0 (no future tokens)
+      # HF sliding_window: 128 means 128 past tokens, so use (128, 0)
+      window_size: [128, 0]  # Left window: 128 past tokens, Right: 0 (causal)
+      window_attn_skip_freq: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+
+      # MoE settings
+      moe_apply_probs_on_input: false
+      moe_aux_loss_coeff: 0.0 #0.9
+      moe_deepep_num_sms: 20
+      moe_enable_deepep: false
+      moe_expert_capacity_factor: null
+      moe_extended_tp: false
+      moe_ffn_hidden_size: 2880
+      moe_flex_dispatcher_backend: deepep
+      moe_grouped_gemm: true
+      moe_hybridep_num_sms: 16
+      moe_input_jitter_eps: null
+      moe_latent_size: null
+      moe_layer_freq: 1
+      moe_layer_recompute: false
+      moe_pad_expert_input_to_capacity: false
+      moe_per_layer_logging: false
+      moe_router_bias_update_rate: 0.001
+      moe_router_dtype: fp32 # DeepEP only supports float32 probs
+      moe_router_enable_expert_bias: false
+      moe_router_force_load_balancing: false
+      moe_router_fusion: true
+      moe_router_group_topk: null
+      moe_router_load_balancing_type: none
+      moe_router_num_groups: null
+      moe_router_padding_for_fp8: false
+      moe_router_padding_for_quantization: false
+      moe_router_pre_softmax: false
+      moe_router_score_function: softmax
+      moe_router_topk: 4
+      moe_router_topk_limited_devices: null
+      moe_router_topk_scaling_factor: null
+      moe_shared_expert_gate: false
+      moe_shared_expert_intermediate_size: null
+      moe_shared_expert_overlap: false
+      moe_token_dispatcher_type: alltoall
+      moe_token_drop_policy: probs
+      moe_token_dropping: false
+      moe_z_loss_coeff: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 100000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      exit_on_missing_checkpoint: false
+      ckpt_format: torch
+      eval_iters: ${EVAL_ITERS:64}  # eval_samples = eval_iters * GBS = 1024; set EVAL_ITERS in config shell (1024/GBS).
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:768}
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
+      use_turbo_fused_act_with_probs : true
+      # Pad tokens-per-expert so the fp8 grouped GEMM path skips the buggy
+      # quantization_padding branch in PrimusGroupedMLP.forward (experts.py:97-109),
+      # which yields NaN with recompute. Not auto-enabled here because
+      # turbo_sync_free_moe_stage=0 (it is only auto-set for sync-free stages 1-3).
+      use_turbo_permute_padding: true
+
+      # deepep
+      use_turbo_deepep: false
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 0-3, 0 means not use sync-free moe
+      # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 0
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # tensorboard logging, set 'disable_tensorboard: false' to enable tensorboard logging
+      disable_tensorboard: true
+      tensorboard_dir: /workspace/code/tensorboard
+      tensorboard_log_interval: 1
+      tensorboard_queue_size: 1000
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_validation_ppl_to_tensorboard: true
+      log_memory_to_tensorboard: true
+      log_world_size_to_tensorboard: true
+      log_loss_scale_to_tensorboard: true
