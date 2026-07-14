@@ -93,6 +93,7 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     load_flydsl_attention_backends,
     load_gluon_attention_backends,
     load_gluon_v2_attention_backends,
+    load_gluon_v3_attention_backends,
     load_turbo_attention_backends,
     v4_attention_v1,
     v4_attention_v2,
@@ -691,7 +692,16 @@ class DeepseekV4Attention(MLASelfAttention):
         # kernel; ``use_v4_csa_attention_backend`` selects the CSA (cr=4) kernel.
         # ``use_turbo_attention`` (built as ``core_attention`` below) still takes
         # precedence for the dense path when it can be built.
-        _ATTN_BACKENDS = ("eager", "triton_v1", "triton_v2", "gluon", "gluon_v2", "flydsl_v1", "turbo")
+        _ATTN_BACKENDS = (
+            "eager",
+            "triton_v1",
+            "triton_v2",
+            "gluon",
+            "gluon_v2",
+            "gluon_v3",
+            "flydsl_v1",
+            "turbo",
+        )
         _CSA_BACKENDS = (
             "eager",
             "triton_v0",
@@ -699,6 +709,7 @@ class DeepseekV4Attention(MLASelfAttention):
             "triton_v2",
             "gluon",
             "gluon_v2",
+            "gluon_v3",
             "flydsl_v0",
             "flydsl_v1",
             "turbo",
@@ -735,6 +746,13 @@ class DeepseekV4Attention(MLASelfAttention):
         if "gluon_v2" in (self._attn_backend, self._csa_backend):
             _require_gfx950()
             self._v4_attention_gluon_v2, self._v4_csa_attention_gluon_v2 = load_gluon_v2_attention_backends()
+
+        # gluon_v3 (3rd-gen optimized gluon fwd+bwd) — same gfx950-only lazy-load contract.
+        self._v4_attention_gluon_v3 = None
+        self._v4_csa_attention_gluon_v3 = None
+        if "gluon_v3" in (self._attn_backend, self._csa_backend):
+            _require_gfx950()
+            self._v4_attention_gluon_v3, self._v4_csa_attention_gluon_v3 = load_gluon_v3_attention_backends()
 
         # flydsl_v1 (native FlyDSL MFMA) is likewise a gfx950/CDNA4-only backend with
         # a hard `flydsl` pip dependency; load + arch-validate only when selected.
@@ -1333,6 +1351,19 @@ class DeepseekV4Attention(MLASelfAttention):
                 training=self.training,
                 scale=self._attention_scale(),
             )
+        if be == "gluon_v3":
+            return self._v4_csa_attention_gluon_v3(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                pool,
+                topk_idxs=topk_idxs,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
         if be == "turbo":
             return self._v4_csa_attention_turbo(
                 q_bh,
@@ -1445,6 +1476,19 @@ class DeepseekV4Attention(MLASelfAttention):
             )
         if be == "gluon_v2":
             return self._v4_attention_gluon_v2(
+                q_bh,
+                k,
+                v,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                additive_mask=additive_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+                hca_local_seqlen=hca_local_seqlen,
+            )
+        if be == "gluon_v3":
+            return self._v4_attention_gluon_v3(
                 q_bh,
                 k,
                 v,
