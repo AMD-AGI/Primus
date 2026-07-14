@@ -33,8 +33,7 @@ def _turbo_grouped_gemm_on_device(ctx: PatchContext) -> bool:
     except Exception:
         return False
     return bool(
-        getattr(args, "use_turbo_grouped_mlp", False)
-        or getattr(args, "use_turbo_grouped_gemm", False)
+        getattr(args, "use_turbo_grouped_mlp", False) or getattr(args, "use_turbo_grouped_gemm", False)
     )
 
 

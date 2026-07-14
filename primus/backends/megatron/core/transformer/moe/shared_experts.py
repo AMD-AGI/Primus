@@ -86,8 +86,6 @@ class PrimusSharedExpertMLP(SharedExpertMLP):
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with torch.cuda.stream(self.stream):
             # [s, b, 4 * h/p]
-            intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
-                self.cached_fc1_input
-            )
+            intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(self.cached_fc1_input)
             self.cached_fc1_input = None
             self.cached_fc2_input = self._fused_swiglu(intermediate_parallel, bias_parallel)

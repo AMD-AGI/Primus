@@ -19,9 +19,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import torch
-from packaging import version
-
 from megatron.core.utils import null_decorator
+from packaging import version
 
 try:
     import triton
