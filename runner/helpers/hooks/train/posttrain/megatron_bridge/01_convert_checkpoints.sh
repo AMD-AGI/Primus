@@ -166,8 +166,15 @@ resolve_pretrained_checkpoint() {
     printf '%s' "${base}"
 }
 
-# Check if Megatron checkpoint already exists
-if [[ -d "$MEGATRON_PATH" ]]; then
+megatron_checkpoint_valid() {
+    local ckpt_root="$1"
+    [[ -f "${ckpt_root}/latest_train_state.pt" ]] && return 0
+    [[ -f "${ckpt_root}/latest_checkpointed_iteration.txt" ]] && return 0
+    return 1
+}
+
+# Check if Megatron checkpoint already exists and is loadable.
+if [[ -d "$MEGATRON_PATH" ]] && megatron_checkpoint_valid "${MEGATRON_PATH}"; then
     LOG_INFO_RANK0 "Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
     CKPT_PATH="$(resolve_pretrained_checkpoint "${MEGATRON_PATH}")"
     echo "extra.pretrained_checkpoint=${CKPT_PATH}"
@@ -175,6 +182,11 @@ if [[ -d "$MEGATRON_PATH" ]]; then
     echo "env.NVTE_FUSED_ATTN=1"
     echo "env.NVTE_UNFUSED_ATTN=0"
     exit 0
+fi
+
+if [[ -d "$MEGATRON_PATH" ]]; then
+    LOG_WARN "[WARNING] ${MEGATRON_PATH} exists but is missing latest_train_state.pt / latest_checkpointed_iteration.txt; re-converting"
+    rm -f "${MEGATRON_PATH}.done" "${MEGATRON_PATH}.converting.lock"
 fi
 
 # Convert checkpoint (only on rank 0, others wait)
