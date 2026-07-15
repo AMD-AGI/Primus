@@ -696,6 +696,44 @@ def _add_inference_args(parser):
         help="DES: also sweep offered load (fractions of max-sustainable rate) and "
         "emit a throughput-vs-latency curve (p50/p99 TTFT & TPOT per load).",
     )
+    serv.add_argument(
+        "--des-burstiness",
+        type=float,
+        default=None,
+        help="DES: gamma-arrival shape for --arrival-model poisson. 1.0 = Poisson "
+        "(default), <1 = burstier, >1 = smoother/more regular.",
+    )
+    serv.add_argument(
+        "--des-range-ratio",
+        type=float,
+        default=None,
+        help="DES: per-request length heterogeneity. Actual ISL/OSL sampled "
+        "uniformly from [ratio*len, len]. 1.0 = homogeneous (default), e.g. 0.5 "
+        "= lengths vary down to half of --input-len/--output-len.",
+    )
+    serv.add_argument(
+        "--des-kv-cache-tokens",
+        type=int,
+        default=None,
+        help="DES: total KV token-slot pool. Admission reserves full ISL+OSL per "
+        "request (head-of-line blocks on shortage). Default: 0 (unlimited; "
+        "concurrency-bound only).",
+    )
+    serv.add_argument(
+        "--des-workload-file",
+        type=str,
+        default=None,
+        help="DES: replay a workload from JSON (list of dicts) or CSV with columns "
+        "arrival(ms),isl,osl instead of synthetic sampling. Enables the DES even "
+        "without --request-rate.",
+    )
+    serv.add_argument(
+        "--des-dump-steps",
+        type=str,
+        default=None,
+        help="DES: write per-step batch-composition records (query/KV shapes per "
+        "request per step) + packing summary to this JSON path.",
+    )
     # ---- Kernel backend + fused ops + sparse attention + expert precision ----
     kern = parser.add_argument_group("inference kernel backend & ops")
     kern.add_argument(
