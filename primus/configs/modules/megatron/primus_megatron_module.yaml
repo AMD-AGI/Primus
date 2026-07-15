@@ -92,7 +92,7 @@ pp_warmup: false # set to true to decrease iter-1 time when using pp
 dump_pp_data: false
 
 # recompute
-recompute_layer_ids: null #int list，id srange from 0 to (num_layers_per_pp_stage - 1)
+recompute_layer_ids: null # int list; global layer ids, range from 0 to (num_layers - 1)
 
 # dataloader
 dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
