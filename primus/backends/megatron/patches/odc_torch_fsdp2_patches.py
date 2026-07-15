@@ -5,8 +5,8 @@
 ###############################################################################
 # ODC (On-Demand Communication) integration into Megatron's PyTorch-FSDP2 path.
 #
-# Gated by env var ODC_ENABLE=1 (so it is a no-op unless explicitly turned on)
-# AND requires use_torch_fsdp2=true.
+# Gated by the enable_odc config item (so it is a no-op unless explicitly turned
+# on) AND requires use_torch_fsdp2=true.
 #
 # Strategy (see primus/core/odc/ROCM_ADAPTATION_REPORT.md for context):
 #   Megatron's TorchFullyShardedDataParallel wraps the model with the STANDARD
@@ -21,12 +21,13 @@
 #     pre_minibatch_start -> start of each train_step       (PHASE 2)
 #     pre_optimizer_step  -> before optimizer.step()        (PHASE 2)
 #
-# ODC_PHASE env var controls how far we wire in:
-#   "1" (default): only __init__ hook (patch_fsdp2 + patch_lazy_init).
-#                  Verifies model construction + first forward/backward do not
-#                  crash (i.e. ODC's symm-buffer replacement is compatible with
-#                  Megatron's FSDP2 params). Gradients are NOT yet routed.
-#   "2": also hook train_step / optimizer.step for full grad routing.
+# The odc_phase config item controls how far we wire in:
+#   1: only __init__ hook (patch_fsdp2 + patch_lazy_init).
+#      Verifies model construction + first forward/backward do not crash (i.e.
+#      ODC's symm-buffer replacement is compatible with Megatron's FSDP2 params).
+#      Gradients are NOT yet routed.
+#   2 (production default): also hook train_step / optimizer.step for full grad
+#      routing.
 ###############################################################################
 
 import os
@@ -102,7 +103,7 @@ def _apply_patch_lazy_init(root_module):
     backend="megatron",
     phase="before_train",
     description="Integrate ODC on-demand communication into Megatron's PyTorch FSDP2 path (ROCm/MORI).",
-    condition=lambda ctx: os.environ.get("ODC_ENABLE", "0") == "1"
+    condition=lambda ctx: getattr(get_args(ctx), "enable_odc", False)
     and getattr(get_args(ctx), "use_torch_fsdp2", False),
 )
 def patch_odc_torch_fsdp2(ctx: PatchContext):
@@ -125,7 +126,7 @@ def patch_odc_torch_fsdp2(ctx: PatchContext):
         return
 
     orig_init = TorchFSDP.__init__
-    phase = os.environ.get("ODC_PHASE", "1")
+    phase = str(getattr(get_args(ctx), "odc_phase", 2))
 
     def odc_init(self, *args, **kwargs):
         # 1) MORI init + ODC module-level FSDP2 patch, BEFORE any fully_shard.
@@ -135,7 +136,14 @@ def patch_odc_torch_fsdp2(ctx: PatchContext):
         # 3) AFTER fully_shard: install ODC's lazy_init hook (symm-buffer replace)
         #    on every wrapped module.
         _apply_patch_lazy_init(self.module)
-        log_rank_0(f"[ODC.torch_fsdp2] TorchFSDP wrapped with ODC (ODC_PHASE={phase})")
+        # 4) [ODC x #808] ODC uses a serial single-stream rocSHMEM/GDA transport, so
+        #    #808's FSDP2 forward all-gather prefetch cannot overlap and is pure
+        #    overhead (+3.4~3.9s/step gather_kernel, +26.6GB max reserved on dual-node
+        #    14B). ODC is active here (this patch only runs when enable_odc=true), so we
+        #    opt every wrapped module out of the forward prefetch. Backward prefetch is
+        #    kept -- it is fine/needed under ODC.
+        _disable_forward_prefetch(self.module)
+        log_rank_0(f"[ODC.torch_fsdp2] TorchFSDP wrapped with ODC (odc_phase={phase})")
 
     odc_init._odc_hooked = True
     TorchFSDP.__init__ = odc_init
@@ -143,6 +151,42 @@ def patch_odc_torch_fsdp2(ctx: PatchContext):
 
     if phase == "2":
         _install_train_loop_hooks()
+
+
+def _disable_forward_prefetch(root_module):
+    """[ODC x #808] Opt ODC-managed modules out of #808's forward all-gather prefetch.
+
+    PR #808's PrimusTorchFullyShardedDataParallel calls set_modules_to_forward_prefetch()
+    on every fully_shard-ed inner module, overlapping the *next* layer's all-gather with
+    the current layer's forward. That is a win for FSDP2-native NCCL all-gather, but ODC's
+    transport is a serial single-stream rocSHMEM/GDA path (overlap_factor 1.00x): the
+    prefetched all-gather cannot overlap and only adds gather_kernel time and peak memory
+    (profiled: +3.4~3.9s/step, +26.6GB max reserved on dual-node 14B). Since this runs only
+    when ODC is enabled, we clear forward prefetch on every param-group module. FORWARD
+    only -- backward prefetch is left intact (fine/needed under ODC).
+    """
+    cleared, missing = 0, 0
+    for m in root_module.modules():
+        if not hasattr(m, "_get_fsdp_state"):
+            continue
+        state = m._get_fsdp_state()
+        if state is None or state._fsdp_param_group is None:
+            continue
+        if not hasattr(m, "set_modules_to_forward_prefetch"):
+            missing += 1
+            continue
+        try:
+            m.set_modules_to_forward_prefetch([])
+            cleared += 1
+        except Exception as e:  # noqa: BLE001
+            warning_rank_0(
+                f"[ODC.torch_fsdp2] set_modules_to_forward_prefetch([]) failed: " f"{type(e).__name__}: {e}"
+            )
+    log_rank_0(
+        f"[ODC.torch_fsdp2] skipped #808 forward all-gather prefetch on {cleared} module(s) "
+        f"(kept backward prefetch); ODC's serial transport cannot overlap it"
+        + (f"; {missing} module(s) lacked the API" if missing else "")
+    )
 
 
 def _find_gpt_model(root):
@@ -196,7 +240,6 @@ def _odc_reduce_output_grad(root):
     cached = getattr(gpt, "_odc_cached_output_weight", None)
     if cached is None:
         return
-    _dbg_grad = os.environ.get("ODC_DEBUG_GRAD", "0") == "1"
     try:
         if cached.grad is not None:
             full_grad = cached.grad
@@ -204,13 +247,7 @@ def _odc_reduce_output_grad(root):
                 ow = gpt.shared_embedding_or_output_weight()
             else:
                 ow = gpt.output_layer.weight
-            _pre = full_grad.norm().item() if _dbg_grad else None
             dist.all_reduce(full_grad, op=dist.ReduceOp.AVG)
-            if _dbg_grad:
-                warning_rank_0(
-                    f"[ODC.dbg] output_weight grad norm: pre-AVG(rank0)={_pre:.2f} "
-                    f"post-AVG={full_grad.norm().item():.2f}"
-                )
             from torch.distributed.tensor import DTensor, distribute_tensor
 
             if isinstance(ow, DTensor):
@@ -239,9 +276,9 @@ def _odc_grad_spike_guard(root):
     balanced) rarely triggers it.
 
     FIX: at the minibatch sync point (optimizer.step), compute the global grad
-    norm; if it exceeds ODC_GRAD_SPIKE_THRESHOLD (default 1000, <=0 disables),
-    zero ALL grads so the ensuing step is a no-op -- i.e. SKIP this bad iter,
-    exactly like Megatron skips nan/inf iterations. Normal grad norm here is
+    norm; if it exceeds the odc_grad_spike_threshold config (default 1000, <=0
+    disables), zero ALL grads so the ensuing step is a no-op -- i.e. SKIP this bad
+    iter, exactly like Megatron skips nan/inf iterations. Normal grad norm here is
     ~3-42, recoverable spikes ~100-200, pathological ones ~1e5+, so 1000 cleanly
     separates them.
 
@@ -250,8 +287,9 @@ def _odc_grad_spike_guard(root):
     """
     import torch
     import torch.distributed as dist
+    from megatron.training import get_args as _mt_get_args
 
-    thr = float(os.environ.get("ODC_GRAD_SPIKE_THRESHOLD", "1000"))
+    thr = float(getattr(_mt_get_args(), "odc_grad_spike_threshold", 1000.0))
     if thr <= 0:
         return
     local_sq = None
@@ -349,7 +387,7 @@ def _install_train_loop_hooks():
     backend="megatron",
     phase="after_train",
     description="Tear down the ODC reduction service after training (ROCm/MORI).",
-    condition=lambda ctx: os.environ.get("ODC_ENABLE", "0") == "1"
+    condition=lambda ctx: getattr(get_args(ctx), "enable_odc", False)
     and getattr(get_args(ctx), "use_torch_fsdp2", False),
 )
 def patch_odc_torch_fsdp2_teardown(ctx: PatchContext):

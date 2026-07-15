@@ -193,6 +193,26 @@ keep_fp8_transpose_cache_when_using_custom_fsdp: false
 num_distributed_optimizer_instances: 1 # int
 data_parallel_replicate_degree: 1
 use_torch_fsdp2: false
+
+# === ODC (On-Demand Communication) ===
+# Master switch for ODC's rocSHMEM/XGMI point-to-point gradient reduction on the
+# torch-FSDP2 path (ROCm/MI300X). DEFAULT false => ODC is a complete no-op and
+# every ODC integration patch is skipped (byte-for-byte stock behaviour). When
+# true (requires use_torch_fsdp2=true), Primus:
+#   * routes FSDP2 gradient reduce-scatter through ODC (scatter_accumulate),
+#   * skips #856's eager-RCCL device_id injection (distributed_init_patches.py),
+#   * skips #808's FSDP2 forward all-gather prefetch (it cannot overlap ODC's
+#     serial transport); backward prefetch is kept.
+# Formerly gated by the ODC_ENABLE env var; now config-driven.
+enable_odc: false
+# ODC wiring depth (integer): 1 = install the __init__/lazy_init hooks only
+# (construction + first fwd/bwd sanity, gradients NOT routed); 2 = also hook
+# train_step / optimizer.step for full gradient routing. Production = 2.
+odc_phase: 2
+# Guard against ODC async-reduce's occasional non-deterministic grad spike: at
+# the optimizer step, if the global grad norm exceeds this threshold, the step is
+# skipped (grads zeroed) exactly like Megatron skips nan/inf iters. <= 0 disables.
+odc_grad_spike_threshold: 1000.0
 nccl_communicator_config_path: null
 use_tp_pp_dp_mapping: false
 replication: false
