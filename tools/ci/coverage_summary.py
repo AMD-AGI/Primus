@@ -79,6 +79,16 @@ def _tier(pct: float) -> str:
     return _TIER_RED
 
 
+# Coverage priority: lower sorts first (ties keep coverage order), pinning the
+# most important groups to the top. core (Primus's core) ranks highest.
+PRIORITY = {"core": 0}
+_DEFAULT_PRIORITY = 1
+
+
+def _priority(group: str) -> int:
+    return PRIORITY.get(group, _DEFAULT_PRIORITY)
+
+
 # Curated, best-effort context -- not exhaustive. Flags infra whose coverage
 # matters more than its size suggests, and low-coverage areas with a known,
 # persistent cause, so it isn't re-litigated every read. Keyed like the table
@@ -86,7 +96,7 @@ def _tier(pct: float) -> str:
 # <br> forces cell wrapping so one long note can't stretch the whole column.
 NOTES = {
     "primus (top-level)": "loose primus/ modules, no sub-package;<br>auto-folded by path depth",
-    "core": "\U0001F511 shared infra;<br>imported by every run",
+    "core": "\U0001F511 Primus core;<br>imported by every run",
     "backends/megatron": (
         "100+ patches gated by fp8 / MoE /<br>zero-bubble-pp / fsdp2 flags;<br>"
         "CI E2E runs only 1-2 configs"
@@ -97,7 +107,7 @@ NOTES = {
 
 _LEGEND = (
     "\U0001F7E2 >=50% / \U0001F7E1 >=25% / \U0001F534 <25% (next to module) "
-    "&nbsp;\u00b7&nbsp; \U0001F511 widely-shared infra\n"
+    "&nbsp;\u00b7&nbsp; \U0001F511 Primus core\n"
 )
 
 
@@ -192,7 +202,7 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
         out.append(_LEGEND)
         out += ["| Module | Covered | Stmts | Coverage | Notes |", "|---|--:|--:|--:|---|"]
 
-    for group in sorted(groups, key=lambda g: -_pct(group_totals(g)[0], group_totals(g)[1])):
+    for group in sorted(groups, key=lambda g: (_priority(g), -_pct(group_totals(g)[0], group_totals(g)[1]))):
         cov, stmts, e2e = group_totals(group)
         out.append(row("`%s`" % group, group, cov, stmts, e2e, bold=True))
         if group in DETAILED_GROUPS:
