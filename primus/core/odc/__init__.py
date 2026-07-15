@@ -9,13 +9,40 @@
 
 import logging
 
-from odc.primitives.gather import GatherService
-from odc.primitives.scatter_accumulate import ReductionService
-from odc.primitives.utils import SymmBufferRegistry, finalize_distributed, init_shmem
+# Eagerly expose the runtime-config API only. This module is a stdlib-only leaf,
+# so importing `odc` stays cheap and does NOT pull in odc.primitives -- which is
+# essential: the ODC integration patch calls odc.set_runtime_config(...) BEFORE
+# the primitives are first imported, so their import-time backend selection
+# (odc_p2p_backend) reads the populated config rather than a stale default.
+from odc.runtime_config import OdcRuntimeConfig
+from odc.runtime_config import get_config as get_runtime_config  # noqa: F401
+from odc.runtime_config import set_config as set_runtime_config
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 logger.setLevel(logging.INFO)
+
+
+# The heavy primitives (which import torch/triton/mori and read the runtime
+# config at import time) are exposed lazily via PEP 562 module __getattr__, so
+# they are imported only on first access -- after set_runtime_config has run.
+_LAZY_EXPORTS = {
+    "init_shmem": ("odc.primitives.utils", "init_shmem"),
+    "finalize_distributed": ("odc.primitives.utils", "finalize_distributed"),
+    "SymmBufferRegistry": ("odc.primitives.utils", "SymmBufferRegistry"),
+    "ReductionService": ("odc.primitives.scatter_accumulate", "ReductionService"),
+    "GatherService": ("odc.primitives.gather", "GatherService"),
+}
+
+
+def __getattr__(name):
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'odc' has no attribute '{name}'")
+    import importlib
+
+    mod = importlib.import_module(target[0])
+    return getattr(mod, target[1])
 
 
 __all__ = [
@@ -24,4 +51,7 @@ __all__ = [
     "ReductionService",
     "GatherService",
     "finalize_distributed",
+    "OdcRuntimeConfig",
+    "get_runtime_config",
+    "set_runtime_config",
 ]

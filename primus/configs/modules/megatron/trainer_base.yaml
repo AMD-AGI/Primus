@@ -213,6 +213,19 @@ odc_phase: 2
 # the optimizer step, if the global grad norm exceeds this threshold, the step is
 # skipped (grads zeroed) exactly like Megatron skips nan/inf iters. <= 0 disables.
 odc_grad_spike_threshold: 1000.0
+# ODC symmetric-memory / comm-kernel tuning (consumed by the ODC library via its
+# runtime config; these replace the former ODC_* env vars). Defaults reproduce the
+# previous env defaults exactly.
+odc_p2p_backend: mori          # symmetric-memory backend: mori | rocshmem
+odc_mori_init: pg              # MORI init method: pg | uid
+odc_max_buffer_size: 67108864  # BufferSplitter max global buffer (bytes, 64 MiB)
+odc_rocshmem_gda: false        # rocSHMEM GPU-direct (GDA) device path (multi-node)
+odc_rocshmem_lib: null         # optional librs_host_gda.so ctypes override path
+odc_gda_rs_blocks: 64          # GDA reduce-scatter kernel grid blocks
+odc_gda_pipe: 1                # GDA peer-pipeline depth (also bridged to turbo env)
+odc_gda_defer_reduce: auto     # defer cross-node reduce to per-minibatch: auto|1|0
+odc_gda_warmup_mode: strided   # write-visibility settle: strided|full|hdp|fence|hdpfence
+odc_gda_stride_bytes: 65536    # strided warm-up page stride (bytes)
 nccl_communicator_config_path: null
 use_tp_pp_dp_mapping: false
 replication: false

@@ -98,6 +98,42 @@ def _apply_patch_lazy_init(root_module):
     )
 
 
+def _populate_odc_runtime_config(ctx: PatchContext):
+    """Bridge the odc_* trainer-config items into the ODC library runtime config.
+
+    The ODC primitives (odc.primitives.*) are decoupled library code that reads its
+    tuning knobs from odc.runtime_config (populated here) rather than os.environ.
+    Only values explicitly set in the config are forwarded; unset items (None) keep
+    the library defaults, so behaviour is unchanged unless a knob is configured.
+    """
+    import odc
+
+    args = get_args(ctx)
+
+    def _g(name):
+        return getattr(args, name, None)
+
+    _defer = _g("odc_gda_defer_reduce")
+    odc.set_runtime_config(
+        p2p_backend=_g("odc_p2p_backend"),
+        mori_init=_g("odc_mori_init"),
+        max_buffer_size=_g("odc_max_buffer_size"),
+        rocshmem_gda=_g("odc_rocshmem_gda"),
+        rocshmem_lib=_g("odc_rocshmem_lib"),
+        gda_rs_blocks=_g("odc_gda_rs_blocks"),
+        gda_pipe=_g("odc_gda_pipe"),
+        gda_defer_reduce=(str(_defer) if _defer is not None else None),
+        gda_warmup_mode=_g("odc_gda_warmup_mode"),
+        gda_stride_bytes=_g("odc_gda_stride_bytes"),
+    )
+    log_rank_0(
+        "[ODC.torch_fsdp2] runtime config populated from trainer config "
+        f"(p2p_backend={odc.get_runtime_config().p2p_backend}, "
+        f"rocshmem_gda={odc.get_runtime_config().rocshmem_gda}, "
+        f"warmup_mode={odc.get_runtime_config().gda_warmup_mode})"
+    )
+
+
 @register_patch(
     "megatron.fsdp.odc_torch_fsdp2",
     backend="megatron",
@@ -107,6 +143,13 @@ def _apply_patch_lazy_init(root_module):
     and getattr(get_args(ctx), "use_torch_fsdp2", False),
 )
 def patch_odc_torch_fsdp2(ctx: PatchContext):
+    # Populate the ODC runtime config from the trainer config BEFORE any ODC
+    # primitive is imported. `import odc` is cheap (odc/__init__ is lazy and does
+    # not pull in odc.primitives), so this runs before _ensure_odc_ready() imports
+    # odc.fsdp.fsdp2 -> odc.primitives, whose import-time backend selection
+    # (odc_p2p_backend) must read the populated config, not a stale default.
+    _populate_odc_runtime_config(ctx)
+
     # PR #808 (feat(flux): FSDP2 optimizers + fp8 all-gather) replaced Megatron's FSDP2
     # wrapper with PrimusTorchFullyShardedDataParallel (installed as
     # megatron.training.training.torch_FSDP), so the stock TorchFullyShardedDataParallel
