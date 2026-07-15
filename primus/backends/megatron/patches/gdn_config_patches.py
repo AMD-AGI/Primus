@@ -13,7 +13,7 @@ in the third-party Megatron-LM codebase.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 _GDN_CONFIG_FIELDS = {
     "linear_conv_kernel_dim": None,

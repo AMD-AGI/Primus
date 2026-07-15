@@ -409,21 +409,11 @@ class GatedDeltaNet(MegatronModule):
         beta = beta.sigmoid()
         nvtx_range_pop(suffix="g_and_beta")
 
-        if not hasattr(self, '_gdn_kernel_logged'):
-            self._gdn_kernel_logged = True
-            mode = (
-                "Pure PyTorch fallback (deterministic)"
-                if self.config.deterministic_mode
-                else "FLA Triton (fwd+bwd, use_gate_in_kernel=True, use_qk_l2norm_in_kernel=True)"
-            )
-            logger.warning(
-                f"[GDN layer {self.layer_number}] kernel={mode} | "
-                f"HAVE_FLA={HAVE_FLA} deterministic={self.config.deterministic_mode}"
-            )
-
         nvtx_range_push(suffix="gated_delta_rule")
+        # Pre-compute gate in fp32 to avoid NaN from FLA's in-kernel gate
+        # path on ROCm (use_gate_in_kernel=True triggers Triton NaN bugs).
+        g = -self.A_log.float().exp() * F.softplus(alpha.float() + self.dt_bias)
         if self.config.deterministic_mode:
-            g = -self.A_log.float().exp() * F.softplus(alpha.float() + self.dt_bias)
             if self.use_qk_l2norm:
                 query = l2norm(query)
                 key = l2norm(key)
@@ -442,14 +432,12 @@ class GatedDeltaNet(MegatronModule):
                 query,
                 key,
                 value,
-                g=alpha,
+                g=g.to(query.dtype),
                 beta=beta,
                 initial_state=None,
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=self.use_qk_l2norm,
-                use_gate_in_kernel=True,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
+                use_gate_in_kernel=False,
             )
         nvtx_range_pop(suffix="gated_delta_rule")
 

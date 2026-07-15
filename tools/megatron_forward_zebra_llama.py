@@ -50,7 +50,7 @@ def _ensure_primus_logger(rank: int, world_size: int) -> None:
     This standalone script must initialize it explicitly.
     """
     from primus.core.utils import logger as primus_logger
-    from primus.modules.module_utils import set_logging_rank
+    from primus.core.utils.module_utils import set_logging_rank
 
     # Make log_rank_0 / log_rank_last behave correctly before torch.distributed init.
     set_logging_rank(rank, world_size)
