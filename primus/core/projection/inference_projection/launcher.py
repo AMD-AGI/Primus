@@ -266,6 +266,22 @@ def _print_des(des: Dict[str, object]) -> None:
     _row("ITL (inter-token)", point.itl)
     _row("End-to-end latency", point.e2e)
 
+    pk = getattr(point, "packing", None) or {}
+    if pk:
+        print("-" * 100)
+        print(
+            f"  Batch packing: avg batch {pk.get('avg_batch_size', 0.0):.1f} "
+            f"(max {int(pk.get('max_batch_size', 0))}) | "
+            f"avg prefill/decode reqs {pk.get('avg_prefill_reqs', 0.0):.1f}/"
+            f"{pk.get('avg_decode_reqs', 0.0):.1f} | "
+            f"avg query tokens/step {pk.get('avg_query_tokens', 0.0):.0f} | "
+            f"mixed-step frac {pk.get('prefill_step_fraction', 0.0) * 100:.0f}%"
+        )
+        if pk.get("kv_peak_tokens", 0):
+            util = pk.get("kv_utilization", 0.0)
+            util_s = f" ({util * 100:.0f}% of pool)" if util else ""
+            print(f"  KV peak: {int(pk['kv_peak_tokens'])} tokens{util_s}")
+
     curve = des.get("curve")
     if curve:
         mu = des.get("max_sustainable_rate", 0.0)
@@ -361,19 +377,52 @@ def launch_projection_from_cli(args, overrides):
         # calibrated) cost kernel for each step's duration.
         req = inference_config.request_config
         arrival_model = (getattr(req, "arrival_model", "closed") or "closed").lower()
-        if arrival_model in ("poisson", "deterministic") and (req.request_rate or 0) > 0:
+        workload_file = getattr(args, "des_workload_file", None)
+        dump_steps = getattr(args, "des_dump_steps", None)
+        run_des_enabled = (
+            arrival_model in ("poisson", "deterministic") and (req.request_rate or 0) > 0
+        ) or bool(workload_file)
+        if run_des_enabled:
             from .des import run_des
 
             des = run_des(
                 inference_config,
                 projector,
-                arrival_model=arrival_model,
-                rate_per_s=float(req.request_rate),
+                arrival_model=arrival_model if arrival_model in ("poisson", "deterministic") else "poisson",
+                rate_per_s=float(req.request_rate or 0.0),
                 num_requests=int(getattr(args, "des_num_requests", 400) or 400),
                 seed=int(getattr(args, "des_seed", 0) or 0),
                 sweep=bool(getattr(args, "des_sweep", False)),
+                burstiness=float(getattr(args, "des_burstiness", 1.0) or 1.0),
+                range_ratio=float(getattr(args, "des_range_ratio", 1.0) or 1.0),
+                kv_cache_tokens=int(getattr(args, "des_kv_cache_tokens", 0) or 0),
+                workload_file=workload_file,
+                record_steps=bool(dump_steps),
             )
             _print_des(des)
             results["des"] = des
+
+            if dump_steps and des["point"].steps is not None:
+                import json as _json
+
+                payload = {
+                    "config": {
+                        "input_len": req.input_seq_len,
+                        "output_len": req.output_seq_len,
+                        "max_concurrency": req.resolved_max_concurrency(),
+                        "max_num_batched_tokens": req.max_num_batched_tokens,
+                        "chunked_prefill_size": req.chunked_prefill_size,
+                        "request_rate": req.request_rate,
+                        "arrival_model": arrival_model,
+                        "burstiness": float(getattr(args, "des_burstiness", 1.0) or 1.0),
+                        "range_ratio": float(getattr(args, "des_range_ratio", 1.0) or 1.0),
+                        "kv_cache_tokens": int(getattr(args, "des_kv_cache_tokens", 0) or 0),
+                    },
+                    "packing": des["point"].packing,
+                    "steps": des["point"].steps,
+                }
+                with open(dump_steps, "w") as _f:
+                    _json.dump(payload, _f)
+                print(f"[Primus:Inference] wrote {len(des['point'].steps)} DES step records to {dump_steps}")
 
     return results
