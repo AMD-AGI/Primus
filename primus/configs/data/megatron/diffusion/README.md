@@ -46,7 +46,7 @@ When using `primus-cli direct --` commands inside containers, understanding Dock
 
 ### Default Docker Setup
 
-From [`tools/docker/start_container.sh`](../../../../tools/docker/start_container.sh):
+From [`tools/docker/start_container.sh`](../../../../../tools/docker/start_container.sh):
 ```bash
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}  # Default: ./data relative to repo
 # Mounted as: -v "${DATA_PATH}:${DATA_PATH}"
@@ -580,15 +580,15 @@ model:
 ## Additional Resources
 
 ### Documentation
-- **Training Guide**: [`examples/megatron/diffusion/README.md`](../../../../examples/megatron/diffusion/README.md)
-- **Energon Integration**: [`docs/backends/megatron/diffusion/energon_integration.md`](../../../../docs/backends/megatron/diffusion/energon_integration.md)
-- **FP8 Training Guide**: [`docs/backends/megatron/diffusion/fp8_training.md`](../../../../docs/backends/megatron/diffusion/fp8_training.md)
+- **Training Guide**: [`examples/megatron/diffusion/README.md`](../../../../../examples/megatron/diffusion/README.md)
+- **Energon Integration**: [`docs/04-technical-guides/diffusion-models/energon_integration.md`](../../../../../docs/04-technical-guides/diffusion-models/energon_integration.md)
+- **FP8 Training Guide**: [`docs/04-technical-guides/diffusion-models/fp8_training.md`](../../../../../docs/04-technical-guides/diffusion-models/fp8_training.md)
 
 ### Related Configs
-- **Encoder Configs**: [`primus/configs/models/megatron/diffusion/encoders.yaml`](../../models/megatron/diffusion/encoders.yaml)
-- **Model Architecture**: [`primus/configs/models/megatron/diffusion/`](../../models/megatron/diffusion/)
-- **Training Configs (MI300X)**: [`examples/megatron/configs/MI300X/diffusion/`](../../../../examples/megatron/configs/MI300X/diffusion/)
-- **Training Configs (MI355X)**: [`examples/megatron/configs/MI355X/diffusion/`](../../../../examples/megatron/configs/MI355X/diffusion/)
+- **Encoder Configs**: [`primus/configs/models/megatron/diffusion/encoders.yaml`](../../../models/megatron/diffusion/encoders.yaml)
+- **Model Architecture**: [`primus/configs/models/megatron/diffusion/`](../../../models/megatron/diffusion/)
+- **Training Configs (MI300X)**: [`examples/megatron/configs/MI300X/diffusion/`](../../../../../examples/megatron/configs/MI300X/diffusion/)
+- **Training Configs (MI355X)**: [`examples/megatron/configs/MI355X/diffusion/`](../../../../../examples/megatron/configs/MI355X/diffusion/)
 
 ---
 

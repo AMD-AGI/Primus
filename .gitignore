@@ -6,6 +6,7 @@ dist/
 *.egg-info
 *~
 logs
+.pip_cache
 .vscode
 local/
 .gitmodules
@@ -13,3 +14,4 @@ output
 experiment
 /data/*
 pp_simulation_result
+.cursor/

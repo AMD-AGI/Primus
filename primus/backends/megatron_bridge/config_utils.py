@@ -329,8 +329,10 @@ def _resolve_recipe(recipe: str, flavor: str):
     Resolve a recipe module and function by searching multiple namespaces.
 
     Search order:
-        1. primus.backends.megatron_bridge.recipes.{recipe}  (Primus-side extensions)
-        2. megatron.bridge.recipes.{recipe}                   (upstream Megatron-Bridge)
+        1. Direct custom module path (e.g., primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.llama2_custom)
+        2. primus.backends.megatron_bridge.recipes.{recipe}  (Primus-side extensions)
+        3. megatron.bridge.recipes.{recipe}                   (upstream Megatron-Bridge)
+        4. recipe as a direct Python module path (fallback)
 
     Returns:
         Tuple of (module, full_module_path) for the first namespace that
@@ -339,6 +341,18 @@ def _resolve_recipe(recipe: str, flavor: str):
     Raises:
         AssertionError if the recipe cannot be found in any namespace.
     """
+    custom_prefixes = ("primus.backends.megatron_bridge.recipes.", "primus.")
+    if any(recipe.startswith(prefix) for prefix in custom_prefixes):
+        try:
+            module = importlib.import_module(recipe)
+        except ImportError as e:
+            assert False, f"Recipe loading failed: Cannot import custom recipe '{recipe}': {e}"
+        assert hasattr(
+            module, flavor
+        ), f"Recipe loading failed: Function '{flavor}' not found in custom recipe '{recipe}'"
+        log_rank_0(f"  ℹ️  Using custom recipe from: {recipe}")
+        return module, recipe
+
     search_prefixes = [
         "primus.backends.megatron_bridge.recipes",
         "megatron.bridge.recipes",
@@ -353,8 +367,20 @@ def _resolve_recipe(recipe: str, flavor: str):
         if hasattr(module, flavor):
             return module, full_module_path
 
+    # Fallback: try recipe as a direct Python module path
+    if "." in recipe and not recipe.startswith(("/", ".")):
+        try:
+            module = importlib.import_module(recipe)
+            if hasattr(module, flavor):
+                log_rank_0(f"  ℹ️  Using custom recipe from: {recipe}")
+                return module, recipe
+        except ImportError:
+            pass
+
     # Build a helpful error message listing all paths that were tried.
     tried = [f"{p}.{recipe}" for p in search_prefixes]
+    if "." in recipe:
+        tried.append(recipe)
     assert False, f"Recipe loading failed: Function '{flavor}' not found. " f"Searched modules: {tried}"
 
 

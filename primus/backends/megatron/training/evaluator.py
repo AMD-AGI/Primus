@@ -7,6 +7,7 @@
 import time
 
 import torch
+from megatron.core import parallel_state
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.pipeline_parallel import get_forward_backward_func
@@ -140,10 +141,32 @@ def primus_evaluate(
         total_loss_dict = {}
         if is_pipeline_stage_containing_loss():
             for key in total_loss_numerators.keys():
-                if total_loss_denominators[key] > 0:
-                    total_loss_dict[key] = total_loss_numerators[key] / total_loss_denominators[key]
+                # Reduce numerator/denominator across data-parallel ranks so the
+                # validation loss is a TRUE global average, identical on every rank.
+                # Without this, args._eval_val_loss stays a per-rank local value, and
+                # the target-eval-loss early stop (mlperf_pretrain_trainer.py) is then
+                # evaluated inconsistently: near the target one rank's local loss can
+                # dip <= target and exit train() alone while the others keep training,
+                # desyncing collectives (grad-norm all-reduce) -> NCCL hang at ~172k.
+                reduced = torch.tensor(
+                    [float(total_loss_numerators[key]), float(total_loss_denominators[key])],
+                    dtype=torch.float64,
+                    device="cuda",
+                )
+                torch.distributed.all_reduce(
+                    reduced,
+                    op=torch.distributed.ReduceOp.SUM,
+                    group=parallel_state.get_data_parallel_group(),
+                )
+                # Keep the result as a 0-dim tensor: downstream Megatron code
+                # (evaluate_and_print_results) and mlperf logging call .item() on it.
+                if reduced[1].item() > 0:
+                    total_loss_dict[key] = (reduced[0] / reduced[1]).to(torch.float32)
                 else:
-                    total_loss_dict[key] = 0.0
+                    total_loss_dict[key] = torch.zeros((), dtype=torch.float32, device="cuda")
+            if "lm loss" in total_loss_dict:
+                val = total_loss_dict["lm loss"]
+                args._eval_val_loss = val.item() if hasattr(val, "item") else float(val)
 
         collected_non_loss_data = None
         if non_loss_data_func is not None:
