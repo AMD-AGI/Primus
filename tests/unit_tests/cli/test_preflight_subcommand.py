@@ -39,7 +39,9 @@ def test_defaults():
     assert args.perf_test is False
     assert args.dist_timeout_sec == 120
     assert args.dump_path == "output/preflight"
-    assert args.report_file_name == "preflight_report"
+    # Default is None so the tool auto-generates a unique timestamped name
+    # (preflight-{NNODES}N-{YYYYMMDD-HHMMSS}) at run time.
+    assert args.report_file_name is None
     assert args.save_pdf is True
 
 
