@@ -45,17 +45,6 @@ def _gda_active():
     return _rs is not None and _rs.gda_enabled()
 
 
-def _official_push():
-    """ODC_OFFICIAL_PUSH=1 -> use the single-sided device-get all-gather and
-    skip the GDA gather barrier/async extras. Default ("0") keeps current
-    behaviour. Env-gated; nothing deleted. (Gather is read-only on stable
-    params, so this is the lower-risk side; the primary alignment target is
-    scatter-accumulate.)"""
-    import os as _os
-
-    return _os.environ.get("ODC_OFFICIAL_PUSH", "0") == "1"
-
-
 @triton.jit
 def shmem_device_producer_gather_2d_get_block_kernel_chunked_synced(
     remote_tensor_ptr,
@@ -229,85 +218,27 @@ class GatherService:
         """GPU-direct all-gather: every rank's shard (incl same-node and self) is
         pulled via a single device rocshmem_getmem kernel into target slot[r],
         then copied into output_tensor_split[r]. No XGMI peer views / host loop."""
-        import os as _os
-        import time as _t
-
-        _prof = _os.environ.get("ODC_GDA_PROFILE", "0") == "1"
-        _g_bar = _g_get = _g_copy = 0.0
         es = input_tensor.element_size()
         assert buf_size % group_world_size == 0
         local_buf_size = buf_size // group_world_size
         output_split = output_tensor.view(group_world_size, -1)
         peers = list(range(group_world_size))
-        # Approach 1 (ODC_GDA_GATHER_ASYNC=1): launch the all-gather kernel on the comm
-        # stream WITHOUT a host hipDeviceSynchronize, so FSDP2's prefetch (it issues
-        # layer L+1's all-gather during layer L compute, async_op=True) actually
-        # overlaps. Gather reads STABLE params (written last step, read-only) -> no
-        # settle/barrier needed; correctness via stream ordering: the reassembly
-        # copies run on the SAME stream after the gather, and the consumer waits the
-        # comm stream (current_stream().wait_stream + FSDP async_op event).
-        # ODC_OFFICIAL_PUSH forces the synchronous single-sided device get (no
-        # prefetch side-stream); the gather barrier below also stays off.
-        _gather_async = _os.environ.get("ODC_GDA_GATHER_ASYNC", "0") == "1" and not _official_push()
-        if _gather_async:
-            # Phase 2 fix: run the async gather on a DEDICATED stream (not the
-            # SHARED get_comm_stream, which scatter-staging etc. also use -> the
-            # original gather-async race: a prefetched gather / other comm-stream
-            # op overwrote the shared `target` scratch mid-use). A dedicated stream
-            # keeps gather+reassembly serial & isolated; the consumer is ordered via
-            # current_stream().wait_stream below (+ FSDP async_op event). No host sync.
-            if not hasattr(self, "_gda_gather_stream") or self._gda_gather_stream is None:
-                self._gda_gather_stream = torch.cuda.Stream()
-            comm = self._gda_gather_stream
-        else:
-            comm = get_comm_stream()
+        comm = get_comm_stream()
         comm.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(comm):
-            _tb = _t.perf_counter()
-            if not _gather_async:
-                torch.cuda.synchronize()
-            # Opt2: NO per-gather rocshmem_barrier_all here. Gather reads PARAMS
-            # (symmetric shard written by the optimizer a full step earlier and
-            # read-only through fwd/bwd) -> peers' data is already stable/visible,
-            # so the cross-PE rendezvous is unnecessary (unlike scatter's
-            # just-written staging). Saves ~2.6s/iter. (Gated revert: set
-            # ODC_GDA_GATHER_BARRIER=1 to restore the barrier.)
-            if _os.environ.get("ODC_GDA_GATHER_BARRIER", "0") == "1" and not _official_push():
-                _rs.barrier()
-            _g_bar += _t.perf_counter() - _tb
+            torch.cuda.synchronize()
+            # NO per-gather rocshmem_barrier_all here. Gather reads PARAMS (symmetric
+            # shard written by the optimizer a full step earlier and read-only through
+            # fwd/bwd) -> peers' data is already stable/visible, so the cross-PE
+            # rendezvous is unnecessary (unlike scatter's just-written staging).
             for start in range(0, input_tensor.numel(), local_buf_size):
                 size = min(local_buf_size, input_tensor.numel() - start)
                 sub_input = input_tensor.view(-1)[start : start + size]
                 tb = size * group_world_size
                 tsplit = target_tensor[:tb].view(group_world_size, size)
-                _tg = _t.perf_counter()
-                if _gather_async:
-                    # launch on comm stream, NO sync -> overlaps with compute
-                    _rs.gda_gather_async(
-                        target_tensor.data_ptr(),
-                        sub_input.data_ptr(),
-                        size * es,
-                        peers,
-                        size * es,
-                        comm.cuda_stream,
-                    )
-                else:
-                    _rs.gda_gather(
-                        target_tensor.data_ptr(), sub_input.data_ptr(), size * es, peers, size * es
-                    )
-                    torch.cuda.synchronize()
-                _g_get += _t.perf_counter() - _tg
-                _tc = _t.perf_counter()
+                _rs.gda_gather(target_tensor.data_ptr(), sub_input.data_ptr(), size * es, peers, size * es)
+                torch.cuda.synchronize()
                 # reassembly on the SAME comm stream -> ordered AFTER the gather kernel
                 for r in range(group_world_size):
                     output_split[r, start : start + size].copy_(tsplit[r])
-                _g_copy += _t.perf_counter() - _tc
         torch.cuda.current_stream().wait_stream(comm)
-        if _prof and rank == 0:
-            logger.warning(
-                "[GDA-PROF gather] in_numel=%d barrier=%.3f gda_gather=%.3f reassembly=%.3f",
-                input_tensor.numel(),
-                _g_bar,
-                _g_get,
-                _g_copy,
-            )

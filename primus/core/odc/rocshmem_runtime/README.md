@@ -24,12 +24,14 @@ This directory now only holds runtime helpers:
 
 ## Selecting the rocSHMEM backend
 
-- `ODC_P2P_BACKEND=rocshmem` — use the rocSHMEM ops (default is `mori`).
-- `ODC_ROCSHMEM_GDA=1` — multi-node GPU-direct (GDA) path; otherwise single-node
-  XGMI IPC host path.
+These are Primus config items (read by the ODC library via its runtime config):
+
+- `odc_p2p_backend: rocshmem` — use the rocSHMEM ops (default is `mori`).
+- `odc_rocshmem_gda: true` — multi-node GPU-direct (GDA) path; otherwise
+  single-node XGMI IPC host path.
 
 The ops resolve from `primus_turbo.pytorch._C`. As an escape hatch,
-`ODC_ROCSHMEM_LIB=<path>/librs_host_gda.so` loads an external monolithic ctypes
+`odc_rocshmem_lib: <path>/librs_host_gda.so` loads an external monolithic ctypes
 binding instead of the Turbo submodule (see `_rocshmem_backend.py`).
 
 ## Multi-node (GDA) correctness & deployment env

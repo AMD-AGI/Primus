@@ -11,10 +11,10 @@ via ctypes; it is now provided by Primus-Turbo as two pybind submodules of
 
   * ``odc_rocshmem_host`` — single-node host-API surface (XGMI IPC path):
     ``rs_get_uid`` / ``rs_init_uid`` / ``rs_malloc`` / ``rs_ptr`` /
-    ``rs_barrier`` / ``rs_finalize``. Selected when ``ODC_ROCSHMEM_GDA`` != 1.
+    ``rs_barrier`` / ``rs_finalize``. Selected when odc_rocshmem_gda is false.
   * ``odc_rocshmem_gda`` — multi-node GPU-direct (GDA) surface: the same
     host-compatible ``rs_*`` bootstrap plus the device ``gda_gather`` /
-    ``gda_reduce_scatter_acc`` launchers. Selected when ``ODC_ROCSHMEM_GDA=1``.
+    ``gda_reduce_scatter_acc`` launchers. Selected when odc_rocshmem_gda is true.
 
 Single-node (host) path: this backend uses ONLY the host API to manage the
 symmetric heap and resolve peer pointers. It deliberately does NOT link any
@@ -52,6 +52,8 @@ from functools import reduce
 
 import torch
 import torch.distributed as dist
+
+from odc.runtime_config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +97,8 @@ _ref_base = None  # reference symmetric address used for affine peer deltas
 _allocations = []  # keep python tensor objects alive for the run
 _initialized = False
 
-_gda_enabled = False  # GPU-direct (GDA) device path: ODC_ROCSHMEM_GDA=1
-_ctypes_gda_lib = False  # True when ODC_ROCSHMEM_LIB overrides embedded turbo GDA
+_gda_enabled = False  # GPU-direct (GDA) device path: config odc_rocshmem_gda=true
+_ctypes_gda_lib = False  # True when odc_rocshmem_lib overrides embedded turbo GDA
 
 
 def gda_enabled():
@@ -105,11 +107,12 @@ def gda_enabled():
 
 
 def _is_gda():
-    return os.environ.get("ODC_ROCSHMEM_GDA", "0") == "1"
+    # config item odc_rocshmem_gda: GPU-direct (GDA) device path (multi-node).
+    return bool(get_config().rocshmem_gda)
 
 
 def _load_ctypes_gda(so):
-    """Load proven in-tree librs_host_gda.so when ODC_ROCSHMEM_LIB is set.
+    """Load proven in-tree librs_host_gda.so when odc_rocshmem_lib is set.
 
     The embedded turbo ``odc_rocshmem_gda`` path linked against rocshmem_combined
     can fault on first device gather; this override uses the monolithic RDC .so
@@ -192,11 +195,12 @@ def _load_ctypes_gda(so):
 def _load_backend():
     """Resolve the ODC rocSHMEM backend submodule from Primus-Turbo.
 
-    When ``ODC_ROCSHMEM_LIB`` points at a GDA ``librs_host_gda.so``, load that
-    monolithic binding via ctypes instead of the embedded turbo GDA kernels.
+    When the odc_rocshmem_lib config points at a GDA ``librs_host_gda.so``, load
+    that monolithic binding via ctypes instead of the embedded turbo GDA kernels.
     """
     global _ctypes_gda_lib
-    so = os.environ.get("ODC_ROCSHMEM_LIB")
+    # config item odc_rocshmem_lib: optional monolithic librs_host_gda.so override.
+    so = get_config().rocshmem_lib
     if so and os.path.isfile(so) and _is_gda():
         _ctypes_gda_lib = True
         logger.info("rocSHMEM GDA backend: ctypes override %s", so)

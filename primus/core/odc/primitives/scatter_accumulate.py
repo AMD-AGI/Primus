@@ -8,7 +8,6 @@
 # See LICENSE for license information.
 
 import logging
-import os
 
 import torch
 import torch.distributed as dist
@@ -18,6 +17,7 @@ from odc.primitives.utils import (
     get_comm_stream,
     get_local_world_size,
 )
+from odc.runtime_config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,6 @@ else:
 
 def _gda_active():
     return _rs is not None and _rs.gda_enabled()
-
-
-def _official_push():
-    """ODC_OFFICIAL_PUSH=1 -> reproduce the reference single-sided push on the
-    GDA path: skip our per-call ``_rs.barrier()``, the strided/full warm-up
-    settle, the overlap side-stream and the DEFER block, so the collective
-    reduce-scatter runs bare (the closest reproduction of the upstream
-    no-settle behaviour). Default ("0") preserves the current GDA behaviour.
-    """
-    return os.environ.get("ODC_OFFICIAL_PUSH", "0") == "1"
 
 
 class ReductionService:
@@ -108,19 +98,21 @@ class ReductionService:
             )
         input_sym = self.input_buffer[in_key]
 
-        # GRID geometry sweep (Deliverable 15): nblk = reduce-scatter kernel grid (one block
-        # per disjoint shard chunk -> # concurrent cross-node getmem_wg = QP/NIC
+        cfg = get_config()
+        # GRID geometry (config odc_gda_rs_blocks): reduce-scatter kernel grid (one
+        # block per disjoint shard chunk -> # concurrent cross-node getmem_wg = QP/NIC
         # parallelism lever). Scratch auto-resizes (sc_key includes chunk*nblk), so
         # this stays correct for any nblk. Default 64 (current behavior).
-        nblk = int(os.environ.get("ODC_GDA_RS_BLOCKS", "64"))
+        nblk = int(cfg.gda_rs_blocks)
         if nblk < 1:
             nblk = 1
-        # PIPE (Deliverable 17): peer-pipeline batch depth. The pipelined rs_acc needs `pipe`
-        # scratch slots PER BLOCK (issues `pipe` peers' nbi getmem concurrently), so
-        # scratch grows pipe x and the main call passes scratch_stride = pipe*chunk.
-        # This is a Primus-Turbo device-kernel knob (odc_rocshmem_gda.cu env_pipe); its
-        # name must match turbo's ENV_ODC_GDA_PIPE = "PRIMUS_TURBO_ODC_GDA_PIPE".
-        pipe = int(os.environ.get("PRIMUS_TURBO_ODC_GDA_PIPE", "1"))
+        # PIPE (config odc_gda_pipe): peer-pipeline batch depth. The pipelined rs_acc
+        # needs `pipe` scratch slots PER BLOCK (issues `pipe` peers' nbi getmem
+        # concurrently), so scratch grows pipe x and the main call passes
+        # scratch_stride = pipe*chunk. This is also a Primus-Turbo device-kernel knob
+        # (odc_rocshmem_gda.cu env_pipe); set_runtime_config bridges odc_gda_pipe back
+        # to the PRIMUS_TURBO_ODC_GDA_PIPE env var so the C++ side agrees.
+        pipe = int(cfg.gda_pipe)
         if pipe < 1:
             pipe = 1
         chunk = (shard_elems + nblk - 1) // nblk
@@ -133,70 +125,32 @@ class ReductionService:
         scratch = self.input_buffer[sc_key]
 
         rank = torch.distributed.get_rank(pg)
-        official = _official_push()
-        import time as _t
 
-        _prof = os.environ.get("ODC_GDA_PROFILE", "0") == "1"
-        # Cross-node write-visibility strategy for the just-staged grad (see the
-        # warm-up note below for why this is needed at all):
-        #   "full" (default) - torch copy_ stage, then a FULL-shard throwaway
-        #            reduce-scatter + barrier primes every NIC/page so the real
-        #            RS reads fresh data. Correct but ~doubles the RS (~59% of RS).
-        #   "hdp"            - stage with torch copy_, then flush this GPU's HDP
-        #            via the HDP_MEM_FLUSH_CNTL register (gda_hdp_flush): an O(1)
-        #            MMIO write that makes the staged symmetric write NIC-visible
-        #            across ALL pages/NICs. The proper GPUDirect-RDMA primitive;
-        #            NO throwaway reduce-scatter.
-        #   "fence"          - stage via gda_stage_fence: a device copy that ends
-        #            in __threadfence_system(). NOTE: empirically INSUFFICIENT on
-        #            this mlx5/GDA path (grad spikes return) -- kept for reference.
-        # Default "strided": page-strided tiny throwaway READ (one element per
-        # ODC_GDA_STRIDE_BYTES page x all PEs) -- keeps full-warmup's deterministic
-        # "read-triggered settle" (validated 0 grad spikes, loss == single-node)
-        # but ~9-10% faster (skips the full-shard throwaway reduce-scatter). Modes:
-        #   "strided" (default) - 0 spikes, ~9-10% faster than full; stride via
-        #                         ODC_GDA_STRIDE_BYTES (default 65536 = 64KB).
-        #   "full"              - full-shard throwaway RS: most robust, slowest.
-        #   "hdp"               - O(1) HDP-flush register write: fastest, but a
-        #                         50-iter run showed intermittent spikes (nopad 6/50);
-        #                         opt-in. Auto-falls back to "full" if no HDP register.
-        _warm_mode = os.environ.get("ODC_GDA_WARMUP_MODE", "strided")
+        # Cross-node write-visibility strategy for the just-staged grad
+        # (config odc_gda_warmup_mode). Modes:
+        #   "strided" (default) - page-strided tiny throwaway READ that keeps
+        #       full-warmup's deterministic "read-triggered settle" (validated 0 grad
+        #       spikes, loss == single-node) at minimal volume; stride via
+        #       odc_gda_stride_bytes (default 64KB).
+        #   "full"  - full-shard throwaway reduce-scatter: most robust, slowest.
+        #   "hdp"   - O(1) HDP_MEM_FLUSH_CNTL register write; auto-falls back to
+        #       "full" if no HDP register. "fence"/"hdpfence" - device system-scope
+        #       fence (+ optional HDP flush) instead of the read settle.
+        _warm_mode = cfg.gda_warmup_mode
         if _warm_mode == "hdp" and getattr(self, "_hdp_fallback", False):
             _warm_mode = "full"
         if not getattr(self, "_logged_warm_mode", False):
             logger.warning(
                 "[GDA] reduce-scatter warm-up mode=%s stride_bytes=%s",
                 _warm_mode,
-                os.environ.get("ODC_GDA_STRIDE_BYTES", "65536"),
+                cfg.gda_stride_bytes,
             )
             self._logged_warm_mode = True
-        # OVERLAP (ODC_GDA_OVERLAP=1): the previous group's reduce-scatter was
-        # launched on a side stream and NOT synced, so it overlapped the backward
-        # compute that ran since. Now, before we re-stage into the SHARED input_sym
-        # (and before its acc is needed), wait it -> guards the buffer reuse + acc.
-        _overlap = os.environ.get("ODC_GDA_OVERLAP", "0") == "1"
-        # ODC_GDA_BUCKET=1: drop the redundant post-strided-warmup barrier (barrier#2).
-        # The strided touch only primes THIS rank's NIC read paths to peers' already-
-        # staged data (barrier#1 after staging guaranteed all peers staged); it writes
-        # nothing, so a second cross-rank barrier before the real reduce-scatter is
-        # unnecessary -> halves rocshmem_barrier_all from ~62 to ~31 per step.
-        _bucket = os.environ.get("ODC_GDA_BUCKET", "0") == "1"
-        if official:
-            # Official single-sided push has no comm/compute overlap side-stream;
-            # force the synchronous bare reduce-scatter (no overlap collect).
-            _overlap = False
-        if _overlap:
-            _rs.gda_rs_overlap_sync()
-        _ts0 = _t.perf_counter()
         if _warm_mode in ("fence", "hdpfence"):
             # Ensure the grad (input_tensor) is fully produced before copy+fence,
-            # then copy into the symmetric staging buffer with a trailing
-            # system-scope fence (gda_stage_fence self-syncs the device).
-            # Deliverable 19 phase 2: "hdpfence" = device system-scope fence (orders the staged
-            # writes to system scope) PLUS an HDP register flush (pushes this GPU's
-            # HDP cache so the remote NIC's RDMA read sees fresh data) -- a read-FREE
-            # visibility guarantee combining BOTH writer-side primitives, to skip the
-            # strided read settle. Correctness gate decides if it's deterministic.
+            # then copy into the symmetric staging buffer with a trailing system-scope
+            # fence (gda_stage_fence self-syncs the device). "hdpfence" additionally
+            # flushes this GPU's HDP so the remote NIC's RDMA read sees fresh data.
             torch.cuda.current_stream().synchronize()
             _flat = input_tensor.view(-1)
             _rs.gda_stage_fence(input_sym.data_ptr(), _flat.data_ptr(), _flat.numel() * es)
@@ -214,16 +168,7 @@ class ReductionService:
             get_comm_stream().wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(get_comm_stream()):
                 input_sym.copy_(input_tensor.view(-1))
-            # Deliverable 20: the staging only needs the COPY (on comm stream) done before the
-            # settle/RS read input_sym; a FULL torch.cuda.synchronize() also waits the
-            # gather-async kernels on their DEDICATED stream (which are already waited
-            # by gather.py's own wait_stream at consumption) -> redundant, it absorbs
-            # the gather RDMA wait into scatter. STAGE_STREAMSYNC=1 syncs only the comm
-            # stream so async gather truly overlaps scatter. Default (0) = full sync.
-            if os.environ.get("ODC_GDA_STAGE_STREAMSYNC", "0") == "1":
-                get_comm_stream().synchronize()
-            else:
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
             if _warm_mode == "hdp":
                 if not getattr(self, "_hdp_inited", False):
                     rc = _rs.gda_hdp_init()
@@ -237,56 +182,7 @@ class ReductionService:
                         self._hdp_inited = True
                 if _warm_mode == "hdp":
                     _rs.gda_hdp_flush()
-        _t_stage = _t.perf_counter() - _ts0
-        _tb0 = _t.perf_counter()
-        # ODC_OFFICIAL_PUSH: official single-sided push does NOT barrier per call
-        # (no cross-PE rendezvous before the reduce-scatter reads peers' staged
-        # grad) -- skip it. On this mlx5/GDA fabric the just-staged write may not
-        # be NIC-visible -> stale read -> grad spike: that is the documented risk.
-        if not official:
-            _rs.barrier()
-        _t_bar = _t.perf_counter() - _tb0
-
-        # ROOT-CAUSE PROBE (ODC_GDA_VERIFY=1): run the SAME reduce-scatter twice
-        # from the identical staged input_sym into two fresh buffers and compare.
-        # diff>0 => non-deterministic => cross-node visibility/race (stale read);
-        # diff==0 => deterministic (wiring bug, compare vs reference separately).
-        if os.environ.get("ODC_GDA_VERIFY", "0") == "1":
-            t1 = torch.zeros(shard_elems, dtype=torch.float32, device="cuda")
-            t2 = torch.zeros(shard_elems, dtype=torch.float32, device="cuda")
-            _rs.gda_reduce_scatter_acc(
-                t1.data_ptr(),
-                input_sym.data_ptr(),
-                rank * shard_elems * es,
-                shard_elems,
-                _rs._n_pes,
-                scratch.data_ptr(),
-                chunk * es,
-                _rs.dtype_code(dt),
-                nblk,
-            )
-            _rs.barrier()
-            _rs.gda_reduce_scatter_acc(
-                t2.data_ptr(),
-                input_sym.data_ptr(),
-                rank * shard_elems * es,
-                shard_elems,
-                _rs._n_pes,
-                scratch.data_ptr(),
-                chunk * es,
-                _rs.dtype_code(dt),
-                nblk,
-            )
-            torch.cuda.synchronize()
-            d = (t1 - t2).abs().max().item()
-            if rank == 0:
-                logger.warning(
-                    "[GDA-VERIFY] key=%s n=%d max|run1-run2|=%.4e run1_norm=%.4e",
-                    str(key),
-                    shard_elems,
-                    d,
-                    t1.norm().item(),
-                )
+        _rs.barrier()
 
         # Cross-node write-visibility settle (FIX for the intermittent stale-read
         # grad spikes): a throwaway "warm-up" reduce-scatter + barrier BEFORE the
@@ -306,23 +202,17 @@ class ReductionService:
         # different NIC and HDP is per-NIC/per-page, so a tiny touch leaves most
         # pages stale -> spikes; use the FULL shard (default) so every NIC/page is
         # settled. The full warm-up is itself parallelized across NICs (cheap).
-        if official:
-            # ODC_OFFICIAL_PUSH: no warm-up / strided / settle reduce-scatter and
-            # no settle barrier. The real reduce-scatter reads peers' staged grad
-            # directly (single-sided), exactly like upstream. Stale-read spikes
-            # here are the documented risk we are reproducing, not fixing.
-            _t_warm = 0.0
-        elif _warm_mode in ("fence", "hdp", "hdpfence"):
+        if _warm_mode in ("fence", "hdp", "hdpfence"):
             # The staged write was already made NIC-visible (HDP flush / fence),
             # so the throwaway warm-up reduce-scatter (the ~59%-of-RS overhead) is
             # skipped entirely. The barrier after staging still rendezvouses PEs.
-            _t_warm = 0.0
+            pass
         elif _warm_mode == "strided":
             # Page-strided tiny throwaway READ: keeps full-warmup's deterministic
             # "read-triggered settle" (covers every page of my segment on every PE
-            # -> all 8 NICs) but at minimal volume (one touch per ODC_GDA_STRIDE_BYTES
+            # -> all 8 NICs) but at minimal volume (one touch per odc_gda_stride_bytes
             # page, not the whole shard). Staging above used plain copy_ (no flush).
-            stride_b = int(os.environ.get("ODC_GDA_STRIDE_BYTES", "65536"))
+            stride_b = int(cfg.gda_stride_bytes)
             touch_b = int(es)
             seg_bytes = int(shard_elems * es)
             npages = (seg_bytes + stride_b - 1) // stride_b
@@ -330,7 +220,6 @@ class ReductionService:
             sstride = 256  # bytes/throwaway scratch slot (>= touch_b; avoids collide)
             scratch_cap = scratch.numel() * scratch.element_size()
             nblk_t = min(int(total_touch), 4096, max(1, scratch_cap // sstride))
-            _tw0 = _t.perf_counter()
             _rs.gda_strided_touch(
                 input_sym.data_ptr(),
                 rank * shard_elems * es,
@@ -342,21 +231,13 @@ class ReductionService:
                 sstride,
                 int(nblk_t),
             )
-            if not _bucket:
-                _rs.barrier()  # barrier#2 (redundant in bucket mode; see _bucket note)
-            _t_warm = _t.perf_counter() - _tw0
-        else:
-            if os.environ.get("ODC_GDA_WARMUP_TINY", "0") == "1":
-                n_warm, w_nblk, w_stride = min(int(shard_elems), 1024), 1, None
-            else:
-                n_warm, w_nblk, w_stride = int(shard_elems), nblk, chunk * es
-            if w_stride is None:
-                w_stride = n_warm * es
+            _rs.barrier()
+        else:  # "full": full-shard throwaway reduce-scatter settle
+            n_warm, w_nblk, w_stride = int(shard_elems), nblk, chunk * es
             wkey = ("gda_warmup", n_warm)
             if wkey not in self.input_buffer:
                 self.input_buffer[wkey] = torch.zeros(n_warm, dtype=torch.float32, device="cuda")
             warmup = self.input_buffer[wkey]
-            _tw0 = _t.perf_counter()
             warmup.zero_()
             _rs.gda_reduce_scatter_acc(
                 warmup.data_ptr(),
@@ -370,48 +251,19 @@ class ReductionService:
                 w_nblk,
             )
             _rs.barrier()
-            _t_warm = _t.perf_counter() - _tw0
-        _tr0 = _t.perf_counter()
-        if _overlap:
-            # Launch reduce-scatter on the side stream and RETURN without syncing,
-            # so the next backward compute overlaps this RDMA-bound kernel. The next
-            # scatter call's start-sync (and sync() at step end) collect it. acc and
-            # input_sym are both guarded by those waits -> no stale read / race.
-            _rs.gda_reduce_scatter_acc_async(
-                acc.data_ptr(),
-                input_sym.data_ptr(),
-                rank * shard_elems * es,
-                shard_elems,
-                _rs._n_pes,
-                scratch.data_ptr(),
-                chunk * es,
-                _rs.dtype_code(dt),
-                nblk,
-            )
-        else:
-            _rs.gda_reduce_scatter_acc(
-                acc.data_ptr(),
-                input_sym.data_ptr(),
-                rank * shard_elems * es,
-                shard_elems,
-                _rs._n_pes,
-                scratch.data_ptr(),
-                pipe * chunk * es,
-                _rs.dtype_code(dt),
-                nblk,
-            )
-            torch.cuda.synchronize()
-        _t_real = _t.perf_counter() - _tr0
+        _rs.gda_reduce_scatter_acc(
+            acc.data_ptr(),
+            input_sym.data_ptr(),
+            rank * shard_elems * es,
+            shard_elems,
+            _rs._n_pes,
+            scratch.data_ptr(),
+            pipe * chunk * es,
+            _rs.dtype_code(dt),
+            nblk,
+        )
+        torch.cuda.synchronize()
         self.dispatched_tasks += 1
-        if _prof and rank == 0:
-            logger.warning(
-                "[GDA-PROF scatter] shard=%d stage=%.3f barrier=%.3f warmup_rs=%.3f real_rs=%.3f",
-                shard_elems,
-                _t_stage,
-                _t_bar,
-                _t_warm,
-                _t_real,
-            )
 
     def _single_device_scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         """Single-node device-side reduce-scatter accumulate (no host-polling subprocess).
@@ -491,7 +343,6 @@ class ReductionService:
 
     def scatter_accumulate(self, key, input_tensor, pg: dist.ProcessGroup):
         if _gda_active():
-            official = _official_push()
             # DEFER the cross-node reduce to once-per-minibatch. The per-call
             # _gda_scatter_accumulate does rocshmem_barrier_all (collective);
             # calling it per-microbatch deadlocks under nopad (ranks have
@@ -499,11 +350,14 @@ class ReductionService:
             # accumulate the unsharded grad LOCALLY here (no comm/barrier ->
             # backward is lockstep-free), then do ONE barriered reduce-scatter
             # per group at get_accumulation (count == #groups, matched across
-            # ranks). Multi-node DEFAULT = defer; single-node (n_pes <=
-            # local_world_size) keeps the per-call path. ODC_OFFICIAL_PUSH skips
-            # DEFER (official does no local pre-accumulation). Env var overrides.
-            defer_default = "1" if _rs._n_pes > get_local_world_size() else "0"
-            if os.environ.get("ODC_GDA_DEFER_REDUCE", defer_default) == "1" and not official:
+            # ranks). Config odc_gda_defer_reduce: "auto" (default) => defer iff
+            # multi-node (n_pes > local_world_size); "1"/"0" force on/off.
+            _defer = str(get_config().gda_defer_reduce)
+            if _defer == "auto":
+                _defer_on = _rs._n_pes > get_local_world_size()
+            else:
+                _defer_on = _defer in ("1", "true", "True")
+            if _defer_on:
                 if not hasattr(self, "_gda_deferred"):
                     self._gda_deferred = {}
                     self._gda_deferred_pg = {}
@@ -559,11 +413,6 @@ class ReductionService:
 
     def sync(self, pg: dist.ProcessGroup):
         if _gda_active():
-            # OVERLAP: collect any in-flight side-stream reduce-scatters before
-            # the optimizer reads acc. ODC_OFFICIAL_PUSH forces synchronous RS
-            # (no side stream), so nothing to collect here.
-            if os.environ.get("ODC_GDA_OVERLAP", "0") == "1" and not _official_push():
-                _rs.gda_rs_overlap_sync()
             # GDA path is fully synchronous (device kernels + barriers).
             torch.cuda.synchronize()
             torch.distributed.barrier(group=pg)

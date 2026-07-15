@@ -50,19 +50,20 @@ Design notes
    compile hook ``install_hook()`` is called at import time.
 """
 
-import os
-
 import triton
 import triton.language as tl
 from packaging import version
 from triton.language import core
 
 # ---------------------------------------------------------------------------
-# ODC P2P backend selector. Default "mori" keeps the existing, verified
-# behaviour byte-for-byte; "rocshmem" selects the host-API backend
-# (single-node / IPC-only) defined in the dedicated branch below.
+# ODC P2P backend selector (config item odc_p2p_backend). Default "mori" keeps
+# the existing, verified behaviour byte-for-byte; "rocshmem" selects the host-API
+# backend (single-node / IPC-only) defined in the dedicated branch below. The ODC
+# integration patch populates the runtime config before this module is imported.
 # ---------------------------------------------------------------------------
-_P2P_BACKEND = os.environ.get("ODC_P2P_BACKEND", "mori").lower()
+from odc.runtime_config import get_config  # noqa: E402
+
+_P2P_BACKEND = get_config().p2p_backend.lower()
 
 
 def is_triton_version_supported():

@@ -45,16 +45,19 @@ import triton
 import triton.language as tl
 
 from odc.primitives import __syncthreads
+from odc.runtime_config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# ODC P2P backend selector. Default "mori" preserves the existing, verified
-# behaviour byte-for-byte; "rocshmem" selects the host-API backend
-# (single-node / IPC-only) implemented in _rocshmem_backend.py.
+# ODC P2P backend selector (config item odc_p2p_backend). Default "mori"
+# preserves the existing, verified behaviour byte-for-byte; "rocshmem" selects
+# the host-API backend (single-node / IPC-only) implemented in
+# _rocshmem_backend.py. Read HERE at import time -- the ODC integration patch
+# populates the runtime config before odc.primitives is first imported.
 # ---------------------------------------------------------------------------
-_P2P_BACKEND = os.environ.get("ODC_P2P_BACKEND", "mori").lower()
+_P2P_BACKEND = get_config().p2p_backend.lower()
 _USE_ROCSHMEM = _P2P_BACKEND == "rocshmem"
 
 
@@ -100,7 +103,7 @@ def init_shmem():
     if "MORI_SOCKET_IFNAME" not in os.environ and "NCCL_SOCKET_IFNAME" in os.environ:
         os.environ["MORI_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"].lstrip("=")
 
-    # Two init methods (select via ODC_MORI_INIT env var):
+    # Two init methods (select via the odc_mori_init config item):
     #   "pg"  (default): shmem_torch_process_group_init("default")
     #   "uid": shmem_init_attr(WITH_UNIQUEID, rank, world, uid) — does NOT
     #          touch PyTorch process-group registration. Use this when the
@@ -108,7 +111,7 @@ def init_shmem():
     #          named process groups and the PG-based init crashes
     #          (observed: `free(): invalid pointer` during
     #          shmem_torch_process_group_init under Megatron).
-    init_method = os.environ.get("ODC_MORI_INIT", "pg")
+    init_method = get_config().mori_init
     logger.info(
         "init_shmem (MORI): heap=%s, sock_ifname=%s, method=%s",
         os.environ.get("MORI_SHMEM_HEAP_SIZE"),
@@ -437,8 +440,8 @@ class BufferSplitter:
         self.round_data_size = 2**6
 
     def get_max_global_buffer_size(self):
-        DEFAULT_MAX_BUFFER_SIZE = 64 * 1024 * 1024
-        max_buffer_size = int(os.environ.get("ODC_MAX_BUFFER_SIZE", DEFAULT_MAX_BUFFER_SIZE))
+        # config item odc_max_buffer_size (default 64 MiB).
+        max_buffer_size = int(get_config().max_buffer_size)
         return max_buffer_size
 
     def get_global_buffer_size(self, original_buffer_shape):
