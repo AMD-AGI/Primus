@@ -212,8 +212,8 @@ The following models are supported out of the box via provided configuration fil
 
 - **Flux** - Flow-based diffusion model for text-to-image generation
   - Training guide: [examples/megatron/diffusion/README.md](megatron/diffusion/README.md) (Flux 535M and 12B)
-  - Architecture & developer docs: [docs/backends/megatron/diffusion/README.md](../docs/backends/megatron/diffusion/README.md)
-  - FP8 training: [docs/backends/megatron/diffusion/fp8_training.md](../docs/backends/megatron/diffusion/fp8_training.md)
+  - Architecture & developer docs: [docs/04-technical-guides/diffusion-models/README.md](../docs/04-technical-guides/diffusion-models/README.md)
+  - FP8 training: [docs/04-technical-guides/diffusion-models/fp8_training.md](../docs/04-technical-guides/diffusion-models/fp8_training.md)
 
 ---
 
