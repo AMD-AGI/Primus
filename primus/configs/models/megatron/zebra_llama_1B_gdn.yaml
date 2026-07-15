@@ -4,7 +4,7 @@ extends:
 # Zebra Llama 1B Pure GDN configuration
 model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
 tokenizer_type: HuggingFaceTokenizer
-tokenizer_model: fla-hub/gla-1.3B-100B
+tokenizer_model: meta-llama/Llama-3.2-1B
 
 # Model size parameters
 num_layers: 32

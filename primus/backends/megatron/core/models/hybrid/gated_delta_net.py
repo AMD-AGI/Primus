@@ -91,7 +91,7 @@ class GatedDeltaNet(MegatronModule):
         conv_bias: bool = False,
         conv_init: Optional[float] = None,
         use_qk_l2norm: bool = True,
-        A_init_range: Tuple[float, float] = (0, 16),
+        A_init_range: Tuple[float, float] = (1, 16),
         pg_collection: ProcessGroupCollection = None,
     ):
         """
@@ -187,20 +187,21 @@ class GatedDeltaNet(MegatronModule):
 
         # Time step projection (discretization)
         self.num_v_heads_local_tp = self.num_value_heads // self.tp_size
-        # dt_bias parameter
+        # dt_bias parameter (fp32 to avoid bf16 quantisation noise in the gate)
         self.dt_bias = nn.Parameter(
             torch.empty(
                 self.num_v_heads_local_tp,
-                dtype=config.params_dtype,
+                dtype=torch.float32,
                 device=torch.cuda.current_device(),
             )
         )
         setattr(self.dt_bias, "tensor_model_parallel", True)
-        # A_log parameter
+        # A_log parameter (fp32: log(A) is fed into exp() inside the kernel,
+        # and bf16 uniform_(0,16) can produce exact 0 → log(0) = -inf → NaN)
         self.A_log = nn.Parameter(
             torch.empty(
                 self.num_v_heads_local_tp,
-                dtype=config.params_dtype,
+                dtype=torch.float32,
                 device=torch.cuda.current_device(),
             )
         )
@@ -267,11 +268,11 @@ class GatedDeltaNet(MegatronModule):
                     ) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
                 ).clamp(min=1e-4)
                 inv_dt = dt + torch.log(-torch.expm1(-dt))
-                self.dt_bias.data.copy_(inv_dt.to(self.config.params_dtype))
-                # A_log
+                self.dt_bias.data.copy_(inv_dt)
+                # A_log (compute in fp32 to avoid log(0) = -inf from bf16 zeros)
                 A = torch.empty(
                     self.num_v_heads_local_tp,
-                    dtype=self.config.params_dtype,
+                    dtype=torch.float32,
                     device=torch.cuda.current_device(),
                 ).uniform_(*self.A_init_range)
                 self.A_log.data.copy_(torch.log(A))
