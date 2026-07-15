@@ -73,6 +73,10 @@ class _HardwareProfile:
     l2_capacity: int  # bytes (per XCD)
     compute_clock_khz: int
     hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
+    # Register-file capacity per CU (bytes). CDNA3/CDNA4 expose 512 KiB of VGPR
+    # per CU; ``origami.get_hardware_for_arch`` requires this argument (matches
+    # ``get_hardware_for_device(...).rf_capacity`` on gfx942/gfx950).
+    rf_capacity: int = 524288
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
@@ -269,8 +273,12 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem.b_mx_block_size = 0
 
         # ----- Select best config & predict latency (in clock cycles) -----
+        # ``select_config`` takes a ``model_t`` selecting the GEMM (vs attention)
+        # cost model as its 4th argument.
         try:
-            result = _origami.select_config(problem, self._hardware, self._configs)
+            result = _origami.select_config(
+                problem, self._hardware, self._configs, _origami.model_t.gemm
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
@@ -399,6 +407,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 arch_enum,
                 n_cu,
                 profile.lds_capacity,
+                profile.rf_capacity,
                 profile.l2_capacity,
                 clock_khz,
             )
@@ -454,6 +463,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             arch_enum,
             n_cu,
             profile.lds_capacity,
+            profile.rf_capacity,
             profile.l2_capacity,
             clock_khz,
         )
