@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -34,6 +34,7 @@ except ModuleNotFoundError:
 
 import argparse
 import importlib
+import logging
 import pkgutil
 import traceback
 from typing import Callable, Dict, Iterable, Optional, Set
@@ -148,6 +149,8 @@ def main():
       ...
     """
     _ensure_project_root_on_path()
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    logging.getLogger("primus").setLevel(logging.INFO)
     parser = argparse.ArgumentParser(
         prog="primus",
         description="Primus Unified CLI for Training & Utilities",
