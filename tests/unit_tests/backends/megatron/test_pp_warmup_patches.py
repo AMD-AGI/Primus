@@ -202,6 +202,12 @@ def _build_training_cmd(
         "False",
         "--mtp_num_layers",
         str(_MTP_NUM_LAYERS),
+        "--deterministic_mode",
+        "True",
+        "--use_flash_attn",
+        "False",
+        "--cross_entropy_loss_fusion",
+        "False",
     ]
 
     env = os.environ.copy()

@@ -13,7 +13,7 @@ from primus.backends.megatron.training.git_metadata import (
     collect_git_metadata,
     get_env_variables,
 )
-from primus.modules.module_utils import debug_rank_0
+from primus.core.utils.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
@@ -152,7 +152,7 @@ def _ensure_var_is_initialized(var, name):
 
 
 def _ensure_var_is_not_initialized(var, name):
-    """Make sure the input variable is not None."""
+    """Make sure the input variable is None (not yet initialized)."""
     assert var is None, "{} is already initialized.".format(name)
 
 

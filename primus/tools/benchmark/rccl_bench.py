@@ -156,9 +156,9 @@ def algo_bytes_factor(op: str, world_size: int) -> float:
     Per-rank effective bytes factor (commonly used in NCCL/RCCL benchmarks).
     """
     p = world_size
-    if op == "allreduce":
+    if op == "all_reduce":
         return 2.0 * (p - 1) / p
-    elif op in ("allgather", "reduce_scatter", "broadcast", "alltoall"):
+    elif op in ("all_gather", "reduce_scatter", "broadcast", "alltoall"):
         return (p - 1) / p
     else:
         raise ValueError(f"Unknown op: {op}")
@@ -195,12 +195,12 @@ def build_tensor(num_bytes: int, dtype: torch.dtype, world_size: int, op: str) -
     """
     elem_size = torch.tensor([], dtype=dtype).element_size()
 
-    if op in ("allreduce", "broadcast"):
+    if op in ("all_reduce", "broadcast"):
         numel = max(1, num_bytes // elem_size)
         t = torch.ones(numel, dtype=dtype, device="cuda")
         return {"in": t}
 
-    elif op == "allgather":
+    elif op == "all_gather":
         # out needs world_size * in.numel
         in_numel = max(1, num_bytes // elem_size)
         _in = torch.ones(in_numel, dtype=dtype, device="cuda")
@@ -233,11 +233,11 @@ def build_tensor(num_bytes: int, dtype: torch.dtype, world_size: int, op: str) -
 
 
 def do_collective(op: str, tensors: Dict[str, torch.Tensor], world_size: int):
-    if op == "allreduce":
+    if op == "all_reduce":
         dist.all_reduce(tensors["in"], op=dist.ReduceOp.SUM)
     elif op == "broadcast":
         dist.broadcast(tensors["in"], src=0)
-    elif op == "allgather":
+    elif op == "all_gather":
         # Prefer into-tensor variant (contiguous & faster)
         dist.all_gather_into_tensor(tensors["out"], tensors["in"])
     elif op == "reduce_scatter":
@@ -259,7 +259,7 @@ def check_correctness(op: str, tensors: Dict[str, torch.Tensor], world_size: int
     Light-weight correctness check on small slices to avoid OOM.
     """
     with torch.no_grad():
-        if op == "allreduce":
+        if op == "all_reduce":
             # Ones reduced by SUM
             ref = torch.full_like(tensors["in"], fill_value=float(world_size))
             return torch.allclose(tensors["in"], ref, rtol=1e-2, atol=1e-2)
@@ -267,7 +267,7 @@ def check_correctness(op: str, tensors: Dict[str, torch.Tensor], world_size: int
             # After bcast, all ranks equal to src's tensor (initialized as ones)
             ref = torch.ones_like(tensors["in"])
             return torch.allclose(tensors["in"], ref, rtol=1e-4, atol=1e-4)
-        elif op == "allgather":
+        elif op == "all_gather":
             # out is concatenation of 'ones' from every rank
             # We only check a few elements
             return torch.allclose(

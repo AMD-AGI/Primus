@@ -19,7 +19,7 @@ from typing import Any
 from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.patches import run_patches
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class MegatronBridgeBaseTrainer(BaseTrainer):
@@ -36,35 +36,47 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         - Handle Megatron-Bridge specific initialization and setup
     """
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, **kwargs):
         """
         Initialize Megatron-Bridge base trainer.
 
         Args:
             backend_args: Megatron-Bridge configuration as SimpleNamespace
                          (from MegatronBridgeArgBuilder)
+            **kwargs: Runtime context kwargs forwarded to BaseTrainer for filtering.
         """
         log_rank_0("=" * 80)
         log_rank_0("Initializing MegatronBridgeBaseTrainer...")
         log_rank_0("=" * 80)
 
         # Initialize BaseTrainer
-        super().__init__(backend_args=backend_args)
+        super().__init__(backend_args=backend_args, **kwargs)
         set_primus_global_variables(self.backend_args)
 
         import primus.backends.megatron.patches  # noqa: F401
+        import primus.backends.megatron_bridge.patches  # noqa: F401
 
         # Create module_config from backend_args for patch context
         module_config = SimpleNamespace(params=self.backend_args)
 
+        megatron_version = type(self).detect_megatron_version()
+        patch_extra = {
+            "module_config": module_config,
+            "backend_args": self.backend_args,
+        }
+
         run_patches(
             backend="megatron",
             phase="before_train",
-            backend_version=type(self).detect_megatron_version(),
-            extra={
-                "module_config": module_config,
-                "backend_args": self.backend_args,
-            },
+            backend_version=megatron_version,
+            extra=patch_extra,
+        )
+
+        run_patches(
+            backend="megatron_bridge",
+            phase="before_train",
+            backend_version=megatron_version,
+            extra=patch_extra,
         )
 
         log_rank_0("=" * 80)

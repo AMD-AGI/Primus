@@ -124,8 +124,8 @@ moe = get_moe_module_spec(
 )
 
 hybrid_stack_spec = ModuleSpec(
-    module=MambaStack,
-    submodules=MambaStackSubmodules(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
         mamba_layer=ModuleSpec(
             module=MambaLayer,
             submodules=MambaLayerSubmodules(

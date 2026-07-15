@@ -10,53 +10,36 @@ Primus Turbo TESpecProvider Patches
 Patches for replacing Transformer Engine TESpecProvider with PrimusTurboSpecProvider.
 """
 
-import importlib.util
-
+from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
-def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
-    """
-    Check if PrimusTurbo is enabled and can be used.
-
-    Requires:
-      - primus_turbo package is installed
-      - tensor_model_parallel_size == 1
-      - enable_primus_turbo == True
-    """
-    # Check if primus_turbo package is available
-    if importlib.util.find_spec("primus_turbo") is None:
-        log_rank_0("[Patch:megatron.turbo.te_spec_provider] primus_turbo not found, use TE backend...")
-        return False
-
+def _use_legacy_grouped_gemm(ctx: PatchContext) -> bool:
     args = get_args(ctx)
-    tp_size = getattr(args, "tensor_model_parallel_size", 1)
-    enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
+    return bool(
+        getattr(args, "moe_grouped_gemm", False)
+        and getattr(args, "moe_use_legacy_grouped_gemm", False)
+        and not getattr(args, "use_turbo_grouped_gemm", False)
+    )
 
-    if tp_size != 1:
-        if enable_primus_turbo:
-            log_rank_0(
-                "[Patch:megatron.turbo.te_spec_provider] "
-                "Primus Turbo does not support TP; using TE backend instead..."
-            )
-        else:
-            log_rank_0("[Patch:megatron.turbo.te_spec_provider] TP > 1; using TE backend...")
-        return False
 
-    if not enable_primus_turbo:
-        log_rank_0("[Patch:megatron.turbo.te_spec_provider] enable_primus_turbo=False; using TE backend...")
-        return False
-
-    return True
+def _needs_primus_spec_provider(ctx: PatchContext) -> bool:
+    if _use_legacy_grouped_gemm(ctx):
+        log_rank_0(
+            "[Patch:megatron.turbo.te_spec_provider] "
+            "legacy grouped GEMM enabled; using Primus spec provider..."
+        )
+        return True
+    return is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
     "megatron.turbo.te_spec_provider",
     backend="megatron",
     phase="before_train",
-    description="Replace TESpecProvider with PrimusTurboSpecProvider when PrimusTurbo is enabled",
-    condition=_is_primus_turbo_enabled,
+    description="Replace TESpecProvider with Primus provider for PrimusTurbo or legacy grouped GEMM",
+    condition=_needs_primus_spec_provider,
     backend_versions=["<0.17"],
     priority=41,
 )
@@ -64,8 +47,8 @@ def patch_te_spec_provider(ctx: PatchContext):
     """
     Patch Transformer Engine integration to use PrimusTurboSpecProvider.
 
-    This replaces TESpecProvider in all relevant Megatron modules with
-    PrimusTurboSpecProvider to enable PrimusTurbo backend.
+    This replaces TESpecProvider in all relevant Megatron modules. It is used
+    for PrimusTurbo features and for legacy grouped-GEMM expert selection.
     """
     import megatron.core.extensions as meg_ext
     from megatron.core.extensions import transformer_engine_spec_provider
@@ -76,9 +59,17 @@ def patch_te_spec_provider(ctx: PatchContext):
         PrimusTurboSpecProvider,
     )
 
+    args = get_args(ctx)
+    if _use_legacy_grouped_gemm(ctx):
+        reason = "legacy grouped GEMM enabled"
+    elif bool(getattr(args, "enable_primus_turbo", False)):
+        reason = "PrimusTurbo backend enabled"
+    else:
+        reason = "Primus spec provider requested"
+
     log_rank_0(
         "[Patch:megatron.turbo.te_spec_provider] "
-        "Patch TESpecProvider to PrimusTurboSpecProvider; PrimusTurbo backend enabled"
+        f"Patch TESpecProvider to PrimusTurboSpecProvider; {reason}"
     )
 
     assert (
@@ -110,4 +101,4 @@ def patch_te_spec_provider(ctx: PatchContext):
         f"megatron.core.transformer.multi_token_prediction.TESpecProvider -> {PrimusTurboSpecProvider.__name__}"
     )
 
-    log_rank_0("[Patch:megatron.turbo.te_spec_provider] Using PrimusTurbo backend (PT)")
+    log_rank_0(f"[Patch:megatron.turbo.te_spec_provider] Using Primus spec provider ({reason})")

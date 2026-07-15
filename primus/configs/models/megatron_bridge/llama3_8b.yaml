@@ -1,0 +1,6 @@
+recipe: llama.llama3
+flavor: llama3_8b_finetune_config
+hf_path: NousResearch/Meta-Llama-3-8B
+
+dataset:
+    dataset_name: "rajpurkar/squad"

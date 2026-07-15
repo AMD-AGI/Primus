@@ -1,0 +1,55 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8b_lora_posttrain_packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Llama-3 8B LoRA SFT via Megatron-Bridge (WITH packing)
+# =============================================================================
+# Counterpart of examples/megatron/configs/MI355X/llama3_8B-BF16-sft-packed.yaml
+# on the megatron-native SFT path. Used for the bridge-vs-native A/B benchmark.
+#
+# Same as llama3_8b_lora_posttrain.yaml but with packed_sequence: true.
+# Bridge uses PackedSequenceSpecs(packed_sequence_size=seq_length) which is its
+# native packing mechanism (different implementation from the primus sequence
+# packer in primus/backends/megatron/sft/packing.py).
+#
+# Comparison goal: throughput / memory / iter time of bridge native packing
+# vs. primus implicit-multi-turn packing on the same model.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: sft_trainer.yaml
+
+    model: llama3_8b.yaml
+
+    overrides:
+      stderr_sink_level: DEBUG
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      train_iters: 20
+      global_batch_size: 128
+      micro_batch_size: 1
+      seq_length: 2048
+      eval_interval: 50
+      save_interval: 100
+
+      peft: lora
+      packed_sequence: true
+
+      finetune_lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+
+      precision_config: bf16_mixed
+
+# Match native LoRA dim/alpha=32/32
+peft:
+    dim: 32
+    alpha: 32
