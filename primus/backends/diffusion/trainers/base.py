@@ -255,13 +255,15 @@ class BaseWanTrainer:
 
         grads = [p.grad for p in parameters]
         norm = torch.nn.utils.get_total_norm(grads, norm_type=2.0, foreach=True)
+        dtensor_cls = None
         try:
             from torch.distributed.tensor import DTensor
 
-            if isinstance(norm, DTensor):
-                norm = norm.full_tensor()
-        except (ImportError, RuntimeError):
-            pass
+            dtensor_cls = DTensor
+        except (ImportError, RuntimeError) as exc:
+            logger.debug(f"Skipping DTensor grad-norm conversion: {exc}")
+        if dtensor_cls is not None and isinstance(norm, dtensor_cls):
+            norm = norm.full_tensor()
 
         torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
         return norm.item() if isinstance(norm, torch.Tensor) else float(norm)

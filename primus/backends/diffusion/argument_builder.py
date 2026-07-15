@@ -226,7 +226,7 @@ class DiffusionArgBuilder:
     def _defaults_for_model(self, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
         if model_name == "wan":
             return self.DEFAULT_DATASET, self.DEFAULT_WAN_TRAINER
-        if model_name == "flux":
+        if model_name == "flux" or model_name.startswith("flux."):
             return self.DEFAULT_FLUX_DATASET, self.DEFAULT_FLUX_TRAINER
         raise ValueError(f"Unsupported diffusion model name: {model_name!r}")
 
@@ -384,7 +384,9 @@ class DiffusionArgBuilder:
         if resume_from_checkpoint is not None:
             self._set_nested(trainer_args, ("resume_from_checkpoint",), resume_from_checkpoint)
 
-        if model_name == "flux" and int(trainer_args.get("sp_size", 1)) != 1:
+        if (model_name == "flux" or model_name.startswith("flux.")) and int(
+            trainer_args.get("sp_size", 1)
+        ) != 1:
             raise ValueError("FLUX diffusion training currently requires `parallelism.sp_size: 1`.")
 
         return normalized

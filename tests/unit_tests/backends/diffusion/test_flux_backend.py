@@ -29,7 +29,7 @@ def _finalize(params: dict):
 def test_flux_argument_builder_selects_flux_defaults():
     args = _finalize(
         {
-            "model": {"name": "flux", "config": {"config": {"model_variant": "flux-dev"}}},
+            "model": {"name": "flux.1-dev", "config": {}},
             "training": {"steps": 7, "local_batch_size": 3},
             "data": {
                 "dataset_path": "/tmp/precomputed",
@@ -44,7 +44,7 @@ def test_flux_argument_builder_selects_flux_defaults():
         }
     )
 
-    assert args.model["name"] == "flux"
+    assert args.model["name"] == "flux.1-dev"
     assert args.dataset["name"] == "flux"
     assert args.dataset["config"]["dataset_path"] == "/tmp/precomputed"
     assert args.dataset["config"]["processor_config"]["empty_encodings_path"] == "/tmp/empty"
@@ -61,7 +61,7 @@ def test_flux_argument_builder_selects_flux_defaults():
 def test_flux_argument_builder_maps_raw_dataset_type():
     args = _finalize(
         {
-            "model": {"name": "flux", "config": {"config": {"model_variant": "flux-dev"}}},
+            "model": {"name": "flux.1-dev", "config": {}},
             "data": {
                 "dataset_type": "raw",
                 "dataset_format": "webdataset",
@@ -94,7 +94,7 @@ def test_flux_argument_builder_rejects_sequence_parallelism():
     with pytest.raises(ValueError, match="sp_size"):
         _finalize(
             {
-                "model": {"name": "flux", "config": {"config": {"model_variant": "flux-dev"}}},
+                "model": {"name": "flux.1-dev", "config": {}},
                 "parallelism": {"sp_size": 2},
             }
         )
@@ -204,7 +204,7 @@ def test_tiny_flux_model_computes_precomputed_loss():
     model = build_flux_model(
         {
             "config": {
-                "model_variant": "flux-dev",
+                "model_preset": "flux.1-dev",
                 "guidance": 1.0,
                 "params": {
                     "in_channels": 4,
@@ -237,7 +237,7 @@ def test_tiny_flux_schnell_model_computes_without_guidance():
     model = build_flux_model(
         {
             "config": {
-                "model_variant": "flux-schnell",
+                "model_preset": "flux.1-schnell",
                 "params": {
                     "in_channels": 4,
                     "out_channels": 4,
@@ -271,7 +271,7 @@ def test_flux_position_ids_are_float32_regardless_of_model_dtype():
     model = build_flux_model(
         {
             "config": {
-                "model_variant": "flux-dev",
+                "model_preset": "flux.1-dev",
                 "guidance": 1.0,
                 "params": {
                     "in_channels": 4,
@@ -329,7 +329,7 @@ def test_tiny_flux_model_computes_raw_loss_with_dummy_encoders():
     model = build_flux_model(
         {
             "config": {
-                "model_variant": "flux-dev",
+                "model_preset": "flux.1-dev",
                 "guidance": 1.0,
                 "params": {
                     "in_channels": 4,

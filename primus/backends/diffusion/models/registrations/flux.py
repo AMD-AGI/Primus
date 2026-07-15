@@ -32,7 +32,7 @@ from primus.backends.diffusion.models.flux.train_pipeline import (
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import count_parameters
 
-_FLUX_VARIANT_ALIASES = {
+_FLUX_PRESET_ALIASES = {
     "flux-schnell": "flux-schnell",
     "flux.1-schnell": "flux-schnell",
     "flux1-schnell": "flux-schnell",
@@ -145,34 +145,31 @@ def _build_flux_dit(params) -> Flux:
 
 def build_flux_model(model_config: dict[str, Any]):
     """
-    YAML shape:
-      model_config:
-        load_from_pretrained_path: /path/to/flux1-dev.safetensors
-        config:
-          model_variant: flux-dev | flux-schnell
-          trainable_modules: dit
-          guidance: 1.0
-          params: {... optional FluxParams overrides ...}
+    Build a FLUX model from the selected model preset.
+
+    `model_preset` is injected by the registry from `model.name` for Primus
+    configs such as `flux.1-dev` and `flux.1-schnell`.
     """
     cfg_dict: dict[str, Any] = dict(model_config.get("config", {}) or {})
-    variant_name = str(cfg_dict.get("model_variant", "flux-schnell"))
-    variant = _FLUX_VARIANT_ALIASES.get(variant_name.lower(), variant_name)
+    preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
+    preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
     params_overrides = dict(cfg_dict.get("params", {}) or {})
-    if variant == "flux-dev":
+    if preset == "flux-dev":
         params = flux_1_dev_params(**params_overrides)
-    elif variant == "flux-schnell":
+    elif preset == "flux-schnell":
         params = flux_1_schnell_params(**params_overrides)
     else:
         raise ValueError(
-            "Unsupported FLUX model_variant=" f"{variant_name!r}; expected one of: 'flux-dev', 'flux-schnell'"
+            "Unsupported FLUX model_preset="
+            f"{preset_name!r}; expected one of: 'flux.1-dev', 'flux.1-schnell'"
         )
     dit = _build_flux_dit(params)
 
     pretrained_path = model_config.get("load_from_pretrained_path") or model_config.get("pretrained_path")
     if pretrained_path:
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
-        default_filename = "flux1-dev.safetensors" if variant == "flux-dev" else "flux1-schnell.safetensors"
+        default_filename = "flux1-dev.safetensors" if preset == "flux-dev" else "flux1-schnell.safetensors"
         _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})
@@ -206,7 +203,7 @@ def build_flux_model(model_config: dict[str, Any]):
         )
 
     training_cfg = FluxTrainingConfig(
-        model_variant=variant,
+        model_preset=preset,
         trainable_modules=cfg_dict.get("trainable_modules", "dit"),
         guidance=None if not params.guidance_embed else float(cfg_dict.get("guidance", 1.0)),
         autoencoder_scale_factor=float(cfg_dict.get("autoencoder_scale_factor", 0.3611)),

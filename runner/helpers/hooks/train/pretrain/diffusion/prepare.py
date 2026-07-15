@@ -133,7 +133,7 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
         _require_path(model_cfg.get("load_from_pretrained_path"), "DiT initialization checkpoint")
         _require_path(encoder_cfg.get("t5_encoder"), "text encoder checkpoint", kind="file")
         _require_path(encoder_cfg.get("autoencoder"), "VAE checkpoint", kind="file")
-    elif model_name == "flux":
+    elif str(model_name).startswith("flux"):
         dataset_type = str(dataset_cfg.get("dataset_type", "precomputed")).lower()
         if dataset_type == "raw":
             dataset_name = dataset_cfg.get("dataset")

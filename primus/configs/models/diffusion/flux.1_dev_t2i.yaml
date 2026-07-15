@@ -1,5 +1,5 @@
 model:
-  name: flux.1-schnell
+  name: flux.1-dev
   config:
     load_from_pretrained_path: ${PRETRAINED_PATH:}
     config:
@@ -12,4 +12,4 @@ model:
       t5_encoder: ${T5_ENCODER:}
       clip_encoder: ${CLIP_ENCODER:}
       autoencoder: ${VAE_CHECKPOINT:}
-      max_t5_length: ${MAX_T5_LENGTH:256}
+      max_t5_length: ${MAX_T5_LENGTH:512}
