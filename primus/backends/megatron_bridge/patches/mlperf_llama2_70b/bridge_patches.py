@@ -19,7 +19,9 @@ from typing import Any, Optional
 
 import torch
 
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.conditions import is_llama2_70b_mlperf
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.conditions import (
+    is_llama2_70b_mlperf,
+)
 from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
     ResettableDataIterator,
 )
@@ -53,7 +55,11 @@ def patch_bridge_data(ctx: PatchContext) -> None:
     loaders.ResettableDataIterator = ResettableDataIterator
 
     import megatron.bridge.peft.lora as bridge_lora
-    from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA, VLMLoRA
+
+    from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import (
+        LoRA,
+        VLMLoRA,
+    )
 
     bridge_lora.LoRA = LoRA
     bridge_lora.VLMLoRA = VLMLoRA
@@ -185,14 +191,14 @@ def patch_bridge_data(ctx: PatchContext) -> None:
             )
             exit_signal = cfg.train.exit_signal
 
-            from megatron.bridge.training.utils.sig_utils import DistributedSignalHandler
+            from megatron.bridge.training.utils.sig_utils import (
+                DistributedSignalHandler,
+            )
 
             def worker_init_fn(_):
                 DistributedSignalHandler(exit_signal).__enter__()
 
-            maybe_worker_init_fn = (
-                worker_init_fn if cfg.train.exit_signal_handler_for_dataloader else None
-            )
+            maybe_worker_init_fn = worker_init_fn if cfg.train.exit_signal_handler_for_dataloader else None
 
             train_dataloader = samplers.build_pretraining_data_loader(
                 train_ds,
@@ -292,12 +298,10 @@ def patch_bridge_data(ctx: PatchContext) -> None:
         def _mlperf_build_train_valid_test_data_iterators(
             cfg, train_state, build_train_valid_test_datasets_provider
         ):
-            train_dataloader, valid_dataloader, test_dataloader = (
-                loaders.build_train_valid_test_data_loaders(
-                    cfg=cfg,
-                    train_state=train_state,
-                    build_train_valid_test_datasets_provider=build_train_valid_test_datasets_provider,
-                )
+            train_dataloader, valid_dataloader, test_dataloader = loaders.build_train_valid_test_data_loaders(
+                cfg=cfg,
+                train_state=train_state,
+                build_train_valid_test_datasets_provider=build_train_valid_test_datasets_provider,
             )
             dl_type = cfg.dataset.dataloader_type
             assert dl_type in ["single", "cyclic", "batch", "external"]
@@ -463,9 +467,7 @@ def patch_training_log_nemo(ctx: PatchContext) -> None:
         ):
             batch_size = config.train.global_batch_size
             num_flops = flop_utils.num_floating_point_operations(config, batch_size)
-            per_gpu_tf = (
-                num_flops / nemo_elapsed_time_per_iter_sec / get_world_size_safe() / 1e12
-            )
+            per_gpu_tf = num_flops / nemo_elapsed_time_per_iter_sec / get_world_size_safe() / 1e12
             elapsed = global_state.timers("interval-time").elapsed(barrier=True)
             interval_ms = (elapsed / max(config.logger.log_interval, 1)) * 1000.0
             print_rank_0(

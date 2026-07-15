@@ -303,14 +303,10 @@ class MaskedTokenLossReduction(MegatronLossReduction):
 
         num_valid_tokens = batch["loss_mask"].sum(1)
         loss_for_ub = torch.sum(masked_losses, dim=1) / num_valid_tokens
-        loss_for_ub = torch.where(
-            num_valid_tokens == 0, torch.zeros_like(loss_for_ub), loss_for_ub
-        )
+        loss_for_ub = torch.where(num_valid_tokens == 0, torch.zeros_like(loss_for_ub), loss_for_ub)
 
         if cp_size > 1 and (self.train_step or not self.disabled_cp_for_eval):
-            torch.distributed.all_reduce(
-                loss_for_ub, group=parallel_state.get_context_parallel_group()
-            )
+            torch.distributed.all_reduce(loss_for_ub, group=parallel_state.get_context_parallel_group())
 
         if self.validation_step and not self.val_drop_last:
             num_valid_tokens_in_ub = (num_valid_tokens > 0).long()
@@ -330,20 +326,15 @@ class MaskedTokenLossReduction(MegatronLossReduction):
         reduced_loss = loss_for_ub
         return loss_for_ub, {"avg": reduced_loss}
 
-    def reduce(
-        self, losses_reduced_per_micro_batch: List[Dict[str, torch.Tensor]]
-    ) -> torch.Tensor:
+    def reduce(self, losses_reduced_per_micro_batch: List[Dict[str, torch.Tensor]]) -> torch.Tensor:
         if losses_reduced_per_micro_batch:
             if "avg" in losses_reduced_per_micro_batch[0]:
-                loss_tensors_list = [
-                    loss_reduced["avg"] for loss_reduced in losses_reduced_per_micro_batch
-                ]
+                loss_tensors_list = [loss_reduced["avg"] for loss_reduced in losses_reduced_per_micro_batch]
                 loss_tensor = torch.concat(loss_tensors_list)
                 return loss_tensor.mean()
 
             loss_sum_tensors_list: List[torch.Tensor] = [
-                loss_sum["loss_sum_and_ub_size"]
-                for loss_sum in losses_reduced_per_micro_batch
+                loss_sum["loss_sum_and_ub_size"] for loss_sum in losses_reduced_per_micro_batch
             ]
             loss_sum = (
                 torch.vstack(loss_sum_tensors_list).sum(dim=0)
@@ -462,9 +453,7 @@ def nemo_masked_next_token_loss(
     per_token_losses = per_token_losses.view(batch_size, -1)
     loss_mask = loss_mask.view(batch_size, -1)
 
-    reduction = (
-        _get_val_reduction() if _is_validation_step() else _get_train_reduction()
-    )
+    reduction = _get_val_reduction() if _is_validation_step() else _get_train_reduction()
 
     batch: Dict[str, torch.Tensor] = {"loss_mask": loss_mask}
     loss_for_ub, reduced_dict = reduction.forward(batch, per_token_losses)
@@ -513,9 +502,7 @@ def nemo_masked_next_token_loss(
         )
         return (agg_loss_sum, num_samples, {"lm loss": reporting_loss})
 
-    num_samples = torch.tensor(
-        loss_for_ub.numel(), dtype=torch.int, device=loss_for_ub.device
-    )
+    num_samples = torch.tensor(loss_for_ub.numel(), dtype=torch.int, device=loss_for_ub.device)
     reporting_loss = torch.cat(
         [
             loss_sum.clone().detach().view(1),

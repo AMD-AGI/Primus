@@ -70,20 +70,22 @@ if [[ -f "${DATA_DIR}/train.npy" && -f "${DATA_DIR}/validation.npy" && -f "${DAT
     exit 0
 fi
 
-if [[ -z "${HF_TOKEN:-}" ]]; then
+if [[ -z "${HF_TOKEN:-}" && ( ! -f "${DATA_DIR}/train.npy" || ! -f "${DATA_DIR}/validation.npy" ) ]]; then
     LOG_ERROR_RANK0 "[mlperf-data] HF_TOKEN is required to download regisss/scrolls_gov_report_preprocessed_mlperf_2"
     exit 1
 fi
 
+MLPERF_RECIPE_DIR="${PRIMUS_ROOT}/primus/backends/megatron_bridge/recipes/mlperf_llama2_70b"
+
 if [[ ! -f "${DATA_DIR}/train.npy" || ! -f "${DATA_DIR}/validation.npy" ]]; then
     LOG_INFO_RANK0 "[mlperf-data] Downloading and converting MLPerf dataset..."
-    python3 download_dataset.py --data_dir "${DATA_DIR}"
-    python3 convert_dataset.py --data_dir "${DATA_DIR}"
+    python3 "${MLPERF_RECIPE_DIR}/download_dataset.py" --data_dir "${DATA_DIR}"
+    python3 "${MLPERF_RECIPE_DIR}/convert_dataset.py" --data_dir "${DATA_DIR}"
 fi
 
 if [[ ! -f "${DATA_DIR}/packed_metadata.jsonl" ]]; then
     LOG_INFO_RANK0 "[mlperf-data] Creating packed_metadata.jsonl..."
-    python3 create_metadata.py "${SEQ_LENGTH}" "${DATA_DIR}/packed_metadata.jsonl"
+    python3 "${MLPERF_RECIPE_DIR}/create_metadata.py" "${SEQ_LENGTH}" "${DATA_DIR}/packed_metadata.jsonl"
 fi
 
 for f in train.npy validation.npy packed_metadata.jsonl; do

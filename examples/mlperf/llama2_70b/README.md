@@ -2,8 +2,8 @@
 
 MLPerf Training 6.0 Llama2-70B LoRA on **MI355X** (8× GPU, 1 node) via Megatron-Bridge and `primus-cli`.
 
-Dataset: [GovReport](https://gov-report-data.github.io/) (SCROLLS `gov_report`), packed to **8192** tokens.  
-Model: **meta-llama/Llama-2-70b-hf** with LoRA (rank 16, alpha 32).  
+Dataset: [GovReport](https://gov-report-data.github.io/) (SCROLLS `gov_report`), packed to **8192** tokens.
+Model: **meta-llama/Llama-2-70b-hf** with LoRA (rank 16, alpha 32).
 Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 
 ## Key files

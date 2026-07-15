@@ -28,8 +28,8 @@
 # This module should be imported as early as possible in the recipe to
 # suppress logs emitted during model construction and training.
 # ---------------------------------------------------------------------------
-import os as _os
 import logging as _logging
+import os as _os
 
 VERBOSE_LOGS = _os.environ.get("MLLOG_VERBOSE_LOGS", "0") == "1"
 

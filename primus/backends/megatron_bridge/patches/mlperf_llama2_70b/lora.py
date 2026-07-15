@@ -18,10 +18,6 @@ from typing import List, Literal, Optional
 import torch
 import torch.nn as nn
 import transformer_engine.pytorch as te
-from megatron.core import parallel_state
-from megatron.core.transformer.moe.router import TopKRouter
-from megatron.core.utils import unwrap_model
-
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.lora_layers import (
     LinearAdapter,
@@ -38,6 +34,9 @@ from megatron.bridge.peft.utils import (
     is_expert_linear,
     wildcard_match,
 )
+from megatron.core import parallel_state
+from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.utils import unwrap_model
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +85,9 @@ class LoRA(PEFT, ModuleMatcher):
     te_fused_lora_include_modules: Optional[List[str]] = None
     te_fused_lora_exclude_modules: List[str] = field(default_factory=list)
 
-    def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
+    def transform(
+        self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None
+    ) -> nn.Module:
         adapter_types = (LinearAdapter, LoRALinear, LoRATopKRouter, TELinearAdapter)
         if isinstance(module, adapter_types):
             return module

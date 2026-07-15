@@ -11,8 +11,6 @@ This is a custom recipe based on Megatron-Bridge's llama2.py recipe,
 but placed in Primus for easier customization and extension.
 """
 
-from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import _log_suppression  # noqa: F401, E402
-
 import gc
 import os
 import sys
@@ -22,13 +20,11 @@ from datetime import timedelta
 from typing import Any, Callable, List, Optional, Union
 
 import torch
-from typing_extensions import TypedDict, Unpack
-
+from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.num_microbatches_calculator import (
     get_current_global_batch_size,
     get_current_running_global_batch_size,
     get_num_microbatches,
-    update_num_microbatches,
 )
 from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
@@ -36,14 +32,22 @@ from megatron.core.parallel_state import update_pg_timeout
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.pipeline_parallel.utils import is_pp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.rerun_state_machine import RerunDataIterator, RerunMode, get_rerun_state_machine
+from megatron.core.rerun_state_machine import (
+    RerunDataIterator,
+    RerunMode,
+    get_rerun_state_machine,
+)
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
-from megatron.core.full_cuda_graph import FullCudaGraphWrapper
+from typing_extensions import TypedDict, Unpack
 
-from primus.core.utils.module_utils import log_rank_0 as _orig_log_rank_0, log_rank_last as _orig_log_rank_last
+from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import (  # noqa: F401, E402
+    _log_suppression,
+)
+from primus.core.utils.module_utils import log_rank_0 as _orig_log_rank_0
+from primus.core.utils.module_utils import log_rank_last as _orig_log_rank_last
 
 _log_suppression.reapply_quiet_logger_levels()
 
@@ -52,8 +56,13 @@ if _verbose_logging:
     log_rank_0 = _orig_log_rank_0
     log_rank_last = _orig_log_rank_last
 else:
-    def log_rank_0(*args, **kwargs): pass
-    def log_rank_last(*args, **kwargs): pass
+
+    def log_rank_0(*args, **kwargs):
+        pass
+
+    def log_rank_last(*args, **kwargs):
+        pass
+
 
 from megatron.bridge.utils import common_utils
 
@@ -107,17 +116,13 @@ def _log_training_gpu_mem(tag: str, memory_keys=None) -> None:
 
 
 from megatron.bridge import AutoBridge
+from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.data.finetuning import prepare_finetuning_batch
 from megatron.bridge.data.iterator_utils import make_data_iterator_list
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
-    ResettableDataIterator,
-)
-from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.recipes.utils.finetune_utils import default_squad_config
-from megatron.bridge.peft.base import PEFT
-from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
-from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
+from megatron.bridge.recipes.utils.tokenizer_utils import (
+    DEFAULT_NULL_TOKENIZER_VOCAB_SIZE,
+)
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.checkpointing import maybe_finalize_async_save
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
@@ -149,42 +154,45 @@ from megatron.bridge.training.profiling import (
     should_profile_rank,
 )
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.bridge.training.tensor_inspect import (
     tensor_inspect_end_if_enabled,
     tensor_inspect_step_if_enabled,
 )
 from megatron.bridge.training.utils import flop_utils
 from megatron.bridge.training.utils import train_utils as _megatron_train_utils
+from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.bridge.training.utils.train_utils import (
     calc_params_l2_norm,
     prepare_forward_step_func,
     training_log,
 )
 
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
+    ResettableDataIterator,
+)
+
 # train_utils binds print_rank_* at import time; rebind so training_log always uses Primus loggers even if
 # this module was imported after an earlier train_utils load.
 _megatron_train_utils.print_rank_0 = log_rank_0
 _megatron_train_utils.print_rank_last = log_rank_last
-from megatron.bridge.utils.common_utils import is_last_rank
 from megatron.bridge.training.train import (
-    train_step,
-    should_disable_forward_pre_hook,
-    enable_forward_pre_hook,
-    disable_forward_pre_hook,
-    maybe_synchronize_training_step,
-    maybe_report_stragglers,
-    maybe_check_weight_hash_across_dp_replicas,
-    maybe_run_manual_gc,
-    checkpoint_and_decide_exit,
-    save_checkpoint_and_time,
-    _should_skip_and_handle_iteration,
     _delete_cuda_graphs,
-    _maybe_register_fsdp_buffers,
+    disable_forward_pre_hook,
+    enable_forward_pre_hook,
+    maybe_check_weight_hash_across_dp_replicas,
+    maybe_report_stragglers,
+    maybe_run_manual_gc,
+    maybe_synchronize_training_step,
+    should_disable_forward_pre_hook,
+    train_step,
 )
+from megatron.bridge.utils.common_utils import is_last_rank
 
 # Importing this module installs a monkey-patch that swaps Megatron-Bridge's
-from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import nemo_loss as _nemo_loss  # noqa: F401
+from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import (  # noqa: F401
+    nemo_loss as _nemo_loss,
+)
 
 MLPERF_TARGET_LOSS = 0.925
 
@@ -201,8 +209,10 @@ _TARGET_LOSS_REACHED: bool = False
 # ---------------------------------------------------------------------------
 _sft_logger = None
 
+
 def _get_sft_logger():
     return _sft_logger
+
 
 @register
 def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
@@ -365,7 +375,8 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
             gbs = kw.get("global_batch_size", 8)
             mbs = kw.get("micro_batch_size", 1)
             _sft_logger = MLPerfSFTLogger(
-                global_batch_size=gbs, micro_batch_size=mbs,
+                global_batch_size=gbs,
+                micro_batch_size=mbs,
             )
             _sft_logger.log_cache_clear_and_init_start()
 
@@ -396,8 +407,9 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
                 pipeline_model_parallel_size=pp,
                 context_parallel_size=int(os.getenv("MLLOG_CONTEXT_PARALLELISM", "1")),
                 config_filename=os.getenv("MLLOG_CONFIG_FILENAME", ""),
-                lowest_numerical_precision_linear=os.getenv("MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4"),
-
+                lowest_numerical_precision_linear=os.getenv(
+                    "MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR", "mxfp4"
+                ),
             )
             _sft_logger.log_init_params(init_cfg)
         except ImportError:
@@ -541,7 +553,7 @@ def _llama2_lora(
 
     config = AutoConfig.from_pretrained("meta-llama/Llama-2-70b-hf")
     bridge = AutoBridge.from_hf_config(config)
-    model_cfg = bridge.to_megatron_provider(load_weights=False) #GPTProvider
+    model_cfg = bridge.to_megatron_provider(load_weights=False)  # GPTProvider
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
     model_cfg.pipeline_model_parallel_size = pipeline_model_parallel_size
     model_cfg.pipeline_dtype = None
@@ -584,10 +596,14 @@ def _llama2_lora(
     model_cfg.fp8_dot_product_attention = False
     model_cfg.disable_parameter_transpose_cache = False
     model_cfg.fine_grained_activation_offloading = False
-    model_cfg.use_transformer_engine_full_layer_spec = False # Doesn't work beacuse of RMSNorm is not supported in FusedLayerNorm
+    model_cfg.use_transformer_engine_full_layer_spec = (
+        False  # Doesn't work beacuse of RMSNorm is not supported in FusedLayerNorm
+    )
     model_cfg.cpu_offloading = False
     model_cfg.cpu_offloading_num_layers = 0
-    model_cfg.empty_unused_memory_level = 0 # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
+    model_cfg.empty_unused_memory_level = (
+        0  # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
+    )
     # Optional MXFP4-style activation recompute (left untouched when kwargs are None).
     if recompute_granularity is not None:
         model_cfg.recompute_granularity = recompute_granularity
@@ -612,6 +628,7 @@ def _llama2_lora(
         model_cfg.log_max_attention_logit = False
 
     from megatron.bridge.training.config import OptimizerConfig, SchedulerConfig
+
     opt_config = OptimizerConfig(
         optimizer="adam",
         lr=lr,
@@ -632,10 +649,10 @@ def _llama2_lora(
     scheduler = SchedulerConfig(
         lr_decay_style="cosine",
         lr_decay_iters=lr_decay_iters,  # same as max_steps in nemo
-        lr_warmup_iters=lr_warmup_iters, # value 0 same as nemo
+        lr_warmup_iters=lr_warmup_iters,  # value 0 same as nemo
         lr_warmup_init=0.0,
         start_weight_decay=weight_decay,
-        end_weight_decay=weight_decay, 
+        end_weight_decay=weight_decay,
         weight_decay_incr_style="constant",
         override_opt_param_scheduler=True,
     )
@@ -686,7 +703,7 @@ def _llama2_lora(
         raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'squad' or 'mlperf_dataset'.")
 
     dataset_cfg.num_workers = 0
-    dataset_cfg.memmap_workers = 1 # needs to be 1>0
+    dataset_cfg.memmap_workers = 1  # needs to be 1>0
     dataset_cfg.pin_memory = True
     dataset_cfg.persistent_workers = False
     dataset_cfg.dataloader_type = "batch"
@@ -704,7 +721,7 @@ def _llama2_lora(
             manual_gc=False,
             manual_gc_interval=0,
             manual_gc_eval=False,
-            empty_unused_memory_level=0, # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
+            empty_unused_memory_level=0,  # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
             train_sync_interval=None,
             check_weight_hash_across_dp_replicas_interval=None,
         ),
@@ -721,9 +738,8 @@ def _llama2_lora(
             # gradient_reduce_div_fusion=True,
             # pad_buckets_for_high_nccl_busbw=True,
             use_megatron_fsdp=False,
-             keep_fp8_transpose_cache=(
-                os.getenv("ENABLE_TRANSPOSE_CACHE", "").strip().lower()
-                in ("1", "true", "yes", "on")
+            keep_fp8_transpose_cache=(
+                os.getenv("ENABLE_TRANSPOSE_CACHE", "").strip().lower() in ("1", "true", "yes", "on")
             ),
             fp8_param_gather=False,
         ),
@@ -796,6 +812,7 @@ def _llama2_lora(
 
     return cfg
 
+
 def _reset_data_iterator(data_iterator):
     """Reset data iterator to the beginning for deterministic evaluation.
     Traverses through RerunDataIterator wrappers to find and reset any
@@ -817,6 +834,8 @@ def _reset_data_iterator(data_iterator):
             data_iterator.replay_pos = 0
     elif isinstance(data_iterator, ResettableDataIterator):
         data_iterator.reset()
+
+
 def evaluate(
     state: GlobalState,
     forward_step_func: ForwardStepCallable,
@@ -849,7 +868,10 @@ def evaluate(
     with torch.no_grad():
         if verbose:
             log_rank_0(f"Evaluating on {state.cfg.train.eval_iters * eval_batch_size} samples")
-        if state.cfg.model.cuda_graph_impl == "local" and "full_iteration" in state.cfg.model.cuda_graph_scope:
+        if (
+            state.cfg.model.cuda_graph_impl == "local"
+            and "full_iteration" in state.cfg.model.cuda_graph_scope
+        ):
             forward_backward_func = FullCudaGraphWrapper(
                 get_forward_backward_func(),
                 cuda_graph_warmup_steps=state.cfg.model.cuda_graph_warmup_steps,
@@ -896,10 +918,12 @@ def evaluate(
                         # NeMo MLPerf-equivalent: accumulate raw [sum, count] across micros & eval iters.
                         # Per-micro [sum, count] is already DP/CP-reduced inside
                         # nemo_loss.MaskedTokenLossReduction.forward, so no extra all_reduce here.
-                        per_iter = torch.vstack([v.float() for v in val]).sum(dim=0)   # [Σ_micro sum, Σ_micro count]
+                        per_iter = torch.vstack([v.float() for v in val]).sum(
+                            dim=0
+                        )  # [Σ_micro sum, Σ_micro count]
                         total_loss_dict[key] += per_iter
                     elif val[0].numel() == 1:
-                        # legacy single-scalar branch 
+                        # legacy single-scalar branch
                         micro_sum = torch.stack([v.float() for v in val], dim=0).sum()
                         total_loss_dict[key][0] += micro_sum
                         total_loss_dict[key][1] += float(len(loss_dicts))
@@ -920,7 +944,7 @@ def evaluate(
                     rerun_state_machine.set_mode(rerun_mode)
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
-        
+
         collected_non_loss_data = None
         if non_loss_data_func is not None:
             collected_non_loss_data = non_loss_data_func(model)
@@ -962,7 +986,9 @@ def evaluate(
     return total_loss_dict, collected_non_loss_data, False
 
 
-from megatron.bridge.training import eval 
+from megatron.bridge.training import eval
+
+
 def evaluate_and_print_results_custom(
     state: GlobalState,
     prefix: str,
@@ -974,7 +1000,7 @@ def evaluate_and_print_results_custom(
     write_to_tensorboard: bool = False,
     process_non_loss_data_func: Optional[Callable] = None,
     non_loss_data_func: Optional[Callable] = None,
-    throughput: float = 0.0, # samples/sec
+    throughput: float = 0.0,  # samples/sec
 ) -> tuple:
     """Helper function to evaluate and dump results on screen.
 
@@ -995,26 +1021,35 @@ def evaluate_and_print_results_custom(
         # Target already hit on a previous pass; skip this entire eval.
         # Returning should_exit=True keeps the outer while-loop on its exit path.
         _orig_log_rank_0(
-            f"Skipping evaluation at {prefix}: target loss < "
-            f"{MLPERF_TARGET_LOSS} already reached."
+            f"Skipping evaluation at {prefix}: target loss < " f"{MLPERF_TARGET_LOSS} already reached."
         )
         return True, None
 
     log_rank_0(f"Evaluating and printing results at {prefix}")
     should_exit = False
+
     def is_last_rank():
         return torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1)
+
     import math
+
     if write_to_tensorboard:
         writer = state.tensorboard_logger
     else:
         writer = None
 
     wandb_writer = state.wandb_logger
-        
+
     eval_start = time.time()
     total_loss_dict, collected_non_loss_data, timelimit = evaluate(
-        state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
+        state,
+        forward_step_func,
+        data_iterator,
+        model,
+        process_non_loss_data_func,
+        config,
+        verbose,
+        non_loss_data_func,
     )
     eval_duration = time.time() - eval_start
     # Timelimit hit during evaluation
@@ -1026,7 +1061,9 @@ def evaluate_and_print_results_custom(
         ppl = math.exp(min(20, total_loss_dict[key].item()))
         string += "{} PPL: {:.6E} | ".format(key, ppl)
         if writer:
-            writer.add_scalar("{} validation".format(key), total_loss_dict[key].item(), state.train_state.step)
+            writer.add_scalar(
+                "{} validation".format(key), total_loss_dict[key].item(), state.train_state.step
+            )
             writer.add_scalar(
                 "{} validation vs samples".format(key),
                 total_loss_dict[key].item(),
@@ -1039,7 +1076,9 @@ def evaluate_and_print_results_custom(
                 )
 
         if wandb_writer and is_last_rank():
-            wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
+            wandb_writer.log(
+                {"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step
+            )
             if state.cfg.logger.log_validation_ppl_to_tensorboard:
                 wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
 
@@ -1050,7 +1089,9 @@ def evaluate_and_print_results_custom(
     string += "eval duration: {:.6E} | ".format(eval_duration)
     if writer:
         writer.add_scalar("throughput samples/sec", throughput, state.train_state.step)
-        writer.add_scalar("throughput samples/sec vs samples", throughput, state.train_state.consumed_train_samples)
+        writer.add_scalar(
+            "throughput samples/sec vs samples", throughput, state.train_state.consumed_train_samples
+        )
 
     if wandb_writer and is_last_rank():
         wandb_writer.log({"throughput samples/sec": throughput}, state.train_state.step)
@@ -1065,14 +1106,16 @@ def evaluate_and_print_results_custom(
     # the key is present.
     eval_loss_value = None
     if total_loss_dict and "lm loss" in total_loss_dict:
-        eval_loss_value = total_loss_dict['lm loss'].item()
+        eval_loss_value = total_loss_dict["lm loss"].item()
         if eval_loss_value < MLPERF_TARGET_LOSS:
             should_exit = True
             _TARGET_LOSS_REACHED = True
             log_rank_0(f"Validation loss is less than {MLPERF_TARGET_LOSS}, exiting training")
     return should_exit, eval_loss_value
 
+
 eval.evaluate_and_print_results = evaluate_and_print_results_custom
+
 
 def warmup_eval(
     state: GlobalState,
@@ -1102,6 +1145,7 @@ def warmup_eval(
         )
         log_rank_0(f"Warmup eval iteration {i} completed")
     log_rank_0(f"Warmup eval completed")
+
 
 class _SyntheticSFTDataIterator:
     """Infinite iterator yielding synthetic finetuning batches for warmup.
@@ -1414,7 +1458,7 @@ def megatron_bridge_train_override(
         log_rank_0(f"Setting rerun_state_machine.current_iteration to {global_state.train_state.step}...")
         rerun_state_machine.current_iteration = global_state.train_state.step
 
-    num_floating_point_operations_so_far = global_state.train_state.floating_point_operations_so_far
+    global_state.train_state.floating_point_operations_so_far
     num_floating_point_operations_since_last_log_event = 0.0
 
     if energy_monitor is not None:
@@ -1432,9 +1476,9 @@ def megatron_bridge_train_override(
     if train_config.manual_gc:
         # Disable the default garbage collector and perform the collection manually.
         # This is to align the timing of garbage collection across ranks.
-        assert train_config.manual_gc_interval >= 0, (
-            "Manual garbage collection interval should be larger than or equal to 0"
-        )
+        assert (
+            train_config.manual_gc_interval >= 0
+        ), "Manual garbage collection interval should be larger than or equal to 0"
         gc.disable()
         gc.collect()
 
@@ -1464,7 +1508,7 @@ def megatron_bridge_train_override(
             # Set to None to disable further checks
             global_state._nvrx_straggler_manager = None
 
-    num_microbatches = get_num_microbatches()
+    get_num_microbatches()
     eval_duration = 0.0
     eval_iterations = 0
 
@@ -1480,17 +1524,20 @@ def megatron_bridge_train_override(
     # Initialize RPD profiler if enabled
     rpd = None
     rpd_status = None
-    profiler_type = os.getenv("PROFILER", '')
+    profiler_type = os.getenv("PROFILER", "")
     rpd_warmup_steps = int(os.getenv("RPD_WARMUP_STEPS", "0"))
     rpd_active_steps = int(os.getenv("RPD_ACTIVE_STEPS", "100"))
-    if profiler_type == 'rpd':
+    if profiler_type == "rpd":
         try:
             from rpdTracerControl import rpdTracerControl
+
             rank = torch.distributed.get_rank()
             rpd_filename = os.getenv("RPD_TRACE_FILENAME", f"trace.rpd")
             rpdTracerControl.setFilename(name=rpd_filename, append=True)
             rpd = rpdTracerControl()
-            log_rank_0(f"RPD profiler initialized. Will start at step {rpd_warmup_steps} and stop at step {rpd_warmup_steps + rpd_active_steps}")
+            log_rank_0(
+                f"RPD profiler initialized. Will start at step {rpd_warmup_steps} and stop at step {rpd_warmup_steps + rpd_active_steps}"
+            )
         except Exception as e:
             log_rank_0(f"Failed to initialize RPD profiler: {e}")
             rpd = None
@@ -1515,9 +1562,9 @@ def megatron_bridge_train_override(
         pre_hook_enabled = False
     # Also, check weight hash across DP replicas to be very pedantic.
     if train_config.check_weight_hash_across_dp_replicas_interval is not None:
-        assert check_param_hashes_across_dp_replicas(model, cross_check=True), (
-            "Parameter hashes not matching across DP replicas"
-        )
+        assert check_param_hashes_across_dp_replicas(
+            model, cross_check=True
+        ), "Parameter hashes not matching across DP replicas"
         torch.distributed.barrier()
         log_rank_0(f">>> Weight hashes match after {global_state.train_state.step} iterations...")
 
@@ -1546,14 +1593,19 @@ def megatron_bridge_train_override(
 
     start_iteration = global_state.train_state.step
     log_rank_0(f"Starting training loop at iteration {start_iteration}")
-    
+
     dp_size = pg_collection.dp.size()
     batch_size = dp_size * train_config.micro_batch_size * get_num_microbatches()
     timer = Timer(batch_size)
 
     # Synthetic warmup: pre-compile JIT kernels before measured training begins.
     run_synthetic_warmup(
-        forward_step_func, model, optimizer, scheduler, global_state, pg_collection,
+        forward_step_func,
+        model,
+        optimizer,
+        scheduler,
+        global_state,
+        pg_collection,
     )
     _log_training_gpu_mem("after synthetic warmup", config.logger.memory_keys)
 
@@ -1595,7 +1647,11 @@ def megatron_bridge_train_override(
             rpd_status = "running"
 
         # Handle RPD profiling stop
-        if rpd and rpd_status == "running" and global_state.train_state.step >= rpd_warmup_steps + rpd_active_steps:
+        if (
+            rpd
+            and rpd_status == "running"
+            and global_state.train_state.step >= rpd_warmup_steps + rpd_active_steps
+        ):
             log_rank_0(f"Stopping RPD profiling at step {global_state.train_state.step}")
             rpd.stop()
             rpd_status = "finished"
@@ -1614,10 +1670,11 @@ def megatron_bridge_train_override(
         # We update the timeout after the first successful iteration,
         # which takes longer than others usually
         if global_state.train_state.step == start_iteration + 1:
-            distributed_timeout_seconds_after_init = global_state.cfg.dist.distributed_timeout_seconds_after_init
+            distributed_timeout_seconds_after_init = (
+                global_state.cfg.dist.distributed_timeout_seconds_after_init
+            )
             if distributed_timeout_seconds_after_init is not None:
                 update_pg_timeout(timedelta(seconds=distributed_timeout_seconds_after_init))
-
 
         # Capture CUDA Graphs after warmup.
         # if (
@@ -1723,7 +1780,9 @@ def megatron_bridge_train_override(
         #     _maybe_register_fsdp_buffers(config, model)
 
         global_state.train_state.consumed_train_samples += batch_size
-        num_skipped_samples_in_batch = get_current_global_batch_size() - get_current_running_global_batch_size()
+        num_skipped_samples_in_batch = (
+            get_current_global_batch_size() - get_current_running_global_batch_size()
+        )
         if train_config.decrease_batch_size_if_needed:
             assert num_skipped_samples_in_batch >= 0
         else:
@@ -1731,7 +1790,7 @@ def megatron_bridge_train_override(
         global_state.train_state.skipped_train_samples += num_skipped_samples_in_batch
         num_floating_point_operations_in_batch = flop_utils.num_floating_point_operations(config, batch_size)
         global_state.train_state.floating_point_operations_so_far += num_floating_point_operations_in_batch
-        num_floating_point_operations_so_far = global_state.train_state.floating_point_operations_so_far
+        global_state.train_state.floating_point_operations_so_far
         num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
 
         # Logging.
@@ -1742,7 +1801,9 @@ def megatron_bridge_train_override(
         params_norm = None
 
         if config.logger.log_params_norm:
-            params_norm = calc_params_l2_norm(model, model_config, use_megatron_fsdp=config.dist.use_megatron_fsdp)
+            params_norm = calc_params_l2_norm(
+                model, model_config, use_megatron_fsdp=config.dist.use_megatron_fsdp
+            )
         learning_rate = None
         decoupled_learning_rate = None
         for param_group in optimizer.param_groups:
@@ -1758,9 +1819,7 @@ def megatron_bridge_train_override(
             and global_state.train_state.step % config.logger.log_interval == 0
             and nemo_style_iter_count > 0
         ):
-            nemo_elapsed_time_per_iter_sec = (
-                nemo_style_iter_seconds_accum / nemo_style_iter_count
-            )
+            nemo_elapsed_time_per_iter_sec = nemo_style_iter_seconds_accum / nemo_style_iter_count
         report_memory_flag = training_log(
             loss_dict,
             total_loss_dict,
@@ -1813,7 +1872,9 @@ def megatron_bridge_train_override(
                 gc.collect()
             prefix = f"iteration {global_state.train_state.step}"
             timers("eval-time", log_level=0).start(barrier=True)
-            assert timer.consumed_samples == global_state.train_state.consumed_train_samples, "Timer and global_state sample mismatch"
+            assert (
+                timer.consumed_samples == global_state.train_state.consumed_train_samples
+            ), "Timer and global_state sample mismatch"
 
             if sft_logger is not None:
                 sft_logger.on_eval_start(global_state.train_state.consumed_train_samples)
@@ -1834,7 +1895,8 @@ def megatron_bridge_train_override(
 
             if sft_logger is not None and eval_loss_value is not None:
                 target_hit = sft_logger.on_eval_end(
-                    global_state.train_state.consumed_train_samples, eval_loss_value,
+                    global_state.train_state.consumed_train_samples,
+                    eval_loss_value,
                 )
                 if target_hit:
                     should_exit = True
@@ -1916,7 +1978,9 @@ def megatron_bridge_train_override(
     # This will finalize all unfinalized async request and terminate
     # a persistent async worker if persistent ckpt worker is enabled
     fault_tolerance.on_checkpointing_start(global_state)
-    maybe_finalize_async_save(global_state=global_state, ckpt_cfg=config.checkpoint, blocking=True, terminate=True)
+    maybe_finalize_async_save(
+        global_state=global_state, ckpt_cfg=config.checkpoint, blocking=True, terminate=True
+    )
     fault_tolerance.on_checkpointing_end(global_state=global_state, is_async_finalization=True)
 
     # Shutdown NVRx straggler detection if enabled
@@ -1938,7 +2002,9 @@ def megatron_bridge_train_override(
 
         # Close NVIDIA DLFw Inspect if enabled
         tensor_inspect_end_if_enabled(config.tensor_inspect)
-        maybe_finalize_async_save(global_state=global_state, ckpt_cfg=config.checkpoint, blocking=True, terminate=True)
+        maybe_finalize_async_save(
+            global_state=global_state, ckpt_cfg=config.checkpoint, blocking=True, terminate=True
+        )
         wandb_writer = global_state.wandb_logger
         if wandb_writer:
             wandb_writer.finish()
@@ -1948,6 +2014,7 @@ def megatron_bridge_train_override(
 
     # Close NVIDIA DLFw Inspect at clean finish
     tensor_inspect_end_if_enabled(config.tensor_inspect)
+
 
 # ---------------------------------------------------------------------------
 # Install ``megatron_bridge_train_override`` on the megatron-bridge training
@@ -1959,6 +2026,7 @@ def megatron_bridge_train_override(
 # wrap, zero runtime cost).
 # ---------------------------------------------------------------------------
 from megatron.bridge.training import train as _mb_train_mod
+
 from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.pre_quantize_mxfp4 import (
     install_pre_quantize_wrap,
 )
@@ -1970,12 +2038,14 @@ _mb_train_mod.train = _installed_train
 
 try:
     from megatron.bridge.training import pretrain as _mb_pretrain_mod
+
     _mb_pretrain_mod.train = _installed_train
 except ImportError:
     pass
 
 try:
     from megatron.bridge.training import finetune as _mb_finetune_mod
+
     if hasattr(_mb_finetune_mod, "train"):
         _mb_finetune_mod.train = _installed_train
 except ImportError:

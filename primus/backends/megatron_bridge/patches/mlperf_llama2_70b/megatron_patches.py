@@ -19,7 +19,9 @@ import functools
 import os
 from typing import Any
 
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.conditions import is_llama2_70b_mlperf
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.conditions import (
+    is_llama2_70b_mlperf,
+)
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -78,9 +80,7 @@ def _build_mxfp4_get_fp4_recipe(orig_get_fp4_recipe):
         elif config.fp4_recipe == Fp4Recipe.custom:
             fp4_recipe = _get_custom_recipe(config.fp4_quantizer_factory)
         else:
-            raise ValueError(
-                f"Unsupported FP4 recipe: {config.fp4_recipe}. Supported: nvfp4, mxfp4, custom."
-            )
+            raise ValueError(f"Unsupported FP4 recipe: {config.fp4_recipe}. Supported: nvfp4, mxfp4, custom.")
         return fp4_recipe
 
     return _mlperf_get_fp4_recipe
@@ -99,6 +99,7 @@ def patch_fp4_mxfp4(ctx: PatchContext) -> None:
     recipe_already_handles_mxfp4 = _upstream_get_fp4_recipe_handles_mxfp4()
 
     if not hasattr(enums.Fp4Recipe, "mxfp4"):
+
         class _MlperfFp4Recipe(str, enum.Enum):
             nvfp4 = "nvfp4"
             mxfp4 = "mxfp4"
@@ -120,8 +121,7 @@ def patch_fp4_mxfp4(ctx: PatchContext) -> None:
 
     if _already_patched(fp4_utils.get_fp4_recipe):
         log_rank_0(
-            "[Patch:mlperf_llama2_70b.megatron.fp4_mxfp4] "
-            "get_fp4_recipe already patched for MLPerf mxfp4"
+            "[Patch:mlperf_llama2_70b.megatron.fp4_mxfp4] " "get_fp4_recipe already patched for MLPerf mxfp4"
         )
         return
 
@@ -151,7 +151,7 @@ def patch_te_swiglu(ctx: PatchContext) -> None:
     if _already_patched(swiglu_mod.SwiGLUFunction.forward):
         return
 
-    orig_forward = swiglu_mod.SwiGLUFunction.forward
+    swiglu_mod.SwiGLUFunction.forward
 
     @staticmethod
     @swiglu_mod.nvtx_decorator()
@@ -160,9 +160,7 @@ def patch_te_swiglu(ctx: PatchContext) -> None:
 
         ctx.fp8_input_store = fp8_input_store
         ctx.ori_input_dtype = input_tensor.dtype
-        input_for_backward = (
-            input_tensor.to(torch.float8_e4m3fn) if fp8_input_store else input_tensor
-        )
+        input_for_backward = input_tensor.to(torch.float8_e4m3fn) if fp8_input_store else input_tensor
         if cpu_offload_input:
             input_for_backward.activation_offloading = True
         ctx.save_for_backward(input_for_backward)
@@ -183,12 +181,10 @@ def patch_te_swiglu(ctx: PatchContext) -> None:
     @staticmethod
     @swiglu_mod.nvtx_decorator()
     def _te_swiglu_backward(ctx, grad_output):
-        import torch
+        pass
 
         input_tensor = ctx.saved_tensors[0]
-        input_tensor = (
-            input_tensor.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input_tensor
-        )
+        input_tensor = input_tensor.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input_tensor
         return tex.dswiglu(grad_output, input_tensor, None), None, None
 
     swiglu_mod.SwiGLUFunction.forward = _te_swiglu_forward

@@ -164,9 +164,7 @@ def _pre_quantize_model(model):
         rowwise=True,
         columnwise=_enable_transpose_cache,
     )
-    _FP8_CPU_PARAMS = _get_quantized_params_cpu(
-        model, fp8_quantizer, "FP8_DS"
-    )
+    _FP8_CPU_PARAMS = _get_quantized_params_cpu(model, fp8_quantizer, "FP8_DS")
 
     _use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
 
@@ -178,9 +176,7 @@ def _pre_quantize_model(model):
         shuffle_columnwise_data=True,
         use_hadamard=_use_hadamard,
     )
-    _get_quantized_params_cpu(
-        model, mxfp4_quantizer, "MXFP4", replace=True
-    )
+    _get_quantized_params_cpu(model, mxfp4_quantizer, "MXFP4", replace=True)
 
     torch.cuda.empty_cache()
 
@@ -205,8 +201,8 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
     import torch
     import transformer_engine.pytorch as te
     import transformer_engine_torch as tex
-    from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
     from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 
     first_last_layers_bf16 = _truthy_env("FIRST_LAST_LAYERS_BF16", default=False)
     num_layers_at_start_in_bf16 = int(os.getenv("NUM_LAYERS_AT_START_IN_BF16", "0") or "0")
@@ -220,7 +216,10 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
     quantized_params = []
     for layer_idx, layer in enumerate(layers):
         if first_last_layers_bf16:
-            if layer_idx < num_layers_at_start_in_bf16 or layer_idx >= layer_count - num_layers_at_end_in_bf16:
+            if (
+                layer_idx < num_layers_at_start_in_bf16
+                or layer_idx >= layer_count - num_layers_at_end_in_bf16
+            ):
                 quantized_params.append([])
                 continue
 
@@ -228,7 +227,7 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
         for name, module in layer.named_modules():
             if not isinstance(module, (te.Linear, te.LayerNormLinear)):
                 continue
-            if not hasattr(module, 'weight'):
+            if not hasattr(module, "weight"):
                 continue
             param = module.weight
             with torch.no_grad():
@@ -258,7 +257,7 @@ def _get_quantized_params_cpu(model, quantizer, qtype: str, replace: bool = Fals
 
                 if replace:
                     qparam.requires_grad = False
-                    module._parameters['weight'] = qparam
+                    module._parameters["weight"] = qparam
                 else:
                     qparam = qparam.clone()
                     if not store_quantized_params_on_gpu:
@@ -287,8 +286,7 @@ def _log_gpu_mem(tag: str) -> None:
     Enabled when ``PRIMUS_LOG_GPU_MEM=1`` or ``MXFP4_HEALING_DEBUG=1``.
     """
     if not (
-        _truthy_env("PRIMUS_LOG_GPU_MEM", default=False)
-        or _truthy_env("MXFP4_HEALING_DEBUG", default=False)
+        _truthy_env("PRIMUS_LOG_GPU_MEM", default=False) or _truthy_env("MXFP4_HEALING_DEBUG", default=False)
     ):
         return
     try:
@@ -307,10 +305,7 @@ def _log_gpu_mem(tag: str) -> None:
             f"max_alloc={max_alloc:7.2f} GiB | max_reserved={max_reserved:7.2f} GiB"
         )
     except Exception as exc:  # noqa: BLE001
-        log_rank_0(
-            f"{_TAG}[mem] {tag}: failed to read "
-            f"({type(exc).__name__}: {exc})"
-        )
+        log_rank_0(f"{_TAG}[mem] {tag}: failed to read " f"({type(exc).__name__}: {exc})")
 
 
 def _empty_cache_and_collect(tag: str) -> None:
@@ -327,10 +322,7 @@ def _empty_cache_and_collect(tag: str) -> None:
             torch.cuda.empty_cache()
         _log_gpu_mem(tag)
     except Exception as exc:  # noqa: BLE001
-        log_rank_0(
-            f"{_TAG}[mem] {tag}: empty_cache failed "
-            f"({type(exc).__name__}: {exc})"
-        )
+        log_rank_0(f"{_TAG}[mem] {tag}: empty_cache failed " f"({type(exc).__name__}: {exc})")
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +404,8 @@ def _make_pre_quantizing_train(orig_train: Callable) -> Callable:
                 try:
                     from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
                         healing_iter as _healing_iter,
+                    )
+                    from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
                         run_fp8_warmup_for_kernel_jit,
                     )
 
