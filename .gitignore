@@ -6,6 +6,7 @@ dist/
 *.egg-info
 *~
 logs
+.pip_cache
 .vscode
 local/
 .gitmodules
@@ -29,3 +30,4 @@ examples/megatron/configs/MI355X/*-cmp-fit-*.yaml
 # ODC one-off experiment sweep configs (underscore-prefixed): _ab200*, _dev200*,
 # _m18*, _sdr* ablation yamls are never committed.
 examples/megatron/configs/MI355X/_*.yaml
+.cursor/

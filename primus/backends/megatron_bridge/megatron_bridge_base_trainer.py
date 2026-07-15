@@ -104,3 +104,39 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
                 "Please ensure Megatron-LM is properly installed and "
                 "megatron.core.package_info is available."
             ) from e
+
+    def _apply_nested_overrides(self) -> None:
+        """Apply flat backend_args overrides to nested ConfigContainer fields.
+
+        ConfigContainer uses nested dataclasses (train, logger, checkpoint, etc.)
+        that cannot be reached by the flat _merge_dict_to_dataclass pass in
+        load_recipe_config. This bridges user-facing YAML keys (e.g.
+        ``log_interval: 99999``) to their nested targets.
+        """
+        args = self.backend_args
+        cfg = self.cfg_container
+
+        if hasattr(args, "log_interval"):
+            val = getattr(args, "log_interval")
+            if val is not None:
+                cfg.logger.log_interval = int(val)
+                log_rank_0(f"  ↳ Override logger.log_interval = {cfg.logger.log_interval}")
+
+        for key in ("eval_interval", "eval_iters"):
+            if hasattr(args, key):
+                val = getattr(args, key)
+                if val is not None:
+                    setattr(cfg.train, key, int(val))
+                    log_rank_0(f"  ↳ Override train.{key} = {val}")
+
+        if hasattr(args, "save_interval"):
+            val = getattr(args, "save_interval")
+            if val is not None:
+                cfg.checkpoint.save_interval = int(val)
+                log_rank_0(f"  ↳ Override checkpoint.save_interval = {val}")
+
+        if hasattr(args, "skip_save") and args.skip_save:
+            cfg.checkpoint.save_interval = 0
+            cfg.checkpoint.save = None
+            log_rank_0("  ↳ Override checkpoint.save_interval = 0 (skip periodic save)")
+            log_rank_0("  ↳ Override checkpoint.save = None (skip final save)")

@@ -4,10 +4,10 @@ Training examples for Flux diffusion models with Primus-Megatron on AMD GPUs.
 
 ## Related Documentation
 
-- **Architecture & Developer Guide:** [docs/backends/megatron/diffusion/README.md](../../../docs/backends/megatron/diffusion/README.md)
-- **API Reference:** [docs/backends/megatron/diffusion/api_reference.md](../../../docs/backends/megatron/diffusion/api_reference.md)
-- **FP8 Training Guide:** [docs/backends/megatron/diffusion/fp8_training.md](../../../docs/backends/megatron/diffusion/fp8_training.md)
-- **MXFP4 Training Guide:** [docs/backends/megatron/diffusion/mxfp4_training.md](../../../docs/backends/megatron/diffusion/mxfp4_training.md)
+- **Architecture & Developer Guide:** [docs/04-technical-guides/diffusion-models/README.md](../../../docs/04-technical-guides/diffusion-models/README.md)
+- **API Reference:** [docs/04-technical-guides/diffusion-models/api_reference.md](../../../docs/04-technical-guides/diffusion-models/api_reference.md)
+- **FP8 Training Guide:** [docs/04-technical-guides/diffusion-models/fp8_training.md](../../../docs/04-technical-guides/diffusion-models/fp8_training.md)
+- **MXFP4 Training Guide:** [docs/04-technical-guides/diffusion-models/mxfp4_training.md](../../../docs/04-technical-guides/diffusion-models/mxfp4_training.md)
 - **Dataset Preparation:** [primus/configs/data/megatron/diffusion/README.md](../../../primus/configs/data/megatron/diffusion/README.md)
 - **Tests:** [tests/unit_tests/backends/megatron/diffusion/](../../../tests/unit_tests/backends/megatron/diffusion/)
 
@@ -178,7 +178,7 @@ bash examples/run_slurm_pretrain.sh
 | Flux 12B | BF16 | ~40-50GB | 1 | 1.0x |
 | Flux 12B | FP8 | ~20-25GB | 2 | 1.5-2x |
 
-For configuration details, tuning recipes, benchmarks, and troubleshooting, see the [FP8 Training Guide](../../../docs/backends/megatron/diffusion/fp8_training.md).
+For configuration details, tuning recipes, benchmarks, and troubleshooting, see the [FP8 Training Guide](../../../docs/04-technical-guides/diffusion-models/fp8_training.md).
 
 ---
 
@@ -198,7 +198,7 @@ AITER_LOG_TUNED_CONFIG=1 \
 bash examples/run_pretrain.sh
 ```
 
-For configuration knobs, backend-selector semantics, tuned-GEMM verification, and troubleshooting, see the [MXFP4 Training Guide](../../../docs/backends/megatron/diffusion/mxfp4_training.md).
+For configuration knobs, backend-selector semantics, tuned-GEMM verification, and troubleshooting, see the [MXFP4 Training Guide](../../../docs/04-technical-guides/diffusion-models/mxfp4_training.md).
 
 ---
 
