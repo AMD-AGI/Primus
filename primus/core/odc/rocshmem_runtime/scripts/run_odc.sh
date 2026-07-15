@@ -13,7 +13,9 @@
 # in the environment (it is prepended to PYTHONPATH).
 #
 # usage: run_odc.sh <mori|rocshmem> <pad|nopad> <exp_yaml_relpath> <exp_name> [KEY=VAL ...]
-#   pad   -> LB_MINI_SAME_MICRO=1 ; nopad -> 0
+#   pad|nopad is retained for backwards-compatible invocation but is now a no-op
+#     (the aligned-vs-decoupled A/B study knob was removed; LB-Mini always runs
+#     decoupled when enabled). ODC feature switches live in the EXP yaml config.
 #   extra KEY=VAL args are exported verbatim.
 #
 # Overridable env (all have portable defaults):
@@ -46,12 +48,17 @@ export EXP=$EXP_REL
 # its PARENT (primus/core/) on PYTHONPATH for `import odc`; odc_early holds the
 # sitecustomize load-order shim.
 export PYTHONPATH="${PRIMUS_TURBO_PATH:+$PRIMUS_TURBO_PATH:}$ODC_ROOT/odc_early:${ODC_ROOT%/*}"
-export ODC_ENABLE=1 ODC_LB_MINI=1 ODC_PHASE=2 MORI_SHMEM_HEAP_SIZE=8G
-if [ "$PAD" = "pad" ]; then export LB_MINI_SAME_MICRO=1; else export LB_MINI_SAME_MICRO=0; fi
+# ODC feature switches (enable_odc, odc_phase, enable_odc_lb_mini, ...) are now
+# CONFIG items set in the EXP yaml, NOT env vars. Only genuine infra env is set
+# here. MORI_SHMEM_HEAP_SIZE is MORI runtime infra (symmetric heap size).
+export MORI_SHMEM_HEAP_SIZE=8G
+# NOTE: the $PAD positional arg is retained for backwards-compatible invocation
+# but no longer toggles an aligned-vs-decoupled A/B baseline (that was a study
+# knob and has been removed); LB-Mini always runs decoupled when enabled.
 # public env
 export HF_HOME=${HF_HOME:-/workspace/hf_cache} DATA_PATH=${DATA_PATH:-/workspace}
 export GLOO_SOCKET_IFNAME=lo NCCL_SOCKET_IFNAME=lo NCCL_IB_DISABLE=1
-export LB_MINI_PACKING=kk FUSED_LINEAR_CE=1
+export FUSED_LINEAR_CE=1
 export PRIMUS_PACK_CACHE_DIR=${PRIMUS_PACK_CACHE_DIR:-$HOME/primus_packed}
 export PRIMUS_EXP_NAME=$EXPNAME
 export MASTER_PORT=${MASTER_PORT:-29600}
@@ -84,7 +91,7 @@ for kv in "$@"; do export "$kv"; done
 TRAIN_LOG_TS=${TRAIN_LOG_TS:-$(date +%Y%m%d_%H%M%S)}
 TRAIN_LOG_DIR=${TRAIN_LOG_DIR:-$HOME/odc_logs}; mkdir -p "$TRAIN_LOG_DIR"
 export TRAIN_LOG="$TRAIN_LOG_DIR/runlog_${EXPNAME}_${TRAIN_LOG_TS}.log"
-echo "[run_odc] ROOT=$PRIMUS_ROOT BACKEND=$BACKEND PAD=$PAD P2P=$ODC_P2P_BACKEND SAME_MICRO=$LB_MINI_SAME_MICRO EXP=$EXP NAME=$EXPNAME TS=$TRAIN_LOG_TS"
+echo "[run_odc] ROOT=$PRIMUS_ROOT BACKEND=$BACKEND PAD=$PAD P2P=$ODC_P2P_BACKEND EXP=$EXP NAME=$EXPNAME TS=$TRAIN_LOG_TS"
 echo "[run_odc] TURBO_PATH=${PRIMUS_TURBO_PATH:-<installed>} TRITON_CACHE_DIR=$TRITON_CACHE_DIR LOG=$TRAIN_LOG"
 bash examples/run_pretrain.sh
 echo "[run_odc] DONE exit=$? log=$TRAIN_LOG"

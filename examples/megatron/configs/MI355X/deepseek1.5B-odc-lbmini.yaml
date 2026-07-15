@@ -23,9 +23,16 @@ modules:
       sft_dataset_name: "zai-org/LongAlign-10k"
       sft_conversation_format: "messages"
 
+      # ODC on-demand communication (rocSHMEM/XGMI P2P gradient reduction) on the
+      # torch-FSDP2 path. Master switch (was the ODC_ENABLE env var).
+      enable_odc: true
+      odc_phase: 2
+
       # thd segmented (packed) attention.
       enable_packed_sequences: true
       use_packed_attention: true
+      # LB-Mini sequence-length load balancing (was the ODC_LB_MINI env var).
+      enable_odc_lb_mini: true
       # LB-Mini cost model: fit (attention-aware a*s^2 + b*s, 1.5B coefficients).
       lb_mini_cost_model: fit
       lb_mini_max_token_len: 32768
