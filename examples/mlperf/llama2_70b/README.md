@@ -6,6 +6,13 @@ Dataset: [GovReport](https://gov-report-data.github.io/) (SCROLLS `gov_report`),
 Model: **meta-llama/Llama-2-70b-hf** with LoRA (rank 16, alpha 32).  
 Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 
+## Key files
+
+- `configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml` — post-train overrides
+- `config_MI355X_1x8x1.sh` — system config and env vars (set `PRIMUS_PATH` to your Primus clone)
+- `run_and_time.sh` — one-shot MLPerf run via `primus-cli`
+- `a4w4_tuned_gemms.csv` — tuned AITER A4W4 GEMM configs
+
 ---
 
 ## Prerequisites
@@ -74,17 +81,17 @@ Hooks create these under `/data` on first run if missing. Point `PACKED_DATA_DIR
 ## 3. Run training
 
 ```bash
-bash examples/megatron_bridge/llama2_70b_lora/run_mlperf_cli.sh
+bash examples/mlperf/llama2_70b/run_and_time.sh
 ```
 
-Hooks run automatically: patches → deps → dataset → HF→Megatron checkpoint.
+Hooks run automatically: pip deps → dataset → HF→Megatron checkpoint.
 
 Equivalent:
 
 ```bash
-source examples/megatron_bridge/llama2_70b_lora/config_MI355X_1x8x1.sh
+source examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh
 ./runner/primus-cli direct train posttrain \
-  --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml
+  --config examples/mlperf/llama2_70b/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml
 ```
 
 ---
@@ -95,10 +102,11 @@ source examples/megatron_bridge/llama2_70b_lora/config_MI355X_1x8x1.sh
 
 | File | Role |
 |------|------|
-| `configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml` | Post-train overrides |
+| `examples/mlperf/llama2_70b/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml` | Post-train overrides |
+| `examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh` | MLPerf env (MXFP4, AITER, NCCL, MLLOG) |
+| `examples/mlperf/llama2_70b/a4w4_tuned_gemms.csv` | Tuned AITER A4W4 GEMM configs |
 | `primus/configs/models/megatron_bridge/llama2_70b_lora_mxfp4.yaml` | Model recipe |
-| `primus/recipes/llama2_custom.py` | `llama2_70b_lora_mxfp4_config` |
-| `config_MI355X_1x8x1.sh` | MLPerf env (MXFP4, AITER, NCCL, MLLOG) |
+| `primus/backends/megatron_bridge/recipes/mlperf_llama2_70b/llama2_custom.py` | `llama2_70b_lora_mxfp4_config` |
 
 ### Training schedule
 
@@ -126,9 +134,27 @@ Targets `linear_qkv`, `linear_proj` (dim 16, alpha 32). `stable_lora_with_te_op_
 
 TP=1, PP=1, CP=1, 8 GPUs data parallel.
 
-### Patches (`primus/recipes/patches/`)
+### MLPerf overrides (Primus-side, no third_party git patches)
 
-`megatron_nemo_lora_only`, `megatron_bridge_validation_consumed_samples`, `megatron_bridge_deterministic_eval`, `sft_attention_mask_cache`, `megatron_lm_mxfp4_recipe`.
+Runtime patches under `primus/backends/megatron_bridge/patches/mlperf_llama2_70b/` apply only when
+`llama2_70b_lora_mxfp4` / `llama2_70b_lora_mlperf_posttrain.yaml` is selected.
+
+Recipe code lives under `primus/backends/megatron_bridge/recipes/mlperf_llama2_70b/`.
+
+| File | Role |
+|------|------|
+| `lora.py` | NeMo-stable LoRA (`use_te_fused_lora=False`) |
+| `resettable_data_iterator.py` | Deterministic validation iterator |
+| `bridge_patches.py` | Data loaders, eval reset, SFT mask cache, NeMo timing |
+| `megatron_patches.py` | MXFP4 recipe + optional TE SwiGLU |
+| `conditions.py` | Scopes patches to MLPerf Llama2-70B only |
+
+One-time cleanup if you previously applied git patches to submodules:
+
+```bash
+git -C third_party/Megatron-Bridge checkout -- .
+git -C third_party/Megatron-Bridge/3rdparty/Megatron-LM checkout -- .
+```
 
 ---
 
@@ -159,7 +185,6 @@ export VERBOSE_TRAINING_LOG=0
 ```bash
 export PRIMUS_TRAIN_ITERS=550
 export SEED=1234
-export SKIP_PATCHES=1
 export SYNTH_WARMUP_STEPS=0
 export NCCL_IB_DISABLE=0    # if RDMA works on your system
 ```

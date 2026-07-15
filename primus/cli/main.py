@@ -8,14 +8,34 @@
 # aiter, ...) that may print/log at import time. Importing this module only
 # triggers the light ``primus/__init__.py`` and installs the FD-level filter
 # when ``PRIMUS_LOG_SUPPRESSION=1`` is set; it is a complete no-op otherwise.
-import primus.mlperf_log_suppression  # noqa: F401  # isort: skip
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _prefer_checkout_primus_on_sys_path() -> None:
+    """Prefer the git checkout over an installed wheel for in-tree Primus modules."""
+    if not (_REPO_ROOT / "primus" / "mlperf_log_suppression.py").is_file():
+        return
+    root = str(_REPO_ROOT)
+    if root in sys.path:
+        sys.path.remove(root)
+    sys.path.insert(0, root)
+
+
+_prefer_checkout_primus_on_sys_path()
+
+try:
+    import primus.mlperf_log_suppression  # noqa: F401  # isort: skip
+except ModuleNotFoundError:
+    # Optional in-tree module; recipe-local _log_suppression covers MLPerf runs.
+    pass
 
 import argparse
 import importlib
 import pkgutil
-import sys
 import traceback
-from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional, Set
 
 SUBCOMMAND_PACKAGE = "primus.cli.subcommands"
@@ -26,11 +46,7 @@ def _ensure_project_root_on_path() -> None:
     Allow running `python primus/cli/main.py` from the repo root without
     requiring an installed package.
     """
-    if __package__:
-        return
-    project_root = Path(__file__).resolve().parents[2]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    _prefer_checkout_primus_on_sys_path()
 
 
 def _iter_subcommand_modules() -> Iterable[str]:

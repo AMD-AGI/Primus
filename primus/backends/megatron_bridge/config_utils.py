@@ -329,7 +329,7 @@ def _resolve_recipe(recipe: str, flavor: str):
     Resolve a recipe module and function by searching multiple namespaces.
 
     Search order:
-        1. Direct custom module path (e.g., primus.recipes.llama2_custom)
+        1. Direct custom module path (e.g., primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.llama2_custom)
         2. primus.backends.megatron_bridge.recipes.{recipe}  (Primus-side extensions)
         3. megatron.bridge.recipes.{recipe}                   (upstream Megatron-Bridge)
         4. recipe as a direct Python module path (fallback)
@@ -341,7 +341,7 @@ def _resolve_recipe(recipe: str, flavor: str):
     Raises:
         AssertionError if the recipe cannot be found in any namespace.
     """
-    custom_prefixes = ("primus.recipes.", "primus.")
+    custom_prefixes = ("primus.backends.megatron_bridge.recipes.", "primus.")
     if any(recipe.startswith(prefix) for prefix in custom_prefixes):
         try:
             module = importlib.import_module(recipe)

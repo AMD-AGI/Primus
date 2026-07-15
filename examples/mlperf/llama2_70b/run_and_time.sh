@@ -1,19 +1,20 @@
 #!/bin/bash
-# One-shot MLPerf Llama2-70B LoRA via primus-cli (auto patches, dataset, model download).
+# One-shot MLPerf Llama2-70B LoRA via primus-cli (dataset + checkpoint hooks).
+#
+# MLPerf overrides live in primus/backends/megatron_bridge/patches/mlperf_llama2_70b/ and are
+# applied automatically via @register_patch when llama2_70b_lora_mxfp4 is selected.
 #
 # Hooks (megatron_bridge) run automatically before training:
-#   00_apply_llama2_patches.sh   — Megatron-Bridge / Megatron-LM patches
 #   00_install_requirements.sh — pip deps
 #   01_convert_checkpoints.sh    — HF → Megatron checkpoint (needs HF_TOKEN)
 #   02_prepare_mlperf_dataset.sh — SCROLLS gov-report .npy + metadata (needs HF_TOKEN)
 #
 # Usage (inside Primus container, repo root):
 #   export HF_TOKEN=...
-#   bash examples/megatron_bridge/llama2_70b_lora/run_mlperf_cli.sh
+#   bash examples/mlperf/llama2_70b/run_and_time.sh
 #
 # Optional:
 #   PACKED_DATA_DIR=/data/mlperf_llama2
-#   SKIP_PATCHES=1
 #   MLLOG_VERBOSE_LOGS=1
 #   PRIMUS_LOG_GPU_MEM=1   # GPU mem every log_interval (default on in config_MI355X)
 #   SEED=1234

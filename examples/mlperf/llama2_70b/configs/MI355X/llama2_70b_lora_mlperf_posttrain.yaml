@@ -8,7 +8,7 @@ modules:
     framework: megatron_bridge
     config: sft_trainer.yaml
 
-    # MXFP4 LoRA recipe (primus.recipes.llama2_custom.llama2_70b_lora_mxfp4_config)
+    # MXFP4 LoRA recipe (primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.llama2_70b_lora_mxfp4_config)
     model: llama2_70b_lora_mxfp4.yaml
 
     overrides:

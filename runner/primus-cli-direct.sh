@@ -382,20 +382,6 @@ if ! execute_hooks "${1:-}" "${2:-}" "$@"; then
     exit 1
 fi
 
-# Revert Llama2-70B LoRA MLPerf Megatron patches after training finishes (or on failure).
-if [[ "${PRIMUS_LLAMA2_REVERT_PATCHES_ON_EXIT:-0}" == "1" && "${SKIP_PATCH_REVERT:-0}" != "1" ]]; then
-    if [[ "${NODE_RANK:-0}" -eq 0 ]]; then
-        _PRIMUS_ROOT="$(cd "${RUNNER_DIR}/.." && pwd)"
-        _LLAMA2_REVERT_SCRIPT="${_PRIMUS_ROOT}/examples/megatron_bridge/llama2_70b_lora/revert_patches.sh"
-        if [[ -f "${_LLAMA2_REVERT_SCRIPT}" ]]; then
-            register_cleanup_hook "PRIMUS_ROOT='${_PRIMUS_ROOT}' bash '${_LLAMA2_REVERT_SCRIPT}'"
-            LOG_INFO_RANK0 "[llama2-patches] Will revert Megatron patches on exit"
-        else
-            LOG_WARN "[llama2-patches] Revert script not found: ${_LLAMA2_REVERT_SCRIPT}"
-        fi
-    fi
-fi
-
 # Prepend collected extra args to the current Primus arguments ($@) so that
 # they are automatically picked up when building the final CMD below.
 if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then

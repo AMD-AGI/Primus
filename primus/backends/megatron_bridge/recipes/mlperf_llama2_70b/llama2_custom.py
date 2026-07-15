@@ -11,10 +11,7 @@ This is a custom recipe based on Megatron-Bridge's llama2.py recipe,
 but placed in Primus for easier customization and extension.
 """
 
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parent))
-import _log_suppression  # noqa: F401, E402  # must precede noisy imports
+from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import _log_suppression  # noqa: F401, E402
 
 import gc
 import os
@@ -46,7 +43,7 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 
-from primus.modules.module_utils import log_rank_0 as _orig_log_rank_0, log_rank_last as _orig_log_rank_last
+from primus.core.utils.module_utils import log_rank_0 as _orig_log_rank_0, log_rank_last as _orig_log_rank_last
 
 _log_suppression.reapply_quiet_logger_levels()
 
@@ -112,11 +109,13 @@ def _log_training_gpu_mem(tag: str, memory_keys=None) -> None:
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.finetuning import prepare_finetuning_batch
 from megatron.bridge.data.iterator_utils import make_data_iterator_list
-from megatron.bridge.data.loaders import ResettableDataIterator
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
+    ResettableDataIterator,
+)
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.recipes.utils.finetune_utils import default_squad_config
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
 from megatron.bridge.training import fault_tolerance
@@ -185,7 +184,7 @@ from megatron.bridge.training.train import (
 )
 
 # Importing this module installs a monkey-patch that swaps Megatron-Bridge's
-from primus.recipes import nemo_loss as _nemo_loss  # noqa: F401
+from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import nemo_loss as _nemo_loss  # noqa: F401
 
 MLPERF_TARGET_LOSS = 0.925
 
@@ -1573,7 +1572,9 @@ def megatron_bridge_train_override(
     # MXFP4_HEALING_PHASE_LOG is on). Safe to call even when the healing
     # module isn't imported — gracefully degrades.
     try:
-        from primus.recipes.mxfp4_healing import log_healing_env_banner_once
+        from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
+            log_healing_env_banner_once,
+        )
 
         log_healing_env_banner_once()
     except Exception:  # noqa: BLE001
@@ -1698,12 +1699,14 @@ def megatron_bridge_train_override(
         global_state.train_state.step += 1
 
         # MXFP4 healing: when train_state.step + 1 == HEALING_ITER, restore FP8
-        # weights from the CPU stash (see ``primus.recipes.mxfp4_healing``) and
+        # weights from the CPU stash (see ``mxfp4_healing``) and
         # switch ``megatron.core.fp4_utils`` out of the MXFP4 phase. No-op when
         # HEALING_ITER == 0 (default) so BF16/MXFP8 submission runs are
         # unaffected.
         try:
-            from primus.recipes import mxfp4_healing as _mxh
+            from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import (
+                mxfp4_healing as _mxh,
+            )
 
             if _mxh.healing_iter() > 0:
                 _mxh.apply_healing_after_step(model, model_config, global_state.train_state.step)
@@ -1956,7 +1959,9 @@ def megatron_bridge_train_override(
 # wrap, zero runtime cost).
 # ---------------------------------------------------------------------------
 from megatron.bridge.training import train as _mb_train_mod
-from primus.recipes.pre_quantize_mxfp4 import install_pre_quantize_wrap
+from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.pre_quantize_mxfp4 import (
+    install_pre_quantize_wrap,
+)
 
 _installed_train = install_pre_quantize_wrap(megatron_bridge_train_override)
 setattr(megatron_bridge_train_override, "_primus_llama2_custom_train_override", True)

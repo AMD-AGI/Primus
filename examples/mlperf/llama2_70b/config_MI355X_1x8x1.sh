@@ -1,6 +1,6 @@
 #!/bin/bash
 # MLPerf 6.0 environment for Llama2-70B LoRA on MI355X (8 GPUs, 1 node).
-# Source before run_mlperf_cli.sh or primus-cli direct train posttrain.
+# Source before run_and_time.sh or primus-cli direct train posttrain.
 
 export DGXSYSTEM=MI355X_1x8x1
 export GPUS_PER_NODE=8
@@ -14,7 +14,7 @@ export SEED="${SEED:-$RANDOM}"
 
 export PRIMUS_PATH="${PRIMUS_PATH:-/workspace/Primus}"
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-Bridge:${PYTHONPATH:-}"
-export EXP="${EXP:-${PRIMUS_PATH}/examples/megatron_bridge/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml}"
+export EXP="${EXP:-${PRIMUS_PATH}/examples/mlperf/llama2_70b/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml}"
 export DATA_PATH="${DATA_PATH:-/data}"
 
 export PACKED_TRAIN_DATA_PATH="${DATA_PATH}/train.npy"
@@ -157,7 +157,7 @@ export RECOMPUTE_METHOD=null
 export RECOMPUTE_NUM_LAYERS=null
 
 export FP8_ACT=0
-export AITER_CONFIG_GEMM_A4W4="${PRIMUS_PATH}/examples/megatron_bridge/llama2_70b_lora/a4w4_tuned_gemms.csv"
+export AITER_CONFIG_GEMM_A4W4="${PRIMUS_PATH}/examples/mlperf/llama2_70b/a4w4_tuned_gemms.csv"
 export AITER_LOG_TUNED_CONFIG=0
 export NVTE_FP4_LOG_GEMM_SHAPES=0
 export AITER_LOG_LEVEL=ERROR

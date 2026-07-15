@@ -119,7 +119,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _safe_log_rank_0(msg: str) -> None:

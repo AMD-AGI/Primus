@@ -34,7 +34,7 @@ Adaptations vs NeMo (NOT behavioural changes):
 Integration: ``install_pre_quantize_wrap(orig_train)`` returns a drop-in
 wrapper around ``megatron.bridge.training.train.train`` that, on the
 first call, stashes FP8 weights on CPU, swaps live weights to MXFP4, and
-bridges the stash to ``primus.recipes.mxfp4_healing._ORDERED_FP8_STASH``
+bridges the stash to ``mxfp4_healing._ORDERED_FP8_STASH``
 before delegating to ``orig_train``. When ``PRE_QUANTIZED_MODEL`` is not
 enabled the wrap is a no-op (it just returns ``orig_train`` unchanged).
 
@@ -55,7 +55,7 @@ import logging
 import os
 from typing import Any, Callable, List
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 _LOG = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ _TAG = "[pre_quantize_mxfp4]"
 # indexed by ``decoder.layers`` index, then by intra-layer iteration
 # order over ``isinstance(m, (te.Linear, te.LayerNormLinear))`` modules.
 # Same ``Float8Tensor`` objects are also referenced from
-# ``primus.recipes.mxfp4_healing._ORDERED_FP8_STASH`` (flat
+# ``mxfp4_healing._ORDERED_FP8_STASH`` (flat
 # ``(module, fp8_tensor)`` view) for restore-time bookkeeping.
 _FP8_CPU_PARAMS: List[List[Any]] = []
 
@@ -357,7 +357,9 @@ def _make_pre_quantizing_train(orig_train: Callable) -> Callable:
         if not state["done"]:
             try:
                 try:
-                    from primus.recipes.mxfp4_healing import log_healing_env_banner_once
+                    from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
+                        log_healing_env_banner_once,
+                    )
 
                     log_healing_env_banner_once()
                 except Exception:  # noqa: BLE001
@@ -388,12 +390,12 @@ def _make_pre_quantizing_train(orig_train: Callable) -> Callable:
                 _log_gpu_mem("after _pre_quantize_model (BEFORE empty_cache)")
                 _empty_cache_and_collect("after _pre_quantize_model (AFTER empty_cache)")
 
-                # Bridge: populate primus.recipes.mxfp4_healing._ORDERED_FP8_STASH
+                # Bridge: populate mxfp4_healing._ORDERED_FP8_STASH
                 # with flat (module, fp8_cpu_tensor) pairs that share storage
                 # with _FP8_CPU_PARAMS, so existing healing-side code
                 # (restore-to-GPU, refcount audit, FP8 warmup) keeps working.
                 try:
-                    from primus.recipes.mxfp4_healing import (
+                    from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
                         _set_ordered_fp8_stash_from_layered,
                     )
 
@@ -408,7 +410,7 @@ def _make_pre_quantizing_train(orig_train: Callable) -> Callable:
                 # NeMo MLPerf MI355X parity: optional FP8 warmup (off by default).
                 # Honors MXFP4_HEALING_FP8_WARMUP=1 to enable.
                 try:
-                    from primus.recipes.mxfp4_healing import (
+                    from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.mxfp4_healing import (
                         healing_iter as _healing_iter,
                         run_fp8_warmup_for_kernel_jit,
                     )

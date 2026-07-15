@@ -15,7 +15,7 @@ surface differs:
 * NeMo's pre-quantize fires from ``on_train_start``; healing fires from
   ``on_train_batch_end`` when ``trainer.global_step + 1 == healing_iter``.
 * Primus's pre-quantize fires from a megatron-bridge ``train()`` wrapper
-  (``primus.recipes.pre_quantize_mxfp4``); healing fires when the recipe
+  (``pre_quantize_mxfp4``); healing fires when the recipe
   calls ``apply_healing_after_step(model, model_config, train_state.step)``
   immediately after ``train_state.step += 1`` -- the same arithmetic
   identity as NeMo.
@@ -36,7 +36,7 @@ from typing import Any, List
 
 import torch
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 # ---------------------------------------------------------------------------
@@ -483,8 +483,8 @@ def reset_healing_state() -> None:
 # ---------------------------------------------------------------------------
 # Backwards-compatible shims for existing callers.
 #
-# These keep ``primus/recipes/pre_quantize_mxfp4.py`` and
-# ``primus/recipes/llama2_custom.py`` importable without edits. The new
+# These keep ``pre_quantize_mxfp4`` and ``llama2_custom`` importable without
+# edits. The new
 # code is ``set_fp8_cpu_params`` (above); the legacy names below just
 # delegate / no-op.
 # ---------------------------------------------------------------------------
