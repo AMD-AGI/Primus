@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
 from typing import Optional, Set
 
 import torch
@@ -323,14 +324,36 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
         log_rank_0(f"FSDP2: wrapped {len(wrapped_list)} inner modules + root")
 
         prefetch_depth = getattr(self.config, "fsdp_prefetch_depth", 1)
+
+        # ODC uses a serial single-stream rocSHMEM/GDA transport (overlap_factor=1.00x),
+        # so #808's FSDP2 forward all-gather prefetch cannot overlap and is pure overhead
+        # (+3.4~3.9s/step gather_kernel, +26.6GB max reserved on dual-node 14B). Auto-gate
+        # the forward prefetch OFF whenever ODC is active (mirrors the #856 device_id gate
+        # in distributed_init_patches.py). Backward prefetch is fine/needed under ODC and is
+        # kept. ODC_DISABLE_FWD_PREFETCH / ODC_DISABLE_BWD_PREFETCH remain manual escape
+        # hatches for debugging. Non-ODC FSDP2 runs are unaffected.
+        _odc_enable = os.environ.get("ODC_ENABLE", "0") == "1"
+        _disable_fwd_prefetch = os.environ.get("ODC_DISABLE_FWD_PREFETCH", "0") == "1" or _odc_enable
+        _disable_bwd_prefetch = os.environ.get("ODC_DISABLE_BWD_PREFETCH", "0") == "1"
+        if _disable_fwd_prefetch:
+            _reason = "ODC active" if _odc_enable else "ODC_DISABLE_FWD_PREFETCH=1"
+            log_rank_0(
+                f"[ODC.torch_fsdp2] {_reason}: skipping #808 forward all-gather prefetch "
+                f"on {len(wrapped_list)} module(s)"
+            )
+        if _disable_bwd_prefetch:
+            log_rank_0(
+                f"[ODC.torch_fsdp2] ODC_DISABLE_BWD_PREFETCH=1: skipping #808 backward "
+                f"all-gather prefetch on {len(wrapped_list)} module(s)"
+            )
         for i, mod in enumerate(wrapped_list):
             fwd_targets = wrapped_list[i + 1 : i + 1 + prefetch_depth]
-            if fwd_targets:
+            if fwd_targets and not _disable_fwd_prefetch:
                 mod.set_modules_to_forward_prefetch(fwd_targets)
 
             bwd_start = max(0, i - prefetch_depth)
             bwd_targets = list(reversed(wrapped_list[bwd_start:i]))
-            if bwd_targets:
+            if bwd_targets and not _disable_bwd_prefetch:
                 mod.set_modules_to_backward_prefetch(bwd_targets)
 
         # Wrap the root module as required by the FSDP API
