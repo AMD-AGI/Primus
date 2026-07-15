@@ -171,7 +171,7 @@ modules:
 #   - Training time: Minutes
 #
 # Validation Checklist:
-#   [ ] Setup FP8 environment (see docs/backends/megatron/diffusion/fp8_training.md)
+#   [ ] Setup FP8 environment (see docs/04-technical-guides/diffusion-models/fp8_training.md)
 #   [ ] Verify TE FP8 support is available
 #   [ ] Run this config to validate FP8 training
 #   [ ] Check logs for NaN/Inf (should be none)
@@ -196,4 +196,4 @@ modules:
 #   - If slow: Verify ROCm FP8 tensor cores are being used
 #   - If unstable: Try fp8_wgrad: false in model config
 #
-# For more information: See docs/backends/megatron/diffusion/fp8_training.md
+# For more information: See docs/04-technical-guides/diffusion-models/fp8_training.md
