@@ -3,17 +3,39 @@
 # See LICENSE for license information.
 
 ###############################################################################
-# LB-Mini (sequence-length load balancing) for Megatron's FSDP2 + ODC path.
+# LB-Mini (sequence-length load balancing) for Megatron's FSDP2 path.
 #
-# ONE switch, TWO code paths:
+# ``enable_odc_lb_mini`` is an ORTHOGONAL, standalone capability: it serves the
+# variable-length, Karmarkar-Karp-balanced LB-Mini DATA on the torch-FSDP2 path.
+# It is INDEPENDENT of the ODC communication switch (``enable_odc``); what the
+# ODC switch selects is only HOW the per-rank micro-batch counts are aligned:
+#
 #   * enable_odc_lb_mini=false (DEFAULT) -> this patch is a complete no-op;
 #     Megatron runs its stock fixed-num_microbatches, all-ranks-in-lockstep
-#     schedule. Byte-for-byte unchanged.
-#   * enable_odc_lb_mini=true (and enable_odc=true) -> data is served variable
-#     length and Karmarkar-Karp balanced across DP ranks; each rank runs its OWN
-#     (possibly different) number of micro-batches. Only ODC's point-to-point
-#     comm can drive ranks out of lockstep without a collective deadlock, hence
-#     the enable_odc=true requirement.
+#     schedule on stock (padded) data. Byte-for-byte unchanged.
+#
+#   * enable_odc_lb_mini=true + enable_odc=true -> DECOUPLED mode. Data is served
+#     variable length and KK-balanced across DP ranks; each rank runs its OWN
+#     (possibly different) number of micro-batches (same_micro_num=False). Only
+#     ODC's point-to-point comm can drive ranks out of lockstep without a
+#     collective deadlock, hence this mode requires ODC comm.
+#
+#   * enable_odc_lb_mini=true + enable_odc=false -> ALIGNED mode. The SAME
+#     variable-length KK-balanced DATA is served, but the micro-batch count is
+#     all-reduce(MAX)-aligned so every rank runs the SAME number of steps
+#     (same_micro_num=True). Uniform per-rank counts keep standard FSDP2 + RCCL
+#     collectives in lockstep (no deadlock), so this is a fair "same data" nccl
+#     baseline WITHOUT ODC. This is the config-driven replacement for the removed
+#     LB_MINI_FORCE_DATA A/B env (which likewise served LB-Mini data under NCCL).
+#
+# In BOTH enabled modes we install the dataloader patch (variable-length data)
+# AND the schedule patch (rank-local num_microbatches). The schedule patch is
+# comm-agnostic -- it only overrides num_microbatches with the iterator's planned
+# per-rank count. Under ALIGNED mode those counts are identical across ranks, so
+# it is NCCL/RCCL-safe; it is NOT an ODC-specific reduction. (Running the
+# dataloader patch WITHOUT the schedule patch would be incoherent: the stock
+# schedule would pull a fixed num_microbatches while the iterator plans a
+# possibly-different per-rank count, drifting the two out of sync.)
 #
 # All wiring is monkey-patch in the Primus layer; the third-party Megatron-LM
 # source is NOT modified.
@@ -34,17 +56,32 @@ _FB_PATCHED = False
 
 
 def _lb_mini_enabled(args) -> bool:
-    """LB-Mini requires BOTH the explicit ``enable_odc_lb_mini`` switch AND ODC
-    comm (``enable_odc``) to be on.
+    """LB-Mini DATA serving is driven by ``enable_odc_lb_mini`` ALONE.
 
-    LB-Mini needs ODC point-to-point comm because Karmarkar-Karp balancing can
-    give ranks different micro-batch counts, and NCCL collectives would deadlock.
+    LB-Mini is ORTHOGONAL to the ODC comm switch: it only requires the explicit
+    ``enable_odc_lb_mini`` config item and the torch-FSDP2 path it patches. The
+    ``enable_odc`` switch does NOT gate whether LB-Mini data is served; it only
+    selects the micro-batch alignment mode (see ``_lb_mini_aligned``):
+
+      * enable_odc=true  -> DECOUPLED (ranks may run different micro-batch counts;
+                            needs ODC point-to-point comm).
+      * enable_odc=false -> ALIGNED   (all ranks run the same micro-batch count
+                            via all_reduce(MAX); NCCL/RCCL-safe "same data"
+                            baseline, no ODC).
     """
-    return (
-        bool(getattr(args, "enable_odc_lb_mini", False))
-        and bool(getattr(args, "use_torch_fsdp2", False))
-        and bool(getattr(args, "enable_odc", False))
-    )
+    return bool(getattr(args, "enable_odc_lb_mini", False)) and bool(getattr(args, "use_torch_fsdp2", False))
+
+
+def _lb_mini_aligned(args) -> bool:
+    """Micro-batch alignment mode for LB-Mini.
+
+    ALIGNED (True) when ODC comm is OFF: all ranks are forced to the same
+    micro-batch count (``same_micro_num=True``, all_reduce MAX) so standard
+    FSDP2 + RCCL collectives stay in lockstep. DECOUPLED (False) when ODC comm is
+    ON: ranks may run different counts, which only ODC's point-to-point comm can
+    drive without a collective deadlock.
+    """
+    return not bool(getattr(args, "enable_odc", False))
 
 
 def _build_lb_mini_train_iterator(args):
@@ -75,6 +112,11 @@ def _build_lb_mini_train_iterator(args):
     # count differences (where DiffMicro saves comm rounds). Priority:
     # yaml lb_mini_max_token_len > seq_length.
     max_token_len = int(getattr(args, "lb_mini_max_token_len", 0) or 0) or int(args.seq_length)
+    # ALIGNED (enable_odc=false) -> same_micro_num=True: all ranks run the SAME
+    # micro-batch count (all_reduce MAX), keeping standard RCCL collectives in
+    # lockstep -> fair "same data" NCCL baseline. DECOUPLED (enable_odc=true) ->
+    # same_micro_num=False: ranks may differ; only ODC p2p comm can drive that.
+    aligned = _lb_mini_aligned(args)
     it = LBMiniDataIterator(
         samples=samples,
         global_batch_size=args.global_batch_size,
@@ -85,14 +127,16 @@ def _build_lb_mini_train_iterator(args):
         cost_model=str(getattr(args, "lb_mini_cost_model", "linear")),
         seed=args.seed,
         shuffle=True,
-        same_micro_num=False,
+        same_micro_num=aligned,
         packing_method="kk",
     )
     log_rank_0(
         f"[ODC.lb_mini] built LB-Mini train iterator: {len(samples)} varlen samples, "
         f"global_batch_size={args.global_batch_size}, max_token_len={max_token_len}, "
         f"dp_size={mpu.get_data_parallel_world_size()}, "
-        f"cost_model={getattr(args, 'lb_mini_cost_model', 'linear')} (LB-Mini decoupled)"
+        f"cost_model={getattr(args, 'lb_mini_cost_model', 'linear')}, "
+        f"same_micro_num={aligned} "
+        f"({'ALIGNED baseline (nccl, no ODC)' if aligned else 'LB-Mini decoupled (ODC)'})"
     )
     return it
 
@@ -188,13 +232,15 @@ def _install_schedule_patch():
     "megatron.fsdp.odc_lb_mini",
     backend="megatron",
     phase="before_train",
-    description="LB-Mini sequence-length load balancing for Megatron FSDP2+ODC (one switch, two paths).",
+    description="LB-Mini sequence-length load balancing for Megatron FSDP2 (data decoupled from ODC comm).",
     condition=lambda ctx: _lb_mini_enabled(get_args(ctx)),
 )
 def patch_odc_lb_mini(ctx: PatchContext):
+    aligned = _lb_mini_aligned(get_args(ctx))
+    mode = "ALIGNED (nccl, no ODC)" if aligned else "DECOUPLED (ODC comm)"
     log_rank_0(
-        "[ODC.lb_mini] enable_odc_lb_mini=true + enable_odc=true -> installing LB-Mini "
-        "(variable-length KK-balanced data, rank-local micro-batch counts)."
+        f"[ODC.lb_mini] enable_odc_lb_mini=true, mode={mode} -> installing LB-Mini "
+        "(variable-length KK-balanced data + rank-local num_microbatches schedule)."
     )
     # Loss normalization under torch FSDP2: we KEEP calculate_per_token_loss at
     # its default (False). Each micro-batch loss is mean-reduced (/=num_tokens)
@@ -207,8 +253,14 @@ def patch_odc_lb_mini(ctx: PatchContext):
     # FSDP2 does its OWN reduce-scatter and BYPASSES that path, so per-token
     # leaves the summed (un-normalized) loss and gradients explode ~1000x
     # (measured: grad norm ~45000 vs ~55). KK balancing keeps per-rank
-    # micro-batch counts nearly equal, so the residual per-minibatch-mean
-    # weighting difference (e.g. a rank with 3 vs 4 micro-batches) is negligible.
+    # micro-batch counts nearly equal (and in ALIGNED mode they are EXACTLY
+    # equal), so the residual per-minibatch-mean weighting difference (e.g. a rank
+    # with 3 vs 4 micro-batches) is negligible.
+    #
+    # Both patches are installed in either mode. The schedule patch is
+    # comm-agnostic (it only sets this rank's num_microbatches); in ALIGNED mode
+    # (enable_odc=false) the counts are all_reduce(MAX)-uniform across ranks, so
+    # the standard FSDP2 + RCCL collectives stay in lockstep -- no ODC required.
     _install_dataloader_patch()
     _install_schedule_patch()
 
