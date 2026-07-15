@@ -303,6 +303,34 @@ jobs:
       - name: Install Primus
         run: |
           pip install -r requirements.txt
+      # v26.3-only: drop this whole step on v26.4. Unit tests import torchtitan
+      # from the submodule source via conftest sys.path injection (v0.2.2 has
+      # PEP-420 namespace packages that need the source root on sys.path). This
+      # just removes any stale torchtitan on the persistent runner that would
+      # shadow it (old install or leftover editable finder / .pth / dist-info).
+      - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
+        run: |
+          pip uninstall -y torchtitan || true
+          python - <<'PY'
+          import glob, os, shutil, site
+          dirs = set(site.getsitepackages() + [site.getusersitepackages()])
+          patterns = (
+              "__editable__*torchtitan*",
+              "__editable__.torchtitan*.pth",
+              "torchtitan*.pth",
+              "torchtitan*.egg-link",
+              "torchtitan*.dist-info",
+              "torchtitan*.egg-info",
+          )
+          for d in dirs:
+              for pat in patterns:
+                  for f in glob.glob(os.path.join(d, pat)):
+                      try:
+                          shutil.rmtree(f) if os.path.isdir(f) else os.remove(f)
+                          print("removed", f)
+                      except OSError as e:
+                          print("skip", f, e)
+          PY
       - name: Install fixed origami
         run: |
           # rocm/primus:v26.3 bundles origami 0.1.0, whose rank_configs() raises
