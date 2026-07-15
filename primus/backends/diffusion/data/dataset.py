@@ -81,9 +81,6 @@ class WanVideoDataset(BaseDataset):
     def _load_metadata(self) -> list[dict]:
         """Load metadata from JSONL or CSV file."""
         samples = []
-        # TODO: add dummy data for debugging
-        if self.data_path.name == "dummy.jsonl":
-            return samples
 
         if self.data_path.suffix == ".jsonl":
             with open(self.data_path) as f:
@@ -170,7 +167,6 @@ class WanVideoDataset(BaseDataset):
         from decord import VideoReader, cpu
 
         num_threads = 4
-        align = os.getenv("ALIGN_WITH_DIFFSYNTH") == "1"
 
         if isinstance(video_path, BytesIO):
             vr = VideoReader(video_path, ctx=cpu(0), num_threads=num_threads)
@@ -192,13 +188,7 @@ class WanVideoDataset(BaseDataset):
             actual_nframes = min(nframes, total_frames)
 
             valid_nframes = (actual_nframes - 1) // 4 * 4 + 1 if actual_nframes > 1 else 1
-
-            if align:
-                # sequential sampling align with diffsynth
-                uniform_sampled_frames = np.arange(valid_nframes, dtype=int)
-            else:
-                # uniform sampling
-                uniform_sampled_frames = np.linspace(0, total_frames - 1, valid_nframes, dtype=int)
+            uniform_sampled_frames = np.linspace(0, total_frames - 1, valid_nframes, dtype=int)
         else:
             raise ValueError(f"Invalid video sampling strategy: {self.config.video_sampling_strategy}")
 

@@ -9,6 +9,7 @@ from primus.backends.diffusion.models.flux.model import (
     Flux,
     FluxParams,
     flux_1_dev_params,
+    flux_1_schnell_params,
 )
 from primus.backends.diffusion.models.flux.train_pipeline import (
     FluxFlowMatchTrainPipeline,
@@ -20,4 +21,5 @@ __all__ = [
     "FluxFlowMatchTrainPipeline",
     "FluxParams",
     "flux_1_dev_params",
+    "flux_1_schnell_params",
 ]

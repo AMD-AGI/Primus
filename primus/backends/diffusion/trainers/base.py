@@ -46,6 +46,14 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     if total_steps <= 0:
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
 
+    warmup_steps = int(warmup_steps)
+    if warmup_steps > total_steps:
+        logger.warning(
+            f"Warmup steps ({warmup_steps}) exceed total steps ({total_steps}). "
+            f"Adjusting warmup steps to {total_steps}."
+        )
+        warmup_steps = total_steps
+
     def linear_warmup(step):
         if warmup_steps == 0:
             return 1.0
@@ -139,8 +147,6 @@ class BaseWanTrainer:
         seed = self.args.get("seed")
         if seed is not None:
             set_seed(int(seed))
-        if os.environ.get("FIXED_SEED"):
-            set_seed(int(os.environ["FIXED_SEED"]))
 
         # --- Gradient Checkpointing ---
         if self.args.get("gradient_checkpointing", False):
@@ -240,10 +246,25 @@ class BaseWanTrainer:
 
     def _clip_grad_norm(self) -> float:
         """Clip gradient norm. Returns the total norm value."""
-        if self.max_grad_norm > 0:
-            norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-            return norm.item() if isinstance(norm, torch.Tensor) else float(norm)
-        return 0.0
+        if self.max_grad_norm <= 0:
+            return 0.0
+
+        parameters = [p for p in self.model.parameters() if p.grad is not None]
+        if not parameters:
+            return 0.0
+
+        grads = [p.grad for p in parameters]
+        norm = torch.nn.utils.get_total_norm(grads, norm_type=2.0, foreach=True)
+        try:
+            from torch.distributed.tensor import DTensor
+
+            if isinstance(norm, DTensor):
+                norm = norm.full_tensor()
+        except (ImportError, RuntimeError):
+            pass
+
+        torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
+        return norm.item() if isinstance(norm, torch.Tensor) else float(norm)
 
     def _save_checkpoint(self):
         """Save checkpoint at save_steps intervals. Override for custom strategies."""
@@ -473,11 +494,6 @@ class BaseWanTrainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
-        debug_steps = os.getenv("DIFFUSION_DEBUG_STEPS", "0") == "1"
-
-        def debug_phase(message: str) -> None:
-            if debug_steps:
-                logger.info(f"debug_step rank={self.rank} step={self.global_step} {message}")
 
         start_time = time.time()
         last_log_time = start_time
@@ -493,27 +509,21 @@ class BaseWanTrainer:
             for batch_idx, batch in enumerate(self.dataloader):
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
-                debug_phase(f"batch_idx={batch_idx} before_compute_loss update={is_update_step}")
 
                 with self._grad_sync_context(is_update_step):
                     raw_loss = self.compute_loss(batch)
-                    debug_phase("after_compute_loss")
                     update_loss_sum += raw_loss.detach().float().item()
                     update_loss_count += 1
                     loss = raw_loss / max(1, self.grad_accum_steps)
                     loss.backward()
-                    debug_phase("after_backward")
 
                 if is_update_step:
                     loss_val = update_loss_sum / max(1, update_loss_count)
                     update_loss_sum = 0.0
                     update_loss_count = 0
-                    debug_phase("before_clip_grad_norm")
                     grad_norm = self._clip_grad_norm()
 
-                    debug_phase("before_optimizer_step")
                     self.optimizer.step()
-                    debug_phase("after_optimizer_step")
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1

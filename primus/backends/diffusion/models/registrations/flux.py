@@ -20,13 +20,26 @@ from primus.backends.diffusion.models.flux.autoencoder import (
 )
 from primus.backends.diffusion.models.flux.conditioner import HFEmbedder
 from primus.backends.diffusion.models.flux.configuration_flux import FluxTrainingConfig
-from primus.backends.diffusion.models.flux.model import Flux, flux_1_dev_params
+from primus.backends.diffusion.models.flux.model import (
+    Flux,
+    flux_1_dev_params,
+    flux_1_schnell_params,
+)
 from primus.backends.diffusion.models.flux.train_pipeline import (
     FluxFlowMatchTrainPipeline,
     FluxFlowMatchTrainPipelineConfig,
 )
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import count_parameters
+
+_FLUX_VARIANT_ALIASES = {
+    "flux-schnell": "flux-schnell",
+    "flux.1-schnell": "flux-schnell",
+    "flux1-schnell": "flux-schnell",
+    "flux-dev": "flux-dev",
+    "flux.1-dev": "flux-dev",
+    "flux1-dev": "flux-dev",
+}
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -56,15 +69,20 @@ def _load_state_dict(path: str) -> dict[str, torch.Tensor]:
     return obj
 
 
-def _candidate_weight_files(path: str) -> list[str]:
+def _candidate_weight_files(path: str, *, default_filename: str) -> list[str]:
     if os.path.isfile(path):
         return [path]
     if not os.path.exists(path):
-        resolved = _resolve_hf_checkpoint(path, default_filename="flux1-dev.safetensors")
+        resolved = _resolve_hf_checkpoint(path, default_filename=default_filename)
         if resolved:
             return [resolved]
     candidates: list[str] = []
-    for fname in ("flux1-dev.safetensors", "dit_model.safetensors", "model.safetensors"):
+    for fname in (
+        "flux1-schnell.safetensors",
+        "flux1-dev.safetensors",
+        "dit_model.safetensors",
+        "model.safetensors",
+    ):
         candidate = os.path.join(path, fname)
         if os.path.exists(candidate):
             candidates.append(candidate)
@@ -94,8 +112,8 @@ def _resolve_hf_checkpoint(path_or_repo_file: str, *, default_filename: str) -> 
     return hf_hub_download(repo_id=repo_id, filename=filename)
 
 
-def _load_flux_weights(dit: torch.nn.Module, pretrained_path: str) -> None:
-    candidates = _candidate_weight_files(pretrained_path)
+def _load_flux_weights(dit: torch.nn.Module, pretrained_path: str, *, default_filename: str) -> None:
+    candidates = _candidate_weight_files(pretrained_path, default_filename=default_filename)
     if not candidates:
         raise FileNotFoundError(f"No FLUX DiT weights found under {pretrained_path}")
 
@@ -131,24 +149,31 @@ def build_flux_model(model_config: dict[str, Any]):
       model_config:
         load_from_pretrained_path: /path/to/flux1-dev.safetensors
         config:
-          model_variant: flux-dev
+          model_variant: flux-dev | flux-schnell
           trainable_modules: dit
           guidance: 1.0
           params: {... optional FluxParams overrides ...}
     """
     cfg_dict: dict[str, Any] = dict(model_config.get("config", {}) or {})
-    variant = cfg_dict.get("model_variant", "flux-dev")
-    if variant != "flux-dev":
-        raise ValueError(f"Only FLUX.1-dev is currently supported, got model_variant={variant!r}")
+    variant_name = str(cfg_dict.get("model_variant", "flux-schnell"))
+    variant = _FLUX_VARIANT_ALIASES.get(variant_name.lower(), variant_name)
 
     params_overrides = dict(cfg_dict.get("params", {}) or {})
-    params = flux_1_dev_params(**params_overrides)
+    if variant == "flux-dev":
+        params = flux_1_dev_params(**params_overrides)
+    elif variant == "flux-schnell":
+        params = flux_1_schnell_params(**params_overrides)
+    else:
+        raise ValueError(
+            "Unsupported FLUX model_variant=" f"{variant_name!r}; expected one of: 'flux-dev', 'flux-schnell'"
+        )
     dit = _build_flux_dit(params)
 
     pretrained_path = model_config.get("load_from_pretrained_path") or model_config.get("pretrained_path")
     if pretrained_path:
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
-        _load_flux_weights(dit, pretrained_path)
+        default_filename = "flux1-dev.safetensors" if variant == "flux-dev" else "flux1-schnell.safetensors"
+        _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})
     dtype = torch.bfloat16
@@ -183,7 +208,7 @@ def build_flux_model(model_config: dict[str, Any]):
     training_cfg = FluxTrainingConfig(
         model_variant=variant,
         trainable_modules=cfg_dict.get("trainable_modules", "dit"),
-        guidance=float(cfg_dict.get("guidance", 1.0)),
+        guidance=None if not params.guidance_embed else float(cfg_dict.get("guidance", 1.0)),
         autoencoder_scale_factor=float(cfg_dict.get("autoencoder_scale_factor", 0.3611)),
         autoencoder_shift_factor=float(cfg_dict.get("autoencoder_shift_factor", 0.1159)),
     )

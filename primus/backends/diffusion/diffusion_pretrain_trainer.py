@@ -9,16 +9,17 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
+from primus.core.base_module import BaseModule
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 
-class DiffusionPretrainTrainer(BaseTrainer):
+class DiffusionPretrainTrainer(BaseTrainer, BaseModule):
     """Primus lifecycle wrapper for diffusion backend training."""
 
-    def __init__(self, backend_args: Any):
-        super().__init__(backend_args=backend_args)
+    def __init__(self, backend_args: Any, *args, **kwargs):
+        super().__init__(backend_args=backend_args, *args, **kwargs)
         self.diffusion_trainer = None
 
     @staticmethod
@@ -114,6 +115,10 @@ class DiffusionPretrainTrainer(BaseTrainer):
 
         self.diffusion_trainer.train()
         self.diffusion_trainer.save_model()
+
+    def run(self, *args, **kwargs):
+        """Compatibility hook for BaseModule; TrainRuntime drives lifecycle phases."""
+        self.train()
 
     def cleanup(self, on_error: bool = False):
         try:

@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:local}
 user_name: ${PRIMUS_USER:local}
-exp_name: ${PRIMUS_EXP_NAME:flux.1_dev_t2i-raw-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:flux.1_schnell_t2i-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 platform:
@@ -11,19 +11,11 @@ modules:
     framework: diffusion
     config: pre_trainer.yaml
 
-    model: flux.1_dev_t2i.yaml
+    model: flux.1_schnell_t2i.yaml
     overrides:
       sink_level: null
-      file_sink_level: DEBUG
+      file_sink_level: INFO
       stderr_sink_level: INFO
-
-      model:
-        config:
-          encoder:
-            t5_encoder: ${T5_ENCODER:google/t5-v1_1-xxl}
-            clip_encoder: ${CLIP_ENCODER:openai/clip-vit-large-patch14}
-            autoencoder: ${VAE_CHECKPOINT:black-forest-labs/FLUX.1-dev/ae.safetensors}
-            max_t5_length: ${MAX_T5_LENGTH:256}
 
       metrics:
         log_freq: 1
@@ -34,19 +26,16 @@ modules:
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
         gradient_accumulation_steps: 1
-        output_dir: ${OUTPUT_DIR:./output/flux.1_dev_t2i-raw-pretrain}
+        output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
         save_steps: 0
         save_strategy: ${SAVE_STRATEGY:dit_only}
-        run_name: flux.1_dev_t2i-raw-pretrain
+        run_name: flux.1_schnell_t2i-pretrain
 
       data:
-        dataset_type: raw
-        dataset: ${DATASET:cc12m-test}
-        dataset_format: ${DATASET_FORMAT:webdataset}
         dataset_path: ${DATASET_PATH:}
+        empty_encodings_path: ${EMPTY_ENCODINGS_PATH:}
         prompt_dropout_prob: ${PROMPT_DROPOUT_PROB:0.1}
         img_size: ${IMG_SIZE:256}
-        skip_low_resolution: false
 
       parallelism:
         sp_size: 1
@@ -54,10 +43,16 @@ modules:
 
       optimizer:
         lr: ${LR:2.0e-4}
-        weight_decay: 0.01
+        weight_decay: ${WEIGHT_DECAY:0.1}
+        adam_beta2: ${ADAM_BETA2:0.95}
+
+      lr_scheduler:
+        lr_scheduler_type: constant_with_warmup
+        warmup_steps: ${WARMUP_STEPS:1600}
 
       runtime:
         attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:false}
+        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
         report_to: none

@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -75,25 +74,7 @@ class WanVideoImageProcessor(BaseImageProcessor):
         from PIL import Image as PILImage
 
         image = PILImage.fromarray(image.astype(np.uint8))
-        # TODO: Here, we align with DiffSynth's resize logic for debugging(may remove in the future)
-        if os.getenv("ALIGN_WITH_DIFFSYNTH") == "1":
-            # Match DiffSynth logic: scale based on max dimension ratio
-            width, height = image.size
-            target_width = size["width"]
-            target_height = size["height"]
-
-            scale = max(target_width / width, target_height / height)
-            new_width = round(width * scale)
-            new_height = round(height * scale)
-
-            from torchvision.transforms import InterpolationMode
-            from torchvision.transforms import functional as F
-
-            # DiffSynth uses torchvision.transforms.resize with BILINEAR
-            # We must use F.resize to match exactly (antialias behavior etc)
-            image = F.resize(image, (new_height, new_width), interpolation=InterpolationMode.BILINEAR)
-        else:
-            image = image.resize((size["width"], size["height"]), PILImage.LANCZOS)
+        image = image.resize((size["width"], size["height"]), PILImage.LANCZOS)
         return np.array(image)
 
     def _extract_hw(self, image: Union[np.ndarray, Image.Image]) -> Tuple[int, int]:
@@ -339,7 +320,7 @@ class WanVideoProcessor:
         if tokenizer is None:
             # Default to T5 tokenizer for text encoding
             try:
-                print("[Debug-processor], loading default tokenizer: google/umt5-xxl")
+                logger.info("Loading default tokenizer: google/umt5-xxl")
                 tokenizer = AutoTokenizer.from_pretrained("google/umt5-xxl")
             except Exception:
                 logger.warning("Could not load default tokenizer, using None")

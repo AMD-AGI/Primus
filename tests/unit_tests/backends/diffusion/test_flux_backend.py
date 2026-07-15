@@ -37,6 +37,10 @@ def test_flux_argument_builder_selects_flux_defaults():
                 "empty_encodings_path": "/tmp/empty",
                 "prompt_dropout_prob": 0.25,
             },
+            "lr_scheduler": {
+                "lr_scheduler_type": "constant_with_warmup",
+                "warmup_steps": 11,
+            },
         }
     )
 
@@ -47,8 +51,11 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.dataset["config"]["processor_config"]["prompt_dropout_prob"] == 0.25
     assert args.trainer["args"]["max_steps"] == 7
     assert args.trainer["args"]["per_device_train_batch_size"] == 3
+    assert args.trainer["args"]["lr_scheduler_type"] == "constant_with_warmup"
+    assert args.trainer["args"]["warmup_steps"] == 11
     assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"
+    assert args.trainer["args"]["compile_transformer_blocks"] is True
 
 
 def test_flux_argument_builder_maps_raw_dataset_type():
@@ -222,6 +229,40 @@ def test_tiny_flux_model_computes_precomputed_loss():
 
     outputs = model.forward_train(batch)
 
+    assert outputs["loss"].ndim == 0
+    assert torch.isfinite(outputs["loss"])
+
+
+def test_tiny_flux_schnell_model_computes_without_guidance():
+    model = build_flux_model(
+        {
+            "config": {
+                "model_variant": "flux-schnell",
+                "params": {
+                    "in_channels": 4,
+                    "out_channels": 4,
+                    "vec_in_dim": 4,
+                    "context_in_dim": 8,
+                    "hidden_size": 12,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 2],
+                },
+            }
+        }
+    )
+    batch = {
+        "t5_encodings": torch.randn(2, 3, 8),
+        "clip_encodings": torch.randn(2, 4),
+        "mean": torch.randn(2, 1, 2, 2),
+        "logvar": torch.zeros(2, 1, 2, 2),
+    }
+
+    outputs = model.forward_train(batch)
+
+    assert model.dit.params.guidance_embed is False
+    assert model.model_config.guidance is None
     assert outputs["loss"].ndim == 0
     assert torch.isfinite(outputs["loss"])
 

@@ -114,26 +114,29 @@ class DiffusionArgBuilder:
             "gradient_checkpointing": False,
             "attention_backend": "flash_attn_aiter",
             "learning_rate": 2.0e-4,
-            "lr_scheduler_type": "constant",
-            "warmup_steps": 0,
-            "weight_decay": 0.01,
+            "lr_scheduler_type": "constant_with_warmup",
+            "warmup_steps": 1600,
+            "weight_decay": 0.1,
             "num_train_epochs": 1,
             "max_steps": 100,
             "logging_steps": 1,
             "save_steps": 0,
             "dataloader_num_workers": 4,
             "report_to": "none",
-            "run_name": "flux-fsdp2",
+            "run_name": "flux-schnell-fsdp2",
             "bf16": True,
             "seed": 10007,
             "optim": "adamw_torch",
             "adam_beta1": 0.9,
-            "adam_beta2": 0.999,
+            "adam_beta2": 0.95,
             "adam_epsilon": 1.0e-8,
             "max_grad_norm": 1.0,
             "fsdp2_wrap_target": "dit",
             "fsdp_transformer_layer_cls_to_wrap": "DoubleStreamBlock,SingleStreamBlock",
+            "fsdp_module_paths_to_wrap": "img_in,time_in,vector_in,txt_in,final_layer",
+            "fsdp_module_paths_no_reshard": "final_layer",
             "fsdp2_reshard_after_forward": True,
+            "compile_transformer_blocks": True,
             "save_strategy": "dit_only",
             "sp_size": 1,
             "dp_replicate": 1,
@@ -252,6 +255,7 @@ class DiffusionArgBuilder:
         data = params.get("data") or {}
         parallelism = params.get("parallelism") or {}
         optimizer = params.get("optimizer") or {}
+        lr_scheduler = params.get("lr_scheduler") or {}
         runtime = params.get("runtime") or {}
         metrics = params.get("metrics") or {}
 
@@ -267,7 +271,6 @@ class DiffusionArgBuilder:
             ("num_train_epochs",): ("num_train_epochs",),
             ("dataloader_num_workers",): ("dataloader_num_workers",),
             ("resume_from_checkpoint",): ("resume_from_checkpoint",),
-            ("dataloader_num_workers",): ("dataloader_num_workers",),
         }
         for source_path, target_path in training_map.items():
             value = self._get_any(training, *source_path)
@@ -334,6 +337,15 @@ class DiffusionArgBuilder:
             if value is not None:
                 self._set_nested(trainer_args, target_path, value)
 
+        lr_scheduler_map = {
+            ("lr_scheduler_type",): ("lr_scheduler_type",),
+            ("warmup_steps",): ("warmup_steps",),
+        }
+        for source_path, target_path in lr_scheduler_map.items():
+            value = self._get_any(lr_scheduler, *source_path)
+            if value is not None:
+                self._set_nested(trainer_args, target_path, value)
+
         runtime_map = {
             ("attention_backend",): ("attention_backend",),
             ("report_to",): ("report_to",),
@@ -341,6 +353,7 @@ class DiffusionArgBuilder:
             ("bf16",): ("bf16",),
             ("fp16",): ("fp16",),
             ("gradient_checkpointing",): ("gradient_checkpointing",),
+            ("compile_transformer_blocks",): ("compile_transformer_blocks",),
             ("fsdp2_reshard_after_forward",): ("fsdp2_reshard_after_forward",),
         }
         for source_path, target_path in runtime_map.items():
@@ -350,6 +363,7 @@ class DiffusionArgBuilder:
                     ("bf16",),
                     ("fp16",),
                     ("gradient_checkpointing",),
+                    ("compile_transformer_blocks",),
                     ("fsdp2_reshard_after_forward",),
                 }:
                     value = self._coerce_bool(value)

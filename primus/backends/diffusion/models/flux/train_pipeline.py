@@ -23,7 +23,7 @@ from primus.backends.diffusion.models.flux.utils import (
 class FluxFlowMatchTrainPipelineConfig:
     autoencoder_scale_factor: float = 0.3611
     autoencoder_shift_factor: float = 0.1159
-    guidance: float = 1.0
+    guidance: float | None = None
 
 
 class FluxFlowMatchTrainPipeline:
@@ -165,8 +165,12 @@ class FluxFlowMatchTrainPipeline:
         noisy_latents = pack_latents(noisy_latents)
         target = pack_latents(target)
 
-        guidance_value = float(getattr(model_config, "guidance", self.cfg.guidance))
-        guidance = torch.full((bsz,), guidance_value, device=device, dtype=dtype)
+        guidance_value = getattr(model_config, "guidance", self.cfg.guidance)
+        guidance = (
+            None
+            if guidance_value is None
+            else torch.full((bsz,), float(guidance_value), device=device, dtype=dtype)
+        )
         pred = dit(
             img=noisy_latents,
             img_ids=img_ids,

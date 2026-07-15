@@ -63,6 +63,12 @@ def flux_1_dev_params(**overrides) -> FluxParams:
     return FluxParams(**values)
 
 
+def flux_1_schnell_params(**overrides) -> FluxParams:
+    values = flux_1_dev_params(guidance_embed=False).to_dict()
+    values.update(overrides)
+    return FluxParams(**values)
+
+
 class Flux(nn.Module):
     """Transformer model for flow matching on packed latent sequences."""
 

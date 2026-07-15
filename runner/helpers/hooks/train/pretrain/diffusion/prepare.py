@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -195,10 +194,6 @@ def main() -> None:
     parser.add_argument("--backend_path", type=str, default=None, help="Unused; diffusion is in-tree")
     parser.add_argument("--module_name", type=str, default=None, help="Override module name to validate")
     args, _unknown = parser.parse_known_args()
-
-    if os.environ.get("SKIP_PREPARE") == "1":
-        _log("SKIP_PREPARE=1; skipping validation")
-        return
 
     if args.backend_path:
         _fail("diffusion is an in-tree backend and does not support --backend_path")
