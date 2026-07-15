@@ -26,7 +26,7 @@ from primus.backends.megatron.training.diffusion.schedulers import (
 from primus.backends.megatron.training.diffusion.timestep_sampling import (
     create_timestep_sampler,
 )
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _restore_chimera_rng_state(args) -> None:

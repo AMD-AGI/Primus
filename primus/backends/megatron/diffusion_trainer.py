@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class DiffusionPretrainTrainer(MegatronPretrainTrainer):
