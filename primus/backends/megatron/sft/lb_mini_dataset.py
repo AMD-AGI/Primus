@@ -16,7 +16,7 @@ minibatch, uses Karmarkar-Karp (see ``lb_mini_packing.plan_minibatch``) to:
 
 The "different micro-batch count per rank" is exactly what a collective-comm
 backend (NCCL all-gather/reduce-scatter) cannot tolerate, which is why this path
-is gated behind ``ODC_ENABLE=1`` -- ODC's point-to-point comm lets ranks run
+is gated behind ``enable_odc=true`` -- ODC's point-to-point comm lets ranks run
 out of lockstep without deadlocking.
 
 Two pieces live here:

@@ -63,6 +63,9 @@ use_distributed_optimizer: true
 # Note: These are typically overridden in the experiment config
 sft_dataset_name: "tatsu-lab/alpaca"
 sft_conversation_format: "alpaca"
+# HuggingFace dataset split to load. Some datasets have no "train" split (e.g.
+# SWE-bench/SWE-smith-trajectories use tool/xml/ticks); override here.
+sft_dataset_split: "train"
 
 # Sequence packing: concatenate multiple short samples into a single
 # max_seq_length sequence. Big throughput win on short-sample datasets such
@@ -85,13 +88,13 @@ enable_packed_sequences: false
 use_packed_attention: false
 
 # === LB-Mini (ODC sequence-length load balancing) ===
-# When true (and env ODC_ENABLE=1 + use_torch_fsdp2=true), the TRAIN data is
+# When true (and enable_odc=true + use_torch_fsdp2=true), the TRAIN data is
 # served variable-length and Karmarkar-Karp balanced across DP ranks, and each
 # rank runs its OWN (possibly different) number of micro-batches -- removing the
 # workload-imbalance bubble on variable-length datasets (e.g. LongAlign).
 # Requires ODC point-to-point comm; it would deadlock under NCCL collectives.
 # DEFAULT false => stock Megatron fixed-num_microbatches, all-ranks-in-lockstep
-# schedule, byte-for-byte unchanged. (Env ODC_LB_MINI=1 also flips the switch.)
+# schedule, byte-for-byte unchanged.
 enable_odc_lb_mini: false
 # Per-micro-batch token cap for LB-Mini (0 => use seq_length).
 lb_mini_max_token_len: 0

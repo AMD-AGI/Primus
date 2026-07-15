@@ -9,11 +9,11 @@
 #   * enable_odc_lb_mini=false (DEFAULT) -> this patch is a complete no-op;
 #     Megatron runs its stock fixed-num_microbatches, all-ranks-in-lockstep
 #     schedule. Byte-for-byte unchanged.
-#   * enable_odc_lb_mini=true (and ODC_ENABLE=1) -> data is served variable
+#   * enable_odc_lb_mini=true (and enable_odc=true) -> data is served variable
 #     length and Karmarkar-Karp balanced across DP ranks; each rank runs its OWN
 #     (possibly different) number of micro-batches. Only ODC's point-to-point
 #     comm can drive ranks out of lockstep without a collective deadlock, hence
-#     the ODC_ENABLE=1 requirement.
+#     the enable_odc=true requirement.
 #
 # All wiring is monkey-patch in the Primus layer; the third-party Megatron-LM
 # source is NOT modified.
@@ -22,8 +22,6 @@
 # to end without deadlocking. Numerical normalization (loss_scale / consumed
 # samples by real tokens) is Stage-2.
 ###############################################################################
-
-import os
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
@@ -36,26 +34,17 @@ _FB_PATCHED = False
 
 
 def _lb_mini_enabled(args) -> bool:
-    """LB-Mini requires BOTH the explicit switch AND ODC comm to be on.
+    """LB-Mini requires BOTH the explicit ``enable_odc_lb_mini`` switch AND ODC
+    comm (``enable_odc``) to be on.
 
-    The switch can come from the YAML arg ``enable_odc_lb_mini`` or, as a
-    convenience for experiments, the env var ``ODC_LB_MINI=1``.
+    LB-Mini needs ODC point-to-point comm because Karmarkar-Karp balancing can
+    give ranks different micro-batch counts, and NCCL collectives would deadlock.
     """
-    switch_on = bool(getattr(args, "enable_odc_lb_mini", False)) or (
-        os.environ.get("ODC_LB_MINI", "0") == "1"
+    return (
+        bool(getattr(args, "enable_odc_lb_mini", False))
+        and bool(getattr(args, "use_torch_fsdp2", False))
+        and bool(getattr(args, "enable_odc", False))
     )
-    if not (switch_on and bool(getattr(args, "use_torch_fsdp2", False))):
-        return False
-    # Normal case: LB-Mini needs ODC point-to-point comm (KK can give ranks
-    # different micro-batch counts -> NCCL collectives would deadlock).
-    if os.environ.get("ODC_ENABLE", "0") == "1":
-        return True
-    # A/B exception: LB_MINI_FORCE_DATA=1 lets the variable-length data layer run
-    # under NCCL too -- ONLY safe with round_robin packing (all ranks keep equal
-    # micro-batch counts). Used to benchmark ODC vs NCCL on the SAME uneven data.
-    if os.environ.get("LB_MINI_FORCE_DATA", "0") == "1":
-        return True
-    return False
 
 
 def _build_lb_mini_train_iterator(args):
@@ -74,56 +63,18 @@ def _build_lb_mini_train_iterator(args):
         dataset_name=getattr(args, "sft_dataset_name", "tatsu-lab/alpaca"),
         tokenizer=tokenizer,
         max_seq_length=args.seq_length,
-        # env-gated: datasets like SWE-bench/SWE-smith-trajectories have no "train" split
-        # (splits: tool/xml/ticks). SFT_DATASET_SPLIT overrides; default "train" preserved.
-        split=os.environ.get("SFT_DATASET_SPLIT", "train"),
+        # Some datasets (e.g. SWE-bench/SWE-smith-trajectories) have no "train"
+        # split; sft_dataset_split lets the config pick it (default "train").
+        split=str(getattr(args, "sft_dataset_split", "train")),
         formatter=getattr(args, "sft_conversation_format", "alpaca"),
         seed=args.seed,
         bridge_compat_inline_bos=bool(getattr(args, "sft_bridge_compat_inline_bos", False)),
     )
-    # Optional length filter: drop samples longer than LB_MINI_FILTER_MAXLEN.
-    # Lets us REUSE a long-seq cache (e.g. seq65536, key 334087) while keeping
-    # every micro-batch small enough that STANDARD (non-fused) CE logits do not
-    # OOM. Used to validate ODC integration WITHOUT fused CE: filter to <=16384
-    # keeps per-micro-batch logits ~= 16384 * vocab * 4B ~= 10GB (safe).
-    filter_maxlen = int(os.environ.get("LB_MINI_FILTER_MAXLEN", "0") or 0)
-    if filter_maxlen > 0:
-        _before = len(samples)
-        samples = [s for s in samples if int(s["length"]) <= filter_maxlen]
-        log_rank_0(
-            f"[LB-Mini] LB_MINI_FILTER_MAXLEN={filter_maxlen}: kept "
-            f"{len(samples)}/{_before} samples (dropped len > {filter_maxlen})"
-        )
-    # Optional LOWER bound: drop samples shorter than LB_MINI_FILTER_MINLEN.
-    # Combined with LB_MINI_FILTER_MAXLEN this carves a NARROW length window out
-    # of an existing dataset to construct a controlled SMALL-VARIANCE tier (same
-    # source as the medium/large-variance runs, only the length spread changes),
-    # for the "length variance vs ODC load-balance advantage" study. Default 0 ->
-    # disabled, so every other dataset/experiment keeps its exact prior behavior.
-    filter_minlen = int(os.environ.get("LB_MINI_FILTER_MINLEN", "0") or 0)
-    if filter_minlen > 0:
-        _before = len(samples)
-        samples = [s for s in samples if int(s["length"]) >= filter_minlen]
-        log_rank_0(
-            f"[LB-Mini] LB_MINI_FILTER_MINLEN={filter_minlen}: kept "
-            f"{len(samples)}/{_before} samples (dropped len < {filter_minlen})"
-        )
     # Per-micro-batch token cap. Larger than a single sample lets short samples
     # pack together and long samples stand alone -> creates per-rank micro-batch
     # count differences (where DiffMicro saves comm rounds). Priority:
-    # env LB_MINI_MAX_TOKEN > yaml lb_mini_max_token_len > seq_length.
-    # NOTE: int() each candidate BEFORE `or` -- the env var is a string and the
-    # string "0" is truthy, so `os.environ.get(..., "0") or ...` would wrongly
-    # pick "0". Convert to int first so 0 is correctly falsy.
-    max_token_len = (
-        int(os.environ.get("LB_MINI_MAX_TOKEN", "0") or 0)
-        or int(getattr(args, "lb_mini_max_token_len", 0) or 0)
-        or int(args.seq_length)
-    )
-    # A/B knob for the perf study: LB_MINI_SAME_MICRO=1 -> aligned baseline (all
-    # ranks same micro-batch count, no LB-Mini decoupling). Default 0 -> LB-Mini.
-    same_micro = os.environ.get("LB_MINI_SAME_MICRO", "0") == "1"
-    packing_method = os.environ.get("LB_MINI_PACKING", "kk")
+    # yaml lb_mini_max_token_len > seq_length.
+    max_token_len = int(getattr(args, "lb_mini_max_token_len", 0) or 0) or int(args.seq_length)
     it = LBMiniDataIterator(
         samples=samples,
         global_batch_size=args.global_batch_size,
@@ -134,14 +85,14 @@ def _build_lb_mini_train_iterator(args):
         cost_model=str(getattr(args, "lb_mini_cost_model", "linear")),
         seed=args.seed,
         shuffle=True,
-        same_micro_num=same_micro,
-        packing_method=packing_method,
+        same_micro_num=False,
+        packing_method="kk",
     )
     log_rank_0(
         f"[ODC.lb_mini] built LB-Mini train iterator: {len(samples)} varlen samples, "
         f"global_batch_size={args.global_batch_size}, max_token_len={max_token_len}, "
-        f"dp_size={mpu.get_data_parallel_world_size()}, cost_model={getattr(args, 'lb_mini_cost_model', 'linear')}, "
-        f"same_micro_num={same_micro} ({'ALIGNED baseline' if same_micro else 'LB-Mini decoupled'})"
+        f"dp_size={mpu.get_data_parallel_world_size()}, "
+        f"cost_model={getattr(args, 'lb_mini_cost_model', 'linear')} (LB-Mini decoupled)"
     )
     return it
 
@@ -242,7 +193,7 @@ def _install_schedule_patch():
 )
 def patch_odc_lb_mini(ctx: PatchContext):
     log_rank_0(
-        "[ODC.lb_mini] enable_odc_lb_mini=true + ODC_ENABLE=1 -> installing LB-Mini "
+        "[ODC.lb_mini] enable_odc_lb_mini=true + enable_odc=true -> installing LB-Mini "
         "(variable-length KK-balanced data, rank-local micro-batch counts)."
     )
     # Loss normalization under torch FSDP2: we KEEP calculate_per_token_loss at
