@@ -13,7 +13,7 @@
 ## ✨ Key Features
 
 - **🔄 Multi-Backend Support**: Seamlessly switch between Megatron-LM, TorchTitan, and other training frameworks
-- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters ([Docs](./docs/README.md))
+- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters ([Docs](./docs/02-user-guide/cli-reference.md))
 - **⚡ ROCm Optimized**: Deep integration with AMD ROCm stack and optimized kernels from Primus-Turbo
 - **📦 Production Ready**: Battle-tested on large-scale training with hundreds of GPUs
 - **🔌 Extensible Architecture**: Plugin-based design for easy integration of custom models and workflows
@@ -27,7 +27,7 @@
 - **TorchTitan**: LLaMA3 / LLaMA4, DeepSeek-V3, and related decoder-only architectures
 - **MaxText (JAX)**: LLaMA3.x and other MaxText-supported transformer models (subset; see MaxText docs for details)
 
-For the full and up-to-date model matrix, see [Supported Models](./docs/backends/overview.md#supported-models).
+For the full and up-to-date model matrix, see [Supported Models](./docs/06-developer-guide/model-support-matrix.md).
 
 ---
 
@@ -93,7 +93,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # For Megatron-LM and TorchTitan backends
     docker pull rocm/primus:v26.3
     # For MaxText backend
-    docker pull rocm/jax-training:v26.3
+    docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
     ```
 
 2. **Clone the repository**
@@ -118,7 +118,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
 
-For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).
+For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-guide/cli-reference.md).
 
 #### Option 2: wheel installation of Primus and run training in container
 
@@ -137,7 +137,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
 
     >**Note**: this will only install the Primus CLI in your virtual environment under the `site-packages` directory, without other dependencies. The third party submodules will be downloaded on the first run. The complete dependencies and training software stack is provided in the AMD published training Docker images. You can use `primus-cli` to launch the training in container from any directory.
 
-    >**Note**: If you don't want to use docker container to run training, and want to install the complete dependencies and training software stack on your host machine, please refer to the instruction: [Install training environment on your host machine](docs/install-on-host.md). The automated installation script is under development and will be released soon.
+    >**Note**: If you don't want to use docker container to run training, and want to install the complete dependencies and training software stack on your host machine, please refer to the instruction: [Install training environment on your host machine](docs/01-getting-started/installation.md#bare-metal-host-setup). The automated installation script is under development and will be released soon.
 
 2. **Run training in container using pip-installed Primus**
 
@@ -162,10 +162,10 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
 
 Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 
-- **[Quick Start Guide](./docs/quickstart.md)** - Get started in 5 minutes
-- **[Primus CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md)** - Complete CLI reference and usage
-- **[CLI Architecture](./docs/cli/CLI-ARCHITECTURE.md)** - Technical design and architecture
-- **[Backend Patch Notes](./docs/backends/overview.md)** - Primus-specific backend arguments
+- **[Quick Start Guide](./docs/01-getting-started/quickstart.md)** - Get started in 5 minutes
+- **[Primus CLI User Guide](./docs/02-user-guide/cli-reference.md)** - Complete CLI reference and usage
+- **[CLI Architecture](./docs/06-developer-guide/cli-architecture.md)** - Technical design and architecture
+- **[Backend Patch Notes](./docs/06-developer-guide/backend-patch-notes.md)** - Primus-specific backend arguments
 - **[Full Documentation Index](./docs/README.md)** - Browse all available documentation
 
 ---
