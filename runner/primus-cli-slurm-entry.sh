@@ -118,8 +118,19 @@ if [[ -z "${SLURM_NODELIST:-}" ]]; then
     exit 2
 fi
 
-# Get all node hostnames (sorted, as needed)
-readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+# Get all node hostnames (sorted, as needed). Prefer scontrol, which correctly
+# expands compressed nodelists (e.g. "node[01-04]"). When scontrol is
+# unavailable -- CI containers / dev VMs without the Slurm client tools -- fall
+# back to parsing SLURM_NODELIST directly. This mirrors the scontrol-optional
+# handling in primus-cli-direct.sh so every launcher behaves consistently
+# off-cluster (range expansion is skipped in the fallback, which is fine for the
+# single-host / comma-list forms used in CI and single-node runs).
+if command -v scontrol >/dev/null 2>&1; then
+    readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+else
+    LOG_WARN "[slurm-entry] scontrol not found; parsing SLURM_NODELIST without range expansion"
+    readarray -t NODE_ARRAY < <(tr ',' '\n' <<< "$SLURM_NODELIST")
+fi
 SLURM_MASTER_ADDR="${NODE_ARRAY[0]:-}"
 if [[ -z "$SLURM_MASTER_ADDR" ]]; then
     LOG_ERROR "[slurm-entry] Failed to resolve the first host from SLURM_NODELIST=$SLURM_NODELIST"

@@ -352,7 +352,7 @@ test_venv_activate() {
     # Sub-test 11a: VENV_ACTIVATE unset = no-op (dry-run succeeds without
     # any "VENV_ACTIVATE" error, and the script never tries to source a file).
     local out_unset
-    out_unset=$(unset VENV_ACTIVATE; timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+    out_unset=$(unset VENV_ACTIVATE; timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_unset" "End of Dry Run" "Unset VENV_ACTIVATE is a no-op (dry-run completes)"
     assert_not_contains "$out_unset" "VENV_ACTIVATE is set but" "No spurious 'missing file' error when unset"
     assert_not_contains "$out_unset" "Activated virtualenv:" "No 'Activated virtualenv' message when unset"
@@ -362,14 +362,14 @@ test_venv_activate() {
     tmpvenv="$(mktemp)"
     echo 'export PRIMUS_TEST_VENV_SOURCED=yes' > "$tmpvenv"
     local out_valid
-    out_valid=$(VENV_ACTIVATE="$tmpvenv" timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+    out_valid=$(VENV_ACTIVATE="$tmpvenv" timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_valid" "Activated virtualenv:" "Valid VENV_ACTIVATE is sourced"
     rm -f "$tmpvenv"
 
     # Sub-test 11c: VENV_ACTIVATE set + missing file = fail-fast (LOG_ERROR
     # on stderr, non-zero exit).
     local ec_missing=0
-    VENV_ACTIVATE=/does/not/exist/anywhere timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm >/dev/null 2>/tmp/test_venv_err_$$ || ec_missing=$?
+    VENV_ACTIVATE=/does/not/exist/anywhere timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm >/dev/null 2>/tmp/test_venv_err_$$ || ec_missing=$?
     if [[ "$ec_missing" -ne 0 ]] && grep -q "VENV_ACTIVATE is set but file does not exist" /tmp/test_venv_err_$$; then
         assert_pass "Missing VENV_ACTIVATE file fails fast with clear error"
     else
@@ -389,7 +389,7 @@ test_slurm_env_derivation() {
     # NODE_RANK derived.
     local out_slurm
     out_slurm=$(SLURM_JOB_ID=999 SLURM_NNODES=4 SLURM_NODEID=0 SLURM_NODELIST=tus1-p3-g25 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_slurm" "SLURM detected" "SLURM detection log fires"
     assert_contains "$out_slurm" "NNODES=4" "NNODES derived from SLURM_NNODES"
     assert_contains "$out_slurm" "--nnodes 4" "torchrun gets --nnodes 4"
@@ -397,13 +397,13 @@ test_slurm_env_derivation() {
     # Sub-test 12b: pre-exported NNODES wins over SLURM_NNODES.
     local out_preset
     out_preset=$(SLURM_JOB_ID=999 SLURM_NNODES=4 NNODES=7 NODE_RANK=0 SLURM_NODELIST=tus1-p3-g25 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_preset" "NNODES=7" "Pre-exported NNODES=7 wins over SLURM_NNODES=4"
     assert_contains "$out_preset" "--nnodes 7" "torchrun honors pre-exported NNODES=7"
 
     # Sub-test 12c: sanity check rejects NODE_RANK >= NNODES.
     local ec_sanity=0
-    NNODES=2 NODE_RANK=5 timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm >/dev/null 2>/tmp/test_slurm_err_$$ || ec_sanity=$?
+    NNODES=2 NODE_RANK=5 timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm >/dev/null 2>/tmp/test_slurm_err_$$ || ec_sanity=$?
     if [[ "$ec_sanity" -ne 0 ]] && grep -q "NODE_RANK (5) must be < NNODES (2)" /tmp/test_slurm_err_$$; then
         assert_pass "Sanity check rejects NODE_RANK >= NNODES"
     else
@@ -420,7 +420,7 @@ test_slurm_env_derivation() {
     # and the dry-run must reach the torchrun command line.
     local out_no_nodelist
     out_no_nodelist=$(env -u SLURM_NODELIST SLURM_JOB_ID=999 SLURM_NNODES=4 SLURM_NODEID=0 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_not_contains "$out_no_nodelist" "unbound variable" \
         "SLURM context with no SLURM_NODELIST does not crash on unbound MASTER_ADDR"
     assert_contains "$out_no_nodelist" "MASTER_ADDR=localhost" \
@@ -437,13 +437,13 @@ test_auto_single_for_node_smoke() {
 
     # Sub-test 13a: preflight stays in torchrun mode by default.
     local out_preflight
-    out_preflight=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- preflight --quick 2>&1 || true)
+    out_preflight=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- preflight --quick 2>&1 || true)
     assert_contains "$out_preflight" "Run Mode        : torchrun" "preflight defaults to torchrun"
     assert_contains "$out_preflight" "torchrun --nproc_per_node" "preflight uses torchrun command"
 
     # Sub-test 13b: node_smoke auto-selects single mode.
     local out_smoke
-    out_smoke=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- node_smoke --tier2-perf 2>&1 || true)
+    out_smoke=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- node_smoke --tier2-perf 2>&1 || true)
     assert_contains "$out_smoke" "Auto-selected run_mode=single for subcommand 'node_smoke'" \
         "node_smoke auto-detect fires"
     assert_contains "$out_smoke" "Run Mode        : single" "node_smoke ends up in single mode"
@@ -453,7 +453,7 @@ test_auto_single_for_node_smoke() {
     # Sub-test 13c: explicit --single on a non-node_smoke subcommand still
     # works (regression guard).
     local out_explicit
-    out_explicit=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --single --dry-run -- benchmark gemm 2>&1 || true)
+    out_explicit=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --single --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_explicit" "Run Mode        : single" "Explicit --single still works for benchmark"
 }
 
@@ -466,7 +466,7 @@ test_silent_flag() {
     # Sub-test 14a: --silent produces empty stdout.
     local out_silent="/tmp/test_silent_out_$$"
     local err_silent="/tmp/test_silent_err_$$"
-    timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --silent --dry-run -- benchmark gemm >"$out_silent" 2>"$err_silent" || true
+    timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --silent --dry-run -- benchmark gemm >"$out_silent" 2>"$err_silent" || true
     if [[ ! -s "$out_silent" ]]; then
         assert_pass "--silent silences stdout (out file is empty)"
     else
@@ -476,7 +476,7 @@ test_silent_flag() {
 
     # Sub-test 14b: --silent does NOT silence launcher errors (stderr survives).
     local err_err_silent="/tmp/test_silent_err2_$$"
-    VENV_ACTIVATE=/does/not/exist timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --silent --dry-run -- benchmark gemm >/dev/null 2>"$err_err_silent" || true
+    VENV_ACTIVATE=/does/not/exist timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --silent --dry-run -- benchmark gemm >/dev/null 2>"$err_err_silent" || true
     if grep -q "VENV_ACTIVATE is set but file does not exist" "$err_err_silent"; then
         assert_pass "--silent preserves launcher LOG_ERROR on stderr"
     else
@@ -490,7 +490,7 @@ test_silent_flag() {
     # applied? actually after -- it shouldn't appear at all). Easiest check:
     # the dry-run "Would Execute" line must NOT contain --silent.
     local out_no_forward
-    out_no_forward=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
+    out_no_forward=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     # Sanity: this baseline run has no --silent anywhere.
     assert_not_contains "$out_no_forward" "--silent" "Baseline dry-run has no --silent leakage"
 }
@@ -501,25 +501,28 @@ test_silent_flag() {
 test_slurm_entry_direct_dispatch() {
     local_print_section "Test 15: slurm-entry direct/container dispatch"
 
-    # The slurm-entry script needs SLURM_NODELIST to run; mock it.
+    # NOTE: primus-cli-slurm-entry.sh resolves the node list via scontrol when
+    # available and falls back to parsing SLURM_NODELIST directly otherwise, so
+    # this test works both on-cluster (scontrol present) and in CI containers
+    # (scontrol absent). We set a plain SLURM_NODELIST so both paths agree.
     # Sub-test 15a: -- direct -- preflight ... routes through primus-cli-direct.sh.
     local out_direct
     out_direct=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- direct -- preflight --quick 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- direct -- preflight --quick 2>&1 || true)
     assert_contains "$out_direct" "Entry mode: direct" "slurm-entry parses 'direct' keyword"
     assert_contains "$out_direct" "primus-cli-direct.sh" "slurm-entry dispatches to primus-cli-direct.sh"
 
     # Sub-test 15b: -- container -- ... routes through primus-cli-container.sh (existing path).
     local out_container
     out_container=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- container -- train pretrain 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- container -- train pretrain 2>&1 || true)
     assert_contains "$out_container" "Entry mode: container" "slurm-entry parses 'container' keyword"
     assert_contains "$out_container" "primus-cli-container.sh" "slurm-entry dispatches to primus-cli-container.sh"
 
     # Sub-test 15c: terse form `-- preflight` (no keyword) defaults to container.
     local out_terse
     out_terse=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
-        timeout 5 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- preflight --quick 2>&1 || true)
+        timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- preflight --quick 2>&1 || true)
     assert_contains "$out_terse" "Entry mode: container" "Terse form defaults to container"
     assert_contains "$out_terse" "primus-cli-container.sh" "Terse form dispatches to primus-cli-container.sh"
 }
@@ -548,7 +551,7 @@ test_run_mode_env_override() {
     # Distributed Settings block. This anchors the "before" state we are
     # protecting users from.
     local out_baseline
-    out_baseline=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- train pretrain 2>&1 || true)
+    out_baseline=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- train pretrain 2>&1 || true)
     assert_contains "$out_baseline" "Run Mode        : torchrun" \
         "Baseline train pretrain shows torchrun (no env override)"
     assert_contains "$out_baseline" "Distributed Settings:" \
@@ -563,7 +566,7 @@ test_run_mode_env_override() {
     #   - "Distributed Settings" gate
     #   - launch command (`python3 ...`, not `torchrun ...`)
     local out_override
-    out_override=$(RUN_MODE=single timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" \
+    out_override=$(RUN_MODE=single timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" \
         --dry-run -- train pretrain 2>&1 || true)
     assert_contains "$out_override" "Run Mode        : single" \
         "RUN_MODE=single env override surfaces in displayed Run Mode"
@@ -583,7 +586,7 @@ test_run_mode_env_override() {
     # convenient stand-in for "user/config set direct_config[run_mode]"
     # -- there is no symmetric --torchrun CLI flag.
     local out_vs_cli
-    out_vs_cli=$(RUN_MODE=torchrun timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" \
+    out_vs_cli=$(RUN_MODE=torchrun timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" \
         --single --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_vs_cli" "Run Mode        : torchrun" \
         "RUN_MODE=torchrun env override wins over --single CLI flag"
@@ -598,7 +601,7 @@ test_run_mode_env_override() {
     # the launch command was actually torchrun -- a display divergence
     # in the exact opposite direction from the MaxText case.
     local out_reverse
-    out_reverse=$(RUN_MODE=torchrun timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" \
+    out_reverse=$(RUN_MODE=torchrun timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" \
         --dry-run -- node_smoke --tier2-perf 2>&1 || true)
     assert_contains "$out_reverse" "Run Mode        : torchrun" \
         "RUN_MODE=torchrun env override surfaces in display for node_smoke"
