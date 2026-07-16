@@ -1,0 +1,52 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:flux.1_dev_t2i-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  pre_trainer:
+    framework: diffusion
+    config: pre_trainer.yaml
+
+    model: flux.1_dev_t2i.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: DEBUG
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: 1
+        enable_wandb: false
+
+      training:
+        local_batch_size: ${LOCAL_BATCH_SIZE:1}
+        steps: ${MAX_STEPS:50}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/flux.1_dev_t2i-pretrain}
+        save_steps: 0
+        save_strategy: ${SAVE_STRATEGY:dit_only}
+        run_name: flux.1_dev_t2i-pretrain
+
+      data:
+        dataset_path: ${DATASET_PATH:}
+        empty_encodings_path: ${EMPTY_ENCODINGS_PATH:}
+        prompt_dropout_prob: ${PROMPT_DROPOUT_PROB:0.1}
+        img_size: ${IMG_SIZE:256}
+
+      parallelism:
+        sp_size: 1
+        dp_replicate: ${DP_REPLICATE:1}
+
+      optimizer:
+        lr: ${LR:2.0e-4}
+        weight_decay: 0.01
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
+        gradient_checkpointing: ${GRADIENT_CHECKPOINTING:false}
+        fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
+        report_to: none

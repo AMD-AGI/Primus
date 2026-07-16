@@ -59,6 +59,11 @@ class FlowMatchScheduler:
                 if dynamic_shift_len is not None
                 else self.exponential_shift_mu
             )
+            if mu is None:
+                raise ValueError(
+                    "`exponential_shift=True` requires either `dynamic_shift_len` "
+                    "or `exponential_shift_mu`."
+                )
             self.sigmas = math.exp(mu) / (math.exp(mu) + (1 / self.sigmas - 1))
         else:
             self.sigmas = self.shift * self.sigmas / (1 + (self.shift - 1) * self.sigmas)

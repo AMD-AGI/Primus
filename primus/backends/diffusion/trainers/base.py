@@ -385,6 +385,9 @@ class BaseWanTrainer:
         return None
 
     def _infer_local_batch_size(self, batch) -> int:
+        if isinstance(batch, (list, tuple)):
+            return len(batch)
+
         tensor_batch_size = self._infer_batch_size_from_tensors(batch)
         if tensor_batch_size is not None:
             return tensor_batch_size
@@ -470,6 +473,11 @@ class BaseWanTrainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
+        debug_steps = os.getenv("DIFFUSION_DEBUG_STEPS", "0") == "1"
+
+        def debug_phase(message: str) -> None:
+            if debug_steps:
+                logger.info(f"debug_step rank={self.rank} step={self.global_step} {message}")
 
         start_time = time.time()
         last_log_time = start_time
@@ -485,21 +493,27 @@ class BaseWanTrainer:
             for batch_idx, batch in enumerate(self.dataloader):
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
+                debug_phase(f"batch_idx={batch_idx} before_compute_loss update={is_update_step}")
 
                 with self._grad_sync_context(is_update_step):
                     raw_loss = self.compute_loss(batch)
+                    debug_phase("after_compute_loss")
                     update_loss_sum += raw_loss.detach().float().item()
                     update_loss_count += 1
                     loss = raw_loss / max(1, self.grad_accum_steps)
                     loss.backward()
+                    debug_phase("after_backward")
 
                 if is_update_step:
                     loss_val = update_loss_sum / max(1, update_loss_count)
                     update_loss_sum = 0.0
                     update_loss_count = 0
+                    debug_phase("before_clip_grad_norm")
                     grad_norm = self._clip_grad_norm()
 
+                    debug_phase("before_optimizer_step")
                     self.optimizer.step()
+                    debug_phase("after_optimizer_step")
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1

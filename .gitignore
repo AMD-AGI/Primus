@@ -13,5 +13,9 @@ local/
 output
 experiment
 /data/*
+!primus/backends/diffusion/data/
+!primus/backends/diffusion/data/**
+primus/backends/diffusion/data/**/__pycache__/
+primus/backends/diffusion/data/**/*.pyc
 pp_simulation_result
 .cursor/
