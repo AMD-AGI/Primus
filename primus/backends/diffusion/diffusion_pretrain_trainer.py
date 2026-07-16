@@ -48,9 +48,18 @@ class DiffusionPretrainTrainer(BaseTrainer, BaseModule):
             )
             if importlib.util.find_spec(package) is None
         ]
-        video_backend = (dataset_cfg.get("config", {}) or {}).get("video_backend")
-        if dataset_cfg.get("name") == "flux" and importlib.util.find_spec("datasets") is None:
-            missing.append("datasets")
+        dataset_config = dataset_cfg.get("config", {}) or {}
+        video_backend = dataset_config.get("video_backend")
+        if dataset_cfg.get("name") == "flux":
+            for package in ("datasets", "huggingface_hub", "sentencepiece"):
+                if importlib.util.find_spec(package) is None:
+                    missing.append(package)
+            if (
+                dataset_config.get("dataset_type") == "raw"
+                and dataset_config.get("dataset_format") == "webdataset"
+                and importlib.util.find_spec("webdataset") is None
+            ):
+                missing.append("webdataset")
         if video_backend == "imageio" and importlib.util.find_spec("imageio") is None:
             missing.append("imageio")
         if video_backend == "decord" and importlib.util.find_spec("decord") is None:

@@ -49,7 +49,7 @@ class BaseDataset(Dataset):
 class WanVideoDataset(BaseDataset):
     """Dataset for WanVideo training from JSONL/CSV."""
 
-    def __init__(self, processor, config={}):
+    def __init__(self, processor, config=None):
         """
         Initialize WanVideo dataset.
 
@@ -57,6 +57,11 @@ class WanVideoDataset(BaseDataset):
             processor: WanVideoDataProcessor instance
             video_backend: Backend for video loading ('qwen_vl_utils' or 'decord')
         """
+        if config is None:
+            raise ValueError("WanVideoDataset requires a dataset config with dataset_path")
+        if getattr(config, "dataset_path", None) is None:
+            raise ValueError("WanVideoDataset requires config.dataset_path")
+
         super().__init__(config)
         self.config = config
         self.data_path = Path(self.config.dataset_path)

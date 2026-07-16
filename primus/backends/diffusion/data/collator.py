@@ -35,6 +35,7 @@ class VisionCollator:
                 inputs[key].append(values)
 
         batched_inputs = {}
+        input_ids = None
         if "input_ids" in inputs:
             input_ids = inputs.pop("input_ids")
             input_ids = self.pad_sequence(
@@ -52,11 +53,18 @@ class VisionCollator:
             )
             batched_inputs["labels"] = labels
 
+        attention_mask = None
         if "attention_mask" in inputs:
-            inputs.pop("attention_mask")
+            attention_mask = inputs.pop("attention_mask")
 
-        attention_mask = input_ids.ne(self.processor.tokenizer.pad_token_id).long()
-        batched_inputs["attention_mask"] = attention_mask
+        if input_ids is not None:
+            batched_inputs["attention_mask"] = input_ids.ne(self.processor.tokenizer.pad_token_id).long()
+        elif attention_mask is not None:
+            batched_inputs["attention_mask"] = self.pad_sequence(
+                attention_mask,
+                batch_first=True,
+                padding_value=0,
+            )
 
         # for the other keys
         for key, values in inputs.items():
