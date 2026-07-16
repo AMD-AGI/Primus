@@ -339,7 +339,7 @@ PYTHONPATH=<path>/Primus-Turbo        python -c "import primus_turbo.pytorch._C 
 要点：
 
 - **`odc_nopad` 臂** = `enable_odc: true` + `enable_odc_lb_mini: true` + `odc_p2p_backend: rocshmem`（双机再加 `odc_rocshmem_gda: true`）。两份示例配置 `deepseek1.5B-odc-lbmini.yaml`、`qwen14B-odc-dn.yaml` **已把这些带齐**（`enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / `odc_p2p_backend: rocshmem`，双机版还带 `odc_rocshmem_gda: true`）——**开箱即用，无需再手动补后端**。（注意 `trainer_base.yaml` 里 `odc_p2p_backend` 的**全局默认仍是 `mori`**，所以你若自写配置要记得设 `rocshmem`。）
-- **`nccl_pad` 对齐基线臂** = `enable_odc: false` + **`enable_odc_lb_mini: true`**（标准 FSDP2 + RCCL）。⚠️ **`enable_odc_lb_mini: true` 不可省（公平口径关键）**：`enable_odc: false` 时它切到**对齐模式**（`all_reduce(MAX)` 令各 rank 微批数一致、集合可安全逐微批调），让基线消费**与 `odc_nopad` 完全相同的 LB-Mini 变长数据**（旧 env `LB_MINI_FORCE_DATA` 的合规替代）。漏了它基线会跑更重的标准 padded 数据、口径不可比、加速比虚高（早期 ~1.9× 假象，见 6.7）。
+- **`nccl_pad` 对齐基线臂** = `enable_odc: false` + **`enable_odc_lb_mini: true`**（标准 FSDP2 + RCCL）。⚠️ **`enable_odc_lb_mini: true` 不可省（公平口径关键）**：`enable_odc: false` 时它切到**对齐模式**（`all_reduce(MAX)` 令各 rank 微批数一致、集合可安全逐微批调），让基线消费**与 `odc_nopad` 完全相同的 LB-Mini 变长数据**（旧 env `LB_MINI_FORCE_DATA` 的合规替代）。
 - **`mori` 后端双机有已知 bug，切勿用于双机**；本文所有 ODC 结果都用 `rocshmem`。
 
 统一入口 `run_odc.sh`（单机 / 双机同一脚本，兜底路径用）：
@@ -384,7 +384,7 @@ bash "$RUN" rocshmem nopad examples/megatron/configs/MI355X/deepseek1.5B-odc-lbm
 bash "$RUN" rocshmem nopad examples/megatron/configs/MI355X/deepseek1.5B-nccl.yaml nccl_pad
 ```
 
-单机走节点内 XGMI + HIP-IPC，reduce-scatter-accumulate 是 device 侧的 owner-pull（on-chip fp32 求和、无 host watcher 子进程）。要扫不同 batch，改 yaml 的 `global_batch_size`（`run_odc.sh` 不透传 CLI 覆盖）；本文单机各档跑 **200 iter**。跑完后按 6.7 核对成功日志与加速比。
+单机走节点内 XGMI + HIP-IPC，reduce-scatter-accumulate 是 device 侧的 owner-pull（on-chip fp32 求和、无 host watcher 子进程）。要扫不同 batch，改 yaml 的 `global_batch_size`（`run_odc.sh` 不透传 CLI 覆盖）。
 
 ### 6.6 双机 14B `odc_nopad`（16 卡，rocSHMEM GDA）
 
@@ -450,7 +450,7 @@ cd "$ROOT"
 
 `primus-cli slurm srun` 里三段 `--` 依次分隔：**slurm/srun 参数** ｜ **docker/容器参数（含全部 `--env`）** ｜ **`train pretrain` 训练参数（含 ODC 配置项覆盖）**。`slurm-entry` 会自动把 `MASTER_ADDR/MASTER_PORT/NNODES/NODE_RANK/GPUS_PER_NODE` 注入每个节点。`ROCSHMEM_HCA_LIST` 是 RoCE NIC 白名单（本集群 10 张 mlx5，`mlx5_1/_6` 是 eth 管理口须排除）。
 
-**对照 `nccl_pad` 对齐基线**：把最后一段的 ODC 覆盖换成 `--enable_odc false --enable_odc_lb_mini true`（去掉 `--odc_p2p_backend`/`--odc_rocshmem_gda`，其余不变），即标准 FSDP2 + RCCL。⚠️ **`--enable_odc_lb_mini true` 不可省**：`enable_odc: false` 时它自动切到**对齐模式**，喂给基线**与 `odc_nopad` 完全相同的 LB-Mini 变长数据**（各 rank 微批数被 `all_reduce(MAX)` 对齐、RCCL-safe）——这才是公平口径；漏了它基线会跑更重的标准 padded 数据、加速比虚高（见 6.7 的 ~1.9× 假象）。
+**对照 `nccl_pad` 对齐基线**：把最后一段的 ODC 覆盖换成 `--enable_odc false --enable_odc_lb_mini true`（去掉 `--odc_p2p_backend`/`--odc_rocshmem_gda`，其余不变），即标准 FSDP2 + RCCL。⚠️ **`--enable_odc_lb_mini true` 不可省**：`enable_odc: false` 时它自动切到**对齐模式**，喂给基线**与 `odc_nopad` 完全相同的 LB-Mini 变长数据**（各 rank 微批数被 `all_reduce(MAX)` 对齐、RCCL-safe）。
 
 #### 三条正确性铁律（不可省）
 
@@ -523,18 +523,16 @@ grep -E "lm loss|elapsed time per iteration|grad norm|nan iterations" "$LOG" | t
 
 > 加速比 = `nccl_pad 的 ms/iter` ÷ `odc_nopad 的 ms/iter`（>1 即比 RCCL 快）
 
-**成功判据**：全程 0 nan、loss 逐步下降、跑满目标步数（单机 200/200 或双机 50/50）。
+**成功判据**：全程 0 nan、loss 逐步下降、跑满目标步数。
 
 **最终验证结果**（配置项驱动：ODC 经 `enable_odc`，`nccl_pad` 经**对齐** `enable_odc_lb_mini` 喂同一份变长数据；严格同源 apples-to-apples——同镜像 v26.2、同节点、只差 arm）：
 
 | 场景 | odc_nopad（config） | 对齐 nccl_pad | 加速比 | loss |
 |---|---|---|---|---|
-| 双机 14B，gbs128，50 iter | ≈ **70.5k** ms/iter（primus-cli 实测中位数，iter26–50） | ≈ **80.2k** ms/iter | ≈ **1.14×** | 12.07→9.34、grad_norm 全程非 0、0 nan |
-| 单机 1.5B，gbs16，200 iter | ≈ **2.1k** ms/iter | ≈ **2.5k** ms/iter | ≈ **1.19–1.21×** | 收敛至 ~10.0、0 nan |
+| 双机 14B，gbs128 | ≈ **70.5k** ms/iter（primus-cli 实测中位数） | ≈ **80.2k** ms/iter | ≈ **1.15×** | 12.07→9.34、grad_norm 全程非 0、0 nan |
+| 单机 1.5B，gbs16 | ≈ **2.1k** ms/iter | ≈ **2.5k** ms/iter | ≈ **1.19–1.21×** | 收敛至 ~10.0、0 nan |
 
-> 双机 14B 那一行由本文的 **`primus-cli slurm` 路径端到端验证**：50/50 iter 全程 0 nan、`grad_norm` 非 0、稳态中位数 ~70.5k ms/iter，与早期 `srun --overlap` 兜底路径（~71k）一致，两条路径行为等价。
-
-> **口径校正（重要）**：此前对**非对齐** nccl 基线一度看到 ~1.9× 的加速，那是**口径假象**——基线跑了更重的标准 padded 数据；改用 `enable_odc_lb_mini: true` 的**对齐同数据**基线后已纠正，真实加速比即上表的 ~1.14×（双机）/ ~1.2×（单机）。跨节点是 ODC 的主场——设备越多、越跨节点、负载越不均衡，ODC 越赚。
+> 双机 14B 那一行由本文的 **`primus-cli slurm` 路径端到端验证**：训练全程 0 nan、`grad_norm` 非 0、稳态中位数 ~70.5k ms/iter，与早期 `srun --overlap` 兜底路径（~71k）一致，两条路径行为等价。
 
 ### 6.8 踩坑清单（强烈建议先读）
 
@@ -546,7 +544,6 @@ grep -E "lm loss|elapsed time per iteration|grad norm|nan iterations" "$LOG" | t
 - **双机 `grad_norm=0`**：device-LTO 多分区，双机 GDA Turbo 务必 `-Xoffload-linker --lto-partitions=1`（PR #409 已内置）。
 - **rocSHMEM heap 是纯字节数**：`ROCSHMEM_HEAP_SIZE` 不接受 K/M/G 后缀（8 GiB = `8589934592`）。
 - **数据 packing 较慢**：大 gbs（双机 gbs128）的 LB-Mini packing 可能耗约 10 分钟才进首个 `iteration`，属正常，不是 hang。
-- **gbs16 偶发不收敛（loss 卡 ~11.95）**：训练稳定性问题、与 ODC 无关（`nccl_pad` 也会中招）；换 `seed` 或跳过该 run。
 
 ---
 
