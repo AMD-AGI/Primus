@@ -28,6 +28,7 @@ non-MLPerf runs.
 
 import os
 import time
+from typing import Any
 
 from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainTrainer
 from primus.backends.megatron.mlperf.mlperf_logger import MLPerfLogger, ThroughputTimer
@@ -54,8 +55,11 @@ def _get_arg(args, kwargs, index, name):
 class MLPerfMegatronPretrainTrainer(MegatronPretrainTrainer):
     """MegatronPretrainTrainer with MLPerf (mllog) logging."""
 
-    def __init__(self, backend_args):
-        super().__init__(backend_args)
+    def __init__(self, backend_args: Any = None, **kwargs):
+        # The core runtime instantiates every trainer with BaseModule-style
+        # context kwargs (module_name, primus_config, module_rank, ...). Accept
+        # and forward them so BaseTrainer can filter them cooperatively.
+        super().__init__(backend_args=backend_args, **kwargs)
 
         self.mllogger = MLPerfLogger()
         self.throughput_timer = None

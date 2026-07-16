@@ -92,7 +92,7 @@ clip:
 #   - Encoders above ARE loaded during training
 #   - Images/text are encoded on-the-fly (slower but saves disk space)
 #
-# See: docs/backends/megatron/diffusion/data_preprocessing.md
+# See: docs/04-technical-guides/diffusion-models/data_preprocessing.md
 # ============================================================================
 
 # ============================================================================

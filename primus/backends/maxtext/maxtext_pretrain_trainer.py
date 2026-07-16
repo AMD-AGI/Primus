@@ -35,6 +35,39 @@ from primus.core.utils.module_utils import (
     warning_rank_0,
 )
 
+# Primus-internal params that are not part of MaxText's config schema. MaxText
+# v26.4's pyconfig raises on unknown fields (v26.3 merely warns), so these must
+# be stripped before the config is handed to ``pyconfig.initialize``.
+_PRIMUS_ONLY_PARAMS = (
+    "file_sink_level",
+    "stderr_sink_level",
+    "sink_level",
+    "trainable",
+    "model",
+)
+
+
+def _resolve_maxtext_train():
+    """Resolve MaxText's train entrypoints across MaxText versions.
+
+    MaxText v26.4+ ships as the ``maxtext`` package with the training loop at
+    ``maxtext.trainers.pre_train.train``. MaxText v26.3 and earlier expose it
+    as ``MaxText.train``. Prefer the newer layout and fall back to the legacy
+    one so a single Primus checkout works against both images.
+
+    Returns:
+        Tuple of ``(initialize, run, module_name)`` where ``module_name`` is the
+        importable module string to use as ``argv[0]`` for ``initialize``.
+    """
+    try:
+        from maxtext.trainers.pre_train.train import initialize, run
+
+        return initialize, run, "maxtext.trainers.pre_train.train"
+    except ImportError:
+        from MaxText.train import initialize, run
+
+        return initialize, run, "MaxText.train"
+
 
 class MaxTextPretrainTrainer(BaseTrainer):
     """
@@ -75,7 +108,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
-        from MaxText.train import initialize
+        initialize, _, module_name = _resolve_maxtext_train()
 
         from primus.backends.maxtext.argument_builder import (
             export_params_to_yaml,
@@ -86,9 +119,13 @@ class MaxTextPretrainTrainer(BaseTrainer):
         params_dict = namespace_to_dict(self.backend_args)
         params_dict.pop("override_model", None)
 
+        # Strip Primus-internal params that MaxText's config schema rejects.
+        for key in _PRIMUS_ONLY_PARAMS:
+            params_dict.pop(key, None)
+
         yaml_path = export_params_to_yaml(params_dict)
         try:
-            argv = ["MaxText.train", yaml_path]
+            argv = [module_name, yaml_path]
             self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
         finally:
             try:
@@ -173,7 +210,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         log_rank_0("Executing MaxText pretrain...")
 
-        from MaxText.train import run
+        _, run, _ = _resolve_maxtext_train()
 
         run(self.train_config, self.recorder, self.diagnostic_config)
 

@@ -10,6 +10,7 @@ Unit tests for MegatronBaseTrainer.
 Tests path resolution, parse_args patching, and setup orchestration.
 """
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -183,6 +184,26 @@ class TestMegatronBaseTrainer:
         trainer._ensure_megatron_path()
 
         assert sys.path == path_before
+
+    def test_cleanup_exit_fast_flushes_before_hard_exit(self, monkeypatch: pytest.MonkeyPatch):
+        """Regression test: PRIMUS_EXIT_FAST=1's os._exit(0) bypasses atexit, so
+        flush_before_hard_exit() (stdout/stderr + coverage.save()) must run first.
+        A prior version inlined only the stdout/stderr half, silently dropping E2E
+        coverage data for that process."""
+        trainer = _build_trainer(monkeypatch)
+        monkeypatch.setattr(trainer, "_finalize_mlflow_artifacts", lambda: None)
+        monkeypatch.setenv("PRIMUS_EXIT_FAST", "1")
+
+        calls = []
+        monkeypatch.setattr(
+            "primus.backends.megatron.megatron_base_trainer.flush_before_hard_exit",
+            lambda: calls.append("flush"),
+        )
+        monkeypatch.setattr(os, "_exit", lambda code: calls.append(("exit", code)))
+
+        trainer.cleanup(on_error=False)
+
+        assert calls == ["flush", ("exit", 0)]
 
     def test_patch_parse_args(self, monkeypatch: pytest.MonkeyPatch):
         """Test that parse_args is patched in both locations."""
