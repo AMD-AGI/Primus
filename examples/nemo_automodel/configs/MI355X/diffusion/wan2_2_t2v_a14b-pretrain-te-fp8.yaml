@@ -1,0 +1,53 @@
+# Primus EXP config — Wan 2.2 T2V A14B pretrain, FP8 via TransformerEngine autocast,
+# NeMo AutoModel backend, MI355X.
+#
+# This is the FP8 counterpart of wan2_2_t2v_a14b-pretrain.yaml. It is CONFIG-ONLY
+# — no AutoModel/Diffusers code change, no fork:
+# the AutoModel diffusion recipe already reads model.transformer_engine_fp8 and wraps
+# each forward in transformer_engine.pytorch.quantization.autocast, swapping the
+# Diffusers nn.Linear modules for TE Linear (transformer_engine_linear is auto-forced
+# true when fp8 is on). Attention stays on AITER; only the Linear GEMMs run in FP8.
+#
+# FP8 via TransformerEngine autocast for the Diffusers + FSDP2 Wan stack.
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain-te-fp8.yaml \
+#   bash examples/run_pretrain.sh
+#
+# If TE fp8 + torch.compile graph-breaks or errors, retry with compile off:
+#   ... bash examples/run_pretrain.sh fsdp.enable_compile=false
+# Alternate scaling recipe (default delayed):
+#   ... bash examples/run_pretrain.sh model.transformer_engine_fp8_recipe=current
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-pretrain-te-fp8}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      model:
+        # FP8 via TransformerEngine autocast (delayed tensorwise scaling, matching
+        # the FLUX local-spec/te-fp8 reference). transformer_engine_linear is forced
+        # true by the recipe when fp8 is enabled.
+        transformer_engine_fp8: true
+        transformer_engine_fp8_recipe: delayed
+        transformer_engine_fp8_amax_history_len: 1024
+        transformer_engine_fp8_amax_compute_algo: max
+      # Batch sizing matches the BF16 EXP so the FP8 vs BF16 comparison is
+      # apples-to-apples.
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 32
+        global_batch_size: 256
+      data:
+        dataloader:
+          cache_dir: /path/to/pusa_v1_512sq
+      checkpoint:
+        enabled: false
