@@ -157,7 +157,7 @@ export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
 # Primus Sync-Free MoE (eliminates the DeepEP host busy-wait on the variable
 # per-expert token counts): 0=off, 1=fused router/permute, 2=+no CPU busy-wait
 # (turbo deepep + grouped mlp), 3=fully sync-free (+fused act). Stage >=2 needs
-# use_turbo_grouped_mlp=True. Auto-enables the required sub-flags. Default 0.
+# use_turbo_grouped_gemm=True. Auto-enables the required sub-flags. Default 0.
 export TURBO_SYNC_FREE_MOE_STAGE=${TURBO_SYNC_FREE_MOE_STAGE:-0}
 # Phase 1b: route the dense/attention projections (q_down/kv/o_a etc.) through
 # Primus-Turbo linears so they pick up the mxfp8 (CK) path under the fp8 context.
@@ -340,8 +340,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   --turbo_sync_free_moe_stage "$TURBO_SYNC_FREE_MOE_STAGE" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
-  --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
-  --use_turbo_parallel_linear "$USE_TURBO_PARALLEL_LINEAR" \
+  --use_turbo_grouped_gemm "$TURBO_USE_GROUPED_MLP" \
+  --use_turbo_gemm "$USE_TURBO_PARALLEL_LINEAR" \
   --moe_experts_fp4 "$MOE_EXPERTS_FP4" \
   --moe_use_legacy_grouped_gemm False \
   --fp8 "$FP8" \

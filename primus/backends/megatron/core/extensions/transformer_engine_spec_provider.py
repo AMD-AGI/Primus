@@ -107,9 +107,9 @@ def _build_default_primus_args() -> SimpleNamespace:
     """Fallback args for environments without initialized Primus globals."""
     return SimpleNamespace(
         enable_primus_turbo=False,
-        use_turbo_parallel_linear=False,
+        use_turbo_gemm=False,
         use_turbo_attention=False,
-        use_turbo_grouped_mlp=False,
+        use_turbo_grouped_gemm=False,
         moe_use_legacy_grouped_gemm=False,
     )
 

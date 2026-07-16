@@ -101,7 +101,7 @@ LOG=${LOG:-dsv4-projection-${MODE}.log}
 # V4-specific flags mirrored from the training launcher (now that the V4 builder
 # is used, the real DeepseekV4MoE/HybridLayer is built and needs these): clamped
 # SwiGLU support on the grouped backend, turbo off, legacy/permute-fusion off.
-EXTRA_OVERRIDES=${EXTRA_OVERRIDES:---rope_type rope --moe_router_score_function sigmoid --moe_token_dispatcher_type alltoall --enable_primus_turbo false --use_turbo_deepep false --use_turbo_grouped_mlp false --use_turbo_parallel_linear false --use_v4_compiled_sinkhorn false --moe_use_legacy_grouped_gemm false --moe_permute_fusion false --gradient_accumulation_fusion false --mtp_num_layers 0 --tokenizer_type NullTokenizer --use_v4_triton_attention true --use_v4_triton_csa_attention true}
+EXTRA_OVERRIDES=${EXTRA_OVERRIDES:---rope_type rope --moe_router_score_function sigmoid --moe_token_dispatcher_type alltoall --enable_primus_turbo false --use_turbo_deepep false --use_turbo_grouped_gemm false --use_turbo_gemm false --use_v4_compiled_sinkhorn false --moe_use_legacy_grouped_gemm false --moe_permute_fusion false --gradient_accumulation_fusion false --mtp_num_layers 0 --tokenizer_type NullTokenizer --use_v4_triton_attention true --use_v4_triton_csa_attention true}
 
 # ---------- Build the projection CLI args -----------------------------------
 PROJ_ARGS="projection $MODE --config $EXP"

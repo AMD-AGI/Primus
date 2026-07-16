@@ -219,7 +219,7 @@ export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
-# Projections: the FP8 yaml sets use_turbo_parallel_linear=true (PrimusTurboLinear);
+# Projections: the FP8 yaml sets use_turbo_gemm=true (PrimusTurboLinear);
 # turbo-free here -> TELinear. Override off so no turbo GEMM is invoked.
 export USE_TURBO_PARALLEL_LINEAR=${USE_TURBO_PARALLEL_LINEAR:-False}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-False}
@@ -380,8 +380,8 @@ PROXY_OVERRIDES="\
     --enable_primus_turbo $ENABLE_PRIMUS_TURBO \
     --use_turbo_attention $USE_TURBO_ATTENTION \
     --use_turbo_deepep $USE_TURBO_DEEPEP \
-    --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
-    --use_turbo_parallel_linear $USE_TURBO_PARALLEL_LINEAR \
+    --use_turbo_grouped_gemm $TURBO_USE_GROUPED_MLP \
+    --use_turbo_gemm $USE_TURBO_PARALLEL_LINEAR \
     --use_v4_attention_backend $USE_V4_ATTENTION_BACKEND \
     --use_v4_csa_attention_backend $USE_V4_CSA_ATTENTION_BACKEND \
     --use_v4_compiled_sinkhorn $USE_V4_COMPILED_SINKHORN \

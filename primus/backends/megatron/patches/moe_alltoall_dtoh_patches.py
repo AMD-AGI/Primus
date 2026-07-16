@@ -16,7 +16,7 @@ host. All other splits are still moved to CPU and the stream sync is unchanged.
 import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _turbo_grouped_gemm_on_device(ctx: PatchContext) -> bool:
@@ -24,17 +24,15 @@ def _turbo_grouped_gemm_on_device(ctx: PatchContext) -> bool:
 
     The authoritative source is the global Primus/Megatron args, not the
     dispatcher's ``TransformerConfig`` (the turbo flags are CLI/args-level and
-    are not guaranteed to be mirrored onto ``self.config``). ``use_turbo_grouped_mlp``
-    is the flag users actually set; ``use_turbo_grouped_gemm`` is the alias
-    auto-enabled by Sync-Free MoE stage >= 2.
+    are not guaranteed to be mirrored onto ``self.config``).
+    ``use_turbo_grouped_gemm`` is the flag users set (also auto-enabled by
+    Sync-Free MoE stage >= 2).
     """
     try:
         args = get_args(ctx)
     except Exception:
         return False
-    return bool(
-        getattr(args, "use_turbo_grouped_mlp", False) or getattr(args, "use_turbo_grouped_gemm", False)
-    )
+    return bool(getattr(args, "use_turbo_grouped_gemm", False))
 
 
 @register_patch(
@@ -43,7 +41,7 @@ def _turbo_grouped_gemm_on_device(ctx: PatchContext) -> bool:
     phase="before_train",
     description=(
         "Skip tokens_per_expert D2H copy in MoEAlltoAllTokenDispatcher "
-        "when PrimusTurbo grouped gemm (use_turbo_grouped_mlp) is enabled"
+        "when PrimusTurbo grouped gemm (use_turbo_grouped_gemm) is enabled"
     ),
 )
 def patch_moe_alltoall_dtoh(ctx: PatchContext):

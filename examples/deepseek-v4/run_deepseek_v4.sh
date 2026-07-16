@@ -292,7 +292,7 @@ fi
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
-  --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
+  --use_turbo_grouped_gemm "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   "${OPTIMIZER_CLI_ARGS[@]}" \
   --fp8 "$FP8" \

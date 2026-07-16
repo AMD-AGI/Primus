@@ -31,10 +31,11 @@ case "${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-0}" in
     ;;
 esac
 
-# Pinned to the commit validated for the V4 Muon recipe (version 0.4.0a0,
-# which provides the built-in 'deepseekv4' Newton-Schulz coefficient set:
-# 8x aggressive (3.4445,-4.7750,2.0315) + 2x stable (2.0,-1.5,0.5)).
-EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-06ff4c68cda0d41a7a40580644a47f61ea4a59b0}"
+# Pinned to match the third_party/Emerging-Optimizers submodule and the
+# Megatron-LM muon.py integration (which passes ``use_nesterov`` to
+# OrthogonalizedOptimizer). The older 06ff4c68 pin used the pre-rename
+# ``nesterov`` kwarg and is incompatible with the current Megatron muon.py.
+EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-93d9eb3a6c899b50de73992826451fba3ab6adfb}"
 EO_URL="git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@${EO_COMMIT}"
 
 PY="${PYTHON:-python3}"

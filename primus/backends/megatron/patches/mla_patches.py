@@ -21,7 +21,7 @@ from primus.core.utils.module_utils import log_rank_0
     phase="before_train",
     description=(
         "Monkey patch MLA attention to use PrimusMLASelfAttention "
-        "when use_turbo_parallel_linear is enabled (skipped for DeepSeek-V4)."
+        "when use_turbo_gemm is enabled (skipped for DeepSeek-V4)."
     ),
     # Skip for DeepSeek-V4: its DeepseekV4Attention subclasses MLASelfAttention,
     # and PrimusMLASelfAttention deliberately bypasses MLASelfAttention.__init__
