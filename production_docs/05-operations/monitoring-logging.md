@@ -21,7 +21,7 @@ Primus uses **loguru** for structured logging. Initialization wires **file sinks
 | `file_sink_level` | `DEBUG` | Minimum level for file sinks when `sink_level` is unset. |
 | `stderr_sink_level` | `INFO` | Minimum level for stderr when `sink_level` is unset. |
 
-`init_worker_logger` in `primus/core/runtime/logging.py` reads `sink_level`, `file_sink_level`, and `stderr_sink_level` from the merged module config. The Megatron trainer maps `stderr_sink_level` to Megatron’s numeric `logging_level` (the `logging_level` field in `trainer_base.yaml` is deprecated; this mapping supersedes it.).
+`init_worker_logger` in `primus/core/runtime/logging.py` reads `sink_level`, `file_sink_level`, and `stderr_sink_level` from the merged module config. The Megatron trainer maps `stderr_sink_level` to Megatron’s numeric `logging_level` (the `logging_level` field in `trainer_base.yaml` is deprecated; this mapping supersedes it).
 
 **Shell / runner environment** (see `production_docs/03-configuration-reference/environment-variables.md`)
 
