@@ -36,6 +36,10 @@ modules:
       # LB-Mini cost model: fit (attention-aware a*s^2 + b*s).
       lb_mini_cost_model: fit
 
+      # ODC P2P backend + dual-node GDA (validated). trainer_base defaults are mori / false.
+      odc_p2p_backend: rocshmem
+      odc_rocshmem_gda: true
+
       wandb_project: "Primus_ODC_Qwen14B"
       stderr_sink_level: DEBUG
       log_avg_skip_iterations: 2

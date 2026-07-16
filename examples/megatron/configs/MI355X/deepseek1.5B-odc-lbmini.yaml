@@ -37,6 +37,9 @@ modules:
       lb_mini_cost_model: fit
       lb_mini_max_token_len: 32768
 
+      # ODC P2P backend: rocshmem (validated single-node host/XGMI-IPC). trainer_base default is mori.
+      odc_p2p_backend: rocshmem
+
       wandb_project: "Primus_ODC_DeepSeek1.5B"
       stderr_sink_level: DEBUG
       log_avg_skip_iterations: 2
