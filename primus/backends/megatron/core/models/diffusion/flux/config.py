@@ -20,6 +20,18 @@ import torch.nn as nn
 
 from ..common.config import BaseDiffusionConfig
 
+# Try to import erf_gelu from megatron, fallback to custom implementation
+try:
+    from megatron.core.transformer.utils import erf_gelu
+except ImportError:
+    # Fallback used when Megatron's erf_gelu is unavailable
+    def erf_gelu(x):
+        """GELU activation using error function approximation."""
+        return 0.5 * x * (1.0 + torch.erf(x / 1.4142135623730951))
+
+
+__all__ = ["FluxConfig", "openai_gelu_no_jit", "erf_gelu"]
+
 
 # Custom non-JIT compiled openai_gelu to avoid ROCm bugs
 def openai_gelu_no_jit(x):
