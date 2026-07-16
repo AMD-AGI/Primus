@@ -36,10 +36,6 @@ transformer shape, but `flux.1-dev` has a guidance embedding module while
 `flux.1-schnell` does not. Select the preset by choosing
 `flux.1_schnell_t2i.yaml` or `flux.1_dev_t2i.yaml`.
 
-This follows the TorchTitan-style separation where `flux_schnell()` is its own
-config/preset and architecture differences such as `guidance_embed=False` are
-part of that preset, not a launch-time switch.
-
 ## Public Config Sections
 
 Diffusion examples use Primus override sections that the backend converts into
