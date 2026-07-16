@@ -77,7 +77,7 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
 
       # deepep
       use_turbo_deepep: true

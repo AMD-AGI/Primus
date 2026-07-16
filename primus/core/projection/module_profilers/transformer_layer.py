@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import logging
 import os
 from typing import Optional
 
@@ -23,6 +24,7 @@ from .utils import benchmark_layer, v4_module_inputs
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
+_LOGGER = logging.getLogger(__name__)
 
 
 def _estimate_layernorm_residual_time_ms(
@@ -449,6 +451,28 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
+    def _get_benchmark_composite_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Aggregate measured sub-profiler times (mirrors :meth:`_get_simulated_results`).
+
+        Whole-layer ``benchmark_layer`` on MoE stacks systematically over-estimates
+        backward latency (extra autograd / cross-submodule work) while isolated
+        attention + decomposed MoE MLP benches match Origami simulation and
+        measured training much more closely.
+        """
+        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
+        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
+        mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
+        mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
+        tp_ar_ms = _estimate_tp_allreduce_time_ms(self.config, batch_size, seq_len)
+        ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
+            self.config, batch_size, seq_len, self._gemm_backend
+        )
+        # Decomposed MoE MLP benchmark already includes measured dispatch/combine A2A.
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (fwd_time, bwd_time, activation_memory)
+
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
@@ -456,8 +480,12 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             if self._gemm_backend is not None or self._sdpa_backend is not None:
                 # Use simulation mode
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
-            else:
-                # Get TransformerConfig from the layer module itself (has fp8 setting)
+            elif os.environ.get("PRIMUS_BENCH_MOE_LAYER_WHOLE", "0").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            ):
+                # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
                 hidden = self.config.model_config.hidden_size
                 hc_mult = getattr(transformer_config, "hc_mult", 1)

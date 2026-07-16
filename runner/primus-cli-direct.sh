@@ -33,6 +33,11 @@ Options:
     --log_file PATH      Save log to a specific file (default: logs/log_TIMESTAMP.txt)
     --numa               Force enable NUMA binding for processes
     --no-numa            Force disable NUMA binding for processes
+    --silent             Suppress all launcher and python tool stdout (back-pocket option).
+                         Must be placed BEFORE the '--' separator. Launcher errors
+                         (LOG_ERROR / LOG_WARN, written to stderr) and the log file
+                         are preserved. Exit code is propagated. NOT recommended for
+                         normal use -- you lose live progress; prefer the log file.
 
 Distributed Environment Variables:
     NNODES        Number of nodes participating in distributed run        [default: 1]
@@ -40,6 +45,17 @@ Distributed Environment Variables:
     GPUS_PER_NODE Number of GPUs to use per node                          [default: 8]
     MASTER_ADDR   Hostname or IP of master node                           [default: localhost]
     MASTER_PORT   Port of master node                                     [default: 1234]
+
+    When running inside a SLURM allocation (SLURM_JOB_ID set), the above are
+    auto-derived from SLURM_NNODES / SLURM_NODEID / SLURM_NODELIST when not
+    pre-exported. Pre-exported values always win, so the standard
+    slurm-entry -> container -> direct chain is unaffected.
+
+Optional Environment Variables:
+    VENV_ACTIVATE Path to a Python virtualenv activate script. If set, sourced
+                  before the primus run. Unset = no-op (use system python or
+                  the container's bundled python). Set + missing file =
+                  fail-fast (avoid silent torch-version mismatches).
 
 You can set these variables in either of the following ways:
     # (1) Export variables before launch (recommended for scripts or single-node runs)
@@ -49,6 +65,10 @@ You can set these variables in either of the following ways:
     # (2) Inject via CLI with --env (useful for launchers and multi-node jobs)
       primus-cli direct --env NNODES=2 --env GPUS_PER_NODE=8 --env NODE_RANK=1 --env MASTER_ADDR=host1 -- \\
         benchmark gemm -M 4096 -N 4096 -K 4096
+
+    # (3) Let SLURM provide them (inside an existing allocation)
+      export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
+      srun -N 4 --ntasks-per-node=1 ./runner/primus-cli direct -- preflight --quick
 
 Examples:
     # Pretrain with a config file (single node)
@@ -77,12 +97,19 @@ Examples:
     # Force enable NUMA binding for better performance
       primus-cli direct --numa -- benchmark gemm -M 8192 -N 8192 -K 8192
 
+    # Run silently (back-pocket option; launcher errors and log file preserved)
+      primus-cli direct --silent -- preflight --quick
+
 Notes:
     - If --single is specified, Primus skips torchrun and uses python3 directly.
+    - run_mode auto-detection: when the primus subcommand is 'node_smoke', run_mode
+      defaults to 'single' (node_smoke runs one process per node by design).
+      Explicit --single or config direct.run_mode still wins.
     - If --script is not specified, defaults to primus/cli/main.py.
     - Always separate Primus arguments from launcher options using '--'.
     - Environment variables can be mixed: 'export' takes precedence unless overridden by '--env'.
     - Multi-node jobs require MASTER_ADDR set to the master node's hostname/IP.
+      Inside a SLURM allocation it is auto-resolved from SLURM_NODELIST.
     - Patch scripts are executed in order before running the main script (useful for env setup, hot fixes, etc.).
     - NUMA binding is auto-disabled by default; use --numa to enable for better memory locality.
     - GPU-specific optimizations: The script automatically sources primus-env.sh, which detects your
@@ -95,6 +122,43 @@ EOF
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     print_usage
     exit 0
+fi
+
+###############################################################################
+# Runner-level --silent (back-pocket option for clean stdout)
+#
+# Contract:
+#   - launcher LOG_INFO / LOG_INFO_RANK0 / LOG_DEBUG_* (stdout)  -> /dev/null
+#   - launcher LOG_WARN / LOG_ERROR  (stderr, written via >&2)   -> terminal
+#   - python tool's stdout + stderr                              -> /dev/null
+#       (the launched CMD ends with `2>&1 | tee <log_file>`, so the python
+#        child's fd2 is merged into the pipe and tee writes to the log file
+#        + this script's fd1 = /dev/null)
+#   - log file                                                   -> captures all
+#   - exit code                                                  -> propagated
+#
+# --silent is only honored BEFORE the `--` separator. Anywhere after `--` it
+# is forwarded to the python tool whose argparse will reject it (intentional;
+# python tools have no --silent flag and never will -- silencing is a bash-side
+# concern).
+#
+# Not recommended for normal use: read the log file or omit --silent if you
+# want to see live tool output and progress.
+###############################################################################
+SILENT=0
+for _arg in "$@"; do
+    if [[ "$_arg" == "--" ]]; then
+        break
+    fi
+    if [[ "$_arg" == "--silent" ]]; then
+        SILENT=1
+        break
+    fi
+done
+if [[ "$SILENT" == "1" ]]; then
+    # fd1 -> /dev/null. fd2 is left attached to the terminal, so LOG_ERROR /
+    # LOG_WARN (which write via >&2) still reach the operator.
+    exec >/dev/null
 fi
 
 # Resolve runner directory
@@ -180,6 +244,12 @@ while [[ $# -gt 0 ]]; do
             PRE_PARSE_ARGS+=("$1")
             shift
             ;;
+        --silent)
+            # Already consumed by the pre-scan above (which has applied
+            # `exec >/dev/null`). Swallow it here so it never reaches the
+            # python parser, which has no --silent flag.
+            shift
+            ;;
         --)
             # Explicit separator: remaining args are for primus Python module
             shift  # skip the '--'
@@ -241,8 +311,11 @@ if [[ "$DRY_RUN_MODE" == "0" ]]; then
     fi
 fi
 
-# Set default values for parameters not in config
-direct_config[run_mode]="${direct_config[run_mode]:-torchrun}"
+# Set default values for parameters not in config.
+# NOTE: run_mode default is deliberately NOT applied here. The auto-detect step
+# after STEP 4 needs to distinguish "user did not specify run_mode" (so we can
+# auto-select `single` for node_smoke) from "default got applied in STEP 3".
+# Defaulting to `torchrun` therefore happens after STEP 4 instead.
 direct_config[script]="${direct_config[script]:-primus/cli/main.py}"
 direct_config[numa]="${direct_config[numa]:-auto}"
 direct_config[log_file]="${direct_config[log_file]:-}"
@@ -316,6 +389,36 @@ set -- "${primus_args[@]}"
 [[ "$DEBUG_MODE" == "1" ]] && set -- --debug "$@"
 
 ###############################################################################
+# STEP 4.4: Auto-select run_mode based on primus subcommand
+#
+# Some primus subcommands MUST run as a single process per srun task (no
+# torchrun fan-out, no inter-node rendezvous). node_smoke is the canonical
+# example: it runs one process per node by design and the per-GPU phase is
+# launched as subprocesses internally. Listed here so users don't need to
+# remember --single. Explicit --single / config direct.run_mode still wins
+# (those paths set direct_config[run_mode] before this block runs).
+###############################################################################
+SINGLE_MODE_SUBCOMMANDS=(node_smoke)
+if [[ -z "${direct_config[run_mode]:-}" ]]; then
+    _detected_subcmd=""
+    for _arg in "${primus_args[@]}"; do
+        case "$_arg" in
+            --*|-*) continue ;;
+            *) _detected_subcmd="$_arg"; break ;;
+        esac
+    done
+    _default_run_mode="torchrun"
+    for _sc in "${SINGLE_MODE_SUBCOMMANDS[@]}"; do
+        if [[ "$_detected_subcmd" == "$_sc" ]]; then
+            _default_run_mode="single"
+            LOG_INFO_RANK0 "[direct] Auto-selected run_mode=single for subcommand '$_detected_subcmd'"
+            break
+        fi
+    done
+    direct_config[run_mode]="$_default_run_mode"
+fi
+
+###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
 ###############################################################################
 
@@ -338,12 +441,110 @@ fi
 mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 
 ###############################################################################
+# STEP 4.7: Activate virtualenv (R1) and derive distributed env from SLURM (R2)
+#
+# Previously these lived in runner/run_preflight_direct.sh and
+# runner/run_node_smoke_direct.sh (now deleted). Hoisting them here makes every
+# `primus-cli direct -- ...` call site (host srun, slurm-entry -> direct,
+# slurm-entry -> container -> direct) inherit identical behavior.
+###############################################################################
+
+# R1 -- Python virtualenv. VENV_ACTIVATE unset = no-op (this is the right
+# default for the container path: primus-cli-container.sh does not auto-forward
+# VENV_ACTIVATE through its env passthrough whitelist, so inside the container
+# we use the container's bundled python). Set + missing = fail-fast: better a
+# loud error than a silent torch-version mismatch.
+if [[ -n "${VENV_ACTIVATE:-}" ]]; then
+    if [[ ! -f "$VENV_ACTIVATE" ]]; then
+        LOG_ERROR "[direct] VENV_ACTIVATE is set but file does not exist: $VENV_ACTIVATE"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$VENV_ACTIVATE"
+    LOG_INFO_RANK0 "[direct] Activated virtualenv: $VENV_ACTIVATE"
+fi
+
+# R2 -- distributed env. Pre-set values always win (the existing
+# slurm-entry -> container -> direct chain already passes them via --env, so
+# this block is a no-op there). When called directly under srun on the host,
+# this block derives them from SLURM_*.
+export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+export MASTER_PORT="${MASTER_PORT:-1234}"
+
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    # Pre-exported values always win (per plan). The standard
+    # slurm-entry -> container -> direct chain already exports NNODES /
+    # NODE_RANK with the SLURM-derived values before direct.sh runs, so this
+    # block is a no-op there. When called directly under srun on bare metal
+    # without pre-set values, derive from SLURM_*.
+    export NNODES="${NNODES:-${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-1}}}"
+    export NODE_RANK="${NODE_RANK:-${SLURM_NODEID:-${SLURM_PROCID:-0}}}"
+    if [[ -z "${MASTER_ADDR:-}" || "${MASTER_ADDR}" == "localhost" ]]; then
+        if command -v scontrol >/dev/null 2>&1 && [[ -n "${SLURM_NODELIST:-}" ]]; then
+            if ! MASTER_ADDR="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)" \
+               || [[ -z "$MASTER_ADDR" ]]; then
+                LOG_ERROR "[direct] Failed to resolve MASTER_ADDR from SLURM_NODELIST=${SLURM_NODELIST:-<unset>}"
+                exit 1
+            fi
+            export MASTER_ADDR
+        else
+            # In a SLURM context but we cannot resolve a real address from
+            # scontrol -- either scontrol is not installed (CI / dev VM) or
+            # SLURM_NODELIST was not propagated (rare; can happen in stubbed
+            # tests or single-node allocations). Fall back to localhost so
+            # the downstream sanity check at line 503 has a valid value;
+            # NODE_RANK=0 + MASTER_ADDR=localhost is correct for single-node
+            # SLURM runs and for dry-run smoke tests. Real multi-node
+            # bare-srun on a SLURM head node always has both, so this
+            # branch never fires in production.
+            export MASTER_ADDR="localhost"
+        fi
+    fi
+    LOG_INFO_RANK0 "[direct] SLURM detected: JOB_ID=$SLURM_JOB_ID NNODES=$NNODES NODE_RANK=$NODE_RANK MASTER_ADDR=${MASTER_ADDR:-<unset>}"
+else
+    export NNODES="${NNODES:-1}"
+    export NODE_RANK="${NODE_RANK:-0}"
+    export MASTER_ADDR="${MASTER_ADDR:-localhost}"
+fi
+
+# Sanity-check the resolved distributed env (lifted from the deleted wrappers).
+[[ "$NNODES"      =~ ^[1-9][0-9]*$ ]] || { LOG_ERROR "[direct] NNODES must be a positive integer (got '$NNODES')"; exit 1; }
+[[ "$NODE_RANK"   =~ ^[0-9]+$       ]] || { LOG_ERROR "[direct] NODE_RANK must be a non-negative integer (got '$NODE_RANK')"; exit 1; }
+[[ "$MASTER_PORT" =~ ^[0-9]+$       ]] || { LOG_ERROR "[direct] MASTER_PORT must be a non-negative integer (got '$MASTER_PORT')"; exit 1; }
+[[ -n "$MASTER_ADDR" ]]                || { LOG_ERROR "[direct] MASTER_ADDR is empty"; exit 1; }
+(( NODE_RANK < NNODES ))               || { LOG_ERROR "[direct] NODE_RANK ($NODE_RANK) must be < NNODES ($NNODES)"; exit 1; }
+if [[ "$MASTER_ADDR" == "localhost" && "${NNODES:-1}" -gt 1 ]]; then
+  LOG_WARN "[direct] MASTER_ADDR=localhost with NNODES=$NNODES — multi-node will likely fail"
+fi
+
+###############################################################################
 # STEP 5: Source GPU environment and helper modules
 ###############################################################################
 
 # Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
+
+###############################################################################
+# STEP 5.5: Auto-sync third_party sources for installed wheels
+###############################################################################
+# When running from an installed wheel (the packaged _thirdparty.lock exists),
+# clone the pinned backend sources on first use and prepend them to PYTHONPATH,
+# so backends like Megatron run from full source (Makefile/helpers can compile).
+# Set PRIMUS_AUTO_DEPS_SYNC=0 to skip.
+_PRIMUS_LOCK="${RUNNER_DIR}/../_thirdparty.lock"
+if [[ "${PRIMUS_AUTO_DEPS_SYNC:-1}" != "0" && -f "$_PRIMUS_LOCK" ]]; then
+    _PRIMUS_TP_DIR="${PRIMUS_THIRDPARTY_DIR:-$HOME/.cache/Primus/third_party}"
+    if [[ ! -d "${_PRIMUS_TP_DIR}/Megatron-LM" || ! -d "${_PRIMUS_TP_DIR}/torchtitan" ]]; then
+        LOG_INFO_RANK0 "[direct] third_party sources not found; running 'primus-cli deps sync' (set PRIMUS_AUTO_DEPS_SYNC=0 to skip)"
+        bash "${RUNNER_DIR}/primus-cli-deps.sh" sync --dir "${_PRIMUS_TP_DIR}" || LOG_WARN "[direct] deps sync failed; continuing"
+    fi
+    if [[ -d "${_PRIMUS_TP_DIR}" ]]; then
+        for _primus_tp in "${_PRIMUS_TP_DIR}"/*/; do
+            [[ -d "$_primus_tp" ]] && export PYTHONPATH="${_primus_tp%/}${PYTHONPATH:+:$PYTHONPATH}"
+        done
+    fi
+fi
 
 ###############################################################################
 # STEP 6: Execute hooks and capture extra arguments / env
@@ -440,17 +641,38 @@ fi
 # STEP 9: Build launch command
 ###############################################################################
 
-# Allow RUN_MODE to be overridden by environment variable
+# Final run-mode resolution. RUN_MODE-from-env wins over direct_config[run_mode]
+# because framework prepare-hooks (e.g. runner/helpers/hooks/train/pretrain/
+# maxtext/prepare.py) emit `env.RUN_MODE=single` from STEP 6 -- the hook layer
+# knows things the launcher can't (e.g. "this framework is JAX, not torch, so
+# torchrun would be wrong"). $RUN_MODE is the authoritative value for the rest
+# of the script -- the display block and the torchrun-only Distributed Settings
+# gate at STEP 10 both read $RUN_MODE, NOT direct_config[run_mode], so a hook
+# that flips the mode is faithfully reflected in the printed configuration.
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
-CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
+# Resolve the launch target. Normally this is the script path
+# (direct_config[script], default: primus/cli/main.py) relative to the repo
+# checkout. When Primus is run from an installed wheel outside the repo, that
+# file is absent; in that case fall back to the installed module form
+# (-m primus.cli.main) so `primus-cli direct ...` works from any directory.
+LAUNCH_TARGET=("${direct_config[script]:-}")
+if [[ "${direct_config[script]:-}" == "primus/cli/main.py" && ! -f "${direct_config[script]:-}" ]]; then
+    LAUNCH_TARGET=(-m primus.cli.main)
+    LOG_INFO_RANK0 "[direct] Default script '${direct_config[script]}' not found in CWD; using installed module 'python -m primus.cli.main'"
+fi
+
+# Build the launch command as an ARRAY and execute it directly (no eval), so
+# Primus arg values containing shell metacharacters are passed verbatim.
+CMD=("${LAUNCH_TARGET[@]}" "$@")
+
 if [[ "$RUN_MODE" == "single" ]]; then
-    CMD="python3 ${CMD}"
+    CMD=(python3 "${CMD[@]}")
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"
 elif [[ "$RUN_MODE" == "torchrun" ]]; then
     # Step 2: Add NUMA binding prefix if enabled
     if [[ "${direct_config[numa]:-}" == "true" ]]; then
-        CMD="--no-python ${RUNNER_DIR}/helpers/numa_bind.sh ${CMD}"
+        CMD=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" "${CMD[@]}")
         LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     else
         LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
@@ -484,7 +706,9 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         FILTER_ARG=()
     fi
 
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS:-} ${CMD}"
+    # LOCAL_RANKS stays unquoted to allow word-splitting into multiple tokens.
+    # shellcheck disable=SC2206
+    CMD=(torchrun "${DISTRIBUTED_ARGS[@]}" "${FILTER_ARG[@]}" ${LOCAL_RANKS:-} "${CMD[@]}")
 fi
 
 ###############################################################################
@@ -496,8 +720,8 @@ else
     print_section "Primus Direct Launch Configuration"
 fi
 
-PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]:-}"
-PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]:-}"
+PRINT_INFO_RANK0 "  Run Mode        : ${RUN_MODE}"
+PRINT_INFO_RANK0 "  Script Path     : ${LAUNCH_TARGET[*]:-${direct_config[script]:-}}"
 PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
 PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]:-}"
 PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]:-}"
@@ -517,7 +741,7 @@ if [[ ${#primus_env_kv[@]} -gt 0 ]]; then
     PRINT_INFO_RANK0 ""
 fi
 
-if [[ "${direct_config[run_mode]:-}" == "torchrun" ]]; then
+if [[ "${RUN_MODE}" == "torchrun" ]]; then
     PRINT_INFO_RANK0 "  Distributed Settings:"
     PRINT_INFO_RANK0 "    NNODES          : ${NNODES:-1}"
     PRINT_INFO_RANK0 "    NODE_RANK       : ${NODE_RANK:-0}"
@@ -531,9 +755,9 @@ print_system_info
 
 PRINT_INFO_RANK0 "  Full Command:"
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 "    Would Execute: $CMD"
+    PRINT_INFO_RANK0 "    Would Execute: ${CMD[*]} 2>&1 | tee ${direct_config[log_file]}"
 else
-    PRINT_INFO_RANK0 "    Executing: $CMD"
+    PRINT_INFO_RANK0 "    Executing: ${CMD[*]} 2>&1 | tee ${direct_config[log_file]}"
 fi
 
 # In dry-run mode, exit after displaying the command
@@ -548,10 +772,10 @@ print_section ""
 ###############################################################################
 # STEP 11: Execute command
 ###############################################################################
-# Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+# PIPESTATUS[0] is the launcher's exit code.
 set +e
-eval "$CMD"
-exit_code=$?
+"${CMD[@]}" 2>&1 | tee "${direct_config[log_file]}"
+exit_code=${PIPESTATUS[0]}
 set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then

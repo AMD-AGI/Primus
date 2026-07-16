@@ -1,0 +1,222 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-sft-packed}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# DeepSeek-V2-Lite SFT — sequence packing experiment
+# =============================================================================
+# Why packing on DeepSeek?
+#   * seq_length=4096 vs Alpaca avg ~80 tokens -> baseline wastes ~98% of every
+#     batch on padding. Packing brings real-token utilization to ~99% and lets
+#     each step learn from ~50 raw samples (vs 1 in the baseline).
+#   * On Llama-3 8B we measured 20x effective-sample-per-step improvement at
+#     seq_length=2048; DeepSeek with seq_length=4096 should see ~50x.
+#
+# Why use_packed_attention=false (the implicit-multi-turn regime)?
+#   * Strict per-segment isolation requires TE's qkv_format='thd' kernel which
+#     hangs / SIGABRTs on the current ROCm + aiter image (rank-7 abort during
+#     the very first forward).
+#   * Without isolation, attention is plain causal across the entire packed
+#     sequence. loss_mask still restricts the loss to response tokens only, so
+#     the supervision target is unchanged; the only effect is sub-samples can
+#     attend to earlier sub-samples (same regime LLaMA-Factory / TRL ship by
+#     default).
+#
+# Side effect on MoE stability:
+#   The mbs=8 SystemError we hit in the baseline was caused by the MoE
+#   permute_fusion Triton kernel choking on extremely imbalanced expert load
+#   when 96% of the batch was padding tokens. Packing fills the batch with real
+#   tokens whose router decisions are far more balanced, so this config keeps
+#   mbs=4 conservatively but mbs=8 is worth a retry once mbs=4 is validated.
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: ${PRIMUS_MODEL:deepseek_v2_lite}.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: deepseek-ai/DeepSeek-V2-Lite
+      tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # KEY: enable sequence packing
+      enable_packed_sequences: true
+      # Strict-isolation thd attention OFF (ROCm/aiter currently crashes in
+      # TE's thd kernel; see header comment).
+      use_packed_attention: false
+
+      wandb_project: "Primus_DeepSeek_V2_Lite_SFT_Packed"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      # Runtime tuning env vars.
+      HSA_NO_SCRATCH_RECLAIM: 1
+      NVTE_CK_USES_BWD_V3: 1
+      GPU_MAX_HW_QUEUES: 4
+      CLEAN_DOCKER_CONTAINER: 1
+      TURBO_DEEPEEP: true
+      TURBO_GROUPED_MLP: false
+      LEGACY_GG: true
+      PRIMUS_DETERMINISTIC: 0
+      USING_AIC: 1
+
+
+      train_iters: 20
+      micro_batch_size: 8
+      global_batch_size: 128
+
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      eod_mask_loss: false
+
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      # EP=8 is the verified sweet spot for DeepSeek-V2-Lite (64 routed experts).
+      # EP=4 is on the edge: the first iter's pretrained-router output may leave
+      # several of the 16 local experts with 0 tokens -> 0/0 NaN in MoE backward.
+      # EP=2 will reliably crash (we tested it). Stay with 8 unless you also enable
+      # moe_router_force_load_balancing (which breaks SFT router learning).
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # =====================================================================
+      # MEASURED: moe_router_force_load_balancing is the dominant cause of
+      # the SFT-vs-pretrain TFLOPS gap. Single-flag flip experiment results
+      # on the exact same config (mbs=8, gbs=128, EP=8, alpaca, LoRA, packing):
+      #
+      #   force_load_balancing=false (THIS RUN, real SFT):
+      #     iter time 3500 ms, TFLOPS 385, max mem 215 GB
+      #
+      #   force_load_balancing=true (controlled test, router NOT learning):
+      #     iter time 1920 ms, TFLOPS 557, max mem 146 GB
+      #
+      # Two effects of force_load_balancing on top of TFLOPS:
+      #   1) Throughput  +45 %: alltoall stragglers eliminated (every EP rank
+      #      receives exactly total_tokens / EP, no waiting on the slowest)
+      #   2) Memory      -70 GB: DeepEP buffer over-provisioning eliminated
+      #      (when routing is unbalanced DeepEP must reserve ~1.6x average
+      #      to handle the worst-case rank; when balanced it reserves only
+      #      the average size)
+      #
+      # Implication: SFT can NEVER reach pretrain's headline TFLOPS while
+      # the router is actually learning -- the real ceiling on this path is
+      # ~385 TFLOPS. The pretrain 478 TFLOPS is a benchmark artefact (router
+      # output is patched, no learning). Closing the gap further would
+      # require a kernel-level fix to DeepEP (handle unbalanced routing
+      # without straggler-bound alltoall).
+      #
+      # KEEP THIS COMMENTED OUT. Setting it true breaks SFT router learning.
+      # ---------------------------------------------------------------------
+      # moe_router_force_load_balancing: true   # experiment-only, do not enable
+      # =====================================================================
+
+      # ZeRO-1 distributed optimizer + comm/comp overlap. Mirrors pretrain.yaml.
+      # Empirically verified: enabling these on DeepSeek-V2-Lite SFT + LoRA path
+      # produces 0% TFLOPS change (still 313) because:
+      #   * LoRA limits trainable params to ~0.88% -> grad reduce traffic is ~280
+      #     MB/iter vs MoE alltoall ~7 GB/iter; DP comm is not on the critical
+      #     path so overlapping it saves nothing visible.
+      #   * The bottleneck is MoE alltoall + HBM bandwidth, neither of which
+      #     these flags affect.
+      # We keep them aligned with pretrain anyway so the config is principled
+      # and any future non-LoRA SFT run benefits from the standard ZeRO-1 path.
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # MLA
+      multi_latent_attention: true
+
+      finetune: true
+      load: null
+      save: null
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+
+      bf16: true
+
+      # Turbo optimizations -- mirror the baseline so the apples-to-apples
+      # comparison stays clean.
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: false
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_deepep_num_cu: 64
+      # Empirically verified: comm_stream=true buys 0% TFLOPS over false because
+      # DeepEP already sets ``deepep_async_finish=True`` and
+      # ``deepep_allocate_on_comm_stream=True`` internally (see primus_turbo.py
+      # L1480-L1481), so the alltoall is already async. Aligning with pretrain.
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # MoE grouped-GEMM kernel selection -- aligned with pretrain.yaml.
+      # The "legacy" grouped_gemm path is the more battle-tested kernel for
+      # DeepSeek-V2-Lite on MI300/MI350 and avoids occasional Triton edge-cases
+      # under skewed expert load.
+      moe_use_legacy_grouped_gemm: true
+
+      # Final lm_head + cross_entropy fusion -- aligned with pretrain.yaml.
+      # Saves activation memory and a kernel launch on the loss path; the
+      # per-token loss is still emitted so our loss_mask gating still works.
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+
+      # =====================================================================
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 15
+      profile_step_end: 16
+      profile_ranks: [0]
+
+      eval_iters: 10
+
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

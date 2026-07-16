@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -79,8 +79,11 @@ from primus_turbo.pytorch.core.low_precision import (
     float8_e4m3,
 )
 from torch import Tensor
+
+# Imported from .constants (not .fp8) for TransformerEngine >= 2.12 compat;
+# the symbol moved out of transformer_engine.pytorch.fp8 in that release.
 from transformer_engine.pytorch.constants import dist_group_type
-from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
@@ -403,6 +406,7 @@ class PrimusTurboQuantConfig:
         strategy: ScalingStrategy = ScalingStrategy.DYNAMIC,
         scale_dtype: ScaleDtype = ScaleDtype.FP32,
         block_size: int = None,
+        use_gradient_sr: bool = True,
     ):
         self._is_fp4 = False
         self._is_fp8 = False
@@ -414,6 +418,7 @@ class PrimusTurboQuantConfig:
                 strategy=strategy,
                 scale_dtype=scale_dtype,
                 block_size=block_size,
+                use_gradient_sr=use_gradient_sr,
             )
             self._is_fp4 = True
         else:
@@ -533,7 +538,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     @classmethod
     def get_fp8_autocast_state(
         cls,
-    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, PrimusTurboQuantConfig]:
+    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, bool, bool, PrimusTurboQuantConfig]:
         """FP8 autocast state getter"""
         return (
             FP8GlobalStateManager.FP8_ENABLED,
@@ -550,7 +555,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     @classmethod
     def set_fp8_autocast_state(
         cls,
-        fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool, bool, PrimusTurboQuantConfig],
+        fp8_state: Tuple[bool, bool, Recipe, dist_group_type, bool, bool, bool, bool, PrimusTurboQuantConfig],
     ) -> None:
         """FP8 autocast state setter"""
         (
@@ -1976,7 +1981,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         """
-        Initialize the Flex token dispatcher.
+        Initialize the DeepEP token dispatcher.
 
         Args:
             num_local_experts (int): Number of local experts on the current device.
@@ -1986,13 +1991,14 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         """
         super().__init__(config=config, pg_collection=pg_collection)
 
-        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        if self.tp_size * self.ep_size <= 1:
+            raise ValueError("DeepEP token dispatcher requires TPxEP > 1")
         assert (
             self.config.moe_enable_deepep
         ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
         assert (
             self.config.moe_pad_expert_input_to_capacity is False
-        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+        ), "DeepEP token dispatcher does not support --moe-pad-expert-input-to-capacity"
 
         args = get_args()
 
@@ -2020,7 +2026,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
                 pad_multiple = 32
 
-        use_turbo_grouped_mlp = args.use_turbo_grouped_mlp
+        use_turbo_grouped_gemm = args.use_turbo_grouped_gemm
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
@@ -2034,7 +2040,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_mlp,
+            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
@@ -2044,6 +2050,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         self._comm_manager = self.deepep_dispatcher
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
+        # "even" -> deterministic round-robin token assignment (constant per-expert
+        # counts / constant M_total); "uniform" -> Megatron-LM original random-logits
+        # balancing (handled upstream in the router, token_indices stays None here).
+        self.moe_router_force_load_balancing_type = getattr(
+            args, "moe_router_force_load_balancing_type", "uniform"
+        )
 
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
@@ -2067,9 +2079,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         hidden_states = hidden_states.view(-1, self.config.hidden_size)
         num_tokens = hidden_states.shape[0]
 
-        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
+        # when force_load_balancing with type "even", we use round-robin token_indices
+        # to make sure each expert gets the same (deterministic) number of tokens.
+        # type "uniform" keeps token_indices=None and relies on the router's upstream
+        # random-logits balancing.
         token_indices = None
-        if self.moe_router_force_load_balancing:
+        if self.moe_router_force_load_balancing and self.moe_router_force_load_balancing_type == "even":
             token_indices = (
                 torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
                     num_tokens, self.config.moe_router_topk

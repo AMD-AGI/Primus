@@ -26,7 +26,7 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/primus:v26.2"
+    image: "rocm/primus:v26.3"
 
     # Single-value options
     ipc: "host"
@@ -37,6 +37,7 @@ container:
     privileged: "true"
     security-opt: "seccomp=unconfined"
     group-add: "video"
+    ulimit: "nofile=1048576:1048576"
 
     # Cumulative options (can be specified multiple times via CLI)
     # Device access (each passed as --device)
@@ -120,7 +121,10 @@ direct:
   master_addr: "localhost"
 
   # Direct mode specific options
-  run_mode: "torchrun"
+  # run_mode: deliberately omitted here so that primus-cli-direct.sh can
+  # auto-select 'single' for subcommands that require it (e.g. node_smoke).
+  # Set run_mode explicitly in your own config to force a specific launcher.
+  # Precedence: CLI --single > user config direct.run_mode > auto-detect > torchrun.
   script: "primus/cli/main.py"
   numa: "auto"
   log_file: ""

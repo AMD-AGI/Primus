@@ -36,7 +36,7 @@ export PROFILE=False
 export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
-export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_GROUPED_GEMM=${TURBO_GROUPED_GEMM:-False}
 export TURBO_RMS_NORM=${TURBO_RMS_NORM:-True}
 # MLA does not support rope fusion
 export APPLY_ROPE_FUSION=False
@@ -101,7 +101,7 @@ export PRIMUS_TEAM
 PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document
-export PRIMUS_EXP_NAME=glm5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+export PRIMUS_EXP_NAME=glm5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_GEMM-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 ./primus-cli direct --numa \
@@ -112,7 +112,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --global_batch_size "$GBS" \
   --use_turbo_attention "$TURBO_ATTENTION" \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
-  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_turbo_grouped_gemm "$TURBO_GROUPED_GEMM" \
   --use_turbo_rms_norm "$TURBO_RMS_NORM" \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \

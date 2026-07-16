@@ -34,6 +34,15 @@ import importlib.util, os, re, subprocess, sys
 
 TAG = "[fix_aiter_asm_dir]"
 
+# Honor PRIMUS_LOG_LEVEL: only emit informational lines at DEBUG/INFO.
+_LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+_CUR_LEVEL = _LOG_LEVELS.get(os.environ.get("PRIMUS_LOG_LEVEL", "INFO").upper(), 20)
+
+
+def info(msg, **kw):
+    if _CUR_LEVEL <= _LOG_LEVELS["INFO"]:
+        print(msg, **kw)
+
 
 def find_aiter_core_and_hsa():
     """Return (core_py_path, aiter_meta_hsa_dir) or (None, None)."""
@@ -105,7 +114,7 @@ def normalize_core_py(core_path):
         try:
             with open(core_path, "w") as f:
                 f.write(content)
-            print(f"{TAG} Normalized AITER_ASM_DIR in {core_path} (removed gfx prefix)")
+            info(f"{TAG} Normalized AITER_ASM_DIR in {core_path} (removed gfx prefix)")
         except PermissionError:
             print(f"{TAG} Cannot write {core_path} (read-only)", file=sys.stderr)
 
@@ -118,7 +127,7 @@ def create_symlinks(hsa_dir, gfx):
     """
     gfx_dir = os.path.join(hsa_dir, gfx)
     if not os.path.isdir(gfx_dir):
-        print(f"{TAG} {gfx_dir} not found, skipping")
+        info(f"{TAG} {gfx_dir} not found, skipping")
         return 0, 0
 
     created = 0
@@ -143,7 +152,7 @@ def create_symlinks(hsa_dir, gfx):
                 os.unlink(dst)
                 os.symlink(src, dst)
                 repaired += 1
-                print(f"{TAG} Repaired stale symlink: {dst} -> {src} (was {cur_target})")
+                info(f"{TAG} Repaired stale symlink: {dst} -> {src} (was {cur_target})")
             except OSError as e:
                 print(f"{TAG} repair symlink {dst} -> {src} failed: {e}", file=sys.stderr)
             continue
@@ -163,7 +172,7 @@ def create_symlinks(hsa_dir, gfx):
 
 core_path, hsa_dir = find_aiter_core_and_hsa()
 if not hsa_dir:
-    print(f"{TAG} aiter_meta/hsa not found, skipping")
+    info(f"{TAG} aiter_meta/hsa not found, skipping")
     sys.exit(0)
 
 gfx = detect_gfx()
@@ -175,7 +184,7 @@ normalize_core_py(core_path)
 
 created, repaired = create_symlinks(hsa_dir, gfx)
 if created > 0 or repaired > 0:
-    print(f"{TAG} Symlink update done in {hsa_dir}: created={created}, repaired={repaired}")
+    info(f"{TAG} Symlink update done in {hsa_dir}: created={created}, repaired={repaired}")
 else:
-    print(f"{TAG} No symlinks needed (already present or {gfx}/ not found)")
+    info(f"{TAG} No symlinks needed (already present or {gfx}/ not found)")
 PYEOF

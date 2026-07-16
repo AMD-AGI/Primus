@@ -12,7 +12,7 @@ components (configs, blocks, etc.) to integrate Primus-specific behavior.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 @register_patch(
@@ -29,7 +29,7 @@ from primus.modules.module_utils import log_rank_0
     # the base class were swapped. V4 builds DeepseekV4Attention directly and does
     # not need the padded-fusion MLA path, so this patch must not fire for it.
     condition=lambda ctx: (
-        getattr(get_args(ctx), "use_turbo_parallel_linear", False)
+        getattr(get_args(ctx), "use_turbo_gemm", False)
         and not any(
             getattr(get_args(ctx), _f, False)
             for _f in (

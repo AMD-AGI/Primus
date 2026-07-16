@@ -12,7 +12,7 @@ from megatron.core.fp8_utils import is_first_last_bf16_layer
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -24,14 +24,23 @@ except (ImportError, ModuleNotFoundError):
     # Transformer Engine not found
     pass
 
-# Check if Primus-Turbo is installed
+# Check if Primus-Turbo is installed.
+#
+# Probe the *deep* import path that the HAVE_TURBO branch below actually uses.
+# A shallow ``import primus_turbo`` succeeds even when ``primus_turbo.pytorch``
+# fails to initialize (e.g. when its transitive ``aiter`` import is broken in
+# the runtime environment), which would otherwise let us enter the HAVE_TURBO
+# branch and crash at module-load time when the deep import is performed.
 HAVE_TURBO = False
 try:
-    import primus_turbo  # pylint: disable=W0611
+    from primus_turbo.pytorch.core.low_precision import (  # noqa: F401  pylint: disable=W0611
+        ScaleDtype,
+        ScalingGranularity,
+    )
 
     HAVE_TURBO = True
 except (ImportError, ModuleNotFoundError):
-    # Primus-Turbo not found
+    # Primus-Turbo not importable (not installed, or a transitive dep is broken).
     pass
 
 # gfx1250 / turbo-free FP8: on builds where primus_turbo is only an import shim
@@ -46,7 +55,7 @@ if _os.environ.get("PRIMUS_FP8_DISABLE_TURBO", "0") == "1":
 
 
 SCALING_BLOCK_SIZE = 128
-MX_SCALING_BLOCK_SIZE = 32
+MXFP8_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -74,14 +83,19 @@ if HAVE_TE and HAVE_TURBO:
         return format_mapping[te_format]
 
     def get_fp8_recipe(config: TransformerConfig):
-        """Return fp8 recipe.
+        """Return fp8 recipe (Primus Turbo + TE variant).
 
         Arguments:
             config (TransformerConfig): Configuration object.
 
         Returns:
-            FP8 recipe: Transformer Engine FP8 recipe.
-            FP8 None reason: reason why the fp8 recipe is None.
+            Tuple of (fp8_recipe, fp8_recipe_none_reason):
+                - fp8_recipe: Transformer Engine FP8 recipe, or None.
+                - fp8_recipe_none_reason: reason why the fp8 recipe is None.
+
+        Note:
+            This variant (HAVE_TE + HAVE_TURBO) returns a tuple. The TE-only
+            variant returns a single recipe value.
         """
         if config.fp8 == "e4m3":
             fp8_format = transformer_engine.common.recipe.Format.E4M3
@@ -159,7 +173,7 @@ if HAVE_TE and HAVE_TURBO:
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.MX_BLOCKWISE,
                 format=te_fp8_format_mapping(fp8_format),
-                block_size=MX_SCALING_BLOCK_SIZE,
+                block_size=MXFP8_SCALING_BLOCK_SIZE,
                 scale_dtype=ScaleDtype.E8M0,
             )
 
