@@ -178,8 +178,16 @@ if HAVE_TE and HAVE_TURBO:
                             primus_turbo_fp4_autocast,
                         )
 
+                        # FP4 is done entirely by Primus-Turbo (``enabled_turbo``);
+                        # keep the TE fp8 autocast DISABLED so a non-turbo TE module
+                        # still inside this context (e.g. the TEDotProductAttention
+                        # used when sliding-window attention forces
+                        # use_turbo_attention=False) does not try to build a TE
+                        # ``MXFP4BlockScaling`` RecipeState, which the shipped TE
+                        # rejects ("MXFP4BlockScaling is not supported"); those
+                        # modules are meant to stay BF16 under MXFP4 anyway.
                         fp4_context = primus_turbo_fp4_autocast(
-                            enabled=True if fp4_recipe is not None else False,
+                            enabled=False,
                             fp4_recipe=fp4_recipe,
                             fp4_group=fp4_group,
                             enabled_turbo=True if fp4_quant_config is not None else False,

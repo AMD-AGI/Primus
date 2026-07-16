@@ -1737,7 +1737,35 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 config=quant_config.data(),
             )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
-            assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
+            quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+            assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
+
+            # Weight de-oscillation eligibility signal.
+            #
+            # Unlike grouped_gemm_fp8 (which consumes a pre-quantized
+            # PrimusTurboQuantizedTensorPair), the MXFP4 grouped GEMM
+            # (Primus-Turbo PR #398, grouped_gemm_fp4) takes the bf16 weight
+            # directly and dual-quantizes it internally per call, so there is no
+            # persistent quantized-weight buffer to cache and reuse. The
+            # single-direction MXFP4 quantizer is 2D-only and cannot pack the 3D
+            # [G, N, K] weight into a QuantizedTensor anyway.
+            #
+            # MXFP4 weight de-oscillation only checks that this buffer is
+            # non-None to mark the grouped weight FP4-eligible; it recomputes its
+            # own per-expert QDQ on the full 3D weight (matching PR #398's
+            # forward weight operand: per-expert 2D-block, axis=-1). So expose a
+            # lightweight non-None marker on the first microbatch, mirroring how
+            # the dense linears advertise a quantized_weight_buffer.
+            if is_first_microbatch:
+                self.quantized_weight_buffer = torch.empty(0, device=weights.device, dtype=torch.uint8)
+
+            out = primus_turbo_torch.ops.grouped_gemm_fp4(
+                x,
+                weights,
+                m_splits,
+                trans_b=True,
+                config=quant_config.data(),
+            )
         else:
             out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
