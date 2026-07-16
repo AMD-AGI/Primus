@@ -1,0 +1,46 @@
+# Primus EXP — FLUX.1-dev T2I PRETRAIN (from scratch), 512x512.
+# =============================================================================
+# Config-only FLUX integration: runs through the exact same Primus nemo_automodel
+# path as Wan2.2 (examples/run_pretrain.sh). The only FLUX-specific pieces are the
+# model preset (flux_1_dev.yaml) and the image module config (flux_pre_trainer.yaml);
+# everything else (env/data/steps) is set here, just like the Wan exps.
+#
+# Data cache (built once; image latents + T5/CLIP embeds, no encoders at train time):
+#   python -m tools.diffusion.preprocessing_multiprocess image \
+#     --image_dir /dataset/pseudo-camera-10k/train \
+#     --output_dir /dataset/pcam_flux_512 \
+#     --processor flux --model_name /models/FLUX.1-dev --resolution 512
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/flux_1_dev-pretrain.yaml \
+#   bash examples/run_pretrain.sh
+#
+# Attention A/B: add PRIMUS_ATTN_NONDETERMINISTIC=1 to the launch env to enable the
+# nondeterministic bf16 flash-attention backward (numerically equivalent, faster).
+# Remove step_scheduler.max_steps to train full epochs instead of a benchmark cap.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_dev-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25            # benchmark cap; remove for a real pretrain run
+        local_batch_size: 4
+        global_batch_size: 32    # 4 x dp8
+      fsdp:
+        activation_checkpointing: true
+      data:
+        dataloader:
+          cache_dir: /dataset/pcam_flux_512
+          base_resolution: [512, 512]
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run
