@@ -1,5 +1,0 @@
-*.log
-log_node_*.txt
-*.pt.trace.json
-*.tgz
-csa_bench_traces/

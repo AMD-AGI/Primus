@@ -14,7 +14,7 @@ on:
     branches:
       - dev/tas/deepseek-v4
     paths:
-      - "deepseek-v4/projection/site/**"
+      - "examples/deepseek-v4/projection/site/**"
       - ".github/workflows/deploy-projection.yml"
 
 permissions:
@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site/deepseek-v4-projection
-          cp -r deepseek-v4/projection/site/. _site/deepseek-v4-projection/
+          cp -r examples/deepseek-v4/projection/site/. _site/deepseek-v4-projection/
           cat > _site/index.html <<'HTML'
           <!doctype html>
           <meta charset="utf-8" />

@@ -1,7 +1,0 @@
-*.log
-log_*.txt
-debug.log
-*.tgz
-*.json
-trace_*.txt
-*.tfevents*
