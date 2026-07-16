@@ -1,0 +1,30 @@
+# NeMo AutoModel model preset: FLUX.1-dev (12B rectified-flow T2I DiT).
+#
+# Merged (as the `model:` block) into the nemo_automodel flux_pre_trainer module
+# config by the Primus launcher. `mode: pretrain` builds ONE randomly-initialised
+# FluxTransformer2DModel from the local diffusers `transformer/config.json`
+# (no weights loaded) — the same from-scratch pretrain path Wan2.2 uses.
+#
+# The VAE + CLIP + T5 encoders are NOT loaded at train time: the dataloader reads
+# a pre-encoded latent/embedding cache (see flux_pre_trainer.yaml data.dataloader),
+# so only the transformer lives on-GPU. Build the cache once with the stock
+# AutoModel preprocessor (tools.diffusion.preprocessing_multiprocess image
+# --processor flux --model_name <this path>).
+model:
+  # Local FLUX.1-dev diffusers snapshot (random init in pretrain mode). Point at
+  # the same dir used to encode the cache so the VAE latent norm matches.
+  pretrained_model_name_or_path: /models/FLUX.1-dev
+  mode: pretrain
+  # Explicit model family (used by the recipe for PEFT and cache validation).
+  model_type: flux
+  # FLUX joint attention. `flash` is the dense, backend-stable choice on gfx950
+  # and is what the nondeterministic-bf16 attention hook re-binds
+  # (PRIMUS_ATTN_NONDETERMINISTIC=1) for the throughput A/B. Falls back cleanly.
+  attention_backend: flash
+  # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: FluxTransformer2DModel
+    subfolder: transformer
+    load_full_pipeline: false
