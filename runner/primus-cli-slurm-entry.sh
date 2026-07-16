@@ -118,8 +118,19 @@ if [[ -z "${SLURM_NODELIST:-}" ]]; then
     exit 2
 fi
 
-# Get all node hostnames (sorted, as needed)
-readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+# Get all node hostnames (sorted, as needed). Prefer scontrol, which correctly
+# expands compressed nodelists (e.g. "node[01-04]"). When scontrol is
+# unavailable -- CI containers / dev VMs without the Slurm client tools -- fall
+# back to parsing SLURM_NODELIST directly. This mirrors the scontrol-optional
+# handling in primus-cli-direct.sh so every launcher behaves consistently
+# off-cluster (range expansion is skipped in the fallback, which is fine for the
+# single-host / comma-list forms used in CI and single-node runs).
+if command -v scontrol >/dev/null 2>&1; then
+    readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+else
+    LOG_WARN "[slurm-entry] scontrol not found; parsing SLURM_NODELIST without range expansion"
+    readarray -t NODE_ARRAY < <(tr ',' '\n' <<< "$SLURM_NODELIST")
+fi
 SLURM_MASTER_ADDR="${NODE_ARRAY[0]:-}"
 if [[ -z "$SLURM_MASTER_ADDR" ]]; then
     LOG_ERROR "[slurm-entry] Failed to resolve the first host from SLURM_NODELIST=$SLURM_NODELIST"
@@ -156,8 +167,20 @@ validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distri
 
 # ------------- Dispatch based on mode ---------------
 
-# Parse mode (default: container)
+# Strip the entry-mode separator if present.
 [[ "${1:-}" == "--" ]] && shift
+
+# Parse entry mode (default: container). Supported keywords are the ones
+# advertised by primus-cli-slurm.sh: container | direct. Anything else is
+# treated as a primus subcommand and routed through the default container
+# chain (preserves the documented terse forms like `-- preflight`).
+ENTRY_MODE="container"
+if [[ "${1:-}" == "container" || "${1:-}" == "direct" ]]; then
+    ENTRY_MODE="$1"
+    shift
+fi
+[[ "${1:-}" == "--" ]] && shift
+LOG_INFO_RANK0 "[slurm-entry] Entry mode: $ENTRY_MODE"
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
@@ -175,8 +198,10 @@ SCRIPT_ARGS+=(
     --env "GPUS_PER_NODE=$GPUS_PER_NODE"
 )
 
-# Build script path (container mode only)
-script_path="$RUNNER_DIR/primus-cli-container.sh"
+# Dispatch to the chosen entry script. Both primus-cli-container.sh and
+# primus-cli-direct.sh already accept --env / --config / --debug, so no
+# downstream changes are needed.
+script_path="$RUNNER_DIR/primus-cli-${ENTRY_MODE}.sh"
 require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
 # Build full command

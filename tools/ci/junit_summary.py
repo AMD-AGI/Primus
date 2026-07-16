@@ -25,6 +25,17 @@ import xml.etree.ElementTree as ET
 COLUMNS = ("tests", "passed", "failed", "errors", "skipped")
 
 
+def _fmt_time(seconds):
+    seconds = int(seconds)
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
 def parse_file(path):
     """Return (label, stats|None, failures) for one JUnit XML file."""
     label = os.path.splitext(os.path.basename(path))[0]
@@ -69,15 +80,30 @@ def render(reports, title=None):
             lines.append("| `%s` | _no report_ |  |  |  |  |  |" % label)
             continue
         lines.append(
-            "| `%s` | %d | %d | %d | %d | %d | %.1fs |"
-            % (label, st["tests"], st["passed"], st["failed"], st["errors"], st["skipped"], st["time"])
+            "| `%s` | %d | %d | %d | %d | %d | %s |"
+            % (
+                label,
+                st["tests"],
+                st["passed"],
+                st["failed"],
+                st["errors"],
+                st["skipped"],
+                _fmt_time(st["time"]),
+            )
         )
         for k in total:
             total[k] += st[k]
         failures += [(label, *f) for f in fails]
     lines.append(
-        "| **TOTAL** | **%d** | **%d** | **%d** | **%d** | **%d** | **%.1fs** |"
-        % (total["tests"], total["passed"], total["failed"], total["errors"], total["skipped"], total["time"])
+        "| **TOTAL** | **%d** | **%d** | **%d** | **%d** | **%d** | **%s** |"
+        % (
+            total["tests"],
+            total["passed"],
+            total["failed"],
+            total["errors"],
+            total["skipped"],
+            _fmt_time(total["time"]),
+        )
     )
     lines.append("")
 
