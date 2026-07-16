@@ -215,8 +215,8 @@ class FSDP2Trainer(BaseWanTrainer):
             blocks = getattr(root, attr, None)
             if blocks is None:
                 continue
-            for block in blocks:
-                block.compile(fullgraph=True)
+            for idx, block in enumerate(blocks):
+                blocks[idx] = torch.compile(block, fullgraph=True)
                 compiled += 1
         if self.rank == 0:
             logger.info(f"FSDP2: compiled {compiled} FLUX transformer blocks with torch.compile")

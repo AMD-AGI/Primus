@@ -48,7 +48,7 @@ class HFEmbedder(nn.Module):
         )
         outputs = self.hf_module(
             input_ids=batch_encoding["input_ids"].to(self.device),
-            attention_mask=None,
+            attention_mask=batch_encoding["attention_mask"].to(self.device),
             output_hidden_states=False,
         )
         return outputs[self.output_key]

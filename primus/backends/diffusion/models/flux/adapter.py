@@ -94,7 +94,8 @@ class FluxForTraining(GenAIModel, nn.Module):
 
     def forward(self, *args, **kwargs):
         if len(args) >= 1 and isinstance(args[0], dict):
-            return self.forward_train(args[0], scheduler=kwargs.get("scheduler"))
+            scheduler = args[1] if len(args) >= 2 else kwargs.get("scheduler")
+            return self.forward_train(args[0], scheduler=scheduler)
         raise TypeError("FluxForTraining.forward expects (batch_dict, scheduler)")
 
     def forward_train(self, batch: dict[str, Any], scheduler: Any = None) -> dict[str, torch.Tensor]:

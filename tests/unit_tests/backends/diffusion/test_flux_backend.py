@@ -14,10 +14,13 @@ from primus.backends.diffusion.data.flux_precomputed import (
     FluxRawImageTextDataset,
     FluxRawImageTextProcessor,
 )
+from primus.backends.diffusion.models.flux.adapter import FluxForTraining
+from primus.backends.diffusion.models.flux.conditioner import HFEmbedder
 from primus.backends.diffusion.models.flux.math import apply_rope
 from primus.backends.diffusion.models.flux.math import attention as flux_attention
 from primus.backends.diffusion.models.flux.math import rope
 from primus.backends.diffusion.models.registrations.flux import build_flux_model
+from primus.backends.diffusion.trainers.fsdp2 import FSDP2Trainer
 
 
 def _finalize(params: dict):
@@ -120,6 +123,91 @@ def test_flux_attention_dispatch_matches_sdpa_layout():
         torch.testing.assert_close(actual, expected)
     finally:
         set_attention_backend(previous_backend)
+
+
+def test_flux_hf_embedder_passes_attention_mask():
+    class FakeTokenizer:
+        def __call__(self, text, **kwargs):
+            assert kwargs["padding"] == "max_length"
+            return {
+                "input_ids": torch.tensor([[1, 2, 0], [3, 0, 0]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.long),
+            }
+
+    class FakeTextModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = torch.nn.Parameter(torch.zeros(()))
+            self.seen_attention_mask = None
+
+        def forward(self, *, input_ids, attention_mask, output_hidden_states):
+            self.seen_attention_mask = attention_mask
+            return {"last_hidden_state": input_ids.float().unsqueeze(-1)}
+
+    embedder = HFEmbedder.__new__(HFEmbedder)
+    torch.nn.Module.__init__(embedder)
+    embedder.tokenizer = FakeTokenizer()
+    embedder.hf_module = FakeTextModel()
+    embedder.output_key = "last_hidden_state"
+    embedder.max_length = 3
+
+    output = embedder(["short", "x"])
+
+    torch.testing.assert_close(
+        embedder.hf_module.seen_attention_mask,
+        torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.long),
+    )
+    assert output.shape == (2, 3, 1)
+
+
+def test_flux_forward_uses_positional_scheduler():
+    model = FluxForTraining(
+        dit=torch.nn.Identity(),
+        train_pipeline=object(),
+        model_config=object(),
+    )
+    scheduler = object()
+    captured = {}
+
+    def forward_train(batch, scheduler=None):
+        captured["batch"] = batch
+        captured["scheduler"] = scheduler
+        return {"loss": torch.tensor(0.0)}
+
+    model.forward_train = forward_train
+    batch = {"x": torch.tensor(1)}
+
+    output = model(batch, scheduler)
+
+    assert output["loss"].item() == 0.0
+    assert captured == {"batch": batch, "scheduler": scheduler}
+
+
+def test_fsdp2_compile_transformer_blocks_replaces_modules(monkeypatch):
+    class CompiledBlock(torch.nn.Module):
+        def __init__(self, original):
+            super().__init__()
+            self.original = original
+
+    root = torch.nn.Module()
+    root.double_blocks = torch.nn.ModuleList([torch.nn.Identity(), torch.nn.ReLU()])
+    root.single_blocks = torch.nn.ModuleList([torch.nn.Sigmoid()])
+    compiled_inputs = []
+
+    def fake_compile(module, *, fullgraph):
+        assert fullgraph is True
+        compiled_inputs.append(module)
+        return CompiledBlock(module)
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+
+    trainer._compile_transformer_blocks(root)
+
+    assert len(compiled_inputs) == 3
+    assert all(isinstance(block, CompiledBlock) for block in root.double_blocks)
+    assert all(isinstance(block, CompiledBlock) for block in root.single_blocks)
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
