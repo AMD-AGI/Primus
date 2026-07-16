@@ -1,3 +1,5 @@
+# Modifications Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +25,7 @@ if str(_RECIPE_DIR) not in sys.path:
 
 import numpy as np
 import pandas as pd
-from dataset_hash import hash_directory
+from dataset_hash import hash_files
 
 
 def convert(data_dir, split):
@@ -54,5 +56,7 @@ if __name__ == "__main__":
         executable="/bin/bash",
         check=True,
     )
-    directory_hash = hash_directory(args.data_dir)
+    # Verify only the produced files, so other content in data_dir does not
+    # affect the hash.
+    directory_hash = hash_files([f"{args.data_dir}/train.npy", f"{args.data_dir}/validation.npy"])
     print(f"Succesfully converted dataset with hash {directory_hash}")

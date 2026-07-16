@@ -1,3 +1,5 @@
+# Modifications Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +15,7 @@
 # limitations under the License.
 
 import argparse
+import glob
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +24,7 @@ _RECIPE_DIR = Path(__file__).resolve().parent
 if str(_RECIPE_DIR) not in sys.path:
     sys.path.insert(0, str(_RECIPE_DIR))
 
-from dataset_hash import hash_directory
+from dataset_hash import hash_files
 from huggingface_hub import snapshot_download
 
 parser = argparse.ArgumentParser()
@@ -37,14 +40,20 @@ snapshot_download(
     max_workers=16,
     repo_type="dataset",
 )
+
+# Move the dataset parquets up and remove only HF's own artifacts. Do NOT
+# blanket-delete data_dir: it may hold a sibling checkpoint (the old
+# `find <data_dir> ! -name '*.parquet' -exec rm -rf` wiped it).
 subprocess.run(
-    f"mv {args.data_dir}/data/* {args.data_dir}/ && find {args.data_dir} -mindepth 1 ! -name '*.parquet' -exec rm -rf {{}} +",
+    f"mv {args.data_dir}/data/*.parquet {args.data_dir}/ && rm -rf {args.data_dir}/data {args.data_dir}/.cache",
     shell=True,
     executable="/bin/bash",
     check=True,
 )
 
-directory_hash = hash_directory(args.data_dir)
+# Verify only the downloaded parquets, so other content in data_dir does not
+# affect the hash.
+directory_hash = hash_files(sorted(glob.glob(f"{args.data_dir}/*.parquet")))
 assert (
     directory_hash == "682a5f40b790a56751bf8303554efc08"
 ), f"Expected hash 682a5f40b790a56751bf8303554efc08, but got {directory_hash}"
