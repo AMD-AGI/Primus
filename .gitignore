@@ -14,7 +14,4 @@ output
 experiment
 /data/*
 pp_simulation_result
-# ODC runtime output dirs (generated at run time)
-odc_logs/
-odc_run/
 .cursor/
