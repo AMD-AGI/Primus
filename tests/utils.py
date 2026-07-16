@@ -17,6 +17,53 @@ from primus.core.utils import logger
 TRAINING_COMPLETED_MARKER = "Training completed."
 
 
+def skip_if_no_cuda(reason: str = "requires GPU (primus_turbo initializes CUDA at import)") -> None:
+    """Skip the calling test module at collection time when CUDA is unavailable.
+
+    Several Flux/diffusion test modules import ``primus_turbo`` (directly or
+    transitively), which initializes CUDA at import and raises on CPU-only
+    hosts. Call this at module scope *before* those imports so collection
+    succeeds without a GPU. It is a no-op when CUDA is present, so GPU CI still
+    runs every test.
+    """
+    import pytest
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip(reason, allow_module_level=True)
+
+
+def install_aiter_deepbind_hook() -> None:
+    """Install Primus' production RTLD_DEEPBIND import hook for aiter's mha kernels.
+
+    This invokes the exact mechanism the ``megatron.turbo.aiter_deepbind``
+    before_train patch uses in real training: it wraps ``importlib.import_module``
+    so aiter's pinned mha extensions bind their own ``aiter::mha_bwd`` instead of
+    transformer_engine's stale vendored ``libmha`` (ROCm/aiter#1332). On
+    gfx942/gfx950 that stale-symbol interposition otherwise makes Turbo's hd128
+    backward launch with an invalid grid config and crash the process.
+
+    Unit tests call ``flash_attn_func`` directly and never run the before_train
+    phase, so without this hook they hit the same crash the production patch
+    prevents. Call this at diffusion ``conftest`` import time so the hook is in
+    place before any test first imports the aiter mha modules (which happens
+    lazily on the first attention op). No-op when CUDA is unavailable or the hook
+    cannot be installed (e.g. CPU-only host).
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        from primus.backends.megatron.patches.turbo.aiter_deepbind_patches import (
+            _install_deepbind_import_hook,
+        )
+    except Exception:
+        return
+
+    _install_deepbind_import_hook()
+
+
 class PrimusUT(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

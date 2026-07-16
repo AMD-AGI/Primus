@@ -1,0 +1,58 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 535M with Guidance Embedding (Advanced Configuration)
+#
+# This config demonstrates Flux training with guidance embedding enabled.
+# This is an OPTIONAL advanced feature that allows for faster single-pass CFG
+# during inference, but requires training with guidance embedding enabled.
+#
+# IMPORTANT: Most users should use the standard flux_535m_pretrain.yaml config.
+# Only use this if you specifically need guidance embedding support.
+#
+# Usage:
+#   EXP=examples/megatron/configs/MI355X/diffusion/flux_535m_with_guidance_embed.yaml \
+#   bash examples/run_pretrain.sh
+
+# Extend standard 535M config
+extends:
+  - flux_535m_pretrain.yaml
+
+modules:
+  pre_trainer:
+    overrides:
+      # ============================================================================
+      # Guidance Embedding Configuration (ADVANCED)
+      # ============================================================================
+
+      # Enable guidance embedding for single-pass CFG
+      # This adds a learned MLPEmbedder layer that conditions on guidance scale
+      guidance_embed: true
+
+      # Guidance scale used during training
+      # Model learns to adapt its predictions based on this scale
+      guidance_scale: 3.5
+
+      # ============================================================================
+      # Notes
+      # ============================================================================
+      #
+      # Training with guidance embedding:
+      # - Adds ~1-2% more parameters (guidance MLPEmbedder)
+      # - Allows single-pass CFG during inference (faster)
+      # - Requires more training data/iterations to converge
+      # - Model learns guidance as a conditioning signal
+      #
+      # Inference with guidance embedding:
+      # - Pipeline automatically detects guidance_embed layer
+      # - Uses single forward pass instead of batch doubling
+      # - ~2x faster CFG compared to explicit CFG
+      # - Guidance scale can be varied at inference time
+      #
+      # Standard approach (guidance_embed: false):
+      # - Default for most Primus training
+      # - Uses explicit CFG (batch doubling) at inference
+      # - More compatible with existing checkpoints
+      # - Slightly slower but more flexible
+      #
+      # See examples/megatron/diffusion/README.md for more details.

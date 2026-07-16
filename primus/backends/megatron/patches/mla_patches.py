@@ -12,7 +12,7 @@ components (configs, blocks, etc.) to integrate Primus-specific behavior.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 @register_patch(
@@ -20,10 +20,9 @@ from primus.modules.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description=(
-        "Monkey patch MLA attention to use PrimusMLASelfAttention "
-        "when use_turbo_parallel_linear is enabled."
+        "Monkey patch MLA attention to use PrimusMLASelfAttention " "when use_turbo_gemm is enabled."
     ),
-    condition=lambda ctx: getattr(get_args(ctx), "use_turbo_parallel_linear", False),
+    condition=lambda ctx: getattr(get_args(ctx), "use_turbo_gemm", False),
 )
 def patch_mla_attention(ctx: PatchContext):
     """

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -18,6 +18,7 @@ from primus.core.launcher.config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from primus.pretrain import setup_backend_path
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     get_node_rank,
     log_error_and_exit,
@@ -32,7 +33,7 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
@@ -102,11 +103,41 @@ def prepare_dataset(
 
 def prepare_dataset_if_needed(primus_config: PrimusConfig, data_path: Path, env=None):
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
+
+    # Skip dataset preparation if train_data_path is explicitly set
     if pre_trainer_cfg.train_data_path is not None:
         return
 
-    tokenizer_type = pre_trainer_cfg.tokenizer_type
-    tokenizer_model = pre_trainer_cfg.tokenizer_model
+    # Check if this is a diffusion model (uses Energon datasets, not tokenized datasets)
+    model_type = getattr(pre_trainer_cfg, "model_type", None)
+    trainer_class = getattr(pre_trainer_cfg, "trainer_class", None)
+    data_path_config = getattr(pre_trainer_cfg, "data_path", None)
+
+    # Determine if this is a diffusion model
+    is_diffusion = False
+    if model_type == "diffusion_model":
+        is_diffusion = True
+    elif trainer_class and ("Flux" in str(trainer_class) or "Diffusion" in str(trainer_class)):
+        is_diffusion = True
+    elif hasattr(model_type, "name") and "DIFFUSION" in model_type.name:
+        is_diffusion = True
+
+    # For diffusion models with data_path set, skip tokenization (they use Energon)
+    if is_diffusion and data_path_config:
+        log_info("=" * 80)
+        log_info("Diffusion model detected with data_path configured.")
+        log_info("Skipping tokenization (diffusion models use Energon datasets).")
+        log_info(f"Data will be loaded from: {data_path_config}")
+        log_info("=" * 80)
+        return
+
+    # For language models, proceed with tokenization
+    tokenizer_type = getattr(pre_trainer_cfg, "tokenizer_type", None)
+    if not tokenizer_type:
+        log_info("No tokenizer_type found, skipping dataset preparation.")
+        return
+
+    tokenizer_model = getattr(pre_trainer_cfg, "tokenizer_model", None)
     default_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_text_sentence"
     tokenized_data_path = Path(os.environ.get("TOKENIZED_DATA_PATH", str(default_tokenized_path)))
 
@@ -118,6 +149,12 @@ def prepare_dataset_if_needed(primus_config: PrimusConfig, data_path: Path, env=
             hf_token = os.environ.get("HF_TOKEN")
             if not hf_token:
                 log_error_and_exit("Environment variable HF_TOKEN must be set.")
+
+            if not tokenizer_model:
+                log_error_and_exit(
+                    "tokenizer_model not found in configuration. "
+                    "This is required for language model tokenization."
+                )
 
             log_info(f"TOKENIZED_DATA_PATH is {tokenized_data_path}")
 
@@ -160,7 +197,7 @@ def resolve_megatron_path_for_helper(primus_path: Path, backend_path: str | None
         log_info(f"Using backend_path from MEGATRON_PATH environment: {path}")
         return path
 
-    path = primus_path / "third_party" / "Megatron-LM"
+    path = default_backend_path(primus_path, "Megatron-LM")
     log_info(f"No backend_path provided, falling back to: {path}")
     return path
 

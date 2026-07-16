@@ -7,9 +7,21 @@
 
 import os
 import re
+import socket
+import subprocess
+import sys
 import unittest
 
 from tests.utils import PrimusUT, run_training_script
+
+
+def _find_free_port() -> int:
+    """Ask the kernel for a free TCP port (bind to 0); avoids EADDRINUSE from
+    guessing a port that overlaps the ephemeral range or a not-yet-released one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
 
 _GFX_TO_PLATFORM = {
     "gfx942": "MI300X",
@@ -392,10 +404,22 @@ class TestMegatronTrainer(PrimusUT):
                 "8",
                 "--pipeline_model_parallel_size",
                 "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "1",
                 "--enable_primus_turbo",
                 "1",
                 "--use_turbo_attention",
                 "1",
+                "--pipeline_model_parallel_layout",
+                "null",
+                "--recompute_layer_ids",
+                "null",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
             ],
         )
 
@@ -454,7 +478,7 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_attention",
                 "1",
-                "--use_turbo_grouped_mlp",
+                "--use_turbo_grouped_gemm",
                 "1",
             ],
         )
@@ -484,7 +508,7 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_attention",
                 "1",
-                "--use_turbo_grouped_mlp",
+                "--use_turbo_grouped_gemm",
                 "1",
                 "--fp8",
                 "e4m3",
@@ -603,9 +627,9 @@ class TestMegatronTrainer(PrimusUT):
             "1",
             "--use_turbo_attention",
             "0",
-            "--use_turbo_grouped_mlp",
+            "--use_turbo_grouped_gemm",
             "0",
-            "--use_turbo_parallel_linear",
+            "--use_turbo_gemm",
             "0",
             "--moe_use_legacy_grouped_gemm",
             "0",
@@ -639,9 +663,9 @@ class TestMegatronTrainer(PrimusUT):
                 "false",
                 "--use_turbo_attention",
                 "1",
-                "--use_turbo_grouped_mlp",
+                "--use_turbo_grouped_gemm",
                 "1",
-                "--use_turbo_parallel_linear",
+                "--use_turbo_gemm",
                 "1",
             ],
         )
@@ -751,6 +775,118 @@ class TestMegatronTrainerDeterministic(PrimusUT):
         )
 
         assert self.check_numerical_reproducility(stdout, stdout_ref)
+
+
+class TestProjectionSimulate(PrimusUT):
+    """Projection is an offline planner that training E2E never runs, so it gets no
+    E2E coverage otherwise. Two paths are exercised so the coverage .pth records them:
+
+    - simulate (no GPU): origami/SDPA backends, multinode scaling, CLI orchestration.
+      A dense + a MoE config; the MoE one adds the expert-parallel / All-to-All /
+      router / grouped-GEMM branches the dense config never reaches.
+    - benchmark (real GPU layer): _run_layer_benchmark / benchmark_layer /
+      memory_capture paths that simulate cannot reach, launched via primus-cli so
+      torchrun sets up the distributed env the real layer bench requires.
+
+    Projection auto-limits the stack to 1-2 layers, so all cases are quick."""
+
+    _DENSE = "llama3.1_8B-BF16-pretrain.yaml"
+    _MOE = "mixtral_8x7B_v0.1-BF16-pretrain.yaml"
+    _BENCH = "qwen2.5_7B-BF16-pretrain.yaml"
+
+    def _check(self, result) -> str:
+        # returncode is the robust E2E-smoke contract: projection raises on any
+        # real error (bad config/arch, missing data, gated model, ...) which the
+        # CLI turns into a non-zero exit. We deliberately do NOT assert on result
+        # text -- the result-line wording differs per path (simulate/benchmark,
+        # dense/MoE/PP) and is brittle to reword.
+        self.assertEqual(result.returncode, 0, msg=(result.stdout[-1500:] + result.stderr[-1500:]))
+        return result.stdout
+
+    def _run_simulate(self, suite: str, mode_flag: str, model: str, extra: list | None = None) -> str:
+        config = f"examples/megatron/configs/{GPU_PLATFORM}/{model}"
+        cmd = [
+            sys.executable,
+            "-m",
+            "primus.cli.main",
+            "projection",
+            suite,
+            "--config",
+            config,
+            mode_flag,
+            "simulate",
+            "--gpu-arch",
+            GPU_PLATFORM.lower(),
+            "--target-nodes",
+            "4",
+            *(extra or []),
+        ]
+        return self._check(subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy()))
+
+    def _run_benchmark(self, suite: str, mode_flag: str) -> str:
+        # Real GPU layer bench needs torchrun's distributed env -> go through
+        # the primus-cli launcher (a plain subprocess won't set NNODES/NODE_RANK).
+        config = f"examples/megatron/configs/{GPU_PLATFORM}/{self._BENCH}"
+        cmd = [
+            "bash",
+            "./runner/primus-cli",
+            "direct",
+            "--",
+            "projection",
+            suite,
+            "--config",
+            config,
+            mode_flag,
+            "benchmark",
+            "--benchmark-gpus",
+            "8",
+            "--target-nodes",
+            "2",
+        ]
+        env = os.environ.copy()
+        # Kernel-assigned free port so back-to-back GPU benches don't hit
+        # EADDRINUSE (a fixed/random port can clash with a not-yet-released
+        # previous run or the ephemeral range).
+        env["MASTER_PORT"] = str(_find_free_port())
+        return self._check(subprocess.run(cmd, capture_output=True, text=True, env=env))
+
+    def test_performance_simulate_dense(self):
+        self._run_simulate("performance", "--profiling-mode", self._DENSE)
+
+    def test_memory_simulate_dense(self):
+        self._run_simulate("memory", "--memory-mode", self._DENSE)
+
+    def test_performance_simulate_moe(self):
+        # --target-ep-size drives the expert-parallel projection path.
+        self._run_simulate("performance", "--profiling-mode", self._MOE, extra=["--target-ep-size", "8"])
+
+    def test_memory_simulate_moe(self):
+        self._run_simulate("memory", "--memory-mode", self._MOE)
+
+    def test_performance_simulate_pp(self):
+        # PP>1 is the only thing that runs the pipeline-scheduler simulator
+        # (simulator.py); the PP=1 configs all skip pipeline simulation.
+        self._run_simulate(
+            "performance", "--profiling-mode", self._DENSE, extra=["--pipeline_model_parallel_size", "4"]
+        )
+
+    def _require_2_gpus(self):
+        import torch
+
+        if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+            self.skipTest("projection benchmark needs >=2 GPUs")
+
+    def test_performance_benchmark(self):
+        # Real GPU layer bench: covers _run_layer_benchmark / benchmark_layer /
+        # utils.benchmark_layer that simulate can't reach.
+        self._require_2_gpus()
+        self._run_benchmark("performance", "--profiling-mode")
+
+    def test_memory_benchmark(self):
+        # Real GPU memory capture: covers memory_projection/benchmark.py +
+        # memory_capture.py (HBM peak hooks) that simulate can't reach.
+        self._require_2_gpus()
+        self._run_benchmark("memory", "--memory-mode")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
 
     def bias_act_func_with_mask(
         self,
@@ -76,6 +77,18 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
+    @staticmethod
+    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+        if bias_parallel is None:
+            return intermediate_parallel
+
+        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
+        tokens_per_expert_cpu = tokens_per_expert.tolist()
+
+        return super()._apply_bias(
+            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
+        )
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -93,11 +106,11 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        # TODO(ruibin): remove extra d2h and h2d by fuse padding into permute kernel
-        if self.config.fp8 or self.config.fp4:
+        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+            # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
             actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+            permuted_local_hidden_states, tokens_per_expert_cpu = self.quantization_padding(
                 permuted_local_hidden_states, tokens_per_expert_cpu
             )
             permuted_probs, _ = self.quantization_padding(
@@ -150,11 +163,10 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.
         if self.offload_moe_act:
             output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
-        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
-        output = self._apply_bias(output, output_bias, tokens_per_expert.tolist(), permuted_probs)
+        output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
+        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None

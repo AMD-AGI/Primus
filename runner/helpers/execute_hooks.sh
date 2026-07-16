@@ -86,11 +86,17 @@ execute_hooks() {
             local hook_output
             local exit_code
 
+            # Internal protocol lines (env.*/extra.*) are consumed by the parser
+            # below and reported via level-aware "[Hooks] ..." messages, so they
+            # are filtered from the real-time terminal copy to avoid raw noise.
+            # The full output is still captured (tee stdout) for parsing.
+            local _hook_proto_re='^(env|extra)\.[A-Za-z_]'
+
             if [[ "$hook_file" == *.sh ]]; then
                 # Only main node prints hook raw output in real-time.
                 # Use set -o pipefail to propagate exit code through pipe
                 if [[ "${NODE_RANK:-0}" -eq 0 ]]; then
-                    hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee >(grep -vE "$_hook_proto_re" >&2))"
                     exit_code=$?
                 else
                     hook_output="$(bash "$hook_file" "${args[@]}" 2>&1)"
@@ -98,7 +104,7 @@ execute_hooks() {
                 fi
             elif [[ "$hook_file" == *.py ]]; then
                 if [[ "${NODE_RANK:-0}" -eq 0 ]]; then
-                    hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee >(grep -vE "$_hook_proto_re" >&2))"
                     exit_code=$?
                 else
                     hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1)"

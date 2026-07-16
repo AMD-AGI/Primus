@@ -17,6 +17,7 @@ from primus.backends.megatron_bridge.config_utils import (
 )
 from primus.core.launcher.parser import load_primus_config
 from runner.helpers.hooks.train.pretrain.utils import (
+    default_backend_path,
     get_env_case_insensitive,
     log_error_and_exit,
     log_info,
@@ -30,7 +31,7 @@ def check_dir_nonempty(path: Path, name: str):
             f"{name} ({path}) does not exist or is empty.\n"
             "Please ensure Primus is properly initialized.\n"
             "If not yet cloned, run:\n"
-            "    git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git\n"
+            "    git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git\n"
             "Or if already cloned, initialize submodules with:\n"
             "    git submodule update --init --recursive"
         )
@@ -49,7 +50,7 @@ def resolve_backend_path(cli_path: Optional[str], primus_path: Path) -> Path:
         log_info(f"MEGATRON_BRIDGE_PATH found in environment: {path}")
         return path
 
-    path = primus_path / "third_party" / "Megatron-Bridge"
+    path = default_backend_path(primus_path, "Megatron-Bridge")
     log_info(f"MEGATRON_BRIDGE_PATH not found, falling back to: {path}")
     return path
 
@@ -64,7 +65,9 @@ def build_megatron_helper(bridge_path: Path):
         return
 
     log_info(f"Building Megatron dataset C++ helper in {dataset_cpp_dir}")
-    ret = subprocess.run(["make"], cwd=dataset_cpp_dir)
+    # `-s` silences make's "Nothing to be done"/recipe echo on no-op rebuilds;
+    # real compiler errors still surface and are handled below.
+    ret = subprocess.run(["make", "-s"], cwd=dataset_cpp_dir)
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ dataset helper failed.")
     log_info("Megatron C++ dataset helper built successfully")

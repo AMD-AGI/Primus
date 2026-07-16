@@ -21,9 +21,9 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 10
-      global_batch_size: 640
+      train_iters: 20
+      micro_batch_size: 12
+      global_batch_size: 384
 
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
@@ -46,7 +46,7 @@ modules:
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -70,8 +70,8 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: true
-      use_turbo_grouped_mlp: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"

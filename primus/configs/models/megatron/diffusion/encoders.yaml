@@ -1,0 +1,126 @@
+# Encoder Configuration for Flux Diffusion Models
+# This file defines configurations for VAE, T5-XXL, and CLIP-L encoders
+
+# ============================================================================
+# Subfolder Configuration Guide
+# ============================================================================
+# Different model repositories organize files differently:
+#
+# 1. FLUX.1-dev (complex structure):
+#    - VAE: model in vae/
+#    - T5: model in text_encoder_2/, tokenizer in tokenizer_2/
+#    - CLIP: model in text_encoder/, tokenizer in tokenizer/
+#
+# 2. Standalone models (simple structure):
+#    - google/t5-v1_1-xxl: all files in root (subfolder: null)
+#    - openai/clip-vit-large-patch14: all files in root (subfolder: null)
+#
+# Configuration fields:
+#   - subfolder: Where model weights are located
+#   - tokenizer_subfolder: Where tokenizer files are located (text encoders only)
+#     If tokenizer_subfolder is null, uses subfolder value
+# ============================================================================
+
+# VAE Encoder (AutoencoderKL)
+vae:
+  type: autoencoder_kl
+  model_path: black-forest-labs/FLUX.1-dev  # HuggingFace repo or local path
+  subfolder: vae  # Subfolder containing VAE weights
+  precision: bf16  # bf16, fp16, or fp32
+  device: cuda
+  use_cached: true  # Use pre-encoded latents if available
+  freeze_weights: true  # Freeze VAE weights during training
+  cache_dir: null  # Optional: custom cache directory
+
+  # Flux-specific VAE parameters
+  scale_factor: 0.3611  # Latent scaling factor
+  shift_factor: 0.1159  # Latent shift factor
+  in_channels: 3  # RGB input
+  out_channels: 16  # Latent channels
+  latent_downsample_factor: 8  # H/8, W/8
+
+# T5-XXL Text Encoder
+t5:
+  type: t5_xxl
+  model_path: black-forest-labs/FLUX.1-dev
+  subfolder: text_encoder_2         # Subfolder containing T5 model weights
+  tokenizer_path: null              # Uses model_path if null
+  tokenizer_subfolder: tokenizer_2  # Subfolder containing T5 tokenizer files
+  precision: bf16
+  device: cuda
+  use_cached: true
+  freeze_weights: true
+  cache_dir: null  # Optional: custom cache directory
+
+  # T5-XXL parameters
+  max_length: 512  # Maximum sequence length
+  embedding_dim: 4096  # T5-XXL hidden size
+  return_pooled: false  # T5 doesn't use pooled embeddings
+
+# CLIP-L Text Encoder
+clip:
+  type: clip_l
+  model_path: black-forest-labs/FLUX.1-dev
+  subfolder: text_encoder          # Subfolder containing CLIP model weights
+  tokenizer_path: null             # Uses model_path if null
+  tokenizer_subfolder: tokenizer   # Subfolder containing CLIP tokenizer files
+  precision: bf16
+  device: cuda
+  use_cached: true
+  freeze_weights: true
+  cache_dir: null  # Optional: custom cache directory
+
+  # CLIP-L parameters
+  max_length: 77  # CLIP max sequence length
+  embedding_dim: 768  # CLIP-L hidden size
+  pooled_dim: 768  # CLIP-L pooled embedding size
+  return_pooled: true  # CLIP returns both sequence and pooled
+
+# ============================================================================
+# Data Mode Configuration
+# ============================================================================
+# Data mode (preencoded vs on-the-fly) is now determined by dataset subflavors
+# in dataset.yaml, not by a config parameter.
+#
+# For preencoded datasets (RECOMMENDED):
+#   - Create dataset.yaml with: subflavors: {encoding: preencoded}
+#   - Encoders above are NOT loaded during training
+#   - Dataset serves precalculated latents and embeddings
+#
+# For raw/on-the-fly datasets:
+#   - Create dataset.yaml with: subflavors: {encoding: raw}
+#   - Encoders above ARE loaded during training
+#   - Images/text are encoded on-the-fly (slower but saves disk space)
+#
+# See: docs/04-technical-guides/diffusion-models/data_preprocessing.md
+# ============================================================================
+
+# ============================================================================
+# Example: Standalone Models (simpler configuration)
+# ============================================================================
+# For standalone models, subfolder and tokenizer_subfolder should be null:
+#
+# t5_standalone:
+#   type: t5_xxl
+#   model_path: google/t5-v1_1-xxl
+#   subfolder: null                  # All files in root
+#   tokenizer_subfolder: null        # Not needed
+#   precision: bf16
+#   device: cuda
+#
+# clip_standalone:
+#   type: clip_l
+#   model_path: openai/clip-vit-large-patch14
+#   subfolder: null                  # All files in root
+#   tokenizer_subfolder: null        # Not needed
+#   precision: bf16
+#   device: cuda
+# ============================================================================
+
+# Notes:
+# - Model paths can be:
+#   1. HuggingFace repo: "black-forest-labs/FLUX.1-dev"
+#   2. Local path: "/path/to/models/flux-dev"
+#
+# - License note: FLUX.1-dev is non-commercial only
+#   Make sure to comply with license restrictions

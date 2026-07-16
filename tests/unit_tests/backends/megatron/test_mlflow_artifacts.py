@@ -175,6 +175,19 @@ class TestFilterTracesByRank:
 class TestNormalizeTracelensInputs:
     """Test TraceLens input normalization helpers."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_world_size_env(self, monkeypatch):
+        """Clear WORLD_SIZE / SLURM_NTASKS before each test.
+
+        ``_normalize_tracelens_ranks`` drops ranks >= world_size, reading it from
+        these env vars. Without isolation an ambient value inherited from the
+        environment (e.g. WORLD_SIZE=1 leaked from torchrun/CI) would filter out
+        otherwise-valid ranks and make these tests non-hermetic. Tests that need
+        a specific world size set it explicitly via ``monkeypatch.setenv``.
+        """
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+        monkeypatch.delenv("SLURM_NTASKS", raising=False)
+
     def test_normalize_ranks_none(self):
         assert mlflow_artifacts_mod._normalize_tracelens_ranks(None) is None
 

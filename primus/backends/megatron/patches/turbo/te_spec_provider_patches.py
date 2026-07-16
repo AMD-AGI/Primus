@@ -12,7 +12,7 @@ Patches for replacing Transformer Engine TESpecProvider with PrimusTurboSpecProv
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _use_legacy_grouped_gemm(ctx: PatchContext) -> bool:
@@ -20,9 +20,7 @@ def _use_legacy_grouped_gemm(ctx: PatchContext) -> bool:
     return bool(
         getattr(args, "moe_grouped_gemm", False)
         and getattr(args, "moe_use_legacy_grouped_gemm", False)
-        and not (
-            getattr(args, "use_turbo_grouped_gemm", False) or getattr(args, "use_turbo_grouped_mlp", False)
-        )
+        and not getattr(args, "use_turbo_grouped_gemm", False)
     )
 
 

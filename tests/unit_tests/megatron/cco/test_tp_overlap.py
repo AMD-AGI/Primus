@@ -28,7 +28,7 @@ from primus.backends.transformer_engine.pytorch.module.base import (
     initialize_ub,
 )
 from primus.core.utils import logger
-from primus.modules.module_utils import set_logging_rank
+from primus.core.utils.module_utils import set_logging_rank
 
 
 @contextmanager

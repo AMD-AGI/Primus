@@ -31,8 +31,8 @@ import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils import logger as primus_logger
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
-from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 @dataclass
@@ -425,7 +425,7 @@ class ThroughputAverageExtension:
                     idx = parsed.throughput_index
                     if idx is not None and 0 <= idx < len(parsed.segments):
                         parsed.segments[idx] = (
-                            f"throughput per GPU (TFLOP/s/GPU): " f"{tflops_value:.1f}/{avg_tflops:.1f}"
+                            f"compute per GPU (TFLOP/s/GPU): {tflops_value:.1f} (avg {avg_tflops:.1f})"
                         )
 
             # ---------------- Tokens/s ----------------
@@ -466,7 +466,16 @@ class ThroughputAverageExtension:
                 warning_rank_0(f"[Patch:megatron.training_log] No token throughput")
                 return log_string
 
-            avg_tokens = sum(self._recent_token_throughputs) / len(self._recent_token_throughputs)
+            # Use the harmonic mean for the token throughput average. The harmonic
+            # mean is the correct way to average rates (tokens/s) over iterations of
+            # equal token count, since it weights slow iterations more heavily.
+            positive_token_throughputs = [t for t in self._recent_token_throughputs if t > 0]
+            if positive_token_throughputs:
+                avg_tokens = len(positive_token_throughputs) / sum(
+                    1.0 / t for t in positive_token_throughputs
+                )
+            else:
+                avg_tokens = 0.0
 
             # Append token throughput directly after the TFLOP throughput within
             # the same segment. We do not create a new segment to keep the log
@@ -475,7 +484,7 @@ class ThroughputAverageExtension:
             if idx is not None and 0 <= idx < len(parsed.segments):
                 parsed.segments[idx] = (
                     f"{parsed.segments[idx]} "
-                    f" | tokens per GPU (tokens/s/GPU): {token_value:.1f}/{avg_tokens:.1f}"
+                    f" | tokens/s/GPU inst/harmonic mean: {token_value:.1f}/{avg_tokens:.1f}"
                 )
 
             # String result is ignored by the main patch when parsed is provided.

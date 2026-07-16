@@ -9,7 +9,7 @@ Megatron V-schedule support patches for pipeline parallelism.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _is_v_schedule_enabled(ctx: PatchContext) -> bool:

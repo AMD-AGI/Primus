@@ -81,7 +81,7 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_grouped_gemm: false
 
       # deepep
       use_turbo_deepep: true
@@ -104,7 +104,7 @@ modules:
       fp8_recipe: delayed # 'tensorwise', 'delayed', 'mxfp8', 'blockwise', 'custom'
       # enable_primus_turbo: true
       # use_turbo_attention: true
-      # use_turbo_grouped_mlp: false
+      # use_turbo_grouped_gemm: false
       # enable_primus_turbo: false
       # enable_turbo_attention_float8 : false
       # enable_turbo_gemm_float8 : false
