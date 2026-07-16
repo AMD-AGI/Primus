@@ -1,6 +1,6 @@
 # Contributing guide
 
-This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The Primus repository root also contains the file [CONTRIBUTING.md](https://github.com/AMD-AGI/Primus/blob/main/CONTRIBUTING.md), which summarizes key contribution guidelines, such as branch naming conventions, commit message style, and pull request requirements.
+This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The repository root [CONTRIBUTING.md](../../CONTRIBUTING.md) summarizes key contribution guidelines, such as branch naming conventions, commit message style, and pull request requirements.
 
 ## 1. Development setup
 
