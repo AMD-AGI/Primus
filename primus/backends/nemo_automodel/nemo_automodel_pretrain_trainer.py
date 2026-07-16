@@ -51,6 +51,31 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
         """Optional pre-init phase (kept for API symmetry)."""
         log_rank_0("NemoAutomodelPretrainTrainer.setup()")
 
+    def _install_optional_hooks(self):
+        """Install env-gated Primus-side numerics hooks BEFORE the recipe builds
+        the transformer (i.e. before ``set_attention_backend`` / first forward).
+
+        Each hook is a self-contained monkeypatch that is a no-op unless its own
+        environment flag is set, so this is safe to call unconditionally and has
+        zero effect on a default (bf16) run. No Automodel/diffusers source is
+        modified.
+        """
+        # (module, description) pairs; each exposes an env-gated install().
+        hooks = (
+            ("primus.backends.nemo_automodel.primus_turbo_fp8", "GEMM low-precision"),
+            ("primus.backends.nemo_automodel.primus_turbo_fp8_attn", "FP8 attention"),
+            ("primus.backends.nemo_automodel.aiter_bf16_attn", "non-deterministic attention"),
+        )
+        import importlib
+
+        for mod_name, desc in hooks:
+            try:
+                mod = importlib.import_module(mod_name)
+                if mod.install():
+                    log_rank_0(f"Installed optional hook: {desc}")
+            except Exception as e:  # defensive: never break a default run
+                error_rank_0(f"Optional hook '{desc}' install failed (skipping): {e}")
+
     def init(self):
         """Build the AutoModel recipe from Primus params and set it up."""
         log_rank_0("NemoAutomodelPretrainTrainer.init() - building AutoModel recipe")
@@ -78,6 +103,9 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
                 os.unlink(yaml_path)
             except OSError as e:
                 error_rank_0(f"NemoAutomodelPretrainTrainer: failed to delete temp YAML {yaml_path}: {e}")
+
+        # Install env-gated numerics hooks before the recipe builds the model.
+        self._install_optional_hooks()
 
         self._recipe = TrainDiffusionRecipe(cfg)
         self._recipe.setup()
