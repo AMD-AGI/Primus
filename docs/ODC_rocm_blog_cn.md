@@ -348,7 +348,7 @@ PYTHONPATH=<path>/Primus-Turbo        python -c "import primus_turbo.pytorch._C 
 
 要点：
 
-- **`odc_nopad` 臂** = `enable_odc: true` + `enable_odc_lb_mini: true` + `odc_p2p_backend: rocshmem`（双机再加 `odc_rocshmem_gda: true`）。两份示例配置 `deepseek1.5B-odc-lbmini.yaml`、`qwen14B-odc-dn.yaml` 已带 `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true`，**只差把后端设成 `rocshmem`**（默认 `mori`），本文照下面各节补上。
+- **`odc_nopad` 臂** = `enable_odc: true` + `enable_odc_lb_mini: true` + `odc_p2p_backend: rocshmem`（双机再加 `odc_rocshmem_gda: true`）。两份示例配置 `deepseek1.5B-odc-lbmini.yaml`、`qwen14B-odc-dn.yaml` **已把这些带齐**（`enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / `odc_p2p_backend: rocshmem`，双机版还带 `odc_rocshmem_gda: true`）——**开箱即用，无需再手动补后端**。（注意 `trainer_base.yaml` 里 `odc_p2p_backend` 的**全局默认仍是 `mori`**，所以你若自写配置要记得设 `rocshmem`。）
 - **`nccl_pad` 对齐基线臂** = `enable_odc: false` + **`enable_odc_lb_mini: true`**（标准 Megatron FSDP2 + RCCL，无 ODC）。⚠️ **务必保留 `enable_odc_lb_mini: true`**：`a1ee1f64` 起 LB-Mini 数据已与 ODC 通信**解耦**，`enable_odc: false` 时它切到**对齐模式**（`all_reduce(MAX)` 令各 rank 微批数一致、集合可安全逐微批调用），从而让基线**消费与 `odc_nopad` 完全相同的变长数据**——这正是被删掉的旧 env `LB_MINI_FORCE_DATA` 的合规替代。
 - **数据口径（关键）**：`odc_nopad` 是变长/nopad 数据；公平的 `nccl_pad` 基线**必须**用**同一份** LB-Mini 变长数据（`enable_odc_lb_mini: true` 的对齐模式）。若基线漏了 `enable_odc_lb_mini: true`，它会跑更重的标准 padded 数据（**不同口径、不可比**），从而把加速比**虚高**（我们早期就见过对非对齐基线的 ~1.9× 假象，见 6.7）。
 - **`mori` 后端双机有已知 bug，切勿用于双机**；本文所有 ODC 结果都用 `rocshmem`。
@@ -367,12 +367,7 @@ run_odc.sh <mori|rocshmem> <pad|nopad> <exp_yaml_relpath> <exp_name> [KEY=VAL ..
 
 ### 6.5 单机 1.5B `odc_nopad`（8 卡，host / XGMI-IPC）
 
-**① 配置**：示例配置 `examples/megatron/configs/MI355X/deepseek1.5B-odc-lbmini.yaml` 已含 `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / `lb_mini_cost_model: fit` / `global_batch_size: 16`；只需在其 `overrides:` 下补一行把后端设成 rocSHMEM：
-
-```yaml
-      # examples/megatron/configs/MI355X/deepseek1.5B-odc-lbmini.yaml -> overrides:
-      odc_p2p_backend: rocshmem      # 单机 host/XGMI-IPC；默认是 mori
-```
+**① 配置**：示例配置 `examples/megatron/configs/MI355X/deepseek1.5B-odc-lbmini.yaml` **已开箱即用**——含 `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / **`odc_p2p_backend: rocshmem`** / `lb_mini_cost_model: fit` / `global_batch_size: 16`，无需再改（`odc_p2p_backend: rocshmem` 已内置；`trainer_base.yaml` 的全局默认才是 `mori`）。
 
 对齐基线臂复制一份、**只把 `enable_odc` 关掉、保留 `enable_odc_lb_mini: true`**（这样基线消费与 odc_nopad 相同的变长数据、只是微批数对齐）：
 
@@ -412,7 +407,7 @@ bash "$RUN" rocshmem nopad examples/megatron/configs/MI355X/deepseek1.5B-nccl.ya
 
 **因为配置项化，双机的 `--env` 清单大幅瘦身。** 早期这条命令要手工注入约 40 个 env（含一整套 `ODC_ENABLE`/`ODC_LB_MINI`/`ODC_PHASE`/`LB_MINI_SAME_MICRO`/`ODC_P2P_BACKEND`/`ODC_ROCSHMEM_GDA`/`ODC_GDA_*` …）；现在这些 ODC 功能开关**全部搬进 yaml / CLI 覆盖**，`--env` 只剩**真正的基础设施变量**：import 路径（PYTHONPATH/Turbo/linker）、NCCL 控制面、rocSHMEM 运行时 heap/ifname/HCA/GID、HF 缓存、以及 primus-cli 内置 hook 的 SFT skip。
 
-**① 配置**：`qwen14B-odc-dn.yaml` 已含 `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true`。双机额外要 `odc_p2p_backend: rocshmem` + `odc_rocshmem_gda: true`——下面直接用 **CLI 覆盖**传入（GDA 的 `warmup=strided` / `stride=65536` / `defer_reduce=auto` / `pipe=1` 已是配置默认，无需再设；`defer_reduce: auto` 在 `n_pes>local_world_size`（16>8）时自动开，把逐微批 reduce-scatter 结算延迟到 minibatch 末一次 rendezvous，避免 nopad 变长微批在跨节点 barrier 死锁）。
+**① 配置**：`qwen14B-odc-dn.yaml` **已开箱即用**——含 `enable_odc: true` / `odc_phase: 2` / `enable_odc_lb_mini: true` / **`odc_p2p_backend: rocshmem`** / **`odc_rocshmem_gda: true`**，无需再改。（下面命令仍显式带了 `--odc_p2p_backend rocshmem --odc_rocshmem_gda true` 作冗余保险，可留可删。GDA 的 `warmup=strided` / `stride=65536` / `defer_reduce=auto` / `pipe=1` 已是配置默认，无需再设；`defer_reduce: auto` 在 `n_pes>local_world_size`（16>8）时自动开，把逐微批 reduce-scatter 结算延迟到 minibatch 末一次 rendezvous，避免 nopad 变长微批在跨节点 barrier 死锁）。
 
 ```bash
 # 编排节点。JOB＝已持有这两节点的 Slurm 作业号（keepalive）
@@ -568,7 +563,7 @@ grep -E "lm loss|elapsed time per iteration|nan" "$LOG" | tail -40
 - **`import primus_turbo` 报错 / `has_host=False has_gda=False`（修复 ①）**：多半是在用镜像自带的 stock turbo，或误以为 `pip install @main` 能装出算子。⚠️ **`pip install "git+…@main"` 装出来的包 `has_host=False has_gda=False`**——ODC 算子被 `#ifndef DISABLE_ROCSHMEM` 门控，构建期没链接 rocSHMEM 就被编掉（详见 6.3）。正解：按 6.3 **从源码构建**（构建期 `ROCSHMEM_HOME` 指向预编 rocSHMEM，单机 host / 双机 GDA 各一份），用 `.image_bak` 去掉 site-packages 的 stock 版，再用 `PRIMUS_TURBO_PATH` 指到 dev 树，确认 `hasattr(C,'odc_rocshmem_host')==True` 且 `hasattr(C,'odc_rocshmem_gda')==True`。
 - **能跑但单机慢 ~6%（修复 ③ / gate 未生效）**：检查 yaml `enable_odc: true` 确实到位（日志出现 `runtime config populated ... p2p_backend=rocshmem`），且 device_id patch 是 `⊘ Skipped ...(condition not met)` 而非 `✓ Applied`。gate 生效靠的是 `enable_odc` **配置项**，不再是 `ODC_ENABLE` 环境变量。
 - **iter2 崩 `'NoneType' object has no attribute 'clear_accumulations'`（修复 ②）**：hook 了旧类。确认 Primus 为含该修复的 `feat/odc-consume-turbo` 分支，日志应出现 `hooked PrimusTorchFullyShardedDataParallel.__init__`（而非旧的 `TorchFullyShardedDataParallel`）。
-- **`odc_p2p_backend` 忘了设成 rocshmem**：示例配置默认 `mori`；忘了改会跑成 mori 后端（**双机 mori 有已知 bug**）。日志 `runtime config populated ... p2p_backend=` 一眼可辨。
+- **`odc_p2p_backend` 跑成了 mori**：两份 ODC 示例配置**已默认 `rocshmem`**；但 `trainer_base.yaml` 的**全局默认是 `mori`**，若你自写配置忘了设 `rocshmem` 会跑到 mori 后端（**双机 mori 有已知 bug**）。日志 `runtime config populated ... p2p_backend=` 一眼可辨。
 - **首步就 NaN（rocshmem 后端）**：复用了异构 toolchain 的 Triton cache，加载了不匹配的 device kernel。`run_odc.sh` 的 rocshmem 分支已默认每次用**全新** `TRITON_CACHE_DIR`；primus-cli 路径记得手动带一个带时间戳的 `TRITON_CACHE_DIR`，勿 pin 到旧 cache。
 - **双机 `grad_norm=0`**：device-LTO 多分区所致，双机 GDA Turbo 务必 `-Xoffload-linker --lto-partitions=1`（PR #409 已内置）。
 - **单双机 Turbo 分开编**：单机 IPC 与双机 GDA 的 rocSHMEM 对称堆 / 连接后端不同，混用会在 symmetric-heap 报错；用两份 `PRIMUS_TURBO_PATH` 隔离。
