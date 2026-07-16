@@ -65,6 +65,7 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             ("primus.backends.nemo_automodel.primus_turbo_fp8", "GEMM low-precision"),
             ("primus.backends.nemo_automodel.primus_turbo_fp8_attn", "FP8 attention"),
             ("primus.backends.nemo_automodel.aiter_bf16_attn", "non-deterministic attention"),
+            ("primus.backends.nemo_automodel.flux_ac", "FLUX real activation checkpointing"),
         )
         import importlib
 
