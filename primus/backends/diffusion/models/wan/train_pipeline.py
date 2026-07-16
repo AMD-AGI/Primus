@@ -55,14 +55,6 @@ class WanFlowMatchTrainPipeline:
 
     @staticmethod
     def _get_seed_from_env_or_batch(batch: Dict[str, Any]) -> Optional[int]:
-        # Keep parity with existing scripts/wan_new behavior.
-        import os
-
-        if os.environ.get("FIXED_SEED"):
-            try:
-                return int(os.environ["FIXED_SEED"])
-            except ValueError as exc:
-                raise ValueError(f"Invalid FIXED_SEED value: {os.environ['FIXED_SEED']}") from exc
         seed = batch.get("seed", None)
         if seed is None:
             return None
@@ -137,24 +129,8 @@ class WanFlowMatchTrainPipeline:
 
     @staticmethod
     def _select_timestep(scheduler: Any, device: torch.device) -> torch.Tensor:
-        """
-        Match `wan_new` timestep selection:
-        - If FIXED_TIMESTEP is set, use that discrete index into [0, num_train_timesteps).
-        - Else uniform randint over [0, num_train_timesteps).
-        """
-        import os
-
-        if os.environ.get("FIXED_TIMESTEP"):
-            try:
-                fixed_step = int(os.environ["FIXED_TIMESTEP"])
-            except ValueError as exc:
-                raise ValueError(f"Invalid FIXED_TIMESTEP value: {os.environ['FIXED_TIMESTEP']}") from exc
-            max_step = int(scheduler.num_train_timesteps) - 1
-            fixed_step = max(0, min(fixed_step, max_step))
-            timestep_id = torch.tensor([fixed_step], device=device)
-        else:
-            timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,), device=device)
-
+        """Sample one training timestep uniformly."""
+        timestep_id = torch.randint(0, int(scheduler.num_train_timesteps), (1,), device=device)
         # scheduler.timesteps live on CPU in this repo; `wan_new` indexes with cpu tensor.
         timestep = scheduler.timesteps[timestep_id.cpu()].float()
         return timestep.to(device=device)
