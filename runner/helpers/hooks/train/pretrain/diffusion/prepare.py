@@ -138,10 +138,14 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
         if dataset_type == "raw":
             dataset_name = dataset_cfg.get("dataset")
             dataset_format = str(dataset_cfg.get("dataset_format", "webdataset")).lower()
-            if dataset_name == "cc12m-test" and _is_placeholder(dataset_cfg.get("dataset_path")):
-                _fail(
-                    "FLUX raw dataset `cc12m-test` requires `dataset_path` to point at local webdataset tars"
-                )
+            if dataset_name == "cc12m-test":
+                if _is_placeholder(dataset_cfg.get("dataset_path")):
+                    _log("FLUX raw image-text dataset: zirui3/cc12m-test (Hugging Face dataset)")
+                elif dataset_format == "hf_repo":
+                    _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
+                else:
+                    kind = "file" if dataset_format == "jsonl" else "dir"
+                    _require_path(dataset_cfg.get("dataset_path"), "FLUX raw image-text dataset", kind=kind)
             elif dataset_name == "cc12m-wds":
                 if _is_placeholder(dataset_cfg.get("dataset_path")):
                     _log("FLUX raw image-text dataset: pixparse/cc12m-wds (Hugging Face dataset)")

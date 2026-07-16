@@ -78,8 +78,9 @@ def test_flux_argument_builder_maps_raw_dataset_type():
 
 
 def test_flux_raw_dataset_name_defaults():
-    with pytest.raises(ValueError, match="cc12m-test.*dataset_path"):
-        FluxRawImageTextDataset._resolve_dataset("cc12m-test", None, "webdataset")
+    path, fmt = FluxRawImageTextDataset._resolve_dataset("cc12m-test", None, "webdataset")
+    assert path == "zirui3/cc12m-test"
+    assert fmt == "hf_repo"
 
     path, fmt = FluxRawImageTextDataset._resolve_dataset("cc12m-test", "/tmp/cc12m_test", "webdataset")
     assert path == "/tmp/cc12m_test"

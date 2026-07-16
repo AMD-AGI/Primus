@@ -33,12 +33,8 @@ flux.1_dev_t2i.yaml
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
-`flux.1-schnell` does not. Use checkpoints that match the selected preset:
-
-```text
-flux.1_schnell_t2i.yaml -> flux1-schnell.safetensors
-flux.1_dev_t2i.yaml     -> flux1-dev.safetensors
-```
+`flux.1-schnell` does not. Select the preset by choosing
+`flux.1_schnell_t2i.yaml` or `flux.1_dev_t2i.yaml`.
 
 This follows the TorchTitan-style separation where `flux_schnell()` is its own
 config/preset and architecture differences such as `guidance_embed=False` are

@@ -130,9 +130,7 @@ class FluxRawImageTextDataset(Dataset):
         dataset_format: str,
     ) -> tuple[str, str]:
         if dataset_name == "cc12m-test":
-            if not dataset_path:
-                raise ValueError("FLUX raw dataset `cc12m-test` requires `dataset_path` to be set.")
-            return dataset_path, "webdataset"
+            return (dataset_path, dataset_format) if dataset_path else ("zirui3/cc12m-test", "hf_repo")
         if dataset_name == "cc12m-wds":
             return dataset_path or "pixparse/cc12m-wds", "hf_repo"
         if not dataset_path:

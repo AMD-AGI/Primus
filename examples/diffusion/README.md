@@ -12,46 +12,29 @@ export MASTER_PORT=${MASTER_PORT:-29500}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 ```
 
-## FLUX.1-schnell Precomputed
-
-Use precomputed mode when T5, CLIP, and VAE outputs are already saved in a
-Hugging Face `datasets.save_to_disk()` directory. Each sample must contain:
-
-```text
-t5_encodings, clip_encodings, mean, logvar
-```
-
-If `PROMPT_DROPOUT_PROB > 0`, `EMPTY_ENCODINGS_PATH` must contain
-`t5_empty.npy` and `clip_empty.npy` with shapes matching one sample's T5 and
-CLIP encodings.
-
-`PRETRAINED_PATH` is optional. For schnell initialization, point it at
-`flux1-schnell.safetensors` or a directory containing that file.
-
-```bash
-DATASET_PATH=/data/flux_precomputed \
-EMPTY_ENCODINGS_PATH=/data/flux_empty_encodings \
-PRETRAINED_PATH=/models/flux1-schnell.safetensors \
-MAX_STEPS=10 \
-torchrun \
-  --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-  --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
-  --nproc_per_node="$GPUS_PER_NODE" \
-  -m primus.cli.main train pretrain \
-  --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-pretrain.yaml
-```
-
 ## FLUX.1-schnell Raw Image-Text
 
 Raw mode loads image-text samples and runs frozen T5, CLIP, and FLUX AE online.
-It is slower than precomputed training but useful for bring-up and custom data.
+The default `DATASET=cc12m-test` uses the Hugging Face dataset
+`zirui3/cc12m-test`, so no dataset preprocessing is required for a smoke test.
+
+Download the encoders and autoencoder before launching training:
 
 ```bash
-DATASET=cc12m-test \
-DATASET_PATH=/data/cc12m_test \
-T5_ENCODER=google/t5-v1_1-xxl \
-CLIP_ENCODER=openai/clip-vit-large-patch14 \
-VAE_CHECKPOINT=black-forest-labs/FLUX.1-dev/ae.safetensors \
+huggingface-cli download google/t5-v1_1-xxl \
+  --local-dir /models/t5-v1_1-xxl
+huggingface-cli download openai/clip-vit-large-patch14 \
+  --local-dir /models/clip-vit-large-patch14
+huggingface-cli download black-forest-labs/FLUX.1-dev ae.safetensors \
+  --local-dir /models/FLUX.1-dev
+```
+
+Launch raw training:
+
+```bash
+T5_ENCODER=/models/t5-v1_1-xxl \
+CLIP_ENCODER=/models/clip-vit-large-patch14 \
+VAE_CHECKPOINT=/models/FLUX.1-dev/ae.safetensors \
 MAX_STEPS=10 \
 torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
@@ -61,13 +44,13 @@ torchrun \
   --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-raw-pretrain.yaml
 ```
 
-`DATASET=cc12m-test` expects `DATASET_PATH` to be a local WebDataset directory
-with `.tar` shards. `DATASET=cc12m-wds` uses the Hugging Face
-`pixparse/cc12m-wds` dataset unless `DATASET_PATH` overrides it.
+To use a local WebDataset directory instead, set `DATASET_PATH=/path/to/tars`.
+To use the full Hugging Face dataset directly, add `DATASET=cc12m-wds` to the
+launch command and omit `DATASET_PATH`.
 
-To run FLUX.1-dev, use the same training example shape with
-`model: flux.1_dev_t2i.yaml` and a matching `flux1-dev.safetensors` checkpoint.
-FLUX.1-dev has a guidance embedding module; FLUX.1-schnell does not.
+To run FLUX.1-dev, use the same training example shape and set the model preset
+to `flux.1_dev_t2i.yaml`. FLUX.1-dev has a guidance embedding module;
+FLUX.1-schnell does not.
 
 ## Wan Data
 
@@ -138,9 +121,6 @@ torchrun \
 Validate configured paths before launching:
 
 ```bash
-python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
-  --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-pretrain.yaml
-
 python3 runner/helpers/hooks/train/pretrain/diffusion/prepare.py \
   --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-raw-pretrain.yaml
 
