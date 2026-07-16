@@ -69,7 +69,19 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 
 # Environment check (info only)
 ./primus-cli direct -- preflight --host --gpu --network
+
+# Per-node smoke test (auto-selects `--single` since node_smoke runs one
+# process per node by design; rank 0 also aggregates the per-node JSONs):
+./primus-cli direct -- node_smoke --tier2-perf
+
+# Suppress launcher + tool stdout (--silent goes BEFORE `--`; errors and
+# the launcher log file are preserved; not recommended for normal use):
+./primus-cli direct --silent -- preflight --quick
 ```
+
+**Optional environment variables (direct mode)**:
+- `VENV_ACTIVATE` — Path to a Python virtualenv `bin/activate` script. If set, sourced before launching; if unset, no-op (the container path uses the container's bundled Python and never sets this).
+- `NNODES` / `NODE_RANK` / `MASTER_ADDR` / `MASTER_PORT` / `GPUS_PER_NODE` — Pre-export to override SLURM-derived values. Inside a SLURM allocation, they are auto-derived from `SLURM_NNODES` / `SLURM_NODEID` / `SLURM_NODELIST` when not pre-exported.
 
 **Suitable for**:
 - ✅ Local development and debugging
@@ -166,12 +178,22 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 # Run distributed GEMM benchmark
 ./primus-cli slurm srun -N 2 -- benchmark gemm --M 16384 --N 16384 --K 16384
 
-# Multi-node environment check (info only)
-# this will generate a fast info report of the host, GPU, and network
+# Multi-node environment check (info only). Anything after `--` that isn't
+# the keyword `container` or `direct` is treated as a primus subcommand and
+# routed through the default container entry chain.
 ./primus-cli slurm srun -N 4 -- preflight --host --gpu --network
 
 # this will generate a full preflight report of the host, GPU, and network, as well as the performance tests
 ./primus-cli slurm srun -N 4 -- preflight --report-file-name preflight-report-4N
+
+# Explicit entry-mode keyword: route through primus-cli-direct.sh instead of
+# the container chain. Useful when nodes share a Python venv on a shared FS
+# (see docs/preflight-direct.md for the setup).
+./primus-cli slurm srun -N 4 -- direct -- preflight --quick
+
+# Per-node smoke via the direct entry (node_smoke auto-runs in single mode;
+# rank 0 aggregates after every rank finishes):
+./primus-cli slurm srun -N 4 -- direct -- node_smoke --tier2-perf
 
 # if you are using AINIC in your cluster, use the appropriate configuration file
 # for preflight test, set docker image to rocm/primus:v26.3 in the configuration file
@@ -761,7 +783,7 @@ Final result:
 | **Entry Script** | primus-cli-direct.sh | primus-cli-container.sh | primus-cli-slurm.sh |
 | **Environment Prep** | Load local GPU env | Start container + mount + devices | Allocate nodes + network config |
 | **Execution Location** | Current host | Inside container | Slurm-allocated nodes |
-| **Final Call** | Direct torchrun execution | Execute direct.sh in container | Each node executes slurm-entry.sh → direct.sh |
+| **Final Call** | Direct torchrun execution (single mode auto-selected for `node_smoke`) | Execute direct.sh in container | Each node executes slurm-entry.sh → container.sh or direct.sh (via `direct` keyword) |
 | **Distributed Support** | Single-node multi-GPU | Single-node multi-GPU | Multi-node multi-GPU |
 | **Use Case** | Dev debugging | Environment isolation | Production training |
 
