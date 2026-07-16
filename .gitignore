@@ -14,20 +14,7 @@ output
 experiment
 /data/*
 pp_simulation_result
+# ODC runtime output dirs (generated at run time)
 odc_logs/
 odc_run/
-primus/core/odc/tests/
-primus/core/odc/docs/
-primus/core/odc/examples/
-primus/core/odc/AMD_DIAGNOSTIC_REPORT.md
-primus/core/odc/ROCM_ADAPTATION_REPORT.md
-primus/core/odc/MORI_GITHUB_ISSUE.md
-examples/megatron/configs/MI355X/*-vf-*.yaml
-examples/megatron/configs/MI355X/*-verify.yaml
-examples/megatron/configs/MI355X/*-it50*.yaml
-examples/megatron/configs/MI355X/*-short30.yaml
-examples/megatron/configs/MI355X/*-cmp-fit-*.yaml
-# ODC one-off experiment sweep configs (underscore-prefixed): _ab200*, _dev200*,
-# _m18*, _sdr* ablation yamls are never committed.
-examples/megatron/configs/MI355X/_*.yaml
 .cursor/
