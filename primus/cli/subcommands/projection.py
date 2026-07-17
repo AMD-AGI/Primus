@@ -774,6 +774,17 @@ def _add_inference_args(parser):
         help="Draft-model forward cost per proposed draft token, as a fraction of "
         "one target decode step. Default: 0 (ignore draft cost).",
     )
+    parser.add_argument(
+        "--inference-bench-layers",
+        type=int,
+        default=None,
+        help=(
+            "Benchmark mode: number of same-type transformer layers to build and "
+            "time as a chained stack per phase (per-layer time = stack time / N). "
+            "Larger N averages out per-layer jitter and captures inter-layer "
+            "effects. Default: 4."
+        ),
+    )
     # Internal: marks this process as the spawned GPU benchmark worker.
     parser.add_argument(
         "--inference-bench-worker",

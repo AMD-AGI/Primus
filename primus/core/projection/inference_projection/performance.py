@@ -134,10 +134,23 @@ class InferencePerformanceProjector:
         gpu_clock = getattr(args, "gpu_clock_mhz", None) if args else None
         gemm_name = getattr(args, "gemm_backend", None) if args else None
 
+        # In benchmark mode the projection is driven *entirely* by measured
+        # layer times, so the analytical GEMM/SDPA simulators (origami) are not
+        # exercised for a dense model.  Don't hard-require origami there — fall
+        # back to a metadata-only backend and skip SDPA if unavailable.
+        benchmark_mode = benchmark_layer_times is not None
         self._gemm = get_gemm_simulation_backend(
-            backend_name=gemm_name, gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock
+            backend_name=gemm_name,
+            gpu_arch=gpu_arch,
+            gpu_clock_mhz=gpu_clock,
+            require_simulation=not benchmark_mode,
         )
-        self._sdpa = get_sdpa_simulation_backend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock)
+        try:
+            self._sdpa = get_sdpa_simulation_backend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock)
+        except RuntimeError:
+            if not benchmark_mode:
+                raise
+            self._sdpa = None
 
         # Build profiler tree against a representative TrainingConfig view.
         view = inference_config.as_training_config(
@@ -791,23 +804,45 @@ class InferencePerformanceProjector:
             return (1.0 - accept ** (spec_k + 1)) / (1.0 - accept)
         return float(spec_k + 1 if spec_k > 0 else 1)
 
+    def _comm_breakdown(self, batch: int, q_len: int, phase: str) -> CommBreakdown:
+        """Explicit per-phase communication breakdown (ms).
+
+        Derived directly from the knob-driven communication model, without the
+        analytical *compute* path (``_forward_times``).  This keeps the comm
+        report available in **benchmark mode**, where the layer compute comes
+        from measured silicon times and the GEMM/SDPA simulators are not built.
+        """
+        comm = CommBreakdown()
+        if self._comm is None:
+            return comm
+        overlap = (
+            float(self._cc.prefill_overlap) if phase == "prefill" else float(self._cc.decode_overlap)
+        )
+        keep = 1.0 - min(max(overlap, 0.0), 1.0)
+        tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
+        ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
+        comm.tp_allreduce_ms = (self._n_dense + self._n_moe) * tp_ar * keep
+        comm.ep_a2a_ms = self._n_moe * ep_a2a * keep
+        comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
+        return comm
+
     def _comm_extras(self, batch: int, input_len: int, output_len: int) -> Dict[str, float]:
         """Representative per-phase comm breakdown (ms) for reporting."""
         if self._comm is None:
             return {}
-        pre = self._forward_times(batch, input_len, "prefill", input_len)
+        pre = self._comm_breakdown(batch, input_len, "prefill")
         spec_k = int(self.cfg.request_config.speculative_num_tokens or 0)
         q_len = (spec_k + 1) if spec_k > 0 else 1
-        dec = self._forward_times(batch, q_len, "decode", input_len + output_len // 2)
+        dec = self._comm_breakdown(batch, q_len, "decode")
         return {
-            "comm_prefill_tp_allreduce_ms": pre.comm.tp_allreduce_ms,
-            "comm_prefill_ep_a2a_ms": pre.comm.ep_a2a_ms,
-            "comm_prefill_pp_p2p_ms": pre.comm.pp_p2p_ms,
-            "comm_prefill_total_ms": pre.comm.total_ms,
-            "comm_decode_tp_allreduce_ms": dec.comm.tp_allreduce_ms,
-            "comm_decode_ep_a2a_ms": dec.comm.ep_a2a_ms,
-            "comm_decode_pp_p2p_ms": dec.comm.pp_p2p_ms,
-            "comm_decode_total_ms": dec.comm.total_ms,
+            "comm_prefill_tp_allreduce_ms": pre.tp_allreduce_ms,
+            "comm_prefill_ep_a2a_ms": pre.ep_a2a_ms,
+            "comm_prefill_pp_p2p_ms": pre.pp_p2p_ms,
+            "comm_prefill_total_ms": pre.total_ms,
+            "comm_decode_tp_allreduce_ms": dec.tp_allreduce_ms,
+            "comm_decode_ep_a2a_ms": dec.ep_a2a_ms,
+            "comm_decode_pp_p2p_ms": dec.pp_p2p_ms,
+            "comm_decode_total_ms": dec.total_ms,
         }
 
     # -- top level -------------------------------------------------------------

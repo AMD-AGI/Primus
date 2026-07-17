@@ -12,9 +12,11 @@ the **forward-only** analogue for serving:
   * a *worker* (``run_inference_benchmark_worker``) that runs under
     ``torch.distributed.run``, builds the real model via the Megatron trainer
     (exactly like the training layer benchmark), then times **forward-only**
-    passes of one dense + one MoE layer at the **prefill** shape
-    ``(batch, input_len)`` and the **decode** shape ``(batch, 1)``; rank 0
-    writes the measured times to a JSON file.
+    passes of a chained stack of ``capture_layers`` dense (and, for MoE models,
+    MoE) layers at the **prefill** shape ``(batch, input_len)`` and the
+    **decode** shape ``(batch, 1)``; the per-layer time is the stack time
+    divided by the layer count.  Rank 0 writes the measured times to a JSON
+    file.  ``capture_layers`` defaults to 4 (``--inference-bench-layers``).
   * a *parent* (``spawn_inference_benchmark``) that — from the normal
     ``projection inference`` process — spawns the torchrun worker, polls for
     the JSON, and returns the measured per-layer-type forward times.
@@ -44,6 +46,11 @@ from typing import Dict, Optional
 _DENSE = "dense"
 _MOE = "moe"
 
+# Default number of same-type layers to build and time as a chained stack.
+# Timing a stack (rather than a single layer) averages out per-layer jitter and
+# captures inter-layer effects; the reported per-layer time is stack / N.
+_INFERENCE_CAPTURE_LAYERS = 4
+
 
 def _unwrap_layers(model):
     """Extract the transformer layer modules from a (possibly wrapped) model."""
@@ -66,6 +73,30 @@ def _unwrap_layers(model):
     return layers
 
 
+def _make_layer_stack(layers):
+    """Wrap ``layers`` into a single module that chains their forward passes.
+
+    Each transformer layer returns ``(hidden_states, context)``; the stack feeds
+    the hidden-state output of one layer into the next so a single timed forward
+    covers the whole chain.
+    """
+    import torch
+
+    class _LayerStack(torch.nn.Module):
+        def __init__(self, modules):
+            super().__init__()
+            self.stack = torch.nn.ModuleList(modules)
+
+        def forward(self, hidden_states):
+            out = hidden_states
+            for layer in self.stack:
+                res = layer(out)
+                out = res[0] if isinstance(res, (tuple, list)) else res
+            return out
+
+    return _LayerStack(layers)
+
+
 def run_inference_benchmark_worker(primus_config, unknown_overrides, args) -> Optional[dict]:
     """Build the real model and benchmark forward-only prefill/decode layers.
 
@@ -86,16 +117,28 @@ def run_inference_benchmark_worker(primus_config, unknown_overrides, args) -> Op
     from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
     module_config = primus_config.get_module_config("pre_trainer")
-    # Keep the benchmarked model tiny (1 dense + 1 MoE layer is enough for a
-    # per-layer-type measurement) and fit it on the available GPUs.
+    # Reduce the stack to just the distinct layer types (1 dense +/- 1 MoE) and
+    # fit it on the available GPUs.
     _limit_layers_for_projection(module_config)
     _rescale_expert_parallelism(module_config)
 
-    # Derive layer metadata (hidden size + which layers are MoE) from the
-    # projection model config — the raw module config has no ``moe_pattern``.
+    # Build (and later time) a chain of ``capture_layers`` same-type layers per
+    # phase instead of a single layer: this averages out per-layer jitter and
+    # captures inter-layer effects.  Expand the reduced 1-2 layer pattern into
+    # ``capture_layers`` copies of each distinct type (dense block, then MoE).
+    capture_layers = max(1, int(getattr(args, "inference_bench_layers", None) or _INFERENCE_CAPTURE_LAYERS))
+    reduced_pattern = list(getattr(module_config, "moe_layer_freq", None) or [0])
+    types_needed = sorted(set(reduced_pattern))  # 0 (dense) before 1 (MoE)
+    expanded_pattern = [t for t in types_needed for _ in range(capture_layers)]
+    module_config.num_layers = len(expanded_pattern)
+    module_config.moe_layer_freq = expanded_pattern
+
+    # Derive layer metadata (hidden size) from the projection model config.
     proj_model = convert_primus_config_to_projection_config(primus_config).model_config
     hidden = int(proj_model.hidden_size)
-    moe_pattern = list(proj_model.moe_pattern or [])
+    # Classify built layers by the (expanded) pattern we just set, so the type
+    # of each constructed layer is known regardless of the full-model pattern.
+    moe_pattern = list(expanded_pattern)
     batch = int(getattr(args, "inference_batch_size", None) or 1)
     input_len = int(getattr(args, "input_len", None) or module_config.seq_length or 1024)
 
@@ -119,46 +162,98 @@ def run_inference_benchmark_worker(primus_config, unknown_overrides, args) -> Op
         extra_args=unknown_overrides,
     )
     trainer.init()
-    trainer.setup()
 
-    model = getattr(trainer, "model", None)
+    # Forward-only benchmark: build ONLY the model. ``trainer.setup()`` would
+    # also construct the optimizer (optimizer-state GB), gradient buffers and
+    # datasets -- none of which a forward-only timing needs -- and that extra
+    # ~28 GB is what OOMs on a shared/loaded GPU.  Build the bare model instead
+    # (no DDP wrap → no grad buffers) so the footprint is just weights +
+    # activations.
+    from megatron.core.enums import ModelType
+    from megatron.training.training import get_model
+
+    try:
+        model = get_model(trainer.model_provider, ModelType.encoder_or_decoder, wrap_with_ddp=False)
+    except TypeError:
+        model = get_model(trainer.model_provider, ModelType.encoder_or_decoder)
     layers = _unwrap_layers(model)
     if not layers:
         raise RuntimeError("[Primus:Inference:Benchmark] No transformer layers found in model.")
 
+    # Serving runs in inference (eval) mode: no dropout. This both matches the
+    # real forward pass and removes the per-forward RNG-tracker ``set_current_seed``
+    # calls that otherwise make the layer un-capturable by a CUDA/HIP graph.
+    for _layer in layers:
+        _layer.eval()
+
+    # Swap in Megatron's inference RNG tracker: its ``fork()`` is a no-op
+    # (nullcontext), so the transformer layers no longer set the CUDA RNG seed
+    # per forward -- which is what makes them capturable by a CUDA/HIP graph.
+    try:
+        from megatron.core.tensor_parallel.random import initialize_rng_tracker
+
+        initialize_rng_tracker(inference_rng_tracker=True, force_reset=True)
+    except Exception as _exc:  # noqa: BLE001 - non-fatal; capture will just fall back
+        if rank == 0:
+            print(f"[Primus:Inference:Benchmark] could not set inference RNG tracker: {_exc}")
+
     if not moe_pattern:
         moe_pattern = [0] * len(layers)
 
-    def _bench(layer_module, q_len) -> float:
-        cfg = getattr(layer_module, "config", None)
+    # Time each step under a CUDA/HIP graph by default so the measured decode
+    # step reflects graph-replayed serving (no per-kernel host launch overhead),
+    # matching how vLLM/SGLang execute decode.  Disable with
+    # ``PRIMUS_INF_BENCH_CUDA_GRAPH=0`` (falls back to eager timing).
+    use_cuda_graph = os.environ.get("PRIMUS_INF_BENCH_CUDA_GRAPH", "1").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+    def _bench_stack(stack_module, cfg, q_len) -> float:
         fwd_ms, _, _ = benchmark_layer(
-            layer_module,
+            stack_module,
             [(q_len, batch, hidden)],
             transformer_config=cfg,
             forward_only=True,
+            use_cuda_graph=use_cuda_graph,
         )
         return float(fwd_ms)
 
-    measured: Dict[str, Dict[str, float]] = {}
-    done_types = set()
+    # Group the constructed layers by type, then time a chained stack of each so
+    # the reported per-layer time is the stack time divided by the layer count.
+    layers_by_type: Dict[str, list] = {_DENSE: [], _MOE: []}
     for idx, layer in enumerate(layers):
         is_moe = bool(moe_pattern[idx]) if idx < len(moe_pattern) else False
-        ltype = _MOE if is_moe else _DENSE
-        if ltype in done_types:
+        layers_by_type[_MOE if is_moe else _DENSE].append(layer)
+
+    measured: Dict[str, Dict[str, float]] = {}
+    for ltype in (_DENSE, _MOE):
+        ls = layers_by_type[ltype]
+        if not ls:
             continue
-        prefill_ms = _bench(layer, input_len)
-        decode_ms = _bench(layer, 1)
+        n = len(ls)
+        cfg = getattr(ls[0], "config", None)
+        stack = _make_layer_stack(ls)
+        prefill_ms = _bench_stack(stack, cfg, input_len) / n
+        decode_ms = _bench_stack(stack, cfg, 1) / n
         measured[ltype] = {"prefill_ms": prefill_ms, "decode_ms": decode_ms}
-        done_types.add(ltype)
         if rank == 0:
             print(
-                f"[Primus:Inference:Benchmark] {ltype} layer  "
+                f"[Primus:Inference:Benchmark] {ltype} layer (avg of {n} chained)  "
                 f"prefill(q={input_len})={prefill_ms:.3f} ms  decode(q=1)={decode_ms:.3f} ms"
             )
 
     result = {
         "measured": measured,
-        "meta": {"batch": batch, "input_len": input_len, "hidden": hidden},
+        "meta": {
+            "batch": batch,
+            "input_len": input_len,
+            "hidden": hidden,
+            "capture_layers": capture_layers,
+        },
     }
 
     if rank == 0 and getattr(args, "save_profiling", None):
@@ -218,6 +313,7 @@ def spawn_inference_benchmark(args, overrides=None) -> Optional[dict]:
         ("input_len", "--input-len"),
         ("output_len", "--output-len"),
         ("inference_batch_size", "--inference-batch-size"),
+        ("inference_bench_layers", "--inference-bench-layers"),
         ("gpu_arch", "--gpu-arch"),
         ("gpu_clock_mhz", "--gpu-clock-mhz"),
         ("gemm_backend", "--gemm-backend"),

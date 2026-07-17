@@ -324,6 +324,21 @@ def launch_projection_from_cli(args, overrides):
         primus_config, inference_overrides=inf_overrides
     )
 
+    # Serving weight precision drives the *compute* GEMM dtype, not just the
+    # memory report. The layer profilers pick the GEMM dtype from
+    # ``model_config.fp8``, so an explicit ``--weight-dtype`` must be reflected
+    # there; otherwise projecting an FP8-trained model in BF16 (or forcing FP8
+    # on a BF16 model) silently kept the training precision for compute. Only
+    # applied when the flag is explicitly set (default ``None``) so omitting it
+    # preserves the model's native precision.
+    explicit_wdt = getattr(args, "weight_dtype", None)
+    if explicit_wdt is not None:
+        wdt = str(explicit_wdt).lower()
+        if wdt.startswith("fp8") or wdt in ("e4m3", "e5m2"):
+            inference_config.model_config.fp8 = "hybrid"
+        elif wdt in ("bf16", "bfloat16", "fp16", "float16", "fp32", "float32"):
+            inference_config.model_config.fp8 = None
+
     # DeepEP / SyncFree (shared perf flags) — enable async EP All-to-All overlap
     # for the serving projection, mirroring the training projection override.
     if getattr(args, "enable_deepep", False):
