@@ -25,7 +25,7 @@ export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:-"tasimage/primus:pr-715-ainic"}
-export SLURM_PARTITION=Compute-DCPT
+export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
 export SLURM_NODELIST="${SLURM_NODELIST:-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
 
@@ -230,6 +230,10 @@ export BACKEND_PATH=${BACKEND_PATH:-"$(pwd)/third_party/Megatron-LM"}
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
 export PRIMUS_USER=${PRIMUS_USER:-tas-mi355x-$(date +%Y%m%d)}
 export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_smoke_${PRECISION_TYPE}_MBS${MBS}_GBS${GBS}_PP${PRIMUS_PP}_EP${PRIMUS_EP}}
+# Host-side directory for the launcher's aggregated log. Defaults to the
+# canonical "output" tree; override when that tree is not writable by the
+# invoking user (e.g. it was created by an earlier root/sudo run).
+export PRIMUS_OUTPUT_ROOT=${PRIMUS_OUTPUT_ROOT:-output}
 
 if [ ! -d "$BACKEND_PATH" ] || [ -z "$(ls -A "$BACKEND_PATH" 2>/dev/null)" ]; then
   echo "[ERROR] BACKEND_PATH does not exist or is empty: $BACKEND_PATH"
@@ -237,7 +241,7 @@ if [ ! -d "$BACKEND_PATH" ] || [ -z "$(ls -A "$BACKEND_PATH" 2>/dev/null)" ]; th
   exit 1
 fi
 
-mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+mkdir -p "$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 
 export PRIMUS_EXIT_FAST=1
 
@@ -311,4 +315,4 @@ fi
   --profile_step_end 7 \
   --profile_step_start 6 \
   --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
-  2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"
+  2>&1 | tee "$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"

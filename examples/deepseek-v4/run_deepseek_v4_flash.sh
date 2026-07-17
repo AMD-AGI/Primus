@@ -7,7 +7,7 @@ export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-256}
 export PRIMUS_MOE_TOPK=${PRIMUS_MOE_TOPK:-6}
 export PRIMUS_MOE_FFN_HIDDEN_SIZE=${PRIMUS_MOE_FFN_HIDDEN_SIZE:-2048}
 export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-512}
-export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'"[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]"'}
+export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]'}
 export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
 
 export NNODES=${NNODES:-8}
@@ -18,9 +18,9 @@ if [ "$NNODES" -eq 8 ]; then
     export PRIMUS_EP=${PRIMUS_EP:-8}
     export PRIMUS_RECOMPUTE_LAYERS=0
     if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-      export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4mL"'
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4mL'
     else
-      export PRIMUS_PP_LAYOUT='"Et*4|t*5|(t*6|)*5,t*4L"'
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4L'
     fi
 elif [ "$NNODES" -eq 4 ]; then
     export PRIMUS_TP=${PRIMUS_TP:-1}
@@ -28,9 +28,9 @@ elif [ "$NNODES" -eq 4 ]; then
     export PRIMUS_EP=${PRIMUS_EP:-8}
     export PRIMUS_RECOMPUTE_LAYERS=3
     if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-      export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11mL"'
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
     else
-      export PRIMUS_PP_LAYOUT='"Et*10|t*11|t*11|t*11L"'
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
     fi
 fi
 
