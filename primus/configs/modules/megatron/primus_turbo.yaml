@@ -2,6 +2,10 @@
 # main control flag
 enable_primus_turbo: false
 
+# ===== AutoTune =====
+# enable turbo auto-tuning
+use_turbo_autotune: false
+
 # ===== Attention =====
 # operator switch
 use_turbo_attention: false

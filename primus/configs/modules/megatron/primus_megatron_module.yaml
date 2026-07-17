@@ -96,3 +96,8 @@ recompute_layer_ids: null # int list; global layer ids, range from 0 to (num_lay
 
 # dataloader
 dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
+
+# Control the force load balancing type for the MoE router.
+# If set to "even", the router will force the load balancing to be even.
+# If set to "uniform", the router will force the load balancing to be uniform. (Megatron-LM original behavior)
+moe_router_force_load_balancing_type: "even"
