@@ -343,10 +343,13 @@ class TestPickDispatcherCls:
         def _raises():
             raise RuntimeError("Megatron not initialised in unit test")
 
-        # Patch the lazy import target inside the helper.
+        # Patch the lazy import target inside the helper. ``megatron.training``
+        # may not have ``get_args`` bound yet depending on suite import order
+        # (it is populated lazily), so ``raising=False`` forces the "raises"
+        # behaviour either way; monkeypatch restores/deletes it on teardown.
         import megatron.training as _megatron_training  # noqa: WPS433
 
-        monkeypatch.setattr(_megatron_training, "get_args", _raises)
+        monkeypatch.setattr(_megatron_training, "get_args", _raises, raising=False)
         cfg = _make_cfg(moe_token_dispatcher_type="flex")
         cls, type_name = _pick_v4_dispatcher_cls(cfg, args=None)
         assert cls is MoEFlexTokenDispatcher

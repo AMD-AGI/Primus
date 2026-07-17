@@ -158,6 +158,22 @@ def _reference_v4_attention_forward(
 _TEST_DTYPE = torch.float32
 
 
+@pytest.fixture(autouse=True)
+def _v4_attention_on_cuda():
+    """DeepSeek-V4 attention (all backends, incl. eager) runs on GPU tensors.
+
+    These tests build CPU-free tensors by defaulting to the CUDA/HIP device;
+    skip the module on a CPU-only host.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("DeepSeek-V4 attention requires a CUDA/HIP device")
+    torch.set_default_device("cuda")
+    try:
+        yield
+    finally:
+        torch.set_default_device("cpu")
+
+
 def _make_v4_config(
     *,
     hidden_size: int,
@@ -198,6 +214,11 @@ def _make_v4_config(
         attn_sink=attn_sink,
         compress_ratios=None,
         compress_rope_theta=160000.0,
+        # These tests validate the V4 attention math against an inline eager
+        # reference at tiny (head_dim=16) shapes; the Triton/gluon/turbo kernels
+        # are specialized for head_dim=512, so pin the eager backend here.
+        use_v4_attention_backend="eager",
+        use_v4_csa_attention_backend="eager",
         # Misc
         layernorm_epsilon=norm_eps,
         norm_epsilon=norm_eps,

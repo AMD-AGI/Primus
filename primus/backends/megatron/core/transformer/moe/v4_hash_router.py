@@ -78,10 +78,13 @@ def _build_default_tid2eid(*, vocab_size: int, num_experts: int, topk: int, seed
     The table layout matches the HF reference: ``int32`` to keep on-disk
     size small, indexed via long-cast at gather time.
     """
+    # Build on CPU with a CPU generator so the table is bit-identical across
+    # ranks and devices, independent of the ambient ``torch.set_default_device``
+    # (the caller colocates the result with the module's weight).
     gen = torch.Generator(device="cpu").manual_seed(int(seed))
     rows = []
     for _ in range(int(vocab_size)):
-        perm = torch.randperm(num_experts, generator=gen)[:topk]
+        perm = torch.randperm(num_experts, generator=gen, device="cpu")[:topk]
         rows.append(perm)
     table = torch.stack(rows, dim=0).to(torch.int32)
     return table
@@ -160,7 +163,9 @@ class DeepseekV4HashRouter(nn.Module):
             topk=self.topk,
             seed=self.seed,
         )
-        self.tid2eid = nn.Parameter(tid2eid_init, requires_grad=False)
+        # Colocate the CPU-built table with the module's weight (the ambient
+        # default device at construction, e.g. CUDA under set_default_device).
+        self.tid2eid = nn.Parameter(tid2eid_init.to(self.weight.device), requires_grad=False)
 
     # ------------------------------------------------------------------
 
@@ -218,8 +223,11 @@ class DeepseekV4HashRouter(nn.Module):
         # Static expert assignment from the table — cast to long for gather.
         indices = self.tid2eid[flat_ids].long()  # [N, K]
 
-        # Plan-6 P39: route the post-logits chain through one fused
-        # Triton kernel when PRIMUS_V4_ROUTER_TRITON=1 (default OFF).
+        # The V4 router is GPU-only: both the Triton and eager paths run on
+        # CUDA/HIP tensors (there is no CPU compute path).
+        assert logits.is_cuda, "V4 router requires CUDA / HIP tensors"
+        # Plan-6 P39: route the post-logits chain through one fused Triton
+        # kernel when PRIMUS_V4_ROUTER_TRITON=1 (default ON); else the eager body.
         if _v4_router_triton_enabled():
             probs, routing_map = v4_router_post_triton(
                 logits,

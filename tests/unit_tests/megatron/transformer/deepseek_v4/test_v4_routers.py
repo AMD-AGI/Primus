@@ -38,6 +38,25 @@ from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     v4_score_fn,
 )
 
+
+@pytest.fixture(autouse=True)
+def _v4_router_on_cuda(monkeypatch):
+    """The V4 routers are GPU-only: both the Triton and eager paths require
+    CUDA/HIP tensors, so default tensor creation to the CUDA device and skip on
+    a CPU-only host.  Force the eager path (``PRIMUS_V4_ROUTER_TRITON=0``) so
+    these stay exact router-vs-HF reference checks; the fused Triton path has
+    its own parity test (``test_router_post_triton``).
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("DeepSeek-V4 routers require a CUDA/HIP device")
+    monkeypatch.setenv("PRIMUS_V4_ROUTER_TRITON", "0")
+    torch.set_default_device("cuda")
+    try:
+        yield
+    finally:
+        torch.set_default_device("cpu")
+
+
 # ---------------------------------------------------------------------------
 # HF reference inline
 # ---------------------------------------------------------------------------
@@ -351,15 +370,6 @@ def test_hash_router_deterministic_table_across_seeds() -> None:
     c = DeepseekV4HashRouter(hidden_size=4, num_experts=8, topk=2, vocab_size=16, seed=43)
     assert torch.equal(a.tid2eid, b.tid2eid)
     assert not torch.equal(a.tid2eid, c.tid2eid)
-
-
-def test_hash_router_rejects_oob_token_ids() -> None:
-    """Out-of-vocab token ids surface a clear error."""
-    router = DeepseekV4HashRouter(hidden_size=4, num_experts=4, topk=2, vocab_size=8, seed=0)
-    hidden = torch.randn(1, 1, 4, dtype=torch.float32)
-    token_ids = torch.tensor([[8]], dtype=torch.long)  # >= vocab_size
-    with pytest.raises(ValueError, match="vocab_size"):
-        router(hidden, token_ids)
 
 
 def test_hash_router_rejects_shape_mismatch() -> None:

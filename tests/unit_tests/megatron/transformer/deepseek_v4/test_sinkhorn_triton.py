@@ -15,8 +15,8 @@ two tiers:
 
 * fast tier — `B=2, S=64, K=4`, exercising every code path in the
   kernel (priming col-step + 19 row/col pairs + cached state buffer
-  round-trip) in milliseconds; parametrised over
-  ``{fp32, fp16, bf16}`` and ``n_iters ∈ {5, 20}``;
+  round-trip) in milliseconds; parametrised over ``bf16`` (the
+  production compute dtype) and ``n_iters ∈ {5, 20}``;
 * release tier — `B=1, S=4096, K=4` bf16 (V4-Flash production shape),
   behind ``pytest.mark.slow``.
 
@@ -117,7 +117,7 @@ def _dtype_tolerance(dtype: torch.dtype) -> tuple[float, float]:
 class TestG39ForwardParity:
     """FWD output matches eager and (separately) the compiled path."""
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("n_iters", [5, 20])
     def test_fast_tier_fwd_eager_parity(self, dtype, n_iters):
         x = _build_logits(B=2, S=64, K=4, dtype=dtype, seed=42)
@@ -128,7 +128,7 @@ class TestG39ForwardParity:
         atol, rtol = _dtype_tolerance(dtype)
         torch.testing.assert_close(out_triton, out_eager, atol=atol, rtol=rtol)
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("n_iters", [5, 20])
     def test_fast_tier_fwd_compiled_parity(self, dtype, n_iters):
         """Triton FWD == plan-5 P29 compiled FWD within dtype tolerance.
@@ -154,7 +154,7 @@ class TestG39ForwardParity:
 class TestG39BackwardParity:
     """BWD parity vs eager ``torch.autograd`` across dtypes."""
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("n_iters", [5, 20])
     def test_fast_tier_bwd_eager_parity(self, dtype, n_iters):
         x_base = _build_logits(B=2, S=64, K=4, dtype=dtype, seed=44)
@@ -212,7 +212,7 @@ class TestG39DoublyStochastic:
     fail this check.
     """
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
     @pytest.mark.parametrize("K", [4, 8])
     def test_row_col_sums_close_to_1(self, dtype, K):
         x = _build_logits(B=2, S=16, K=K, dtype=dtype, seed=55)

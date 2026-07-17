@@ -8,7 +8,7 @@
 
 Pins :class:`DeepseekV4MoE` against the HF reference at
 ``DeepSeek-V4-Flash/inference/model.py:MoE.forward``. The test runs on
-CPU, fp32, with ``pg_collection=None`` so the V4 MoE uses its
+GPU (CUDA/HIP), fp32, with ``pg_collection=None`` so the V4 MoE uses its
 local-experts path (per-expert dispatch loop, no Megatron dispatcher).
 
 Pass criteria (G5):
@@ -41,6 +41,24 @@ from primus.backends.megatron.core.transformer.moe.v4_moe import (
 from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     DeepseekV4LearnedRouter,
 )
+
+
+@pytest.fixture(autouse=True)
+def _v4_moe_on_cuda(monkeypatch):
+    """The V4 MoE routers are GPU-only: both the Triton and eager paths require
+    CUDA/HIP tensors, so default tensor creation to the CUDA device and skip on
+    a CPU-only host.  Force the eager router path (``PRIMUS_V4_ROUTER_TRITON=0``)
+    so this stays an exact MoE-vs-HF reference check.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("DeepSeek-V4 MoE requires a CUDA/HIP device")
+    monkeypatch.setenv("PRIMUS_V4_ROUTER_TRITON", "0")
+    torch.set_default_device("cuda")
+    try:
+        yield
+    finally:
+        torch.set_default_device("cpu")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

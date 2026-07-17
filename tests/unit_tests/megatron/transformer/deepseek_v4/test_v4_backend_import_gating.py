@@ -43,6 +43,13 @@ def test_config_defaults_are_triton_v1():
 def test_kernels_package_exposes_lazy_gluon_loader():
     """The package exposes the lazy loader and does NOT eagerly bind gluon entries."""
     pkg = importlib.import_module("primus.backends.megatron.core.transformer.v4_attention_kernels")
+    # A prior gluon test may have called the lazy loader, which caches the
+    # backends as module attributes; drop them + reload so this asserts the
+    # import-time (no eager binding) contract independent of test order.
+    for attr in ("v4_attention_gluon", "v4_csa_attention_gluon"):
+        if hasattr(pkg, attr):
+            delattr(pkg, attr)
+    importlib.reload(pkg)
     assert hasattr(pkg, "load_gluon_attention_backends")
     # gluon entries must NOT be module-level attributes (would mean eager import).
     assert not hasattr(pkg, "v4_attention_gluon")

@@ -118,7 +118,10 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
     def __init__(self, fallback_to_eager_attn: bool = False):
-        self.cfg = get_primus_args()
+        try:
+            self.cfg = get_primus_args()
+        except AssertionError:
+            self.cfg = _build_default_primus_args()
         self.fallback_to_eager_attn = fallback_to_eager_attn
 
     def linear(self) -> type:

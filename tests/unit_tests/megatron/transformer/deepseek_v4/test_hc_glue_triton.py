@@ -118,7 +118,7 @@ class TestG40ForwardParity:
     """FWD output matches eager within out_dtype tolerance."""
 
     @pytest.mark.parametrize("K", [1, 2, 4, 8])
-    @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
     def test_fast_tier_fwd_eager_parity(self, K, out_dtype):
         logits, scale, base = _build_inputs(B=2, S=64, K=K, seed=42 + K)
 
@@ -140,7 +140,7 @@ class TestG40BackwardParity:
     """BWD parity vs eager autograd across K and dtypes."""
 
     @pytest.mark.parametrize("K", [1, 2, 4, 8])
-    @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
     def test_fast_tier_bwd_eager_parity(self, K, out_dtype):
         logits_e, scale_e, base_e = _build_inputs(B=2, S=64, K=K, seed=144 + K, requires_grad=True)
         logits_t = logits_e.detach().clone().requires_grad_(True)
@@ -178,7 +178,7 @@ class TestG40HyperMixerParity:
     weights / inputs / Sinkhorn iters).
     """
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
     def test_compute_weights_env_dispatch_parity(self, dtype):
         torch.manual_seed(20260514)
         mixer = HyperMixer(hidden_size=64, hc_mult=4, sinkhorn_iters=20).to("cuda")

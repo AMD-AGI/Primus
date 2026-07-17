@@ -128,6 +128,9 @@ def _compute_route(
         sel_score = scores_for_selection
     indices = sel_score.topk(topk, dim=-1).indices  # [N, K]
 
+    # The V4 router is GPU-only: both the Triton and eager paths run on
+    # CUDA/HIP tensors (there is no CPU compute path).
+    assert logits.is_cuda, "V4 router requires CUDA / HIP tensors"
     if _v4_router_triton_enabled():
         # The Triton kernel re-applies the score function inside (so
         # it can save the full row for backward).  This keeps the

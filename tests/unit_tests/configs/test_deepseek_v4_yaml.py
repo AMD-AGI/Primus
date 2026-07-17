@@ -75,6 +75,20 @@ def _build_v4_config(yaml_dict: Dict[str, Any]):
     )
 
     kwargs = _config_kwargs_from_yaml(yaml_dict)
+    # The model YAML uses ``num_experts`` (mapped to Megatron's dataclass field
+    # ``num_moe_experts`` by the primus config loader at runtime); apply the same
+    # alias here so the standalone build is a valid MoE config.
+    if "num_experts" in yaml_dict and "num_moe_experts" not in kwargs:
+        kwargs["num_moe_experts"] = yaml_dict["num_experts"]
+    # The model YAML inherits ``sequence_parallel: true`` (for runtime TP>1),
+    # but this standalone build uses tensor_model_parallel_size=1, which
+    # Megatron rejects ("sequence parallelism without tensor parallelism").
+    kwargs["sequence_parallel"] = False
+    # V4 uses the sqrtsoftplus score function, but Megatron only allows the
+    # aux-loss-free expert bias with sigmoid. The runner disables expert bias
+    # for V4; do the same here. None of these fields affect compress_ratios,
+    # which is the only thing these tests validate.
+    kwargs["moe_router_enable_expert_bias"] = False
     return DeepSeekV4TransformerConfig(**kwargs)
 
 
