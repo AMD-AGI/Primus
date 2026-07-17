@@ -7,8 +7,6 @@
 import os
 import re
 
-import yaml
-
 from primus.core.config.merge_utils import deep_merge
 
 ENV_PATTERN = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
@@ -30,6 +28,8 @@ def parse_yaml(path: str) -> dict:
 # 1. Load YAML
 # ================================================================
 def _load_yaml(path: str):
+    import yaml
+
     with open(path, "r") as f:
         return yaml.load(f, Loader=yaml.SafeLoader)
 
