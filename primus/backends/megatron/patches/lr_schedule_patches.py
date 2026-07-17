@@ -26,7 +26,7 @@ Enabled by setting nemo_aligned_lr_warmup: true in the YAML config.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _nemo_lr_enabled(ctx: PatchContext) -> bool:
