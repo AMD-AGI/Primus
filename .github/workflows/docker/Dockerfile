@@ -77,11 +77,11 @@ RUN rm -rf /opt/Primus-Turbo
 # Install Triton
 # ---------------------------------------------------------------------------
 RUN cd /opt && \
-    git clone -b release/3.7.x https://github.com/triton-lang/triton.git && \
+    git clone https://github.com/triton-lang/triton.git && \
     cd triton && \
-    git checkout ${TRITON_COMMIT} && \
-    pip3 install ninja cmake && \
-    pip3 install --no-build-isolation -v .
+    git checkout 09500db9 && \
+    pip3 install -r python/requirements.txt && \
+    MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
 
 RUN rm -rf /opt/triton
 

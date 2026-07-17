@@ -1,0 +1,66 @@
+name: Deploy DeepSeek-V4 Projection
+
+# Publishes the DeepSeek-V4 performance-projection site to GitHub Pages from the
+# current development branch (no need to merge to main). The site is served at
+#   https://<user>.github.io/<repo>/deepseek-v4-projection/
+# NOTE: a repo has a single Pages site, so this deployment and the main
+# backend-gap dashboard deployment overwrite each other (last run wins). If the
+# github-pages environment restricts deployment branches, allow this branch in
+# repo Settings -> Environments -> github-pages -> Deployment branches.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/tas/deepseek-v4
+    paths:
+      - "examples/deepseek-v4/projection/site/**"
+      - ".github/workflows/deploy-projection.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deepseek-v4-projection-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Assemble Pages bundle
+        run: |
+          set -euo pipefail
+          mkdir -p _site/deepseek-v4-projection
+          cp -r examples/deepseek-v4/projection/site/. _site/deepseek-v4-projection/
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8" />
+          <meta http-equiv="refresh" content="0; url=./deepseek-v4-projection/" />
+          <title>DeepSeek-V4 Projection</title>
+          <a href="./deepseek-v4-projection/">DeepSeek-V4 Performance Projection</a>
+          HTML
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
