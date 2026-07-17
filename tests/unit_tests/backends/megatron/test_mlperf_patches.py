@@ -618,8 +618,6 @@ class TestSeedFp8Amax:
                     assert (module.fp8_meta[key].amax_history == 1.0).all()
 
     def test_seeds_custom_value(self):
-        pass
-
         from primus.backends.megatron.patches.mlperf_warmup_patches import (
             _seed_fp8_amax,
         )
