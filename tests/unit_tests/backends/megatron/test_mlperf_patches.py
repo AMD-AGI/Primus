@@ -602,8 +602,6 @@ class TestSeedFp8Amax:
         return torch.nn.Sequential(FakeTeModule(), FakeTeModule())
 
     def test_seeds_default_value(self):
-        pass
-
         from primus.backends.megatron.patches.mlperf_warmup_patches import (
             _seed_fp8_amax,
         )
