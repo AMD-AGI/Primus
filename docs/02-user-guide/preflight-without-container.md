@@ -1,4 +1,4 @@
-# Run Preflight Without a Container
+# Run preflight without a container
 
 > ⚠ **Run the [node-smoke test](./node-smoke-test-instruction.md) first.** `preflight` opens a global `torch.distributed` rendezvous, so a single sick node (wedged driver, leaked rank holding HBM, partial NIC enumeration, time-sync drift, etc.) can stall the whole job for up to `--dist-timeout-sec` seconds — long before any cross-node bandwidth number is produced. The node-smoke test catches those exact failure modes *without* a rendezvous in ~30–60 s and emits a SLURM-ready `failing_nodes.txt` you can pipe straight into `srun --exclude=`. Treat node-smoke as a hard prerequisite; only run `preflight` on the nodes node-smoke marked PASS. See [§0 "Which test should I run?"](#0-which-test-should-i-run) for the side-by-side comparison and the recommended 3-step workflow.
 
