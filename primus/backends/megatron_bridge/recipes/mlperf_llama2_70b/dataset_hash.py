@@ -1,3 +1,5 @@
+# Modifications Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +15,6 @@
 # limitations under the License.
 
 import hashlib
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -29,15 +30,15 @@ def hash_file_md5(file_path, chunk_size=4194304):  # Default chunk size 4MB.
     return md5_hash.hexdigest()
 
 
-def hash_directory(path):
-    """Hashes all files in a directory in parallel using MD5."""
+def hash_files(file_paths):
+    """Hashes an explicit list of files in parallel using MD5.
+
+    Only the given files are considered, so unrelated content in the same
+    directory (e.g. checkpoints) does not affect the result.
+    """
     hashes = []
     with ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(hash_file_md5, os.path.join(root, file))
-            for root, dirs, files in os.walk(path)
-            for file in files
-        ]
+        futures = [executor.submit(hash_file_md5, p) for p in file_paths]
         for future in futures:
             file_hash = future.result()
             if file_hash:
