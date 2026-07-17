@@ -73,6 +73,10 @@ class _HardwareProfile:
     l2_capacity: int  # bytes (per XCD)
     compute_clock_khz: int
     hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
+    # Peak *dense* BF16 matrix throughput (TFLOP/s). FP8 is taken as 2x. Used
+    # only for the roofline sanity-cap in ``simulate_gemm`` (see below), not for
+    # the primary Origami tile prediction.
+    peak_tflops_bf16: float = 1307.0
     # Register-file capacity per CU (bytes). CDNA3/CDNA4 expose 512 KiB of VGPR
     # per CU; ``origami.get_hardware_for_arch`` requires this argument (matches
     # ``get_hardware_for_device(...).rf_capacity`` on gfx942/gfx950).
@@ -80,17 +84,31 @@ class _HardwareProfile:
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
-    # MI300X / gfx942: HBM3 ~5.3 TB/s
-    "mi300x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
-    "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
+    # MI300X / gfx942: HBM3 ~5.3 TB/s, ~1307 TFLOP/s dense BF16
+    "mi300x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0, 1307.0),
+    "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0, 1307.0),
     # MI325X / gfx942 (same die as MI300X, HBM3E upgrade): ~6.0 TB/s
-    "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 6000.0),
-    # MI355X / gfx950: HBM3E ~8.0 TB/s
-    "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
-    "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
+    "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 6000.0, 1307.0),
+    # MI355X / gfx950: HBM3E ~8.0 TB/s, ~2500 TFLOP/s dense BF16 (CDNA4)
+    "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0, 2500.0),
+    "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0, 2500.0),
     # MI300A
-    "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0),
+    "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0, 981.0),
 }
+
+# Achievable fractions of peak for the roofline sanity-cap. The cap only exists
+# to trim Origami's small-M (memory-bound decode) over-prediction — a spurious
+# ~1/M inflation from tile quantisation. It must NOT override Origami's
+# compute-bound tile model for large-M / prefill GEMMs (which is accurate,
+# including the native FP8 speedup once K>=MI.k tiles are available).
+#
+# ``_ROOFLINE_MEM_EFF`` sets how tightly the memory-bound floor caps small-M.
+# ``_ROOFLINE_COMPUTE_EFF`` is deliberately *low* so the compute ceiling stays
+# well above Origami's real compute-bound predictions (which reach ~55-70% of
+# peak) and never clips them; it only guards against a pathological case where
+# even the compute roofline is exceeded.
+_ROOFLINE_MEM_EFF = 0.70
+_ROOFLINE_COMPUTE_EFF = 0.40
 
 # ---------------------------------------------------------------------------
 # Dtype mapping:  Primus string  →  origami datatype string
@@ -100,7 +118,13 @@ _DTYPE_MAP: Dict[str, str] = {
     "bf16": "bf16",
     "fp16": "f16",
     "fp32": "f32",
-    "fp8": "bf8_fnuz",
+    # gfx950 (CDNA4) exposes a native FP8 matrix instruction under the "f8"
+    # datatype (16x16x128). The older "bf8_fnuz" name is not accepted by
+    # ``string_to_datatype`` in current Origami builds and raised — silently
+    # forcing the BF16 fallback on *every* arch. On archs without an FP8 MI
+    # (e.g. gfx942) "f8" resolves to a 0x0x0 instruction, which the caller
+    # detects and falls back to BF16 (÷2) as before.
+    "fp8": "f8",
 }
 
 # ---------------------------------------------------------------------------
@@ -125,6 +149,33 @@ _DEFAULT_TILE_SIZES: List[Tuple[int, int, int]] = [
     (256, 256, 64),
 ]
 _DEFAULT_OCCUPANCIES: List[int] = [1, 2, 4]
+
+# Widest ``block_K`` in the static list above. When a matrix instruction is
+# wider than this in the K dimension, none of the static macro-tiles can fully
+# feed it and Origami predicts *no* compute speedup (the MI runs half-empty).
+_MAX_STATIC_TILE_K = 64
+
+
+def _candidate_tile_sizes(mi_k: int) -> List[Tuple[int, int, int]]:
+    """Macro-tile candidates, widened so at least one tile can feed the MI.
+
+    Origami only ranks the tiles it is given. If every candidate's ``block_K``
+    is smaller than the matrix instruction's K dimension, the instruction is
+    under-fed and the selected config shows no throughput gain — this is why
+    FP8 on gfx950 (MI = 16x16x128) landed at ~BF16 while FP8 on gfx942
+    (MI = 16x16x32, fed fine by a K=64 tile) showed the expected speedup.
+
+    We therefore append macro-tiles with ``block_K`` set to a multiple of the
+    instruction's K whenever ``mi_k`` exceeds the widest static tile. Smaller
+    instructions (all BF16/FP16 MIs, and gfx942 FP8) keep the exact static list
+    so their tuned predictions are unchanged.
+    """
+    if not mi_k or mi_k <= _MAX_STATIC_TILE_K:
+        return list(_DEFAULT_TILE_SIZES)
+
+    mn_shapes = sorted({(m, n) for (m, n, _) in _DEFAULT_TILE_SIZES})
+    extra = [(m, n, k) for (m, n) in mn_shapes for k in (mi_k, mi_k * 2)]
+    return list(_DEFAULT_TILE_SIZES) + extra
 
 
 class OrigamiGEMMBackend(GEMMSimulationBackend):
@@ -178,7 +229,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         self._clock_ghz: Optional[float] = None
         self._initialized = False
         self._init_dtype: Optional[str] = None  # tracks dtype used for config init
-        self._fp8_mi_unavailable = False  # set True if FP8 MI is 0x0x0
+        self._fp8_origami_str: Optional[str] = None  # resolved FP8 MI dtype str
 
     # ------------------------------------------------------------------
     # GEMMSimulationBackend interface
@@ -203,6 +254,41 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         profile = _KNOWN_PROFILES.get(arch)
         return profile.hbm_bandwidth_gbps if profile is not None else None
 
+    @property
+    def peak_tflops_bf16(self) -> float:
+        """Peak dense BF16 matrix throughput (TFLOP/s) for the roofline cap."""
+        arch = self._gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")
+        arch = arch.lower().strip()
+        profile = _KNOWN_PROFILES.get(arch)
+        return profile.peak_tflops_bf16 if profile is not None else 1307.0
+
+    def _roofline_ceiling_ms(self, m: int, n: int, k: int, batch: int, sim_dtype: str, native_fp8: bool) -> float:
+        """Efficiency-adjusted max(memory, compute) roofline for one (batched) GEMM.
+
+        This is a physical *upper bound* on a well-tuned kernel's time: it can't
+        take longer than streaming its operands at achievable HBM bandwidth, nor
+        longer than issuing its FLOPs at achievable matrix throughput. Origami's
+        tile model is accurate in the compute-bound (large-M) regime but has a
+        known small-M over-prediction (a spurious ~1/M inflation for
+        memory-bound decode GEMMs); capping at this ceiling removes that
+        artifact while leaving compute-bound GEMMs untouched.
+        """
+        bw = self.hbm_bandwidth_gbps or _FALLBACK_HBM_BW_GBPS  # GB/s
+        # FP8 halves operand bytes and doubles matrix throughput; when FP8 is
+        # simulated as a BF16 fallback the peak still reflects FP8 silicon.
+        is_fp8 = native_fp8 or sim_dtype != "bf16"
+        in_bytes = 1 if is_fp8 else 2
+        out_bytes = 2  # outputs kept at BF16 for accumulation fidelity
+        peak_tflops = self.peak_tflops_bf16 * (2.0 if is_fp8 else 1.0)
+
+        mem_bytes = (float(m) * k + float(n) * k) * in_bytes + float(m) * n * out_bytes
+        mem_bytes *= max(1, batch)
+        t_mem_ms = mem_bytes / (bw * 1e9 * _ROOFLINE_MEM_EFF) * 1e3
+
+        flops = 2.0 * m * n * k * max(1, batch)
+        t_compute_ms = flops / (peak_tflops * 1e12 * _ROOFLINE_COMPUTE_EFF) * 1e3
+        return max(t_mem_ms, t_compute_ms)
+
     def simulate_gemm(
         self,
         m: int,
@@ -220,37 +306,21 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 "#subdirectory=shared/origami/python"
             )
 
-        # FP8 fallback strategy
-        # ~~~~~~~~~~~~~~~~~~~~~~
-        # Origami v0.1.0 maps the Primus "fp8" dtype to "bf8_fnuz" (the FNUZ
-        # variant used by gfx942 / MI300X), but this datatype string is not
-        # yet recognised by Origami's ``string_to_datatype``.  As a result,
-        # ``_ensure_initialized("fp8")`` sets ``_fp8_mi_unavailable = True``
-        # on *all* current architectures.
-        #
-        # When the FP8 MI is unavailable we simulate in BF16 and halve the
-        # time (``÷ 2.0`` below).  This is a first-order approximation:
-        # FP8 doubles the matrix-instruction throughput relative to BF16 on
-        # both gfx942 and gfx950.
-        #
-        # Origami does expose *native* ``bf8`` / ``f8`` MI for gfx950
-        # (MI=16×16×128 vs BF16 MI=16×16×32), but its tile-level performance
-        # model currently does not translate the higher MI throughput into
-        # proportional time savings — native FP8 predictions are only ~1.03×
-        # faster than BF16 instead of the expected ~2×.  Until Origami's FP8
-        # performance model is updated, the BF16 ÷ 2 heuristic is more
-        # accurate for all supported architectures.
-        fp8_fallback = False
+        # FP8 matrix-instruction strategy (see ``_resolve_fp8_mi``)
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        # FP8 is always modelled with a *native* matrix instruction:
+        #   * gfx950 / MI355X (CDNA4): native OCP FP8 MI = 16x16x128. Requires
+        #     the K>=128 candidate tiles (``_candidate_tile_sizes``) to actually
+        #     feed the instruction, otherwise it runs half-empty and shows no
+        #     speedup.
+        #   * gfx942 / MI300X (CDNA3): FP8 shares the INT8 MFMA unit (both
+        #     16x16x32, 2x BF16, 1-byte operands). This Origami build doesn't
+        #     surface an FP8 datatype for gfx942, so we use the INT8 MI as a
+        #     physically-exact throughput proxy → native ~1.8x.
+        # ``_ensure_initialized`` raises if an arch has neither, which does not
+        # happen for any supported AMD GPU.
         sim_dtype = dtype
-        if dtype == "fp8":
-            self._ensure_initialized("fp8")
-            if self._fp8_mi_unavailable:
-                sim_dtype = "bf16"
-                fp8_fallback = True
-                self._ensure_initialized("bf16")
-            # else: origami supports FP8 natively, proceed normally
-        else:
-            self._ensure_initialized(dtype)
+        self._ensure_initialized(dtype)
 
         # ----- Build origami problem_t -----
         # NOTE: problem.batch models **batched** GEMM (all sub-problems share
@@ -263,7 +333,12 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem.a_transpose = _origami.transpose_t.T if trans_a else _origami.transpose_t.N
         problem.b_transpose = _origami.transpose_t.T if trans_b else _origami.transpose_t.N
 
-        origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(sim_dtype, "bf16"))
+        # For FP8 the resolved MI datatype may be a native FP8 type (f8/bf8) or
+        # an INT8 proxy on archs that share the MFMA unit (see _resolve_fp8_mi).
+        if sim_dtype == "fp8" and self._fp8_origami_str:
+            origami_dtype = _origami.string_to_datatype(self._fp8_origami_str)
+        else:
+            origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(sim_dtype, "bf16"))
         problem.a_dtype = origami_dtype
         problem.b_dtype = origami_dtype
         problem.c_dtype = origami_dtype
@@ -287,6 +362,15 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         latency_cycles = result.latency
         time_ms = latency_cycles / (self._clock_ghz * 1e6)
 
+        # Roofline sanity-cap: remove Origami's small-M (memory-bound decode)
+        # over-prediction by capping at an efficiency-adjusted max(mem, compute)
+        # roofline. Compute-bound (large-M / prefill) GEMMs sit below the
+        # ceiling and are unaffected. dtype=="fp8" always earns the FP8 roofline
+        # (2x throughput, 1-byte operands) regardless of the BF16 fallback.
+        ceiling_ms = self._roofline_ceiling_ms(m, n, k, batch, sim_dtype, native_fp8=(dtype == "fp8"))
+        if ceiling_ms > 0:
+            time_ms = min(time_ms, ceiling_ms)
+
         # Compute achieved TFLOPS for metadata
         flops = 2.0 * m * n * k * batch
         time_s = time_ms / 1e3
@@ -303,7 +387,6 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 "clock_ghz": self._clock_ghz,
                 "dtype": dtype,
                 "batch": batch,
-                "fp8_fallback": fp8_fallback,
                 "best_tile": (
                     result.config.mt.m,
                     result.config.mt.n,
@@ -316,6 +399,28 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_fp8_mi(self):
+        """Resolve the best FP8 matrix instruction for the target arch.
+
+        Tries the native OCP FP8 datatypes first (``f8``/``bf8`` — gfx950/CDNA4
+        expose a 16x16x128 MI). On archs whose FP8 shares the INT8 MFMA unit but
+        which this Origami build does not surface under an FP8 datatype string
+        (gfx942/CDNA3: FP8 and INT8 are both 16x16x32, 2x BF16, 1-byte operands),
+        it falls back to the ``i8`` MI as a physically-exact throughput proxy.
+
+        Returns ``(origami_dtype, origami_str, mi)`` for the first datatype that
+        yields a non-zero MI, or ``None`` if the arch has no FP8/INT8 MI at all.
+        """
+        for cand in ("f8", "bf8", "i8"):
+            try:
+                dt = _origami.string_to_datatype(cand)
+            except (ValueError, RuntimeError):
+                continue
+            mi = self._hardware.get_recommended_matrix_instruction(dt)
+            if not (mi.m == 0 and mi.n == 0 and mi.k == 0):
+                return dt, cand, mi
+        return None
 
     def _ensure_initialized(self, dtype: str = "bf16") -> None:
         """Lazily initialise hardware and candidate configs.
@@ -332,31 +437,27 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         if self._initialized and self._init_dtype == dtype:
             return
 
-        origami_str = _DTYPE_MAP.get(dtype, "bf16")
-        try:
-            origami_dtype = _origami.string_to_datatype(origami_str)
-        except (ValueError, RuntimeError):
-            # Origami doesn't know this dtype string — treat as unavailable
-            if dtype == "fp8":
-                self._fp8_mi_unavailable = True
-            return
-
-        mi = self._hardware.get_recommended_matrix_instruction(origami_dtype)
-
-        # Detect MI=0x0x0 (datatype not supported by this arch)
-        if mi.m == 0 and mi.n == 0 and mi.k == 0:
-            if dtype == "fp8":
-                self._fp8_mi_unavailable = True
-                is_rank_0 = int(os.getenv("RANK", "0")) == 0
-                if is_rank_0:
-                    print(
-                        "[Primus:Origami] FP8 matrix instruction not available "
-                        "for this hardware; will use BF16 with 2x speedup factor"
-                    )
-            return
+        if dtype == "fp8":
+            resolved = self._resolve_fp8_mi()
+            if resolved is None:
+                raise RuntimeError(
+                    "[Primus:Origami] No FP8/INT8 matrix instruction available for "
+                    f"arch '{self._gpu_arch}'. FP8 projection is unsupported on this "
+                    "hardware/Origami build."
+                )
+            origami_dtype, self._fp8_origami_str, mi = resolved
+        else:
+            origami_str = _DTYPE_MAP.get(dtype, "bf16")
+            try:
+                origami_dtype = _origami.string_to_datatype(origami_str)
+            except (ValueError, RuntimeError):
+                return  # Origami doesn't know this dtype string
+            mi = self._hardware.get_recommended_matrix_instruction(origami_dtype)
+            if mi.m == 0 and mi.n == 0 and mi.k == 0:
+                return
 
         configs: list = []
-        for mt_m, mt_n, mt_k in _DEFAULT_TILE_SIZES:
+        for mt_m, mt_n, mt_k in _candidate_tile_sizes(mi.k):
             for occ in _DEFAULT_OCCUPANCIES:
                 cfg = _origami.config_t()
                 cfg.mt = _origami.dim3_t(mt_m, mt_n, mt_k)
