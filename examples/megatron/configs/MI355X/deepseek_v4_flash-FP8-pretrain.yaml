@@ -1,0 +1,166 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v4_flash-fp8-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# DeepSeek-V4 Flash FP8 pretraining config tuned for MI355X.
+# Derived from deepseek_v4_flash-BF16-pretrain.yaml; the ONLY substantive
+# delta is the FP8 training block at the bottom.
+#
+# Precision recipe (paper §4.x quantization / techblog §9.6):
+#   Paper = "FP4 + FP8 Mixed": MoE experts + CSA-Indexer QK in FP4 (MXFP4),
+#   EVERYTHING ELSE in FP8, all with the **ue8m0** microscaling scale format.
+#   ue8m0 = OCP Microscaling (MX) block scale → on this stack that is
+#   `fp8_recipe: mxfp8` → TE MXFP8BlockScaling → Primus-Turbo MX_BLOCKWISE
+#   with scale_dtype=E8M0 (fp8_utils.py:148), native on MI355X/CDNA4.
+#
+# Integration gap vs the paper (NOT config — Primus V4 TODO, techblog item 10
+# "Phase 2 FP4/FP8 Mixed"): the FP4 expert / FP4-Indexer path is not yet wired
+# in V4, so experts run at FP8 here (FP8 everywhere) rather than FP4. This is
+# the closest supported step toward the paper recipe. FP8 is highly outlier-
+# sensitive, which is why the paper pairs it with clamped SwiGLU (swiglu_limit,
+# set below) — keep that on whenever FP8 is enabled.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:deepseek_v4_flash}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_DeepSeek_V4_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: 50
+      micro_batch_size: 1
+      global_batch_size: 256
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel — scaffold defaults; will be retuned in Phase 6.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:8}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+
+      # data
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # ---------- DeepSeek-V4 specific ----------
+      hybrid_attention_enabled: true
+      attn_sink: true
+      hc_use_sinkhorn: true
+      mtp_use_separate_hc_head: true
+      moe_router_score_function: sqrtsoftplus
+      swiglu_limit: 10.0
+
+      # ---------- Optimizer ----------
+      # NOTE: Phase 7 will add Muon for the latent / hidden projections.
+      #       Until then we run plain BF16 AdamW (precision-aware).
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: false   # V4 uses partial RoPE on a 512-dim head
+
+      # recompute
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # turbo / deepep — keep off by default; enable via env vars when
+      # benchmarking the Turbo path (see run_deepseek_v4.sh).  Plan-3 P22
+      # routes the dense (compress_ratio == 0) attention layers through
+      # PrimusTurboAttention when ``use_turbo_attention=true``; the V4
+      # builder auto-derives ``use_sink_attention`` /
+      # ``sink_sliding_window`` from ``attn_sink`` / ``attn_sliding_window``
+      # so the YAML stays free of Turbo-internal knobs.
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
+      # use_turbo_attention stays OFF: the dense (cr=0) path must run the
+      # triton_v2 sparse-MLA backend below, not PrimusTurboAttention (which
+      # would take dispatch precedence).
+      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:false}
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:true}
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      # deepep tuning (64 or 80 for ep8, 32 for ep16-64 is best practice)
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support (stage 1-2; 0 = off). stage 2 = best perf.
+      turbo_sync_free_moe_stage: 1
+
+      # V4 attention backend selection (unified string selectors; default triton_v2).
+      #   use_v4_attention_backend     (dense cr=0 / HCA cr=128): eager|triton_v1|triton_v2|gluon
+      #   use_v4_csa_attention_backend (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
+      use_v4_attention_backend: ${PRIMUS_USE_V4_ATTENTION_BACKEND:triton_v2}
+      use_v4_csa_attention_backend: ${PRIMUS_USE_V4_CSA_ATTENTION_BACKEND:triton_v2}
+
+      # plan-5 P29 (RESCOPED): wrap sinkhorn_normalize with a cached
+      # torch.compile(fullgraph=True, dynamic=False) build. Default
+      # false until G32 (parity) + G33b (trace) flip it on.
+      use_v4_compiled_sinkhorn: ${PRIMUS_USE_V4_COMPILED_SINKHORN:false}
+
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # ---------- FP8 training ----------
+      # fp8 = number format (E4M3); fp8_recipe = scaling strategy.
+      # The paper uses ue8m0 microscaling (= mxfp8, 1x32 block / E8M0 scale), but
+      # mxfp8 is NOT runnable on this gfx950 build: turbo grouped-GEMM has no MX
+      # path, and TE's ROCm MXFP8 GEMM requires K%128==0 (V4 has a K=224 proj).
+      # So we use `tensorwise` (per-tensor scale) — the working recipe. This gives
+      # the paper's fp8 *layout* (all weight GEMMs fp8) with a non-ue8m0 scale.
+      # Override via FP8 / FP8_RECIPE env knobs (CLI wins); FP8=null => BF16.
+      fp8: e4m3
+      fp8_recipe: tensorwise
+      # Route the attention/dense linear projections through PrimusTurboLinear so
+      # they quantize to fp8 too (not just the MoE experts) — matches the paper's
+      # "fp8 on all weight GEMMs". Without this the projections stay bf16.
+      use_turbo_gemm: true
+
+      moe_router_padding_for_quantization: true

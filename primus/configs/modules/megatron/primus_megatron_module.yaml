@@ -70,7 +70,7 @@ mlflow_upload_performance_metrics: false
 disable_profiler_activity_cpu: false
 torch_profiler_record_shapes: true
 torch_profiler_with_stack: true
-torch_profiler_use_gzip: false
+torch_profiler_use_gzip: true
 
 # continue/finetune
 auto_continue_train: false

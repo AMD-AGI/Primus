@@ -136,10 +136,14 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt, mamba, or diffusion) from backend_args
+        # Determine model type (gpt / mamba / deepseek_v4 / diffusion) from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
 
+        # Import the appropriate training components based on model_type.
+        # DeepSeek-V4 is causal-LM with the same data shape as GPT, so we
+        # reuse pretrain_gpt's forward_step + dataset provider; only the
+        # model_provider itself is V4-specific.
         if model_type == "mamba":
             from pretrain_mamba import (  # type: ignore
                 forward_step,
@@ -152,6 +156,13 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             # only TP rank 0 enters dataset construction while the core dataset builder still issues
             # distributed barriers, which deadlocks for TP>1.
             train_valid_test_datasets_provider.is_distributed = True
+        elif model_type == "deepseek_v4":
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+
+            log_rank_0("Using DeepSeek-V4 model provider; reusing pretrain_gpt forward_step + datasets")
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own
             # forward_step / dataset_provider. Defaults pull from pretrain_gpt.
