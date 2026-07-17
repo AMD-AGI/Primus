@@ -18,6 +18,7 @@ class Attention(TTAttention):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -29,12 +30,11 @@ class Attention(TTAttention):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
+        # Primus-Turbo path: inner_attention is replaced by TurboAttention, which
+        # consumes the (bs, seqlen, n_heads, head_dim) layout and handles GQA /
+        # causal masking internally, so we skip repeat_kv and the transpose.
         output = self.inner_attention(xq, xk, xv)
 
         output = output.contiguous().view(bs, seqlen, -1)
