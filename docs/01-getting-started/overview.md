@@ -2,7 +2,7 @@
 
 ## Executive summary
 
-**Primus** is a YAML-driven training framework for large-scale foundation model work on AMD GPUs. It targets **machine learning engineers**, **researchers**, and **platform/operations teams** who need reproducible, multi-backend training pipelines on AMD Instinct™ hardware. Within the broader Primus ecosystem, this repository is the training component, sometimes referred to as **Primus-LM** (see [Primus ecosystem](#primus-ecosystem) below).
+**Primus** is a YAML-driven training framework for large-scale foundation model work on AMD GPUs. It targets **machine learning engineers**, **researchers**, and **platform/operations teams** who need reproducible, multi-backend training pipelines on AMD Instinct™ hardware. This project, also referred to as **Primus-LM**, serves as the training component within the broader [Primus ecosystem](#primus-ecosystem).
 
 **Repository:** [https://github.com/AMD-AGI/Primus](https://github.com/AMD-AGI/Primus)
 
@@ -25,7 +25,7 @@ Workflows span **pretraining** and **post-training** (including SFT and LoRA). S
 
 ## Primus ecosystem
 
-The training component (Primus-LM) sits between the stability/platform services above it and the low-level operator libraries below it:
+The training component (Primus-LM) serves as the layer between the stability and platform services above it and the low-level operator libraries below it:
 
 ```
                     +------------------+
@@ -63,7 +63,7 @@ The training component (Primus-LM) sits between the stability/platform services 
 | **Megatron Bridge** | Post-training and bridge workflows on top of Megatron-related stacks. |
 | **HummingbirdXT** | Additional integrated training path when enabled by your deployment. |
 
-Backend choice is expressed in the configuration YAML and resolved through Primus’s adapter layer (see [glossary](./glossary.md)).
+Backend choice is specified in the configuration YAML and resolved through Primus’s adapter layer (see [glossary](./glossary.md)).
 
 ---
 
