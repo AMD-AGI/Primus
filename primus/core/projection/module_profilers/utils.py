@@ -6,7 +6,7 @@
 
 
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import List, Tuple, Union
 
 import torch
@@ -97,12 +97,97 @@ def _get_fp8_context_for_benchmark(transformer_config):
     return _FP8ContextFactory(transformer_config)
 
 
+@contextmanager
+def _graph_safe_rng():
+    """Neutralise Megatron's TP RNG-tracker ``fork`` during graph capture.
+
+    Megatron transformer layers wrap attention/MLP in
+    ``get_cuda_rng_tracker().fork()``, which calls ``set_current_seed`` on every
+    forward.  CUDA/HIP graph capture forbids setting a *different* seed mid-
+    capture, so capture fails.  Inference runs in eval mode (dropout off), so the
+    fork is only relevant to numerical RNG we don't care about while *timing* —
+    replace it with a no-op context for the duration of capture.
+    """
+    try:
+        from megatron.core.tensor_parallel import random as _mrand
+
+        tracker = _mrand.get_cuda_rng_tracker()
+    except Exception:  # noqa: BLE001 - Megatron not importable → nothing to patch
+        yield
+        return
+
+    orig_fork = getattr(tracker, "fork", None)
+    if orig_fork is None:
+        yield
+        return
+    try:
+        tracker.fork = lambda *a, **k: nullcontext()
+        yield
+    finally:
+        tracker.fork = orig_fork
+
+
+def _time_forward_cuda_graph(layer_module, inputs, fp8_context, num_iterations, device):
+    """Capture ``layer_module`` forward into a CUDA/HIP graph and time replays.
+
+    Returns the average per-replay time in ms, or ``None`` if graph capture is
+    unsupported for this module/kernels (caller falls back to eager timing).
+
+    The static input tensors are reused across warmup, capture and replay (a
+    graph requires fixed input addresses), so a replay reruns the exact same
+    kernels the captured forward issued -- with no per-kernel host launch cost.
+    """
+    try:
+        _rng_ctx = _graph_safe_rng()
+        _rng_ctx.__enter__()
+    except Exception:  # noqa: BLE001
+        _rng_ctx = None
+    try:
+        # Warm up on a side stream first (required before capture so that
+        # allocator / autotune / JIT work does not get recorded into the graph).
+        side = torch.cuda.Stream(device=device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            with fp8_context, torch.no_grad():
+                for _ in range(5):
+                    layer_module(*inputs)
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+
+        graph = torch.cuda.CUDAGraph()
+        with fp8_context, torch.no_grad():
+            with torch.cuda.graph(graph):
+                layer_module(*inputs)
+
+        # Timed replays.
+        torch.cuda.synchronize(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(num_iterations):
+            graph.replay()
+        end.record()
+        torch.cuda.synchronize(device)
+        return float(start.elapsed_time(end)) / max(1, num_iterations)
+    except Exception as exc:  # noqa: BLE001 - any capture failure → eager fallback
+        if int(os.getenv("RANK", "0")) == 0:
+            print(
+                "[Primus:Inference:Benchmark] CUDA-graph capture failed "
+                f"({type(exc).__name__}: {exc}); falling back to eager timing."
+            )
+        return None
+    finally:
+        if _rng_ctx is not None:
+            _rng_ctx.__exit__(None, None, None)
+
+
 def benchmark_layer(
     layer_module: torch.nn.Module,
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,  # Match typical microbatch count
     transformer_config=None,  # Optional: pass config to enable FP8 context
     forward_only: bool = False,  # Inference: time forward only, under no_grad
+    use_cuda_graph: bool = False,  # Inference: capture + replay under a CUDA/HIP graph
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
@@ -247,6 +332,19 @@ def benchmark_layer(
     backward_times = []
 
     if forward_only:
+        # Preferred: capture the forward into a CUDA/HIP graph and time replays.
+        # Replay collapses all of the layer's kernel launches into a single
+        # graph launch, removing the per-kernel host-launch overhead that
+        # dominates a memory-bound (small-M) decode step -- this is exactly how
+        # real serving engines (vLLM/SGLang) run decode.  Falls back to eager
+        # timing if capture is unsupported for any kernel on this stack.
+        if use_cuda_graph and device.type == "cuda":
+            graph_ms = _time_forward_cuda_graph(
+                layer_module, inputs, fp8_context, num_iterations, device
+            )
+            if graph_ms is not None:
+                return graph_ms, 0.0, int(activation_memory)
+
         with fp8_context, torch.no_grad():
             for _ in range(num_iterations):
                 forward_start = torch.cuda.Event(enable_timing=True)
