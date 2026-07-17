@@ -1,6 +1,6 @@
 # Benchmark suite
 
-Primus ships microbenchmarks for GPU compute and distributed communication. They are exposed as the `benchmark` subcommand of the Primus CLI. Use them to sanity-check a node or cluster before long training jobs.
+Primus ships microbenchmarks for GPU compute and distributed communication. They are exposed as the `benchmark` subcommand of the Primus CLI. Use them to validate a node or cluster before long training jobs.
 
 **Implementation:** `primus/cli/subcommands/benchmark.py` (initializes distributed execution, runs the selected suite, then finalizes).
 
