@@ -46,6 +46,14 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     if total_steps <= 0:
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
 
+    warmup_steps = int(warmup_steps)
+    if warmup_steps > total_steps:
+        logger.warning(
+            f"Warmup steps ({warmup_steps}) exceed total steps ({total_steps}). "
+            f"Adjusting warmup steps to {total_steps}."
+        )
+        warmup_steps = total_steps
+
     def linear_warmup(step):
         if warmup_steps == 0:
             return 1.0
@@ -139,8 +147,6 @@ class BaseWanTrainer:
         seed = self.args.get("seed")
         if seed is not None:
             set_seed(int(seed))
-        if os.environ.get("FIXED_SEED"):
-            set_seed(int(os.environ["FIXED_SEED"]))
 
         # --- Gradient Checkpointing ---
         if self.args.get("gradient_checkpointing", False):
@@ -240,10 +246,27 @@ class BaseWanTrainer:
 
     def _clip_grad_norm(self) -> float:
         """Clip gradient norm. Returns the total norm value."""
-        if self.max_grad_norm > 0:
-            norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-            return norm.item() if isinstance(norm, torch.Tensor) else float(norm)
-        return 0.0
+        if self.max_grad_norm <= 0:
+            return 0.0
+
+        parameters = [p for p in self.model.parameters() if p.grad is not None]
+        if not parameters:
+            return 0.0
+
+        grads = [p.grad for p in parameters]
+        norm = torch.nn.utils.get_total_norm(grads, norm_type=2.0, foreach=True)
+        dtensor_cls = None
+        try:
+            from torch.distributed.tensor import DTensor
+
+            dtensor_cls = DTensor
+        except (ImportError, RuntimeError) as exc:
+            logger.debug(f"Skipping DTensor grad-norm conversion: {exc}")
+        if dtensor_cls is not None and isinstance(norm, dtensor_cls):
+            norm = norm.full_tensor()
+
+        torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
+        return norm.item() if isinstance(norm, torch.Tensor) else float(norm)
 
     def _save_checkpoint(self):
         """Save checkpoint at save_steps intervals. Override for custom strategies."""
@@ -385,6 +408,9 @@ class BaseWanTrainer:
         return None
 
     def _infer_local_batch_size(self, batch) -> int:
+        if isinstance(batch, (list, tuple)):
+            return len(batch)
+
         tensor_batch_size = self._infer_batch_size_from_tensors(batch)
         if tensor_batch_size is not None:
             return tensor_batch_size

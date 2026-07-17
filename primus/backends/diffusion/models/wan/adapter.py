@@ -28,7 +28,7 @@ class WanConfigShim:
     raw: dict
 
     def save_pretrained(self, save_directory: str):
-        # Best-effort: keep minimal JSON for debugging/reproducibility.
+        # Best-effort: keep minimal JSON for reproducibility.
         import json
         import os
 

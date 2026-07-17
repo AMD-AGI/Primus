@@ -98,6 +98,12 @@ def validate_fsdp2_optimizer_exclusivity(args) -> None:
 
 
 def validate_args_on_rocm(args):
+    # Primus-Turbo auto-tuning
+    use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
+    if use_turbo_autotune:
+        # NOTE: Set PRIMUS_TURBO_AUTO_TUNE to 1 to enable turbo auto-tuning.
+        os.environ["PRIMUS_TURBO_AUTO_TUNE"] = "1"
+
     # Deterministic mode
     if args.deterministic_mode:
         # NOTE: Some environment variables affect deterministic mode on ROCm. Need to do extra check.
