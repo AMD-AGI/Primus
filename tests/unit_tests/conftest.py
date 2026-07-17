@@ -38,7 +38,6 @@ def pytest_configure(config):
     if str(megatron_path) not in sys.path:
         sys.path.append(str(megatron_path))
 
-<<<<<<< feat/torchtitan-upgrade-v0.2.2-torch2.12
     # TorchTitan v0.2.2 has PEP-420 namespace subpackages (e.g. torchtitan/tools,
     # no __init__.py) that only import with the source root on sys.path. Insert the
     # submodule at the FRONT so it wins over any stale torchtitan in site-packages.
@@ -47,7 +46,7 @@ def pytest_configure(config):
         torchtitan_path = project_root / "third_party" / "torchtitan"
     if str(torchtitan_path) not in sys.path:
         sys.path.insert(0, str(torchtitan_path))
-=======
+
     # Register custom markers used by the primus test suite.
     config.addinivalue_line(
         "markers",
@@ -70,4 +69,3 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip_slow)
->>>>>>> main
