@@ -189,23 +189,41 @@ result. Keep the system-level break-even discussion (amax reduction, cast cost)
 honest but framed around how Primus mitigates it. Replace [X] placeholders.
 --->
 
-Low precision is one of the most direct levers for MoE training throughput, since expert GEMMs dominate compute. Primus supports FP8 training through Transformer Engine recipes with a Primus-Turbo operator overlay, covering **delayed**, **tensorwise (current) scaling**, **blockwise scaling**, and **MXFP8** recipes. For MoE specifically, the routed-expert path uses an FP8 **grouped GEMM** (`grouped_gemm_fp8`) with per-first-microbatch weight quantization and caching, and the token dispatch/permute path pads permuted tokens to the quantization block boundary so that dispatch, permutation, and expert GEMM all agree on the FP8 layout.
+Low precision is one of the most direct levers for MoE training throughput, since expert GEMMs dominate compute. Primus supports FP8 training through Transformer Engine recipes with a Primus-Turbo operator overlay, covering **delayed**, **tensorwise (current) scaling**, **blockwise scaling**, and **MXFP8** recipes. For MoE specifically, the routed-expert path uses an FP8 **grouped GEMM** (`grouped_gemm_fp8`) with per-first-microbatch weight quantization and caching, and pads permuted tokens to the quantization block boundary so that dispatch, permutation, and expert GEMM all agree on the FP8 layout. These paths run on Primus-Turbo kernels supporting both FP8 tensorwise scaling and MXFP8 block scaling (`E4M3`, block size 32, `E8M0` scale).
 
 Key considerations for FP8 MoE training on AMD GPUs:
 
+- **Accuracy is preserved.** Both the FP8 and MXFP8 expert GEMMs are numerically validated (including uneven-`M` grouped cases); at the training level the default tensorwise (current-scaling) recipe tracks BF16 convergence, while MXFP8's per-block scaling further contains quantization error on the expert GEMMs.
 - **Recipe choice matters.** Tensorwise (current) scaling and block/MX scaling behave differently in both accuracy and speed on MI355X; Primus exposes the recipe as a single knob (`fp8_recipe`) so users can select the right trade-off.
 - **Format selection.** On gfx950, using the OCP E4M3 format for expert GEMMs avoids costly up-conversions.
 - **System-level break-even.** At the kernel level, FP8 expert GEMMs are substantially faster than BF16. End-to-end, the win depends on amortizing the surrounding quantization work — amax reduction, casting, and token-count synchronization. Primus reduces this overhead through weight-quantization caching, quantization-aware padding, and keeping token counts on-GPU, so the kernel speedup translates into end-to-end gains.
 
-<!---
-OWNER / FILL: Ruibin Zhang, Kyle Zhao. Insert the kernel-level FP8 vs BF16
-grouped-GEMM comparison at imgs/fp8_grouped_gemm.png and any end-to-end numbers.
-Replace the placeholder below.
---->
+Figure 4 isolates that kernel-level payoff on MI355X alone, sweeping tokens-per-expert `M` over training-relevant sizes and reporting the FP8 (tensorwise) grouped-GEMM speedup over BF16 with quantization included in the FP8 timing:
 
-![Figure 4: FP8 vs BF16 grouped GEMM performance for representative MoE expert shapes on MI355X](imgs/fp8_grouped_gemm.png)
+<p align="center">
+  <img src="imgs/low_precision_fp8_vs_bf16_grouped.png" alt="FP8 vs BF16 grouped GEMM speedup on MI355X" width="45%">
+</p>
 
-**Figure 4: FP8 vs BF16 grouped GEMM performance for representative MoE expert shapes on MI355X** _(placeholder — asset and numbers to be finalized)_
+**Figure 4: Kernel-level FP8-vs-BF16 grouped-GEMM speedup on AMD Instinct MI355X, swept over tokens-per-expert `M` and averaged over the DeepSeek-V3 / Qwen3-235B-A22B / gpt-oss expert shapes; quantization is included in the FP8 timing.**
+
+The trend is clear: the forward speedup grows with `M` — from ~1.2x at `M`=2048 to ~1.6x at `M`=8192 as the GEMM gets large enough to hide the cast/amax cost that Primus already minimizes — while the backward is consistently ~1.5–1.7x. At training-relevant token counts the FP8 grouped-GEMM speedup is real and sizable.
+
+To place these kernels, we benchmark end-to-end quantized dense and grouped GEMMs (quantization included in timing, correctness checked by output/gradient SNR) against the NVIDIA B200/GB200 TransformerEngine baseline on representative Llama-style dense shapes and DeepSeek-V3 / Qwen3-235B-A22B / Kimi-K2 expert shapes. Across these shapes MI355X is broadly at parity: dense GEMM is essentially even in both precisions, and grouped GEMM leads on the forward pass (driven by the memory-bound `Down` projection) while backward is close to parity, with large-`N` `GateUP` weight-gradient the main remaining gap.
+
+<table>
+  <tr>
+    <td><img src="imgs/low_precision_tensorwise_dense_b200.png" alt="FP8 tensorwise dense GEMM performance vs B200/GB200" width="100%"></td>
+    <td><img src="imgs/low_precision_tensorwise_grouped_b200.png" alt="FP8 tensorwise grouped GEMM performance vs B200/GB200" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="imgs/low_precision_mxfp8_dense_b200.png" alt="MXFP8 dense GEMM performance vs B200/GB200" width="100%"></td>
+    <td><img src="imgs/low_precision_mxfp8_grouped_b200.png" alt="MXFP8 grouped GEMM performance vs B200/GB200" width="100%"></td>
+  </tr>
+</table>
+
+**Figure 5: FP8 tensorwise (top) and MXFP8 (bottom) GEMM throughput on AMD Instinct MI355X vs NVIDIA B200/GB200 (TE) — dense (left) and grouped (right), forward and backward, averaged over the tested shapes.**
+
+The main lesson is that low precision is not just a datatype switch: for MoE, layout and grouped scheduling matter as much as the quantization recipe. Removing the forward transpose tax and autotuning each grouped shape turns an apparent forward deficit into a forward lead, and MXFP8 layers finer-grained scaling on top of the same execution path while staying competitive with the B200/GB200 baseline.
 
 ### Benchmarking against B200
 
@@ -235,9 +253,9 @@ and add the comparison chart at imgs/b200_comparison.png.
 
 On the same small MoE training configuration, AMD Instinct MI355X reaches **[X]** ms/step (**[X]** TFLOP/s/GPU) versus **[X]** ms/step on NVIDIA B200. _(to be finalized as an apples-to-apples comparison)_
 
-![Figure 5: Small MoE training step time — AMD Instinct MI355X vs NVIDIA B200](imgs/b200_comparison.png)
+![Figure 6: Small MoE training step time — AMD Instinct MI355X vs NVIDIA B200](imgs/b200_comparison.png)
 
-**Figure 5: Small MoE training step time — AMD Instinct MI355X vs NVIDIA B200** _(placeholder — asset and numbers to be finalized)_
+**Figure 6: Small MoE training step time — AMD Instinct MI355X vs NVIDIA B200** _(placeholder — asset and numbers to be finalized)_
 
 ### Time-to-Train (TTT) oriented optimization
 
@@ -267,9 +285,9 @@ DeepSeek-V3 (61 layers, 256 routed experts, top-8, MLA attention) is representat
 
 <!--- OWNER / FILL: Lihuan Zhang — add remaining sub-topics as needed. --->
 
-![Figure 6: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X](imgs/dsv3_scaling.png)
+![Figure 7: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X](imgs/dsv3_scaling.png)
 
-**Figure 6: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X** _(placeholder — asset and numbers to be finalized)_
+**Figure 7: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X** _(placeholder — asset and numbers to be finalized)_
 
 ### JAX MoE training optimization
 
