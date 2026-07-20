@@ -1,0 +1,72 @@
+{
+  "report_id": "2026-W21",
+  "content_type": "weekly-report",
+  "title": "Primus Weekly Engineering Report — 2026-W21",
+  "report_path": "docs/weekly_reports/2026-W21-primus-weekly.md",
+  "report_github_url": "https://github.com/AMD-AGI/Primus/blob/dashboard-data/docs/weekly_reports/2026-W21-primus-weekly.md",
+  "time_window": {
+    "timezone": "Asia/Shanghai",
+    "start": "2026-05-18T00:00:00+08:00",
+    "end": "2026-05-22T09:01:00+08:00"
+  },
+  "generated_at": "2026-05-22T09:01:00+08:00",
+  "merged_pr_count": 1,
+  "category_breakdown": {
+    "Bug Fix": 1,
+    "Performance Optimization": 0,
+    "Turbo/Dependency Version Update": 0,
+    "CI/Infra": 0,
+    "Refactor": 0,
+    "Docs": 0,
+    "Other": 0
+  },
+  "megatron_status": {
+    "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+    "pin_date": "2026-03-06",
+    "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+    "upstream_ref": "main",
+    "upstream_head": "e27607a89b4e36ef084590eb10567031f4798a21",
+    "upstream_head_date": "2026-05-22",
+    "commit_gap": 554,
+    "recommendation": "plan sync"
+  },
+  "torchtitan_status": {
+    "pin_commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021",
+    "pin_date": "2025-10-15",
+    "upstream_repo": "https://github.com/pytorch/torchtitan",
+    "upstream_ref": "main",
+    "upstream_head": "b5852826b98278c705954ca95ae2cfcb7e94789e",
+    "upstream_head_date": "2026-05-21",
+    "commit_gap": 667,
+    "recommendation": "urgent sync"
+  },
+  "primus_turbo_status": {
+    "drift_type": "monthly_in_repo",
+    "month_start_ts": "2026-05-01T00:00:00+08:00",
+    "current_ci_commit": "06b8d3fefd91be26d6adfb5cd43c7524ef87b825",
+    "month_start_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+    "current_benchmark_commit": "06b8d3fefd91be26d6adfb5cd43c7524ef87b825",
+    "month_start_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+    "current_aiter_commit": "b5e03ed191fca11ee423226537ef8d9435e432a6",
+    "month_start_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+    "current_triton_commit": "88b227e23f0445f3f695bad05bbf1a363b4f50e0",
+    "month_start_triton_commit": null,
+    "drift_commits": 39,
+    "benchmark_drift_commits": 44,
+    "recommendation": "monitor"
+  },
+  "recommendations": {
+    "megatron": "plan sync",
+    "torchtitan": "urgent sync",
+    "primus_turbo": "monitor"
+  },
+  "key_findings": [
+    "1 PR merged to main in the 2026-W21 window (Bug Fix: 1). No backend pin or Turbo pin changed in this window; the current Primus-Turbo pin landed in PR #723 on 2026-05-15 (W20).",
+    "PR #721 hardens the Slurm launcher: runner/primus-cli-slurm-entry.sh resolves SLURM_MASTER_ADDR via scontrol show hostnames \"$SLURM_NODELIST\" up front, uses it as MASTER_ADDR when unset (replacing the prior `head -n1 || echo localhost` fallback), and exits 2 with explicit error logs when a user-provided MASTER_ADDR does not match the first SLURM host — preventing distributed Slurm jobs from hanging due to mismatched Slurm node-rank mapping.",
+    "No weekly report was generated for 2026-W20; the W21 report covers only Mon 2026-05-18 → Fri 2026-05-22 GMT+8. PRs merged between 2026-05-11 and 2026-05-17 (notably #723's Primus-Turbo pin advance, #722 unify enable_primus_turbo flag, #715 AINIC v26.2 a-77 bundle, and others) are visible in git log origin/main but fall outside the W21 PR-table window and are summarized only in the Highlights sections.",
+    "Megatron-LM upstream drift: pin d3528a21 (2026-03-06) is now 554 commits behind upstream HEAD e27607a8 (2026-05-22), +96 since W19. Highlights since W19: `fully remove legacy code` (#4759), TE 2.15.0 dependency bump (#4682), `[Main] Support A2A Overlap for Megatron-FSDP` (#3797), `M-FSDP` MXFP8 fine_grained_param_gather toggle (#4181), HybridModel recompute (#4496), mamba-builder migration (#4550), MTP recompute crash fix on packed sequences (#4593), CUDA graph API refactor (#4292), GEMM+SwiGLU fused MLP roll-up (#4636), high-priority A2A stream + HybridEP preprocessing SMs (#4694), MoE GroupedExperts EP-aware memory estimation (#4687). Recommendation: plan sync (unchanged).",
+    "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is now 667 commits behind upstream HEAD b5852826 (2026-05-21), +57 since W19. Highlights since W19: DeepEP import fix (#3414), split DeepEP/HybridEP dispatchers (#3389), clean DTensor boundaries for shared/routed experts (#3386), GraphTrainer rework of full_inductor_compilation_pass via regional_inductor + CPU-attr migration (#3346), `[graph_trainer] AutoParallel AOT FX Trace Integration` (#2725), `[GraphTrainer] Add Context Parallel support` (#3305), `[Full DTensor] Config-based Full DTensor for Llama3` (#3159), `ChunkedCELoss torch.autograd.grad` (#3249), `[LoRA] Add LoRA converter` (#3264), `[rl] switch to vllm v2 engine` (#3330). Recommendation: urgent sync (unchanged).",
+    "Primus-Turbo monthly drift (May): CI/benchmark pin is now 06b8d3fe (Primus-Turbo #278, HYBRID FP8 grouped GEMM for Triton, 2026-05-13), +39 commits ahead of month-start CI pin 333b68d7 and +44 commits ahead of month-start benchmark pin a4488f6c. Pin moved in TWO PRs this month: PR #694 (W19) bumped 333b68d7→ef5b58ea (+32); PR #723 (W20) bumped ef5b58ea→06b8d3fe (+7 more). AITER pin moved e83f9903→857f4d15 (W19) →b5e03ed191 (W20). TRITON_COMMIT 88b227e is unchanged since W19. Recommendation: monitor.",
+    "No backend-gap report was regenerated this week: no submodule SHA changed (Megatron-LM, torchtitan, Megatron-Bridge, Emerging-Optimizers, HummingbirdXT, maxtext are all unchanged on origin/main); no PRIMUS_TURBO_* / AITER / TRITON / ROCSHMEM / UCCL pin changed in the W21 window; Primus-Turbo is also not currently surfaced as a separate backend under docs/backend-gap/, so the existing torchtitan baseline report (5fb7cc2e vs upstream main) is unaffected."
+  ]
+}

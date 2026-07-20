@@ -1,0 +1,6 @@
+# Aggregate indexes are generated at build time from the per-report JSON.
+docs/weekly_reports/dashboard-data/index.json
+docs/monthly_reports/dashboard-data/index.json
+docs/backend-gap/dashboard-data/index.json
+# Publish-time PDFs are generated into the site bundle, never committed.
+docs/backend-gap/reports/**/*.pdf
