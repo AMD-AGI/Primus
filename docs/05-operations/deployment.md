@@ -14,7 +14,7 @@ Primus supports three deployment modes:
 | **Direct** | Runs on the current host (or inside an existing container) | Local debugging, single-node, clusters with ROCm on nodes |
 | **Slurm** | Wraps `srun`/`sbatch` and launches per-node entry scripts | Multi-node clusters with Slurm |
 
-**Container image:** `docker.io/rocm/primus:v26.3` (default in `runner/.primus.yaml`). For clusters using **AINIC**, use `runner/use_ainic.yaml` and tune the image and NCCL-related variables (for example `USING_AINIC`, `NCCL_IB_GID_INDEX`) to match your fabric.
+**Container image:** `docker.io/rocm/primus:v26.4` (default in `runner/.primus.yaml`). For clusters using **AINIC**, use `runner/use_ainic.yaml` and tune the image and NCCL-related variables (for example `USING_AINIC`, `NCCL_IB_GID_INDEX`) to match your fabric.
 
 **Prerequisites (baseline):**
 
@@ -29,10 +29,10 @@ Primus supports three deployment modes:
 ### 2.1 Pull the image
 
 ```bash
-docker pull docker.io/rocm/primus:v26.3
+docker pull docker.io/rocm/primus:v26.4
 ```
 
-The default `container.options.image` in `runner/.primus.yaml` is `rocm/primus:v26.3` (equivalent to `docker.io/rocm/primus:v26.3` when the registry is omitted).
+The default `container.options.image` in `runner/.primus.yaml` is `rocm/primus:v26.4` (equivalent to `docker.io/rocm/primus:v26.4` when the registry is omitted).
 
 ### 2.2 Required device mounts
 
@@ -107,7 +107,7 @@ Use `--clean` before launch to remove existing containers (`primus-cli-container
 ./primus-cli slurm srun -N <nodes> -p <partition> -- train pretrain --config <yaml>
 ```
 
-The Slurm entry script invokes the container launcher on each allocated node. Set the image through `runner/.primus.yaml`, a custom launcher config file, or site policy; the default is `rocm/primus:v26.3`.
+The Slurm entry script invokes the container launcher on each allocated node. Set the image through `runner/.primus.yaml`, a custom launcher config file, or site policy; the default is `rocm/primus:v26.4`.
 
 ### 3.2 `sbatch` (batch jobs)
 
@@ -157,7 +157,7 @@ The shipped `primus-cli-slurm-entry.sh` invokes **`primus-cli-container.sh`** wi
 
 ## 4. Kubernetes deployment
 
-Kubernetes integration is **not** shipped as a Helm chart or operator in this repository. The repo includes **`examples/run_k8s_pretrain.sh`**, a client script that talks to a Kubernetes **API** to create and manage training workloads (image default `docker.io/rocm/primus:v26.3`).
+Kubernetes integration is **not** shipped as a Helm chart or operator in this repository. The repo includes **`examples/run_k8s_pretrain.sh`**, a client script that talks to a Kubernetes **API** to create and manage training workloads (image default `docker.io/rocm/primus:v26.4`).
 
 Use that script as a reference for your platform; adapt networking, storage, and scheduling to your cluster policies.
 

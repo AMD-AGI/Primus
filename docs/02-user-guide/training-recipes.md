@@ -49,7 +49,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.3` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.4` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
 
 Image is picked in the priority order of `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -94,7 +94,7 @@ For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_
 ### 1. Launch the container
 
 ```bash
-docker pull rocm/primus:v26.3
+docker pull rocm/primus:v26.4
 docker run -it \
     --device /dev/dri --device /dev/kfd --device /dev/infiniband \
     --network host --ipc host \
@@ -102,7 +102,7 @@ docker run -it \
     --security-opt seccomp=unconfined --privileged \
     -v $HOME:$HOME --shm-size 128G \
     --name primus_training_env \
-    rocm/primus:v26.3
+    rocm/primus:v26.4
 ```
 
 Access the container later with `docker start primus_training_env && docker exec -it primus_training_env bash`.

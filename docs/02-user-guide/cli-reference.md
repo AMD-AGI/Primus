@@ -101,7 +101,7 @@ primus-cli container [options] -- <command>
 
 | Option | Description |
 | --- | --- |
-| `--image NAME` | Image tag (default from config: `rocm/primus:v26.3`). |
+| `--image NAME` | Image tag (default from config: `rocm/primus:v26.4`). |
 | `--volume HOST[:CONTAINER]` | Bind mount (repeatable). |
 | `--env KEY=VALUE` | Pass into the **inner** `primus-cli direct` as `--env` (repeatable). |
 | `--device PATH` | Extra device nodes (repeatable; defaults include GPU/RDMA devices). |

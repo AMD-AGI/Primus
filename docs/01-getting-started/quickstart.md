@@ -28,7 +28,7 @@ Check the AMD published training Docker images:
 
 ```bash
 # For Megatron-LM and TorchTitan backends
-docker pull rocm/primus:v26.3
+docker pull rocm/primus:v26.4
 # For MaxText backend
 docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
 ```
@@ -39,7 +39,7 @@ docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 # checkout the branch for the specific release
-git checkout release/v26.3
+git checkout release/v26.4
 git submodule update --init --recursive
 ```
 
@@ -48,7 +48,7 @@ git submodule update --init --recursive
 Run the training from the repository root. If your configuration downloads weights or tokenizers from Hugging Face Hub, pass `HF_TOKEN` into the container:
 
 ```bash
-./primus-cli container --image rocm/primus:v26.3 \
+./primus-cli container --image rocm/primus:v26.4 \
   --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
@@ -73,7 +73,7 @@ pip install "primus==26.3.1" --no-deps --extra-index-url https://amd-agi.github.
 ### Step 2: Run training in a container using the pip-installed Primus
 
 ```bash
-primus-cli container --image rocm/primus:v26.3 \
+primus-cli container --image rocm/primus:v26.4 \
   --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   --volume /path/to/your/data:/data -- --log_file /data/run.log \
   -- train pretrain --config /data/your/config.yaml
@@ -103,7 +103,7 @@ Use one configuration file: `examples/megatron/configs/MI300X/llama2_7B-BF16-pre
 
 | Mode | Example command |
 |------|------------------|
-| **Container** | `./primus-cli container --image rocm/primus:v26.3 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
+| **Container** | `./primus-cli container --image rocm/primus:v26.4 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 | **Direct** | `./primus-cli direct -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 | **Slurm** | `./primus-cli slurm srun -N <nodes> ... -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml` |
 
@@ -118,14 +118,14 @@ For container and Slurm runs, Primus resolves which Docker image to use in the f
 1. **`DOCKER_IMAGE` environment variable**—if set, it overrides every other source (including `--image`):
 
 ```bash
-export DOCKER_IMAGE=rocm/primus:v26.3
+export DOCKER_IMAGE=rocm/primus:v26.4
 ./primus-cli container -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 2. **`--image` command-line argument**—the usual per-run override, passed as a container mode argument (before `--`):
 
 ```bash
-./primus-cli container --image rocm/primus:v26.3 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
+./primus-cli container --image rocm/primus:v26.4 -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
 3. **`image` field in a config file** (`container.options.image`)—used when neither of the above is set:
@@ -133,7 +133,7 @@ export DOCKER_IMAGE=rocm/primus:v26.3
 ```yaml
 container:
   options:
-    image: "rocm/primus:v26.3"
+    image: "rocm/primus:v26.4"
 ```
 
 Primus loads a **single** config file—the first that exists among `--config <file>`, then `~/.primus.yaml`, then the shipped `runner/.primus.yaml` (these files are **not** merged). Because `runner/.primus.yaml` ships with a default image, a bare `./primus-cli container -- ...` works out of the box.
@@ -154,7 +154,7 @@ primus-cli [global-options] <mode> [mode-args] -- <command> [command-args...]
 Example:
 
 ```text
-primus-cli  container  --image rocm/primus:v26.3  --  train pretrain --config path/to/experiment.yaml
+primus-cli  container  --image rocm/primus:v26.4  --  train pretrain --config path/to/experiment.yaml
             ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
             mode        mode args                     command + args
 ```
