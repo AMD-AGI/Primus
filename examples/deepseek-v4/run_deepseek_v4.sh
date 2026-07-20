@@ -24,25 +24,17 @@ export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"tasimage/primus:pr-715-ainic"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-882-ainic"}
 export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
-export SLURM_NODELIST="${SLURM_NODELIST:-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
+export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1"
-# "fenic" is the cluster RDMA NIC. Prefer it when present (cluster / multi-node),
-# but fall back to a real local interface (lo) so single-node / direct in-container
-# smoke runs work out of the box — otherwise gloo aborts with
-# "Unable to find address for: fenic". Still override-guarded: pass
-# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME explicitly to force a specific NIC.
-if [ -d /sys/class/net/fenic ]; then
-    _PRIMUS_DEFAULT_IFNAME=fenic
-else
-    _PRIMUS_DEFAULT_IFNAME=lo
-fi
-export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-$_PRIMUS_DEFAULT_IFNAME}
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-$_PRIMUS_DEFAULT_IFNAME}
+# Default socket interface to loopback (single-node fallback). Override with
+# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME for multi-node (e.g. ens3 on amd-spur).
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-lo}
 export NCCL_IB_GID_INDEX=1
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
@@ -243,6 +235,14 @@ fi
 
 mkdir -p "$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 
+# On spur, direct the sbatch job's aggregated stdout+stderr (the actual per-node
+# training log) into the experiment output dir. sbatch returns right after
+# submission, so we can't `tee` it here; spur's sbatch reads SBATCH_OUTPUT/ERROR.
+if command -v spur >/dev/null 2>&1; then
+    export SBATCH_OUTPUT="$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/train_sbatch_output.log"
+    export SBATCH_ERROR="$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/train_sbatch_error.log"
+fi
+
 export PRIMUS_EXIT_FAST=1
 
 # Launcher: slurm (default, multi-node cluster) or direct (single-node, already
@@ -252,10 +252,15 @@ export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-slurm}
 if [ "$PRIMUS_LAUNCHER" = "direct" ]; then
   LAUNCHER_ARGS=(direct)
 else
-  LAUNCHER_ARGS=(slurm -N "$NNODES")
+  LAUNCHER_ARGS=(slurm "${SLURM_LAUNCH_CMD:-srun}" -N "$NNODES")
   [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
   [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
-  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa)
+  [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
+  [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
+  # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
+  # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
+  [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ] && LAUNCHER_ARGS+=(--exclusive)
+  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa --patch runner/helpers/patches/10_fix_libionic_abi4.sh)
 fi
 
 ./primus-cli "${LAUNCHER_ARGS[@]}" \
