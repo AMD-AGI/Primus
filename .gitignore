@@ -29,6 +29,15 @@ eval_results/
 # of the Primus public surface, kept on disk for follow-up work).
 /eval/
 
+# Pre-push FLA parity sanity harness — local-only (configs/driver/logs used to
+# re-verify all 5 models match FLA speed + loss before pushing).
+/sanity_before_push/
+
+# Experiment-only model config: FLA-exact mamba2 replica used to prove the
+# 300M mamba_hybrid loss offset is architecture (not a bug). Not a production
+# model — delete or keep local; never merge.
+/primus/configs/models/megatron/zebra_llama_300M_mamba_hybrid_flaexact.yaml
+
 # IDE / editor workspace files (not part of source)
 Primus.code-workspace
 **/Primus.code-workspace

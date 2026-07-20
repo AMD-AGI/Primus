@@ -35,6 +35,14 @@
 
 set -euo pipefail
 
+# NOTE (2026-05-27): These FLA flags are now ALSO declared in the EXP YAML
+# (examples/megatron/configs/MI300X/zebra_llama_300M_mamba_hybrid-pretrain.yaml,
+# under `overrides:` as use_fla_fused_swiglu / use_fla_fused_rmsnorm / etc.).
+# The patch primus.backends.megatron.patches.fla_runtime_patches resolves
+# each knob (env > YAML > default) onto args.* at phase="before_train".
+# All consumers read getattr(get_args(), 'field', default) directly.
+# Env vars set here win over the YAML (backward compat).
+# Comment them out to let the YAML be the sole source of truth.
 export PRIMUS_FLA_MLA_ATTN=1
 export PRIMUS_FUSED_CE=1
 export PRIMUS_FLA_SWIGLU=1
