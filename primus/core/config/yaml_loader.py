@@ -12,6 +12,7 @@ from primus.core.config.merge_utils import deep_merge
 ENV_PATTERN = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
 # Matches floats like: 1.2, .5, 1., 1e5, 1.2e-5, -1.2
 FLOAT_PATTERN = re.compile(r"^-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)$")
+_BOOL_MAP = {"true": True, "false": False}
 
 
 def parse_yaml(path: str) -> dict:
@@ -61,9 +62,10 @@ def _resolve_env_in_string(s: str):
 
     Returns
     -------
-    str or int or float
+    str, bool, int, or float
         The resolved value.
         - If environment variable substitution occurs:
+            - If the resulting string is ``true``/``false`` (case-insensitive), it is converted to bool.
             - If the resulting string represents a number, it is converted to int or float.
             - Otherwise, returns the substituted string.
         - If no substitution occurs: returns the original string unchanged (even if it looks numeric).
@@ -98,26 +100,31 @@ def _resolve_env_in_string(s: str):
         return os.environ.get(var, default)
 
     replaced = ENV_PATTERN.sub(replace_match, s)
-    return _try_numeric(replaced) if replaced != s else replaced
+    return _try_scalar(replaced) if replaced != s else replaced
 
 
-def _try_numeric(v: str):
+def _try_scalar(v: str):
     """
-    Attempt to convert a string value to int or float.
+    Attempt to convert a string value to bool, int, or float.
     Returns the original string if conversion fails.
     """
-    # 1. Integer check
+    # 1. Boolean check (whole-string, case-insensitive)
+    lowered = v.lower()
+    if lowered in _BOOL_MAP:
+        return _BOOL_MAP[lowered]
+
+    # 2. Integer check
     if re.fullmatch(r"-?\d+", v):
         return int(v)
 
-    # 2. Float check using regex to avoid exceptions for non-numeric strings
+    # 3. Float check using regex to avoid exceptions for non-numeric strings
     if FLOAT_PATTERN.fullmatch(v):
         try:
             return float(v)
         except ValueError:
             return v
 
-    # 3. Return original string
+    # 4. Return original string
     return v
 
 
