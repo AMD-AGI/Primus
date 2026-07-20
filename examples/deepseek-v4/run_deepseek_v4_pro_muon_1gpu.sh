@@ -109,7 +109,7 @@ else
 fi
 
 # ---------- REQUIRED gfx1250 RCCL AVG->SUM workaround -----------------------
-export PYTHONPATH="$SCRIPT_DIR/rccl_avg_workaround:${PYTHONPATH:-}"
+export PYTHONPATH="$SCRIPT_DIR/examples/deepseek-v4/rccl_avg_workaround:${PYTHONPATH:-}"
 # Real primus_turbo imports flydsl at import time; put FLYDSL_PKG_DIR on PYTHONPATH.
 export FLYDSL_PKG_DIR=${FLYDSL_PKG_DIR:-}
 if [ -n "$FLYDSL_PKG_DIR" ] && [ -d "$FLYDSL_PKG_DIR/flydsl" ]; then
