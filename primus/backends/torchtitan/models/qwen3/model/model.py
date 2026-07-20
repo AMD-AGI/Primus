@@ -18,6 +18,7 @@ class Attention(TTAttention):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -34,14 +35,12 @@ class Attention(TTAttention):
         if self.k_norm is not None:
             xk = self.k_norm(xk)
 
-        xq, xk = apply_rotary_emb(xq, xk, rope_cache)
+        xq, xk = apply_rotary_emb(xq, xk, rope_cache, positions)
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+        # Primus-Turbo path: inner_attention is replaced by TurboAttention, which
+        # consumes the (bs, seqlen, n_heads, head_dim) layout and handles GQA /
+        # causal masking internally, so we skip the transpose and block_mask.
+        output = self.inner_attention(xq, xk, xv)
 
         output = output.contiguous().view(bs, seqlen, -1)
         return self.wo(output)

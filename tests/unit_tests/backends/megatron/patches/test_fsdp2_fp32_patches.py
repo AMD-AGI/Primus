@@ -453,7 +453,7 @@ class TestOptimizerPatchMutualExclusivity:
         patch get_megatron_optimizer at the same priority, so enabling more than
         one is ambiguous. validate_fsdp2_optimizer_exclusivity enforces this at
         arg-validation time."""
-        from primus.modules.trainer.megatron.utils import (
+        from primus.backends.megatron.patches.args.rocm_arg_validation import (
             validate_fsdp2_optimizer_exclusivity,
         )
 
@@ -467,7 +467,7 @@ class TestOptimizerPatchMutualExclusivity:
 
     def test_single_optimizer_flag_is_allowed(self):
         """Exactly one FSDP2 optimizer flag is the supported case (no raise)."""
-        from primus.modules.trainer.megatron.utils import (
+        from primus.backends.megatron.patches.args.rocm_arg_validation import (
             validate_fsdp2_optimizer_exclusivity,
         )
 
@@ -481,7 +481,7 @@ class TestOptimizerPatchMutualExclusivity:
 
     def test_no_optimizer_flag_is_allowed(self):
         """No FSDP2 optimizer flag set (default Megatron optimizer) must not raise."""
-        from primus.modules.trainer.megatron.utils import (
+        from primus.backends.megatron.patches.args.rocm_arg_validation import (
             validate_fsdp2_optimizer_exclusivity,
         )
 

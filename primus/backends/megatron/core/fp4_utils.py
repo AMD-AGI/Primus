@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,7 +14,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
 from primus.backends.megatron.core.enums import Fp4Recipe
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -45,8 +45,7 @@ def _primus_turbo_enabled() -> bool:
 
         args = get_args()
         enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
-        use_turbo_fp4_autocast = bool(getattr(args, "use_turbo_fp4_autocast", False))
-        return enable_primus_turbo and use_turbo_fp4_autocast
+        return enable_primus_turbo
     except Exception:
         return False
 
@@ -68,7 +67,8 @@ if HAVE_TE and HAVE_TURBO:
                     fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
                 except AttributeError:
                     fp4_recipe_none_reason = (
-                        "NVFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                        "NVFP4BlockScaling recipe is not available in this version of "
+                        "Transformer Engine. Please make sure you are using TE version >= 2.7.0.dev0."
                     )
             elif config.fp4_recipe == Fp4Recipe.mxfp4:
                 try:
@@ -78,10 +78,14 @@ if HAVE_TE and HAVE_TURBO:
                     fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
                 except AttributeError:
                     fp4_recipe_none_reason = (
-                        "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                        "MXFP4BlockScaling recipe is not available in this version of "
+                        "Transformer Engine. MXFP4 requires ROCm TE with AITER support."
                     )
             else:
-                fp4_recipe_none_reason = f"Unsupported FP4 recipe: {config.fp4_recipe}."
+                fp4_recipe_none_reason = (
+                    f"Unsupported fp4_recipe '{config.fp4_recipe}'. "
+                    "Supported recipes: 'nvfp4' (NVIDIA), 'mxfp4' (AMD ROCm with AITER)."
+                )
         else:
             fp4_recipe_none_reason = "FP4 support requires TransformerEngine version >= 2.7.0.dev0."
 
@@ -116,6 +120,7 @@ if HAVE_TE and HAVE_TURBO:
             format=Format.E2M1_X2,
             block_size=MXFP4_SCALING_BLOCK_SIZE,
             scale_dtype=ScaleDtype.E8M0,
+            use_gradient_sr=getattr(config, "mxfp4_gradient_stochastic_rounding", False),
         )
         return fp4_quant_config, ""
 
@@ -133,62 +138,67 @@ if HAVE_TE and HAVE_TURBO:
         elif layer_no >= 0 and config.first_last_layers_bf16 and (is_first_layer or is_last_layer):
             fp4_context = nullcontext()
         else:
-            fp4_recipe, fp4_recipe_none_reason = get_fp4_recipe(config)
-            turbo_enabled = _primus_turbo_enabled()
+            # Local spec bypasses TE autocast -- quantization is handled
+            # internally by PrimusTurboMXFP4LocalSpecProvider's custom ops.
+            if getattr(config, "transformer_impl", "transformer_engine") == "local":
+                fp4_context = nullcontext()
+            else:
+                fp4_recipe, fp4_recipe_none_reason = get_fp4_recipe(config)
+                turbo_enabled = _primus_turbo_enabled()
 
-            global WARN_ONCE
-            if WARN_ONCE:
-                if fp4_recipe is None:
-                    warning_rank_0(
-                        f"TransformerEngine FP4 {config.fp4_recipe} not work since {fp4_recipe_none_reason}"
-                    )
-                if is_init:
-                    warning_rank_0(
-                        f"Primus-Turbo FP4 {config.fp4_recipe} not work since Primus-Turbo not support fp4 model init."
-                    )
-                WARN_ONCE = False
-
-            fp4_group = None
-            if parallel_state.model_parallel_is_initialized():
-                fp4_group = parallel_state.get_amax_reduction_group(
-                    with_context_parallel=True, tp_only_amax_red=config.tp_only_amax_red
-                )
-
-            if not is_init:
-                # Only touch the Primus-Turbo extension when the Turbo FP4
-                # autocast path is explicitly enabled; otherwise use TE directly.
-                if turbo_enabled:
-                    fp4_quant_config, fp4_quant_config_none_reason = get_fp4_quant_config(config)
-                    if WARN_ONCE and fp4_quant_config is None:
+                global WARN_ONCE
+                if WARN_ONCE:
+                    if fp4_recipe is None:
                         warning_rank_0(
-                            f"Primus-Turbo FP4 {config.fp4_recipe} not work since {fp4_quant_config_none_reason}"
+                            f"TransformerEngine FP4 {config.fp4_recipe} not work since {fp4_recipe_none_reason}"
+                        )
+                    if is_init:
+                        warning_rank_0(
+                            f"Primus-Turbo FP4 {config.fp4_recipe} not work since Primus-Turbo not support fp4 model init."
+                        )
+                    WARN_ONCE = False
+
+                fp4_group = None
+                if parallel_state.model_parallel_is_initialized():
+                    fp4_group = parallel_state.get_amax_reduction_group(
+                        with_context_parallel=True, tp_only_amax_red=config.tp_only_amax_red
+                    )
+
+                if not is_init:
+                    # Only touch the Primus-Turbo extension when the Turbo FP4
+                    # autocast path is explicitly enabled; otherwise use TE directly.
+                    if turbo_enabled:
+                        fp4_quant_config, fp4_quant_config_none_reason = get_fp4_quant_config(config)
+                        if WARN_ONCE and fp4_quant_config is None:
+                            warning_rank_0(
+                                f"Primus-Turbo FP4 {config.fp4_recipe} not work since {fp4_quant_config_none_reason}"
+                            )
+
+                        from primus.backends.megatron.core.extensions.primus_turbo import (
+                            primus_turbo_fp4_autocast,
                         )
 
-                    from primus.backends.megatron.core.extensions.primus_turbo import (
-                        primus_turbo_fp4_autocast,
-                    )
-
-                    fp4_context = primus_turbo_fp4_autocast(
-                        enabled=True if fp4_recipe is not None else False,
-                        fp4_recipe=fp4_recipe,
-                        fp4_group=fp4_group,
-                        enabled_turbo=True if fp4_quant_config is not None else False,
-                        turbo_quant_config=fp4_quant_config,
-                    )
+                        fp4_context = primus_turbo_fp4_autocast(
+                            enabled=True if fp4_recipe is not None else False,
+                            fp4_recipe=fp4_recipe,
+                            fp4_group=fp4_group,
+                            enabled_turbo=True if fp4_quant_config is not None else False,
+                            turbo_quant_config=fp4_quant_config,
+                        )
+                    else:
+                        # TE currently uses fp8_autocast for fp8 and fp4 quantization.
+                        fp4_context = transformer_engine.pytorch.fp8_autocast(
+                            enabled=True if fp4_recipe is not None else False,
+                            fp8_recipe=fp4_recipe,
+                            fp8_group=fp4_group,
+                        )
                 else:
-                    # TE currently uses fp8_autocast for fp8 and fp4 quantization.
-                    fp4_context = transformer_engine.pytorch.fp8_autocast(
-                        enabled=True if fp4_recipe is not None else False,
-                        fp8_recipe=fp4_recipe,
-                        fp8_group=fp4_group,
-                    )
-            else:
-                import inspect
+                    import inspect
 
-                context_args = {"enabled": True}
-                if "recipe" in inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters:
-                    context_args["recipe"] = fp4_recipe
-                fp4_context = transformer_engine.pytorch.fp8_model_init(**context_args)
+                    context_args = {"enabled": True}
+                    if "recipe" in inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters:
+                        context_args["recipe"] = fp4_recipe
+                    fp4_context = transformer_engine.pytorch.fp8_model_init(**context_args)
 
         return fp4_context
 
@@ -196,22 +206,34 @@ elif HAVE_TE:
 
     def get_fp4_recipe(config: TransformerConfig):
         """Return fp4 recipe."""
-        if config.fp4_recipe == Fp4Recipe.nvfp4:
-            if not is_te_min_version("2.7.0.dev0"):
-                raise ValueError("NVFP4BlockScaling requires TransformerEngine >= 2.7.0.dev0.")
-            fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
-        elif config.fp4_recipe == Fp4Recipe.mxfp4:
-            try:
-                import os
+        if is_te_min_version("2.7.0.dev0"):
+            if config.fp4_recipe == Fp4Recipe.nvfp4:
+                try:
+                    fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
+                except AttributeError:
+                    raise ValueError(
+                        "NVFP4BlockScaling recipe is not available in this version of "
+                        "Transformer Engine. Please make sure you are using TE version "
+                        ">= 2.7.0.dev0."
+                    )
+            elif config.fp4_recipe == Fp4Recipe.mxfp4:
+                try:
+                    import os
 
-                fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
-                fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
-            except AttributeError:
+                    fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
+                    fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+                except AttributeError:
+                    raise ValueError(
+                        "MXFP4BlockScaling recipe is not available in this version of "
+                        "Transformer Engine. MXFP4 requires ROCm TE with AITER support."
+                    )
+            else:
                 raise ValueError(
-                    "MXFP4BlockScaling recipe is not available in this version of Transformer Engine."
+                    f"Unsupported fp4_recipe '{config.fp4_recipe}'. "
+                    "Supported recipes: 'nvfp4' (NVIDIA), 'mxfp4' (AMD ROCm with AITER)."
                 )
         else:
-            raise ValueError(f"Unsupported FP4 recipe: {config.fp4_recipe}. " "Supported: nvfp4, mxfp4.")
+            raise ValueError("FP4 support requires TransformerEngine version >= 2.7.0.dev0.")
         return fp4_recipe
 
     def get_fp4_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
@@ -228,25 +250,29 @@ elif HAVE_TE:
         elif layer_no >= 0 and config.first_last_layers_bf16 and (is_first_layer or is_last_layer):
             fp4_context = nullcontext()
         else:
-            fp4_recipe = get_fp4_recipe(config)
-            fp4_group = None
-            if parallel_state.model_parallel_is_initialized():
-                fp4_group = parallel_state.get_amax_reduction_group(
-                    with_context_parallel=True, tp_only_amax_red=config.tp_only_amax_red
-                )
-
-            if not is_init:
-                # TE currently uses fp8_autocast for fp8 and fp4 quantization.
-                fp4_context = transformer_engine.pytorch.fp8_autocast(
-                    enabled=True, fp8_recipe=fp4_recipe, fp8_group=fp4_group
-                )
+            # Local spec bypasses TE autocast -- quantization is handled
+            # internally by PrimusTurboMXFP4LocalSpecProvider's custom ops.
+            if getattr(config, "transformer_impl", "transformer_engine") == "local":
+                fp4_context = nullcontext()
             else:
-                import inspect
+                fp4_recipe = get_fp4_recipe(config)
+                fp4_group = None
+                if parallel_state.model_parallel_is_initialized():
+                    fp4_group = parallel_state.get_amax_reduction_group(
+                        with_context_parallel=True, tp_only_amax_red=config.tp_only_amax_red
+                    )
 
-                context_args = {"enabled": True}
-                if "recipe" in inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters:
-                    context_args["recipe"] = fp4_recipe
-                fp4_context = transformer_engine.pytorch.fp8_model_init(**context_args)
+                if not is_init:
+                    fp4_context = transformer_engine.pytorch.fp8_autocast(
+                        enabled=True, fp8_recipe=fp4_recipe, fp8_group=fp4_group
+                    )
+                else:
+                    import inspect
+
+                    context_args = {"enabled": True}
+                    if "recipe" in inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters:
+                        context_args["recipe"] = fp4_recipe
+                    fp4_context = transformer_engine.pytorch.fp8_model_init(**context_args)
 
         return fp4_context
 

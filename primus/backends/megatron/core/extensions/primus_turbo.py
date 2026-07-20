@@ -1,9 +1,11 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
+import contextlib
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
@@ -77,12 +79,62 @@ from primus_turbo.pytorch.core.low_precision import (
     float8_e4m3,
 )
 from torch import Tensor
+
+# Imported from .constants (not .fp8) for TransformerEngine >= 2.12 compat;
+# the symbol moved out of transformer_engine.pytorch.fp8 in that release.
 from transformer_engine.pytorch.constants import dist_group_type
-from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
+try:
+    import triton
+    import triton.language as tl
+
+    _HAVE_TRITON = True
+except (ImportError, ModuleNotFoundError):
+    _HAVE_TRITON = False
+
 _dummy_wgrads = {}
+
+
+if _HAVE_TRITON:
+
+    @triton.jit
+    def _inplace_add_kernel(dst_ptr, src_ptr, n_elements, BLOCK: tl.constexpr):
+        """In-place ``dst += src`` over a flat buffer, accumulating in fp32.
+
+        int64 offsets so a single launch covers tensors with > 2**31 elements
+        (e.g. the consolidated grouped-expert ``main_grad`` of [E, N, K]),
+        instead of Torch's ``add_`` which tiles into multiple ~528M-element
+        ``vectorized_elementwise_kernel`` launches.
+        """
+        pid = tl.program_id(axis=0).to(tl.int64)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n_elements
+        d = tl.load(dst_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        s = tl.load(src_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        tl.store(dst_ptr + offs, (d + s).to(dst_ptr.dtype.element_ty), mask=mask)
+
+
+def _triton_inplace_add_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """``dst.add_(src)`` via a single Triton launch (fp32 accumulate).
+
+    Falls back to Torch's ``add_`` when Triton is unavailable or the layout is
+    unsupported (non-contiguous / shape mismatch). The write is in-place on
+    ``dst``'s storage, so ``dst`` must be contiguous.
+    """
+    if not _HAVE_TRITON or not dst.is_cuda or not dst.is_contiguous() or dst.numel() != src.numel():
+        return dst.add_(src)
+
+    dst_flat = dst.view(-1)
+    # reshape (not view) so a non-contiguous grad is materialized contiguously.
+    src_flat = src.reshape(-1)
+    n_elements = dst_flat.numel()
+    BLOCK = 8192
+    grid = (triton.cdiv(n_elements, BLOCK),)
+    _inplace_add_kernel[grid](dst_flat, src_flat, n_elements, BLOCK=BLOCK)
+    return dst
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -105,6 +157,25 @@ def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tenso
     if zero:
         _dummy_wgrads[key].fill_(0)
     return _dummy_wgrads[key].detach()
+
+
+class _MainGradShim:
+    """Per-expert handle for primus_turbo's ``fused_grouped_wgrad`` over a
+    *consolidated* ``[E, N, K]`` grouped-expert weight (OPT-1).
+
+    ``PrimusTurboGroupedLinear`` keeps one consolidated weight with a single
+    ``main_grad`` block, but ``fused_grouped_wgrad`` / ``_expert_main_grad_view``
+    expect a list of per-expert handles, each exposing a 2-D ``main_grad`` and a
+    ``grad_added_to_main_grad`` flag. These shims point at the contiguous 2-D
+    slices ``main_grad[i]`` of the consolidated block, so the grouped GEMM
+    backward accumulates each expert's wgrad straight into the right slice.
+    """
+
+    __slots__ = ("main_grad", "grad_added_to_main_grad")
+
+    def __init__(self, main_grad_slice: torch.Tensor) -> None:
+        self.main_grad = main_grad_slice
+        self.grad_added_to_main_grad = False
 
 
 def _bridge_weight_grad(
@@ -136,8 +207,33 @@ def _bridge_weight_grad(
                 weight, "grad_added_to_main_grad"
             ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
 
-            weight.main_grad.add_(grad_quantized_weight)
-            weight.grad_added_to_main_grad = True
+            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding the
+            # quantized weight gradient to main_grad twice.
+            if grad_quantized_weight is None:
+                # OPT-1 fused path: the grouped GEMM backward already accumulated the
+                # expert wgrad straight into main_grad (under fused_grouped_wgrad) and
+                # returned grad_b=None, so there is nothing to add here -- just flag it.
+                weight.grad_added_to_main_grad = True
+            else:
+                # `is_gfx1250` only exists in newer primus_turbo builds (it gates a
+                # gfx1250-specific elementwise-add workaround). Older / feature-branch
+                # primus_turbo that predate it (e.g. the flydsl sparse-MLA attention branch)
+                # don't define it; treat a missing symbol as False so those builds still work
+                # on non-gfx1250 archs (gfx942 / gfx950) instead of raising ImportError.
+                try:
+                    from primus_turbo.pytorch.core.utils import is_gfx1250
+
+                    _use_triton_inplace_add = is_gfx1250()
+                except ImportError:
+                    _use_triton_inplace_add = False
+
+                if _use_triton_inplace_add:
+                    # NOTE: The bandwith of torch's elementwise add kernel has issue. Use triton to temporary workaround for gfx1250.
+                    _triton_inplace_add_(weight.main_grad, grad_quantized_weight)
+                else:
+                    weight.main_grad.add_(grad_quantized_weight)
+
+                weight.grad_added_to_main_grad = True
 
             return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None, None
 
@@ -310,6 +406,7 @@ class PrimusTurboQuantConfig:
         strategy: ScalingStrategy = ScalingStrategy.DYNAMIC,
         scale_dtype: ScaleDtype = ScaleDtype.FP32,
         block_size: int = None,
+        use_gradient_sr: bool = True,
     ):
         self._is_fp4 = False
         self._is_fp8 = False
@@ -321,6 +418,7 @@ class PrimusTurboQuantConfig:
                 strategy=strategy,
                 scale_dtype=scale_dtype,
                 block_size=block_size,
+                use_gradient_sr=use_gradient_sr,
             )
             self._is_fp4 = True
         else:
@@ -440,7 +538,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     @classmethod
     def get_fp8_autocast_state(
         cls,
-    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, PrimusTurboQuantConfig]:
+    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, bool, bool, PrimusTurboQuantConfig]:
         """FP8 autocast state getter"""
         return (
             FP8GlobalStateManager.FP8_ENABLED,
@@ -457,7 +555,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     @classmethod
     def set_fp8_autocast_state(
         cls,
-        fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool, bool, PrimusTurboQuantConfig],
+        fp8_state: Tuple[bool, bool, Recipe, dist_group_type, bool, bool, bool, bool, PrimusTurboQuantConfig],
     ) -> None:
         """FP8 autocast state setter"""
         (
@@ -1699,7 +1797,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
         weights = self.weights
         # NOTE: keep x and m_splits on the same device
-        m_splits = m_splits.to(x.device)
+        if m_splits.device != x.device:
+            m_splits = m_splits.to(x.device)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -1726,13 +1825,65 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 ),
             )
 
-            out = primus_turbo_torch.ops.grouped_gemm_fp8(
-                x,
-                quantized_weights,
-                m_splits,
-                trans_b=True,
-                config=quant_config.data(),
+            # OPT-1 (opt-in, single-GPU): accumulate the expert wgrad straight into
+            # main_grad in the grouped GEMM backward (beta=1 ACCUMULATE) instead of
+            # GEMM-wgrad -> _WeightGradBridge.main_grad.add_(). Per-expert shims point
+            # at the consolidated [E,N,K] main_grad slices; the grouped backward
+            # accumulates into them and returns grad_b=None, then the bridge backward
+            # just flags grad_added. ONLY safe with no gradient all-reduce /
+            # reduce-scatter (TP=1 / DP=1 / EP=1), since grad_b=None skips the reduce.
+            # Needs a turbo wheel carrying fused_grouped_wgrad (else falls back).
+            _wgrad_ctx = contextlib.nullcontext()
+            _fwg_dbg = (
+                os.environ.get("PRIMUS_TURBO_FUSE_WGRAD_DEBUG") == "1"
+                and getattr(type(self), "_fwg_logn", 0) < 10
             )
+            _fwg_flag = os.environ.get("PRIMUS_TURBO_FUSE_GROUPED_WGRAD", "0") == "1"
+            _mg = getattr(weights, "main_grad", None)
+            if _fwg_flag and _mg is not None and _mg.dim() == 3:
+                try:
+                    from primus_turbo.pytorch.ops.grouped_gemm_fp8 import (
+                        _expert_main_grad_view,
+                        fused_grouped_wgrad,
+                    )
+
+                    _shims = [_MainGradShim(_mg[i]) for i in range(_mg.shape[0])]
+                    if _fwg_dbg:
+                        import sys
+
+                        _v = _expert_main_grad_view(_shims)
+                        print(
+                            f"[OPT-1] gate PASS shape={tuple(_mg.shape)} contig={_mg.is_contiguous()} "
+                            f"stride={_mg.stride()} view={'OK' if _v is not None else 'REJECTED'}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
+                    _wgrad_ctx = fused_grouped_wgrad(_shims)
+                except ImportError as _e:
+                    if _fwg_dbg:
+                        import sys
+
+                        print(f"[OPT-1] ImportError: {_e}", file=sys.stderr, flush=True)
+                        type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
+            elif _fwg_dbg:
+                import sys
+
+                print(
+                    f"[OPT-1] gate FAIL flag={_fwg_flag} main_grad={'None' if _mg is None else f'dim={_mg.dim()}'}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
+
+            with _wgrad_ctx:
+                out = primus_turbo_torch.ops.grouped_gemm_fp8(
+                    x,
+                    quantized_weights,
+                    m_splits,
+                    trans_b=True,
+                    config=quant_config.data(),
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
@@ -1830,7 +1981,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         """
-        Initialize the Flex token dispatcher.
+        Initialize the DeepEP token dispatcher.
 
         Args:
             num_local_experts (int): Number of local experts on the current device.
@@ -1840,13 +1991,14 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         """
         super().__init__(config=config, pg_collection=pg_collection)
 
-        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        if self.tp_size * self.ep_size <= 1:
+            raise ValueError("DeepEP token dispatcher requires TPxEP > 1")
         assert (
             self.config.moe_enable_deepep
         ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
         assert (
             self.config.moe_pad_expert_input_to_capacity is False
-        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+        ), "DeepEP token dispatcher does not support --moe-pad-expert-input-to-capacity"
 
         args = get_args()
 
@@ -1898,6 +2050,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         self._comm_manager = self.deepep_dispatcher
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
+        # "even" -> deterministic round-robin token assignment (constant per-expert
+        # counts / constant M_total); "uniform" -> Megatron-LM original random-logits
+        # balancing (handled upstream in the router, token_indices stays None here).
+        self.moe_router_force_load_balancing_type = getattr(
+            args, "moe_router_force_load_balancing_type", "uniform"
+        )
 
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
@@ -1921,9 +2079,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         hidden_states = hidden_states.view(-1, self.config.hidden_size)
         num_tokens = hidden_states.shape[0]
 
-        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
+        # when force_load_balancing with type "even", we use round-robin token_indices
+        # to make sure each expert gets the same (deterministic) number of tokens.
+        # type "uniform" keeps token_indices=None and relies on the router's upstream
+        # random-logits balancing.
         token_indices = None
-        if self.moe_router_force_load_balancing:
+        if self.moe_router_force_load_balancing and self.moe_router_force_load_balancing_type == "even":
             token_indices = (
                 torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
                     num_tokens, self.config.moe_router_topk

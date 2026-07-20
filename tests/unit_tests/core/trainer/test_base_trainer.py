@@ -59,7 +59,7 @@ class TestBaseTrainer:
 
     def test_init_mro_with_base_module(self, monkeypatch: pytest.MonkeyPatch):
         """Test MRO handling when BaseModule IS in inheritance chain (legacy pattern)."""
-        from primus.modules.base_module import BaseModule
+        from primus.core.base_module import BaseModule
 
         # Create a class that inherits from both BaseTrainer and BaseModule
         class LegacyTrainer(BaseTrainer, BaseModule):

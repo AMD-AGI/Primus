@@ -15,7 +15,7 @@ from typing import Callable, List, Optional, Set
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.utils import version_in_range
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # -----------------------------------------------------------------------------
 # FunctionPatch

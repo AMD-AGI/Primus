@@ -14,7 +14,8 @@ from primus.backends.megatron.training.global_vars import (
 )
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.env import flush_before_hard_exit
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -127,14 +128,7 @@ class MegatronBaseTrainer(BaseTrainer):
 
         if exit_fast and not on_error:
             log_rank_0("[MegatronBaseTrainer] PRIMUS_EXIT_FAST=1 -> os._exit(0)")
-            # Flush stdout/stderr so the final log lines are not lost.
-            try:
-                import sys
-
-                sys.stdout.flush()
-                sys.stderr.flush()
-            except Exception:  # pragma: no cover
-                pass
+            flush_before_hard_exit()
             os._exit(0)
 
     def _finalize_mlflow_artifacts(self):

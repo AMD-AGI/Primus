@@ -22,7 +22,7 @@ from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0
 
 
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
@@ -79,6 +79,7 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         log_rank_0("Initializing Megatron-Bridge post-training components...")
 
         self.cfg_container = load_recipe_config(self.backend_args)
+        self._apply_nested_overrides()
 
         log_rank_0("Post-training initialization completed")
 
@@ -100,10 +101,13 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
 
         try:
             # Execute post-training based on configuration
+            from megatron.bridge.training.config import runtime_config_update
             from megatron.bridge.training.finetune import finetune
             from megatron.bridge.training.vlm_step import forward_step
 
             # log_rank_0(f"ConfigContainer: {self.cfg_container}")
+            runtime_config_update(self.cfg_container)
+
             log_dict_aligned("ConfigContainer", self.cfg_container.to_dict())
             finetune(self.cfg_container, forward_step_func=forward_step)
 

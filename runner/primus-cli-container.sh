@@ -408,6 +408,14 @@ for key in "${!container_config[@]}"; do
     [[ "$opt_name" == "image" ]] && continue
     [[ "$opt_value" == "[]" ]] && continue
 
+    # Make the container name unique per job so an orphaned container left by a
+    # previous/cancelled job on a reused node doesn't cause a "name already in
+    # use" conflict. SLURM_JOB_ID is per-job (same on all its nodes, unique across
+    # jobs); fall back to the PID when not under Slurm.
+    if [[ "$opt_name" == "name" && -n "$opt_value" && "$opt_value" != *$'\n'* ]]; then
+        opt_value="${opt_value}-${SLURM_JOB_ID:-$$}"
+    fi
+
     # Check if this is a cumulative option
     is_cumulative=0
     for cum_opt in "${CUMULATIVE_OPTIONS[@]}"; do
@@ -452,7 +460,10 @@ if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
     LOG_INFO_RANK0 "[container] Cleaning up existing containers..."
     CONTAINERS="$($CONTAINER_RUNTIME ps -aq)"
     if [[ -n "$CONTAINERS" ]]; then
-        printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" rm -f
+        # Tolerate per-container removal failures ("removal already in progress",
+        # "No such container") so a stale/concurrently-removing container on a
+        # shared node does not abort the whole run via xargs' exit code 123.
+        printf '%s\n' "$CONTAINERS" | xargs -r -n1 -I{} sh -c "$CONTAINER_RUNTIME rm -f {} 2>/dev/null || true"
         LOG_INFO_RANK0 "[container] Removed containers: $CONTAINERS"
     else
         LOG_INFO_RANK0 "[container] No containers to remove."

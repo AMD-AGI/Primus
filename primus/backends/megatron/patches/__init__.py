@@ -31,7 +31,7 @@ import importlib
 import pkgutil
 
 # from primus.core.patches import run_patches
-# from primus.modules.module_utils import log_rank_0
+# from primus.core.utils.module_utils import log_rank_0
 
 
 def _auto_import_patch_modules() -> None:
@@ -63,3 +63,6 @@ def _auto_import_patch_modules() -> None:
 # Eagerly import all patch modules on package import so patches are registered
 # before any backend-specific logic runs.
 _auto_import_patch_modules()
+
+# MLPerf Llama2-70B LoRA Megatron-LM overrides (MXFP4 recipe, optional TE SwiGLU).
+import primus.backends.megatron_bridge.patches.mlperf_llama2_70b.megatron_patches  # noqa: F401, E402

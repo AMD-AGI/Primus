@@ -20,7 +20,7 @@ from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0
 
 
 class MegatronBridgePretrainTrainer(MegatronBridgeBaseTrainer):
@@ -71,45 +71,6 @@ class MegatronBridgePretrainTrainer(MegatronBridgeBaseTrainer):
         self._apply_nested_overrides()
 
         log_rank_0("Pre-training initialization completed")
-
-    def _apply_nested_overrides(self):
-        """Apply backend_args overrides to nested ConfigContainer fields.
-
-        ConfigContainer uses nested dataclasses (train, logger, checkpoint, etc.)
-        that cannot be reached by the flat _merge_dict_to_dataclass pass.
-        This method bridges user-facing flat keys to their nested targets.
-        """
-        args = self.backend_args
-        cfg = self.cfg_container
-
-        # logger.*
-        if hasattr(args, "log_interval"):
-            val = getattr(args, "log_interval")
-            if val is not None:
-                cfg.logger.log_interval = int(val)
-                log_rank_0(f"  ↳ Override logger.log_interval = {cfg.logger.log_interval}")
-
-        # train.*
-        for key in ("eval_interval", "eval_iters"):
-            if hasattr(args, key):
-                val = getattr(args, key)
-                if val is not None:
-                    setattr(cfg.train, key, int(val))
-                    log_rank_0(f"  ↳ Override train.{key} = {val}")
-
-        # checkpoint.*
-        if hasattr(args, "save_interval"):
-            val = getattr(args, "save_interval")
-            if val is not None:
-                cfg.checkpoint.save_interval = int(val)
-                log_rank_0(f"  ↳ Override checkpoint.save_interval = {val}")
-
-        # Skip final/in-training save entirely.
-        if hasattr(args, "skip_save") and args.skip_save:
-            cfg.checkpoint.save_interval = 0
-            cfg.checkpoint.save = None
-            log_rank_0("  ↳ Override checkpoint.save_interval = 0 (skip periodic save)")
-            log_rank_0("  ↳ Override checkpoint.save = None (skip final save)")
 
     def train(self):
         """
