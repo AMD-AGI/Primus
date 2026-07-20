@@ -59,7 +59,7 @@ export NVTE_ROCM_ENABLE_MXFP8=${NVTE_ROCM_ENABLE_MXFP8:-1}
 # RCCL all_reduce(AVG) hangs even at world_size=1 -> sitecustomize rewrites AVG->SUM/ws.
 # Also put the vendored Emerging-Optimizers on PYTHONPATH so the muon optimizer
 # (emerging_optimizers.*) imports — required for OPTIMIZER=muon.
-export PYTHONPATH_IN="$SCRIPT_DIR/rccl_avg_workaround:$SCRIPT_DIR/third_party/Emerging-Optimizers"
+export PYTHONPATH_IN="$SCRIPT_DIR/examples/deepseek-v4/rccl_avg_workaround:$SCRIPT_DIR/third_party/Emerging-Optimizers"
 
 LOG=${LOG:-dsv4-projection-${MODE}.log}
 
