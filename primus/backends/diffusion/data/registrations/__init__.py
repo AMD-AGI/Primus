@@ -4,4 +4,4 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Registered diffusion dataset builders."""
+"""Dataset registrations."""

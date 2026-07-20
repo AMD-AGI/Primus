@@ -6,32 +6,26 @@ dist/
 *.egg-info
 *~
 logs
+.pip_cache
 .vscode
 local/
 .gitmodules
 output
 experiment
 /data/*
+!primus/backends/diffusion/data/
+!primus/backends/diffusion/data/**
+primus/backends/diffusion/data/**/__pycache__/
+primus/backends/diffusion/data/**/*.pyc
 pp_simulation_result
 
-# Scratch run artefacts (repo root only; archived results under experiments/results/archive/ ARE tracked)
-/primus_*.log
-/primus_*.launcher.out
-/primus_perf_*.summary.txt
-/experiments/results/*.log
-/experiments/results/*.launcher.out
-/experiments/results/*.driver.out
-/train_gdn.log
-/run_pure_1B_eval.log
-eval_results/
+# Allow the projection site's breakdown JSON (consumed by the static site /
+# GitHub Pages) despite the generic `data` ignore above.
+!examples/deepseek-v4/projection/site/data/
+!examples/deepseek-v4/projection/site/data/*.json
 
-# FLA-parity evaluation harness — local working copy only (configs/launchers/
-# logs/summaries used to iterate on the 300M & 1B comparison runs; not part
-# of the Primus public surface, kept on disk for follow-up work).
-/eval/
-
-# IDE / editor workspace files (not part of source)
-Primus.code-workspace
-**/Primus.code-workspace
-*.code-workspace
+*.log
+*.nohup
+*.zip
+.triton_cache_shared/
 .cursor/

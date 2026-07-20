@@ -92,11 +92,18 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 # shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
-LOG_INFO_RANK0 "Pip installing required packages ..."
-if [ "${BACKEND:-}" != "MaxText" ]; then
-    pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+# PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
+# image). Use it when many ranks/nodes share one venv and concurrent pip installs
+# would race, or simply to speed up a warm container. Not keyed on the launcher.
+if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
+    LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
 else
-    pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+    LOG_INFO_RANK0 "Pip installing required packages ..."
+    if [ "${BACKEND:-}" != "MaxText" ]; then
+        pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+    else
+        pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+    fi
 fi
 
 
@@ -203,7 +210,16 @@ LOG_INFO "GLOO_SOCKET_IFNAME: $GLOO_SOCKET_IFNAME"
 LOG_INFO ""
 
 # ----------------- AMD-specific GPU optimizations -----------------
-export HSA_ENABLE_SDMA=1
+
+# Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput.
+# ${:-} guarded so a caller can set HSA_ENABLE_SDMA=0 to route copies through
+# blit/compute kernels instead — workaround for hosts where an SDMA H2D copy
+# intermittently never signals completion (hangs in BusyWaitSignal).
+export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
+
+# Prevent scratch memory from being reclaimed to stabilize large memory usage patterns (e.g., KV cache, MoE experts)
+# NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
+# Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
 export RCCL_MSCCL_ENABLE=0
 export RCCL_MSCCLPP_ENABLE=0

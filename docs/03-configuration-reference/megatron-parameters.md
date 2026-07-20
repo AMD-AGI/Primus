@@ -597,6 +597,8 @@ models:
 | `disable_primus_topk_router` | `false` | *Primus:* disable Primus top-k router patch. |
 | `moe_router_force_load_balancing` | `false` | *Primus:* force load-balanced routing. |
 | `use_deprecated_20241209_moe_layer` | `false` | *Primus:* legacy MoE layer implementation. |
+| `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, uniform. |
+
 
 ### 10.7 Logit softcapping (Primus / Grok-style)
 
@@ -625,7 +627,8 @@ models:
 | `use_sink_attention` | `false` | GPT-OSS-style learned sink attention. |
 | `sink_sliding_window` | `0` | Sliding-window size for sink attention (GPT-OSS uses `128`). |
 | `sink_window_even_layers_only` | `true` | Apply the sliding window only to even layers (GPT-OSS pattern). |
-| `use_turbo_parallel_linear` | `false` | Turbo parallel linear layers. |
+| `use_turbo_gemm` | `false` | Active Turbo GEMM flag for Dense paths. |
+| `use_turbo_parallel_linear` | *(removed)* | Removed—use `use_turbo_gemm`. Passing this key now raises an assertion error (`use_turbo_parallel_linear has been removed; please use use_turbo_gemm instead`). |
 | `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
 | `use_turbo_grouped_mlp` | *(removed)* | Removed—use `use_turbo_grouped_gemm`. Passing this key now raises an assertion error (`use_turbo_grouped_mlp has been removed; please use use_turbo_grouped_gemm instead`). |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary scores. |

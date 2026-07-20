@@ -488,31 +488,25 @@ def _get_pcie_link_info_sysfs() -> Dict[str, Any]:
     return info
 
 
-def get_gpu_count_rocm() -> int:
-    """Get GPU count using rocm-smi (more reliable in containers)."""
+def get_gpu_count_sysfs() -> int:
+    """GPU count via KFD sysfs — no subprocesses, no /dev/shm mutex."""
     try:
-        result = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            # Count lines that look like GPU entries (contain "GPU[")
-            count = sum(1 for line in result.stdout.splitlines() if "GPU[" in line)
-            if count > 0:
-                return count
-    except FileNotFoundError:
-        pass
+        from primus.tools.preflight.gpu.sysfs_probe import sysfs_gpu_count
+
+        count = sysfs_gpu_count()
+        if count > 0:
+            return count
     except Exception:
         pass
+    return 0
 
-    # Fallback: try HIP_VISIBLE_DEVICES or count /dev/dri/renderD* devices
+
+def get_gpu_count_rocm_fallback() -> int:
+    """GPU count without invoking rocm-smi (HIP_VISIBLE_DEVICES / /dev/dri)."""
     hip_devices = os.environ.get("HIP_VISIBLE_DEVICES", "")
     if hip_devices:
         return len([x for x in hip_devices.split(",") if x.strip()])
 
-    # Count render devices
     try:
         import glob
 
@@ -523,6 +517,27 @@ def get_gpu_count_rocm() -> int:
         pass
 
     return 0
+
+
+def get_gpu_count_rocm() -> int:
+    """Get GPU count using rocm-smi (more reliable in containers)."""
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            count = sum(1 for line in result.stdout.splitlines() if "GPU[" in line)
+            if count > 0:
+                return count
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    return get_gpu_count_rocm_fallback()
 
 
 def get_pcie_topology() -> Optional[str]:

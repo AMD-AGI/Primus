@@ -1,0 +1,8 @@
+{"instruction": "What is the capital of France?", "input": "", "output": "The capital of France is Paris."}
+{"instruction": "Translate the following sentence into French.", "input": "I love programming.", "output": "J'aime la programmation."}
+{"instruction": "Summarize the given text in one sentence.", "input": "The quick brown fox jumps over the lazy dog. It is a common English pangram used to test typefaces.", "output": "A pangram about a fox jumping over a dog is used to test typefaces."}
+{"instruction": "Give three tips for staying healthy.", "input": "", "output": "1. Eat a balanced diet. 2. Exercise regularly. 3. Get enough sleep."}
+{"instruction": "Convert the temperature from Celsius to Fahrenheit.", "input": "100 degrees Celsius", "output": "100 degrees Celsius is 212 degrees Fahrenheit."}
+{"instruction": "Write a short greeting for a new employee.", "input": "", "output": "Welcome to the team! We're excited to have you on board."}
+{"instruction": "Explain what an API is in one sentence.", "input": "", "output": "An API is a set of rules that lets different software programs communicate with each other."}
+{"instruction": "Rewrite the sentence to be more formal.", "input": "hey can u send me that file", "output": "Could you please send me that file?"}

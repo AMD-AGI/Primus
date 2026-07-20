@@ -178,14 +178,19 @@ def run_gpu_basic_checks(
     else:
         findings.append(Finding("info", "GPU occupancy", {"note": "amd-smi JSON not available; skipped"}))
 
-    # ROCm runtime availability: best-effort presence via tooling.
+    # ROCm runtime availability: sysfs is always available; amd-smi/rocm-smi
+    # are supplementary and only probed on LOCAL_RANK 0.
     if probe.backend == "rocm":
-        if "amd-smi" in probe.tooling or "rocm-smi" in probe.tooling:
-            findings.append(
-                Finding("info", "ROCm runtime/tooling detected", {"tooling": list(probe.tooling.keys())})
-            )
+        detected = [k for k in ("sysfs", "amd-smi", "rocm-smi") if k in probe.tooling]
+        if detected:
+            findings.append(Finding("info", "ROCm runtime/tooling detected", {"tooling": detected}))
         else:
-            findings.append(Finding("warn", "ROCm tooling not found (amd-smi/rocm-smi)", {}))
+            from primus.tools.preflight.global_vars import LOCAL_RANK
+
+            if LOCAL_RANK != 0:
+                findings.append(Finding("info", "ROCm tooling skipped (non-zero LOCAL_RANK)", {}))
+            else:
+                findings.append(Finding("warn", "ROCm tooling not found (sysfs/amd-smi/rocm-smi)", {}))
 
     ok = not any(f.level == "fail" for f in findings)
     return {"ok": ok, "probe": probe, "findings": findings}

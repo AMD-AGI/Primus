@@ -4,7 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for tools/ci/select_tests.py (classify-based PR test selection)."""
+"""Unit tests for tools/ci/select_tests.py (classify-based E2E suite selection).
+
+Only E2E selection is covered: the unit-test suite is always run in full (see
+select_tests.py's module docstring for why), so there's nothing to select
+there anymore.
+"""
 
 import importlib.util
 from pathlib import Path
@@ -13,54 +18,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("select_tests", _ROOT / "tools/ci/select_tests.py")
 _MOD = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MOD)
-select = _MOD.select_targets
 
-FULL = ["tests/unit_tests/"]
-
-
-# --- unit-test selection ---------------------------------------------------
-def test_empty_runs_full():
-    assert select([]) == FULL
-
-
-def test_global_change_runs_full():
-    assert select([".github/workflows/ci.yaml"]) == FULL
-    assert select(["tools/ci/select_tests.py"]) == FULL
-    assert select(["runner/helpers/x.sh"]) == FULL
-    assert select(["requirements.txt"]) == FULL
-    assert select(["primus/core/launcher/initialize.py"]) == FULL
-
-
-def test_non_py_under_primus_runs_full():
-    # configs / fixtures can't be localized to a unit dir -> fail-safe.
-    assert select(["primus/configs/x.yaml"]) == FULL
-
-
-def test_backend_maps_to_its_unit_dir():
-    out = select(["primus/backends/megatron/training/global_vars.py"])
-    assert "tests/unit_tests/backends/megatron/" in out
-    assert "tests/unit_tests/megatron/" in out  # megatron's extra GPU-operator tests
-
-
-def test_backend_without_unit_dir_runs_full():
-    # transformer_engine has no tests/unit_tests/backends/transformer_engine/.
-    assert select(["primus/backends/transformer_engine/x.py"]) == FULL
-
-
-def test_component_maps_to_isomorphic_dir():
-    assert select(["primus/core/projection/engine.py"]) == ["tests/unit_tests/core/projection/"]
-    assert select(["primus/agents/a.py"]) == ["tests/unit_tests/agents/"]
-
-
-def test_changed_unit_test_runs_its_dir():
-    assert select(["tests/unit_tests/agents/test_tools.py"]) == ["tests/unit_tests/agents/"]
-
-
-def test_docs_only_runs_full():
-    assert select(["README.md", "docs/guide.md"]) == FULL
-
-
-# --- E2E selection (pass a fixed suite set for determinism) ----------------
 SUITES = {"megatron", "torchtitan", "maxtext"}
 
 
@@ -84,14 +42,29 @@ def test_e2e_backend_with_trainer_runs_its_suite():
 
 
 def test_e2e_backend_without_trainer_runs_all():
-    # No trainer suite (bridge / hummingbirdxt / transformer_engine) -> fail-safe all.
+    # No trainer suite (bridge / hummingbirdxt / transformer_engine / diffusion) -> fail-safe all.
     assert set(e2e(["primus/backends/megatron_bridge/x.py"])) == SUITES
     assert set(e2e(["primus/backends/hummingbirdxt/x.py"])) == SUITES
     assert set(e2e(["primus/backends/transformer_engine/x.py"])) == SUITES
+    assert set(e2e(["primus/backends/diffusion/x.py"])) == SUITES
 
 
 def test_e2e_component_change_runs_all():
+    # Any other primus/ or tests/unit_tests/ change -- not just the
+    # explicitly-listed GLOBAL_TRIGGERS -- also runs everything: classify()
+    # maps it to "component", which select_e2e() treats the same as "global".
     assert set(e2e(["primus/core/trainer/base.py"])) == SUITES
+    assert set(e2e(["primus/core/launcher/parser.py"])) == SUITES
+    assert set(e2e(["tests/unit_tests/core/patches/test_patch.py"])) == SUITES
+
+
+def test_e2e_bare_examples_file_runs_all():
+    # A bare examples/<file> (no backend subdir) is shared launcher plumbing
+    # -- e.g. test_maxtext_trainer.py shells out to examples/run_pretrain.sh
+    # directly -- so it must not be silently ignored like a docs-only change.
+    assert set(e2e(["examples/run_pretrain.sh"])) == SUITES
+    # examples/<backend>/... is unaffected: still maps to that one backend.
+    assert e2e(["examples/maxtext/configs/x.yaml"]) == ["maxtext"]
 
 
 def test_e2e_docs_only_runs_none():

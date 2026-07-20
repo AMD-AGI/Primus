@@ -1056,16 +1056,23 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
-
-    if has_moe and dense_layers_present:
-        # Need at least 2 layers to profile both dense (layer 0) and MoE (layer 1)
-        # so extraction code can correctly classify each type using the full
-        # model's moe_pattern where layer 0 is typically dense.
-        max_layers = 2
-    else:
-        max_layers = 1
+    # Use 1 layer for fast profiling - results are extrapolated to full model
+    # Increase to 2-4 for better accuracy if needed. PRIMUS_PROJ_MAX_LAYERS lets
+    # the caller benchmark more representative layers (e.g. =2 to capture both the
+    # DeepSeek-V4 HCA(cr=128) and CSA(cr=4) attention kinds, which alternate).
+    max_layers = int(os.environ.get("PRIMUS_PROJ_MAX_LAYERS", "1"))
     target_layers = max(1, min(original_layers, max_layers))
     module_config.num_layers = target_layers
+    # Set the benchmarked layers' attention kinds. PRIMUS_PROJ_COMPRESS_RATIOS
+    # (e.g. "128,4") picks exactly one HCA + one CSA; otherwise trim the model's
+    # own schedule to the benchmarked layer count.
+    _cr_env = os.environ.get("PRIMUS_PROJ_COMPRESS_RATIOS", "").strip("[] ")
+    if _cr_env and hasattr(module_config, "compress_ratios"):
+        module_config.compress_ratios = [int(x) for x in _cr_env.split(",")][:target_layers]
+    else:
+        _cr = getattr(module_config, "compress_ratios", None)
+        if isinstance(_cr, (list, tuple)) and len(_cr) >= target_layers:
+            module_config.compress_ratios = list(_cr[:target_layers])
 
     if has_moe:
         if not dense_layers_present:

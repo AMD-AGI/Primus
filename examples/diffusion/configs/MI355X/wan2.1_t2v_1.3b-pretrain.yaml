@@ -15,7 +15,7 @@ modules:
     model: wan2.1_t2v_1.3b.yaml
     overrides:
       sink_level: null
-      file_sink_level: DEBUG
+      file_sink_level: INFO
       stderr_sink_level: INFO
 
       metrics:
