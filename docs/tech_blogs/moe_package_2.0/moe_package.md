@@ -292,20 +292,40 @@ DeepSeek-V3 (61 layers, 256 routed experts, top-8, MLA attention) is representat
 ### JAX MoE training optimization
 
 <!---
-OWNER / FILL: Liying Li. Accuracy note: in Primus today the JAX path is a wrapper
-over the ROCm MaxText fork; MoE efficiency comes from MaxText-native controls
-(megablox / sparse_matmul / capacity_factor / expert parallelism) plus ROCm
-XLA/TE tuning. DeepEP / grouped-GEMM on JAX and DeepSeek-V3-on-JAX are
-in-progress/roadmap, not yet landed — please frame them as such. Add any JAX MoE
-benchmark numbers once available.
+OWNER / FILL: Liying Li. This section summarizes the now-published JAX dropless-MoE
+work (grouped GEMM + DeepEP in Primus-Turbo's JAX front-end, integrated into the
+ROCm MaxText fork). For the full treatment — the FFI / custom-VJP integration,
+the memory-wall analysis, and the complete throughput/convergence tables — see
+the dedicated blog linked at the end.
 --->
 
-Primus also supports MoE training on the JAX backend via [MaxText](https://github.com/AMD-AGI/maxtext) (the ROCm fork), integrated through a thin backend adapter that drives MaxText's native training loop. On this path, MoE efficiency is delivered through MaxText's native controls — block-sparse/grouped expert matmul (`megablox` / `sparse_matmul`), expert capacity (`capacity_factor`), and expert parallelism across intra-node and inter-node mesh axes — combined with ROCm-tuned XLA and Transformer Engine settings (latency-hiding scheduler, collective-combine thresholds, hipBLASLt/CK attention). Primus provides ready-to-run MoE configs for models including DeepSeek-V2, Mixtral, Qwen3-30B-A3B, and Grok on both MI300X and MI355X.
+Primus also supports MoE training on the JAX backend via [MaxText](https://github.com/ROCm/maxtext.git) (the ROCm fork), integrated through a thin backend adapter that drives MaxText's native training loop. On this path, MoE efficiency starts from MaxText's native controls — block-sparse/grouped expert matmul (`megablox` / `sparse_matmul`), expert capacity (`capacity_factor`), and expert parallelism across intra-node and inter-node mesh axes — combined with ROCm-tuned XLA and Transformer Engine settings (latency-hiding scheduler, collective-combine thresholds, hipBLASLt/CK attention). Primus provides ready-to-run MoE configs for models including DeepSeek-V2, Mixtral, Qwen3-30B-A3B, and Grok on both MI300X and MI355X.
 
-- **JAX DeepEP / grouped GEMM** — [TODO: status and results for accelerated expert dispatch/combine and grouped GEMM on the JAX path. If still in progress, describe the plan and current MaxText-native baseline.]
-- **DeepSeek-V3** — [TODO: status and results for DeepSeek-V3 on the JAX backend.]
+**The dropless dilemma.** On the JAX/MaxText stack, MoE training has historically forced an unhappy choice. The default `dense_matmul` path makes expert shapes static by fixing a per-expert *capacity* (`capacity_factor`) and **dropping** the tokens that overflow — fast, but lossy. The faithful `sparse_matmul` path is **dropless** — every routed token reaches its expert via a ragged, sorted-by-expert grouped matmul — but in pure JAX it hits two memory walls: the built-in `jax.lax.ragged_dot` expert matmul OOMs at ~444 GiB even at a per-device batch size of 1, and because `jax.jit` traces static shapes, the `ragged_all_to_all` routing shuffle must allocate the worst case, OOMing at ~242 GiB on DeepSeek-V3 671B. Dropless was therefore infeasible at production scale.
 
-<!--- OWNER / FILL: Liying Li — add a JAX MoE throughput figure at imgs/jax_moe.png if available. --->
+**Two Primus-Turbo primitives brought to JAX.** [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) closes that gap by exposing two Composable Kernel (CK)-backed primitives as first-class JAX ops through the [XLA FFI](https://docs.jax.dev/en/latest/ffi.html) — with `custom_vjp` autodiff and `shard_map` sharding rules, so they compose cleanly with FSDP:
+
+- **Grouped GEMM (GMM).** A single-launch kernel over the ragged, variable-`M` per-expert groups that the dropless expert FFN needs (plus its two backward grouped GEMMs, including the variable-`K` weight-gradient case). This removes the `ragged_dot` matmul wall and is what makes dropless trainable at all.
+- **DeepEP dispatch/combine.** A token-aware expert-parallel all-to-all (dispatch sends each token to the rank owning its selected expert; combine reverses and reduces the results), over xGMI intranode and RDMA internode. Because its worst-case receive buffer is a static shape, the entire MoE forward traces **sync-free by default** under `jax.jit`, while leaner buffer management trims the transient footprint enough to claw back a step of batch size.
+
+These are wired into MaxText behind two config flags — `use_turbo_grouped_gemm` and `use_turbo_deepep_dispatch` — with careful custom-VJP fan-out/fan-in, out-of-group masking, and a once-per-process `setup()` bootstrap, and with **zero overhead when the flags are off**, so the default graph is byte-for-byte unchanged.
+
+**Results.** On DeepSeek-V3 671B across 8 nodes × 8 AMD Instinct MI355X (64 GPUs, sequence length 4096, FSDP=8, bf16), the grouped-GEMM + DeepEP dropless path is:
+
+- **Feasible where pure JAX was not** — the grouped GEMM removes the ~444 GiB expert-matmul wall, and DeepEP's leaner all-to-all (~15% lower transient footprint) claws back a batch-size step, fitting per-device batch size 8–9 where the `ragged_all_to_all` dropless path OOMs at 8.
+- **The fastest dropless option** — ~1180 tokens/s/device at per-device batch size 8, beating the `ragged_all_to_all` dropless path at every feasible batch size and reaching ~2× the throughput of a high-capacity (`capacity_factor=4`) dense config.
+- **Numerically faithful and Pareto-superior to token dropping** — over a 2000-step C4 run its loss tracks the `ragged_all_to_all` dropless path to within 0.004 and converges below every capacity-factor dense config (final loss 5.003 vs 5.163 for the `capacity_factor=1.25` default — a 0.16-nat improvement), reaching lower loss at equal wall-clock even after paying the routing-imbalance throughput tax on real data.
+
+<table>
+  <tr>
+    <td><img src="imgs/jax_moe_throughput.png" alt="Per-device TGS across dense-cf / sparse-gmm / sparse-gmm-deepep configs on DeepSeek-V3 671B" width="100%"></td>
+    <td><img src="imgs/jax_moe_convergence.png" alt="C4 training-loss vs. step for the same configs" width="100%"></td>
+  </tr>
+</table>
+
+**Figure 8: Dropless MoE on the JAX (MaxText) path on DeepSeek-V3 671B (8×8 MI355X, FSDP=8, bf16) — (left) per-device throughput (TGS) for the grouped-GEMM + DeepEP dropless config vs. capacity-factor dropping and the `ragged_all_to_all` dropless baseline; (right) C4 training-loss convergence for the same configs.**
+
+For the full treatment — the FFI / `custom_vjp` integration, the fan-out/fan-in and out-of-group-masking correctness details, and the complete throughput and convergence tables — see the dedicated [Dropless MoE Training in JAX with Primus-Turbo](https://rocm.blogs.amd.com/software-tools-optimization/maxtext-dropless-moe/README.html) blog.
 
 ### Primus Projection
 
