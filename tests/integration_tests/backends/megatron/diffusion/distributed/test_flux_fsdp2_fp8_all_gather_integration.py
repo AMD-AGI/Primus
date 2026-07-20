@@ -220,7 +220,7 @@ def _init_distributed():
         )
         primus_logger.setup_logger(cfg, is_head=(rank == 0))
 
-    from primus.modules.module_utils import set_logging_rank
+    from primus.core.utils.module_utils import set_logging_rank
 
     set_logging_rank(rank, world_size)
 
