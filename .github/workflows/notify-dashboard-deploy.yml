@@ -1,0 +1,30 @@
+name: Notify Dashboard Deploy
+
+# On a push to this orphan data branch, dispatch the real deployer
+# (`deploy-backend-gap-dashboard.yml` on `main`) so the dashboard refreshes.
+# Must live here: GitHub runs a push-triggered workflow from the pushed branch.
+
+on:
+  push:
+    branches:
+      - dashboard-data
+
+# Only need to dispatch another workflow.
+permissions:
+  actions: write
+
+concurrency:
+  group: dashboard-data-notify
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the dashboard deploy on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        # If org policy blocks GITHUB_TOKEN from dispatching workflows, replace
+        # GH_TOKEN with a PAT secret that has `actions: write`.
+        run: gh workflow run deploy-backend-gap-dashboard.yml --ref main
