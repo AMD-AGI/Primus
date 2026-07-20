@@ -319,7 +319,7 @@ def attention(
     resolved = _resolve_flash_version(q.device.type)
     if resolved is not None:
         version = resolved
-        # Only "auto" allows call-site override (useful for debugging).
+        # Only "auto" allows call-site override.
         if _ATTENTION_BACKEND == "auto" and fa_version is not None:
             version = fa_version
         return flash_attention(

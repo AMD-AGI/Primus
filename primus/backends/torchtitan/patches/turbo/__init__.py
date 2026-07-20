@@ -17,6 +17,7 @@ from primus.backends.torchtitan.patches.turbo import (  # noqa: F401
     attention_patches,
     deepseek_v3_classic_attention_patches,
     fp8_linear_patches,
+    gptoss_sink_attention_patches,
     moe_grouped_mm_patches,
     mx_linear_patches,
 )

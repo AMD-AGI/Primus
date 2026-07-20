@@ -45,9 +45,9 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
     training_pkg.training = training_mod
     megatron_mod.training = training_pkg
 
-    sys.modules["megatron"] = megatron_mod
-    sys.modules["megatron.training"] = training_pkg
-    sys.modules["megatron.training.training"] = training_mod
+    monkeypatch.setitem(sys.modules, "megatron", megatron_mod)
+    monkeypatch.setitem(sys.modules, "megatron.training", training_pkg)
+    monkeypatch.setitem(sys.modules, "megatron.training.training", training_mod)
 
     return training_mod, fake_training_log
 
@@ -140,9 +140,10 @@ def test_patch_training_log_wraps_and_stacks_extensions(monkeypatch: pytest.Monk
 
 
 def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.MonkeyPatch):
-    # Prepare fake torch and ROCm SMI helpers. MemoryStatsExtension also calls
-    # torch.tensor / torch.distributed.all_gather for cross-rank max ROCm mem;
-    # stub those so inject() does not fall into the exception path in unit tests.
+    # Prepare fake torch and ROCm SMI helpers. MemoryStatsExtension computes the
+    # cross-rank max ROCm mem via torch.tensor + torch.distributed.all_reduce(MAX)
+    # and torch.distributed.get_rank(); stub those so inject() does not fall into
+    # the exception path in unit tests.
     class _FakeTensor:
         __slots__ = ("_value",)
 
@@ -163,13 +164,17 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
     def _get_world_size():
         return 8
 
-    def _all_gather(gathered_list, tensor):
-        v = tensor.item()
-        for i in range(len(gathered_list)):
-            gathered_list[i] = _FakeTensor(v)
+    def _get_rank():
+        return 0
+
+    def _all_reduce(tensor, op=None):
+        # Single-rank reduction: MAX over one rank is a no-op, so leave the
+        # in-place tensor value unchanged (matching real all_reduce semantics).
+        return None
 
     # `inject` passes `dtype=torch.int64`; SimpleNamespace must expose `int64`
-    # or attribute lookup fails before our fake `tensor()` runs.
+    # or attribute lookup fails before our fake `tensor()` runs. The refactored
+    # code also reads `torch.distributed.ReduceOp.MAX`, so provide that too.
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(
             mem_get_info=lambda: (2 * 1024**3, 4 * 1024**3),
@@ -180,7 +185,9 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
         int64=int,
         distributed=SimpleNamespace(
             get_world_size=_get_world_size,
-            all_gather=_all_gather,
+            get_rank=_get_rank,
+            all_reduce=_all_reduce,
+            ReduceOp=SimpleNamespace(MAX=object()),
         ),
     )
     monkeypatch.setattr(

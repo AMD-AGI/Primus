@@ -116,7 +116,11 @@ class FSDP2Trainer(BaseWanTrainer):
                 pass  # fallback to full mesh
 
         wrap_target = str(self.args.get("fsdp2_wrap_target", "") or "").strip()
-        wrap_root = self._get_module_by_path(self.model, wrap_target) if wrap_target else self.model
+        wrap_root = (
+            self._get_module_by_path(self.model, wrap_target, option_name="fsdp2_wrap_target")
+            if wrap_target
+            else self.model
+        )
 
         # Pre-cast to bf16 before FSDP wrapping so parameters are stored in bf16,
         # matching DiffSynth/DeepSpeed bf16 behavior.
@@ -130,7 +134,32 @@ class FSDP2Trainer(BaseWanTrainer):
                 logger.info("FSDP2: world_size=1; skipping composable FSDP wrapping.")
             return
 
+        if bool(self.args.get("compile_transformer_blocks", False)):
+            self._compile_transformer_blocks(wrap_root)
+
         reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
+        no_reshard_paths = {
+            item.strip()
+            for item in str(self.args.get("fsdp_module_paths_no_reshard", "") or "").split(",")
+            if item.strip()
+        }
+
+        module_paths_spec = str(self.args.get("fsdp_module_paths_to_wrap", "") or "")
+        module_paths = [item.strip() for item in module_paths_spec.split(",") if item.strip()]
+        wrapped_paths = 0
+        for module_path in module_paths:
+            module = self._get_module_by_path(wrap_root, module_path, option_name="fsdp_module_paths_to_wrap")
+            fully_shard(
+                module,
+                mesh=fsdp_mesh,
+                reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
+                mp_policy=mp_policy,
+            )
+            wrapped_paths += 1
+        if self.rank == 0 and wrapped_paths:
+            logger.info(
+                "FSDP2: wrapped explicit module paths under " f"'{wrap_target or '<model>'}': {module_paths}"
+            )
 
         # Wrap transformer blocks first for optimal memory management
         layer_cls_spec = self.args.get("fsdp_transformer_layer_cls_to_wrap")
@@ -180,18 +209,30 @@ class FSDP2Trainer(BaseWanTrainer):
         if self.rank == 0:
             logger.info(f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' with mp={mp_dtype}")
 
+    def _compile_transformer_blocks(self, root: torch.nn.Module) -> None:
+        compiled = 0
+        for attr in ("double_blocks", "single_blocks"):
+            blocks = getattr(root, attr, None)
+            if blocks is None:
+                continue
+            for idx, block in enumerate(blocks):
+                blocks[idx] = torch.compile(block, fullgraph=True)
+                compiled += 1
+        if self.rank == 0:
+            logger.info(f"FSDP2: compiled {compiled} FLUX transformer blocks with torch.compile")
+
     @staticmethod
-    def _get_module_by_path(root: torch.nn.Module, path: str) -> torch.nn.Module:
+    def _get_module_by_path(root: torch.nn.Module, path: str, *, option_name: str) -> torch.nn.Module:
         """Resolve a dot-separated attribute path on a module."""
         cur = root
         if not path:
             return cur
         for part in path.split("."):
             if not hasattr(cur, part):
-                raise ValueError(f"fsdp2_wrap_target='{path}' is invalid: missing attribute '{part}'")
+                raise ValueError(f"{option_name}='{path}' is invalid: missing attribute '{part}'")
             cur = getattr(cur, part)
         if not isinstance(cur, torch.nn.Module):
-            raise ValueError(f"fsdp2_wrap_target='{path}' did not resolve to a torch.nn.Module")
+            raise ValueError(f"{option_name}='{path}' did not resolve to a torch.nn.Module")
         return cur
 
     # ------------------------------------------------------------------ #
@@ -370,6 +411,10 @@ class FSDP2Trainer(BaseWanTrainer):
 
     def save_model(self):
         """Save final model using the configured strategy."""
+        if self.save_strategy in ("none", "skip", "disabled"):
+            if self.rank == 0:
+                logger.info(f"Skipping final checkpoint save (strategy={self.save_strategy})")
+            return
         if self.save_strategy == "dit_only":
             save_path = os.path.join(self.output_dir, "dit_model.safetensors")
             self._save_dit(save_path)

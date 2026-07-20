@@ -55,6 +55,6 @@ modules:
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_rms_norm: false
-      use_turbo_parallel_linear: false
+      use_turbo_gemm: false
 
       check_for_nan_in_loss: false

@@ -83,6 +83,50 @@ def run_script(
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
+def run_posttrain_script(
+    ut_name: str,
+    tag: str,
+    exp_path: str,
+    env_override: dict = None,
+    extra_args: list[str] = None,
+):
+    """Like run_script, but for the "posttrain" suite (SFT/alignment).
+
+    SFT experiment configs declare a `modules.post_trainer` section (instead
+    of `modules.pre_trainer`), which the CLI only loads via `train posttrain`
+    (see primus/cli/subcommands/train.py). The "Training completed." marker
+    that run_training_script asserts on is emitted generically by
+    PrimusRuntime._run_trainer_lifecycle for any module, so it applies here
+    unchanged.
+    """
+    shell_entry = "./runner/primus-cli"
+    env = os.environ.copy()
+    if env_override:
+        env.update(env_override)
+    env["EXP"] = exp_path
+
+    ut_log_path = os.environ.get("UT_LOG_PATH", "ut_out")
+    train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
+    env["TRAIN_LOG"] = train_log_path
+
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "posttrain",
+        "--config",
+        exp_path,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
+
+
 class TestMegatronTrainer(PrimusUT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -561,6 +605,117 @@ class TestMegatronTrainer(PrimusUT):
         assert (
             Dataloader_mp_context_patch_log in stdout
         ), "Expected dataloader_mp_context patch log not found in stdout"
+
+    def test_sdma_allgather_fused_residual_norm(self):
+        # Neither patch runs in any other case here: SDMA param all-gather
+        # only activates with ENABLE_SDMA_ALLGATHER=1 (env var, not a --arg) +
+        # a distributed optimizer; fused residual+RMSNorm needs
+        # use_turbo_rms_norm=1 + PRIMUS_FUSED_RESIDUAL_NORM_V2=1. Confirmed via
+        # coverage instrumentation that both patches install and execute.
+        run_script(
+            self.__class__.__name__,
+            "sdma_allgather_fused_residual_norm",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_8B-BF16-pretrain.yaml",
+            env_override={
+                "ENABLE_SDMA_ALLGATHER": "1",
+                "PRIMUS_FUSED_RESIDUAL_NORM_V2": "1",
+            },
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+                "--use_turbo_rms_norm",
+                "1",
+                "--use_distributed_optimizer",
+                "1",
+                "--overlap_param_gather",
+                "1",
+            ],
+        )
+
+    def test_mamba_370M(self):
+        # Default `auto` attention backend exercises attention_backend_patches:
+        # megatron-core's probe must respect the image's baked NVTE_FLASH_ATTN=0.
+        run_script(
+            self.__class__.__name__,
+            "mamba_370M",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mamba_370M-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "2",
+                "--global_batch_size",
+                "16",
+            ],
+        )
+
+    def test_zebra_llama_1B_hybrid(self):
+        # Hybrid Mamba+MLA (HybridStack) path. num_layers=8 is the minimum that
+        # keeps the default hybrid_attention_ratio=0.25 from allocating zero
+        # attention layers (division by zero).
+        run_script(
+            self.__class__.__name__,
+            "zebra_llama_1B_hybrid",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_llama_1B-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "8",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "2",
+                "--global_batch_size",
+                "16",
+            ],
+        )
+
+    def test_mamba_130M_bridge_pretrain(self):
+        # Only E2E covering the megatron_bridge backend (mamba/zebra above use
+        # the megatron backend). extra_args pin a tiny shape so the test doesn't
+        # depend on the example yaml's sizes. Don't override seq_length: the
+        # recipe feeds it to both model and dataset but a CLI override reaches
+        # only the dataset, and Bridge asserts the two match.
+        run_script(
+            self.__class__.__name__,
+            "mamba_130M_bridge_pretrain",
+            exp_path=f"examples/megatron_bridge/configs/{GPU_PLATFORM}/mamba_130M_pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+            ],
+        )
+
+    def test_qwen2_sft_lora(self):
+        # Only E2E covering the "posttrain" suite (MegatronSFTTrainer) and
+        # peft/*.py; LoRA is enabled in test_megatron_trainer_sft_lora.yaml.
+        # The posttrain hook HF->Megatron-converts `tokenizer_model` into the
+        # base checkpoint when pretrained_checkpoint/load are unset, so this
+        # uses a tiny stand-in checkpoint, not real Qwen2.5-7B weights.
+        run_posttrain_script(
+            self.__class__.__name__,
+            "qwen2_sft_lora",
+            exp_path="tests/trainer/test_megatron_trainer_sft_lora.yaml",
+            env_override={},
+            # head_dim (2) is below the image's fused-attention CK kernel minimum,
+            # so pin the unfused path; attention_backend_patches forces it over
+            # the image's baked NVTE_FUSED_ATTN=1.
+            extra_args=["--attention_backend", "unfused"],
+        )
 
     def test_deepseekv2_lite_uep(self):
         run_script(

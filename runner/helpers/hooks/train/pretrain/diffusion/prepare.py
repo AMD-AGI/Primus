@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -71,6 +70,42 @@ def _require_path(path: str | None, description: str, *, kind: str = "any") -> N
     _log(f"{description}: {resolved}")
 
 
+def _require_optional_path(path: str | None, description: str, *, kind: str = "any") -> None:
+    if _is_placeholder(path):
+        _log(f"{description}: not configured; skipping optional initialization")
+        return
+    _require_path(path, description, kind=kind)
+
+
+def _looks_like_local_path(value: str) -> bool:
+    if value.startswith(("/", "./", "../", "~")):
+        return True
+    parts = value.split("/")
+    return len(parts) == 2 and parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
+
+
+def _looks_like_hf_reference(value: str) -> bool:
+    if _looks_like_local_path(value):
+        return False
+    parts = value.split("/")
+    return len(parts) >= 2 and all(part for part in parts[:2])
+
+
+def _validate_local_or_hf_id(value: str | None, description: str) -> None:
+    if _is_placeholder(value):
+        _fail(f"{description} is not configured: {value!r}")
+    value = str(value)
+    path = Path(value).expanduser()
+    if path.exists():
+        _log(f"{description}: {path}")
+    elif _looks_like_local_path(value):
+        _fail(f"{description} path not found: {path}")
+    elif _looks_like_hf_reference(value):
+        _log(f"{description}: {value} (assuming Hugging Face reference)")
+    else:
+        _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
+
+
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
     cfg = load_primus_config(config_path)
     selected_module = _select_module_name(cfg, module_name)
@@ -87,16 +122,62 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
 
     dataset_cfg = dataset.get("config", {})
     processor_cfg = dataset_cfg.get("processor_config", {})
-    encoder_cfg = model.get("config", {}).get("encoder", {}) or model.get("encoder", {})
-
-    _require_path(dataset_cfg.get("dataset_path"), "dataset metadata", kind="file")
-    _require_path(dataset_cfg.get("data_folder"), "dataset media folder", kind="dir")
-    _require_path(processor_cfg.get("text_tokenizer"), "text tokenizer", kind="dir")
-
     model_cfg = model.get("config", {})
-    _require_path(model_cfg.get("load_from_pretrained_path"), "DiT initialization checkpoint")
-    _require_path(encoder_cfg.get("t5_encoder"), "text encoder checkpoint", kind="file")
-    _require_path(encoder_cfg.get("autoencoder"), "VAE checkpoint", kind="file")
+    model_name = model.get("name")
+
+    if model_name == "wan":
+        encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+        _require_path(dataset_cfg.get("dataset_path"), "dataset metadata", kind="file")
+        _require_path(dataset_cfg.get("data_folder"), "dataset media folder", kind="dir")
+        _require_path(processor_cfg.get("text_tokenizer"), "text tokenizer", kind="dir")
+        _require_path(model_cfg.get("load_from_pretrained_path"), "DiT initialization checkpoint")
+        _require_path(encoder_cfg.get("t5_encoder"), "text encoder checkpoint", kind="file")
+        _require_path(encoder_cfg.get("autoencoder"), "VAE checkpoint", kind="file")
+    elif str(model_name).startswith("flux"):
+        dataset_type = str(dataset_cfg.get("dataset_type", "precomputed")).lower()
+        if dataset_type == "raw":
+            dataset_name = dataset_cfg.get("dataset")
+            dataset_format = str(dataset_cfg.get("dataset_format", "webdataset")).lower()
+            if dataset_name == "cc12m-test":
+                if _is_placeholder(dataset_cfg.get("dataset_path")):
+                    _log("FLUX raw image-text dataset: zirui3/cc12m-test (Hugging Face dataset)")
+                elif dataset_format == "hf_repo":
+                    _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
+                else:
+                    kind = "file" if dataset_format == "jsonl" else "dir"
+                    _require_path(dataset_cfg.get("dataset_path"), "FLUX raw image-text dataset", kind=kind)
+            elif dataset_name == "cc12m-wds":
+                if _is_placeholder(dataset_cfg.get("dataset_path")):
+                    _log("FLUX raw image-text dataset: pixparse/cc12m-wds (Hugging Face dataset)")
+                else:
+                    _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
+            elif dataset_format == "hf_repo":
+                _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), "FLUX raw Hugging Face dataset")
+            else:
+                kind = "file" if dataset_format == "jsonl" else "dir"
+                _require_path(dataset_cfg.get("dataset_path"), "FLUX raw image-text dataset", kind=kind)
+            encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+            _validate_local_or_hf_id(encoder_cfg.get("t5_encoder"), "FLUX T5 encoder")
+            _validate_local_or_hf_id(encoder_cfg.get("clip_encoder"), "FLUX CLIP encoder")
+            _validate_local_or_hf_id(encoder_cfg.get("autoencoder"), "FLUX autoencoder checkpoint")
+        elif dataset_type == "precomputed":
+            _require_path(dataset_cfg.get("dataset_path"), "FLUX precomputed dataset", kind="dir")
+            prompt_dropout_prob = float(processor_cfg.get("prompt_dropout_prob", 0.0) or 0.0)
+            if prompt_dropout_prob > 0.0:
+                empty_dir = processor_cfg.get("empty_encodings_path")
+                _require_path(empty_dir, "FLUX empty encodings directory", kind="dir")
+                _require_path(str(Path(empty_dir) / "t5_empty.npy"), "FLUX empty T5 encoding", kind="file")
+                _require_path(
+                    str(Path(empty_dir) / "clip_empty.npy"), "FLUX empty CLIP encoding", kind="file"
+                )
+        else:
+            _fail(f"unsupported FLUX dataset_type: {dataset_type!r}")
+        _require_optional_path(
+            model_cfg.get("load_from_pretrained_path"),
+            "FLUX DiT initialization checkpoint",
+        )
+    else:
+        _fail(f"unsupported diffusion model for prepare hook: {model_name!r}")
 
     _log(
         "validated "
@@ -117,10 +198,6 @@ def main() -> None:
     parser.add_argument("--backend_path", type=str, default=None, help="Unused; diffusion is in-tree")
     parser.add_argument("--module_name", type=str, default=None, help="Override module name to validate")
     args, _unknown = parser.parse_known_args()
-
-    if os.environ.get("SKIP_PREPARE") == "1":
-        _log("SKIP_PREPARE=1; skipping validation")
-        return
 
     if args.backend_path:
         _fail("diffusion is an in-tree backend and does not support --backend_path")

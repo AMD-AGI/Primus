@@ -70,7 +70,7 @@ mlflow_upload_performance_metrics: false
 disable_profiler_activity_cpu: false
 torch_profiler_record_shapes: true
 torch_profiler_with_stack: true
-torch_profiler_use_gzip: false
+torch_profiler_use_gzip: true
 
 # continue/finetune
 auto_continue_train: false
@@ -96,3 +96,8 @@ recompute_layer_ids: null # int list; global layer ids, range from 0 to (num_lay
 
 # dataloader
 dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
+
+# Control the force load balancing type for the MoE router.
+# If set to "even", the router will force the load balancing to be even.
+# If set to "uniform", the router will force the load balancing to be uniform. (Megatron-LM original behavior)
+moe_router_force_load_balancing_type: "even"

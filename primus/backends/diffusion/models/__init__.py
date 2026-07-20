@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Wan model exports for the Primus Wan backend."""
+"""Model exports for the Primus diffusion backend."""
 
 from .wan import WanForTraining
 
