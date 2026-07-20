@@ -1,0 +1,244 @@
+# Adapted from ODC (https://github.com/sail-sg/odc), which is distributed under
+# the MIT License per its package metadata (pyproject.toml / setup.py
+# classifiers). The upstream repository ships no LICENSE file or per-file
+# copyright headers; upstream copyright is held by the ODC authors (Sea AI Lab).
+#
+# Modifications Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+
+import logging
+import math
+
+import torch
+import torch.distributed as dist
+import triton
+import triton.language as tl
+from torch import Tensor
+
+from odc.primitives import (
+    SHMEM_EXTERN_LIBS,
+    __syncthreads,
+    getmem_nbi_block,
+    quiet,
+    tid,
+)
+from odc.primitives.utils import (
+    BufferSplitter,
+    SymmBufferRegistry,
+    get_comm_stream,
+    get_local_world_size,
+    sync_cta,
+)
+
+logger = logging.getLogger(__name__)
+
+from odc.primitives.utils import _USE_ROCSHMEM  # noqa: E402
+
+if _USE_ROCSHMEM:
+    from odc.primitives import _rocshmem_backend as _rs
+else:
+    _rs = None
+
+
+def _gda_active():
+    return _rs is not None and _rs.gda_enabled()
+
+
+@triton.jit
+def shmem_device_producer_gather_2d_get_block_kernel_chunked_synced(
+    remote_tensor_ptr,
+    target_tensor_ptr,
+    elem_per_rank,
+    size_per_elem,
+    rank,
+    num_ranks_per_node,
+    world_size,
+    chunk_size,
+    signal_ptr,
+):
+    pid = tl.program_id(axis=0)
+    # np = tl.num_programs(axis=0)
+    assert num_ranks_per_node == tl.num_programs(axis=0)
+    np = num_ranks_per_node
+    num_nodes = world_size // np
+
+    tidx = tid(axis=0)
+    expected = 0
+    for i in range(1, num_nodes):
+        peer_node = (i + rank // np) % num_nodes
+        peer = (pid + peer_node * np) % world_size
+        # chunk_size = elem_per_rank // num_chunks
+        num_chunks = tl.cdiv(elem_per_rank, chunk_size)
+        for chunk in range(num_chunks):
+            this_chunk_size = chunk_size
+            if chunk == num_chunks - 1:
+                this_chunk_size = elem_per_rank - chunk * chunk_size
+            getmem_nbi_block(
+                target_tensor_ptr + peer * elem_per_rank + (chunk * chunk_size),
+                remote_tensor_ptr + (chunk * chunk_size),
+                this_chunk_size * size_per_elem,
+                peer,
+            )
+            expected += np
+            sync_cta(signal_ptr, expected)
+            if tidx == 0 and pid == 0:
+                quiet()
+            __syncthreads()
+
+            expected += np
+            sync_cta(signal_ptr, expected)
+
+
+class GatherService:
+    def __init__(self):
+        self.shaped_buffer = {}
+        self.buffer_splitter = BufferSplitter()
+        self.chunk_size_bytes = 2**20
+
+    def get_chunk_size(self, buffer_dtype):
+        return self.chunk_size_bytes // buffer_dtype.itemsize
+
+    def gather_into_tensor(self, output_tensor: Tensor, input_tensor: Tensor, pg: dist.ProcessGroup):
+        buf_size = self.buffer_splitter.get_global_buffer_size(output_tensor.shape)
+        buffer_shape = (buf_size,)
+        output_size = output_tensor.numel()
+        assert output_size >= buf_size, f"output_size: {output_size} < buf_size: {buf_size}"
+
+        rank = torch.distributed.get_rank()
+        if (buffer_shape, output_tensor.dtype) not in self.shaped_buffer:
+            logger.info(
+                f"Rank {rank} create buffer: output_size: {output_size} num_sub_buffers: {math.ceil(output_size / buf_size)} buf_size: {buf_size}"
+            )
+            self.shaped_buffer[
+                (buffer_shape, output_tensor.dtype)
+            ] = SymmBufferRegistry.get_instance().allocate_symm_buffer(
+                f"ag_buffer_{buffer_shape}_{output_tensor.dtype}",
+                buffer_shape,
+                output_tensor.dtype,
+            )
+        target_tensor = self.shaped_buffer[(buffer_shape, output_tensor.dtype)]
+
+        assert (input_tensor.numel() * input_tensor.element_size()) % (
+            2**6
+        ) == 0 or input_tensor.numel() < 2**6, "better align to 64 for efficiency"
+        chunk_size = self.get_chunk_size(input_tensor.dtype)
+        # assert input_tensor.numel() % chunk_size == 0
+
+        registry = SymmBufferRegistry.get_instance()
+        peer_tensors = registry.get_peer_tensors(input_tensor)
+
+        group_world_size = torch.distributed.get_world_size(pg)
+        local_world_size = get_local_world_size()
+        assert group_world_size in (
+            torch.distributed.get_world_size(),
+            local_world_size,
+        ), f"{group_world_size=} {torch.distributed.get_world_size()=} {local_world_size=}"
+
+        get_comm_stream().wait_stream(torch.cuda.current_stream())
+        # GPU-direct (GDA): IPC is off, so there are no XGMI peer views; ALL ranks
+        # (incl. same-node and self) are pulled via device rocshmem_getmem. Handle
+        # the whole cross-group gather here and return.
+        gda = _gda_active() and local_world_size != group_world_size
+        if gda:
+            self._gda_gather_into_tensor(
+                output_tensor,
+                input_tensor,
+                target_tensor,
+                buf_size,
+                group_world_size,
+                rank,
+            )
+            return
+
+        with torch.cuda.stream(get_comm_stream()):
+            output_tensor_split = output_tensor.view(group_world_size, -1)
+            assert local_world_size == len(peer_tensors)
+            local_rank = rank % local_world_size
+            rank_same_node_start = rank - local_rank
+            rank_same_node_end = rank_same_node_start + local_world_size
+            for r_offset in range(local_world_size):
+                src_local_rank = (local_rank + r_offset) % local_world_size
+                if group_world_size == local_world_size:
+                    output_tensor_split[src_local_rank].copy_(peer_tensors[src_local_rank])
+                else:
+                    src_rank = rank_same_node_start + src_local_rank
+                    output_tensor_split[src_rank].copy_(peer_tensors[src_local_rank])
+
+            assert buf_size % group_world_size == 0
+            local_buf_size = buf_size // group_world_size
+            signal_ptr = torch.empty(1, dtype=torch.int32, device="cuda")
+            for start in range(0, input_tensor.numel(), local_buf_size):
+                if local_world_size == group_world_size:
+                    continue
+                size = min(local_buf_size, input_tensor.numel() - start)
+                sub_input_tensor = input_tensor.view(-1)[start : start + size]
+                assert (sub_input_tensor.numel() * sub_input_tensor.element_size()) % (
+                    2**6
+                ) == 0 or sub_input_tensor.numel() < 2**6, "better align to 64 for efficiency"
+                target_buf_size = size * group_world_size
+                assert target_buf_size <= buf_size
+                target_tensor_split = target_tensor[:target_buf_size].view(group_world_size, size)
+
+                signal_ptr.fill_(0)
+                assert group_world_size % 8 == 0 or group_world_size < 8
+                # grid_size = 8 if world_size == 32 else world_size
+                grid_size = local_world_size
+                shmem_device_producer_gather_2d_get_block_kernel_chunked_synced[(grid_size,)](
+                    remote_tensor_ptr=sub_input_tensor,
+                    target_tensor_ptr=target_tensor_split.view(-1),
+                    elem_per_rank=sub_input_tensor.numel(),
+                    size_per_elem=sub_input_tensor.element_size(),
+                    rank=rank,
+                    num_ranks_per_node=local_world_size,
+                    world_size=group_world_size,
+                    chunk_size=chunk_size,
+                    signal_ptr=signal_ptr,
+                    num_warps=32,
+                    extern_libs=SHMEM_EXTERN_LIBS,
+                )
+                if buf_size == output_size:
+                    local_world_data_size = size * local_world_size
+                    local_world_idx = rank // local_world_size
+                    data_start_idx = local_world_data_size * local_world_idx
+                    data_end_idx = data_start_idx + local_world_data_size
+                    output_tensor[:data_start_idx].copy_(target_tensor[:data_start_idx])
+                    output_tensor[data_end_idx:].copy_(target_tensor[data_end_idx:])
+                    # output_tensor.copy_(target_tensor)
+                else:
+                    for r in range(group_world_size):
+                        if rank_same_node_start <= r < rank_same_node_end:
+                            continue
+                        output_tensor_split[r, start : start + size].copy_(target_tensor_split[r, :])
+        torch.cuda.current_stream().wait_stream(get_comm_stream())
+
+    def _gda_gather_into_tensor(
+        self, output_tensor, input_tensor, target_tensor, buf_size, group_world_size, rank
+    ):
+        """GPU-direct all-gather: every rank's shard (incl same-node and self) is
+        pulled via a single device rocshmem_getmem kernel into target slot[r],
+        then copied into output_tensor_split[r]. No XGMI peer views / host loop."""
+        es = input_tensor.element_size()
+        assert buf_size % group_world_size == 0
+        local_buf_size = buf_size // group_world_size
+        output_split = output_tensor.view(group_world_size, -1)
+        peers = list(range(group_world_size))
+        comm = get_comm_stream()
+        comm.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(comm):
+            torch.cuda.synchronize()
+            # NO per-gather rocshmem_barrier_all here. Gather reads PARAMS (symmetric
+            # shard written by the optimizer a full step earlier and read-only through
+            # fwd/bwd) -> peers' data is already stable/visible, so the cross-PE
+            # rendezvous is unnecessary (unlike scatter's just-written staging).
+            for start in range(0, input_tensor.numel(), local_buf_size):
+                size = min(local_buf_size, input_tensor.numel() - start)
+                sub_input = input_tensor.view(-1)[start : start + size]
+                tb = size * group_world_size
+                tsplit = target_tensor[:tb].view(group_world_size, size)
+                _rs.gda_gather(target_tensor.data_ptr(), sub_input.data_ptr(), size * es, peers, size * es)
+                torch.cuda.synchronize()
+                # reassembly on the SAME comm stream -> ordered AFTER the gather kernel
+                for r in range(group_world_size):
+                    output_split[r, start : start + size].copy_(tsplit[r])
+        torch.cuda.current_stream().wait_stream(comm)

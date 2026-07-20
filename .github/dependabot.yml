@@ -1,16 +1,24 @@
 version: 2
 # Version updates for GitHub Actions only; CVEs are handled by Dependabot
-# security updates (enabled repo-wide).
+# security updates (enabled repo-wide), which are unaffected by the schedule
+# and ignore rules below.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
     groups:
       github-actions:
         patterns:
           - "*"
+    # Only open PRs for major version bumps; skip the churn of minor/patch
+    # version updates (security fixes still come through regardless).
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
     labels:
       - "dependencies"
       - "github-actions"

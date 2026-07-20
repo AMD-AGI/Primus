@@ -67,18 +67,6 @@ def get_memory(unit=1e9):
     return allocated / unit, reserved / unit, max_alloc / unit
 
 
-def print_cuda_memory(prefix="", unit=1e9):
-    allocated = torch.cuda.memory_allocated() / unit
-    reserved = torch.cuda.memory_reserved() / unit
-    max_alloc = torch.cuda.max_memory_allocated() / unit
-    print(
-        f"{prefix} "
-        f"allocated={allocated:.2f}GB, "
-        f"reserved={reserved:.2f}GB, "
-        f"max_alloc={max_alloc:.2f}GB"
-    )
-
-
 @contextmanager
 def init_weights_on_device(device=torch.device("meta"), include_buffers: bool = False):
 
