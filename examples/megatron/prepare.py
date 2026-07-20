@@ -282,6 +282,15 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
             f"if you actually need it). SFT does not require this dependency."
         )
         return
+    # This prepare step may run once PER RANK (e.g. 8-16 concurrent processes on a
+    # node under torchrun), and concurrent `pip install -e` writes race on the shared
+    # venv .pth file (OSError). If the package is already importable (one-time
+    # pre-install), take a fast, write-free path so all ranks agree without racing.
+    import importlib.util
+
+    if importlib.util.find_spec("emerging_optimizers") is not None:
+        log_info("Emerging-Optimizers already installed; skipping editable reinstall.")
+        return
     log_info(f"Building Emerging Optimizers in {emerging_optimizers_path}")
     ret = subprocess.run(
         ["pip", "install", "--no-build-isolation", "-e", str(emerging_optimizers_path)], check=True

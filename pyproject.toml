@@ -73,6 +73,15 @@ Repository = "https://github.com/AMD-AGI/Primus"
 line-length = 110
 target-version = ["py38"]
 
+[tool.isort]
+# Mirror the pre-commit hook (isort --profile black) so local runs and the
+# pure-checkout CI agree. `odc` lives under primus/core/odc/odc/, so a clean
+# checkout has no top-level `odc` package and isort would otherwise treat
+# `import odc` as third-party. Declaring it first-party keeps import grouping
+# deterministic and identical between local and CI.
+profile = "black"
+known_first_party = ["odc"]
+
 ###############################################################################
 # Hatch build configuration
 ###############################################################################

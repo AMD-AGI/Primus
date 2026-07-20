@@ -92,11 +92,18 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 # shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
-LOG_INFO_RANK0 "Pip installing required packages ..."
-if [ "${BACKEND:-}" != "MaxText" ]; then
-    pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+# PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
+# image). Use it when many ranks/nodes share one venv and concurrent pip installs
+# would race, or simply to speed up a warm container. Not keyed on the launcher.
+if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
+    LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
 else
-    pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+    LOG_INFO_RANK0 "Pip installing required packages ..."
+    if [ "${BACKEND:-}" != "MaxText" ]; then
+        pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+    else
+        pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+    fi
 fi
 
 
