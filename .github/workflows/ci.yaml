@@ -28,7 +28,7 @@ env:
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
-  BASE_IMAGE: docker.io/rocm/primus:v26.3
+  BASE_IMAGE: docker.io/rocm/primus:v26.4
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
 jobs:
@@ -133,7 +133,7 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.3 already includes AINIC under /workspace. Re-enable this
+          # Primus v26.4 already includes AINIC under /workspace. Re-enable this
           # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
@@ -211,7 +211,7 @@ jobs:
     needs: [code-lint]
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
+    runs-on: [primus-lm-cicd-v26.4-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Clean stale Primus-Turbo checkout
@@ -285,41 +285,14 @@ jobs:
       - name: Install Primus
         run: |
           pip install -r requirements.txt
-      # v26.3-only: drop this whole step on v26.4. Unit tests import torchtitan
-      # from the submodule source via conftest sys.path injection (v0.2.2 has
-      # PEP-420 namespace packages that need the source root on sys.path). This
-      # just removes any stale torchtitan on the persistent runner that would
-      # shadow it (old install or leftover editable finder / .pth / dist-info).
-      - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
-        run: |
-          pip uninstall -y torchtitan || true
-          python - <<'PY'
-          import glob, os, shutil, site
-          dirs = set(site.getsitepackages() + [site.getusersitepackages()])
-          patterns = (
-              "__editable__*torchtitan*",
-              "__editable__.torchtitan*.pth",
-              "torchtitan*.pth",
-              "torchtitan*.egg-link",
-              "torchtitan*.dist-info",
-              "torchtitan*.egg-info",
-          )
-          for d in dirs:
-              for pat in patterns:
-                  for f in glob.glob(os.path.join(d, pat)):
-                      try:
-                          shutil.rmtree(f) if os.path.isdir(f) else os.remove(f)
-                          print("removed", f)
-                      except OSError as e:
-                          print("skip", f, e)
-          PY
       - name: Install fixed origami
         run: |
-          # rocm/primus:v26.3 bundles origami 0.1.0, whose rank_configs() raises
-          # ValueError: vector::reserve during MoE grouped-gemm kernel selection and
-          # crashes training (turbo's _safe_rank_configs only catches RuntimeError).
-          # Install the fixed origami (rocm-libraries@223648a) over the bundled 0.1.0.
-          # TODO: drop this once a base image ships origami with the fix.
+          # The v26.4 base image ships no origami at all, so primus_turbo falls
+          # back to a heuristic kernel selection instead of origami's tuned
+          # rank_configs(). Install origami (rocm-libraries@223648a) so CI exercises
+          # the same grouped-gemm path as the published image (Dockerfile installs
+          # the same pin). Keep in sync with .github/workflows/docker/Dockerfile.
+          # TODO: drop once a base image ships origami with the fix.
           rm -rf /tmp/rocm-libraries
           git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries
           cd /tmp/rocm-libraries

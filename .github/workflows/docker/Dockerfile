@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v26.3
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.4
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
@@ -24,7 +24,7 @@ RUN rm -rf /var/lib/apt/lists/*
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 # ENV MPI_HOME=/opt/ompi
-# Use the system OpenMPI prefix from the v26.3 base image.
+# Use the system OpenMPI prefix from the v26.4 base image.
 ENV MPI_HOME=/usr/lib/x86_64-linux-gnu/openmpi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
@@ -101,10 +101,11 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     fi
 
 # ---------------------------------------------------------------------------
-# Install fixed origami (rocm-libraries@223648a) over the base image's bundled
-# 0.1.0. The bundled origami's rank_configs() raises
-# `ValueError: vector::reserve` during MoE grouped-gemm kernel selection and
-# crashes training (turbo's _safe_rank_configs only catches RuntimeError).
+# Install origami (rocm-libraries@223648a). The v26.4 base image ships no origami
+# at all, so primus_turbo would fall back to heuristic kernel selection instead
+# of origami's tuned rank_configs() for MoE grouped-gemm. (The earlier v26.3 base
+# bundled a broken origami 0.1.0 whose rank_configs() raised
+# `ValueError: vector::reserve`; this pin also supersedes that.)
 # Skipped for JAX. TODO: drop once a base image ships origami with the fix.
 RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /tmp/rocm-libraries && \
