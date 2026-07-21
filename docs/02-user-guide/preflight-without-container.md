@@ -7,7 +7,7 @@ This guide explains how to run Primus's [`preflight`](./preflight.md) cluster-di
 **Git clone the Primus repository to a shared filesystem that all nodes can read.**
 
 ```bash
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 ```
 
