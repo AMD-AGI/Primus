@@ -1,0 +1,31 @@
+# Primus EXP — FLUX.1-dev T2I PRETRAIN (from scratch), 720x720 SQUARE (T5-256).
+# Auto-generated for the FLUX square resolution ladder (256/512/720/1024).
+# The 256 rung matches the MLPerf FLUX-schnell operating point (256px, 256-token T5).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_dev_sq720}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 4
+        global_batch_size: 32
+      fsdp:
+        activation_checkpointing: true
+      data:
+        dataloader:
+          cache_dir: /checkpoints/pcam_flux_720_sq
+          base_resolution: [720, 720]
+      flow_matching:
+        adapter_kwargs:
+          guidance_scale: 1
+          use_guidance_embeds: true
+      checkpoint:
+        enabled: false

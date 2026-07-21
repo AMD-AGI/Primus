@@ -1,0 +1,25 @@
+# SCRATCH (Phase-2 sharding sweep, delete after) — Wan2.2 720p DDP point.
+# Uses the _ddp_pre_trainer.yaml module (ddp: block instead of fsdp:) so the
+# recipe takes the DistributedDataParallel path. Expected to OOM at A14B.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:_wan_720p_ddp}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: _ddp_pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 20
+        local_batch_size: 1
+        global_batch_size: 16
+        log_every: 1
+      data:
+        dataloader:
+          cache_dir: /mnt/m2m_nobackup/datasets/pusa_v1_720p
+      checkpoint:
+        enabled: false

@@ -1,0 +1,28 @@
+# TEMP scratch exp (delete after) — FLUX 1024 hero AC smoke (832x1216).
+# Run once with PRIMUS_FLUX_REAL_AC=0 (silent no-op) and once with =1 (real AC);
+# compare peak mem at fixed mbs1 to confirm the strategy actually checkpoints.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:_flux_ac_smoke}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 12
+        local_batch_size: 1
+        global_batch_size: 8
+        log_every: 2
+      fsdp:
+        activation_checkpointing: true
+      data:
+        dataloader:
+          cache_dir: /checkpoints/pcam_flux_1024_hero
+          base_resolution: [832, 1216]
+      checkpoint:
+        enabled: false
