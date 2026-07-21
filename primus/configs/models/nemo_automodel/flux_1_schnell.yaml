@@ -1,0 +1,25 @@
+# NeMo AutoModel model preset: FLUX.1-schnell (12B rectified-flow T2I DiT).
+#
+# Identical transformer architecture to FLUX.1-dev (19 dual + 38 single blocks,
+# 24 heads x 128 dim, in_channels 64, joint_attention_dim 4096) EXCEPT
+# `guidance_embeds: false` — schnell is a guidance-distilled model and its
+# transformer has NO guidance embedding layer. Therefore the FLUX flow-matching
+# adapter must run with `use_guidance_embeds: false` (set in the schnell EXP
+# configs) so it does not pass a guidance tensor into the transformer forward.
+#
+# `mode: pretrain` builds ONE randomly-initialised FluxTransformer2DModel from the
+# local `transformer/config.json` (no safetensors loaded) — so only the schnell
+# transformer/config.json (+ model_index.json) needs to live under the path below.
+# The VAE + CLIP + T5 encoders are NOT loaded at train time (the dataloader reads
+# a pre-encoded latent/embedding cache), so this preset never touches them.
+model:
+  pretrained_model_name_or_path: /checkpoints/flux_schnell_local
+  mode: pretrain
+  model_type: flux
+  attention_backend: flash
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: FluxTransformer2DModel
+    subfolder: transformer
+    load_full_pipeline: false

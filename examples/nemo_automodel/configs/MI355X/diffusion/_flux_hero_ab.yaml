@@ -1,0 +1,27 @@
+# TEMP scratch exp (delete after) — FLUX 1024 hero A/B on a single fixed bucket
+# (832x1216, seqlen 4464). Run once baseline, once with PRIMUS_ATTN_NONDETERMINISTIC=1.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:_flux_hero_ab}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 60
+        local_batch_size: 1
+        global_batch_size: 8
+        log_every: 5
+      fsdp:
+        activation_checkpointing: true
+      data:
+        dataloader:
+          cache_dir: /checkpoints/pcam_flux_1024_hero
+          base_resolution: [832, 1216]
+      checkpoint:
+        enabled: false

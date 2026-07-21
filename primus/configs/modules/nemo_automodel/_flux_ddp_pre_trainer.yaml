@@ -1,0 +1,84 @@
+# SCRATCH (Phase-2 sharding sweep, delete after) — FLUX.1-dev DDP variant of
+# flux_pre_trainer.yaml: `fsdp:` block replaced by `ddp:` so the diffusion recipe
+# takes the DistributedDataParallel path (full replication, no sharding).
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 4
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_every: 2
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: nemo_automodel.components.datasets.diffusion.build_text_to_image_multiresolution_dataloader
+    cache_dir: /dataset
+    train_text_encoder: false
+    base_resolution: [512, 512]
+    dynamic_batch_size: false
+    shuffle: true
+    drop_last: false
+    num_workers: 2
+
+optim:
+  learning_rate: 2e-5
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    foreach: false
+    fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: flux
+  adapter_kwargs:
+    guidance_scale: 1
+    use_guidance_embeds: true
+  timestep_sampling: uniform
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 1.0
+  mix_uniform_ratio: 0.1
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+ddp:
+  activation_checkpointing: true
+  gradient_as_bucket_view: true
+  broadcast_buffers: false
+  find_unused_parameters: false
+  static_graph: false
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: /checkpoints/flux_primus_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null
