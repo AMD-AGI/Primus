@@ -8,7 +8,7 @@ Core workflows and day-to-day usage.
 - [Pretraining](pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [Backend training recipes](training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
 - [Post-training](posttraining.md): SFT and LoRA fine-tuning via Megatron Bridge
-- [Node-smoke test instruction](node-smoke-test-instruction.md): screen a cluster fast and exclude bad nodes before launching a real training job  
+- [Node-smoke test instruction](node-smoke-test-instruction.md): screen a cluster fast and exclude bad nodes before launching a real training job
 - [Preflight](preflight.md): cluster diagnostics and environment validation
 - [Run preflight without a container](preflight-without-container.md): run cluster-diagnostic tool directly on the host
 - [Benchmarking](benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
