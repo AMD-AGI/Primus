@@ -309,8 +309,23 @@ class TestOdcMegatronTrainerE2E(PrimusUT):
 
         if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
             self.skipTest("ODC needs a ROCm GPU; none available")
-        if importlib.util.find_spec("primus_turbo") is None:
-            self.skipTest("ODC rocSHMEM ops need a Primus-Turbo build (primus_turbo not importable)")
+        # ODC's rocSHMEM ops must be COMPILED INTO Primus-Turbo -- a stock/pip
+        # primus_turbo is built with -DDISABLE_ROCSHMEM and carries NEITHER op, so a
+        # bare find_spec("primus_turbo") is not enough (a "GPU present but turbo lacks
+        # ODC ops" box would crash mid-run instead of skipping). Verify the op this
+        # fixture actually needs is present. This single-node (TP/PP/EP=1) rocshmem
+        # run uses the host/XGMI-IPC op (odc_rocshmem_host); a multi-node GDA run
+        # would additionally require odc_rocshmem_gda. Build a host-capable
+        # Primus-Turbo from source against rocSHMEM per the repro guide (§6.3) to run.
+        try:
+            import primus_turbo.pytorch._C as _turbo_c
+        except Exception as e:  # noqa: BLE001 -- any import failure -> not runnable here
+            self.skipTest(f"Primus-Turbo not importable ({type(e).__name__}: {e})")
+        if not hasattr(_turbo_c, "odc_rocshmem_host"):
+            self.skipTest(
+                "Primus-Turbo lacks the ODC rocSHMEM host op (odc_rocshmem_host); build "
+                "Primus-Turbo from source against rocSHMEM (repro guide §6.3)"
+            )
         props = torch.cuda.get_device_properties(0)
         arch = (getattr(props, "gcnArchName", "") or "").split(":")[0].strip()
         platform = _GFX_TO_PLATFORM.get(arch)
