@@ -225,7 +225,7 @@ Required variables for distributed training:
 | Shared data | Paths visible and consistent on all nodes |
 | Hugging Face | Set `HF_TOKEN` if using gated models |
 | Checkpoints | Save directory on shared or replicated storage with sufficient space |
-| Monitoring | Configure WandB or TensorBoard (see [Monitoring and Logging](./monitoring-logging.md)) |
+| Monitoring | Configure Weights & Biases or TensorBoard (see [Monitoring and Logging](./monitoring-logging.md)) |
 | Resources | Slurm time limits, partitions, and GPU counts match your YAML and hardware |
 
 ---

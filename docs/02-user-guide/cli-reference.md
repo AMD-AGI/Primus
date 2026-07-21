@@ -14,7 +14,7 @@ primus-cli [global-options] <mode> [mode-args] -- [command]
 - **Mode** is one of `direct`, `container`, or `slurm`.
 - **`--` (required)** separates launcher options from the Primus Python CLI. Everything after the first `--` is passed to `primus/cli/main.py` (or another script if you override it in direct mode).
 
-From the repository root, invoke the launcher as `./runner/primus-cli` (or install/link it as `primus-cli` on your `PATH`).
+From the repository root, invoke the launcher as `./runner/primus-cli` (or install or link it as `primus-cli` on your `PATH`).
 
 ---
 

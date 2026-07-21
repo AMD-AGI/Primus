@@ -1,6 +1,6 @@
 # Primus documentation
 
-Production documentation for **Primus**, a large-scale foundation model training framework for AMD GPUs.
+Documentation for **Primus**, a large-scale foundation model training framework for AMD GPUs.
 
 ---
 

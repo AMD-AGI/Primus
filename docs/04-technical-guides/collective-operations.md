@@ -200,9 +200,9 @@ The following appear in ROCm / AMD deployments and partner integrations; availab
 
 | Feature | Notes |
 |---------|--------|
-| **MSCCL** | Microsoft Collective Communication Library: **custom algorithms** and patterns; may be used when the stack is built and configured for them. |
+| **MSCCL** | Microsoft Collective Communication Library: **custom algorithms** and patterns; might be used when the stack is built and configured for them. |
 | **MSCCL++** | User-space collective paths aimed at **lower latency** for specific patterns and hardware. |
-| **ANP (AMD Network Plugin)** | Network backend integration (e.g. **AINIC**-oriented paths). Example: `NCCL_NET_PLUGIN` may point to `librccl-anp.so` or similar when installed (see Primus `examples/run_pretrain.sh` patterns). |
+| **ANP (AMD Network Plugin)** | Network backend integration (e.g. **AINIC**-oriented paths). Example: `NCCL_NET_PLUGIN` might point to `librccl-anp.so` or similar when installed (see Primus `examples/run_pretrain.sh` patterns). |
 
 ### Environment variables
 

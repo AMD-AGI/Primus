@@ -20,24 +20,28 @@ subtrees:
 
   - caption: User guide
     entries:
-      - file: 02-user-guide/pretraining.md
-        title: Pretraining workflows
-      - file: 02-user-guide/posttraining.md
-        title: Post-training workflows
-      - file: 02-user-guide/training-recipes.md
-        title: Backend training recipes
-      - file: 02-user-guide/cli-reference.md
-        title: CLI reference
-      - file: 02-user-guide/preflight.md
-        title: Preflight diagnostics
-      - file: 02-user-guide/configuration-system.md
-        title: Configuration system
-      - file: 02-user-guide/projection.md
-        title: Memory and performance projection
-      - file: 02-user-guide/benchmarking.md
-        title: Benchmark suite
       - file: 02-user-guide/primus-tools.md
         title: Primus tools
+      - file: 02-user-guide/cli-reference.md
+        title: CLI reference
+      - file: 02-user-guide/configuration-system.md
+        title: Configuration system
+      - file: 02-user-guide/pretraining.md
+        title: Pretraining workflows
+      - file: 02-user-guide/training-recipes.md
+        title: Backend training recipes
+      - file: 02-user-guide/posttraining.md
+        title: Post-training workflows
+      - file: 02-user-guide/node-smoke-test-instruction.md
+        title: Node-smoke test instruction
+      - file: 02-user-guide/preflight.md
+        title: Preflight diagnostics
+      - file: 02-user-guide/preflight-without-container.md
+        title: Run preflight without a container
+      - file: 02-user-guide/benchmarking.md
+        title: Benchmark suite
+      - file: 02-user-guide/projection.md
+        title: Memory and performance projection      
       - file: 02-user-guide/tuning-agent.md
         title: Tuning agent
 

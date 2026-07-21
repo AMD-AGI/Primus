@@ -65,7 +65,7 @@ These apply across all backends. Set them up before running the recipes below.
 export HF_TOKEN=<your_hf_token>
 ```
 
-`runner/.primus.yaml` forwards `HF_TOKEN` into the container automatically. MaxText configurations may also read `${HF_TOKEN:""}` directly.
+`runner/.primus.yaml` forwards `HF_TOKEN` into the container automatically. MaxText configurations might also read `${HF_TOKEN:""}` directly.
 
 ### Mock vs. real data
 
@@ -136,7 +136,7 @@ Switch model or precision by changing the config filename (e.g. `llama3.1_70B-FP
 **Model-specific notes:**
 
 - **Zebra-Llama** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/zebra_llama_{1B,3B,8B}-pretrain.yaml` and run via the standard core runtime; Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
-- **MoE models** (DeepSeek-V2-Lite, Mixtral) may need extra grouped-GEMM or router flags; [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) lists the exact flags per model.
+- **MoE models** (DeepSeek-V2-Lite, Mixtral) might need extra grouped-GEMM or router flags; [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) lists the exact flags per model.
 
 ### 3. Multi-node (Slurm mode)
 

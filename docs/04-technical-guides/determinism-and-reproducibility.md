@@ -32,7 +32,7 @@ export PRIMUS_TURBO_AUTO_TUNE=0            # disable Primus-Turbo autotuning (st
 
 Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning only runs when `PRIMUS_DETERMINISTIC != 1` *and* `PRIMUS_HIPBLASLT_TUNING=1` (`examples/run_pretrain.sh`). This prevents run-to-run kernel-selection differences. See [Performance tuning](./performance-tuning.md).
 
-`PRIMUS_DETERMINISTIC` is on the container passthrough whitelist (`runner/.primus.yaml`), so it reaches the training container. See [Environment variables](../03-configuration-reference/environment-variables.md).
+`PRIMUS_DETERMINISTIC` is on the container passthrough allowlist (`runner/.primus.yaml`), so it reaches the training container. See [Environment variables](../03-configuration-reference/environment-variables.md).
 
 ```bash
 export PRIMUS_DETERMINISTIC=1
