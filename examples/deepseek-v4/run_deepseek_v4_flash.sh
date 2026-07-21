@@ -12,12 +12,14 @@ if command -v spur >/dev/null 2>&1; then
     export SLURM_ACCOUNT=amd-primus
     # Empty = let the scheduler allocate nodes (skip the hardcoded smci355 default
     # in run_deepseek_v4.sh, whose SLURM_NODELIST uses ${VAR-default} so empty wins).
-    export SLURM_NODELIST=""
+    # Honor an incoming SLURM_NODELIST so callers can pin to specific good nodes
+    # (e.g. to work around a bad node that keeps causing JobLaunchFailure).
+    export SLURM_NODELIST="${SLURM_NODELIST:-}"
     # ABI-4 libionic provider .so to swap into the container at launch (fixes ionic
     # RDMA on AINIC images whose bundled libionic only advertises uverbs ABI 1).
     # The tools/patches/fix_libionic_abi4.sh patch reads this; set empty to disable.
     export PRIMUS_LIBIONIC_SRC_ABI4_SO="bak/ainic/libionic-rdmav34.so.host-abi4/libionic.so.1.0.54.0-149.g3304be71"
-    export NCCL_DEBUG=INFO
+    export NCCL_DEBUG=
     export GLOO_SOCKET_IFNAME=ens3
     export NCCL_SOCKET_IFNAME=ens3
 fi
@@ -32,7 +34,7 @@ export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
 
 export NNODES=${NNODES:-4}
 
-if [ "$NNODES" -eq 8 ]; then
+if [ "$NNODES" -ge 8 ]; then
     export PRIMUS_TP=${PRIMUS_TP:-1}
     export PRIMUS_PP=${PRIMUS_PP:-8}
     export PRIMUS_EP=${PRIMUS_EP:-8}
@@ -78,7 +80,7 @@ export PRIMUS_INDEXER_TRITON=${PRIMUS_INDEXER_TRITON:-1}
 export PRIMUS_INDEXER_TRITON_FULL=${PRIMUS_INDEXER_TRITON_FULL:-0}
 export PRIMUS_V4_ROUTER_TRITON=${PRIMUS_V4_ROUTER_TRITON:-1}
 export PROFILE=${PROFILE:-False}
-export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_flash_proxy_pp${PRIMUS_PP}_ep${PRIMUS_EP}_seq${PRIMUS_SEQ_LENGTH}}
+export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_flash_proxy_nodes${NNODES}_pp${PRIMUS_PP}_ep${PRIMUS_EP}_seq${PRIMUS_SEQ_LENGTH}}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "${SCRIPT_DIR}/run_deepseek_v4.sh" 2>&1 | tee train_flash_ainic.log
