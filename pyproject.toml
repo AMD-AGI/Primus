@@ -48,6 +48,8 @@ dependencies = [
     "mlflow==3.11.1",
     "pyrsmi",
     "plotext",
+    "mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5",
+    "mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git",
 ]
 
 [project.optional-dependencies]

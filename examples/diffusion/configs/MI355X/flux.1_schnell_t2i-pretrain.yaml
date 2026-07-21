@@ -18,7 +18,7 @@ modules:
       stderr_sink_level: INFO
 
       metrics:
-        log_freq: 1
+        log_freq: ${LOG_FREQ:1}
         enable_wandb: false
 
       training:
@@ -33,6 +33,7 @@ modules:
 
       data:
         dataset_path: ${DATASET_PATH:}
+        eval_dataset_path: ${EVAL_DATASET_PATH:}
         empty_encodings_path: ${EMPTY_ENCODINGS_PATH:}
         prompt_dropout_prob: ${PROMPT_DROPOUT_PROB:0.1}
         img_size: ${IMG_SIZE:256}
@@ -56,3 +57,9 @@ modules:
         compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
         report_to: none
+
+      mlperf:
+        enable: ${MLPERF_ENABLE:false}
+        target_eval_loss: ${TARGET_ACCURACY:0.586}
+        eval_samples: ${VAL_CHECK_INTERVAL:262144}
+        output_file: ${MLLOG_OUTPUT_FILE:}

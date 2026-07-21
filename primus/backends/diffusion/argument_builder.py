@@ -92,6 +92,7 @@ class DiffusionArgBuilder:
             "dataset_type": "precomputed",
             "dataset_format": "hf_dataset",
             "dataset_path": "/path/to/flux_precomputed_dataset",
+            "eval_dataset_path": None,
             "dataset": None,
             "shuffle": True,
             "processor_config": {
@@ -146,6 +147,9 @@ class DiffusionArgBuilder:
                 "extra_one_step": False,
                 "num_train_timesteps": 1000,
             },
+            "mlperf_enable": False,
+            "mlperf_target_eval_loss": 0.586,
+            "mlperf_eval_samples": 262144,
         },
     }
 
@@ -262,6 +266,7 @@ class DiffusionArgBuilder:
         training_map = {
             ("steps",): ("max_steps",),
             ("local_batch_size",): ("per_device_train_batch_size",),
+            ("eval_batch_size",): ("per_device_eval_batch_size",),
             ("global_batch_size",): ("global_batch_size",),
             ("gradient_accumulation_steps",): ("gradient_accumulation_steps",),
             ("output_dir",): ("output_dir",),
@@ -276,9 +281,12 @@ class DiffusionArgBuilder:
             value = self._get_any(training, *source_path)
             if value is not None:
                 self._set_nested(trainer_args, target_path, value)
+        if training.get("local_batch_size") is not None and training.get("eval_batch_size") is None:
+            self._set_nested(trainer_args, ("per_device_eval_batch_size",), training["local_batch_size"])
 
         data_map = {
             ("dataset_path",): ("dataset_path",),
+            ("eval_dataset_path",): ("eval_dataset_path",),
             ("data_folder",): ("data_folder",),
             ("frame_num",): ("frame_num",),
             ("video_backend",): ("video_backend",),
@@ -378,6 +386,23 @@ class DiffusionArgBuilder:
             self._set_nested(trainer_args, ("report_to",), "none")
         elif enable_wandb is True and runtime.get("report_to") is None:
             self._set_nested(trainer_args, ("report_to",), "wandb")
+
+        mlperf = params.get("mlperf") or {}
+        mlperf_map = {
+            ("enable",): ("mlperf_enable",),
+            ("target_eval_loss",): ("mlperf_target_eval_loss",),
+            ("eval_samples",): ("mlperf_eval_samples",),
+            ("eval_steps",): ("mlperf_eval_steps",),
+            ("train_samples",): ("mlperf_train_samples",),
+            ("eval_total_samples",): ("mlperf_eval_total_samples",),
+            ("output_file",): ("mlperf_output_file",),
+        }
+        for source_path, target_path in mlperf_map.items():
+            value = self._get_any(mlperf, *source_path)
+            if value is not None:
+                if target_path == ("mlperf_enable",):
+                    value = self._coerce_bool(value)
+                self._set_nested(trainer_args, target_path, value)
 
         checkpoint = params.get("checkpoint") or {}
         resume_from_checkpoint = checkpoint.get("resume_from_checkpoint")

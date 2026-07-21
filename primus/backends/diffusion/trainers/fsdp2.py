@@ -45,6 +45,8 @@ class FSDP2Trainer(BaseWanTrainer):
         rank: int,
         world_size: int,
         local_rank: int,
+        eval_dataset=None,
+        eval_processor=None,
     ):
         super().__init__(
             model=model,
@@ -52,6 +54,8 @@ class FSDP2Trainer(BaseWanTrainer):
             train_dataset=train_dataset,
             data_collator=data_collator,
             processing_class=processing_class,
+            eval_dataset=eval_dataset,
+            eval_processor=eval_processor,
             rank=rank,
             world_size=world_size,
             local_rank=local_rank,
@@ -426,7 +430,7 @@ class FSDP2Trainer(BaseWanTrainer):
         self._save_dtcp(path)
 
 
-def build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict):
+def build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None):
     rank, world_size, local_rank = setup_distributed()
     return FSDP2Trainer(
         model=model,
@@ -434,6 +438,8 @@ def build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict):
         train_dataset=dataset,
         data_collator=dataset.get_collator(),
         processing_class=processor,
+        eval_dataset=eval_dataset,
+        eval_processor=eval_processor,
         rank=rank,
         world_size=world_size,
         local_rank=local_rank,
