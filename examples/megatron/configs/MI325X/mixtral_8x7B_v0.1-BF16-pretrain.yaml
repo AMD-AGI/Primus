@@ -16,7 +16,6 @@ modules:
 
       # moe
       moe_router_force_load_balancing: true
-      moe_router_dtype: null
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
