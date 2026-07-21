@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: edc8d2ccb0be4888e80ee7c6e765fd3956026a32 # feat: add quantized tensor support for blockwise grouped gemm (#422)
+  PRIMUS_TURBO_COMMIT: 56c789e58f72aaf733b7715f1536be1ed33b69a1 # dev/kyle/flydsl_attn_deepseekv4 (dsv4 sparse-MLA attention + cr=4 fixes + flydsl kernels packaging __init__.py fix)
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
