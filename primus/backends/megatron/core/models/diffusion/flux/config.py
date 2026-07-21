@@ -174,6 +174,13 @@ class FluxConfig(BaseDiffusionConfig):
     # quantization instead of the default inline implementation.
     use_cpp_fp8_quantize: bool = False
 
+    # FP4 autocast backend (TE-spec only). When True, the model-level FP4 autocast
+    # uses TE's native fp8_autocast with the MXFP4BlockScaling recipe (TE -> AITER
+    # a4w4) instead of Primus-Turbo's primus_turbo_fp4_autocast, forcing
+    # get_fp4_context onto the TE-native branch. Enables pure-TE MXFP4
+    # (enable_primus_turbo=false); requires use_turbo_gemm=false (native TE linears).
+    fp4_use_native_te_autocast: bool = False
+
     # CUDA graph support
     enable_cuda_graph: bool = False
     cuda_graph_scope: Optional[str] = None  # Options: "full", "full_iteration"
