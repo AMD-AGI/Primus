@@ -1,0 +1,204 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell Training — DDP + TE Spec + MXFP4 (native-TE autocast) (MI355X)
+#
+# Combines Megatron DDP + distributed optimizer with the TransformerEngine spec,
+# routed through TE's native FP4 autocast (MXFP4BlockScaling) for MXFP4 training.
+#
+# Key configuration:
+#   - Megatron DDP with overlap_grad_reduce + overlap_param_gather
+#   - TEColumnParallelLinear / TERowParallelLinear / TEDotProductAttention / TENorm
+#   - Fused CK attention (attention_backend: fused), ~2.5x faster bwd than FlashAttn
+#   - MXFP4 (E2M1 + E8M0 block-of-32 scales) via TE-native fp4_use_native_te_autocast
+#   - Primus Turbo disabled (native TE linears consume the model-level FP4 autocast)
+#   - torch.compile disabled (TE FP4 autocast global state breaks graph capture)
+#   - Energon pre-encoded dataset with stored VAE mean/logvar (resample mode)
+#
+# Set these environment variables before launching:
+#   export NVTE_USE_CAST_TRANSPOSE_TRITON=0
+#   export NVTE_FUSED_ATTN=1
+#   export NVTE_FUSED_ATTN_CK=1
+#   export NVTE_USE_HIPBLASLT=1
+#   export USE_HIPBLASLT=1
+#   export TORCH_BLAS_PREFER_HIPBLASLT=1
+#   export NVTE_FP4_USE_TUNED_GEMM=1
+#   export NVTE_FP4_LOG_GEMM_SHAPES=0
+#   unset NVTE_FLASH_ATTN 
+#   unset NVTE_UNFUSED_ATTN
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_te_mxfp4}
+
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      # ==========================================
+      # Flux Schnell training recipe
+      # ==========================================
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+      vae_latent_mode: resample
+
+      # ==========================================
+      # RoPE Fusion
+      # ==========================================
+      rotary_interleaved: true
+      apply_rope_fusion: true
+      position_embedding_type: rope
+
+      # ==========================================
+      # TransformerEngine Spec
+      # ==========================================
+      transformer_impl: "transformer_engine"
+
+      # ==========================================
+      # Attention backend — FUSED (TE CK fused attention)
+      # ==========================================
+      attention_backend: fused
+
+      # ==========================================
+      # MXFP4 — via TE-native MXFP4BlockScaling autocast (no Primus-Turbo)
+      # ==========================================
+      fp4: "mxfp4"
+      fp4_recipe: "mxfp4"
+      fp4_use_native_te_autocast: true
+      mxfp4_backward_precision: "mxfp4"
+
+      # ==========================================
+      # Energon Dataset
+      # ==========================================
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Training iterations (example value; increase for a full training run)
+      train_iters: 1000
+      eval_interval: 10000
+      eval_iters: 0
+      log_interval: 1
+      save_interval: 10000
+
+      # ==========================================
+      # Batch Configuration
+      # ==========================================
+      micro_batch_size: 64
+      global_batch_size: 512
+      seq_length: 512  # 256 img tokens + 256 text tokens (schnell)
+
+      # ==========================================
+      # BF16 + MXFP4 Precision
+      # ==========================================
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      # ==========================================
+      # Optimizer
+      # ==========================================
+      optimizer: adam
+      lr: 2.0e-4
+      min_lr: 2.0e-4
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+      
+      # Learning rate scheduler (warmup-hold, no decay)
+      lr_warmup_iters: 1600
+      lr_decay_iters: 4000
+      lr_decay_style: constant
+
+      # DataLoader
+      num_workers: 8
+      prefetch_factor: 8
+      dataloader_type: external
+      max_samples_per_sequence: null
+
+      # ==========================================
+      # Megatron DDP + Distributed Optimizer
+      # ==========================================
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+      use_precision_aware_optimizer: false
+
+      ddp_bucket_size: 256000000
+      use_fsdp2_fp32_param_optimizer: false
+
+      ckpt_format: torch_dist
+
+      gradient_accumulation_fusion: false
+
+      check_for_nan_in_loss_and_grad: true
+
+      # ==========================================
+      # Memory / Misc
+      # ==========================================
+      empty_unused_memory_level: 0
+
+      # Manual GC — align GC timing across ranks to avoid stragglers
+      manual_gc: true
+      manual_gc_interval: 1000
+
+      distributed_timeout_minutes: 60
+      distributed_backend: nccl
+
+      # Checkpointing (disabled)
+      finetune: false
+      save: null
+      load: null
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Logging
+      log_throughput: true
+      wall_clock_step_timer: true
+
+      # Profiler — disabled
+      profile: false
+
+      # ==========================================
+      # NATIVE TE — Primus-Turbo disabled
+      # ==========================================
+      # The native-TE MXFP4 path uses TE's own linears + fp8_autocast(MXFP4BlockScaling).
+      # Primus-Turbo is disabled, so the model builds native TE linears that consume the
+      # model-level FP4 autocast returned by Flux.get_fp8_context().
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      seed: 2025
+      te_rng_tracker: true
+
+      # torch.compile — DISABLED for native-TE MXFP4.
+      # TE's FP4 autocast toggles process-global quantization state, which breaks
+      # torch.compile graph capture (graph breaks / stale guards). Run eager, matching
+      # the validated native-TE MXFP4 runs.
+      torch_compile:
+        enable: false
