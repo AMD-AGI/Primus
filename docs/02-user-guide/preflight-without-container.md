@@ -785,8 +785,8 @@ final `summary.txt` are written under `--output-dir`.
 
 ## 10. See also
 
-- [Preflight](./preflight.md) — full reference for the `preflight` subcommand and its flags
-- [CLI User Guide](./cli-reference.md) — container-based and `primus-cli slurm` workflows
-- [`runner/primus-cli-direct.sh`](https://github.com/AMD-AGI/Primus/blob/main/runner/primus-cli-direct.sh) — the direct launcher itself (`primus-cli direct` dispatches here)
-- [`primus/tools/preflight/`](https://github.com/AMD-AGI/Primus/tree/main/primus/tools/preflight) — preflight implementation
-- [`tools/preflight_bisect/bisect.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/preflight_bisect/bisect.py) — bisect wrapper for narrowing down failing nodes in multi-node preflight runs
+- [Preflight](./preflight.md)—full reference for the `preflight` subcommand and its flags
+- [CLI User Guide](./cli-reference.md)—container-based and `primus-cli slurm` workflows
+- [`runner/primus-cli-direct.sh`](https://github.com/AMD-AGI/Primus/blob/main/runner/primus-cli-direct.sh)—the direct launcher itself (`primus-cli direct` dispatches here)
+- [`primus/tools/preflight/`](https://github.com/AMD-AGI/Primus/tree/main/primus/tools/preflight)—preflight implementation
+- [`tools/preflight_bisect/bisect.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/preflight_bisect/bisect.py)—bisect wrapper for narrowing down failing nodes in multi-node preflight runs
