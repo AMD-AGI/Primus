@@ -100,24 +100,11 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /opt/uccl; \
     fi
 
-# ---------------------------------------------------------------------------
-# Install origami (rocm-libraries@223648a). The v26.4 base image ships no origami
-# at all, so primus_turbo would fall back to heuristic kernel selection instead
-# of origami's tuned rank_configs() for MoE grouped-gemm. (The earlier v26.3 base
-# bundled a broken origami 0.1.0 whose rank_configs() raised
-# `ValueError: vector::reserve`; this pin also supersedes that.)
-# Skipped for JAX. TODO: drop once a base image ships origami with the fix.
-RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
-    rm -rf /tmp/rocm-libraries && \
-    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
-    cd /tmp/rocm-libraries && \
-    git sparse-checkout init --cone && \
-    git sparse-checkout set shared/origami && \
-    git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b && \
-    (pip uninstall -y origami || true) && \
-    pip install --no-cache-dir ./shared/origami/python && \
-    rm -rf /tmp/rocm-libraries; \
-    fi
+# This base image ships no origami, so primus_turbo falls back to heuristic
+# kernel selection instead of origami's tuned rank_configs() for MoE
+# grouped-gemm (benchmarked: no measurable gain on gfx942). If needed, install
+# it the same way CI used to, e.g.:
+#   pip install "git+https://github.com/ROCm/rocm-libraries.git@223648a26928ebed7f3dd0ccdc044c09f1dccf9b#subdirectory=shared/origami/python"
 
 # Set the default working directory
 WORKDIR /opt

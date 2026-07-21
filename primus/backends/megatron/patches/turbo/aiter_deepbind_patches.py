@@ -26,12 +26,17 @@ few extensions, leaving torch/c10 untouched. Installed by the ``before_train`` p
 below, gated on Turbo + affected arch (TE path never touched); ``before_train`` runs
 well before the first backward that JIT-imports these modules.
 
-TEMPORARY: delete this file (and its turbo/__init__.py entry) once the base image's
-TE is built against the updated aiter.
+Self-detection: skipped once ``transformer_engine.__version__`` >= 2.14, which renamed
+the vendored library and stopped exporting the colliding ``aiter::mha_bwd`` symbol --
+confirmed fixed in rocm/primus:v26.4. Older images (e.g. v26.3) still get the patch.
+
+TEMPORARY: delete this file (and its turbo/__init__.py entry) once every base image
+still in support ships a TE built against the updated aiter.
 """
 
 import importlib
 import os
+import re
 import sys
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
@@ -69,6 +74,34 @@ def _is_affected_arch() -> bool:
         return any(affected in arch for affected in _AFFECTED_ARCHS)
     except Exception:  # pragma: no cover - defensive, never block training
         return False
+
+
+# First TE version that dropped the stale vendored libmha_bwd.so (see module docstring).
+_TE_FIX_VERSION = (2, 14, 0)
+_TE_FIX_VERSION_STR = ".".join(map(str, _TE_FIX_VERSION))
+
+
+def _te_version_tuple():
+    """Best-effort (major, minor, patch) from ``transformer_engine.__version__``, or
+    None if TE isn't importable / the version string can't be parsed."""
+    try:
+        import transformer_engine
+
+        match = re.match(r"(\d+)\.(\d+)\.(\d+)", getattr(transformer_engine, "__version__", "") or "")
+        return tuple(int(part) for part in match.groups()) if match else None
+    except Exception:  # pragma: no cover - defensive, never block training
+        return None
+
+
+def _te_already_fixed() -> bool:
+    """True if the installed TE no longer vendors the stale libmha_bwd.so.
+
+    Fails safe towards False (unfixed) on an unknown/unparseable version: applying
+    the hook on an already-fixed TE is a harmless no-op, but skipping it on an
+    unfixed TE reintroduces the hd128 backward crash.
+    """
+    version = _te_version_tuple()
+    return version is not None and version >= _TE_FIX_VERSION
 
 
 def _install_deepbind_import_hook() -> bool:
@@ -115,7 +148,7 @@ def _install_deepbind_import_hook() -> bool:
 
 
 def _can_install_aiter_deepbind(ctx: PatchContext) -> bool:
-    """Install only on affected arches (gfx942/gfx950) with the Turbo attention path active."""
+    """Install only on affected arches (gfx942/gfx950) with an unfixed TE and Turbo attention active."""
     args = get_args(ctx)
     if not bool(getattr(args, "use_turbo_attention", False)):
         return False
@@ -125,6 +158,13 @@ def _can_install_aiter_deepbind(ctx: PatchContext) -> bool:
         log_rank_0(
             f"{_LOG_PREFIX} device is not an affected arch ({', '.join(_AFFECTED_ARCHS)}); "
             "aiter DEEPBIND isolation not needed."
+        )
+        return False
+    if _te_already_fixed():
+        log_rank_0(
+            f"{_LOG_PREFIX} transformer_engine >= {_TE_FIX_VERSION_STR} detected "
+            "(no vendored stale libmha_bwd.so exported as aiter::mha_bwd); aiter DEEPBIND "
+            "isolation not needed on this image."
         )
         return False
     return True
@@ -137,8 +177,8 @@ def _can_install_aiter_deepbind(ctx: PatchContext) -> bool:
     description=(
         "On gfx942/gfx950, install the aiter mha RTLD_DEEPBIND import hook so the Turbo "
         "attention backward binds the pinned aiter::mha_bwd instead of TE's stale vendored "
-        "libmha. Gated on Turbo attention (TE path untouched). Temporary workaround "
-        "(ROCm/aiter#1332)."
+        "libmha. Gated on Turbo attention and an unfixed TE (auto-skips once "
+        f"transformer_engine >= {_TE_FIX_VERSION_STR}). Temporary workaround (ROCm/aiter#1332)."
     ),
     condition=_can_install_aiter_deepbind,
 )
