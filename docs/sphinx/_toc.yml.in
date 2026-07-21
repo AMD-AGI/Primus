@@ -41,7 +41,7 @@ subtrees:
       - file: 02-user-guide/benchmarking.md
         title: Benchmark suite
       - file: 02-user-guide/projection.md
-        title: Memory and performance projection      
+        title: Memory and performance projection
       - file: 02-user-guide/tuning-agent.md
         title: Tuning agent
 
