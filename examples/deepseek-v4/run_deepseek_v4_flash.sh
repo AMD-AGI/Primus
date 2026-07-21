@@ -19,7 +19,7 @@ if command -v spur >/dev/null 2>&1; then
     # RDMA on AINIC images whose bundled libionic only advertises uverbs ABI 1).
     # The tools/patches/fix_libionic_abi4.sh patch reads this; set empty to disable.
     export PRIMUS_LIBIONIC_SRC_ABI4_SO="bak/ainic/libionic-rdmav34.so.host-abi4/libionic.so.1.0.54.0-149.g3304be71"
-    export NCCL_DEBUG=
+    export NCCL_DEBUG="${NCCL_DEBUG:-}"
     export GLOO_SOCKET_IFNAME=ens3
     export NCCL_SOCKET_IFNAME=ens3
 fi
