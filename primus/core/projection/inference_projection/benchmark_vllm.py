@@ -302,10 +302,23 @@ def run_vllm_benchmark(args) -> dict:
         trust_remote_code=args.trust_remote_code,
         enforce_eager=args.enforce_eager,
     )
+    # The benchmark drives the engine purely with ``prompt_token_ids`` (never
+    # text), so the tokenizer is unnecessary. Skipping its init avoids a hard
+    # dependency on sentencepiece/tiktoken for models whose fast tokenizer can't
+    # be built in the container (e.g. DeepSeek-V4). Auto-on for dummy weights.
+    if args.skip_tokenizer_init or args.load_format == "dummy":
+        kwargs["skip_tokenizer_init"] = True
     if args.quantization:
         kwargs["quantization"] = args.quantization
     if args.kv_cache_dtype:
         kwargs["kv_cache_dtype"] = args.kv_cache_dtype
+    # Sub-scale ("reduced-layer") benchmarking: override the model's layer count
+    # so a huge model fits on fewer GPUs. The per-layer time is recovered by
+    # benchmarking two layer counts and differencing; the full model is then
+    # projected as fixed_overhead + num_layers x per_layer_time. Mirrors the
+    # training sub-node bench that times a few layers and scales up.
+    if args.num_hidden_layers:
+        kwargs["hf_overrides"] = {"num_hidden_layers": int(args.num_hidden_layers)}
 
     llm = LLM(**kwargs)  # loaded once; reused across the batch sweep
 
@@ -332,6 +345,7 @@ def run_vllm_benchmark(args) -> dict:
             "input_len": args.input_len,
             "decode_steps": args.decode_steps,
             "tp": args.tp,
+            "num_hidden_layers": args.num_hidden_layers,
             "quantization": args.quantization,
             "kv_cache_dtype": args.kv_cache_dtype,
             "enforce_eager": args.enforce_eager,
@@ -362,6 +376,10 @@ def main():
     ap.add_argument("--batch", type=int, default=16, help="ref batch (anchor) when no --batches")
     ap.add_argument("--batches", default=None, help="comma list to sweep, e.g. 4,8,16,32,64")
     ap.add_argument("--max-model-len", type=int, default=None)
+    ap.add_argument("--num-hidden-layers", type=int, default=None,
+                    help="override the model's transformer layer count (sub-scale "
+                         "benchmarking so a large model fits on fewer GPUs; recorded "
+                         "in meta as num_hidden_layers)")
     ap.add_argument("--load-format", default="dummy",
                     help="vLLM load_format: 'dummy' (random weights, needs an "
                          "imposed routing dist) or 'auto'/'safetensors' (REAL "
@@ -374,6 +392,9 @@ def main():
                     help="upper bound for random token ids")
     ap.add_argument("--gpu-mem-util", type=float, default=0.9)
     ap.add_argument("--trust-remote-code", action="store_true")
+    ap.add_argument("--skip-tokenizer-init", action="store_true",
+                    help="skip loading the tokenizer (benchmark uses token ids "
+                         "directly; auto-on for --load-format dummy)")
     ap.add_argument("--enforce-eager", action="store_true")
     ap.add_argument("--no-aiter", action="store_true",
                     help="disable AMD AITER kernels (default: enabled on ROCm)")

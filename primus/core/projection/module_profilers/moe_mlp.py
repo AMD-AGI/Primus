@@ -155,9 +155,30 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
         num_experts = self.config.model_config.num_experts or 1
         num_local_experts = num_experts // ep_size
-        # Floor at 1: small decode batches yield < 1 token per expert, which
-        # would size a 0-row grouped GEMM and divide-by-zero in the simulator.
-        tokens_per_expert = max(1, topk_tokens // max(num_local_experts, 1))
+
+        # Expected number of *distinct* experts whose weights are actually read
+        # this step. MoE decode is weight-bandwidth-bound, so its cost tracks the
+        # number of experts touched, not the full local set: at small batch only
+        # ``topk × tokens`` routings land, covering a fraction of experts, while
+        # at prefill / high batch nearly every expert is hit. Uniform-routing
+        # approximation for the hit probability of a given expert over
+        # ``routing_tokens`` tokens each selecting ``topk`` of ``num_experts``:
+        #   P(hit) = 1 - (1 - topk/E)^tokens
+        # This is a no-op for prefill/training (tokens large -> P(hit) -> 1) and
+        # only reshapes the small-batch decode curve.
+        routing_tokens = max(1, int(batch_size) * int(seq_len))
+        if num_experts > 1 and num_local_experts > 1:
+            hit_frac = 1.0 - (1.0 - min(1.0, topk / num_experts)) ** routing_tokens
+            active_local_experts = max(
+                1, min(num_local_experts, int(round(num_local_experts * hit_frac)))
+            )
+        else:
+            active_local_experts = max(1, num_local_experts)
+
+        # Tokens concentrate on the experts actually hit. Floor at 1: small decode
+        # batches yield < 1 token per expert, which would size a 0-row grouped
+        # GEMM and divide-by-zero in the simulator.
+        tokens_per_expert = max(1, topk_tokens // max(active_local_experts, 1))
 
         # FP8-hybrid: MoE expert MLP projections run in FP8
         gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
@@ -182,12 +203,13 @@ class MoEMLPProfiler(BaseModuleProfiler):
             mode = "Turbo (batched)" if use_turbo else "Legacy (sequential)"
             print(
                 f"  [MoE MLP] Grouped-GEMM model: {mode}"
-                f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})"
+                f"  ({active_local_experts}/{num_local_experts} active local experts, "
+                f"M={M}, H={H}, F={F})"
             )
 
         if use_turbo:
-            # ── Turbo model: batched GEMM (all experts in parallel) ──
-            B = num_local_experts
+            # ── Turbo model: batched GEMM (active experts in parallel) ──
+            B = active_local_experts
             if self.config.model_config.swiglu:
                 gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
                 up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
@@ -260,8 +282,8 @@ class MoEMLPProfiler(BaseModuleProfiler):
                     + down_wg.forward_time_ms
                 )
 
-            expert_fwd = expert_fwd_ms * num_local_experts
-            expert_bwd = expert_bwd_ms * num_local_experts
+            expert_fwd = expert_fwd_ms * active_local_experts
+            expert_bwd = expert_bwd_ms * active_local_experts
 
             # NOTE: Legacy grouped GEMM is not properly modelled. Origami
             # simulates ideal single-kernel execution

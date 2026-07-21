@@ -1120,3 +1120,80 @@ def test_inference_agent_evaluate_tool_searches_new_knobs(tmp_path):
     # Budget tracking is wired.
     budget = _json.loads(by_name["get_budget_status"]())
     assert budget["eval_used"] == 1 and budget["eval_max"] == 10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# benchmark TP/EP restoration (training-style reduced-parallelism extrapolation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _dense_inference_config(tp=8, **req_kw):
+    return InferenceConfig(
+        model_config=ModelConfig(num_layers=4, hidden_size=4096, num_attention_heads=32),
+        request_config=InferenceRequestConfig(**req_kw),
+        model_parallel_config=ModelParallelConfig(tensor_model_parallel_size=tp),
+    )
+
+
+def _per_layer_artifact(decode_ms, prefill_ms, batch, input_len,
+                        benchmark_tp, benchmark_pp=1):
+    return {
+        "backend": "megatron",
+        "measured": {"dense": {"prefill_ms": prefill_ms, "decode_ms": decode_ms}},
+        "meta": {"batch": batch, "input_len": input_len, "benchmark_tp": benchmark_tp,
+                 "benchmark_ep": 1, "benchmark_pp": benchmark_pp},
+    }
+
+
+def test_benchmark_tp_restoration_scales_compute_and_adds_comm():
+    """A per-layer bench captured at TP=1 restores to target TP=8 by scaling the
+    sharded compute (÷8) and adding the analytical TP all-reduce at TP=8 — the
+    training-style reduce-and-restore mechanism."""
+    B, L, D = 4, 512, 8.0
+    cfg = _dense_inference_config(tp=8, input_seq_len=L, output_seq_len=128, batch_size=B)
+    proj = InferencePerformanceProjector(
+        cfg, args=_moe_sim_args(),
+        benchmark_layer_times=_per_layer_artifact(D, 6.0, B, L, benchmark_tp=1),
+    )
+    assert proj._restore and proj._bench_tp == 1 and proj._tgt_tp == 8
+    comm_tgt = proj._comm_tgt.layer_comm_ms(B, 1, is_moe=False).total_ms
+    assert comm_tgt > 0.0  # TP=8 adds a blocking all-reduce absent at TP=1
+    expected = cfg.model_config.num_layers * (D / 8.0 + comm_tgt)
+    assert proj._measured_decode_step_ms(B) == pytest.approx(expected)
+
+
+def test_benchmark_no_restoration_when_parallelism_matches():
+    """When the bench already ran at the target TP, measured times pass through
+    unchanged (no restoration, no analytical comm added)."""
+    B, L, D = 4, 512, 8.0
+    cfg = _dense_inference_config(tp=8, input_seq_len=L, output_seq_len=128, batch_size=B)
+    proj = InferencePerformanceProjector(
+        cfg, args=_moe_sim_args(),
+        benchmark_layer_times=_per_layer_artifact(D, 6.0, B, L, benchmark_tp=8),
+    )
+    assert not proj._restore
+    assert proj._measured_decode_step_ms(B) == pytest.approx(cfg.model_config.num_layers * D)
+
+
+def test_benchmark_pp_restoration_adds_per_forward_p2p():
+    """A per-layer bench captured at PP=1 restores to target PP=4 by adding one
+    per-forward pipeline P2P term (PP distributes layers; it does not shard
+    compute), leaving the per-layer compute unchanged."""
+    B, L, D = 4, 512, 8.0
+    mp = ModelParallelConfig(tensor_model_parallel_size=1, pipeline_model_parallel_size=4)
+    cfg = InferenceConfig(
+        model_config=ModelConfig(num_layers=4, hidden_size=4096, num_attention_heads=32),
+        request_config=InferenceRequestConfig(input_seq_len=L, output_seq_len=128, batch_size=B),
+        model_parallel_config=mp,
+    )
+    proj = InferencePerformanceProjector(
+        cfg, args=_moe_sim_args(),
+        benchmark_layer_times=_per_layer_artifact(D, 6.0, B, L, benchmark_tp=1, benchmark_pp=1),
+    )
+    assert proj._restore and proj._bench_pp == 1
+    pp_p2p = proj._comm_tgt.pp_p2p_ms(B, 1)
+    assert pp_p2p > 0.0  # PP=4 adds (pp-1) send/recv hops per forward
+    # TP unchanged (1→1) so per-layer compute is unchanged; only the per-forward
+    # P2P is added on top of the summed layers.
+    expected = cfg.model_config.num_layers * D + pp_p2p
+    assert proj._measured_decode_step_ms(B) == pytest.approx(expected)
