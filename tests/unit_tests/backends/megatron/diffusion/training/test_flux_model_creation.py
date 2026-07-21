@@ -286,3 +286,93 @@ class TestFluxModelCreation:
         # New attributes should still be set
         assert mock_args.torch_compile_mode == "reduce-overhead"
         assert mock_args.torch_compile_fullgraph is True
+
+    def test_build_flux_config_from_yaml_attention_backend_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A YAML string like 'fused' is converted to the AttnBackend enum."""
+        from megatron.core.transformer.enums import AttnBackend
+
+        backend_args = SimpleNamespace(mock_data=True, attention_backend="fused")
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.attention_backend is AttnBackend.fused
+
+    def test_build_flux_config_from_yaml_attention_backend_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An omitted attention_backend falls back to AttnBackend.auto."""
+        from megatron.core.transformer.enums import AttnBackend
+
+        backend_args = SimpleNamespace(mock_data=True)
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.attention_backend is AttnBackend.auto
+
+    def test_build_flux_config_from_yaml_attention_backend_null(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An explicit `attention_backend: null` (None) is coerced to auto.
+
+        Guards against the AttributeError regression where None flowed past the
+        string branch and crashed on attn_backend.name.
+        """
+        from megatron.core.transformer.enums import AttnBackend
+
+        backend_args = SimpleNamespace(mock_data=True, attention_backend=None)
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.attention_backend is AttnBackend.auto
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_build_flux_config_from_yaml_attention_backend_blank(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ):
+        """Empty/whitespace-only strings are treated as auto, not errors."""
+        from megatron.core.transformer.enums import AttnBackend
+
+        backend_args = SimpleNamespace(mock_data=True, attention_backend=value)
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.attention_backend is AttnBackend.auto
+
+    def test_build_flux_config_from_yaml_attention_backend_strips_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Surrounding whitespace is stripped before the enum lookup."""
+        from megatron.core.transformer.enums import AttnBackend
+
+        backend_args = SimpleNamespace(mock_data=True, attention_backend="  fused  ")
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.attention_backend is AttnBackend.fused
+
+    def test_build_flux_config_from_yaml_attention_backend_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An unknown attention_backend raises a clear ValueError listing choices."""
+        backend_args = SimpleNamespace(mock_data=True, attention_backend="bogus")
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        with pytest.raises(ValueError, match=r"Unknown attention_backend 'bogus'"):
+            trainer._build_flux_config_from_yaml()
+
+    def test_build_flux_config_from_yaml_attention_backend_case_sensitive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Enum lookup is case-sensitive: 'FUSED' is rejected, not matched to 'fused'."""
+        backend_args = SimpleNamespace(mock_data=True, attention_backend="FUSED")
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+
+        with pytest.raises(ValueError, match=r"Unknown attention_backend 'FUSED'"):
+            trainer._build_flux_config_from_yaml()
