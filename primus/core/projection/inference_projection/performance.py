@@ -22,7 +22,7 @@ Serving features modelled here: chunked prefill, KV-cache quantization
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Optional
 
 from primus.core.projection.module_profilers.language_model import (
@@ -152,6 +152,20 @@ class InferencePerformanceProjector:
                 raise
             self._sdpa = None
 
+        # Serving engines (vLLM/SGLang with AITER) run the MoE experts through a
+        # *batched* grouped GEMM, not the training-time legacy sequential kernel.
+        # The MoE profiler selects the batched Origami model via
+        # ``use_turbo_grouped_gemm``, but the ModelConfig dataclass only carries
+        # ``use_turbo_grouped_mlp`` — so the profiler-facing flag is never set on
+        # the inference path and decode is otherwise mis-modelled as N sequential
+        # per-expert GEMMs (grossly inflating small-batch decode). Set it here for
+        # MoE serving, respecting an explicit legacy request.
+        _mc = inference_config.model_config
+        if getattr(_mc, "num_experts", 0) and not getattr(
+            _mc, "moe_use_legacy_grouped_gemm", False
+        ):
+            _mc.use_turbo_grouped_gemm = True
+
         # Build profiler tree against a representative TrainingConfig view.
         view = inference_config.as_training_config(
             batch_size=inference_config.request_config.batch_size,
@@ -213,6 +227,13 @@ class InferencePerformanceProjector:
         self._meas_ref_input: int = 0
         self._bench_backend: str = "megatron"
         self._bench_measured = benchmark_layer_times
+        # Training-style TP/EP restoration state (populated for the per-layer
+        # schema in set_benchmark_calibration). Off unless the benchmark ran at
+        # a reduced parallelism vs the target.
+        self._restore = False
+        self._bench_tp = 1
+        self._bench_ep = 1
+        self._bench_pp = 1
         if benchmark_layer_times:
             self.set_benchmark_calibration(benchmark_layer_times)
 
@@ -249,18 +270,20 @@ class InferencePerformanceProjector:
         """Measured whole-model / composed decode *step* latency at ``batch``."""
         if self._meas_whole.get("decode"):
             return self._interp(batch, self._meas_whole["decode"])
-        # Per-layer schema: sum measured layer times by layer count.
-        d = self._meas_layer.get(("decode", "dense"), 0.0)
-        m = self._meas_layer.get(("decode", "moe"), 0.0)
-        return self._n_dense * d + self._n_moe * m
+        # Per-layer schema: restore each layer to the target TP/EP, then sum by
+        # layer count. Decode processes 1 token/step.
+        d = self._restore_per_layer("dense", self._meas_layer.get(("decode", "dense"), 0.0), batch, 1)
+        m = self._restore_per_layer("moe", self._meas_layer.get(("decode", "moe"), 0.0), batch, 1)
+        return self._n_dense * d + self._n_moe * m + self._restore_pp_ms(batch, 1)
 
     def _measured_full_prefill_ms(self, batch: int) -> float:
         """Measured whole-model / composed prefill latency for the full prompt."""
         if self._meas_whole.get("prefill"):
             return self._interp(batch, self._meas_whole["prefill"])
-        d = self._meas_layer.get(("prefill", "dense"), 0.0)
-        m = self._meas_layer.get(("prefill", "moe"), 0.0)
-        return self._n_dense * d + self._n_moe * m
+        tok = self._meas_ref_input or 1
+        d = self._restore_per_layer("dense", self._meas_layer.get(("prefill", "dense"), 0.0), batch, tok)
+        m = self._restore_per_layer("moe", self._meas_layer.get(("prefill", "moe"), 0.0), batch, tok)
+        return self._n_dense * d + self._n_moe * m + self._restore_pp_ms(batch, tok)
 
     def _measured_prefill_tokens_ms(self, total_tokens: int) -> float:
         """Measured prefill time for an arbitrary token count (chunk pieces).
@@ -312,6 +335,11 @@ class InferencePerformanceProjector:
         self._bench_backend = str(benchmark_layer_times.get("backend", "megatron"))
         ref_batch = int(meta.get("batch") or self.cfg.request_config.batch_size or 1)
         ref_input = int(meta.get("input_len") or self.cfg.request_config.input_seq_len or 1)
+        # Parallelism the benchmark ran at (for training-style restoration of a
+        # reduced-parallelism per-layer bench to the target TP/EP).
+        self._bench_tp = int(meta.get("benchmark_tp") or meta.get("tp") or 1)
+        self._bench_ep = int(meta.get("benchmark_ep") or meta.get("ep") or 1)
+        self._bench_pp = int(meta.get("benchmark_pp") or meta.get("pp") or 1)
 
         self._meas_ref_input = ref_input
 
@@ -357,10 +385,62 @@ class InferencePerformanceProjector:
             if entry.get("decode_ms"):
                 layer[("decode", ltype)] = float(entry["decode_ms"])
         self._meas_layer = layer
+        self._setup_restoration()
         # Prefill rate from the dominant (per-layer * count) prefill total.
         if ref_input > 0:
             full_pre = self._measured_full_prefill_ms(ref_batch)
             self._meas_prefill_rate_ms_per_tok = full_pre / (ref_batch * ref_input)
+
+    def _setup_restoration(self) -> None:
+        """Prepare TP/EP restoration when a per-layer benchmark was captured at a
+        reduced parallelism (mirrors training's benchmark-at-fewer-GPUs → target
+        extrapolation). Builds analytical collective models at the benchmark and
+        target TP/EP so ``_restore_per_layer`` can strip the benchmark's comm,
+        scale the sharded compute, and add the target comm back."""
+        mp = self.cfg.model_parallel_config
+        self._tgt_tp = max(1, mp.tensor_model_parallel_size)
+        tgt_ep = max(1, getattr(mp, "expert_model_parallel_size", 1) or 1)
+        tgt_pp = max(1, mp.pipeline_model_parallel_size)
+        self._restore = (
+            self._bench_tp != self._tgt_tp
+            or self._bench_ep != tgt_ep
+            or self._bench_pp != tgt_pp
+        )
+        if not self._restore:
+            return
+        mc = self.cfg.model_config
+        bench_mp = replace(
+            mp,
+            tensor_model_parallel_size=self._bench_tp,
+            expert_model_parallel_size=self._bench_ep,
+            pipeline_model_parallel_size=self._bench_pp,
+        )
+        self._comm_bench = InferenceCollectiveModel(mc, bench_mp, self._cc)
+        self._comm_tgt = InferenceCollectiveModel(mc, mp, self._cc)
+
+    def _restore_per_layer(self, ltype: str, ms_bench: float, batch: int, tokens: int) -> float:
+        """Restore a per-layer time measured at the benchmark's (reduced) TP/EP to
+        the target parallelism, training-style: the shardable compute scales by
+        ``bench_tp / target_tp`` and the blocking collective at the target TP/EP
+        is added back analytically. No-op when bench and target parallelism match
+        or for the whole-model (vLLM) schema, which is non-decomposable."""
+        if not self._restore or ms_bench <= 0.0:
+            return ms_bench
+        is_moe = ltype == "moe"
+        comm_bench = self._comm_bench.layer_comm_ms(batch, tokens, is_moe=is_moe).total_ms
+        comm_tgt = self._comm_tgt.layer_comm_ms(batch, tokens, is_moe=is_moe).total_ms
+        compute = max(0.0, ms_bench - comm_bench) * (self._bench_tp / self._tgt_tp)
+        return compute + comm_tgt
+
+    def _restore_pp_ms(self, batch: int, tokens: int) -> float:
+        """Per-*forward* pipeline P2P delta added when restoring to a target PP.
+        PP distributes whole layers across stages, so it adds ``(pp-1)``
+        send/recv hops to a forward pass without sharding compute — hence a
+        single additive term per step, not a per-layer one. Reuses the shared
+        ``cm.sendrecv`` primitive via ``InferenceCollectiveModel.pp_p2p_ms``."""
+        if not self._restore:
+            return 0.0
+        return self._comm_tgt.pp_p2p_ms(batch, tokens) - self._comm_bench.pp_p2p_ms(batch, tokens)
 
     # -- per-pass forward time -------------------------------------------------
 

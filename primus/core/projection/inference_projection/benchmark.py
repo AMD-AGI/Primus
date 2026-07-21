@@ -134,8 +134,14 @@ def run_inference_benchmark_worker(primus_config, unknown_overrides, args) -> Op
     module_config.moe_layer_freq = expanded_pattern
 
     # Derive layer metadata (hidden size) from the projection model config.
-    proj_model = convert_primus_config_to_projection_config(primus_config).model_config
+    proj_cfg = convert_primus_config_to_projection_config(primus_config)
+    proj_model = proj_cfg.model_config
     hidden = int(proj_model.hidden_size)
+    # Parallelism the benchmark actually ran at, so the projector can restore a
+    # reduced-parallelism per-layer bench to a different target TP/EP.
+    bench_tp = max(1, proj_cfg.model_parallel_config.tensor_model_parallel_size)
+    bench_ep = max(1, getattr(proj_cfg.model_parallel_config, "expert_model_parallel_size", 1) or 1)
+    bench_pp = max(1, proj_cfg.model_parallel_config.pipeline_model_parallel_size)
     # Classify built layers by the (expanded) pattern we just set, so the type
     # of each constructed layer is known regardless of the full-model pattern.
     moe_pattern = list(expanded_pattern)
@@ -253,6 +259,9 @@ def run_inference_benchmark_worker(primus_config, unknown_overrides, args) -> Op
             "input_len": input_len,
             "hidden": hidden,
             "capture_layers": capture_layers,
+            "benchmark_tp": bench_tp,
+            "benchmark_ep": bench_ep,
+            "benchmark_pp": bench_pp,
         },
     }
 
