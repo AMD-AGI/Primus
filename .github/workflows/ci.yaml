@@ -212,70 +212,18 @@ jobs:
       # PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
-    needs: [code-lint]
+      # All test steps run inside a sibling container launched from the image that
+      # build-docker built+pushed (docker.io/tasimage/primus:${IMAGE_TAG}). That
+      # image already bundles turbo / aiter / triton / rocSHMEM / uccl / origami,
+      # so their runtime installs are removed here.
+      UT_CONTAINER: primus_ut_torch
+    needs: [build-docker]
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # runs-on: [primus-lm-cicd-torch-j8knc]
     # runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
     runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
     steps:
-      - run: echo "🎉 Begin Primus-Turbo Checkout."
-      - name: Clean stale Primus-Turbo checkout
-        run: rm -rf "${GITHUB_WORKSPACE}/Primus-Turbo"
-      - name: Set commit hash to env
-        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
-      - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: AMD-AGI/Primus-Turbo
-          submodules: "recursive"
-          path: Primus-Turbo
-          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin AITER + Primus-Turbo Install."
-      - name: Install AITER
-        run: |
-          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
-          echo "✅ [Uninstall old aiter] started at: $(date)"
-          pip3 uninstall aiter amd-aiter -y || true
-          rm -rf /tmp/aiter || true
-          cd /tmp
-          git clone https://github.com/ROCm/aiter.git
-          cd aiter
-          git checkout -f ${PRIMUS_TURBO_AITER_COMMIT}
-          git submodule sync
-          git submodule update --init --recursive
-          start_time=$(date +%s)
-          echo "✅ [Build aiter] started at: $(date)"
-          PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Build aiter] ended at: $(date)"
-          echo "⏱️ [Build aiter] Total elapsed time: ${elapsed} seconds"
-          echo -e "Build aiter\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
-      - name: Install Primus-Turbo
-        run: |
-          rm -rf /tmp/Primus-Turbo || true
-          mv Primus-Turbo /tmp/
-          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
-          git config --global --add safe.directory /tmp/Primus-Turbo || true
-          cd /tmp/Primus-Turbo || true
-          start_time=$(date +%s)
-          echo "✅ [Pip install requirements] started at: $(date)"
-          mkdir -p ${PRIMUS_WORKDIR}/primus-cache
-          MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Pip install requirements] ended at: $(date)"
-          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
-          echo -e "primus-turbo: pip install requirements\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
-          start_time=$(date +%s)
-          echo "✅ [build primus-turbo] started at: $(date)"
-          pip3 install --no-build-isolation -e . -v
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
-          echo -e "primus-turbo: build/install\t${elapsed}" >> "$RUNNER_TEMP/runtime.tsv"
-      - run: echo "🎉 Begin Primus Unit Test."
+      - run: echo "🎉 Begin Primus Unit Test (containerized)."
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
@@ -287,16 +235,66 @@ jobs:
           echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
           echo "Runner Temp Dir: $RUNNER_TEMP"
           echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+      - name: Resolve image tag
+        run: |
+          # build-docker sets IMAGE_TAG in its own job env only; re-derive it here
+          # with the identical logic so we can target the image it pushed.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.ref }}"
+            TAG="${TAG_NAME#refs/tags/}"
+            echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=others" >> $GITHUB_ENV
+          fi
+      - name: Start (or reuse) unit-test container
+        run: |
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
+          IMG="docker.io/tasimage/primus:${{ env.IMAGE_TAG }}"
+          echo "Target image: ${IMG}"
+          # Reuse the container only if it is already running on the same image;
+          # otherwise recreate it from the freshly pushed image.
+          cur_img="$(docker inspect -f '{{.Config.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          running="$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          if [ "${running}" = "true" ] && [ "${cur_img}" = "${IMG}" ]; then
+            echo "Reusing container ${UT_CONTAINER} (already on ${IMG})."
+          else
+            echo "Recreating container ${UT_CONTAINER} (running=${running}, image=${cur_img})."
+            docker rm -f "${UT_CONTAINER}" >/dev/null 2>&1 || true
+            docker pull "${IMG}"
+            # Single /shared_nfs mount covers GITHUB_WORKSPACE, PRIMUS_WORKDIR and
+            # DATA_PATH (all live under /shared_nfs) at identical paths; GITHUB_WORKSPACE
+            # is also mounted explicitly in case the runner root is not under /shared_nfs.
+            docker run -d --name "${UT_CONTAINER}" \
+              --network host --ipc host --privileged \
+              --group-add video \
+              --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+              --shm-size 128G \
+              --device /dev/kfd --device /dev/dri --device /dev/infiniband \
+              -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+              -v /shared_nfs:/shared_nfs \
+              -w "${GITHUB_WORKSPACE}" \
+              "${IMG}" sleep infinity
+          fi
+          echo "Container ready:"
+          docker exec "${UT_CONTAINER}" bash -lc 'python3 --version; python3 -c "import triton; print('\''triton'\'', triton.__version__)" 2>/dev/null || true'
       - name: Install Primus
         run: |
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
           pip install -r requirements.txt
+          IN
       # v26.3-only: drop this whole step on v26.4. Unit tests import torchtitan
       # from the submodule source via conftest sys.path injection (v0.2.2 has
       # PEP-420 namespace packages that need the source root on sys.path). This
-      # just removes any stale torchtitan on the persistent runner that would
-      # shadow it (old install or leftover editable finder / .pth / dist-info).
+      # just removes any stale torchtitan in the image that would shadow it.
       - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
         run: |
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
           pip uninstall -y torchtitan || true
           python - <<'PY'
           import glob, os, shutil, site
@@ -318,21 +316,7 @@ jobs:
                       except OSError as e:
                           print("skip", f, e)
           PY
-      - name: Install fixed origami
-        run: |
-          # rocm/primus:v26.3 bundles origami 0.1.0, whose rank_configs() raises
-          # ValueError: vector::reserve during MoE grouped-gemm kernel selection and
-          # crashes training (turbo's _safe_rank_configs only catches RuntimeError).
-          # Install the fixed origami (rocm-libraries@223648a) over the bundled 0.1.0.
-          # TODO: drop this once a base image ships origami with the fix.
-          rm -rf /tmp/rocm-libraries
-          git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries
-          cd /tmp/rocm-libraries
-          git sparse-checkout init --cone
-          git sparse-checkout set shared/origami
-          git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
-          pip uninstall -y origami || true
-          pip install ./shared/origami/python
+          IN
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
@@ -350,40 +334,22 @@ jobs:
           fi
       - name: Run CLI Shell Tests
         run: |
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
-      - name: Build and install Triton
-        run: |
-          # Build Triton from source pinned to the same commit as the CI Docker
-          # image (.github/workflows/docker/Dockerfile) so the runner's Triton
-          # matches the image build. Skip the (slow) rebuild when this exact pin
-          # is already installed, tracked via a per-commit marker on the
-          # persistent runner (PRIMUS_WORKDIR).
-          TRITON_PIN=09500db9
-          MARKER="${PRIMUS_WORKDIR}/.triton_build_${TRITON_PIN}.done"
-          if [ -f "$MARKER" ] && python3 -c "import triton" 2>/dev/null; then
-            echo "✅ Triton (pin ${TRITON_PIN}) already installed; skipping build."
-          else
-            echo "🔧 Building Triton (pin ${TRITON_PIN})..."
-            rm -rf /tmp/triton
-            cd /tmp && \
-              git clone https://github.com/triton-lang/triton.git && \
-              cd triton && \
-              git checkout ${TRITON_PIN} && \
-              pip3 install -r python/requirements.txt && \
-              MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
-            mkdir -p "${PRIMUS_WORKDIR}"
-            touch "$MARKER"
-            echo "✅ Triton build complete; marker: $MARKER"
-          fi
+          IN
       - name: Run Primus Core Tests
         run: |
-          echo "Running Primus Core tests..."
           # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
           # Note: `test_limit_layers_moe_with_dense_keeps_two` is temporarily disabled pending a fix to
           #       `_limit_layers_for_projection` dense-layer handling (num_layers collapses to 1 instead of 2).
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
-          export HSA_NO_SCRATCH_RECLAIM=1
+          docker exec \
+            -e GITHUB_WORKSPACE -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
+          echo "Running Primus Core tests..."
           mkdir -p "${GITHUB_WORKSPACE}/test-reports"
           pytest --maxfail=1 -s ./tests/unit_tests/ \
             --cov=primus --cov-report=term-missing:skip-covered \
@@ -393,34 +359,46 @@ jobs:
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward \
             --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two
+          IN
       - name: Snapshot unit-test coverage
         if: always()
         continue-on-error: true
         run: |
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set +e
           # Keep the unit data for the final unit-vs-E2E comparison table
           # (.coverage.unit is fed to `coverage combine` after the E2E steps).
           python -m coverage json -o coverage_unit.json 2>/dev/null || true
-          cp .coverage "$GITHUB_WORKSPACE/.coverage.unit" 2>/dev/null || true
+          cp .coverage "${GITHUB_WORKSPACE}/.coverage.unit" 2>/dev/null || true
+          IN
       - name: Setup E2E training coverage
         if: always()
         continue-on-error: true
         run: |
           # Record coverage of the training subprocesses (primus-cli -> torchrun
-          # -> python). A .pth makes every new interpreter call
-          # coverage.process_startup(); COVERAGE_PROCESS_START points it at the rc
-          # and COVERAGE_FILE keeps E2E data separate from the unit .coverage.
+          # -> python). A .pth (written inside the container's site-packages) makes
+          # every new interpreter call coverage.process_startup(); COVERAGE_PROCESS_START
+          # points it at the rc and COVERAGE_FILE keeps E2E data separate from unit.
           # parallel=true -> one data file per rank; sigterm=true captures ranks
-          # killed on teardown. These env vars are inherited by the E2E steps.
+          # killed on teardown. These env vars are passed to the E2E steps via -e.
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
-          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "${GITHUB_WORKSPACE}/.coveragerc_e2e"
+          IN
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
       - name: Decide E2E scope (torch)
         run: |
           # Fail-safe: default to running all E2E (push/release/dispatch, or any
           # diff failure). On PRs, narrow to the suites the changed files affect.
+          # Computed inside the container (git + select_tests.py), result read back
+          # on the runner to export RUN_*_E2E for the (host-side) skip guards.
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
           M=1; T=1
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}" 2>/dev/null || true
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base="${{ github.event.pull_request.base.sha }}"
             git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
@@ -434,35 +412,47 @@ jobs:
               fi
             fi
           fi
-          echo "RUN_MEGATRON_E2E=${M}" >> "$GITHUB_ENV"
-          echo "RUN_TORCHTITAN_E2E=${T}" >> "$GITHUB_ENV"
+          printf '%s %s\n' "$M" "$T" > "${GITHUB_WORKSPACE}/.e2e_scope"
+          IN
+          read RM RT < "${GITHUB_WORKSPACE}/.e2e_scope"
+          echo "RUN_MEGATRON_E2E=${RM:-1}" >> "$GITHUB_ENV"
+          echo "RUN_TORCHTITAN_E2E=${RT:-1}" >> "$GITHUB_ENV"
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
-          echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
-          rm -rf "${{ env.UT_LOG_PATH }}"
-          mkdir -p "${{ env.UT_LOG_PATH }}"
-          # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
-          # MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
-          MASTER_PORT=10009 DATA_PATH=/shared_nfs/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
-          GPU_ARCHS=gfx942 \
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
+            -e HSA_NO_SCRATCH_RECLAIM=1 -e GPU_ARCHS=gfx942 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
+          echo "Set UT_LOG_PATH: ${UT_LOG_PATH}"
+          rm -rf "${UT_LOG_PATH}"
+          mkdir -p "${UT_LOG_PATH}"
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
+          IN
       - name: Run Primus Model Tests -- TorchTitan
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
-          echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
-          rm -rf "${{ env.UT_LOG_PATH }}"
-          mkdir -p "${{ env.UT_LOG_PATH }}"
-          # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
-          # MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
-          MASTER_PORT=10009 DATA_PATH=/shared_nfs/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
+            -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set -e
+          echo "Set UT_LOG_PATH: ${UT_LOG_PATH}"
+          rm -rf "${UT_LOG_PATH}"
+          mkdir -p "${UT_LOG_PATH}"
           pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+          IN
       - name: Run Primus CLI tool smoke (benchmark / preflight, E2E coverage)
         if: always()
         continue-on-error: true
@@ -470,8 +460,12 @@ jobs:
           # Best-effort CLI smoke so primus/tools (GEMM / attention / RCCL
           # benches + preflight probes) is exercised under the inherited E2E
           # coverage injection. Never fails CI: coverage is kept up to any exit.
-          export HSA_NO_SCRATCH_RECLAIM=1
-          OUT="${{ env.UT_LOG_PATH }}/cli_smoke"; mkdir -p "$OUT"
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set +e
+          OUT="${UT_LOG_PATH}/cli_smoke"; mkdir -p "$OUT"
           cli() { python -m primus.cli.main "$@" || true; }
           # single-GPU benches + preflight info
           cli benchmark gemm --M 512 --N 512 --K 512 --duration 2 --output-file "$OUT/gemm.md"
@@ -483,6 +477,7 @@ jobs:
           NGPU=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
           [ "$NGPU" -ge 2 ] && torchrun --nproc_per_node="$NGPU" -m primus.cli.main benchmark rccl --op all_reduce all_gather --min-bytes 1K --max-bytes 256K --num-sizes 2 --iters 3 --warmup 1 --output-file "$OUT/rccl.md" || true
           [ "$NGPU" -ge 8 ] && torchrun --nproc_per_node=8 -m primus.cli.main benchmark strided-allgather --sizes-mb 8 --iters 3 --warmup 1 || true
+          IN
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -494,25 +489,30 @@ jobs:
       - name: Write test summary
         if: always()
         run: |
-          python tools/ci/junit_summary.py --title torch test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" \
+            bash -lc 'python tools/ci/junit_summary.py --title torch test-reports/*.xml' >> "$GITHUB_STEP_SUMMARY" || true
       - name: Write runtime summary
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python tools/ci/runtime_summary.py --title torch >> "$GITHUB_STEP_SUMMARY" || true
+          docker exec -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e RUNNER_TEMP -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" \
+            bash -lc 'python tools/ci/runtime_summary.py --title torch' >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
         run: |
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          set +e
           # Don't instrument coverage's own helper processes here.
           unset COVERAGE_PROCESS_START
           # Merge per-rank E2E data, then line-merge unit + E2E into one dataset.
           # The JSON is consumed by the coverage-summary job (no per-job summary).
           python -m coverage combine 2>/dev/null || true
-          COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage combine --keep \
-            "$GITHUB_WORKSPACE/.coverage.unit" "$GITHUB_WORKSPACE/.coverage_e2e" 2>/dev/null || true
-          COVERAGE_FILE="$GITHUB_WORKSPACE/.coverage_all" python -m coverage json -o coverage_combined.json 2>/dev/null || true
+          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage combine --keep \
+            "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_e2e" 2>/dev/null || true
+          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage json -o coverage_combined.json 2>/dev/null || true
+          IN
       - name: Upload torch coverage json
         if: always()
         continue-on-error: true
@@ -526,12 +526,13 @@ jobs:
       - name: Clean
         if: always()
         run: |
-          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
-          rm -rf ${PRIMUS_WORKDIR}/Primus
-          # Remove E2E coverage artifacts and, importantly, the subprocess
-          # injection .pth so it never leaks into later jobs on this persistent runner.
-          rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_all" "${GITHUB_WORKSPACE}/.coveragerc_e2e" coverage_unit.json coverage_combined.json || true
-          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true
+          # Host-side workspace artifacts (the container reuses /shared_nfs, so these
+          # live on the runner too). The container itself is intentionally left
+          # running for reuse by the next run (see "Start (or reuse) unit-test container").
+          rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_all" "${GITHUB_WORKSPACE}/.coveragerc_e2e" "${GITHUB_WORKSPACE}/.e2e_scope" "${GITHUB_WORKSPACE}/coverage_unit.json" "${GITHUB_WORKSPACE}/coverage_combined.json" || true
+          # Remove the coverage subprocess-injection .pth inside the test container
+          # so it never leaks into later runs that reuse the container.
+          docker exec "${UT_CONTAINER}" bash -lc 'SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true' 2>/dev/null || true
 
   run-unittest-jax:
     permissions:
