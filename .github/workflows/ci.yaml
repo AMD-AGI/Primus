@@ -108,82 +108,100 @@ jobs:
           fi
       - name: Build and Push Docker Image
         run: |
-          # Runner lives on the jump host (crs-m2m-cpu-spur-009) to keep a stable
-          # connection to GitHub; the heavy docker build/push runs on
-          # crsuse2-m2m-321 over SSH. ${{ ... }} are baked in by GitHub before the
-          # script is piped to the remote shell; $(...) / ${var} run on 321.
-          # ${{ github.workspace }} lives under /shared_nfs so it resolves on 321 too.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=1000 crsuse2-m2m-321 bash -s <<'IN'
-          set -e
-          cd ${{ github.workspace }}
+          # echo "> Login to ROCm Docker Hub"
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          echo "> Build dependencies"
           start_time=$(date +%s)
-          docker build -f ${{ github.workspace }}/.github/workflows/docker/Dockerfile \
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
-               -t tasimage/primus:${{ env.IMAGE_TAG }} \
-               --build-arg BASE_IMAGE=${{ env.BASE_IMAGE }} \
-               --build-arg PRIMUS_TURBO_COMMIT=${{ env.PRIMUS_TURBO_COMMIT }} \
-               --build-arg PRIMUS_TURBO_AITER_COMMIT=${{ env.PRIMUS_TURBO_AITER_COMMIT }} \
-               --build-arg ROCSHMEM_COMMIT=${{ env.ROCSHMEM_COMMIT }} \
+               -t tasimage/primus:${{env.IMAGE_TAG}} \
+               --build-arg BASE_IMAGE=${BASE_IMAGE} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
-               --build-arg UCCL_COMMIT=${{ env.UCCL_COMMIT }} \
-               --build-arg TRITON_COMMIT=${{ env.TRITON_COMMIT }} \
-               ${{ github.workspace }}/.github/workflows/docker
-          echo "⏱️ [build primus docker] Total elapsed time: $(( $(date +%s) - start_time )) seconds"
-          docker tag tasimage/primus:${{ env.IMAGE_TAG }} docker.io/tasimage/primus:${{ env.IMAGE_TAG }}
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{ env.IMAGE_TAG }}
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
 
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
+          # Primus v26.3 already includes AINIC under /workspace. Re-enable this
+          # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
-          mkdir -p ${{ github.workspace }}/.github/workflows/docker/ainic
-          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz ${{ github.workspace }}/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f ${{ github.workspace }}/.github/workflows/docker/Dockerfile.ainic \
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
                --network=host \
-               -t tasimage/primus:${{ env.IMAGE_TAG }}-ainic \
-               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{ env.IMAGE_TAG }} \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
-               ${{ github.workspace }}/.github/workflows/docker
-          echo "⏱️ [build primus docker-ainic] Total elapsed time: $(( $(date +%s) - start_time )) seconds"
-          docker tag tasimage/primus:${{ env.IMAGE_TAG }}-ainic docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-ainic
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-ainic
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
-          docker build -f ${{ github.workspace }}/.github/workflows/docker/Dockerfile \
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
-               -t tasimage/primus:${{ env.IMAGE_TAG }}-jax \
-               --build-arg BASE_IMAGE=${{ env.MAXTEXT_BASE_IMAGE }} \
-               --build-arg PRIMUS_TURBO_COMMIT=${{ env.PRIMUS_TURBO_COMMIT }} \
-               --build-arg PRIMUS_TURBO_AITER_COMMIT=${{ env.PRIMUS_TURBO_AITER_COMMIT }} \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
-               --build-arg UCCL_COMMIT=${{ env.UCCL_COMMIT }} \
-               --build-arg ROCSHMEM_COMMIT=${{ env.ROCSHMEM_COMMIT }} \
-               --build-arg TRITON_COMMIT=${{ env.TRITON_COMMIT }} .
-          echo "⏱️ [build primus docker-jax] Total elapsed time: $(( $(date +%s) - start_time )) seconds"
-          docker tag tasimage/primus:${{ env.IMAGE_TAG }}-jax docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-jax
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
+               --build-arg TRITON_COMMIT=${TRITON_COMMIT} .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
+
+          echo "> Docker tag image for Docker Hub"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-jax
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
           start_time=$(date +%s)
-          mkdir -p ${{ github.workspace }}/.github/workflows/docker/ainic
-          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-56.tar.gz ${{ github.workspace }}/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f ${{ github.workspace }}/.github/workflows/docker/Dockerfile_jax.ainic \
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
                --network=host \
-               -t tasimage/primus:${{ env.IMAGE_TAG }}-jax-ainic \
-               --build-arg BASE_IMAGE=${{ env.MAXTEXT_BASE_IMAGE }} \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
-               ${{ github.workspace }}/.github/workflows/docker
-          echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: $(( $(date +%s) - start_time )) seconds"
-          docker tag tasimage/primus:${{ env.IMAGE_TAG }}-jax-ainic docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-jax-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{ env.IMAGE_TAG }}-jax-ainic
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: ${elapsed} seconds"
 
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
+          # echo "> Docker cleanup local images"
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-jax
           echo "> build-docker success"
-          IN
 
   run-unittest-torch:
     permissions:
@@ -234,48 +252,38 @@ jobs:
           fi
       - name: Start (or reuse) unit-test container
         run: |
-          # Runner is on the jump host; the container runs on crsuse2-m2m-321 (which
-          # has the GPUs + docker). All docker work is done there over SSH.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 bash -s <<'IN'
-          set -e
-          IMG="tasimage/primus:${{ env.IMAGE_TAG }}"
-          CONTAINER="${{ env.UT_CONTAINER }}"
-          echo "Target image (local on this host, built by build-docker): ${IMG}"
-          # build-docker built this image locally on the same host; pull from
-          # Docker Hub only as a fallback if the local image is gone.
-          if ! docker image inspect "${IMG}" >/dev/null 2>&1; then
-            echo "Local image missing; pulling docker.io/${IMG}"
-            docker pull "docker.io/${IMG}"
-            docker tag "docker.io/${IMG}" "${IMG}" || true
-          fi
-          img_id="$(docker image inspect -f '{{.Id}}' "${IMG}")"
-          cur_id="$(docker inspect -f '{{.Image}}' "${CONTAINER}" 2>/dev/null || true)"
-          running="$(docker inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null || true)"
-          if [ "${running}" = "true" ] && [ "${cur_id}" = "${img_id}" ]; then
-            echo "Reusing container ${CONTAINER} (already on ${IMG})."
+          : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
+          IMG="docker.io/tasimage/primus:${{ env.IMAGE_TAG }}"
+          echo "Target image: ${IMG}"
+          # Reuse the container only if it is already running on the same image;
+          # otherwise recreate it from the freshly pushed image.
+          cur_img="$(docker inspect -f '{{.Config.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          running="$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          if [ "${running}" = "true" ] && [ "${cur_img}" = "${IMG}" ]; then
+            echo "Reusing container ${UT_CONTAINER} (already on ${IMG})."
           else
-            echo "Recreating container ${CONTAINER} (running=${running})."
-            docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+            echo "Recreating container ${UT_CONTAINER} (running=${running}, image=${cur_img})."
+            docker rm -f "${UT_CONTAINER}" >/dev/null 2>&1 || true
+            docker pull "${IMG}"
             # Single /shared_nfs mount covers GITHUB_WORKSPACE, PRIMUS_WORKDIR and
-            # DATA_PATH (all under /shared_nfs) at identical paths; GITHUB_WORKSPACE
-            # mounted explicitly too in case the runner root is not under /shared_nfs.
-            docker run -d --name "${CONTAINER}" \
+            # DATA_PATH (all live under /shared_nfs) at identical paths; GITHUB_WORKSPACE
+            # is also mounted explicitly in case the runner root is not under /shared_nfs.
+            docker run -d --name "${UT_CONTAINER}" \
               --network host --ipc host --privileged \
               --group-add video \
               --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
               --shm-size 128G \
               --device /dev/kfd --device /dev/dri --device /dev/infiniband \
-              -v ${{ github.workspace }}:${{ github.workspace }} \
+              -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
               -v /shared_nfs:/shared_nfs \
-              -w ${{ github.workspace }} \
+              -w "${GITHUB_WORKSPACE}" \
               "${IMG}" sleep infinity
           fi
           echo "Container ready:"
-          docker exec "${CONTAINER}" python3 --version || true
-          IN
+          docker exec "${UT_CONTAINER}" bash -lc 'python3 --version; python3 -c "import triton; print('\''triton'\'', triton.__version__)" 2>/dev/null || true'
       - name: Install Primus
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           pip install -r requirements.txt
           IN
@@ -285,7 +293,7 @@ jobs:
       # just removes any stale torchtitan in the image that would shadow it.
       - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           pip uninstall -y torchtitan || true
           python - <<'PY'
@@ -326,7 +334,7 @@ jobs:
           fi
       - name: Run CLI Shell Tests
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
@@ -337,7 +345,9 @@ jobs:
           # Note: `test_limit_layers_moe_with_dense_keeps_two` is temporarily disabled pending a fix to
           #       `_limit_layers_for_projection` dense-layer handling (num_layers collapses to 1 instead of 2).
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -e HSA_NO_SCRATCH_RECLAIM=1 -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec \
+            -e GITHUB_WORKSPACE -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus Core tests..."
           mkdir -p "${GITHUB_WORKSPACE}/test-reports"
@@ -354,7 +364,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
           # Keep the unit data for the final unit-vs-E2E comparison table
           # (.coverage.unit is fed to `coverage combine` after the E2E steps).
@@ -371,7 +381,7 @@ jobs:
           # points it at the rc and COVERAGE_FILE keeps E2E data separate from unit.
           # parallel=true -> one data file per rank; sigterm=true captures ranks
           # killed on teardown. These env vars are passed to the E2E steps via -e.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
@@ -385,7 +395,7 @@ jobs:
           # diff failure). On PRs, narrow to the suites the changed files affect.
           # Computed inside the container (git + select_tests.py), result read back
           # on the runner to export RUN_*_E2E for the (host-side) skip guards.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           M=1; T=1
           git config --global --add safe.directory "${GITHUB_WORKSPACE}" 2>/dev/null || true
@@ -412,7 +422,12 @@ jobs:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -e UT_LOG_PATH='${{ env.UT_LOG_PATH }}' -e HF_TOKEN='${{ secrets.HF_TOKEN }}' -e COVERAGE_PROCESS_START='${{ env.COVERAGE_PROCESS_START }}' -e COVERAGE_FILE='${{ env.COVERAGE_FILE }}' -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data -e HSA_NO_SCRATCH_RECLAIM=1 -e GPU_ARCHS=gfx942 -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
+            -e HSA_NO_SCRATCH_RECLAIM=1 -e GPU_ARCHS=gfx942 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Set UT_LOG_PATH: ${UT_LOG_PATH}"
           rm -rf "${UT_LOG_PATH}"
@@ -425,7 +440,12 @@ jobs:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -e UT_LOG_PATH='${{ env.UT_LOG_PATH }}' -e HF_TOKEN='${{ secrets.HF_TOKEN }}' -e COVERAGE_PROCESS_START='${{ env.COVERAGE_PROCESS_START }}' -e COVERAGE_FILE='${{ env.COVERAGE_FILE }}' -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data -e HSA_NO_SCRATCH_RECLAIM=1 -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
+            -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Set UT_LOG_PATH: ${UT_LOG_PATH}"
           rm -rf "${UT_LOG_PATH}"
@@ -440,7 +460,10 @@ jobs:
           # Best-effort CLI smoke so primus/tools (GEMM / attention / RCCL
           # benches + preflight probes) is exercised under the inherited E2E
           # coverage injection. Never fails CI: coverage is kept up to any exit.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -e UT_LOG_PATH='${{ env.UT_LOG_PATH }}' -e HSA_NO_SCRATCH_RECLAIM=1 -e COVERAGE_PROCESS_START='${{ env.COVERAGE_PROCESS_START }}' -e COVERAGE_FILE='${{ env.COVERAGE_FILE }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec \
+            -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
           OUT="${UT_LOG_PATH}/cli_smoke"; mkdir -p "$OUT"
           cli() { python -m primus.cli.main "$@" || true; }
@@ -466,16 +489,20 @@ jobs:
       - name: Write test summary
         if: always()
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -lc 'python tools/ci/junit_summary.py --title torch test-reports/*.xml'" >> "$GITHUB_STEP_SUMMARY" || true
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" \
+            bash -lc 'python tools/ci/junit_summary.py --title torch test-reports/*.xml' >> "$GITHUB_STEP_SUMMARY" || true
       - name: Write runtime summary
         if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -e GITHUB_WORKSPACE='${{ github.workspace }}' -e GITHUB_TOKEN='${{ secrets.GITHUB_TOKEN }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -lc 'python tools/ci/runtime_summary.py --title torch'" >> "$GITHUB_STEP_SUMMARY" || true
+          docker exec -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e RUNNER_TEMP -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" \
+            bash -lc 'python tools/ci/runtime_summary.py --title torch' >> "$GITHUB_STEP_SUMMARY" || true
       - name: Build torch coverage json (unit + E2E)
         if: always()
         continue-on-error: true
         run: |
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i -e GITHUB_WORKSPACE='${{ github.workspace }}' -w '${{ github.workspace }}' '${{ env.UT_CONTAINER }}' bash -s" <<'IN'
+          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
           # Don't instrument coverage's own helper processes here.
           unset COVERAGE_PROCESS_START
@@ -504,10 +531,8 @@ jobs:
           # running for reuse by the next run (see "Start (or reuse) unit-test container").
           rm -f "${GITHUB_WORKSPACE}/.coverage_e2e"* "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_all" "${GITHUB_WORKSPACE}/.coveragerc_e2e" "${GITHUB_WORKSPACE}/.e2e_scope" "${GITHUB_WORKSPACE}/coverage_unit.json" "${GITHUB_WORKSPACE}/coverage_combined.json" || true
           # Remove the coverage subprocess-injection .pth inside the test container
-          # (on crsuse2-m2m-321) so it never leaks into later runs that reuse it.
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ServerAliveInterval=30 crsuse2-m2m-321 "docker exec -i '${{ env.UT_CONTAINER }}' bash -s" <<'IN' || true
-          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true
-          IN
+          # so it never leaks into later runs that reuse the container.
+          docker exec "${UT_CONTAINER}" bash -lc 'SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth" || true' 2>/dev/null || true
 
   run-unittest-jax:
     permissions:
