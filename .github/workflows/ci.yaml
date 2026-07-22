@@ -352,6 +352,30 @@ jobs:
         run: |
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
+      - name: Build and install Triton
+        run: |
+          # Build Triton from source pinned to the same commit as the CI Docker
+          # image (.github/workflows/docker/Dockerfile) so the runner's Triton
+          # matches the image build. Skip the (slow) rebuild when this exact pin
+          # is already installed, tracked via a per-commit marker on the
+          # persistent runner (PRIMUS_WORKDIR).
+          TRITON_PIN=09500db9
+          MARKER="${PRIMUS_WORKDIR}/.triton_build_${TRITON_PIN}.done"
+          if [ -f "$MARKER" ] && python3 -c "import triton" 2>/dev/null; then
+            echo "✅ Triton (pin ${TRITON_PIN}) already installed; skipping build."
+          else
+            echo "🔧 Building Triton (pin ${TRITON_PIN})..."
+            rm -rf /tmp/triton
+            cd /tmp && \
+              git clone https://github.com/triton-lang/triton.git && \
+              cd triton && \
+              git checkout ${TRITON_PIN} && \
+              pip3 install -r python/requirements.txt && \
+              MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
+            mkdir -p "${PRIMUS_WORKDIR}"
+            touch "$MARKER"
+            echo "✅ Triton build complete; marker: $MARKER"
+          fi
       - name: Run Primus Core Tests
         run: |
           echo "Running Primus Core tests..."
