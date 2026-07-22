@@ -75,7 +75,8 @@ jobs:
     # Skip on Draft PRs (keep code-lint ungated); the event_name guard preserves
     # push/tag and workflow_dispatch runs where github.event.pull_request is absent.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: build-docker
+    # runs-on: build-docker
+    runs-on: build-docker-crusoe
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -138,7 +139,8 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
@@ -179,7 +181,8 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
@@ -205,13 +208,15 @@ jobs:
       contents: read
       actions: read # let "Write runtime summary" list this job's own steps for auto-discovered timing
     env:
-      PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
+      PRIMUS_WORKDIR: /shared_nfs/tas/primus_github_runner/primus-lm-cicd/actions-runner
+      # PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
+    # runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
+    runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Clean stale Primus-Turbo checkout
@@ -416,7 +421,8 @@ jobs:
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
-          MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          # MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          MASTER_PORT=10009 DATA_PATH=/shared_nfs/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           GPU_ARCHS=gfx942 \
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
@@ -429,7 +435,8 @@ jobs:
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
-          MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          # MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
+          MASTER_PORT=10009 DATA_PATH=/shared_nfs/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
       - name: Run Primus CLI tool smoke (benchmark / preflight, E2E coverage)
