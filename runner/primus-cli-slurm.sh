@@ -294,8 +294,54 @@ fi
 ENTRY="$RUNNER_DIR/primus-cli-slurm-entry.sh"
 require_file "$ENTRY" "[slurm] Entry script not found: $ENTRY"
 
-# Build full command
-CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}" -- "$@")
+# Build full command.
+#
+# Scheduler-flavor handling for the sbatch path:
+#   - Standard Slurm `sbatch` accepts `script [args...]` (and runs the script on
+#     node 0 only), so we can pass the entry + args directly, as before.
+#   - Spur's `sbatch` reimplementation accepts ONLY one positional (the script):
+#     it rejects args passed to the batch script, has no --wrap, and runs the
+#     script on EVERY allocated node. So we can't use `sbatch ENTRY <args>` there
+#     (it fails with "unexpected argument '--image'"). Instead we emit a
+#     self-contained script that bakes in the entry + all args and runs the
+#     per-node entry directly (no inner srun -- that would nest job steps); QOS /
+#     partition / account are passed as sbatch options (which spur does accept).
+# Spur is detected by the presence of the `spur` command. srun is unchanged on
+# both flavors (its COMMAND accepts args and fans out per task).
+IS_SPUR=false
+command -v spur >/dev/null 2>&1 && IS_SPUR=true
+
+# Emit a self-contained batch-script body: `bash ENTRY <entry-args> -- <primus-args>`
+# with every token safely quoted so it re-runs verbatim inside the batch job.
+_emit_spur_batch_script() {
+    # "$@" here are the Primus args (everything after the first '--').
+    printf '#!/bin/bash\n'
+    printf 'set -euo pipefail\n'
+    printf 'exec bash %q' "$ENTRY"
+    local _a
+    for _a in "${ENTRY_ARGS[@]}"; do printf ' %q' "$_a"; done
+    printf ' --'
+    for _a in "$@"; do printf ' %q' "$_a"; done
+    printf '\n'
+}
+
+JOB_SCRIPT=""
+if [[ "$LAUNCH_CMD" == "sbatch" && "$IS_SPUR" == "true" ]]; then
+    if [[ "$DRY_RUN_MODE" == "true" ]]; then
+        LOG_INFO "[slurm] Spur detected: sbatch would submit this self-contained per-node script:"
+        _emit_spur_batch_script "$@" | sed 's/^/[slurm]   | /' >&2
+        LOG_INFO "[slurm] [DRY RUN] Would execute: $LAUNCH_CMD ${SLURM_FLAGS[*]} <generated-script>"
+        LOG_INFO "[slurm] Dry-run mode: command not executed"
+        exit 0
+    fi
+    JOB_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/primus-sbatch.XXXXXX.sh")"
+    _emit_spur_batch_script "$@" > "$JOB_SCRIPT"
+    chmod +x "$JOB_SCRIPT"
+    LOG_INFO "[slurm] Spur sbatch: submitting self-contained per-node script: $JOB_SCRIPT"
+    CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$JOB_SCRIPT")
+else
+    CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}" -- "$@")
+fi
 
 # Display command
 if [[ "$DRY_RUN_MODE" == "true" ]]; then
@@ -305,4 +351,16 @@ if [[ "$DRY_RUN_MODE" == "true" ]]; then
 fi
 
 LOG_INFO "[slurm] Executing: ${CMD[*]}"
-exec "${CMD[@]}"
+if [[ -n "$JOB_SCRIPT" ]]; then
+    # Don't exec here: run sbatch, then remove the temp script. Spur copies the
+    # script into its spool dir at submit time, so it is safe to delete once
+    # sbatch returns.
+    set +e
+    "${CMD[@]}"
+    _rc=$?
+    set -e
+    rm -f "$JOB_SCRIPT"
+    exit "$_rc"
+else
+    exec "${CMD[@]}"
+fi

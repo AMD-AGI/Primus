@@ -162,7 +162,7 @@ From `primus/configs/models/megatron/language_model.yaml`:
 |-----------|----------------|-------|
 | `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
 | `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
-| `recompute_num_layers` | integer | Layers to recompute when using selective/uniform strategies. |
+| `recompute_num_layers` | integer | Layers to recompute when using selective or uniform strategies. |
 | `recompute_layer_ids` | list or null | Primus extension: **global** layer indices from `0` to `num_layers - 1` (the patch resolves block-local indices to global ids via `layer_offset`). Use with `recompute_granularity: full` and supported recompute methods. |
 
 ### TorchTitan
@@ -195,7 +195,7 @@ From `trainer_base.yaml` and model settings:
 
 ### Environment
 
-`CUDA_DEVICE_MAX_CONNECTIONS=1` is commonly required for **correct** overlap behavior in TP/PP stacks (see `docs/03-configuration-reference/environment-variables.md` and Megatron tests). Primus launch scripts or your cluster setup may set this.
+`CUDA_DEVICE_MAX_CONNECTIONS=1` is commonly required for **correct** overlap behavior in TP/PP stacks (see `docs/03-configuration-reference/environment-variables.md` and Megatron tests). Primus launch scripts or your cluster setup might set this.
 
 ---
 

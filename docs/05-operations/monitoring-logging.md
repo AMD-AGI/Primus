@@ -1,6 +1,6 @@
 # Monitoring and logging
 
-This page summarizes how Primus configures application logging, experiment tracking (Weights and Biases, TensorBoard, MLflow), training metrics, profilers, ROCm memory probes, and how to capture a reproducible configuration snapshot.
+This page summarizes how Primus configures application logging, experiment tracking (Weights & Biases, TensorBoard, MLflow), training metrics, profilers, ROCm memory probes, and how to capture a reproducible configuration snapshot.
 
 ---
 
@@ -21,7 +21,7 @@ Primus uses **loguru** for structured logging. Initialization wires **file sinks
 | `file_sink_level` | `DEBUG` | Minimum level for file sinks when `sink_level` is unset. |
 | `stderr_sink_level` | `INFO` | Minimum level for stderr when `sink_level` is unset. |
 
-`init_worker_logger` in `primus/core/runtime/logging.py` reads `sink_level`, `file_sink_level`, and `stderr_sink_level` from the merged module config. The Megatron trainer maps `stderr_sink_level` to Megatron’s numeric `logging_level` (deprecated `logging_level` in `trainer_base.yaml` is replaced by this mapping).
+`init_worker_logger` in `primus/core/runtime/logging.py` reads `sink_level`, `file_sink_level`, and `stderr_sink_level` from the merged module config. The Megatron trainer maps `stderr_sink_level` to Megatron’s numeric `logging_level` (the `logging_level` field in `trainer_base.yaml` is deprecated; this mapping supersedes it)..
 
 **Shell / runner environment** (see `docs/03-configuration-reference/environment-variables.md`)
 
@@ -37,25 +37,29 @@ Primus uses **loguru** for structured logging. Initialization wires **file sinks
 
 ---
 
-## 2. Weights and biases
+## 2. Weights & Biases
 
-### Megatron (`primus/configs/modules/megatron/trainer_base.yaml`, `primus_megatron_module.yaml`)
+### Megatron
 
-Defaults in `primus_megatron_module.yaml` disable WandB; trainer fields in `trainer_base.yaml` supply names and paths when enabled.
+Configuration files: `primus/configs/modules/megatron/trainer_base.yaml` and `primus_megatron_module.yaml`.
+
+Defaults in `primus_megatron_module.yaml` disable Weights & Biases; trainer fields in `trainer_base.yaml` supply names and paths when enabled.
 
 | Parameter | Default (module / trainer) | Description |
 |-----------|----------------------------|-------------|
 | `disable_wandb` | `true` (`primus_megatron_module.yaml`) | Master switch; when `false`, Primus sets paths and default project/run names from experiment metadata. |
-| `wandb_project` | `null` | If unset when WandB is enabled, defaults to `{work_group}_{user_name}`. |
+| `wandb_project` | `null` | If unset when Weights & Biases is enabled, defaults to `{work_group}_{user_name}`. |
 | `wandb_exp_name` | `null` | If unset, defaults to `exp_name`. |
 | `wandb_entity` | `null` | Optional WandB entity/team. |
 | `wandb_save_dir` | `null` | Deprecated in favor of `{exp_root}`; artifacts use `{exp_root}/wandb`. |
 
 **Environment**
 
-- `WANDB_API_KEY` is **required** when WandB is enabled; Primus emits a warning if it is missing (`primus/backends/megatron/patches/args/wandb_config_patches.py`).
+- `WANDB_API_KEY` is **required** when Weights & Biases is enabled; Primus emits a warning if it is missing (`primus/backends/megatron/patches/args/wandb_config_patches.py`).
 
-### TorchTitan (`primus/configs/modules/torchtitan/pre_trainer.yaml`)
+### TorchTitan
+
+Configuration file: `primus/configs/modules/torchtitan/pre_trainer.yaml`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -69,13 +73,17 @@ When enabled, `primus/backends/torchtitan/patches/wandb_patches.py` can set `WAN
 
 ### Megatron
 
-**Module toggles** (`primus_megatron_module.yaml`)
+**Module toggles**
+
+Configuration file: `primus_megatron_module.yaml`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `disable_tensorboard` | `true` | When `false`, TensorBoard output is placed under `{exp_root}/tensorboard` (Primus overrides deprecated `tensorboard_dir` with this path). |
 
-**Trainer** (`trainer_base.yaml`)
+**Trainer**
+
+Configuration file: `trainer_base.yaml`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -92,7 +100,9 @@ When enabled, `primus/backends/torchtitan/patches/wandb_patches.py` can set `WAN
 
 **Note:** Enabling Megatron **profiling** (`profile: true`) forces `disable_tensorboard` off in `update_primus_config` so TensorBoard is available for profile-related views.
 
-### TorchTitan (`pre_trainer.yaml`)
+### TorchTitan
+
+Configuration file: `pre_trainer.yaml`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -113,7 +123,9 @@ Point `<path>` at the Megatron `tensorboard` directory under the experiment root
 
 MLflow integration is **Megatron-only** in the paths described here.
 
-**Module** (`primus_megatron_module.yaml`)
+**Module**
+
+Configuration file: `primus_megatron_module.yaml`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -121,7 +133,9 @@ MLflow integration is **Megatron-only** in the paths described here.
 | `mlflow_run_name` | `null` | If unset when enabled, defaults to `{work_group}_{user_name}`. |
 | `mlflow_experiment_name` | `null` | Passed to `mlflow.set_experiment` when set. |
 
-**Startup behavior** (`primus/backends/megatron/training/global_vars.py`)
+**Startup behavior**
+
+Configuration file: `primus/backends/megatron/training/global_vars.py`
 
 - Logs training `args` as parameters.
 - Logs filtered environment variables with an `env__` prefix.
@@ -139,7 +153,9 @@ MLflow integration is **Megatron-only** in the paths described here.
 
 ## 5. Training metrics
 
-### Megatron (`trainer_base.yaml`)
+### Megatron
+
+Configuration file: `trainer_base.yaml`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -153,7 +169,9 @@ MLflow integration is **Megatron-only** in the paths described here.
 | `timing_log_level` | `0` | Timing log verbosity. |
 | `timing_log_option` | `minmax` | Timing aggregation option. |
 
-### TorchTitan (`pre_trainer.yaml`)
+### TorchTitan
+
+Configuration file: `pre_trainer.yaml`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -165,7 +183,9 @@ MLflow integration is **Megatron-only** in the paths described here.
 
 ## 6. Profiling
 
-### Megatron (`trainer_base.yaml`, `primus_megatron_module.yaml`)
+### Megatron
+
+Configuration files: `trainer_base.yaml` and `primus_megatron_module.yaml`
 
 | Parameter | Source | Default | Description |
 |-----------|--------|---------|-------------|
@@ -181,7 +201,9 @@ MLflow integration is **Megatron-only** in the paths described here.
 | `torch_profiler_with_stack` | `primus_megatron_module.yaml` | `true` | Capture Python stacks. |
 | `torch_profiler_use_gzip` | `primus_megatron_module.yaml` | `false` | Gzip profiler traces. |
 
-### TorchTitan (`pre_trainer.yaml`)
+### TorchTitan
+
+Configuration file: `pre_trainer.yaml`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|

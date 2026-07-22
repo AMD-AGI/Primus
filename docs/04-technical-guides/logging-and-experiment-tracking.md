@@ -16,11 +16,11 @@ disable_wandb: true
 disable_mlflow: true
 ```
 
-Set the relevant `disable_*` to `false` to enable a tracker. Primus performs sanity checks at startup—e.g. it warns if WandB is enabled but `WANDB_API_KEY` is unset (`primus/backends/megatron/patches/args/wandb_config_patches.py`). MLflow logging is initialized in `primus/backends/megatron/training/global_vars.py`; Databricks-hosted MLflow additionally requires `DATABRICKS_HOST` (read by the `mlflow` client).
+Set the relevant `disable_*` to `false` to enable a tracker. Primus performs validation checks at startup—e.g. it warns if WandB is enabled but `WANDB_API_KEY` is unset (`primus/backends/megatron/patches/args/wandb_config_patches.py`). MLflow logging is initialized in `primus/backends/megatron/training/global_vars.py`; Databricks-hosted MLflow additionally requires `DATABRICKS_HOST` (read by the `mlflow` client).
 
 ---
 
-## 2. Console / step logging (Megatron)
+## 2. Console and step logging (Megatron)
 
 Core logging cadence and content (`trainer_base.yaml`, overridden by `pre_trainer.yaml`):
 
@@ -78,7 +78,7 @@ export WANDB_RUN_NAME=...    # optional
 export WANDB_TEAM=...        # optional (entity)
 ```
 
-`WANDB_API_KEY` is on the container passthrough whitelist (`runner/.primus.yaml`), so it propagates into the training container.
+`WANDB_API_KEY` is on the container passthrough allowlist (`runner/.primus.yaml`), so it propagates into the training container.
 
 ---
 
@@ -95,7 +95,7 @@ Enable with `disable_mlflow: false`. Run identification and upload behavior:
 | `mlflow_upload_performance_metrics` | `false` | Upload the comprehensive perf/memory/utilization metric set (implicitly enables throughput calc). |
 | `mlflow_upload_tracelens_report` | `false` | Generate + upload TraceLens reports (see [Profiling & observability](./profiling-and-observability.md)). |
 
-**Credentials / endpoints:**
+**Credentials and endpoints:**
 
 ```bash
 export MLFLOW_TRACKING_URI=...     # tracking server URI
@@ -151,7 +151,7 @@ MaxText logging cadence is controlled by `log_period` (`primus/configs/modules/m
 1. **Local-only:** enable TensorBoard (`disable_tensorboard: false`, set `tensorboard_dir`)—no credentials required.
 2. **Team tracking:** enable WandB (`disable_wandb: false`) + export `WANDB_API_KEY` and `wandb_project`/`wandb_entity`.
 3. **Enterprise / scaling studies:** enable MLflow (`disable_mlflow: false`) + `MLFLOW_TRACKING_URI` (or Databricks host/token), and turn on `mlflow_upload_performance_metrics` for throughput/memory/utilization dashboards.
-4. **Keep `WANDB_API_KEY` and tokens out of YAML**—pass them as environment variables (whitelisted for container passthrough). See [Security](../05-operations/security.md).
+4. **Keep `WANDB_API_KEY` and tokens out of YAML**—pass them as environment variables (allowlisted for container passthrough). See [Security](../05-operations/security.md).
 
 ---
 

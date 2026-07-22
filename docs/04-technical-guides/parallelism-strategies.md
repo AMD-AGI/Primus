@@ -10,7 +10,7 @@ For Megatron YAML flags and environment tuning, see [Megatron parameters](../03-
 
 ### Why parallelism is needed
 
-Modern foundation models often exceed the memory of a single accelerator: parameters, activations, optimizer states, and KV caches cannot all reside on one device at useful batch sizes. Even when a model *fits*, training throughput may be too low without scaling across many GPUs. Parallelism splits the problem along several independent **dimensions** so that:
+Modern foundation models often exceed the memory of a single GPU: parameters, activations, optimizer states, and KV caches cannot all reside on one device at useful batch sizes. Even when a model *fits*, training throughput might be too low without scaling across many GPUs. Parallelism splits the problem along several independent **dimensions** so that:
 
 - **Memory** is shared across devices (sharding, pipeline stages, sequence splits).
 - **Compute** is scaled by processing more data in parallel or by overlapping communication with computation.
@@ -21,7 +21,7 @@ Modern foundation models often exceed the memory of a single accelerator: parame
 |-----------|----------------|--------------|
 | **Data parallelism (DP)** | Input batches | Throughput; same model on each GPU |
 | **FSDP / ZeRO** | Parameters, gradients, optimizer (by stage) | Memory; keep DP semantics |
-| **Tensor parallelism (TP)** | Individual weight matrices / matmuls | Memory per layer; needs fast links |
+| **Tensor parallelism (TP)** | Individual weight matrices and matmuls | Memory per layer; needs fast links |
 | **Sequence parallelism (SP)** | Sequence in non-TP regions | Activation memory with TP |
 | **Pipeline parallelism (PP)** | Layer groups across stages | Memory; depth-wise split |
 | **Context parallelism (CP)** | Sequence for attention (e.g. ring) | Very long contexts |
@@ -170,7 +170,7 @@ Typical **transformer block** pattern: **column-parallel** for the first project
 **Interaction with TP**
 
 - After a **column-parallel** region, partial activations can be **ReduceScatter**d along the sequence.
-- Before a **row-parallel** region, activations may be **AllGather**d along the sequence.
+- Before a **row-parallel** region, activations might be **AllGather**d along the sequence.
 
 So SP trades **extra collectives** for **lower per-rank activation footprint** on long sequences.
 
@@ -203,7 +203,7 @@ If a stage waits for input while other stages compute, **idle time** appears (**
 |----------|------|
 | **1F1B** | One forward, one backward; classic **warmup / steady / cooldown** phases |
 | **1F1B interleaved (VPP)** | **Virtual pipeline** stages: multiple chunks per device to improve utilization |
-| **Zero-bubble (ZB)** | Reorders / splits backward so **forward and backward** hide each other better; may separate **input-gradient** vs **weight-gradient** phases |
+| **Zero-bubble (ZB)** | Reorders / splits backward so **forward and backward** hide each other better; might separate **input-gradient** vs **weight-gradient** phases |
 | **V-Schedule / V-Half / V-Min** | Variants reducing bubbles further (names vary by codebase) |
 | **DualPipe** | Bidirectional pipeline scheduling (e.g. DeepSeek-style) to overlap forward/backward paths |
 
