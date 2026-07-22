@@ -736,7 +736,7 @@ srun ... runner/primus-cli direct -- preflight --perf-test \
 
 ---
 
-## 9. Automated node bisection (finding the bad node in an NCCL hang)
+## 9. Automated node bisection (finding the bad node in a NCCL hang)
 
 When a cluster-wide preflight run hangs or fails, use
 [`tools/preflight_bisect/bisect.py`](../../tools/preflight_bisect/bisect.py) to
@@ -760,8 +760,11 @@ mkdir -p output
 python tools/preflight_bisect/bisect.py \
     --nodelist "$SLURM_NODELIST" \
     --output-dir "output/bisect-$(date +%Y%m%d-%H%M%S)" \
-    --trial-timeout-sec 600 \
-    --slurm-time 00:15:00 \
+    --all-reduce-inter --comm-sizes-mb 64,256 \
+    --pin-suspects --confirm-rest \
+    --trial-timeout-sec 120 \
+    --slurm-time 00:03:00 \
+    --max-concurrent-trials 1 \
     --preflight-env USING_AINIC=1 \
     --preflight-env NCCL_IB_GID_INDEX=1 \
     --preflight-env NCCL_CROSS_NIC=1 \
@@ -772,14 +775,76 @@ python tools/preflight_bisect/bisect.py \
 Adjust the `--preflight-env` lines to match your cluster. Per-trial logs and a
 final `summary.txt` are written under `--output-dir`.
 
+This example restricts every trial to just the inter-node NCCL all-reduce
+(`--all-reduce-inter`) to diagnose NCCL hangs — other node-level failures should
+already have been caught earlier by the smoke test. It then localizes the result
+(`--pin-suspects --confirm-rest`); see the subsections below for what each flag
+does. The full default perf suite runs if you omit `--all-reduce-inter`.
+
 > Note: Set `--trial-timeout-sec` high enough for a healthy subset to finish.
 > Too small a timeout can turn slow-but-good trials into false failures, causing
 > the bisection to explore extra paths.
+>
+> Note: Keep `--slurm-time` above `--trial-timeout-sec` plus scheduling headroom
+> (here 120s vs 180s). For large cluster settings the short trial times may be too aggressive and can be increased.
+> The Python timeout is the real one — it SIGKILLs the trial,
+> cleans up, and marks it `HANG`; `--slurm-time` is only an outer backstop.
+>
+> Note: `--max-concurrent-trials 1` forces sequential trials (default is 2).
 >
 > Note: `--preflight-env KEY=VALUE` values are concatenated into a single
 > `srun --export=ALL,...` argument, so values must not contain commas or
 > whitespace. Keep comma-containing values as normal exported environment
 > variables.
+
+### Post-bisection verification
+- `--pin-suspects` will rerun the failing subset to check reproducible fault, then pairs each suspect with a
+  known-good node to further search for a culprit; if none fails
+  alone the pair is flagged as an edge fault.
+- `--confirm-rest` will run a the preflight once more over all nodes minus the culprits.
+ This is to confirm there is no additional faults and the rest of the nodes are healthy.
+
+### Sample generated summary
+`summary.txt` lists every trial (index, node count, PASS/FAIL/HANG, phase,
+duration, nodes). We induce a NCCL hang by mislabeling `NCCL_IB_HCA` in `tus1-p3-g47` 
+
+```
+2026-07-21T07:32:59.048058+00:00 bisect nodes=8
+[000] N= 8 HANG bisect        184.9s nodes=tus1-p3-g[32-33,46-47,54-55,57,59]
+[001] N= 4 PASS bisect         30.7s nodes=tus1-p3-g[32-33,54-55] # short trial times and timeouts
+[002] N= 4 FAIL bisect         20.4s nodes=tus1-p3-g[46-47,57,59]
+[003] N= 2 FAIL bisect         20.1s nodes=tus1-p3-g[46-47]
+[004] N= 1 PASS bisect         21.2s nodes=tus1-p3-g46
+[005] N= 1 PASS bisect         20.8s nodes=tus1-p3-g47
+[006] N= 2 PASS bisect         30.0s nodes=tus1-p3-g[57,59]
+[007] N= 2 FAIL pin            19.3s nodes=tus1-p3-g[46-47] # post-bisection verification stage
+[008] N= 2 PASS pin            30.9s nodes=tus1-p3-g[32,46]
+[009] N= 2 FAIL pin            20.6s nodes=tus1-p3-g[32,47]
+[010] N= 7 PASS confirm-rest   37.2s nodes=tus1-p3-g[32-33,46,54-55,57,59] # confirm-rest
+
+SUSPECT_NODES: tus1-p3-g46 tus1-p3-g47
+PIN: CULPRIT_NODES: tus1-p3-g47
+CONFIRM_REST: coverage over tus1-p3-g[32-33,46,54-55,57,59] -> PASS
+FAULT: tus1-p3-g47
+```
+
+
+### Container mode (optional)
+
+`--container` routes each trial through
+`runner/primus-cli-slurm-entry.sh container` for an in-container RoCE run instead
+of the venv `direct` path (which stays the default). It needs three settings, via
+env vars or flags:
+
+```bash
+export BISECT_CONTAINER_NAME=primus-training
+export BISECT_IMAGE=rocm/megatron-lm:v25.8_py310
+export BISECT_BNXT_TAR=/path/to/libbnxt_re-<ver>.tar.gz
+python tools/preflight_bisect/bisect.py --nodelist "$SLURM_NODELIST" \
+    --container --all-reduce-inter --output-dir output/bisect-container
+```
+
+In container mode `VENV_ACTIVATE` is not required.
 
 ---
 
