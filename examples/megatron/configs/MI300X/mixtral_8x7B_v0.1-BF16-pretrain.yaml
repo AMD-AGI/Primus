@@ -77,7 +77,7 @@ modules:
 
 
       # deepep
-      use_turbo_deepep: false
+      use_turbo_deepep: true
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
