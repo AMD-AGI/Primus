@@ -283,7 +283,7 @@ jobs:
           docker exec "${UT_CONTAINER}" bash -lc 'python3 --version; python3 -c "import triton; print('\''triton'\'', triton.__version__)" 2>/dev/null || true'
       - name: Install Primus
         run: |
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           pip install -r requirements.txt
           IN
@@ -293,7 +293,7 @@ jobs:
       # just removes any stale torchtitan in the image that would shadow it.
       - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
         run: |
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           pip uninstall -y torchtitan || true
           python - <<'PY'
@@ -334,7 +334,7 @@ jobs:
           fi
       - name: Run CLI Shell Tests
         run: |
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
@@ -345,7 +345,7 @@ jobs:
           # Note: `test_limit_layers_moe_with_dense_keeps_two` is temporarily disabled pending a fix to
           #       `_limit_layers_for_projection` dense-layer handling (num_layers collapses to 1 instead of 2).
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
-          docker exec \
+          docker exec -i \
             -e GITHUB_WORKSPACE -e HSA_NO_SCRATCH_RECLAIM=1 \
             -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
@@ -364,7 +364,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
           # Keep the unit data for the final unit-vs-E2E comparison table
           # (.coverage.unit is fed to `coverage combine` after the E2E steps).
@@ -381,7 +381,7 @@ jobs:
           # points it at the rc and COVERAGE_FILE keeps E2E data separate from unit.
           # parallel=true -> one data file per rank; sigterm=true captures ranks
           # killed on teardown. These env vars are passed to the E2E steps via -e.
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
@@ -395,7 +395,7 @@ jobs:
           # diff failure). On PRs, narrow to the suites the changed files affect.
           # Computed inside the container (git + select_tests.py), result read back
           # on the runner to export RUN_*_E2E for the (host-side) skip guards.
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           M=1; T=1
           git config --global --add safe.directory "${GITHUB_WORKSPACE}" 2>/dev/null || true
@@ -422,7 +422,7 @@ jobs:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
-          docker exec \
+          docker exec -i \
             -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
             -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
             -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
@@ -440,7 +440,7 @@ jobs:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
-          docker exec \
+          docker exec -i \
             -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
             -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
             -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
@@ -460,7 +460,7 @@ jobs:
           # Best-effort CLI smoke so primus/tools (GEMM / attention / RCCL
           # benches + preflight probes) is exercised under the inherited E2E
           # coverage injection. Never fails CI: coverage is kept up to any exit.
-          docker exec \
+          docker exec -i \
             -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HSA_NO_SCRATCH_RECLAIM=1 \
             -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
             -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
@@ -502,7 +502,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          docker exec -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
+          docker exec -i -e GITHUB_WORKSPACE -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
           # Don't instrument coverage's own helper processes here.
           unset COVERAGE_PROCESS_START
