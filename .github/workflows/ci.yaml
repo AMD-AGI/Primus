@@ -156,47 +156,47 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
-          start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
-               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
-               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
-               --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
-               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
-               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
-               --build-arg TRITON_COMMIT=${TRITON_COMMIT} .
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
+          # start_time=$(date +%s)
+          # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+          #      --network=host \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
+          #      --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+          #      --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+          #      --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
+          #      --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
+          #      --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
+          #      --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
+          #      --build-arg TRITON_COMMIT=${TRITON_COMMIT} .
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
 
-          echo "> Docker tag image for Docker Hub"
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # echo "> Docker tag image for Docker Hub"
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
+          # docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
+          # # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
-          start_time=$(date +%s)
-          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
-               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
-               --build-arg AINIC_BUNDLE_PATH=ainic \
-               $GITHUB_WORKSPACE/.github/workflows/docker
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: ${elapsed} seconds"
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
+          # start_time=$(date +%s)
+          # mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          # # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
+          #      --network=host \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
+          #      --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+          #      --build-arg AINIC_BUNDLE_PATH=ainic \
+          #      $GITHUB_WORKSPACE/.github/workflows/docker
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: ${elapsed} seconds"
 
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
-          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          # docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          # # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
@@ -426,9 +426,14 @@ jobs:
             -e GITHUB_WORKSPACE -e UT_LOG_PATH -e HF_TOKEN \
             -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
             -e MASTER_PORT=10009 -e DATA_PATH=/shared_nfs/tas/0_public/data \
-            -e HSA_NO_SCRATCH_RECLAIM=1 -e GPU_ARCHS=gfx942 \
+            -e HSA_NO_SCRATCH_RECLAIM=1 \
             -w "${GITHUB_WORKSPACE}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
+          # Detect the real GPU arch (gfx950 on MI355X, gfx942 on MI300X, ...) so the
+          # aiter/turbo JIT kernels are built for the actual hardware. Hardcoding the
+          # wrong arch (e.g. gfx942 on an MI355X node) makes those kernels SIGSEGV.
+          export GPU_ARCHS="$(python3 -c 'import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(":")[0])' 2>/dev/null || echo gfx942)"
+          echo "Detected GPU_ARCHS=${GPU_ARCHS}"
           echo "Set UT_LOG_PATH: ${UT_LOG_PATH}"
           rm -rf "${UT_LOG_PATH}"
           mkdir -p "${UT_LOG_PATH}"
