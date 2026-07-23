@@ -1,0 +1,36 @@
+# NeMo AutoModel model preset: Ideogram-4 (single-stream rectified-flow T2I DiT,
+# ~9.3B at the default 34-layer config; Primus backend: nemo_automodel).
+#
+# Merged (as the `model:` block) into the nemo_automodel ideogram4_pre_trainer
+# module config by the Primus launcher. `mode: pretrain` builds ONE randomly-
+# initialised Ideogram4Transformer2DModel from the local diffusers
+# `transformer/config.json` (no weights loaded) — the same from-scratch pretrain
+# path Wan2.2 / FLUX use.
+#
+# NO gated weights are required: the from_config path only needs the transformer
+# CONFIG. Generate a weightless config dir once (meta device, no 9.3B alloc):
+#   OUT=/workspace/ideogram4_config \
+#   python .../ttt_l2_02_IDEOGRAM/scripts/make_ideogram_config_dir.py
+# then point `pretrained_model_name_or_path` at it (default below).
+#
+# The Flux-2 VAE + Qwen3-VL encoder are NOT loaded at train time: the dataloader
+# provides pre-encoded image latents [B,128,H_p,W_p] + Qwen3-VL features
+# [B,·,53248] (synthetic here; real preprocessor cache in Phase B.3), so only the
+# transformer lives on-GPU.
+model:
+  # Local weightless Ideogram-4 diffusers config dir (random init in pretrain mode).
+  pretrained_model_name_or_path: /workspace/ideogram4_config
+  mode: pretrain
+  # Explicit model family (used by the recipe only for PEFT/cache paths; unused here).
+  model_type: ideogram4
+  # NOTE: attention_backend intentionally unset -> the recipe skips
+  # set_attention_backend, so the model keeps its default dispatch (torch SDPA),
+  # which honours the Ideogram block-diagonal segment mask. This is the path
+  # validated in Phase A/B. Set a backend here only once mask support is confirmed.
+  # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: Ideogram4Transformer2DModel
+    subfolder: transformer
+    load_full_pipeline: false
