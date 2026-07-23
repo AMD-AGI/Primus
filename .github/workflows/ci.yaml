@@ -574,11 +574,13 @@ jobs:
         run: |
           # The container steps run as ROOT and write root-owned files into the
           # mounted GITHUB_WORKSPACE (__pycache__, .pytest_cache/, .hypothesis/,
-          # logs/, test-reports/, ut_out/, .coverage*). The next run's
-          # actions/checkout runs as the runner user and cannot delete those, so
-          # it fails at "Deleting the contents of ...".
-          # Remove them here AS ROOT (via the container) so the workspace is left
-          # clean for the next checkout. Artifacts have already been uploaded by the
+          # logs/, test-reports/, ut_out/, .coverage*, plus E2E-generated dirs like
+          # data/, output/, pp_simulation_result/). The next run's actions/checkout
+          # runs as the runner user and cannot delete those, so it fails at
+          # "Deleting the contents of ..." (e.g. EACCES on data/huggingface).
+          # Remove the well-known artifacts here AS ROOT (via the container), then
+          # chown whatever root-owned files remain back to the runner user so the
+          # next checkout can clean them. Artifacts have already been uploaded by the
           # preceding upload steps. The container is left running for reuse.
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" "${UT_CONTAINER}" bash -s <<'IN' || true
           set +e
@@ -590,6 +592,12 @@ jobs:
           find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
           # Coverage subprocess-injection .pth in site-packages.
           SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) && rm -f "$SP/primus_e2e_coverage.pth"
+          # Safety net: hand any remaining root-owned files (E2E-generated data/,
+          # output/, pp_simulation_result/, .git internals, ...) back to the runner
+          # user so the next actions/checkout can delete them instead of hitting
+          # EACCES. Owner is taken from GITHUB_WORKSPACE itself (the runner user).
+          owner="$(stat -c '%u:%g' "${GITHUB_WORKSPACE}" 2>/dev/null)"
+          [ -n "$owner" ] && find "${GITHUB_WORKSPACE}" -user 0 -exec chown "$owner" {} + 2>/dev/null
           IN
 
   run-unittest-jax:
