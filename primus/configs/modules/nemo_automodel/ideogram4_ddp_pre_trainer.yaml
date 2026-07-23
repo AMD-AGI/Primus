@@ -1,0 +1,117 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 single-stream T2I
+# pretrain, DDP + ZeRO-1 variant (Primus backend: nemo_automodel).
+#
+# Identical to ideogram4_pre_trainer.yaml EXCEPT the `fsdp:` block is replaced by
+# a `ddp:` block, so the diffusion recipe takes the DistributedDataParallel path
+# (params + grads REPLICATED, no per-layer all-gather). Pair it with
+# PRIMUS_IDEOGRAM_ZERO1=1 (no-fork hook, ideogram_zero1.py) to:
+#   - shard the AdamW optimizer state across DP ranks (ZeRO-1), recovering the
+#     memory pure DDP would waste on a replicated optimizer, and
+#   - whole-block checkpoint-wrap the Ideogram layers on the DDP path (the generic
+#     sub-module AC is a no-op for Ideogram blocks; without this it OOMs).
+#
+# CAVEAT (see 10_PHASE_C_PROFILE.md §3d): torch.compile is wired ONLY on the FSDP2
+# path, and single-node exposed comm is 0.7-3 %, so this DDP path (no compile)
+# trails FSDP2+compile on ONE node. It is the multi-node lever / reference point.
+#
+# Launch (inside the container, 8 GPUs free):
+#   PYTHONPATH=<primus>:<primus>/third_party/Automodel \
+#   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PRIMUS_IDEOGRAM_REAL_AC=1 \
+#   PRIMUS_IDEOGRAM_VARLEN_ATTN=1 PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 \
+#   PRIMUS_IDEOGRAM_ZERO1=1 \
+#   torchrun --nproc_per_node=8 --nnodes=1 --master_port=29534 \
+#     primus/cli/main.py train pretrain \
+#     --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain-ddp.yaml
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_every: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.ideogram_synthetic_data.SyntheticIdeogram4DataloaderConfig
+    num_samples: 64
+    in_channels: 128
+    grid_h: 16
+    grid_w: 16
+    max_text_tokens: 32
+    min_text_tokens: 28
+    llm_features_dim: 53248
+    feature_scale: 0.1
+    latent_scale: 1.0
+    seed: 1234
+    shuffle: true
+    drop_last: false
+    num_workers: 0
+    pin_memory: true
+
+optim:
+  learning_rate: 1e-4
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    # ZeRO-1 shards these local AdamW states across ranks. fused AdamW is fine
+    # (the per-rank local optimizer runs over its shard of regular tensors).
+    foreach: false
+    fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+# DDP path (replaces the fsdp: block). activation_checkpointing here is honored by
+# the no-fork ideogram_zero1 DDP-AC patch (whole-block wrap) when PRIMUS_IDEOGRAM_ZERO1=1.
+ddp:
+  activation_checkpointing: true
+  gradient_as_bucket_view: true
+  broadcast_buffers: false
+  find_unused_parameters: false
+  static_graph: false
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: /checkpoints/ideogram4_primus_pretrain_ddp
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

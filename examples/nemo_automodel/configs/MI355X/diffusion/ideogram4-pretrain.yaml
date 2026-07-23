@@ -1,0 +1,59 @@
+# Primus EXP — Ideogram-4 single-stream T2I PRETRAIN (from scratch, random init).
+# =============================================================================
+# Config-only Ideogram-4 integration: runs through the exact same Primus
+# nemo_automodel path as Wan2.2 / FLUX. The Ideogram-specific pieces are all
+# no-fork Primus hooks (installed by NemoAutomodelPretrainTrainer):
+#   - flow_matching.adapter_type: ideogram4  -> Ideogram4Adapter
+#     (primus/backends/nemo_automodel/ideogram4_adapter.py)
+#   - data.dataloader -> SyntheticIdeogram4DataloaderConfig
+#     (primus/backends/nemo_automodel/ideogram_synthetic_data.py)
+#   - fsdp.activation_checkpointing + PRIMUS_IDEOGRAM_REAL_AC=1 -> real AC
+#     (primus/backends/nemo_automodel/ideogram_ac.py)
+# The model builds from a weightless local config dir (no gated weights).
+#
+# One-time setup (inside the Primus container, e.g. ttt_ideogram on 089):
+#   OUT=/workspace/ideogram4_config \
+#   python .../ttt_l2_02_IDEOGRAM/scripts/make_ideogram_config_dir.py
+#
+# Launch (inside the container, 8 GPUs free) — the wrapper script does this:
+#   PYTHONPATH=<primus>:<primus>/third_party/Automodel \
+#   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PRIMUS_IDEOGRAM_REAL_AC=1 \
+#   torchrun --nproc_per_node=8 --nnodes=1 --master_port=29533 \
+#     primus/cli/main.py train pretrain \
+#     --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain.yaml
+# (or: bash .../ttt_l2_02_IDEOGRAM/scripts/phase_b5_run.sh)
+#
+# This is a from-config OVERFIT smoke on a fixed synthetic cache: the goal is a
+# clearly decreasing loss on 8-GPU FSDP2 bf16 with real activation checkpointing,
+# not convergence. Remove step_scheduler.max_steps / swap the dataloader for the
+# real preprocessor cache (Phase B.3) for a real pretrain run.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 60            # overfit-smoke cap; remove for a real pretrain run
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x dp8 (grad_acc = 1)
+        log_every: 1
+      optim:
+        learning_rate: 1.0e-4
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: false
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          max_text_tokens: 32
+      checkpoint:
+        enabled: false           # set true + checkpoint_dir for a real run
