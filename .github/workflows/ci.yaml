@@ -568,16 +568,17 @@ jobs:
         if: always()
         run: |
           # The container steps run as ROOT and write root-owned files into the
-          # mounted GITHUB_WORKSPACE (__pycache__, logs/, test-reports/, ut_out/,
-          # .coverage*). The next run's actions/checkout runs as the runner user and
-          # cannot delete those, so it fails at "Deleting the contents of ...".
+          # mounted GITHUB_WORKSPACE (__pycache__, .pytest_cache/, .hypothesis/,
+          # logs/, test-reports/, ut_out/, .coverage*). The next run's
+          # actions/checkout runs as the runner user and cannot delete those, so
+          # it fails at "Deleting the contents of ...".
           # Remove them here AS ROOT (via the container) so the workspace is left
           # clean for the next checkout. Artifacts have already been uploaded by the
           # preceding upload steps. The container is left running for reuse.
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" "${UT_CONTAINER}" bash -s <<'IN' || true
           set +e
           cd "${GITHUB_WORKSPACE}" || exit 0
-          rm -rf logs test-reports ut_out \
+          rm -rf logs test-reports ut_out .pytest_cache .hypothesis \
                  .coverage .coverage.* .coverage_e2e* .coverage.unit .coverage_all \
                  .coveragerc_e2e .e2e_scope coverage_unit.json coverage_combined.json
           # Bytecode caches written during the run (root-owned; block checkout clean).
