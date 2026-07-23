@@ -100,10 +100,8 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /opt/uccl; \
     fi
 
-# This base image ships no origami, so primus_turbo falls back to heuristic
-# kernel selection instead of origami's tuned rank_configs() for MoE
-# grouped-gemm (benchmarked: no measurable gain on gfx942). If needed, install
-# it the same way CI used to, e.g.:
+# No origami in this image; primus_turbo falls back to heuristic kernel
+# selection for MoE grouped-gemm. To add it back:
 #   pip install "git+https://github.com/ROCm/rocm-libraries.git@223648a26928ebed7f3dd0ccdc044c09f1dccf9b#subdirectory=shared/origami/python"
 
 # Set the default working directory

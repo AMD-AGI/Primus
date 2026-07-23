@@ -7,31 +7,18 @@
 """
 hd128 backward crash fix via scoped RTLD_DEEPBIND (ROCm/aiter#1332).
 
-Affects gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X).
+On gfx942/gfx950, rocm/primus:v26.3's transformer_engine bundles a stale vendored
+``libmha_bwd.so`` that shadows the global symbol ``aiter::mha_bwd`` over the pinned
+aiter build, crashing Turbo's hd128 backward. A global fix would break TE (it needs
+the stale symbol), so isolation is scoped: wrap ``importlib.import_module`` and OR in
+``RTLD_DEEPBIND`` only for the pinned aiter mha modules, installed via the
+``before_train`` patch below.
 
-rocm/primus:v26.3's transformer_engine bundles a STALE vendored ``libmha_bwd.so``
-(old aiter f299f579) that, via ``libck_fused_attn.so``'s DT_NEEDED, interposes the
-global symbol ``aiter::mha_bwd`` over the freshly pinned aiter (b5e03ed1) -> Turbo's
-hd128 backward mis-selects the swa variant and launches with an invalid grid config
-(gridDim.x=0 on gfx942 / "invalid configuration argument" on gfx950) -> 8-rank crash.
-The ``mha_bwd_args`` ABI differs between the two aiter revisions, so a
-*global* fix (RTLD_GLOBAL preload / .so overwrite) repairs Turbo but breaks the TE
-path (TE's libck calls the stale libmha by the old ABI) -- isolation must be scoped.
+Self-detection: skipped once ``transformer_engine.__version__`` >= 2.14 (confirmed
+fixed in rocm/primus:v26.4). Older images still get the patch.
 
-Fix: wrap ``importlib.import_module`` (aiter loads its mha extensions through it,
-honouring ``sys.setdlopenflags()``) and OR in ``RTLD_DEEPBIND`` only for the pinned
-aiter mha modules (``module_fmha_v3_bwd`` / ``mha_bwd_bf16_*``), so they bind their
-own fresh ``aiter::mha_bwd`` while TE keeps the stale one. DEEPBIND is scoped to these
-few extensions, leaving torch/c10 untouched. Installed by the ``before_train`` patch
-below, gated on Turbo + affected arch (TE path never touched); ``before_train`` runs
-well before the first backward that JIT-imports these modules.
-
-Self-detection: skipped once ``transformer_engine.__version__`` >= 2.14, which renamed
-the vendored library and stopped exporting the colliding ``aiter::mha_bwd`` symbol --
-confirmed fixed in rocm/primus:v26.4. Older images (e.g. v26.3) still get the patch.
-
-TEMPORARY: delete this file (and its turbo/__init__.py entry) once every base image
-still in support ships a TE built against the updated aiter.
+TEMPORARY: delete this file (and its turbo/__init__.py entry) once every supported
+base image ships a TE built against the updated aiter.
 """
 
 import importlib

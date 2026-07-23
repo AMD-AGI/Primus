@@ -304,16 +304,18 @@ jobs:
           : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           IMG="docker.io/tasimage/primus:${{ env.IMAGE_TAG }}"
           echo "Target image: ${IMG}"
-          # Reuse the container only if it is already running on the same image;
-          # otherwise recreate it from the freshly pushed image.
-          cur_img="$(docker inspect -f '{{.Config.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          # Pull first, then compare image id (not tag name): IMAGE_TAG is
+          # constant ("latest") on main, so a tag-only check can't detect a
+          # same-tag repush and would keep reusing a stale container.
+          docker pull "${IMG}"
+          target_id="$(docker image inspect -f '{{.Id}}' "${IMG}" 2>/dev/null || true)"
+          cur_id="$(docker inspect -f '{{.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
           running="$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null || true)"
-          if [ "${running}" = "true" ] && [ "${cur_img}" = "${IMG}" ]; then
-            echo "Reusing container ${UT_CONTAINER} (already on ${IMG})."
+          if [ "${running}" = "true" ] && [ -n "${target_id}" ] && [ "${cur_id}" = "${target_id}" ]; then
+            echo "Reusing container ${UT_CONTAINER} (already on ${IMG}, id=${target_id})."
           else
-            echo "Recreating container ${UT_CONTAINER} (running=${running}, image=${cur_img})."
+            echo "Recreating container ${UT_CONTAINER} (running=${running}, cur_id=${cur_id}, target_id=${target_id})."
             docker rm -f "${UT_CONTAINER}" >/dev/null 2>&1 || true
-            docker pull "${IMG}"
             docker run -d --name "${UT_CONTAINER}" \
               --network host --ipc host --privileged \
               --group-add video \
@@ -333,11 +335,8 @@ jobs:
           set -e
           pip install -r requirements.txt
           IN
-      # This runner's image ships no origami, so primus_turbo falls back to
-      # heuristic kernel selection instead of origami's tuned rank_configs()
-      # for MoE grouped-gemm (benchmarked: no measurable gain on gfx942). If
-      # needed, install it the same way docker/Dockerfile documents, e.g.:
-      #   pip install "git+https://github.com/ROCm/rocm-libraries.git@223648a26928ebed7f3dd0ccdc044c09f1dccf9b#subdirectory=shared/origami/python"
+      # No origami in this image (see docker/Dockerfile); primus_turbo falls
+      # back to heuristic kernel selection for MoE grouped-gemm.
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
