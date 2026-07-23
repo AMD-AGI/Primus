@@ -1,0 +1,86 @@
+bases:
+  - mamba_base.yaml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERIMENT-ONLY config (not a production model).
+#
+# Purpose: prove WHY zebra_llama_300M_mamba_hybrid.yaml shows a ~+10% loss
+# offset vs FLA's `mamba2_300M_hybrid.json` reference.  This config is a
+# *byte-for-byte architectural replica* of FLA's reference, so if its loss
+# lands on FLA's curve (within the ~1-2% no-FLA-init band we already see on the
+# GDN hybrid) then the offset is 100% an architecture/hyperparameter mismatch,
+# NOT a Primus/Megatron bug.
+#
+# Differences vs the production zebra_llama_300M_mamba_hybrid.yaml (which was
+# deliberately sized to match the *GDN* hybrid 300M, not FLA's mamba2):
+#
+#   param              production (GDN-matched)   THIS (FLA-exact)   FLA ref
+#   hidden_size        1024                       1216               1216
+#   ffn_hidden_size    4096                       4864               4864
+#   mamba_state_dim    64                         128                128
+#   mamba_num_groups   8                          1                  1
+#   norm_epsilon       1e-6                       1e-5               1e-5
+#   MLP placement      after EVERY mixer (12)     ONLY after MLA (3) only attn
+#   override pattern   *-M-M-M-... (24 sublyr)    *-MMM... (15 sublyr)
+#
+# The MLP-placement difference is the big one: FLA's Mamba2Block only attaches
+# a GatedMLP on attention layers (modeling_mamba2.py: `if self.is_attn_layer`),
+# i.e. the 9 pure-Mamba2 blocks have NO MLP (original Mamba design).  Our
+# production hybrid follows the transformer-style HybridStack convention and
+# adds an MLP after every mixer — which is why it is BIGGER (356.7M) than FLA's
+# reference (301.3M) yet trains to a different loss curve: it is simply a
+# different architecture.
+# ─────────────────────────────────────────────────────────────────────────────
+
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B
+
+# ── Model dimensions (match FLA mamba2_300M_hybrid.json) ──
+# 15 sublayers = 12 mixer blocks (3 MLA + 9 Mamba2) + 3 MLPs (one per MLA only).
+num_layers: 15
+hidden_size: 1216
+ffn_hidden_size: 4864
+
+# ── Hybrid pattern: MLP ONLY after the 3 attention (MLA) layers ──
+#   '*' = MLA attention, 'M' = Mamba2 mixer, '-' = MLP
+#   "*-MMM*-MMM*-MMM" → MLA(+MLP), Mamba×3, MLA(+MLP), Mamba×3, MLA(+MLP), Mamba×3
+# Mixer indices 0,4,8 are MLA (matches FLA attn.layers = [0, 4, 8]); the 9
+# Mamba2 mixers carry no MLP, exactly like FLA's Mamba2Block.
+is_hybrid_model: true
+hybrid_attention_ratio: 0.25
+hybrid_override_pattern: "*-MMM*-MMM*-MMM"
+
+# ── Mamba2 parameters (match FLA: state 128, groups 1) ──
+mamba_state_dim: 128
+mamba_head_dim: 64
+mamba_num_groups: 1
+mamba_expand: 2
+
+# ── MLA parameters (identical to FLA attn block + our production hybrid) ──
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: true
+num_attention_heads: 16
+q_lora_rank: 672
+kv_lora_rank: 64
+qk_head_dim: 32
+qk_pos_emb_head_dim: 32
+v_head_dim: 64
+rotary_scaling_factor: 1.0
+mscale: 1.0
+mscale_all_dim: 1.0
+
+untie_embeddings_and_output_weights: false
+add_bias_linear: false
+
+# FLA mamba2 uses norm_eps = 1e-5 (NOT the 1e-6 our production hybrid uses).
+normalization: RMSNorm
+norm_epsilon: 1.0e-5
+
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072

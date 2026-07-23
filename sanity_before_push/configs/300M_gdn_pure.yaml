@@ -1,0 +1,153 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: sanity_300M_gdn_pure
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: zebra_llama_300M_gdn_pure.yaml
+    overrides:
+      wandb_project: ""
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      num_workers: 8
+      create_attention_mask_in_dataloader: false
+
+      profile: false
+      use_pytorch_profiler: false
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 100
+      log_interval: 10
+      check_for_nan_in_loss_and_grad: false
+
+      # Perf: Megatron defaults to inserting dist.barrier() before every L1
+      # timer measurement (~5-10/iter) to make per-stage timings comparable.
+      # This serializes ranks. Disable for production training.
+      barrier_with_L1_time: false
+
+      # Match FLA seed for reproducibility comparison
+      seed: 42
+
+      # Fix: norm_epsilon in model YAML maps to args.norm_epsilon, but
+      # TransformerConfig uses layernorm_epsilon (default 1e-5).
+      # Must explicitly set layernorm_epsilon to match FLA's 1e-6.
+      layernorm_epsilon: 1.0e-6
+
+      # CRITICAL: Megatron's TransformerConfig defaults hidden_dropout=0.1 and
+      # attention_dropout=0.1 (transformer_config.py L152). Even though
+      # mamba_base.yaml sets these to 0.0, the YAML inheritance is being
+      # overridden by language_model.yaml (which sets 0.1) and the override is
+      # not propagating to args. This caused embeddings to be dropout-perturbed
+      # at every iteration in prior runs (verified empirically: same token
+      # produced DIFFERENT embedding vectors with 1/(1-0.1)=1.111 scaling).
+      # FLA does NOT apply any dropout. Force these to 0 here to match.
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
+
+      # Training schedule — matched to FLA (8 GPUs):
+      #   FLA: per_device_train_batch_size=128, 8 GPUs → global=1024
+      #   tokens/step = 1024 * 2048 = 2,097,152
+      #   total tokens ~= 4768 * 2,097,152 ≈ 10B
+      # Sanity budget: FLA warmup (200) + 500 steady = 700 iters.  lr_warmup_iters
+      # and lr_decay_iters stay at FLA's values so the cosine LR at every compared
+      # step is bit-identical to FLA's full-length schedule.
+      train_iters: 700
+      micro_batch_size: 128
+      global_batch_size: 1024
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+      original_max_position_embeddings: 2048
+
+      # Optimizer — matched to FLA:
+      #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
+      #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
+      #   max_grad_norm=1.0, warmup_steps=200
+      clip_grad: 1.0
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 4768
+      lr_decay_style: cosine
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # Pure GDN hybrid spec (hybrid_attention_ratio=0.0 → all GDN, no MLA)
+      # Use no-TE spec to match FLA's native PyTorch layers for loss curve alignment
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec_no_te']
+      no_persist_layer_norm: true
+
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.2-1B
+
+      # Parallelism
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      # Perf: For a small 300M model, distributed optimizer (ZeRO-1) adds
+      # REDUCE-SCATTER + ALL-GATHER overhead with no memory savings (full
+      # optimizer state ~3.6GB easily fits per-rank). Switch to plain DDP
+      # ALL-REDUCE to match FLA. Memory cost: +3GB/rank, expected: ~10-15% faster.
+      # NOTE: overlap_param_gather requires distributed optimizer, so disable it.
+      overlap_grad_reduce: true
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      use_torch_fsdp2: false
+      use_distributed_optimizer: false
+      ddp_average_in_collective: true
+
+      # NOTE (2026-06-03): we tried `use_fla_fused_norm_gated: true` to
+      # match the kernel stack used by KDA/hybrid configs and to fix the
+      # gdn_pure_mock NaN-grad issue, but it (a) did NOT fix the mock NaN
+      # (it still NaNs at iter 10) and (b) shifted the real-data loss from
+      # 4.456 to 4.498 (FLA-Δ from +0.34% to +1.3%).  The vanilla gated-norm
+      # path is numerically closer to FLA's reference than the FLA-fused one
+      # for pure GDN.  Leaving it OFF.  Mock NaN root cause still unknown.
+
+      # FLA token-order parity — replaces Megatron's GPTDataset shuffler with
+      # FLAOrderGPTDataset so Primus consumes tokens in the exact same order
+      # as FLA's HF DistributedSampler.  Without this, the loss curves
+      # diverge by ~+6% by iter 600 even with identical kernels (different
+      # batches => different optimization trajectory).  Mirrors what
+      # launch_hybrid_faflag.sh sets via PRIMUS_FLA_DATA=1.
+      use_fla_data: true
+
+      # Data — FLA-aligned FineWeb-Edu sample-10BT
+      mock_data: false
+      train_data_path: >
+        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      valid_data_path: null
+      test_data_path: null
+
+      # Checkpoints — load FLA-initialized weights for exact comparison
+      # Load FLA-equivalent init weights so iter-1 is bit-identical to FLA.
+      # Without this the loss curves diverge past iter 300 (different random
+      # init traversal order amplifies bf16 ordering differences over time).
+      # Generated by:
+      #   PYTHONPATH=<fla> python3 tools/init_primus_from_fla.py \
+      #     --fla-config <fla>/legacy/training/configs/gated_deltanet_300M_pure.json \
+      #     --output-dir output/fla_init_ckpt_300M --seed 42 --no-te
+      finetune: false
+      auto_continue_train: false
+      no_load_optim: true
+      no_load_rng: true
+      load: /home/vanbhati@amd.com/Primus/output/fla_init_ckpt_300M
+      save: ./output/sanity/300M_gdn_pure
+      save_interval: 99999
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      # Context parallel
+      context_parallel_size: 1

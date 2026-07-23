@@ -2,7 +2,7 @@ diff --git a/megatron/core/models/mamba/mamba_model.py b/megatron/core/models/ma
 index ae309e418..9abb3d25d 100644
 --- a/megatron/core/models/mamba/mamba_model.py
 +++ b/megatron/core/models/mamba/mamba_model.py
-@@ -275,11 +275,59 @@ class MambaModel(LanguageModule):
+@@ -275,11 +275,72 @@ class MambaModel(LanguageModule):
          if self.pre_process or self.post_process or self.mtp_process:
              self.setup_embeddings_and_output_layer()
  
@@ -19,9 +19,22 @@ index ae309e418..9abb3d25d 100644
 +                pass
 +        elif _ce_mode == 1:
 +            try:
++                import inspect as _inspect
 +                from fla.modules import FusedLinearCrossEntropyLoss
 +                _nc = getattr(_args, 'fused_ce_chunks', 32)
-+                self._fused_lce = FusedLinearCrossEntropyLoss(reduction='mean', num_chunks=_nc)
++                _lce_kwargs = dict(reduction='mean', num_chunks=_nc)
++                # FLA >=0.5.1 defaults accumulate_grad_in_fp32=True, which upcasts
++                # the [V,H] weight-gradient GEMM in the chunked LCE to FP32. On
++                # MI300X that FP32 GEMM has no matrix-core acceleration and runs
++                # ~4.5x slower (Tensile MT256x192x16 vs bf16 MT256x128x32),
++                # costing ~15-18% end-to-end on hybrid configs. Restore the old
++                # bf16-matmul / fp32-accumulate path when the knob exists.
++                if 'accumulate_grad_in_fp32' in _inspect.signature(
++                        FusedLinearCrossEntropyLoss.__init__).parameters:
++                    import os as _os
++                    _lce_kwargs['accumulate_grad_in_fp32'] = (
++                        _os.environ.get('PRIMUS_LCE_ACCUM_FP32', '0') == '1')
++                self._fused_lce = FusedLinearCrossEntropyLoss(**_lce_kwargs)
 +                self._fused_ce_mode = 1
 +            except ImportError:
 +                pass
@@ -62,7 +75,7 @@ index ae309e418..9abb3d25d 100644
      def set_input_tensor(self, input_tensor: Tensor) -> None:
          """Sets input tensor to the model.
  
-@@ -439,6 +487,9 @@ class MambaModel(LanguageModule):
+@@ -439,6 +500,9 @@ class MambaModel(LanguageModule):
                      hidden_states.squeeze(1).unsqueeze(0)
                  ).unsqueeze(1)
  

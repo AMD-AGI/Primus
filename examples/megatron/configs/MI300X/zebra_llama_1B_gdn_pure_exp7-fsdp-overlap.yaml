@@ -423,7 +423,7 @@ modules:
       use_fla_data: true               # PRIMUS_FLA_DATA
       # fla_cache_dir: /home/<user>/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-100BT/train
       fused_ce_mode: 1                 # 1=chunked FLA FusedLinearCrossEntropyLoss
-      fused_ce_chunks: 32              # Chunk count for FLA fused CE (32 = launcher default)
+      fused_ce_chunks: 128            # 128 (not 32) keeps exact mbs=64/gbs=512 fitting on upstream FLA 0.5.2 (finer LCE chunking, numerically identical; bump to 256 for long-run margin)
 
       # ─────────────────────────────────────────────────────────────────────
       # SwiGLU path — disable Megatron's bias-fused SwiGLU so the MLP

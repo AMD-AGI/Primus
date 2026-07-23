@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn_pure_100B-pretrain}
+exp_name: sanity_1B_gdn_pure
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ modules:
 
     model: zebra_llama_1B_gdn_pure.yaml
     overrides:
-      wandb_project: "Primus_Zebra_Llama_1B_GDN_Pure_100B"
+      wandb_project: ""
       stderr_sink_level: DEBUG
 
       eval_iters: 0
@@ -50,7 +50,7 @@ modules:
       create_attention_mask_in_dataloader: false
 
       log_avg_skip_iterations: 2
-      log_avg_reset_interval: 50
+      log_avg_reset_interval: 100
 
       # Perf: Megatron defaults to inserting dist.barrier() before every L1 timer
       # measurement (~5-10/iter). Costs throughput, no correctness impact.
@@ -121,7 +121,11 @@ modules:
       #   global_batch_size = 64 × 8 = 512
       #   tokens/iter       = 512 × 2048 = 1,048,576
       #   total tokens      = 95368 × 1,048,576 ≈ 100 B
-      train_iters: 50
+      # Sanity budget: FLA warmup (2000) + 500 steady = 2500 iters.  Using FLA's
+      # FULL warmup (2000) — not the shortened 400 the eval smoke used — so the
+      # LR schedule is bit-identical to FLA's 100B run at every compared step.
+      # lr_decay_iters stays 95368 so the cosine slope per iter matches FLA.
+      train_iters: 2500
       micro_batch_size: 64
       global_batch_size: 512
 
@@ -159,6 +163,8 @@ modules:
       clip_grad: 1.0
       lr: 3.0e-4
       min_lr: 3.0e-5
+      # FLA's full warmup (matches --warmup_steps 2000).  lr_decay_iters stays at
+      # 95368 so the cosine slope per iter is bit-identical to the full 100B run.
       lr_warmup_iters: 2000
       lr_decay_iters: 95368
       lr_decay_style: cosine
@@ -422,10 +428,15 @@ modules:
       # The launcher script sets PRIMUS_FLA_CACHE_DIR; if you launch
       # without it, uncomment fla_cache_dir below to make this YAML
       # self-contained.
-      use_fla_data: true               # PRIMUS_FLA_DATA
+      use_fla_data: true
       # fla_cache_dir: /home/<user>/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-100BT/train
       fused_ce_mode: 1                 # 1=chunked FLA FusedLinearCrossEntropyLoss
-      fused_ce_chunks: 128            # 128 (not 32) keeps exact mbs=64/gbs=512 fitting on upstream FLA 0.5.2 (finer LCE chunking, numerically identical; bump to 256 for long-run margin)
+      # 128 (not the 32 default) keeps the exact mbs=64/gbs=512 batch fitting on
+      # upstream FLA 0.5.2: it grew memory just enough to OOM the June-8-era 32-chunk
+      # run (which peaked at 99.2%). Finer chunking shrinks the LCE logit transient
+      # (vocab 128256 x batch) — numerically identical, negligible speed cost.
+      # Still peaks ~99.98%; for long production runs bump to 256 for a safety margin.
+      fused_ce_chunks: 128
 
       # ─────────────────────────────────────────────────────────────────────
       # SwiGLU path — disable Megatron's bias-fused SwiGLU so the MLP
@@ -462,18 +473,35 @@ modules:
       # by the launcher — see launch_gdn_pure_1B_100B.sh and
       # third_party/Megatron-LM/megatron/core/models/mamba/mamba_model.py.
 
-      # Data
-      mock_data: true
-      train_data_path: null
+      # ── Data ─ FLA-aligned via PRIMUS_FLA_DATA=1 at runtime.
+      #
+      # `train_data_path` below is just a Megatron config-parser placeholder;
+      # FLAOrderGPTDataset overrides it when PRIMUS_FLA_DATA=1 + a valid
+      # PRIMUS_FLA_CACHE_DIR are exported.  Point the launcher's
+      # PRIMUS_FLA_CACHE_DIR at the sample-100BT cache (FLA has it on disk
+      # at /home/vanbhati@amd.com/flash-linear-attention/legacy/training/
+      # data/HuggingFaceFW/fineweb-edu/sample-100BT/train).
+      #
+      # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
+      # builder doesn't choke on a missing file — its actual indices and
+      # tokens are never read when FLAOrderGPTDataset is active.
+      mock_data: false
+      train_data_path: >
+        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
       valid_data_path: null
       test_data_path: null
 
       # ── Checkpoints ─
+      # auto_continue_train:false so each sanity run starts fresh (no resume
+      # from a previous sanity checkpoint).
       finetune: false
-      auto_continue_train: true
+      auto_continue_train: false
       load: null
-      # Checkpoint save path
-      save: ./output/zebra_llama_1B_gdn_pure_100B-pretrain
+      # FLA's `path=` for this run is /home/vanbhati@amd.com/checkpoints/
+      # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
+      # the two runs' checkpoints can coexist on disk and downstream eval
+      # tools (tools/eval_gdn_lm_eval.py) can A/B them side-by-side.
+      save: ./output/sanity/1B_gdn_pure
       # FLA's 100B launcher passes `save=99999` (HF `--save_steps 99999`),
       # meaning over 95368 iters HF never writes an intermediate ckpt — only
       # the final one at end-of-training (then `--save_total_limit 3` keeps
@@ -486,7 +514,7 @@ modules:
       # FLA's "almost never save" and ~2× lighter than the previous 5000
       # setting. `disable_last_saving: false` still guarantees the very last
       # iter is saved exactly like FLA does at end-of-training.
-      save_interval: 10000
+      save_interval: 99999
       disable_last_saving: false
       ckpt_format: fsdp_dtensor   # Megatron-FSDP requires this when use_megatron_fsdp=true
 
