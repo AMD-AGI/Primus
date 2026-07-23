@@ -46,9 +46,9 @@ modules:
       profile_step_start: 6
 
       # hyper parameters
-      train_iters: 10
-      micro_batch_size: 8
-      global_batch_size: 512
+      train_iters: 50
+      micro_batch_size: 6
+      global_batch_size: 48
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -106,6 +106,7 @@ modules:
       eval_iters: 0
 
       cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
 
       fp8: hybrid
       # enable_primus_turbo: true
