@@ -7,7 +7,7 @@ This guide explains how to run Primus's [`preflight`](./preflight.md) cluster-di
 **Git clone the Primus repository to a shared filesystem that all nodes can read.**
 
 ```bash
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 ```
 
@@ -739,7 +739,7 @@ srun ... runner/primus-cli direct -- preflight --perf-test \
 ## 9. Automated node bisection (finding the bad node in an NCCL hang)
 
 When a cluster-wide preflight run hangs or fails, use
-[`tools/preflight_bisect/bisect.py`](../../tools/preflight_bisect/bisect.py) to
+[`tools/preflight_bisect/bisect.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/preflight_bisect/bisect.py) to
 run `preflight --perf-test` on smaller Slurm node subsets until suspect nodes
 are isolated.
 
@@ -785,8 +785,8 @@ final `summary.txt` are written under `--output-dir`.
 
 ## 10. See also
 
-- [Preflight](./preflight.md) — full reference for the `preflight` subcommand and its flags
-- [CLI User Guide](../../docs_deprecated/cli/PRIMUS-CLI-GUIDE.md) — container-based and `primus-cli slurm` workflows
-- [`runner/primus-cli-direct.sh`](../../runner/primus-cli-direct.sh) — the direct launcher itself (`primus-cli direct` dispatches here)
-- [`primus/tools/preflight/`](../../primus/tools/preflight/) — preflight implementation
-- [`tools/preflight_bisect/bisect.py`](../../tools/preflight_bisect/bisect.py) — bisect wrapper for narrowing down failing nodes in multi-node preflight runs
+- [Preflight](./preflight.md)—full reference for the `preflight` subcommand and its flags
+- [CLI User Guide](./cli-reference.md)—container-based and `primus-cli slurm` workflows
+- [`runner/primus-cli-direct.sh`](https://github.com/AMD-AGI/Primus/blob/main/runner/primus-cli-direct.sh)—the direct launcher itself (`primus-cli direct` dispatches here)
+- [`primus/tools/preflight/`](https://github.com/AMD-AGI/Primus/tree/main/primus/tools/preflight)—preflight implementation
+- [`tools/preflight_bisect/bisect.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/preflight_bisect/bisect.py)—bisect wrapper for narrowing down failing nodes in multi-node preflight runs
