@@ -81,5 +81,10 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
+      # FP8 delayed scaling (default) + the delayed_fp8_scaling stream patches
+      # crash with a GPU memory fault; disable the patches. (This also drops the
+      # data-prefetch double-buffer, freeing some device memory.)
+      fp8_recipe: delayed
+      disable_delayed_scaling_patches: true
       moe_use_legacy_grouped_gemm: false
       no_fp8_weight_transpose_cache: true

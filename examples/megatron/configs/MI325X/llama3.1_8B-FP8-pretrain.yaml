@@ -77,4 +77,14 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
+      # FP8 recipe: keep delayed scaling (the inherited default), which is the
+      # fastest FP8 path here (~3% higher throughput than tensorwise/current
+      # scaling because it reuses cached amax history instead of recomputing
+      # per-step amax). However, the delayed_fp8_scaling stream patches
+      # (secondary-stream grad-zero + data prefetch) have a use-after-free that
+      # crashes with a GPU memory fault (sum_and_scatter, "write to read-only
+      # page") at ~iter 6, so disable them. Alternative: fp8_recipe=tensorwise
+      # (Turbo-native, no patches, ~3% slower).
+      fp8_recipe: delayed
+      disable_delayed_scaling_patches: true
       moe_use_legacy_grouped_gemm: false
