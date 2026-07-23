@@ -75,8 +75,8 @@ jobs:
     # Skip on Draft PRs (keep code-lint ungated); the event_name guard preserves
     # push/tag and workflow_dispatch runs where github.event.pull_request is absent.
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    # runs-on: build-docker
-    runs-on: build-docker-crusoe
+    runs-on: build-docker
+    # runs-on: build-docker-crusoe
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -220,8 +220,8 @@ jobs:
     needs: [build-docker]
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    # runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
-    runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
+    runs-on: [primus-lm-cicd-v26.3-tas8n-a16-40]
+    # runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
     steps:
       - run: echo "🎉 Begin Primus Unit Test (containerized)."
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
