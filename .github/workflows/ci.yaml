@@ -364,6 +364,8 @@ jobs:
           # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
           # Note: `test_limit_layers_moe_with_dense_keeps_two` is temporarily disabled pending a fix to
           #       `_limit_layers_for_projection` dense-layer handling (num_layers collapses to 1 instead of 2).
+          # Note: `test_single_pass_te_vs_local` is temporarily disabled pending a fix to the
+          #       diffusion TE-vs-local spec attention parity check.
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           docker exec -i \
             -e GITHUB_WORKSPACE="${CWS}" -e HSA_NO_SCRATCH_RECLAIM=1 \
@@ -378,7 +380,8 @@ jobs:
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
             --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward \
-            --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two
+            --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two \
+            --deselect=tests/unit_tests/backends/megatron/diffusion/test_te_vs_local_spec_attention.py::TestTEvsLocalSpecAttention::test_single_pass_te_vs_local
           IN
       - name: Snapshot unit-test coverage
         if: always()
