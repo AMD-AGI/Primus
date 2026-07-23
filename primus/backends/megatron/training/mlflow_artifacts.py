@@ -40,7 +40,7 @@ import subprocess
 import sys
 from typing import List, Optional
 
-from primus.modules.module_utils import log_rank_0, log_rank_last, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, log_rank_last, warning_rank_0
 
 # Pinned to immutable commit SHA for supply-chain safety (tags can be moved).
 # This corresponds to tag v0.4.0 in AMD-AGI/TraceLens.

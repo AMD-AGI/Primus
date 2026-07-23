@@ -7,8 +7,7 @@
 """
 TorchTitan Mock HF Dataset Patch
 
-This patch mirrors ``patch_mock_hf_dataset`` from
-``primus.modules.trainer.torchtitan.patch_utils`` using the generic Primus
+This patch implements ``patch_mock_hf_dataset`` using the generic Primus
 patch system, so that HF dataset mocking can be enabled via config without
 tightly coupling it to the trainer implementation.
 """
@@ -17,7 +16,7 @@ from datasets import Dataset
 from datasets.search import np
 
 from primus.core.patches import PatchContext, get_param, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _create_mock_text_dataset(num_samples: int = 128) -> Dataset:

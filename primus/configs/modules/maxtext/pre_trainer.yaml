@@ -16,8 +16,12 @@ hf_path: "allenai/c4"  # for using https://huggingface.co/datasets/allenai/c4
 hf_data_dir: "en"
 hf_train_files: ""
 packing: true
+# Required by MaxText v26.4's strict config validation: when hardware=gpu,
+# packing=true, and attention=cudnn_flash_te, max_segments_per_seq must be > 0.
+# 32 matches upstream MaxText GPU model configs and is harmless on v26.3.
+max_segments_per_seq: 32
 
-shardy: false
+shardy: true
 
 remat_policy: 'full'
 optimizer_memory_host_offload: false

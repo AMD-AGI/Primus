@@ -1,0 +1,53 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:wan2.1_t2v_1.3b-posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  post_trainer:
+    framework: diffusion
+    config: post_trainer.yaml
+
+    # Model preset to fine-tune from INIT_CHECKPOINT.
+    model: wan2.1_t2v_1.3b_sft.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: 1
+        enable_wandb: false
+
+      training:
+        local_batch_size: 1
+        steps: ${MAX_STEPS:50}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/wan2.1_t2v_1.3b-posttrain}
+        save_steps: 0
+        run_name: wan2.1_t2v_1.3b-posttrain
+
+      data:
+        dataset_path: ${DATASET_PATH:/data/tiny-video-samples/meta.jsonl}
+        data_folder: ${DATA_FOLDER:/data/tiny-video-samples/data}
+        frame_num: 81
+        video_backend: imageio
+        text_tokenizer: ${TEXT_TOKENIZER:/models/Wan2.1-T2V-1.3B/google/umt5-xxl}
+        height: 480
+        width: 832
+
+      parallelism:
+        sp_size: ${SP_SIZE:1}
+        dp_replicate: ${DP_REPLICATE:1}
+
+      optimizer:
+        lr: 5.0e-6
+        weight_decay: 0.01
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
+        report_to: none

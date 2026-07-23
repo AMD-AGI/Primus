@@ -6,10 +6,26 @@ dist/
 *.egg-info
 *~
 logs
+.pip_cache
 .vscode
 local/
 .gitmodules
 output
 experiment
-data
+/data/*
+!primus/backends/diffusion/data/
+!primus/backends/diffusion/data/**
+primus/backends/diffusion/data/**/__pycache__/
+primus/backends/diffusion/data/**/*.pyc
 pp_simulation_result
+
+# Allow the projection site's breakdown JSON (consumed by the static site /
+# GitHub Pages) despite the generic `data` ignore above.
+!examples/deepseek-v4/projection/site/data/
+!examples/deepseek-v4/projection/site/data/*.json
+
+*.log
+*.nohup
+*.zip
+.triton_cache_shared/
+.cursor/

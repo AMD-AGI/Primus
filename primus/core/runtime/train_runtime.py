@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc.
+# Copyright (c) 2026, Advanced Micro Devices, Inc.
 #
 # Primus Runtime Orchestrator for Training
 #
@@ -23,14 +23,15 @@ from primus.core.config.primus_config import (
 )
 from primus.core.patches import run_patches
 from primus.core.runtime.logging import init_worker_logger
+from primus.core.runtime.runtime_state import RuntimeState
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
+from primus.core.utils.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     merge_namespace,
     nested_namespace_to_dict,
 )
-from primus.modules.module_utils import log_dict_aligned, log_rank_0, warning_rank_0
 
 # ---------------------------------------------------------------------------
 # Context & Hooks
@@ -56,6 +57,7 @@ class TrainContext:
     trainer: Any = None
     backend_args: Any = None
     backend_version: Optional[str] = None
+    runtime_state: Optional[RuntimeState] = None
 
     # Distributed context
     rank: int = 0
@@ -109,6 +111,64 @@ class PrimusRuntime:
             self._safe_cleanup(error=e)
             raise RuntimeError(f"Training execution failed: {e}") from e
 
+    def setup_model_only(
+        self,
+        module_name: str = "pre_trainer",
+        overrides: Optional[List[str]] = None,
+        primus_config: Any = None,
+    ) -> Any:
+        """Run the runtime pipeline but stop after building the model (no training).
+
+        A general, training-neutral entry that mirrors :meth:`run_train_module`
+        except it replaces the training step with a model-only build. Reuses the
+        full runtime initialization pipeline (config → environment → distributed →
+        logging → backend adapter → args conversion → build_args patches → trainer
+        setup/init → before_train patches) and then asks the trainer to build only
+        the model via ``setup_model_only``. Useful for any "build the model only"
+        scenario (offline profiling, layer benchmarking, model inspection);
+        performance/memory projection is the current consumer.
+
+        Args:
+            module_name: training module to build (default ``pre_trainer``).
+            overrides: CLI-style overrides to merge into the module params.
+            primus_config: optional pre-loaded (runtime-shaped) PrimusConfig. When
+                provided, config is not re-loaded from ``self.args.config`` — this
+                lets callers (e.g. projection) apply their own config mutations
+                before building.
+
+        Returns:
+            The trainer instance whose ``.model`` has been built.
+        """
+        overrides = overrides or []
+
+        # 1) Configuration (optionally injected, so callers can pre-mutate it)
+        self._initialize_configuration(module_name, overrides, primus_config=primus_config)
+        # 2) Runtime environment (paths, distributed, logging)
+        self._initialize_runtime_environment()
+        # 3) Backend adapter + trainer (convert config, build_args patches, instantiate)
+        self._initialize_adapter()
+        self._initialize_trainer()
+
+        assert self.ctx is not None and self.ctx.trainer is not None
+        trainer = self.ctx.trainer
+
+        # 4) Setup + init + before_train patches (mirror _run_trainer_lifecycle up
+        #    to, but excluding, the training step).
+        self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
+        trainer.setup()
+        trainer.init()
+        self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
+
+        # 5) Build only the model (no datasets / no train loop).
+        build_fn = getattr(trainer, "setup_model_only", None)
+        if build_fn is None:
+            raise NotImplementedError(
+                f"Trainer '{type(trainer).__name__}' for framework "
+                f"'{self.ctx.framework}' does not implement setup_model_only()."
+            )
+        build_fn()
+        return trainer
+
     # --------------------------- Internal Steps --------------------------- #
 
     def _initialize_runtime_environment(self) -> None:
@@ -135,7 +195,9 @@ class PrimusRuntime:
             self.ctx.backend_version = None
         return self.ctx.backend_version
 
-    def _run_phase_patches(self, phase: str, backend_args: Any = None) -> None:
+    def _run_phase_patches(
+        self, phase: str, backend_args: Any = None, runtime_state: Optional[RuntimeState] = None
+    ) -> None:
         """
         Apply a patch phase in a single, runtime-owned place.
 
@@ -156,6 +218,7 @@ class PrimusRuntime:
                 "backend_args": backend_args,
                 "primus_config": self.ctx.primus_config,
                 "module_config": self.ctx.module_config,
+                "runtime_state": runtime_state,
             },
         )
 
@@ -168,11 +231,28 @@ class PrimusRuntime:
         # setup_training_env expects a string path.
         setup_training_env(str(data_path), setup_hf=True)
 
-    def _initialize_configuration(self, module_name: str, overrides: Optional[List[str]] = None) -> None:
-        cfg_path = Path(self.args.config)
-        assert cfg_path.exists(), f"[Primus:TrainRuntime] Config file not found: {cfg_path}"
+    def _initialize_configuration(
+        self,
+        module_name: str,
+        overrides: Optional[List[str]] = None,
+        primus_config: Any = None,
+    ) -> None:
+        # Resolve a config path for diagnostics/context (falls back to args.config
+        # when a pre-loaded config is injected and args may lack a usable path).
+        cfg_path = Path(getattr(self.args, "config", None) or getattr(primus_config, "config_file", "") or "")
+        if primus_config is not None:
+            # Caller supplied a pre-loaded (and possibly mutated) runtime config;
+            # skip re-loading from disk so those mutations are preserved.
+            primus_cfg = primus_config
+        else:
+            assert cfg_path.exists(), f"[Primus:TrainRuntime] Config file not found: {cfg_path}"
+            primus_cfg = load_primus_config(cfg_path, self.args)
 
-        primus_cfg = load_primus_config(cfg_path, self.args)
+        # Reuse the legacy PrimusConfig that load_primus_config already parsed
+        # (exposed as `_legacy`) instead of re-parsing the YAML a second time.
+        # BaseModule needs the PrimusConfig interface (get_module_config / global
+        # vars); the SimpleNamespace `primus_cfg` drives the new core runtime.
+        primus_config_obj = primus_cfg._legacy
 
         # Resolve module configuration via core helper.
         module_cfg = get_module_config(primus_cfg, module_name)
@@ -188,11 +268,15 @@ class PrimusRuntime:
             raise ValueError(f"[Primus:TrainRuntime] Module '{module_name}' missing 'framework'.")
 
         # Initialize TrainContext based on raw configuration (before CLI overrides).
+        # Use primus_config_obj (PrimusConfig) for BaseModule compatibility
+        _data_path = getattr(self.args, "data_path", None)
+        if not _data_path:
+            _data_path = "./data"
         self.ctx = TrainContext(
             config_path=cfg_path,
-            data_path=Path(getattr(self.args, "data_path", "./data")),
+            data_path=Path(_data_path),
             module_name=module_name,
-            primus_config=primus_cfg,
+            primus_config=primus_config_obj,  # Use PrimusConfig object, not SimpleNamespace
             module_config=module_cfg,
             framework=framework,
         )
@@ -247,6 +331,10 @@ class PrimusRuntime:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
         backend_path = getattr(self.args, "backend_path", None)
 
+        # CRITICAL: Set up backend path BEFORE importing backend module
+        # This ensures megatron is importable when patches are loaded
+        self._setup_backend_path_early(backend=self.ctx.framework, backend_path=backend_path)
+
         adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
 
         assert (
@@ -257,6 +345,49 @@ class PrimusRuntime:
         adapter.setup_backend_path(backend_path=backend_path)
 
         self.ctx.adapter = adapter
+
+    def _setup_backend_path_early(self, backend: str, backend_path=None) -> None:
+        """Set up backend path before backend module is imported."""
+        import os
+        import sys
+        from pathlib import Path
+
+        # For Megatron backend, set up the path early
+        if backend == "megatron":
+            megatron_paths = []
+
+            # Method 1: From backend_path argument
+            if backend_path:
+                megatron_path = Path(backend_path)
+                if megatron_path.exists():
+                    megatron_paths.append(str(megatron_path))
+
+            # Method 2: From PRIMUS_PATH environment variable
+            primus_path = os.getenv("PRIMUS_PATH")
+            if primus_path:
+                megatron_path = Path(primus_path) / "third_party" / "Megatron-LM"
+                if megatron_path.exists():
+                    megatron_paths.append(str(megatron_path))
+
+            # Method 3: From current working directory
+            try:
+                cwd = Path.cwd()
+                if "Primus" in str(cwd):
+                    primus_root = cwd
+                    while primus_root.name != "Primus" and primus_root != primus_root.parent:
+                        primus_root = primus_root.parent
+                    if primus_root.name == "Primus":
+                        megatron_path = primus_root / "third_party" / "Megatron-LM"
+                        if megatron_path.exists():
+                            megatron_paths.append(str(megatron_path))
+            except Exception:
+                pass
+
+            # Add paths to sys.path if not already present
+            for path in megatron_paths:
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+                    log_rank_0(f"[Primus:Runtime] Early setup: Added Megatron-LM to sys.path: {path}")
 
     def _initialize_trainer(self) -> None:
         assert (
@@ -273,8 +404,14 @@ class PrimusRuntime:
         backend_args = adapter.convert_config(module_config.params)
         self.ctx.backend_args = backend_args
 
+        # Create runtime state object (for dynamic per-iteration metrics)
+        # Initialize early so it's available for all patch phases
+        self.ctx.runtime_state = RuntimeState()
+
         # Phase: build_args (after args creation, before trainer instantiation)
-        self._run_phase_patches(phase="build_args", backend_args=backend_args)
+        self._run_phase_patches(
+            phase="build_args", backend_args=backend_args, runtime_state=self.ctx.runtime_state
+        )
 
         # Log final args after patches, then merge module_config.params into backend_args
         log_dict_aligned("Final backend args (after patches)", backend_args)
@@ -290,17 +427,63 @@ class PrimusRuntime:
             primus_only_params = {key: params_dict[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
 
+        # Extract trainer_class from module_config BEFORE merging params into backend_args
+        # (After merge, module_config.params becomes backend_args, and trainer_class might be lost)
+        trainer_class = None
+
+        # First, check module_config directly (top-level attribute)
+        if hasattr(module_config, "trainer_class"):
+            trainer_class = module_config.trainer_class
+        # Second, check module_config.params (nested in params, BEFORE merge)
+        elif hasattr(module_config.params, "trainer_class"):
+            trainer_class = module_config.params.trainer_class
+
         # Merge backend_args into params (backend_args overrides params)
         merge_namespace(backend_args, module_config.params, allow_override=False, excepts=[])
         module_config.params = backend_args
 
-        # Load trainer class and instantiate
+        # Third, check backend_args (after merge, in case it was preserved)
+        if not trainer_class and hasattr(backend_args, "trainer_class"):
+            trainer_class = backend_args.trainer_class
+
+        # Log summary of trainer_class extraction (keep one summary log for troubleshooting)
+        if trainer_class:
+            log_rank_0(f"[TrainRuntime] Using trainer_class: {trainer_class}")
+        else:
+            log_rank_0(f"[TrainRuntime] WARNING: trainer_class not found, will use default for stage")
+
+        # Extract stage for fallback
         stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
-        TrainerClass = adapter.load_trainer_class(stage=stage)
-        trainer = TrainerClass(backend_args=backend_args)
+
+        log_rank_0(f"[TrainRuntime] Loading trainer: stage={stage}, trainer_class={trainer_class}")
+        # Only forward trainer_class to adapters that support it (Megatron). Other
+        # backend adapters keep their stage-only signature, so passing trainer_class
+        # unconditionally would raise TypeError on the shared core-runtime path.
+        trainer_cls = adapter.load_trainer_class(
+            stage=stage,
+            **({"trainer_class": trainer_class} if trainer_class else {}),
+        )
+        log_rank_0(f"[TrainRuntime] Loaded trainer class: {trainer_cls.__name__}")
+
+        # Initialize trainer with both BaseModule and BaseTrainer arguments
+        # BaseModule needs: module_name, primus_config, module_rank, module_world_size, module_master_addr, module_master_port
+        # BaseTrainer needs: backend_args
+        # Note: BaseModule.__init__ expects keyword arguments, not positional
+        trainer = trainer_cls(
+            backend_args=backend_args,
+            module_name=self.ctx.module_name,
+            primus_config=self.ctx.primus_config,
+            module_rank=self.ctx.rank,
+            module_world_size=self.ctx.world_size,
+            module_master_addr=self.ctx.master_addr,
+            module_master_port=self.ctx.master_port,
+        )
 
         assert trainer is not None, f"Failed to create trainer instance for framework '{self.ctx.framework}'."
         self.ctx.trainer = trainer
+
+        # Attach runtime_state to trainer instance for easy access in forward_step()
+        trainer.runtime_state = self.ctx.runtime_state
 
     def _run_trainer_lifecycle(self) -> None:
         assert (
@@ -320,18 +503,32 @@ class PrimusRuntime:
         trainer = self.ctx.trainer
 
         # 1) Optional setup phase
-        self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
+        self._run_phase_patches(
+            phase="setup", backend_args=self.ctx.backend_args, runtime_state=self.ctx.runtime_state
+        )
         _log_step("Setup", trainer.setup)
 
         # 2) Initialize training components
         _log_step("Init", trainer.init)
 
         # 3) Execute training
-        self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
-        _log_step("Training", trainer.train)
+        self._run_phase_patches(
+            phase="before_train", backend_args=self.ctx.backend_args, runtime_state=self.ctx.runtime_state
+        )
+        import gc
+
+        gc.disable()
+        log_rank_0("Python GC disabled for training (matching NeMo memory management)")
+        try:
+            _log_step("Training", trainer.train)
+        finally:
+            gc.enable()
+            log_rank_0("Python GC re-enabled after training")
 
         # 4) Cleanup and finalize
-        self._run_phase_patches(phase="after_train", backend_args=self.ctx.backend_args)
+        self._run_phase_patches(
+            phase="after_train", backend_args=self.ctx.backend_args, runtime_state=self.ctx.runtime_state
+        )
         _log_step("Cleanup", trainer.cleanup)
 
     # --------------------------- Cleanup ---------------------------------- #

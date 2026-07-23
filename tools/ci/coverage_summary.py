@@ -9,57 +9,106 @@
 Modes (by number of report arguments):
   1 report   -> single "Coverage" column (e.g. JAX MaxText E2E).
   2+ reports -> "Unit" vs "Unit+E2E". The 1st is unit; the rest are E2E reports,
-                merged per module by taking the max covered lines. Each E2E
-                report should be a `coverage combine` of unit + that job's E2E
-                data (line-level). Taking the max across jobs avoids double
-                counting and lets torch (megatron/torchtitan) and jax (maxtext)
-                E2E - which cover near-disjoint modules - share one table.
+                merged per module by max covered lines (avoids double-counting
+                torch's near-disjoint megatron/torchtitan E2E).
 
-Layout: top-level groups (core, backends, modules, agents, cli, ...) are bold
-rows at the same level, sorted by coverage. core/ and backends/ also get
-indented sub-rows per area, sorted by coverage. __init__.py is dropped;
-tools/, platforms/ and the top-level pretrain.py entrypoint are excluded (ops
-tooling / env abstraction / thin CLI glue, exercised by E2E and shell tests
-rather than unit tests). runner/ is bash, covered by the tests/runner/ shell
-tests.
+Layout: top-level groups are bold rows sorted by coverage; core/backends also
+get indented per-area detail rows. The headline percentage gets a tier emoji
+(_TIER_THRESHOLDS) and a curated "Notes" column flags widely-shared infra or a
+known low-coverage cause (NOTES) -- both are reading aids, not quality gates.
 
-Single-report mode reflects what a partial run (e.g. MaxText E2E) actually
-executed: modules with zero covered lines are hidden and the total is computed
-over the executed modules only, so the headline number is meaningful instead of
-diluted by code that run can never touch. The two-report comparison keeps every
-module (unit gives the full denominator).
+What counts toward a total vs. what gets its own row are deliberately
+decoupled decisions -- see classify().
+
+Single-report mode hides untouched modules and totals only the executed ones,
+so a partial run (e.g. MaxText E2E) isn't diluted by code it can't reach; the
+two-report comparison keeps the full denominator.
 """
 
 import json
 import sys
 from collections import defaultdict
 
-OMIT_MODULES = {"tools", "platforms", "pretrain.py"}
+OMIT_MODULES = {"tools", "platforms"}
 # Top-level groups whose sub-packages are shown as indented detail rows; every
-# other group (modules, agents, cli, ...) is a single bold row.
+# other group (agents, cli, ...) is a single bold row.
 DETAILED_GROUPS = ("core", "backends")
 
 
 def classify(path: str):
-    """Return (group, detail) for a covered file, or None to skip it.
+    """Return (group, detail) for a file, or None to drop it (not counted).
 
-    group is the top-level row key; detail is the sub-row key for
-    DETAILED_GROUPS (e.g. core/projection), else None.
+    group is the top-level row key; detail is the sub-row key within
+    DETAILED_GROUPS (e.g. "core/projection"). detail=None means "counted
+    toward group's total, no row of its own" -- true for every
+    non-DETAILED_GROUPS group, and for a bare file with no sub-package of its
+    own (pretrain.py -> folds into "primus (top-level)"; core/base_module.py ->
+    folds into "core"). Folding is by path *depth*, not filename, so a future
+    file added the same way folds the same way for free.
+
+    Dropping entirely (OMIT_MODULES above) is the only *policy* exclusion --
+    orthogonal to the structural folding here.
     """
     seg = (path[path.find("primus/") :] if "primus/" in path else path).split("/")
     if seg[-1] == "__init__.py":
         return None
-    if len(seg) < 2:
-        return "(top-level)", None
-    if len(seg) == 2:  # primus/<file>.py, e.g. pretrain.py
-        return seg[1], None
+    if len(seg) <= 2:  # outside primus/ entirely, or primus/<file>.py directly (no sub-package)
+        return "primus (top-level)", None
     if seg[1] in DETAILED_GROUPS:
+        if len(seg) == 3:  # primus/<group>/<file>.py directly: no sub-package of its own
+            return seg[1], None
         return seg[1], seg[1] + "/" + seg[2]
     return seg[1], None
 
 
 def _pct(covered: int, total: int) -> float:
     return (100.0 * covered / total) if total else 0.0
+
+
+# Best-effort visual highlight for the headline column: GitHub strips CSS color
+# from Action run summaries, so emoji is the portable substitute. Thresholds
+# are a rough reading aid, not a quality gate.
+_TIER_THRESHOLDS = ((50.0, "\U0001F7E2"), (25.0, "\U0001F7E1"))  # >=50% green, >=25% yellow, else red
+_TIER_RED = "\U0001F534"
+
+
+def _tier(pct: float) -> str:
+    for threshold, emoji in _TIER_THRESHOLDS:
+        if pct >= threshold:
+            return emoji
+    return _TIER_RED
+
+
+# Coverage priority: lower sorts first (ties keep coverage order), pinning the
+# most important groups to the top. core (Primus's core) ranks highest.
+PRIORITY = {"core": 0}
+_DEFAULT_PRIORITY = 1
+
+
+def _priority(group: str) -> int:
+    return PRIORITY.get(group, _DEFAULT_PRIORITY)
+
+
+# Curated, best-effort context -- not exhaustive. Flags infra whose coverage
+# matters more than its size suggests, and low-coverage areas with a known,
+# persistent cause, so it isn't re-litigated every read. Keyed like the table
+# (group, or "<group>/<detail>"); update alongside any fix or new finding.
+# <br> forces cell wrapping so one long note can't stretch the whole column.
+NOTES = {
+    "primus (top-level)": "loose primus/ modules, no sub-package;<br>auto-folded by path depth",
+    "core": "\U0001F511 Primus core;<br>imported by every run",
+    "backends/megatron": (
+        "100+ patches gated by fp8 / MoE /<br>zero-bubble-pp / fsdp2 flags;<br>"
+        "CI E2E runs only 1-2 configs"
+    ),
+    "backends/transformer_engine": "fp8 GEMM / attn-overlap kernels;<br>only hit when an E2E enables fp8",
+    "backends/diffusion": "no E2E trainer suite yet<br>(unit-tested only)",
+}
+
+_LEGEND = (
+    "\U0001F7E2 >=50% / \U0001F7E1 >=25% / \U0001F534 <25% (next to module) "
+    "&nbsp;\u00b7&nbsp; \U0001F511 Primus core\n"
+)
 
 
 def _aggregate(report: dict):
@@ -89,27 +138,34 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
         # modules, so max avoids double counting the shared core code).
         return max((sa.get(group, {}).get(key, [0])[0] for sa in sas), default=0) if two else 0
 
-    def row(label, cov, stmts, e2e, bold=False):
+    def row(label, key, cov, stmts, e2e, bold=False):
+        # Tier dot rides next to the module name (leftmost), so it reads as a
+        # per-module health mark and leaves the right-aligned % columns clean.
+        # It goes *after* any &emsp; indent so detail-row dots stay indented.
+        headline = _pct(e2e if two else cov, stmts)
+        dot = _tier(headline) + " " if stmts else ""
         if two:
             vals = [format(stmts, ","), "%.1f%%" % _pct(cov, stmts), "%.1f%%" % _pct(e2e, stmts)]
         else:
             vals = [format(cov, ","), format(stmts, ","), "%.1f%%" % _pct(cov, stmts)]
         w = "**" if bold else ""
-        return "| " + " | ".join("%s%s%s" % (w, x, w) for x in [label] + vals) + " |"
+        indent = "&emsp;" if label.startswith("&emsp;") else ""
+        rest = label[len(indent) :]
+        label_cell = "%s%s%s%s%s" % (indent, dot, w, rest, w)
+        cells = [label_cell] + ["%s%s%s" % (w, x, w) for x in vals]
+        cells.append(NOTES.get(key, ""))
+        return "| " + " | ".join(cells) + " |"
 
     def group_totals(group):
-        # Single-report mode counts only executed entries (cov > 0) so a partial
-        # run isn't diluted by sub-modules it never touched; two-report keeps all.
+        # Two-report mode keeps every entry (full denominator); single-report
+        # mode counts only executed ones so a partial run isn't diluted.
         entries = [(k, v) for k, v in pa[group].items() if two or v[0] > 0]
         cov = sum(v[0] for _, v in entries)
         stmts = sum(v[1] for _, v in entries)
         e2e = sum(e2e_cov(group, k) for k, _ in entries) if two else 0
         return cov, stmts, e2e
 
-    # Single-report mode hides modules with zero coverage and totals over the
-    # executed modules only, so a partial run (e.g. MaxText E2E) isn't diluted by
-    # code it can never touch. The two-report comparison keeps the full denominator.
-    def group_executed(group):
+    def group_executed(group):  # single-report mode: hide groups a partial run never touched
         return group_totals(group)[0] > 0 if not two else True
 
     groups = [g for g in pa if group_totals(g)[1] > 0 and group_executed(g)]
@@ -136,25 +192,27 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
         out.append(
             "_Including all modules (nothing excluded): Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
         )
-        out += ["| Module | Stmts | Unit | Unit+E2E |", "|---|--:|--:|--:|"]
+        out.append(_LEGEND)
+        out += ["| Module | Stmts | Unit | Unit+E2E | Notes |", "|---|--:|--:|--:|---|"]
     else:
         out.append(
             "**Total line coverage: %.1f%%** (%s / %s statements; excludes %s)\n"
             % (_pct(tc, tn), format(tc, ","), format(tn, ","), excl)
         )
-        out += ["| Module | Covered | Stmts | Coverage |", "|---|--:|--:|--:|"]
+        out.append(_LEGEND)
+        out += ["| Module | Covered | Stmts | Coverage | Notes |", "|---|--:|--:|--:|---|"]
 
-    # Top-level groups, sorted by coverage (desc).
-    for group in sorted(groups, key=lambda g: -_pct(group_totals(g)[0], group_totals(g)[1])):
+    for group in sorted(groups, key=lambda g: (_priority(g), -_pct(group_totals(g)[0], group_totals(g)[1]))):
         cov, stmts, e2e = group_totals(group)
-        out.append(row("`%s`" % group, cov, stmts, e2e, bold=True))
+        out.append(row("`%s`" % group, group, cov, stmts, e2e, bold=True))
         if group in DETAILED_GROUPS:
-            # In single-report mode, hide sub-rows that were never executed.
-            details = ((k, v) for k, v in pa[group].items() if v[1] > 0 and (two or v[0] > 0))
+            # k == group is a folded loose file (see classify()), already
+            # counted in group_totals() above -- no row of its own here.
+            details = ((k, v) for k, v in pa[group].items() if k != group and v[1] > 0 and (two or v[0] > 0))
             for k, v in sorted(details, key=lambda kv: -_pct(kv[1][0], kv[1][1])):
-                out.append(row("&emsp;`%s`" % k, v[0], v[1], e2e_cov(group, k)))
+                out.append(row("&emsp;`%s`" % k, k, v[0], v[1], e2e_cov(group, k)))
 
-    out.append(row("TOTAL", tc, tn, te, bold=True))
+    out.append(row("TOTAL", None, tc, tn, te, bold=True))
     return "\n".join(out)
 
 

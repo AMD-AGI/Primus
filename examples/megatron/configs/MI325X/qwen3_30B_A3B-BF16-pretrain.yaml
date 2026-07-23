@@ -82,7 +82,13 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
+      # AMD-optimized attention kernel (faster and typically lower activation
+      # memory than the default backend).
+      use_turbo_attention: true
+      # NOTE: use_turbo_grouped_gemm (the replacement for the removed
+      # use_turbo_grouped_gemm) was tested but uses more device memory than the
+      # legacy grouped GEMM here and OOMs at MBS=8 (only 5 recompute layers), so
+      # this model stays on the legacy grouped-GEMM path.
       use_turbo_grouped_gemm: false
       use_turbo_rms_norm: false # bug
 

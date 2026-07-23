@@ -4,7 +4,7 @@
       "name": "torchtitan",
       "path": "third_party/torchtitan",
       "url": "https://github.com/pytorch/torchtitan.git",
-      "commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021"
+      "commit": "73a0e6979dd10b6b1904098eb3c8f62c18ab87ce"
     },
     {
       "name": "Megatron-LM",
@@ -16,7 +16,7 @@
       "name": "maxtext",
       "path": "third_party/maxtext",
       "url": "https://github.com/ROCm/maxtext.git",
-      "commit": "851c0935a4e9c9e4cd0771603e3bdf75a6578ad1"
+      "commit": "a7c6c7e5377cce39be51cbe2a48fe0f86fbab8dc"
     },
     {
       "name": "Emerging-Optimizers",

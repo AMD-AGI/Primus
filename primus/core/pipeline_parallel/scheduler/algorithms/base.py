@@ -11,7 +11,7 @@ from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
     SchedulerNode,
 )
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class PipelineScheduleAlgo(ABC):

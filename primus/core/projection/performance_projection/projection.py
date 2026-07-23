@@ -39,9 +39,9 @@ from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
 
-# NOTE: MegatronPretrainTrainer is imported lazily inside _run_layer_benchmark()
-# to avoid pulling in the megatron dependency when running in pure simulation mode
-# (--profiling-mode simulate).
+# NOTE: The core runtime (PrimusRuntime) and megatron backend are imported
+# lazily inside _run_layer_benchmark() to avoid pulling in the megatron
+# dependency when running in pure simulation mode (--profiling-mode simulate).
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
@@ -1056,16 +1056,23 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
-
-    if has_moe and dense_layers_present:
-        # Need at least 2 layers to profile both dense (layer 0) and MoE (layer 1)
-        # so extraction code can correctly classify each type using the full
-        # model's moe_pattern where layer 0 is typically dense.
-        max_layers = 2
-    else:
-        max_layers = 1
+    # Use 1 layer for fast profiling - results are extrapolated to full model
+    # Increase to 2-4 for better accuracy if needed. PRIMUS_PROJ_MAX_LAYERS lets
+    # the caller benchmark more representative layers (e.g. =2 to capture both the
+    # DeepSeek-V4 HCA(cr=128) and CSA(cr=4) attention kinds, which alternate).
+    max_layers = int(os.environ.get("PRIMUS_PROJ_MAX_LAYERS", "1"))
     target_layers = max(1, min(original_layers, max_layers))
     module_config.num_layers = target_layers
+    # Set the benchmarked layers' attention kinds. PRIMUS_PROJ_COMPRESS_RATIOS
+    # (e.g. "128,4") picks exactly one HCA + one CSA; otherwise trim the model's
+    # own schedule to the benchmarked layer count.
+    _cr_env = os.environ.get("PRIMUS_PROJ_COMPRESS_RATIOS", "").strip("[] ")
+    if _cr_env and hasattr(module_config, "compress_ratios"):
+        module_config.compress_ratios = [int(x) for x in _cr_env.split(",")][:target_layers]
+    else:
+        _cr = getattr(module_config, "compress_ratios", None)
+        if isinstance(_cr, (list, tuple)) and len(_cr) >= target_layers:
+            module_config.compress_ratios = list(_cr[:target_layers])
 
     if has_moe:
         if not dense_layers_present:
@@ -2536,9 +2543,43 @@ def _summarize_bench_training_config(training_config) -> Dict[str, Any]:
     }
 
 
-def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
-    from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+def _build_runtime_primus_config(legacy_primus_config, args, module_name="pre_trainer"):
+    """Adapt the (already-mutated) legacy PrimusConfig into a runtime-shaped config.
 
+    Performance projection loads config via the legacy ``PrimusConfig`` and mutates
+    the flat ``pre_trainer`` module in place (layer limiting, EP rescale, turbo /
+    overlap overrides, ...). The core runtime, however, consumes the normalized
+    ``cfg.modules[*].params`` shape. This helper reuses the runtime loader to build
+    a correct scaffold (exp_root_path / exp_meta_info / platform / ...), then swaps
+    in the mutated ``pre_trainer`` module normalized to the runtime shape, so the
+    benchmark model is built from exactly the mutated config.
+    """
+    from pathlib import Path
+
+    from primus.core.config.primus_config import (
+        _normalize_module_for_runtime,
+        load_primus_config,
+    )
+
+    runtime_cfg = load_primus_config(Path(args.config), args)
+    normalized = _normalize_module_for_runtime(
+        legacy_primus_config.get_module_config(module_name), module_name
+    )
+
+    modules = list(getattr(runtime_cfg, "modules", []) or [])
+    replaced = False
+    for i, m in enumerate(modules):
+        if getattr(m, "name", None) == module_name:
+            modules[i] = normalized
+            replaced = True
+            break
+    if not replaced:
+        modules.append(normalized)
+    runtime_cfg.modules = modules
+    return runtime_cfg
+
+
+def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, args=None):
     module_config = primus_config.get_module_config("pre_trainer")
     _limit_layers_for_projection(module_config)
     rescale_info = _rescale_expert_parallelism(module_config)
@@ -2549,8 +2590,6 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     if reduction_info is not None:
         reduction_info["bench_training_config_summary"] = _summarize_bench_training_config(training_config)
 
-    master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
-    master_port = int(os.getenv("MASTER_PORT", "29500"))
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
 
@@ -2560,7 +2599,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     mem_recorder = MemoryBenchmarkRecorder(rank=rank)
     mem_recorder.snapshot("pre_trainer_init")
 
-    print("[Primus:Performance Projection] Initializing MegatronPretrainTrainer...")
+    print("[Primus:Performance Projection] Preparing benchmark model build...")
     # Disable overlap features and FSDP2 for profiling (they add complexity without benefiting isolated layer benchmarking)
     # FSDP2 uses DTensor which causes issues with benchmarking inputs
     cfg = primus_config.get_module_config("pre_trainer")
@@ -2599,22 +2638,32 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None):
     if getattr(cfg, "multi_latent_attention", False):
         print(f"  enable_primus_turbo: {cfg.enable_primus_turbo}")
         print(f"  use_turbo_gemm: {cfg.use_turbo_gemm}")
-    trainer = MegatronPretrainTrainer(
+
+    # Build the model via the new core runtime instead of the legacy trainer.
+    # The runtime reuses the exact real-training init pipeline (adapter config
+    # conversion + build_args/setup/before_train patches + megatron
+    # initialize_megatron + setup_model_and_optimizer) but stops before the
+    # training loop, giving us a model identical to real training for the
+    # per-layer benchmark. `args` provides data_path / backend_path / config.
+    from primus.core.runtime.train_runtime import PrimusRuntime
+
+    if args is None:
+        raise ValueError(
+            "[Primus:Performance Projection] _run_layer_benchmark requires `args` "
+            "(CLI namespace with config/data_path/backend_path) to build the model "
+            "via the core runtime."
+        )
+
+    runtime_primus_config = _build_runtime_primus_config(primus_config, args, module_name="pre_trainer")
+
+    print("[Primus:Performance Projection] Initializing Megatron and building model...")
+    runtime = PrimusRuntime(args=args)
+    trainer = runtime.setup_model_only(
         module_name="pre_trainer",
-        primus_config=primus_config,
-        module_rank=rank,
-        module_world_size=world_size,
-        module_master_addr=master_addr,
-        module_master_port=master_port,
-        extra_args=unknown_overrides,
+        overrides=unknown_overrides,
+        primus_config=runtime_primus_config,
     )
-
-    print("[Primus:Performance Projection] Initializing Megatron...")
-    trainer.init()
     mem_recorder.snapshot("post_megatron_init")
-
-    print("[Primus:Performance Projection] Setting up model and optimizer...")
-    trainer.setup()
     # post_setup captures: params + distributed-optimizer state + grad buffers
     # at the bench config.  This is the "static" memory anchor — what every
     # rank pays before any forward pass.
@@ -3930,7 +3979,7 @@ def launch_projection_from_cli(args, overrides):
         # downstream pipeline simulation / multinode projection, but print
         # a side-by-side comparison.
         sim_results = _run_layer_simulation(copy.deepcopy(primus_config), args)
-        bench_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info)
+        bench_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info, args=args)
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0:
@@ -3960,7 +4009,7 @@ def launch_projection_from_cli(args, overrides):
         profiling_results = bench_results
     else:
         # Default: actual GPU benchmark
-        profiling_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info)
+        profiling_results = _run_layer_benchmark(primus_config, unknown_overrides, reduction_info, args=args)
 
     # ── Save bench artifact if requested ──
     # ``--save-benchmark`` (preferred) and ``--save-profiling`` (deprecated)

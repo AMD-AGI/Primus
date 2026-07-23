@@ -1,8 +1,10 @@
 # ===== Global =====
 # main control flag
 enable_primus_turbo: false
-# use primus_turbo_fp4_autocast instead of TE fp8_autocast for FP4 (requires enable_primus_turbo)
-use_turbo_fp4_autocast: false
+
+# ===== AutoTune =====
+# enable turbo auto-tuning
+use_turbo_autotune: false
 
 # ===== Attention =====
 # operator switch

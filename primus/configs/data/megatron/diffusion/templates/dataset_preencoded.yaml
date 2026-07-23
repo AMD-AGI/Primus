@@ -1,0 +1,79 @@
+# Local Dataset Configuration for Pre-encoded Diffusion Data
+#
+# This file should be placed in your pre-encoded dataset directory
+# as dataset.yaml (alongside the WebDataset tar files).
+#
+# Directory structure:
+#   /path/to/dataset_preencoded/
+#   ├── dataset.yaml          <- This file
+#   ├── train-000000.tar
+#   ├── train-000001.tar
+#   ├── ...
+#   └── .nv-meta/             <- Created by `energon prepare`
+#
+# After creating this file, run:
+#   energon prepare /path/to/dataset_preencoded --num-workers 8
+
+# Use CrudeWebdataset to enable cooker-based processing
+__module__: megatron.energon
+__class__: CrudeWebdataset
+
+# Subflavor indicates this dataset contains pre-encoded features
+# This routes samples to the preencoded cooker in the task encoder
+subflavors:
+  encoding: preencoded
+
+# Optional: Filter which tar files to load
+# Uncomment and adjust to use specific shards
+# part_filter:
+#   - train-*.tar      # Load all training shards
+#   - val-*.tar        # Or load validation shards
+
+# Optional: Sample filtering
+# max_samples: 100000  # Limit total samples (useful for testing)
+
+# ============================================================================
+# Expected WebDataset Format
+# ============================================================================
+#
+# Each sample in the tar files should contain:
+#   - __key__: unique identifier (e.g., "sample_000001")
+#   - latent.npy: VAE-encoded image latents [C, H, W] float32
+#   - t5_embed.npy: T5-XXL text embeddings [seq_len, 4096] float32
+#   - clip_embed.npy: CLIP-L pooled embeddings [768] float32
+#   - metadata.json: sample metadata (optional)
+#
+# Example tar content:
+#   sample_000001.latent.npy
+#   sample_000001.t5_embed.npy
+#   sample_000001.clip_embed.npy
+#   sample_000001.metadata.json
+#
+# ============================================================================
+# Preparation Steps
+# ============================================================================
+#
+# 1. Prepare pre-encoded features using the Primus CLI:
+#    tools/docker/primus data diffusion-encoded \
+#      --source-type directory \
+#      --input-dir /path/to/raw_images \
+#      --output-dir /path/to/dataset_preencoded \
+#      --model-path black-forest-labs/FLUX.1-dev \
+#      --batch-size 8
+#
+# 2. Copy this template to the output directory as dataset.yaml
+#
+# 3. Run Energon indexing:
+#    energon prepare /path/to/dataset_preencoded --num-workers 8
+#
+# 4. Verify the dataset:
+#    energon info /path/to/dataset_preencoded
+#
+# 5. Use in training config:
+#    data:
+#      dataset_path: /path/to/dataset_preencoded/dataset.yaml
+#
+# For more information, see:
+#   - primus/configs/data/megatron/diffusion/README.md
+#   - examples/megatron/diffusion/README.md
+#
