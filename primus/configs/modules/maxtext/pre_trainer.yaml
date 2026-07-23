@@ -21,7 +21,7 @@ packing: true
 # 32 matches upstream MaxText GPU model configs and is harmless on v26.3.
 max_segments_per_seq: 32
 
-shardy: false
+shardy: true
 
 remat_policy: 'full'
 optimizer_memory_host_offload: false
