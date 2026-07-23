@@ -1,6 +1,6 @@
 # Contributing guide
 
-This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The repository root [CONTRIBUTING.md](../../CONTRIBUTING.md) repeats branch naming, commit style, and pull request steps in short form.
+This guide summarizes how to set up a development environment, follow project conventions, run checks locally, and align with the CI pipeline. For test commands and layout, see [Testing Guide](testing.md). The repository root [CONTRIBUTING.md](../../CONTRIBUTING.md) summarizes key contribution guidelines, such as branch naming conventions, commit message style, and pull request requirements.
 
 ## 1. Development setup
 

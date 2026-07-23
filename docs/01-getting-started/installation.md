@@ -51,7 +51,7 @@ Check the AMD-published training Docker images here:
 
 ```bash
 # For Megatron-LM and TorchTitan backends
-docker pull rocm/primus:v26.3
+docker pull rocm/primus:v26.4
 # For MaxText backend
 docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
 ```
@@ -64,7 +64,7 @@ Submodules are required for third-party backends and tools:
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 # checkout the branch for the specific release
-git checkout release/v26.3
+git checkout release/v26.4
 git submodule update --init --recursive
 ```
 
@@ -73,7 +73,7 @@ git submodule update --init --recursive
 From the repository root:
 
 ```bash
-./primus-cli container --image rocm/primus:v26.3 -- \
+./primus-cli container --image rocm/primus:v26.4 -- \
   benchmark gemm --M 4096 --N 4096 --K 4096
 ```
 
@@ -117,7 +117,7 @@ Reproducing the training environment on the host means building the **same stack
 
 Follow the full, step-by-step guide here, which includes the exact pinned versions, environment variables, and automated install scripts:
 
-- **[Installing the Primus training environment on a host (no Docker)](../../docs_deprecated/install-on-host.md)**
+- **[Bare-metal installation: build the Primus training stack from source (no Docker)](./bare-metal-installation.md)**
 
 ### Verify
 
@@ -182,7 +182,7 @@ The image used for the job is resolved according to the following priority order
 1. **`DOCKER_IMAGE` environment variable**—overrides everything else. This is the simplest way to switch images and it propagates to all nodes:
 
 ```bash
-export DOCKER_IMAGE=rocm/primus:v26.3
+export DOCKER_IMAGE=rocm/primus:v26.4
 ./primus-cli slurm srun -N 2 \
   -- train pretrain --config <your-config>.yaml
 ```
@@ -191,10 +191,10 @@ export DOCKER_IMAGE=rocm/primus:v26.3
 
 ```bash
 ./primus-cli slurm srun -N 2 \
-  -- --image rocm/primus:v26.3 train pretrain --config <your-config>.yaml
+  -- --image rocm/primus:v26.4 train pretrain --config <your-config>.yaml
 ```
 
-3. **Config file default**—`container.options.image` in `runner/.primus.yaml` (or your `~/.primus.yaml`), which is set to `rocm/primus:v26.3` by default.
+3. **Config file default**—`container.options.image` in `runner/.primus.yaml` (or your `~/.primus.yaml`), which is set to `rocm/primus:v26.4` by default.
 
 ### Distributed environment variables
 
@@ -249,7 +249,7 @@ With Kubernetes, inject these as container environment variables (deriving `NODE
 | Step                 | Check                                                                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------------------- |
 | **ROCm**             | `rocm-smi` shows expected GPUs and no driver errors.                                                    |
-| **Container engine** | `docker run --rm ... rocm/primus:v26.3` (or your site’s GPU test) succeeds.                             |
+| **Container engine** | `docker run --rm ... rocm/primus:v26.4` (or your site’s GPU test) succeeds.                             |
 | **GEMM benchmark**   | `./primus-cli` **container** or **direct** benchmark completes (see sections above).                    |
 | **Preflight**        | Run preflight diagnostics: `./primus-cli direct -- preflight` (single node) or `./primus-cli slurm srun -N <N> -- preflight` (cluster).         |
 
