@@ -117,7 +117,7 @@ Reproducing the training environment on the host means building the **same stack
 
 Follow the full, step-by-step guide here, which includes the exact pinned versions, environment variables, and automated install scripts:
 
-- **[Installing the Primus training environment on a host (no Docker)](../../docs_deprecated/install-on-host.md)**
+- **[Bare-metal installation: build the Primus training stack from source (no Docker)](./bare-metal-installation.md)**
 
 ### Verify
 
