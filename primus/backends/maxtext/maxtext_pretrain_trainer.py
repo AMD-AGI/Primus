@@ -84,6 +84,9 @@ class MaxTextPretrainTrainer(BaseTrainer):
         self.train_config: Optional[Any] = None
         self.recorder: Optional[Any] = None
         self.diagnostic_config: Optional[Any] = None
+        # Raw tuple returned by MaxText's initialize(); forwarded verbatim to
+        # run() so we stay agnostic to its return arity across MaxText versions.
+        self._init_result: tuple = ()
 
         log_rank_0("Initialized MaxTextPretrainTrainer")
 
@@ -126,12 +129,26 @@ class MaxTextPretrainTrainer(BaseTrainer):
         yaml_path = export_params_to_yaml(params_dict)
         try:
             argv = [module_name, yaml_path]
-            self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
+            init_result = initialize(argv, **override_model_args)
         finally:
             try:
                 os.unlink(yaml_path)
             except OSError as e:
                 error_rank_0(f"MaxTextPretrainTrainer: Failed to delete temporary YAML at {yaml_path}: {e}")
+
+        # MaxText's ``initialize()`` return arity changed across versions:
+        #   - v26.4 and earlier: ``(config, recorder, diagnostic_config)``
+        #   - v26.5+:            ``(config, recorder)`` (diagnostic_config dropped)
+        # Keep the raw tuple so ``train()`` can forward it verbatim to ``run()``,
+        # whose parameter count matches ``initialize()``'s arity in the same
+        # version. Unpacking a fixed number of names here is what previously
+        # crashed on v26.5 with "not enough values to unpack (expected 3, got 2)".
+        if not isinstance(init_result, tuple):
+            init_result = (init_result,)
+        self._init_result = init_result
+        self.train_config = init_result[0] if len(init_result) > 0 else None
+        self.recorder = init_result[1] if len(init_result) > 1 else None
+        self.diagnostic_config = init_result[2] if len(init_result) > 2 else None
 
         self._update_logger_rank()
         log_rank_0("MaxText training components initialized successfully")
@@ -212,6 +229,9 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         _, run, _ = _resolve_maxtext_train()
 
-        run(self.train_config, self.recorder, self.diagnostic_config)
+        # Forward the exact tuple returned by initialize(); run()'s signature
+        # matches initialize()'s arity within a given MaxText version (3 args on
+        # v26.4 with diagnostic_config, 2 args on v26.5+).
+        run(*self._init_result)
 
         log_rank_0("MaxText pretrain execution completed.")
