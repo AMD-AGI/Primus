@@ -111,10 +111,19 @@ jobs:
           # echo "> Login to ROCm Docker Hub"
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
+          # This build-docker runner lives under /apps, which the Docker daemon
+          # cannot see (only its bind-mount /mnt/apps_proxy is visible to docker).
+          # Use the /mnt/apps_proxy view of GITHUB_WORKSPACE for every docker
+          # build context / -f path so BuildKit can read them.
+          CWS="${GITHUB_WORKSPACE}"
+          if [[ "${GITHUB_WORKSPACE}" == /apps/* ]]; then
+            CWS="/mnt/apps_proxy${GITHUB_WORKSPACE#/apps}"
+          fi
+
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           echo "> Build dependencies"
           start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+          docker build -f $CWS/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg BASE_IMAGE=${BASE_IMAGE} \
@@ -124,7 +133,7 @@ jobs:
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg TRITON_COMMIT=${TRITON_COMMIT} \
-               $GITHUB_WORKSPACE/.github/workflows/docker
+               $CWS/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
@@ -138,15 +147,15 @@ jobs:
           # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
-          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          mkdir -p $CWS/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-77.tar.gz $CWS/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           # cp /shared_nfs/tas/primus_github_runner/build-docker/ainic/ainic_bundle_1.117.5-a-77.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
+          docker build -f $CWS/.github/workflows/docker/Dockerfile.ainic \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
                --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
-               $GITHUB_WORKSPACE/.github/workflows/docker
+               $CWS/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
