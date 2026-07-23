@@ -233,6 +233,32 @@ jobs:
     # runs-on: [primus-lm-cicd-v26.3-crusoe-m2m-321]
     steps:
       - run: echo "🎉 Begin Primus Unit Test (containerized)."
+      - name: Pre-checkout cleanup of root-owned leftovers
+        # Safety net for when a PREVIOUS run never reached its Clean step (runner
+        # crash/reboot/OOM, or cancellation past the grace period): it can leave
+        # root-owned files (E2E data/, output/, pp_simulation_result/,
+        # .pytest_cache, ...) in the workspace, and actions/checkout then fails
+        # with EACCES while deleting them ("Deleting the contents of ..."). Fix
+        # ownership here BEFORE checkout so the current run self-heals regardless
+        # of how the previous one ended. Runs as root via docker because the
+        # runner user cannot chown root-owned files. Best-effort (never fails).
+        run: |
+          WS="${GITHUB_WORKSPACE}"
+          CWS="$WS"; [[ "$WS" == /apps/* ]] && CWS="/mnt/apps_proxy${WS#/apps}"
+          if [ ! -d "$CWS" ]; then echo "Workspace $CWS not present yet; nothing to clean."; exit 0; fi
+          owner="$(stat -c '%u:%g' "$CWS")"
+          echo "Workspace=$CWS owner=$owner root-owned-before=$(find "$CWS" -user 0 2>/dev/null | wc -l)"
+          FIX="find '$CWS' -user 0 -exec chown $owner {} + 2>/dev/null; true"
+          if [ "$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null)" = "true" ]; then
+            echo "Fixing ownership via running container ${UT_CONTAINER}."
+            docker exec "${UT_CONTAINER}" bash -lc "$FIX" || true
+          else
+            IMG="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 -E 'tasimage/primus|rocm/primus' || true)"
+            [ -n "$IMG" ] || IMG="${BASE_IMAGE}"
+            echo "Fixing ownership via throwaway container from image: $IMG"
+            docker run --rm -v /mnt/apps_proxy:/mnt/apps_proxy "$IMG" bash -lc "$FIX" || true
+          fi
+          echo "root-owned-after=$(find "$CWS" -user 0 2>/dev/null | wc -l)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
