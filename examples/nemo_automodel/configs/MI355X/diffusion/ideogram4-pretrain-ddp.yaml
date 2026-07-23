@@ -1,0 +1,43 @@
+# Primus EXP — Ideogram-4 single-stream T2I PRETRAIN, DDP + ZeRO-1 variant.
+# =============================================================================
+# Sibling of ideogram4-pretrain.yaml (the FSDP2 EXP). Uses the DDP module preset
+# (ideogram4_ddp_pre_trainer.yaml -> `ddp:` block) so the recipe replicates
+# params+grads and skips per-layer all-gather; pair with PRIMUS_IDEOGRAM_ZERO1=1
+# to shard the optimizer state (ZeRO-1) + whole-block-checkpoint the Ideogram
+# layers on the DDP path (no-fork ideogram_zero1.py hook).
+#
+# CAVEAT: torch.compile is FSDP2-only and single-node comm is ~hidden, so this
+# path trails FSDP2+compile on one node (see 10_PHASE_C_PROFILE.md §3d). It is the
+# multi-node lever / reference; do NOT set fsdp.enable_compile here (no fsdp block).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-ddp}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_ddp_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 20
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x dp8 (grad_acc = 1 -> no no_sync needed)
+        log_every: 1
+      optim:
+        learning_rate: 1.0e-4
+      ddp:
+        activation_checkpointing: true
+      model:
+        torch_dtype: bfloat16    # ZeRO-1/DDP baseline (bf16 master, matches compile A/B)
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          max_text_tokens: 128
+          min_text_tokens: 128
+      checkpoint:
+        enabled: false

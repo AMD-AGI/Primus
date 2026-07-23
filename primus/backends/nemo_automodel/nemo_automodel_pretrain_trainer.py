@@ -65,7 +65,12 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             ("primus.backends.nemo_automodel.primus_turbo_fp8", "GEMM low-precision"),
             ("primus.backends.nemo_automodel.primus_turbo_fp8_attn", "FP8 attention"),
             ("primus.backends.nemo_automodel.aiter_bf16_attn", "non-deterministic attention"),
+            ("primus.backends.nemo_automodel.ideogram4_varlen_attn", "Ideogram-4 var-len flash attention"),
             ("primus.backends.nemo_automodel.flux_ac", "FLUX real activation checkpointing"),
+            ("primus.backends.nemo_automodel.ideogram4_adapter", "Ideogram-4 flow-matching adapter"),
+            ("primus.backends.nemo_automodel.ideogram_ac", "Ideogram-4 real activation checkpointing"),
+            ("primus.backends.nemo_automodel.ideogram_zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
+            ("primus.backends.nemo_automodel.ideogram_profile", "Ideogram-4 torch.profiler train-loop wrapper"),
         )
         import importlib
 
