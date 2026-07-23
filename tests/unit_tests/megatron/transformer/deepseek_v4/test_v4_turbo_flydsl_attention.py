@@ -43,10 +43,15 @@ if not torch.cuda.is_available():
 
 pytest.importorskip("flydsl", reason="flydsl pip package not installed")
 # The turbo API: primus_turbo must carry the flydsl sparse-MLA attention submodule.
-pytest.importorskip(
-    "primus_turbo.flydsl.attention.kernels.sparse_mla_v2",
-    reason="installed primus_turbo has no flydsl sparse-MLA attention (turbo backend)",
-)
+# The upstream module layout changed across releases; accept either (new flat
+# ``sparse_mla_fwd`` module, or the old ``kernels.sparse_mla_v2`` package).
+try:
+    import primus_turbo.flydsl.attention.sparse_mla_fwd  # noqa: F401
+except ImportError:
+    pytest.importorskip(
+        "primus_turbo.flydsl.attention.kernels.sparse_mla_v2",
+        reason="installed primus_turbo has no flydsl sparse-MLA attention (turbo backend)",
+    )
 
 _ARCH = torch.cuda.get_device_properties(0).gcnArchName
 if "gfx950" not in _ARCH:

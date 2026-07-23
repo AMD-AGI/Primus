@@ -248,6 +248,12 @@ class TestMegatronTrainer(PrimusUT):
                 "8",
                 "--pipeline_model_parallel_size",
                 "1",
+                # Unset the config's interleaved pipeline_model_parallel_layout (it
+                # requires PP>1, but this test runs with PP=1). "None" is coerced to
+                # Python None by parse_cli_overrides, which clears the layout; an empty
+                # string instead builds an empty layout that fails validation.
+                "--pipeline_model_parallel_layout",
+                "None",
                 "--recompute_granularity",
                 "full",
                 "--recompute_method",
@@ -524,6 +530,10 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--use_turbo_grouped_gemm",
                 "1",
+                # use_turbo_grouped_gemm is incompatible with the config's default
+                # moe_use_legacy_grouped_gemm=True, so disable the legacy path.
+                "--moe_use_legacy_grouped_gemm",
+                "0",
             ],
         )
 
@@ -590,6 +600,9 @@ class TestMegatronTrainer(PrimusUT):
                 "0",
                 "--moe_use_legacy_grouped_gemm",
                 "0",
+                # Sync-Free MoE stage 3 requires PrimusTurboGroupedLinear.
+                "--use_turbo_grouped_gemm",
+                "1",
                 "--turbo_sync_free_moe_stage",
                 "3",
                 "--use_turbo_attention",
