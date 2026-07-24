@@ -144,7 +144,13 @@ if HAVE_TE and HAVE_TURBO:
                 fp4_context = nullcontext()
             else:
                 fp4_recipe, fp4_recipe_none_reason = get_fp4_recipe(config)
-                turbo_enabled = _primus_turbo_enabled()
+                # fp4_use_native_te_autocast forces the TE-native autocast branch
+                # (TE fp8_autocast + MXFP4BlockScaling -> AITER a4w4), bypassing
+                # Primus-Turbo entirely -- even if the Turbo autocast is otherwise
+                # enabled. This is the pure-TE MXFP4 path (enable_primus_turbo=false).
+                turbo_enabled = _primus_turbo_enabled() and not getattr(
+                    config, "fp4_use_native_te_autocast", False
+                )
 
                 global WARN_ONCE
                 if WARN_ONCE:

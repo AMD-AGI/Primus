@@ -634,25 +634,46 @@ class Flux(DiffusionModule):
 
     def get_fp8_context(self):
         """
-        Return FP8 context manager for FP8 training.
+        Return the active low-precision (FP8 or FP4) quantization context manager.
 
-        When transformer_impl="local", FP8 is handled per-module at init time
-        (inside Float8ColumnParallelLinear / Float8RowParallelLinear), so no
-        global FP8 context manager is needed. This avoids mutable global state
-        that would cause torch.compile graph breaks.
+        For the TransformerEngine spec, a TE linear only issues an FP8/FP4 GEMM
+        while the corresponding autocast context is active. The Flux forward wraps
+        every compile strategy in this single method, so it must return whichever
+        quantization context the config requests:
+
+        - FP8 (config.fp8): TE FP8 autocast via megatron.core.fp8_utils.
+        - FP4 (config.fp4, e.g. MXFP4): TE FP4 autocast via megatron.core.fp4_utils.
+          Without this branch a pure-FP4 run would get nullcontext and silently
+          fall back to BF16 GEMMs (no AITER FP4 routing).
+
+        FP8 takes precedence over FP4 when both are set, mirroring stock Megatron's
+        transformer_block (`if config.fp8 ... elif config.fp4 ...`).
+
+        When transformer_impl="local", FP8/FP4 is handled per-module at init time
+        (inside Float8/MXFP4 ColumnParallelLinear / RowParallelLinear), so no global
+        context manager is needed. This avoids mutable global state that would cause
+        torch.compile graph breaks.
 
         Returns:
-            Context manager for FP8 operations (or nullcontext if FP8 disabled
-            or using local spec)
+            Context manager for the active quantization mode (or nullcontext if
+            quantization is disabled or using local spec).
         """
         from contextlib import nullcontext
 
         if self.config.transformer_impl == "local":
             return nullcontext()
 
-        from megatron.core.fp8_utils import get_fp8_context as get_fp8_context_util
+        if getattr(self.config, "fp8", None):
+            from megatron.core.fp8_utils import get_fp8_context as get_fp8_context_util
 
-        return get_fp8_context_util(self.config)
+            return get_fp8_context_util(self.config)
+
+        if getattr(self.config, "fp4", None):
+            from megatron.core.fp4_utils import get_fp4_context as get_fp4_context_util
+
+            return get_fp4_context_util(self.config)
+
+        return nullcontext()
 
     def forward(
         self,
