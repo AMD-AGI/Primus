@@ -120,21 +120,33 @@ Most MoE workloads benefit first from a foundation of general-purpose training o
 
 On top of this foundation, we have hardened and extended the following for the current model generation:
 
+**Performance**
+
+- **Quantized-weight.** Caching quantized weights across multiple microbatches reduces quantization overhead in FP4 and FP8 training.
+- **FlyDSL GEMM and grouped GEMM kernels.** Support for FlyDSL FP8 GEMM and grouped GEMM kernels improves performance over Triton implementations.
+- **Single-parameter for grouped linear.** Merging multiple experts' weights into a single contiguous tensor and applying a grouped quantization kernel reduces quantization overhead.
 - **Precision-aware optimizer with BF16 states.** Storing master gradients and the Adam moment estimates in BF16 (`main_grads_dtype`, `exp_avg_dtype`, `exp_avg_sq_dtype`) meaningfully reduces optimizer memory and gradient-reduction cost, freeing memory headroom for larger micro-batches.
-- **Fused cross-entropy and RoPE.** TE-backed cross-entropy loss fusion (`cross_entropy_fusion_impl: te`) and fused RoPE (`apply_rope_fusion`) cut memory and kernel overhead in the loss and attention paths.
-- **Turbo RMSNorm and fused activation.** Fused normalization and SwiGLU-with-probs paths reduce the number of small kernels in the MoE block.
+- **Fused cross-entropy and RoPE.** TE-backend cross-entropy loss fusion (`cross_entropy_fusion_impl: te`) and fused RoPE (`apply_rope_fusion`) cut memory and kernel overhead in the loss and attention paths.
+
+**Usability**
+
 - **Pipeline warm-up (`pp_warmup`).** A parallel forward+backward warm-up on every pipeline rank exercises all lazy-init paths (CUDA/HIP, TE, FP8, NCCL) concurrently, removing first-iteration stalls without changing numerics.
 - **Faster process teardown.** An opt-in fast-exit path shaves wall-clock time from the tail of large runs.
 
-<!---
-OWNER / FILL: Ruibin Zhang. Insert a figure/table quantifying the cumulative
-general-optimization uplift on a representative model (e.g. Qwen3-30B-A3B or
-DeepSeek-V3) at imgs/general_opt_uplift.png. Replace the placeholder below.
---->
+![Figure 2: Additional Primus-Turbo optimizations improve throughput by 16.2% on Qwen3-235B-A22B, 9.7% on GPT-OSS 20B, and 5.8% on Qwen3-30B-A3B](imgs/general_opt_uplift.png)
 
-![Figure 2: Cumulative impact of general Primus + Primus-Turbo optimizations on a representative MoE model](imgs/general_opt_uplift.png)
+**Figure 2: Incremental throughput uplift from additional Primus-Turbo optimizations.** Compared with the listed reference configurations, the additional Turbo and FlyDSL settings improve throughput by **16.2%** on Qwen3-235B-A22B, **9.7%** on GPT-OSS 20B, and **5.8%** on Qwen3-30B-A3B.
 
-**Figure 2: Cumulative impact of general Primus + Primus-Turbo optimizations on a representative MoE model** _(placeholder — asset and numbers to be finalized)_
+The specific model configurations and measured throughput are shown below.
+
+| Model | GPUs | Precision | Parallelism (TP/PP/CP/EP/DP) | MBS | GBS | Seq Len | Key Config / Flags | Throughput (tokens/s) |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3-235B-A22B (best configuration) | 32 | FP8-CS | 1/1/4/8/1 | 2 | 16 | 4096 | `turbo_sync_free_moe_stage: 1` | 4137.5 |
+| Qwen3-235B-A22B (Turbo-accelerated) | 32 | FP8-CS | 1/1/4/8/1 | 2 | 16 | 4096 | `use_turbo_grouped_gemm: true`<br>`turbo_sync_free_moe_stage: 2`<br>`PRIMUS_TURBO_GROUPED_GEMM_BACKEND=flydsl` | 4809.1 |
+| GPT-OSS 20B (MLPerf configuration) | 8 | FP8-CS | 1/1/1/1/8 | 2 | 16 | 4096 | `use_turbo_grouped_gemm: true`<br>`use_turbo_fused_act_with_probs: true`<br>`use_turbo_rms_norm: true` | 25660.1 |
+| GPT-OSS 20B (Turbo-accelerated) | 8 | FP8-CS | 1/1/1/1/8 | 2 | 16 | 4096 | `use_turbo_grouped_gemm: true`<br>`use_turbo_fused_act_with_probs: true`<br>`use_turbo_rms_norm: true`<br>`PRIMUS_TURBO_GROUPED_GEMM_BACKEND=flydsl` | 28136.7 |
+| Qwen3-30B-A3B (best configuration) | 8 | FP8-CS | 1/1/1/8/1 | 8 | 512 | 4096 | `turbo_sync_free_moe_stage: 1` | 26058.7 |
+| Qwen3-30B-A3B (Turbo-accelerated) | 8 | FP8-CS | 1/1/1/8/1 | 8 | 512 | 4096 | `turbo_sync_free_moe_stage: 2`<br>`use_turbo_gemm: true`<br>`use_turbo_grouped_gemm: true`<br>`PRIMUS_TURBO_GROUPED_GEMM_BACKEND=flydsl` | 27581.3 |
 
 Together, these general optimizations are the default-on baseline that the model-specific and kernel-level work below builds upon.
 
