@@ -1,0 +1,16 @@
+diff --git a/megatron/core/transformer/torch_norm.py b/megatron/core/transformer/torch_norm.py
+index 5948ae600..ed829ffa8 100644
+--- a/megatron/core/transformer/torch_norm.py
++++ b/megatron/core/transformer/torch_norm.py
+@@ -56,6 +56,11 @@ class WrappedTorchNorm:
+         if config.normalization == "LayerNorm":
+             norm_cls = torch.nn.LayerNorm
+         elif config.normalization == "RMSNorm":
++            from megatron.training import get_args as _get_args
++            if getattr(_get_args(), 'use_fla_fused_rmsnorm', False):
++                from fla.modules import RMSNorm as FLARMSNorm
++                return FLARMSNorm(hidden_size=hidden_size, eps=eps)
++
+             assert is_torch_min_version(
+                 "2.4.0a0"
+             ), 'Torch RMSNorm requires PyTorch version >= 2.4.0'

@@ -1,0 +1,511 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn_pure_exp7-fsdp-overlap}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pure GDN 1B — 100B tokens on FineWeb-Edu (matched to FLA's
+# `setup_and_train_gdn_pure_1B_100B.sh` so the loss curves can be compared
+# iter-for-iter once we drive Primus from FLA's token order via PRIMUS_FLA_DATA).
+#
+# FLA's run:
+#   model:       configs/gated_deltanet_1B_pure_100B.json (same arch as the
+#                10B config we already replicate in zebra_llama_1B_gdn_pure.yaml)
+#   lr:          3e-4   (vs the 10B run's 2e-4 — bigger LR for the longer schedule)
+#   scheduler:   cosine_with_min_lr  (min_lr ≈ 0.1 × peak = 3e-5)
+#   warmup:      2000 iters         (vs 200 on the 10B run)
+#   batch:       64 per GPU         (vs 16 on the 10B run)
+#   update:      1                  (no grad-accum)
+#   gpus:        8
+#     → global_batch_size = 64 × 8 = 512
+#     → tokens/iter      = 512 × 2048 = 1,048,576
+#   steps:       95368              (95368 × 1,048,576 ≈ 100B tokens)
+#   data:        HuggingFaceFW/fineweb-edu, sample-100BT
+#                cache: .../data/HuggingFaceFW/fineweb-edu/sample-100BT/train
+#                (~364 GB on disk — pre-tokenized by FLA)
+#
+# Wall-time estimate on 8×MI300X with the full FLA-parity stack (~1.8 s/iter
+# based on the GDN-hybrid 300M @ 2.2 s/iter rescaled for the larger model):
+#   95368 × ~1.8 s ≈ 48 h (~2 days)
+# ─────────────────────────────────────────────────────────────────────────────
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: zebra_llama_1B_gdn_pure.yaml
+    overrides:
+      wandb_project: "Primus_Zebra_Llama_1B_GDN_Pure_100B"
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      # FLA's `train.sh` defaults `--dataloader_num_workers 32` and the 100B
+      # run does NOT override it. At b=64 mbs, ~131k tokens/GPU/iter, 32
+      # workers (vs Primus's previous 8 carried over from the 300M run) keeps
+      # the DataLoader queue full so the GPU never starves between iters.
+      # PyTorch's default `prefetch_factor=2` is already what FLA uses.
+      num_workers: 32
+      create_attention_mask_in_dataloader: false
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # Perf: Megatron defaults to inserting dist.barrier() before every L1 timer
+      # measurement (~5-10/iter). Costs throughput, no correctness impact.
+      barrier_with_L1_time: false
+
+      # ─────────────────────────────────────────────────────────────────────
+      # SPEED RECOVERY (lifted from 300M YAML which matched FLA at +0.27%):
+      #
+      # The profile of iters 15-16 showed 487 ms/iter spent in `aten::item`
+      # (CPU↔GPU sync points). The 300M run avoided this by disabling NaN
+      # checking and bumping log_interval to 100. Both are loss-identical
+      # — only affect logging and sync, not training math.
+      #
+      # check_for_nan_in_loss_and_grad: false
+      #   • Megatron default = true, which fires `loss.item()` and an
+      #     `isnan`/`isinf` validate_result on the loss EVERY iter
+      #     (pretrain_mamba.py:178). Each is a CPU-GPU sync. Saves ~50 ms.
+      #   • If loss ever spikes to NaN you'll still see it in the log
+      #     output, just won't auto-rerun the step.
+      #
+      # log_interval: 32
+      #   • Default is 1, meaning every step we run timers, compute
+      #     throughput, `loss.item()`, and print to stdout/log files —
+      #     ~200 ms of sync+formatting per iter. Logging every 32 iters
+      #     EXACTLY matches FLA's `--logging_steps 32` (legacy/training/
+      #     train.sh:55) so loss curves line up tick-for-tick with the
+      #     FLA reference log when overlaid for parity verification.
+      #     At ~7.5 s/iter that's a log line every 4 min — plenty.
+      #
+      # tensorboard_log_interval: 32
+      #   • Same logic for TB/wandb logging. Default is 1 = sync every
+      #     iter. ~100 ms recovered.
+      #
+      # Combined expected speedup: ~300-400 ms/iter (7.6 s → ~7.2 s),
+      # all loss-identical. This is what the 300M YAML had.
+      # ─────────────────────────────────────────────────────────────────────
+      check_for_nan_in_loss_and_grad: false
+      # FLA's 100B launcher uses `logging=10` → `--logging_steps 10`. Matching
+      # exactly so the Primus loss log lines up tick-for-tick with FLA's
+      # reference `train_gdn_pure_1B_100B.log`.
+      log_interval: 10
+      tensorboard_log_interval: 10
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FLA-parity numerics (lifted verbatim from the validated 300M parity
+      # YAML — these are the *exact* settings that produced the iter-1
+      # bit-perfect match and the < 0.5% late-training residual documented
+      # in GDN_FLA_PARITY.md).  Skipping any of them re-introduces a known
+      # source of drift:
+      #
+      #   layernorm_epsilon  — Megatron's TransformerConfig defaults to 1e-5;
+      #                        FLA uses 1e-6.  ~1% per-layer divergence.
+      #   hidden_dropout     — Megatron's TransformerConfig defaults these to
+      #   attention_dropout    0.1 each (transformer_config.py L152).  Even
+      #                        though the model YAML asks for 0, the EXP-level
+      #                        defaults leak through and we'd train with 10%
+      #                        dropout while FLA trains with 0.  CRITICAL.
+      #   no_persist_layer_norm — disables Apex's persistent buffer kernel
+      #                        which has slightly different rounding.
+      # ─────────────────────────────────────────────────────────────────────
+      layernorm_epsilon: 1.0e-6
+      hidden_dropout: 0.0
+      attention_dropout: 0.0
+      no_persist_layer_norm: true
+
+      # ── Training schedule ─ matches FLA EXACTLY (bit-perfect every knob):
+      #   batch=64, grad_accum=1, gpus=8, seq=2048
+      #   global_batch_size = 64 × 8 = 512
+      #   tokens/iter       = 512 × 2048 = 1,048,576
+      #   total tokens      = 95368 × 1,048,576 ≈ 100 B
+      train_iters: 50    # PERF EXP: 50 iters to measure steady-state
+      micro_batch_size: 64
+      global_batch_size: 512
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+      original_max_position_embeddings: 2048
+
+      # ── Optimizer ─ exact bit-match to FLA's 100B CLI:
+      #   --learning_rate 3.0e-4
+      #   --lr_scheduler_type cosine_with_min_lr
+      #   --warmup_steps 2000
+      #   --optim adamw_torch_fused
+      #   --adam_beta1=0.9 --adam_beta2=0.95
+      #   --weight_decay 0.01
+      #   --max_grad_norm 1.0
+      #   --seed 42 --bf16
+      #
+      # CRITICAL: although FLA's train.sh does NOT pass --lr_scheduler_kwargs,
+      # FLA's run.py OVERRIDES it programmatically — see
+      # flash-linear-attention/legacy/training/run.py:96-97 :
+      #     if args.lr_scheduler_type == 'cosine_with_min_lr':
+      #         args.lr_scheduler_kwargs = {'min_lr_rate': 0.1}
+      # So FLA's lr decays from 3e-4 to 0.1*3e-4 = 3e-5 over 95368 iters,
+      # NOT to 0 as the HF default would imply.  Megatron's cosine is
+      #     lr = min_lr + 0.5*(1+cos(π*p))*(max_lr - min_lr)
+      # HF's cosine_with_min_lr is the algebraically identical form
+      #     lr = peak * (factor*(1-min_lr_rate) + min_lr_rate)
+      # so setting `min_lr: 3.0e-5` here matches FLA's lr at every step,
+      # bit-exact.  (Setting `min_lr: 0.0` — what we had earlier — would
+      # cause Primus's lr to undershoot FLA's in late training; the loss
+      # curves would diverge after ~iter 50000.)
+      # (Warmup is `init_lr + (max_lr-init_lr)*step/warmup` in Megatron and
+      # `peak*step/warmup` in HF — identical when init_lr=0, which is the
+      # Megatron default.)
+      clip_grad: 1.0
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 2000
+      lr_decay_iters: 95368
+      lr_decay_style: cosine
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # Match FLA's --seed 42 exactly.  Primus's default is 1234; using FLA's
+      # seed minimises init-RNG drift between the two runs (still not bit-
+      # identical because Megatron and HF transformers walk parameters in
+      # different orders, but it eliminates the 12 % of variance that comes
+      # from the seed itself).
+      seed: 42
+
+      # ─────────────────────────────────────────────────────────────────────
+      # NO-TE spec — the validated 300M parity run uses this variant because
+      # FLA's reference is built on native PyTorch nn.Linear / RMSNorm.  TE's
+      # ColumnParallelLinear / TENorm wrappers introduce small numerical
+      # differences (cast ordering, persistent buffers) that drift the loss
+      # by ~0.1% per layer.  Using the no-TE spec aligns Megatron's layer
+      # numerics with FLA's.  (See GDN_FLA_PARITY.md §A.)
+      # ─────────────────────────────────────────────────────────────────────
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec_no_te']
+
+      # Tokenizer (cached locally — same path FLA's run uses)
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.2-1B
+
+      # ── Parallelism ─
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # DDP / optimizer sharding — Megatron-FSDP (ZeRO-2 equivalent)
+      # ─────────────────────────────────────────────────────────────────────
+      #
+      # WHY we switched from ZeRO-1 to Megatron-FSDP (this run only):
+      #
+      # Profile of iter 15-16 (captured 2026-05-25) showed:
+      #
+      #   GPU busy:                   ~43 %  (TFLOP/s = 261, peak 1300)
+      #   aten::empty                 1500 calls × 2.3 ms = 3390 ms / iter
+      #   aten::empty_like            1206 calls × 2.6 ms = 3114 ms / iter
+      #   aten::empty_strided         1100 calls × 2.3 ms = 2575 ms / iter
+      #   aten::mm dispatch            576 calls × 9.5 ms = 5485 ms / iter
+      #
+      # Normal aten::empty is *microseconds*. Ours is **1000× slower**
+      # because the PyTorch HIP allocator is constantly hitting hipMalloc/
+      # hipFree at 81 % VRAM (156 GB / 192 GB). For comparison the 300M
+      # run runs at 30 % VRAM, the allocator cache stays warm, every
+      # aten::empty is sub-µs, and it achieves 643 TFLOP/s (49 % of peak).
+      #
+      # Megatron's own FSDP docs explicitly call out this exact failure
+      # mode (third_party/Megatron-LM/docs/user-guide/features/
+      # custom_fsdp.md §5 line 187):
+      #
+      #   "FSDP can lead to crashes of the PyTorch memory allocator cache,
+      #    and a large number of cudaMalloc and cudaFree calls. This
+      #    problem is challenging and can only be mitigated by avoiding
+      #    frequent hits on the GPU memory limit."
+      #
+      # FLA's reference run uses DeepSpeed ZeRO-Stage-2 (ds_config.json
+      # "stage": 2, contiguous_gradients=true) which shards BOTH optimizer
+      # state AND gradients. Our prior config used Megatron's
+      # `use_distributed_optimizer=true` which is ZeRO-Stage-1 (only opt
+      # state sharded — full grads stay on every rank, ≈ 4.8 GB / rank).
+      # Megatron-FSDP with `data_parallel_sharding_strategy: optim_grads`
+      # is the bit-for-bit equivalent of FLA's setup: shards both opt-state
+      # AND grads, leaves params un-sharded. Memory savings ≈ 4.2 GB/rank
+      # (from 156 → ~152 GB, 81 % → 79 %), which along with removing the
+      # per-iter `empty_cache()` (see empty_unused_memory_level below)
+      # should give the allocator enough headroom to stop thrashing.
+      #
+      # Why optim_grads (ZeRO-2) NOT optim_grads_params (ZeRO-3):
+      #   • optim_grads_params shards params too, but Megatron-FSDP only
+      #     auto-wraps `TransformerLayer` instances as FSDP units. Our
+      #     GDN layers are `MambaLayer` (a separate Megatron class), so
+      #     they would NOT be FSDP-wrapped and would silently fall back
+      #     to no-sharding for the GDN half of the model.
+      #   • FLA itself uses ZeRO-2, not ZeRO-3.
+      #   • Loss numerics are identical to FLA only with ZeRO-2 (ZeRO-3
+      #     introduces a tiny float-rounding difference in the per-shard
+      #     param reconstruction).
+      #
+      # Compatibility caveats verified:
+      #   ✓ Megatron-FSDP requires use_distributed_optimizer=true (kept)
+      #   ✓ Requires gradient_accumulation_fusion=false (kept)
+      #   ✓ Auto-handles CUDA_DEVICE_MAX_CONNECTIONS via Primus's
+      #     env_patches.py:set_cuda_device_max_connections() — sets to
+      #     8 when use_megatron_fsdp=true (vs 1 for non-FSDP)
+      #   ✓ GDN layer has reset_parameters() (megatron/core/ssm/
+      #     gated_delta_net.py:227), so meta-device init would work too
+      #     (but we leave init_model_with_meta_device=false for safety)
+      #   ✓ Prior segfault (overlap_grad_reduce=true + ZeRO-1) was NOT
+      #     about FSDP — it was a separate Megatron bug in the ZeRO-1
+      #     bucket layout for heterogeneous Mamba params. FSDP uses its
+      #     own (different) buffer code path.
+      #
+      # If FSDP causes any crash, revert these 2 lines to restore ZeRO-1:
+      #   use_megatron_fsdp: false
+      #   data_parallel_sharding_strategy: no_shard
+      # (Rest of config is FSDP-safe AND ZeRO-1-safe.)
+      # ─────────────────────────────────────────────────────────────────────
+      use_distributed_optimizer: true
+      # ── Megatron-FSDP ATTEMPTS (2026-05-25 + 2026-05-26) ─────────────────
+      # Take #1 (2026-05-25): `use_megatron_fsdp: true` +
+      #   `data_parallel_sharding_strategy: optim_grads` crashed at iter-1
+      #   post-step NaN-check all_reduce with `Failed to CUDA calloc
+      #   268435456 bytes` (256 MiB).
+      #
+      #   Root cause (diagnosed 2026-05-26): RCCL's lazy comm-init allocates
+      #   BUFFSIZE × #channels per NCCL communicator. Defaults =
+      #   4 MiB × 64 channels = 256 MiB per comm. Megatron-FSDP creates
+      #   extra comm groups (HSDP outer + DP inner) on top of the one
+      #   ZeRO-1 needs, and at 99% VRAM there is no contiguous 256 MiB hole.
+      #
+      # Take #2 (2026-05-26): added NCCL channel clamp via launcher env vars
+      #   (NCCL_MIN_NCHANNELS=1 NCCL_MAX_NCHANNELS=4 NCCL_NCHANNELS_PER_PEER=1
+      #    + ckpt_format: fsdp_dtensor since Megatron asserts it).
+      #   Result: 500 iters complete, exit 0, ZERO crashes.
+      #
+      #   Steady-state iter time: 2.84 s/iter (vs ZeRO-1's 2.75 s/iter).
+      #   FSDP wins on non-flush iters (2.67 s vs 2.75 s) but loses on
+      #   empty_cache_interval=32 flushes (3.18 s vs ~2.98 s) because FSDP
+      #   has to re-allgather sharded params after the cache drop, while
+      #   ZeRO-1 keeps full param replicas resident.
+      #
+      #   NET (Take #2): FSDP 2.84 s/iter vs ZeRO-1 2.75 s/iter (90 ms slower).
+      #
+      # Take #3 (2026-05-26): Controlled 50-iter experiment EXP5 with
+      #   `empty_cache_interval` raised from 32 to 128 (one flush per 128
+      #   iters instead of one per 32):
+      #     - ZeRO-1 baseline (EXP0):  2768 ms steady-state
+      #     - FSDP + flush@128 (EXP5): 2684 ms steady-state  (-83 ms, -3.0%)
+      #     - 100B run savings: 95k iters × 83 ms = 2.2 hours
+      #     - Loss bit-identical to ZeRO-1 at iter 50: 11.7538
+      #
+      #   Why this works: between flushes, FSDP's per-iter allgather work is
+      #   pipelined into the backward pass (Megatron-FSDP enables this
+      #   internally even though `overlap_param_gather` is off). On flush
+      #   iters FSDP still pays the re-allgather cost, but at 1-in-128 the
+      #   amortized penalty is ~6 ms/iter vs the ~85 ms/iter saved.
+      #
+      # EXP6 (ZeRO-3 / optim_grads_params) FAILED at iter 1 with:
+      #   "RuntimeError: Pointer argument cannot be accessed from Triton
+      #    (cpu tensor?)"
+      # Because ZeRO-3 shards parameters across ranks, and the FLA Triton
+      # kernel cannot dereference a sharded DTensor. ZeRO-2 (optim_grads)
+      # is the maximum sharding compatible with our Triton GDN.
+      #
+      # FSDP working config + full experiment results:
+      #   experiments/results/SYNTHESIS.md
+      #   experiments/run_perf_exp.sh
+      #   examples/megatron/configs/MI300X/zebra_llama_1B_gdn_pure_exp5-fsdp-rareflush.yaml
+      # ──────────────────────────────────────────────────────────────────
+      use_megatron_fsdp: true
+      data_parallel_sharding_strategy: optim_grads
+      # EXP7: FSDP path's overlap_grad_reduce is DIFFERENT code than ZeRO-1's
+      # (which segfaulted in EXP4). FSDP uses ReduceScatter into its own buffer.
+      # If this works, we save ~152 ms/iter (NCCL all-reduce → overlapped with backward).
+      overlap_grad_reduce: true        # EXP7: enable ReduceScatter overlap (FSDP path, not ZeRO-1 path)
+      overlap_param_gather: true       # EXP7: enable AllGather overlap (free with overlap_grad_reduce)
+      gradient_accumulation_fusion: false
+      ddp_average_in_collective: true
+      use_torch_fsdp2: false
+
+      # ─────────────────────────────────────────────────────────────────────
+      # PyTorch profiler — already captured iter 15-17 trace which showed
+      # 487 ms/iter in `aten::item` (the 300M-parity log_interval/NaN-check
+      # fixes above target exactly this). Disabling for this run.
+      #
+      # To re-enable: set `profile: true`, `use_pytorch_profiler: true`
+      # and pick `profile_step_start`/`profile_step_end`.
+      # ─────────────────────────────────────────────────────────────────────
+      profile: false
+      use_pytorch_profiler: false
+      tensorboard_dir: /tmp/primus_perf_exp7-fsdp-overlap_tb
+
+      # ─────────────────────────────────────────────────────────────────────
+      # MEMORY: empty_unused_memory_level + empty_cache_interval
+      # ─────────────────────────────────────────────────────────────────────
+      #
+      # empty_unused_memory_level=1 → calls `torch.cuda.empty_cache()` at
+      # training.py:1759, IMMEDIATELY before optimizer.step() (which
+      # internally calls get_grad_norm_fp32() → torch.distributed.all_reduce
+      # in clip_grads.py:130).
+      #
+      # That all_reduce is where NCCL crashes if we disable empty_cache
+      # entirely:
+      #   "Failed to CUDA calloc 4194304 bytes" inside ProcessGroupNCCL.
+      # NCCL's calloc bypasses PyTorch's allocator and goes straight to
+      # hipMalloc — at 81% VRAM there is no contiguous 4 MiB block free
+      # unless PyTorch first returns its cached pool to the driver.
+      #
+      # 2026-05-26 — PROFILE + FIX:
+      # PyTorch profiler attribution on iter 21 of the live 100B run
+      # measured 6,937 ms of the 7,650 ms iter (91%) in hipMalloc + hipFree,
+      # because the per-iter empty_cache() was thrashing ~250 cached
+      # blocks per iter against the ROCm driver (~17 ms per hipMalloc).
+      #
+      # FIX: keep `empty_unused_memory_level: 1` (Megatron's gate) but
+      # only fire empty_cache() every N iters via the Primus patch
+      # primus/backends/megatron/patches/empty_cache_interval_patches.py.
+      # The patch reads `empty_cache_interval` from this YAML (preferred),
+      # then falls back to the PRIMUS_EMPTY_CACHE_INTERVAL env var, then
+      # to the default 1 (passthrough).
+      #
+      # Iter 0 always fires empty_cache() so NCCL's first workspace alloc
+      # happens against a clean cache.  Iters 1..N-1 skip it, iter N fires
+      # again, etc.  NCCL workspace persists across the gap because once
+      # allocated it is not freed by PyTorch's allocator (NCCL owns the
+      # block).
+      #
+      # Measured impact (50-iter diag at empty_cache_interval=32,
+      # 2026-05-26):
+      #   before fix:  7.65 s/iter  ( 262 TFLOP/s/GPU,  20% of peak)
+      #   after fix:   2.79 s/iter  ( 727 TFLOP/s/GPU,  56% of peak)
+      #   speedup:     2.74×
+      #   loss curve:  iter-1 bit-identical to baseline (no math impact)
+      #   100B wall:   was 8.4 days → now 3.08 days  (~5.3 days saved)
+      #
+      # Knob choice:
+      #   - 1   = original per-iter behaviour (safest, slowest)
+      #   - 32  = our default (best tested point; ~2.8× speedup)
+      #   - 64+ = even fewer flushes; tested briefly, slightly faster
+      #           between flushes but bigger spike on the trigger iter
+      #   - 0   = NEVER flush (CRASHES at iter-1 NCCL alloc; do not use)
+      # ─────────────────────────────────────────────────────────────────────
+      empty_unused_memory_level: 1
+      empty_cache_interval: 128   # 2026-05-26 EXP5: 32→128 saves 83 ms/iter (-3% wall, -2.2 h on 100B run)
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FLA runtime knobs — declarative YAML surface for the PRIMUS_FLA_* /
+      # PRIMUS_FUSED_CE* env vars (consumed by the
+      # primus.backends.megatron.patches.fla_runtime_patches patch which
+      # re-exports them as env vars at phase="build_args").  These
+      # exactly mirror the values the legacy launcher script sets via
+      # `export PRIMUS_FLA_*` — keeping them here makes the YAML the
+      # single source of truth.  Env vars set on the launcher still win
+      # over the YAML (backward compat).
+      # ─────────────────────────────────────────────────────────────────────
+      use_fla_fused_swiglu: true       # FLA Triton SwiGLU (matches fla.modules.swiglu)
+      use_fla_fused_rmsnorm: true      # FLA Triton RMSNorm + FusedRMSNormGated
+      use_fla_fused_gated_norm: true   # Same env var (PRIMUS_FLA_NORM); kept explicit for clarity
+      use_fla_short_conv: true         # FLA Triton causal_conv1d for GDN short-conv
+      # ── Dataset source selector ───────────────────────────────────────
+      # use_fla_data + fla_cache_dir together pick the data path:
+      #   use_fla_data=false (or fla_cache_dir empty): vanilla Megatron
+      #     GPTDataset reading train_data_path (.bin/.idx).  This is
+      #     Megatron's native sampler order — fine for standalone runs
+      #     but NOT bit-comparable to FLA's loss curve.
+      #   use_fla_data=true  AND fla_cache_dir=<path>: replace
+      #     GPTDataset with tools/fla_order_dataset.FLAOrderGPTDataset
+      #     which emits tokens in the exact same order as FLA's HF
+      #     DistributedSampler (eliminates the data-ordering drift that
+      #     caused the +2.4 nat warm-up spike we debugged for GDN/KDA).
+      # The launcher script sets PRIMUS_FLA_CACHE_DIR; if you launch
+      # without it, uncomment fla_cache_dir below to make this YAML
+      # self-contained.
+      use_fla_data: true               # PRIMUS_FLA_DATA
+      # fla_cache_dir: /home/<user>/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-100BT/train
+      fused_ce_mode: 1                 # 1=chunked FLA FusedLinearCrossEntropyLoss
+      fused_ce_chunks: 32              # Chunk count for FLA fused CE (32 = launcher default)
+
+      # ─────────────────────────────────────────────────────────────────────
+      # SwiGLU path — disable Megatron's bias-fused SwiGLU so the MLP
+      # actually routes through FLA's Triton SwiGLU (the PRIMUS_FLA_SWIGLU=1
+      # env var's intent).
+      #
+      # `primus/configs/models/megatron/language_model.yaml` sets
+      # `bias_swiglu_fusion: true`, which Megatron translates to
+      # `bias_activation_fusion=true` (see arguments.py L1610-1613) and
+      # forces the MLP forward through `bias_swiglu_impl` (mlp.py L308).
+      # That code path NEVER checks `self._use_fla_swiglu` — meaning
+      # PRIMUS_FLA_SWIGLU=1 has been silently inert ever since.  The
+      # backward for `bias_swiglu_impl` materialises a ~4 GB grad
+      # temporary at b=64, s=2048, intermediate=8192 — exactly the
+      # iter-1 OOM we hit (HIPBLAS_STATUS_ALLOC_FAILED → 4.00 GiB request).
+      #
+      # Setting this to false:
+      #   • routes MLP through the `_use_fla_swiglu` branch (mlp.py L323)
+      #   • uses FLA's `swiglu` Triton kernel (the kernel we actually want
+      #     for parity — same one FLA's reference run uses)
+      #   • saves ~4 GB of backward-pass memory
+      # All bit-perfect parity guarantees are preserved (this is in fact
+      # what we were claiming to do all along — see GDN_FLA_PARITY.md §B
+      # patch 03 "mlp-fla-swiglu").
+      # ─────────────────────────────────────────────────────────────────────
+      bias_swiglu_fusion: false
+
+      # NOTE: `recompute_granularity` is intentionally NOT set here. It's a
+      # no-op for pure GDN — MambaBlock.forward()/HybridStack.forward() are
+      # plain `for layer in self.layers:` loops with zero recompute logic
+      # (verified in third_party/Megatron-LM/megatron/core/ssm/mamba_block.py
+      # and primus/backends/megatron/core/models/hybrid/hybrid_block.py).
+      # The actual fix for the iter-1 OOM is PRIMUS_FUSED_CE_CHUNKS=32 set
+      # by the launcher — see launch_gdn_pure_1B_100B.sh and
+      # third_party/Megatron-LM/megatron/core/models/mamba/mamba_model.py.
+
+      # ── Data ─ FLA-aligned via PRIMUS_FLA_DATA=1 at runtime.
+      #
+      # `train_data_path` below is just a Megatron config-parser placeholder;
+      # FLAOrderGPTDataset overrides it when PRIMUS_FLA_DATA=1 + a valid
+      # PRIMUS_FLA_CACHE_DIR are exported.  Point the launcher's
+      # PRIMUS_FLA_CACHE_DIR at the sample-100BT cache (FLA has it on disk
+      # at /home/vanbhati@amd.com/flash-linear-attention/legacy/training/
+      # data/HuggingFaceFW/fineweb-edu/sample-100BT/train).
+      #
+      # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
+      # builder doesn't choke on a missing file — its actual indices and
+      # tokens are never read when FLAOrderGPTDataset is active.
+      mock_data: false
+      train_data_path: >
+        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+      valid_data_path: null
+      test_data_path: null
+
+      # ── Checkpoints ─
+      finetune: false
+      auto_continue_train: true
+      load: null
+      # FLA's `path=` for this run is /home/vanbhati@amd.com/checkpoints/
+      # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
+      # the two runs' checkpoints can coexist on disk and downstream eval
+      # tools (tools/eval_gdn_lm_eval.py) can A/B them side-by-side.
+      save: /tmp/primus_perf_exp_ckpt_unused
+      # FLA's 100B launcher passes `save=99999` (HF `--save_steps 99999`),
+      # meaning over 95368 iters HF never writes an intermediate ckpt — only
+      # the final one at end-of-training (then `--save_total_limit 3` keeps
+      # the last 3 across all runs in the dir).
+      #
+      # For Primus we cannot match `99999` literally because
+      # `auto_continue_train: true` needs SOME periodic checkpoint to be able
+      # to resume mid-flight from a crash on a 48 h run. Set save_interval to
+      # 10000 (~10 B tokens, ~10 ckpts over the run) — closer in spirit to
+      # FLA's "almost never save" and ~2× lighter than the previous 5000
+      # setting. `disable_last_saving: false` still guarantees the very last
+      # iter is saved exactly like FLA does at end-of-training.
+      save_interval: 100000   # PERF EXP: never save
+      disable_last_saving: false
+      ckpt_format: fsdp_dtensor   # Megatron-FSDP requires this when use_megatron_fsdp=true
+
+      # Turbo (kept off for the comparison run; can flip on later)
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      # Context parallel
+      context_parallel_size: 1

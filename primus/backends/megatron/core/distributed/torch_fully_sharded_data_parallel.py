@@ -20,6 +20,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
+from megatron.core.ssm.mamba_layer import MambaLayer
 from torch.distributed import ProcessGroup
 
 from primus.core.utils.module_utils import warning_rank_0
@@ -91,6 +92,7 @@ class PrimusTorchFullyShardedDataParallel(_BaseDataParallel):
         if sub_modules_to_wrap is None:
             sub_modules_to_wrap = {
                 TransformerLayer,
+                MambaLayer,
                 LanguageModelEmbedding,
                 RotaryEmbedding,
                 tensor_parallel.ColumnParallelLinear,

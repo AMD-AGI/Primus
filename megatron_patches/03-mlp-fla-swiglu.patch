@@ -1,0 +1,53 @@
+diff --git a/megatron/core/transformer/mlp.py b/megatron/core/transformer/mlp.py
+index 8a19fef87..a0c53887b 100644
+--- a/megatron/core/transformer/mlp.py
++++ b/megatron/core/transformer/mlp.py
+@@ -228,6 +228,17 @@ class MLP(MegatronModule):
+         else:
+             self.activation_func = self.config.activation_func
+ 
++        from megatron.training import get_args as _get_args
++        self._use_fla_swiglu = False
++        if getattr(_get_args(), 'use_fla_fused_swiglu', True):
++            if self.config.gated_linear_unit and self.config.activation_func == F.silu:
++                try:
++                    from fla.modules.activations import swiglu as _fla_swiglu
++                    self._use_fla_swiglu = True
++                    self._fla_swiglu_fn = _fla_swiglu
++                except ImportError:
++                    pass
++
+         self.linear_fc2 = submodules.linear_fc2(
+             not_none(self.config.ffn_hidden_size),
+             not_none(
+@@ -309,16 +320,21 @@ class MLP(MegatronModule):
+                 intermediate_parallel = intermediate_parallel + bias_parallel
+             if self.config.gated_linear_unit:
+ 
+-                def glu(x):
+-                    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
+-                    if (val := self.config.activation_func_clamp_value) is not None:
+-                        x_glu = x_glu.clamp(min=None, max=val)
+-                        x_linear = x_linear.clamp(min=-val, max=val)
+-                    return self.config.activation_func(x_glu) * (
+-                        x_linear + self.config.glu_linear_offset
+-                    )
++                if self._use_fla_swiglu:
++                    x_glu, x_linear = torch.chunk(intermediate_parallel, 2, dim=-1)
++                    intermediate_parallel = self._fla_swiglu_fn(x_glu, x_linear)
++                else:
++
++                    def glu(x):
++                        x_glu, x_linear = torch.chunk(x, 2, dim=-1)
++                        if (val := self.config.activation_func_clamp_value) is not None:
++                            x_glu = x_glu.clamp(min=None, max=val)
++                            x_linear = x_linear.clamp(min=-val, max=val)
++                        return self.config.activation_func(x_glu) * (
++                            x_linear + self.config.glu_linear_offset
++                        )
+ 
+-                intermediate_parallel = glu(intermediate_parallel)
++                    intermediate_parallel = glu(intermediate_parallel)
+             else:
+                 intermediate_parallel = self.activation_func(intermediate_parallel)
+ 

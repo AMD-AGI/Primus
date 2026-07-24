@@ -87,6 +87,7 @@ class HybridStack(MegatronModule):
         submodules: HybridStackSubmodules,
         residual_in_fp32=False,
         pre_process: bool = True,
+        layer_type_list=None,
         hybrid_attention_ratio: float = 0.0,
         hybrid_mlp_ratio: float = 0.0,
         hybrid_override_pattern: str = None,
@@ -94,10 +95,13 @@ class HybridStack(MegatronModule):
         post_process: bool = True,
         device=None,
         dtype=None,
+        pp_layer_offset: int = 0,
         pg_collection: ProcessGroupCollection = None,
         **kwargs,
     ) -> None:
         super().__init__(config=config)
+        if residual_in_fp32 is False and config.fp32_residual_connection:
+            residual_in_fp32 = True
         self.residual_in_fp32 = residual_in_fp32
         self.pre_process = pre_process
         self.post_layer_norm = post_layer_norm
@@ -129,20 +133,30 @@ class HybridStack(MegatronModule):
         self.hybrid_mlp_ratio = hybrid_mlp_ratio
         self.hybrid_override_pattern = hybrid_override_pattern
 
-        # Customized layer allocation
-        # hybrid_mlp_ratio is not used in this hybrid stack.
-        # It is by default to be always followed by mamba or mla (i.e., mamba + MLP or MLA + MLP)
-        # By setting hybrid_attention_ratio, attention layers are by default to be distributed uniformly.
-        self.layer_type_list = self.allocate_layers(
-            self.config.num_layers,
-            self.hybrid_attention_ratio,
-        )
-
-        pp_layer_offset = 0
-        if self.pp_group.size() > 1:
-            pp_layer_offset, self.layer_type_list = self._select_layers_for_pipeline_parallel(
-                self.layer_type_list
+        # Modern Megatron `MambaModel` parses `hybrid_layer_pattern` into a
+        # concrete `layer_type_list` (list of `Symbols` like 'M', '*', '-',
+        # 'E') and a `pp_layer_offset`, then passes them to
+        # `build_module(mamba_stack_spec, ..., layer_type_list=..., pp_layer_offset=...)`.
+        # If we received a non-empty pre-computed list, USE IT.  An *empty*
+        # list (or None) means the caller didn't specify a pattern (e.g. pure
+        # GDN configs, or hybrid configs whose YAML uses `hybrid_attention_ratio`
+        # which upstream silently dropped as an arg); in that case fall back
+        # to the legacy ratio-based allocation so the old behaviour is preserved.
+        if layer_type_list:
+            self.layer_type_list = list(layer_type_list)
+        else:
+            # Legacy path: caller didn't pre-compute the list, allocate from
+            # the ratio.  hybrid_mlp_ratio is intentionally ignored here --
+            # this hybrid stack always follows attention/mamba with an MLP.
+            self.layer_type_list = self.allocate_layers(
+                self.config.num_layers,
+                self.hybrid_attention_ratio,
             )
+            pp_layer_offset = 0
+            if self.pp_group.size() > 1:
+                pp_layer_offset, self.layer_type_list = self._select_layers_for_pipeline_parallel(
+                    self.layer_type_list
+                )
 
         print(f"layer_type_list: {self.layer_type_list}")
 
@@ -180,11 +194,18 @@ class HybridStack(MegatronModule):
                     assert False, "unexpected layer_type"
             self.layers.append(layer)
 
+        from megatron.training import get_args as _get_args
+        self._fuse_prenorm = getattr(_get_args(), 'use_fla_fused_rmsnorm', False)
+        if self._fuse_prenorm:
+            from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer
+            for i, (lt, layer) in enumerate(zip(self.layer_type_list, self.layers)):
+                if lt == LayerSymbols.MAMBA and isinstance(layer, GatedDeltaNetLayer):
+                    layer._fuse_prenorm_with_next = True
+
         # Required for activation recomputation
         self.num_layers_per_pipeline_rank = len(self.layers)
 
         if self.post_process and self.post_layer_norm:
-            # Final layer norm before output.
             self.final_norm = TENorm(
                 config=self.config,
                 hidden_size=self.config.hidden_size,
@@ -195,6 +216,10 @@ class HybridStack(MegatronModule):
         layer_type_list = []
         num_attention_layers = int(num_layers // 2 * hybrid_attention_ratio)
         num_mamba_layers = num_layers // 2 - num_attention_layers
+
+        if num_attention_layers == 0:
+            return [LayerSymbols.MAMBA, LayerSymbols.MLP] * (num_layers // 2)
+
         num_mamba_per_attention_layer = num_mamba_layers // num_attention_layers
 
         if hybrid_attention_ratio <= 0.5:
@@ -254,6 +279,8 @@ class HybridStack(MegatronModule):
         rotary_pos_emb: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
+        packed_seq_params=None,
+        padding_mask=None,
         **kwargs,
     ):
         """
@@ -322,15 +349,31 @@ class HybridStack(MegatronModule):
         use_inner_fp8_context = self.config.fp8 and self.config.fp8_recipe != Fp8Recipe.delayed
         outer_fp8_context = get_fp8_context(self.config) if use_outer_fp8_context else nullcontext()
 
+        _pending_fuse = None
+
         with outer_fp8_context:
-            for layer in self.layers:
+            for i_layer, layer in enumerate(self.layers):
                 inner_fp8_context = (
                     get_fp8_context(self.config, layer.layer_number - 1)
                     if use_inner_fp8_context
                     else nullcontext()
                 )
                 with inner_fp8_context:
-                    if isinstance(layer, TransformerLayer):
+                    if isinstance(layer, TransformerLayer) and _pending_fuse is not None:
+                        mixer_out, block_residual = _pending_fuse
+                        _pending_fuse = None
+                        normed, new_residual = layer.pre_mlp_layernorm(
+                            mixer_out, block_residual, True
+                        )
+                        mlp_output_with_bias = layer.mlp(normed)
+                        bda_fn = layer.mlp_bda(
+                            training=self.training,
+                            fused=self.config.bias_dropout_fusion,
+                        )
+                        hidden_states = bda_fn(
+                            mlp_output_with_bias, new_residual, layer.hidden_dropout
+                        )
+                    elif isinstance(layer, TransformerLayer):
                         hidden_states, _ = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
@@ -338,12 +381,16 @@ class HybridStack(MegatronModule):
                             rotary_pos_emb=rotary_pos_emb,
                             sequence_len_offset=sequence_len_offset,
                         )
-                    else:  # MambaLayer
-                        hidden_states = layer(
+                    else:  # MambaLayer / GatedDeltaNetLayer
+                        result = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
                             inference_context=inference_context,
                         )
+                        if isinstance(result, tuple):
+                            _pending_fuse = result
+                        else:
+                            hidden_states = result
 
                 # The attention layer (currently a simplified transformer layer)
                 # outputs a tuple of (hidden_states, context). Context is intended

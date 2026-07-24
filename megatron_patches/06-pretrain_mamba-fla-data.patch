@@ -1,0 +1,42 @@
+diff --git a/pretrain_mamba.py b/pretrain_mamba.py
+index 0fecbef2c..734aa0542 100644
+--- a/pretrain_mamba.py
++++ b/pretrain_mamba.py
+@@ -316,6 +316,37 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
+         train_val_test_num_samples : A list containing the number of samples in train test and validation.
+     """
+     args = get_args()
++
++    fla_data_flag = getattr(args, 'use_fla_data', False)
++    fla_cache = getattr(args, 'fla_cache_dir', "")
++    print_rank_0(f"> [FLA-check] use_fla_data={fla_data_flag!r}, fla_cache_dir={fla_cache!r}")
++    if fla_data_flag and fla_cache:
++        import importlib.util
++        _spec = importlib.util.spec_from_file_location(
++            "fla_order_dataset",
++            os.path.join(os.environ.get("PRIMUS_PATH", os.getcwd()), "tools", "fla_order_dataset.py"),
++        )
++        _mod = importlib.util.module_from_spec(_spec)
++        _spec.loader.exec_module(_mod)
++        FLAOrderGPTDataset = _mod.FLAOrderGPTDataset
++        from megatron.core import parallel_state
++
++        dp_size = parallel_state.get_data_parallel_world_size()
++        tokenizer = build_tokenizer(args)
++        print_rank_0(f"> building FLA-order dataset from {fla_cache} ...")
++        train_ds = FLAOrderGPTDataset(
++            cache_dir=fla_cache,
++            seq_length=args.seq_length,
++            micro_batch_size=args.micro_batch_size,
++            data_parallel_size=dp_size,
++            seed=args.seed,
++            pad_token_id=0,
++            eod_token=tokenizer.eod,
++            eod_mask_loss=args.eod_mask_loss,
++        )
++        print_rank_0(f"> FLA-order dataset: {len(train_ds)} samples")
++        return train_ds, None, None
++
+     config = core_gpt_dataset_config_from_args(args)
+ 
+     is_packed_sequence = False
