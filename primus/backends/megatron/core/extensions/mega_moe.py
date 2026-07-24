@@ -12,6 +12,17 @@ and expert bias all live there, and the aux-loss gradient is baked into ``probs`
 via ``MoEAuxLossAutoScaler``. This layer only converts the router's dense
 ``probs`` into sparse top-k and runs the fused expert kernel; the shared expert
 reuses Megatron's ``SharedExpertMLP``.
+
+The fused expert weights are exposed as two callable modules:
+
+    experts.fc1_weight (owns w1): called before fused stage1
+    experts.fc2_weight (owns w2): called before fused stage2
+
+Calling each module triggers Megatron's DDP forward pre-hook at the matching
+weight boundary. This lets w2's parameter all-gather overlap fused stage1 in
+forward, while the staged autograd graph lets dW2's reduce-scatter overlap
+stage1 backward. The kernel math is unchanged (see primus_turbo
+``fused_mega_moe``).
 """
 
 import contextlib
@@ -31,11 +42,66 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
-from primus_turbo.pytorch.ops.moe.mega_moe_fused import mega_moe_fused
+from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
+    fused_mega_moe_stage1,
+    fused_mega_moe_stage2,
+)
+
+
+class MegaMoEWeightModule(MegatronModule):
+    """Callable expert-weight module used as a DDP overlap boundary.
+
+    Calling the module triggers DDP's forward pre-hook before returning its
+    weight, allowing the next weight's all-gather to overlap the current fused
+    stage. Keeping each weight in a separate module also preserves per-weight
+    gradient readiness, so DDP can overlap reduce-scatter with staged backward
+    compute.
+    """
+
+    def __init__(self, config: TransformerConfig, weight_shape) -> None:
+        super().__init__(config)
+        device = torch.device("cpu") if config.use_cpu_initialization else torch.cuda.current_device()
+        self.weight = torch.nn.Parameter(torch.empty(weight_shape, device=device, dtype=config.params_dtype))
+
+    def forward(self) -> torch.Tensor:
+        return self.weight
+
+    def backward_dw(self) -> None:
+        # Wgrad is produced inside the custom autograd backward.
+        return None
+
+
+class MegaMoEExperts(MegatronModule):
+    """Two-stage fused expert with separately wrapped w1/w2 parameters."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        experts_per_rank: int,
+        hidden_size: int,
+        intermediate_size: int,
+        ep_group,
+    ) -> None:
+        super().__init__(config)
+        self.ep_group = ep_group
+        # w1 [g, 2I, H] (gate+up) and w2 [g, H, I] (down projection).
+        self.fc1_weight = MegaMoEWeightModule(config, (experts_per_rank, 2 * intermediate_size, hidden_size))
+        self.fc2_weight = MegaMoEWeightModule(config, (experts_per_rank, hidden_size, intermediate_size))
+
+    def forward(self, x, topk_idx, topk_weights):
+        w1 = self.fc1_weight()
+        l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
+        w2 = self.fc2_weight()
+        return fused_mega_moe_stage2(l1_out, dwib, handle, topk_idx, topk_weights, w2, self.ep_group)
+
+    def backward_dw(self) -> None:
+        # Match native fc2-then-fc1 order (both no-ops here).
+        self.fc2_weight.backward_dw()
+        self.fc1_weight.backward_dw()
 
 
 class PrimusTurboMegaMoELayer(MegatronModule):
-    """Fused EP MoE layer: Megatron router -> mega_moe_fused experts -> shared expert."""
+    """Fused EP MoE layer: Megatron router -> two-linear fused experts -> shared expert."""
 
     def __init__(
         self,
@@ -70,26 +136,20 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # Router owns all routing logic (PrimusTopKRouter via the topk-router patch)
         self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
 
-        # Per-rank expert shard: w1 [g, 2I, H] (gate+up), w2 [g, H, I]
-        self.w1 = torch.nn.Parameter(
-            torch.empty(
-                (self.experts_per_rank, 2 * self.intermediate_size, self.hidden_size),
-                device=torch.cuda.current_device(),
-                dtype=torch.bfloat16,
-            )
+        # Separately wrapped w1/w2 provide DDP overlap boundaries.
+        self.experts = MegaMoEExperts(
+            config,
+            self.experts_per_rank,
+            self.hidden_size,
+            self.intermediate_size,
+            self.ep_group,
         )
-        self.w2 = torch.nn.Parameter(
-            torch.empty(
-                (self.experts_per_rank, self.hidden_size, self.intermediate_size),
-                device=torch.cuda.current_device(),
-                dtype=torch.bfloat16,
-            )
-        )
-        self.reset_parameters()
+        if config.perform_initialization:
+            self.reset_parameters()
 
         # experts are EP-sharded: skip DP allreduce hook when EP>1
         expert_parallel = self.ep_size > 1
-        for p in (self.w1, self.w2):
+        for p in (self.experts.fc1_weight.weight, self.experts.fc2_weight.weight):
             setattr(p, "allreduce", not expert_parallel)
 
         # Optional shared expert: reuse Megatron SharedExpertMLP
@@ -113,17 +173,19 @@ class PrimusTurboMegaMoELayer(MegatronModule):
                 return contextlib.nullcontext()
             return tracker.fork(get_expert_parallel_rng_tracker_name())
 
+        w1 = self.experts.fc1_weight.weight
+        w2 = self.experts.fc2_weight.weight
         init1 = self.config.init_method
         init2 = self.config.output_layer_init_method or self.config.init_method
         with torch.no_grad(), rng_fork():
             if init1 is not None:
-                init1(self.w1)
+                init1(w1)
             else:
-                self.w1.normal_(mean=0.0, std=2.0 / math.sqrt(self.hidden_size))
+                w1.normal_(mean=0.0, std=2.0 / math.sqrt(self.hidden_size))
             if init2 is not None:
-                init2(self.w2)
+                init2(w2)
             else:
-                self.w2.normal_(mean=0.0, std=2.0 / math.sqrt(self.intermediate_size))
+                w2.normal_(mean=0.0, std=2.0 / math.sqrt(self.intermediate_size))
 
     @staticmethod
     def _assert_supported_config(config: TransformerConfig) -> None:
@@ -161,13 +223,10 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         topk_weights, topk_idx = probs.topk(self.router.topk, dim=-1)
 
         x = hidden_states.reshape(-1, self.hidden_size).to(torch.bfloat16)
-        y = mega_moe_fused(
-            self.ep_group,
+        y = self.experts(
             x,
-            topk_idx.to(torch.int32),
+            topk_idx,
             topk_weights.to(torch.float32),
-            self.w1,
-            self.w2,
         )
         y = y.reshape(in_shape).to(hidden_states.dtype)
         if self.shared_experts is not None:
@@ -187,9 +246,12 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         expert_replica_id = (0, 0, edp_rank)
 
         sharded_sd: dict = {}
-        # experts w1/w2: EP-sharded on axis 0
-        for name, weight in (("w1", self.w1), ("w2", self.w2)):
-            key = f"{prefix}experts.{name}"
+        # experts fc1_weight/fc2_weight: EP-sharded on axis 0 (keys match module path)
+        for name, weight in (
+            ("fc1_weight", self.experts.fc1_weight.weight),
+            ("fc2_weight", self.experts.fc2_weight.weight),
+        ):
+            key = f"{prefix}experts.{name}.weight"
             sharded_sd[key] = ShardedTensor.from_rank_offsets(
                 key,
                 weight,
