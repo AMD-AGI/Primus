@@ -117,7 +117,8 @@ Reproducing the training environment on the host means building the **same stack
 
 Follow the full, step-by-step guide here, which includes the exact pinned versions, environment variables, and automated install scripts:
 
-- **[Bare-metal installation: build the Primus training stack from source (no Docker)](./bare-metal-installation.md)**
+- **[Bare-metal installation (PyTorch: Megatron-LM / TorchTitan): build the Primus training stack from source (no Docker)](./bare-metal-installation.md)**
+- **[Bare-metal installation (JAX / MaxText): build the Primus JAX training stack from source (no Docker)](./bare-metal-installation-jax.md)**
 
 ### Verify
 
