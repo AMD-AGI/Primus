@@ -5,8 +5,7 @@ stack directly on a host machine**, without using the AMD published JAX training
 Docker image. It is intended for users who, for policy or operational reasons,
 cannot run containers and need to reproduce the same environment on bare metal.
 
-It is derived from the official JAX training `Dockerfile`
-(`unified-training-dockers/jax_training_the_rock/docker/Dockerfile`) and
+It is derived from the official JAX training `Dockerfile` and
 installs the same components and versions. Wherever possible, everything is
 installed **inside a Python virtual environment and without `sudo`**. The only
 steps that require root are a small set of OS-level system libraries (installed
@@ -70,9 +69,9 @@ There are two files:
 ### Choose where it installs (important)
 
 Everything lives under `PRIMUS_JAX_BASE` (venv, kept checkouts), with transient
-build sources on `SRC_DIR` (defaults to local `/tmp` for fast I/O). The
-**default `PRIMUS_JAX_BASE` is site-specific** and may not exist on your host, so
-set it to a directory you can write to that has tens of GB free:
+build sources on `SRC_DIR` (defaults to local `/tmp` for fast I/O).
+**`PRIMUS_JAX_BASE` is required — there is no default**, so set it to a directory
+you can write to that has tens of GB free (`env.sh` errors out if it is unset):
 
 ```bash
 export PRIMUS_JAX_BASE=/path/to/big/disk/primus-jax-env   # venv + checkouts (persistent)
@@ -199,11 +198,9 @@ extracted into a user-writable directory (`$ROCM_DIR`, default
   `jax_rocm7_plugin` wheels (from `repo.amd.com/rocm/whl-multi-arch/`) provide
   GPU-accelerated JAX built against that ROCm.
 
-> **Changed from v26.4:** the v26.4 recipe installed ROCm from pip
-> `rocm-sdk-devel` **nightly** wheels. v26.5 uses a pinned **release tarball**,
-> which is more stable and avoids the pip version-skew that could break
-> hipBLASLt GEMMs. RCCL is then rebuilt from source (see Section 3.9) and dropped
-> into this ROCm tree.
+> The pinned **release tarball** is stable and avoids any pip version-skew that
+> could break hipBLASLt GEMMs. RCCL is then rebuilt from source (see Section 3.11)
+> and dropped into this ROCm tree.
 
 This means almost the entire stack can be installed **without root** into a
 venv. The only host-level requirements from the system administrator are:
@@ -248,7 +245,7 @@ scripts use the same pins; change one and you may have to change the others.
 | TensorFlow (CPU, from source)     | ROCm `tensorflow-upstream` branch `upstream-v2.21.0`                    | Built with bazelisk `v1.25.0`. Needs host `clang-18`/`lld-18`. |
 | RCCL (from source)                | `rocm-systems` @ `9e5e4084a4b8e1e86551b0eb054725c62354a926`            | Installed into `$ROCM_PATH/lib`. Needs host `clang-18`/`lld-18`. |
 | MaxText (ROCm fork)               | `release/v26.5`                                                         | 2-value `initialize()`/`run()` API; Primus `main` supports it (fix #912). |
-| Primus                            | `main`                                                                  | Includes the MaxText v26.4/v26.5 compatibility shim. |
+| Primus                            | `main`                                                                  | Includes the MaxText `initialize()`/`run()` compatibility shim. |
 | scipy                             | `1.16`                                                                  | |
 | amdsmi                            | `7.0.2`                                                                 | pip, after the ROCm tarball. |
 | Build front-end                   | `cmake 3.31.6`, `ninja 1.11.1.3`, `wheel 0.45.1`, `packaging 25.0`, `setuptools 69.5.1` | Plus `uv` (used by MaxText's dep install). |
@@ -452,9 +449,8 @@ pip install amdsmi==7.0.2
 ```
 
 > The tarball is multi-arch (gfx942 + gfx950), so there is no per-arch package to
-> pick, and there is **no pip version-skew to worry about** (the v26.4 recipe's
-> `rocm-sdk-*` nightly wheels could drift out of sync and break hipBLASLt GEMMs;
-> the pinned tarball avoids that entirely).
+> pick, and there is **no pip version-skew to worry about** — a pinned tarball
+> cannot drift out of sync and break hipBLASLt GEMMs.
 
 ### 3.5 Export ROCm paths
 
@@ -567,13 +563,11 @@ image runs MaxText's `src/dependencies/scripts/setup.sh`; on bare metal we run
 the **Python portion** of that script directly (the `apt`/`gcsfuse` steps are the
 one-time root action from Section 2, and the venv already exists).
 
-> **MaxText `release/v26.5` and the Primus API.** v26.5 switched MaxText's
-> `initialize()`/`run()` to a **2-value** API (`config, recorder`); v26.4 and
-> earlier used a **3-value** API (adds `diagnostic_config`). Primus `main`
-> supports **both**: `MaxTextPretrainTrainer` forwards `initialize()`'s tuple
-> verbatim to `run()` (fix #912), so v26.5 trains out of the box. You only need
-> `MAXTEXT_BRANCH=release/v26.4 bash setup.sh maxtext` if you deliberately want
-> to pin an older MaxText release.
+> **MaxText `release/v26.5` and the Primus API.** MaxText v26.5 uses a
+> **2-value** `initialize()`/`run()` API (`config, recorder`). Primus `main`
+> handles it: `MaxTextPretrainTrainer` forwards `initialize()`'s tuple verbatim
+> to `run()` (fix #912), so v26.5 trains out of the box. Override `MAXTEXT_BRANCH`
+> only if you deliberately need to pin a different MaxText release.
 
 ```bash
 cd ~/primus-jax-env   # or your $WORKSPACE_DIR

@@ -127,7 +127,7 @@ stage_venv() {
         fi
     fi
     log "Creating venv at $VENV_DIR (interpreter: $PRIMUS_PYTHON -> $("$PRIMUS_PYTHON" --version 2>&1))"
-    mkdir -p "$PRIMUS_JAX_BASE" "$SRC_DIR" "$WORKSPACE_DIR"
+    mkdir -p "$PRIMUS_JAX_BASE" "$SRC_DIR" "$WORKSPACE_DIR" || die "could not create the install dirs under PRIMUS_JAX_BASE=$PRIMUS_JAX_BASE (SRC_DIR=$SRC_DIR, WORKSPACE_DIR=$WORKSPACE_DIR). Set PRIMUS_JAX_BASE to a directory you can write to with tens of GB free, e.g.  export PRIMUS_JAX_BASE=/big/disk/primus-jax-env"
     # Recreate the venv if it exists but was built with a too-old Python.
     if [ -f "$VENV_DIR/bin/activate" ] && ! _venv_python_ok "$VENV_DIR/bin/python"; then
         log "Existing venv at $VENV_DIR is < Python 3.12; recreating it"

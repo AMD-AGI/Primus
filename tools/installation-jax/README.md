@@ -22,12 +22,6 @@ The key reason no sudo is required: the ROCm tarball is extracted into a
 user-writable dir (`$ROCM_DIR`) instead of `/opt/rocm`, so we don't depend on
 system ROCm or apt for the ROCm toolchain itself.
 
-> **v26.5 vs v26.4:** ROCm moved from pip `rocm-sdk-devel` **nightly** wheels to a
-> pinned release **tarball** (`repo.amd.com/.../therock-dist-linux-multiarch-7.14.0.tar.gz`);
-> JAX 0.10.2 → **0.10.0** (`repo.amd.com/rocm/whl-multi-arch/`); TE → **2.15.0.dev0**;
-> TensorFlow is now **built from source** (2.21 CPU, bazel) and **RCCL** is rebuilt
-> from source; MaxText → **release/v26.5** (Primus `main` supports its 2-value API).
-
 > **Python 3.12+ required (3.12 preferred).** MaxText requires Python ≥ 3.12 (the
 > PyTorch recipe works on 3.10; this one does not). 3.12 is preferred because the
 > prebuilt ROCm wheels are `cp312`. You do **not** need `sudo` or a PPA:
@@ -56,9 +50,9 @@ system ROCm or apt for the ROCm toolchain itself.
 
 ```bash
 cd tools/installation-jax
-# Default base is /it-share-4/envs/primus-jax-env (persistent shared disk).
-# This default is site-specific; override it for your host:
-#   export PRIMUS_JAX_BASE=/some/big/disk/primus-jax-env
+# PRIMUS_JAX_BASE is REQUIRED (no default). Point it at a directory you can write
+# to with tens of GB free — the venv, ROCm tarball, and checkouts all live here:
+export PRIMUS_JAX_BASE=/some/big/disk/primus-jax-env
 bash setup.sh                 # all default stages
 ```
 
@@ -74,7 +68,8 @@ bash setup.sh venv rocm jax   # venv + ROCm + JAX only
 ## Use the environment afterward
 
 ```bash
-# Use the SAME PRIMUS_JAX_BASE you built with (export it first if you overrode the default)
+# Set the SAME PRIMUS_JAX_BASE you built with (required — env.sh errors without it)
+export PRIMUS_JAX_BASE=/some/big/disk/primus-jax-env
 source tools/installation-jax/env.sh   # activates venv + sets ROCm / NVTE / XLA env vars
 python -c "import jax; print(jax.devices())"
 
@@ -127,12 +122,11 @@ Optional / alternative stages:
 bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
 ```
 
-> **MaxText v26.5 and Primus.** v26.5 MaxText uses a **2-value**
-> `initialize()`/`run()` API; v26.4 and earlier used a **3-value** API. Primus
-> `main` supports **both** — `MaxTextPretrainTrainer` forwards `initialize()`'s
-> tuple verbatim to `run()` (fix #912) — so this recipe's pinned `release/v26.5`
-> trains out of the box. Use `MAXTEXT_BRANCH=release/v26.4 bash setup.sh maxtext`
-> only if you deliberately want to pin an older MaxText release.
+> **MaxText v26.5 and Primus.** MaxText v26.5 uses a **2-value**
+> `initialize()`/`run()` API. Primus `main` handles it — `MaxTextPretrainTrainer`
+> forwards `initialize()`'s tuple verbatim to `run()` (fix #912) — so this
+> recipe's pinned `release/v26.5` trains out of the box. Override
+> `MAXTEXT_BRANCH` only if you deliberately need a different MaxText release.
 
 ## What is SKIPPED (needs sudo / apt — not reproducible here)
 

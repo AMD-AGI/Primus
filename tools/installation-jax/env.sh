@@ -8,11 +8,25 @@
 # (TheRock dist) extracted to a user-writable dir ($ROCM_DIR) — NOT the pip
 # `rocm-sdk-devel` wheels used by the v26.4 recipe. No system ROCm is required.
 #
-# NOTE: choose a BASE on a big disk. Override by exporting PRIMUS_JAX_BASE first.
-#       MaxText requires Python >= 3.12; see PRIMUS_PYTHON below.
+# NOTE: PRIMUS_JAX_BASE is REQUIRED (no default) — export it to a big-disk dir
+#       before sourcing this file. MaxText requires Python >= 3.12; see
+#       PRIMUS_PYTHON below.
 
 # ---- Install location (persistent) + transient build sources ----
-export PRIMUS_JAX_BASE="${PRIMUS_JAX_BASE:-/it-share-4/envs/primus-jax-env}"   # persistent shared disk
+# PRIMUS_JAX_BASE is REQUIRED (there is intentionally no default): it is where
+# the venv, the extracted ROCm tarball, and the kept checkouts live. Point it at
+# a directory you can write to with tens of GB free, then (re-)source this file:
+#     export PRIMUS_JAX_BASE=/big/disk/primus-jax-env
+if [ -z "${PRIMUS_JAX_BASE:-}" ]; then
+    echo "[env] ERROR: PRIMUS_JAX_BASE is not set (no default). Set it to a directory" >&2
+    echo "[env]        you can write to with tens of GB free, then re-run:" >&2
+    echo "[env]            export PRIMUS_JAX_BASE=/big/disk/primus-jax-env" >&2
+    # env.sh is always sourced (by setup.sh and to use the env); stop sourcing
+    # without killing an interactive shell. Fall back to exit if run directly.
+    # shellcheck disable=SC2317  # 'exit 1' is reachable when this file is executed, not sourced
+    return 1 2>/dev/null || exit 1
+fi
+export PRIMUS_JAX_BASE
 export VENV_DIR="${VENV_DIR:-$PRIMUS_JAX_BASE/venv}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_JAX_BASE/workspace}"  # kept checkouts (maxtext, Primus)
 # Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
