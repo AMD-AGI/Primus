@@ -306,6 +306,14 @@ python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-d
   (missing cadence support, a rendering bug, a schema evolution) or when the
   user explicitly requests a shell change.
 
+## Data location
+
+Backend-gap report data (the `docs/backend-gap/...` files this skill produces)
+belongs to the same `dashboard-data` data plane as the weekly/monthly reports.
+This skill only generates the files under that layout; the branch, commit, and
+deploy orchestration are owned by the caller (the automation's Agent
+Instructions), not this skill.
+
 ## Additional Resources
 
 - Schema, metadata fields, and path conventions: [reference.md](reference.md)

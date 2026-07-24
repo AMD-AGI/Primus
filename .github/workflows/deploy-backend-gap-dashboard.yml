@@ -1,15 +1,28 @@
 name: Deploy Backend Gap Dashboard
 
+# Report content lives on the orphan `dashboard-data` branch; tooling + site
+# shell live on `main`. This job checks out both and overlays the data branch's
+# `docs/` before building, so report runs never touch `main`.
+#
+# Pre-merge preview: run this workflow via "Run workflow" on a dev branch; it
+# builds and deploys the full site (dashboard + that branch's sections) so new
+# content can be validated before merging. Note: one Pages site per repo, so a
+# preview temporarily replaces production until the next normal run.
 on:
   workflow_dispatch:
+  # Companion `notify-dashboard-deploy.yml` on the dashboard-data branch fires
+  # this after a data push, so report updates publish without a timed schedule.
+  repository_dispatch:
+    types: [dashboard-data-updated]
+  # Tooling/shell/workflow changes and mounted section sources (declared in
+  # pages-sections.json) on main. Add a new section's source path here too.
   push:
     branches:
       - main
     paths:
-      - "docs/backend-gap/**"
-      - "docs/weekly_reports/**"
-      - "docs/monthly_reports/**"
       - "tools/backend_gap_report/**"
+      - "tools/pip_index/**"
+      - "examples/deepseek-v4/projection/site/**"
       - ".github/workflows/deploy-backend-gap-dashboard.yml"
 
 permissions:
@@ -21,12 +34,30 @@ concurrency:
   group: backend-gap-dashboard-pages
   cancel-in-progress: true
 
+env:
+  DASHBOARD_DATA_BRANCH: dashboard-data
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Check out repository (tooling + site shell from main)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check out dashboard data branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.DASHBOARD_DATA_BRANCH }}
+          path: _dashboard_data
+
+      - name: Overlay report data onto the checkout
+        run: |
+          if [ -d _dashboard_data/docs ]; then
+            cp -r _dashboard_data/docs/. docs/
+          else
+            echo "::error::dashboard-data branch has no docs/ directory"
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0

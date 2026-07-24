@@ -163,6 +163,58 @@ code {
   font-weight: 600;
 }
 
+/* ---------- Hero nav (data-driven links to sibling sites) ---------- */
+.hero__nav {
+  margin-top: 1.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.hero__nav[hidden] {
+  display: none;
+}
+
+.hero__nav-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+}
+
+.hero__nav-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.hero__nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.hero__nav-link:hover {
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.hero__nav-link::after {
+  content: "\2197";
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
 /* ---------- Section tabs ---------- */
 .section-tabs {
   display: flex;
