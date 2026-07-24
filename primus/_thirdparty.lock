@@ -35,6 +35,12 @@
       "path": "third_party/HummingbirdXT",
       "url": "https://github.com/AMD-AGI/HummingbirdXT.git",
       "commit": "ed7b7bd0dd03ed084f645c5dda1bc7b333f326f0"
+    },
+    {
+      "name": "Automodel",
+      "path": "third_party/Automodel",
+      "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
+      "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
     }
   ]
 }
