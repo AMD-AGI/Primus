@@ -22,6 +22,16 @@ if command -v spur >/dev/null 2>&1; then
     export NCCL_DEBUG="${NCCL_DEBUG:-}"
     export GLOO_SOCKET_IFNAME=ens3
     export NCCL_SOCKET_IFNAME=ens3
+    # Docker Hub login for pulling the private tasimage/primus image. On each node
+    # primus-cli-container.sh runs `docker login` before the image pull; spur
+    # sbatch --export=ALL propagates these to every node, so training auto-logs-in
+    # and pulls without a manual `docker login`. Defaults are empty (login is
+    # skipped when DOCKER_LOGIN_KEY is unset): export DOCKER_LOGIN_USER and
+    # DOCKER_LOGIN_KEY (Docker Hub PAT) in your environment to enable it -- this
+    # keeps the secret out of this git-tracked file.
+    export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-}"
+    export DOCKER_LOGIN_KEY="${DOCKER_LOGIN_KEY:-}"
+    export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/tasimage/primus:pr-898-ainic}"
 fi
 
 export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-43}
@@ -64,8 +74,10 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-True}
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v2}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
+# V4 attention backend: default to PrimusTurbo native-FlyDSL sparse-MLA ("turbo")
+# for both the dense/HCA path and the CSA path.
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-turbo}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-turbo}
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-True}
 export USE_V4_COMPILED_SINKHORN=${USE_V4_COMPILED_SINKHORN:-True}

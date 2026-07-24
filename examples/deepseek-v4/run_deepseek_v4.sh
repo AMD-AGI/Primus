@@ -24,7 +24,7 @@ export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-882-ainic"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-898-ainic"}
 export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
 export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
