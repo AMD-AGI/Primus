@@ -70,11 +70,18 @@ RUN rm -rf /opt/Primus-Turbo
 RUN cd /opt && \
     git clone https://github.com/triton-lang/triton.git && \
     cd triton && \
-    git checkout 09500db9 && \
+    git checkout ${TRITON_COMMIT} && \
     pip3 install -r python/requirements.txt && \
     MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
 
 RUN rm -rf /opt/triton
+
+# torch's dist-info still pins the base image's stock triton build; without this,
+# any later "pip install" (e.g. CI unit tests) sees torch's triton requirement as
+# unsatisfiable and silently upgrades torch from PyPI, dragging in a CUDA stack.
+RUN TORCH_META=$(python3 -c "import importlib.metadata as m; print(m.distribution('torch')._path / 'METADATA')") && \
+    TRITON_VER=$(python3 -c "import importlib.metadata as m; print(m.version('triton'))") && \
+    sed -i -E "s/^Requires-Dist: triton==.*/Requires-Dist: triton==${TRITON_VER}/" "${TORCH_META}"
 
 # ---------------------------------------------------------------------------
 # Install UCCL-EP (skip for JAX framework)

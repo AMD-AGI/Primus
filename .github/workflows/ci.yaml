@@ -27,7 +27,7 @@ env:
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
-  TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
+  TRITON_COMMIT: 09500db9f0fe66fd176d1f080e2017b37e7e995d # pinned triton-lang/triton commit built from source in Dockerfile
   BASE_IMAGE: docker.io/rocm/primus:v26.4
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
