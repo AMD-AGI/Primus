@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 ARG PRIMUS_TURBO_COMMIT
 ARG PRIMUS_TURBO_AITER_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
-ARG ROCSHMEM_COMMIT
+# ARG ROCSHMEM_COMMIT # only needed if the rocSHMEM rebuild below is restored
 ARG UCCL_COMMIT
 ARG TRITON_COMMIT
 # Non-interactive APT
@@ -21,34 +21,25 @@ RUN rm -rf /var/lib/apt/lists/*
 # ---------------------------------------------------------------------------
 # Enviroment variables
 # ---------------------------------------------------------------------------
-ENV ROCSHMEM_HOME=/opt/rocshmem
-ENV UCX_HOME=/opt/ucx
-# ENV MPI_HOME=/opt/ompi
-# Use the system OpenMPI prefix from the v26.4 base image.
-ENV MPI_HOME=/usr/lib/x86_64-linux-gnu/openmpi
-ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
 
-# ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}"
-# ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}"
 ENV GPU_ARCHS="gfx942;gfx950"
 ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
 ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
-# ---------------------------------------------------------------------------
-# Install rocSHMEM
-# ---------------------------------------------------------------------------
-RUN mkdir -p /opt && cd /opt && \
-    git clone https://github.com/ROCm/rocSHMEM.git && \
-    cd rocSHMEM && \
-    git checkout ${ROCSHMEM_COMMIT} && \
-    mkdir build && \
-    cd build && \
-    MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} INSTALL_PREFIX=${ROCSHMEM_HOME} ../scripts/build_configs/gda \
-                                                                                            -DGDA_IONIC=ON \
-                                                                                            -DGDA_MLX5=ON  \
-                                                                                            -DGDA_BNXT=ON  \
-                                                                                            -DUSE_IPC=ON
-RUN rm -rf /opt/rocSHMEM
+
+# rocSHMEM: used by Primus ODC via Primus-Turbo's odc_rocshmem_* extensions.
+# This base image already ships a prebuilt install (commit 17ff985c, version
+# 3.2.0) at $ROCSHMEM_HOME=/opt/rocshmem, so building it again is redundant.
+#
+# If a future base image drops it, restore by uncommenting below (and the
+# `ARG ROCSHMEM_COMMIT` above). Note: cmake reads the ROCm version from
+# -DROCM_PATH=, not $ROCM_PATH; omitting it falls back to the nonexistent
+# /opt/rocm and fails.
+# RUN mkdir -p /opt && cd /opt && git clone https://github.com/ROCm/rocSHMEM.git && \
+#     cd rocSHMEM && git checkout ${ROCSHMEM_COMMIT} && mkdir build && cd build && \
+#     MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} INSTALL_PREFIX=${ROCSHMEM_HOME} \
+#     ../scripts/build_configs/gda -DROCM_PATH=${ROCM_PATH} \
+#       -DGDA_IONIC=ON -DGDA_MLX5=ON -DGDA_BNXT=ON -DUSE_IPC=ON
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
