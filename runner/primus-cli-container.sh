@@ -541,5 +541,28 @@ if [[ "$DRY_RUN_MODE" == "true" ]]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Optional: authenticate to the container registry before the implicit pull.
+# On clusters whose compute nodes are not pre-logged-in, a private image
+# (e.g. docker.io/tasimage/primus:*) cannot be pulled and `docker run` fails
+# with "Unable to find image '<image>' locally" followed by a pull-access
+# error. Export DOCKER_LOGIN_USER and DOCKER_LOGIN_KEY (e.g. a Docker Hub PAT)
+# and the scheduler propagates them to every node (spur sbatch --export=ALL),
+# so the login+pull happens automatically at launch. DOCKER_LOGIN_REGISTRY is
+# optional and defaults to Docker Hub.
+# ---------------------------------------------------------------------------
+if [[ -n "${DOCKER_LOGIN_KEY:-}" ]]; then
+    if [[ -z "${DOCKER_LOGIN_USER:-}" ]]; then
+        LOG_ERROR "[container] DOCKER_LOGIN_KEY is set but DOCKER_LOGIN_USER is empty."
+        exit 1
+    fi
+    LOG_INFO_RANK0 "[container] Logging in to registry ${DOCKER_LOGIN_REGISTRY:-docker.io} as ${DOCKER_LOGIN_USER}..."
+    if ! printf '%s' "${DOCKER_LOGIN_KEY}" | \
+        "$CONTAINER_RUNTIME" login ${DOCKER_LOGIN_REGISTRY:+"$DOCKER_LOGIN_REGISTRY"} -u "${DOCKER_LOGIN_USER}" --password-stdin; then
+        LOG_ERROR "[container] Registry login failed for user ${DOCKER_LOGIN_USER}."
+        exit 1
+    fi
+fi
+
 LOG_INFO "[container] Executing command..."
 "${CMD[@]}"
