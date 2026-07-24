@@ -25,10 +25,10 @@ permissions:
 env:
   PRIMUS_TURBO_COMMIT: edc8d2ccb0be4888e80ee7c6e765fd3956026a32 # feat: add quantized tensor support for blockwise grouped gemm (#422)
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
-  ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
+  #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
-  TRITON_COMMIT: 88b227e23f0445f3f695bad05bbf1a363b4f50e0
-  BASE_IMAGE: docker.io/rocm/primus:v26.3
+  TRITON_COMMIT: 09500db9f0fe66fd176d1f080e2017b37e7e995d # pinned triton-lang/triton commit built from source in Dockerfile
+  BASE_IMAGE: docker.io/rocm/primus:v26.4
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.2
 
 jobs:
@@ -123,16 +123,20 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           echo "> Build dependencies"
           start_time=$(date +%s)
+          # Optional build-args, off by default (kept as an array so a commented-out
+          # element here can't break the docker build \-continuation below).
+          EXTRA_BUILD_ARGS=()
+          # EXTRA_BUILD_ARGS+=(--build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT})
           docker build -f $CWS/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg BASE_IMAGE=${BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
-               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg TRITON_COMMIT=${TRITON_COMMIT} \
+               "${EXTRA_BUILD_ARGS[@]}" \
                $CWS/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -143,7 +147,7 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          # Primus v26.3 already includes AINIC under /workspace. Re-enable this
+          # Primus v26.4 already includes AINIC under /workspace. Re-enable this
           # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
@@ -304,16 +308,18 @@ jobs:
           : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
           IMG="docker.io/tasimage/primus:${{ env.IMAGE_TAG }}"
           echo "Target image: ${IMG}"
-          # Reuse the container only if it is already running on the same image;
-          # otherwise recreate it from the freshly pushed image.
-          cur_img="$(docker inspect -f '{{.Config.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
+          # Pull first, then compare image id (not tag name): IMAGE_TAG is
+          # constant ("latest") on main, so a tag-only check can't detect a
+          # same-tag repush and would keep reusing a stale container.
+          docker pull "${IMG}"
+          target_id="$(docker image inspect -f '{{.Id}}' "${IMG}" 2>/dev/null || true)"
+          cur_id="$(docker inspect -f '{{.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
           running="$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null || true)"
-          if [ "${running}" = "true" ] && [ "${cur_img}" = "${IMG}" ]; then
-            echo "Reusing container ${UT_CONTAINER} (already on ${IMG})."
+          if [ "${running}" = "true" ] && [ -n "${target_id}" ] && [ "${cur_id}" = "${target_id}" ]; then
+            echo "Reusing container ${UT_CONTAINER} (already on ${IMG}, id=${target_id})."
           else
-            echo "Recreating container ${UT_CONTAINER} (running=${running}, image=${cur_img})."
+            echo "Recreating container ${UT_CONTAINER} (running=${running}, cur_id=${cur_id}, target_id=${target_id})."
             docker rm -f "${UT_CONTAINER}" >/dev/null 2>&1 || true
-            docker pull "${IMG}"
             docker run -d --name "${UT_CONTAINER}" \
               --network host --ipc host --privileged \
               --group-add video \
@@ -333,36 +339,8 @@ jobs:
           set -e
           pip install -r requirements.txt
           IN
-      # v26.3-only: drop this whole step on v26.4. Unit tests import torchtitan
-      # from the submodule source via conftest sys.path injection (v0.2.2 has
-      # PEP-420 namespace packages that need the source root on sys.path). This
-      # just removes any stale torchtitan in the image that would shadow it.
-      - name: Purge stale TorchTitan install (v26.3-only, drop on v26.4)
-        run: |
-          docker exec -i -e GITHUB_WORKSPACE="${CWS}" -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
-          set -e
-          pip uninstall -y torchtitan || true
-          python - <<'PY'
-          import glob, os, shutil, site
-          dirs = set(site.getsitepackages() + [site.getusersitepackages()])
-          patterns = (
-              "__editable__*torchtitan*",
-              "__editable__.torchtitan*.pth",
-              "torchtitan*.pth",
-              "torchtitan*.egg-link",
-              "torchtitan*.dist-info",
-              "torchtitan*.egg-info",
-          )
-          for d in dirs:
-              for pat in patterns:
-                  for f in glob.glob(os.path.join(d, pat)):
-                      try:
-                          shutil.rmtree(f) if os.path.isdir(f) else os.remove(f)
-                          print("removed", f)
-                      except OSError as e:
-                          print("skip", f, e)
-          PY
-          IN
+      # No origami in this image (see docker/Dockerfile); primus_turbo falls
+      # back to heuristic kernel selection for MoE grouped-gemm.
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
