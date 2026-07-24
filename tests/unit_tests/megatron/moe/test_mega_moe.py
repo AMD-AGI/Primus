@@ -9,6 +9,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
@@ -27,6 +28,9 @@ from torch.testing._internal.common_utils import (
     parametrize,
     run_tests,
 )
+
+if not torch.cuda.is_available() or torch.version.hip is None or torch.cuda.get_device_capability() != (9, 5):
+    pytest.skip("MegaMoE only supports gfx950", allow_module_level=True)
 
 from primus.backends.megatron.core.extensions.mega_moe import PrimusTurboMegaMoELayer
 
@@ -114,7 +118,9 @@ def _build_layers(config, num_moe_experts, num_layers):
         ).cuda()
 
         experts = moe_layer.experts.local_experts
-        assert len(experts) == mega_layer.w1.shape[0]
+        mega_w1 = mega_layer.experts.fc1_weight.weight
+        mega_w2 = mega_layer.experts.fc2_weight.weight
+        assert len(experts) == mega_w1.shape[0]
         with torch.no_grad():
             # match routing: copy router gate weight into mega's own router
             mega_layer.router.weight.copy_(moe_layer.router.weight)
@@ -126,10 +132,10 @@ def _build_layers(config, num_moe_experts, num_layers):
                     r.expert_bias.zero_()
             # routed experts: grouped fc1/fc2 -> packed w1/w2
             for i, expert in enumerate(experts):
-                assert expert.linear_fc1.weight.shape == mega_layer.w1[i].shape
-                assert expert.linear_fc2.weight.shape == mega_layer.w2[i].shape
-                mega_layer.w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
-                mega_layer.w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
+                assert expert.linear_fc1.weight.shape == mega_w1[i].shape
+                assert expert.linear_fc2.weight.shape == mega_w2[i].shape
+                mega_w1[i].copy_(expert.linear_fc1.weight.to(torch.bfloat16))
+                mega_w2[i].copy_(expert.linear_fc2.weight.to(torch.bfloat16))
             # shared expert: same SharedExpertMLP module, copy fc1/fc2
             if mega_layer.shared_experts is not None:
                 se_ref, se_mega = moe_layer.shared_experts, mega_layer.shared_experts
@@ -228,36 +234,34 @@ class TestMegaMoEAccuracy(MultiProcessTestCase):
             GRAD_FLOOR = 0.95
             failures = []
 
-            def _check(tag, cos):
+            def check_accuracy(tag, cos):
                 if cos <= GRAD_FLOOR:
                     failures.append(f"{tag} cosine {cos:.6f} < {GRAD_FLOOR}")
 
             # forward + dx parity: every microbatch
             for step in range(num_ga):
-                _check(f"ga{step} fwd", fwd_cos[step])
-                _check(f"ga{step} dx", dx_cos[step])
+                check_accuracy(f"ga{step} fwd", fwd_cos[step])
+                check_accuracy(f"ga{step} dx", dx_cos[step])
 
             # accumulated per-weight grad parity: every trainable weight
             dgate = _cosine(mega_layer.router.weight.grad, moe_layer.router.weight.grad)
-            _check("router", dgate)
+            check_accuracy("router", dgate)
             dsw1 = _cosine(mega_layer.shared_experts.linear_fc1.weight.grad, se.linear_fc1.weight.grad)
             dsw2 = _cosine(mega_layer.shared_experts.linear_fc2.weight.grad, se.linear_fc2.weight.grad)
-            _check("shared dW1", dsw1)
-            _check("shared dW2", dsw2)
+            check_accuracy("shared dW1", dsw1)
+            check_accuracy("shared dW2", dsw2)
             # routed experts: full w1/w2 grad tensors (norm-weighted over all local
             # experts); per-expert min is thin-token bf16 noise, informational only.
             ref_dw1 = torch.stack([e.linear_fc1.weight.grad for e in experts])
             ref_dw2 = torch.stack([e.linear_fc2.weight.grad for e in experts])
-            dW1 = _cosine(mega_layer.w1.grad, ref_dw1)
-            dW2 = _cosine(mega_layer.w2.grad, ref_dw2)
-            _check("experts dW1", dW1)
-            _check("experts dW2", dW2)
-            dw1_min = min(
-                _cosine(mega_layer.w1.grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts)
-            )
-            dw2_min = min(
-                _cosine(mega_layer.w2.grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts)
-            )
+            mega_w1_grad = mega_layer.experts.fc1_weight.weight.grad
+            mega_w2_grad = mega_layer.experts.fc2_weight.weight.grad
+            dW1 = _cosine(mega_w1_grad, ref_dw1)
+            dW2 = _cosine(mega_w2_grad, ref_dw2)
+            check_accuracy("experts dW1", dW1)
+            check_accuracy("experts dW2", dW2)
+            dw1_min = min(_cosine(mega_w1_grad[i], e.linear_fc1.weight.grad) for i, e in enumerate(experts))
+            dw2_min = min(_cosine(mega_w2_grad[i], e.linear_fc2.weight.grad) for i, e in enumerate(experts))
             self._rank0(
                 f"[grad accum over {num_ga} ga] dgate={dgate:.6f} dSharedW1={dsw1:.6f} "
                 f"dSharedW2={dsw2:.6f} experts dW1={dW1:.6f} dW2={dW2:.6f} "
