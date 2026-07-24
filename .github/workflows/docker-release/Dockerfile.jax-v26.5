@@ -1,0 +1,281 @@
+ARG DEFAULT_BASE=ubuntu:24.04
+ARG BASE_IMAGE=${DEFAULT_BASE}
+FROM  ${BASE_IMAGE:-$DEFAULT_BASE} AS jax_base
+
+WORKDIR /workspace/
+ENV MAX_JOBS=128
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV ROCM_AMDGPU_TARGETS="gfx942,gfx950"
+
+# Flag to fix profiler hang issue.
+ENV ROCPROFILER_QUEUE_INTERPOSITION=0
+ENV DEBUG_HIP_DYNAMIC_QUEUES=0
+
+# Install Ubuntu dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+	&& apt install -y \
+	gfortran \
+	git \
+	git-lfs \
+	ninja-build \
+	g++ \
+	pkg-config \
+	xxd \
+	patchelf \
+	automake \
+	libtool \
+	python3-venv \
+	python3-dev \
+	python3-pip \
+	python-is-python3 \
+	libegl1-mesa-dev \
+	wget \
+    sudo \
+    flex \
+    liblzma-dev \
+    ccache \
+    libdw1 \
+    libdrm-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Setup python env
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip \
+    && pip uninstall -y wheel \
+    && pip install \
+        cmake==3.31.6 \
+        ninja==1.11.1.3 \
+        wheel==0.45.1 \
+        packaging==25.0 \
+        setuptools==69.5.1 \
+    && rm -rf /root/.cache
+
+ENV THEROCK_TARBALL=https://repo.amd.com/rocm/tarball-multi-arch/therock-dist-linux-multiarch-7.14.0.tar.gz
+
+RUN mkdir -p /opt/rocm \
+    && cd /opt/rocm \
+    && wget ${THEROCK_TARBALL} \
+    && tar -xvf *.tar.gz -C /opt/rocm \
+    && rm *.tar.gz
+
+# Setup ROCm stack related envs
+ENV PATH="/opt/rocm/lib:/opt/venv/bin:/opt/rocm/bin:$PATH"
+ENV LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib/rocm_sysdeps/lib"
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_PLATFORM=amd
+ENV HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode
+
+# Install LLVM 18
+RUN echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+RUN sudo apt-get update
+RUN sudo apt-get install -y clang-18 lld-18 llvm-18-dev llvm-18-tools
+
+# amdsmi
+RUN pip install amdsmi==7.0.2 \
+    && rm -rf /root/.cache
+
+WORKDIR /workspace
+
+# Install maxtext
+ARG MAXTEXT_REPO=https://github.com/ROCm/maxtext.git
+ARG MAXTEXT_BRANCH=release/v26.5
+
+RUN git clone ${MAXTEXT_REPO} \
+    && cd maxtext \
+    && git checkout ${MAXTEXT_BRANCH} \
+    && chmod +x src/dependencies/scripts/setup.sh \
+    && ./src/dependencies/scripts/setup.sh \
+    && cd .. \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /root/.cache
+
+# Fix (root cause): the prebuilt PyPI TensorFlow wheel bundles an LLVM whose symbols
+# collide with ROCm 7.14's libLLVM inside Grain "spawn" workers -> SIGSEGV on
+# `import tensorflow` after `import jax`. Rebuild the CPU-only TF wheel from ROCm's
+# fork (correct symbol visibility) and install it in place of the stock wheel. A CPU
+# build also has no bundled NCCL, so it preserves the previous XLA-RCCL fix.
+# NOTE: bumps TF to 2.21.0 and adds a long (~30-60 min) bazel build to the image.
+ARG TF_REPO=https://github.com/ROCm/tensorflow-upstream.git
+ARG TF_BRANCH=upstream-v2.21.0
+ARG BAZELISK_VERSION=v1.25.0
+# Bazelisk auto-selects the bazel version pinned by TF's .bazelversion.
+RUN apt-get update && apt-get install -y unzip zip \
+    && wget -O /usr/local/bin/bazel \
+        https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64 \
+    && chmod +x /usr/local/bin/bazel \
+    && apt clean && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${TF_BRANCH} ${TF_REPO} tensorflow-upstream \
+    && cd tensorflow-upstream \
+    && bazel build //tensorflow/tools/pip_package:wheel \
+        --repo_env=WHEEL_NAME=tensorflow_cpu \
+        --repo_env=HERMETIC_PYTHON_VERSION=3.12 \
+    && pip uninstall -y tensorflow tensorflow-cpu tensorflow_cpu \
+    && pip install --no-deps \
+        bazel-bin/tensorflow/tools/pip_package/wheel_house/tensorflow_cpu-2.21.0-cp312-cp312-linux_x86_64.whl \
+    && cd .. \
+    && rm -rf tensorflow-upstream /root/.cache/bazel /root/.cache
+
+# JAX
+# Note: JAX and related libraries need to be installed before TE
+ARG JAX_VERSION=0.10.0
+ENV JAX_VERSION=${JAX_VERSION}
+# See: https://repo.amd.com/rocm/whl-multi-arch/jax-rocm7-pjrt/
+ENV JAX_PJRT_VERSION=0.10.0+rocm7.14.0
+# See: https://repo.amd.com/rocm/whl-multi-arch/jax-rocm7-plugin/
+ENV JAX_PLUGIN_VERSION=0.10.0+rocm7.14.0
+
+RUN pip install jax==${JAX_VERSION} jaxlib==${JAX_VERSION} scipy==1.16 \
+    && pip install \
+        --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+        --pre jax_rocm7_pjrt==${JAX_PJRT_VERSION} \
+        --pre jax_rocm7_plugin==${JAX_PLUGIN_VERSION}  \
+    && rm -rf /root/.cache
+
+# TransformerEngine
+# See: https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/transformer-engine-rocm-jax/
+ARG TE_VERSION=2.15.0.dev0+rocm7.15.0a20260707.72d01a0
+
+RUN pip install \
+        pybind11==3.0.4 \
+        importlib-metadata==8.7.1 \
+        pydantic==2.13.4 \
+        flax==0.12.2 \
+    && pip install \
+        --index-url https://rocm.frameworks-nightlies.amd.com/whl-staging/device-all/ \
+        --pre \
+        --no-build-isolation \
+        transformer_engine_rocm_jax==${TE_VERSION} \
+    && rm -rf /root/.cache
+
+# Configure required envs
+ENV NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
+ENV NVTE_USE_HIPBLASLT=1
+ENV GPU_MAX_HW_QUEUES=2
+ENV HIP_FORCE_DEV_KERNARG=1
+ENV HSA_FORCE_FINE_GRAIN_PCIE=1
+ENV NVTE_FUSED_ATTN=1
+ENV NCCL_DEBUG=VERSION
+ENV NVTE_CK_USES_BWD_V3=1
+ENV NVTE_CK_USES_FWD_V3=1
+ENV NVTE_CK_IS_V3_ATOMIC_FP32=1
+ENV NVTE_CK_HOW_V3_BF16_CVT=2
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=.9
+ENV XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE --xla_gpu_enable_command_buffer=''"
+
+WORKDIR /workspace
+
+# Primus
+ARG PRIMUS_REPO=https://github.com/AMD-AGI/Primus.git
+ARG PRIMUS_BRANCH=main
+
+RUN git clone --recurse-submodules ${PRIMUS_REPO} \
+    && cd Primus \
+    && git checkout ${PRIMUS_BRANCH} \
+    && git submodule update --init third_party/maxtext/ \
+    && cd .. \
+    && pip uninstall -y dataclasses dataclasses_json \
+    && rm -rf /root/.cache
+
+####### AINIC related installations #######
+RUN apt update \
+    && apt install -y \
+    libibverbs-dev \
+    jq \
+    dpkg-dev \
+    kmod \
+    xz-utils \
+    ibverbs-utils \
+    infiniband-diags \
+    rdma-core \
+    ethtool \
+    libevent-dev \
+    libhwloc-dev \
+    libmunge-dev \
+    software-properties-common \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install AMD AINIC library
+ARG AINIC_BUNDLE_VERSION="1.117.5-a-77"
+
+RUN add-apt-repository -y "deb https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_BUNDLE_VERSION} noble main" \
+    && apt update --allow-insecure-repositories \
+    && apt install -y --allow-unauthenticated libionic-dev \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Allow insecure repositories by default
+RUN echo 'Acquire::AllowInsecureRepositories "true";' >> /etc/apt/apt.conf.d/99allow-insecure-repositories
+
+# Install UCX
+ARG UCX_VERSION="1.18.0"
+
+RUN wget https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz \
+    && mkdir -p ucx-${UCX_VERSION} \
+    && tar -zxf ucx-${UCX_VERSION}.tar.gz -C ucx-${UCX_VERSION} --strip-components=1 \
+    && cd ucx-${UCX_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=/workspace/ucx-${UCX_VERSION}/install --with-rocm=${ROCM_PATH} \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm ucx-${UCX_VERSION}.tar.gz
+
+ENV UCX_INSTALL_DIR=/workspace/ucx-${UCX_VERSION}/install
+
+# Install OpenMPI
+ARG MPI_VERSION="4.1.6"
+
+RUN wget https://download.open-mpi.org/release/open-mpi/v$(echo "${MPI_VERSION}" | cut -d. -f1-2)/openmpi-${MPI_VERSION}.tar.gz \
+    && mkdir -p ompi-${MPI_VERSION} \
+    && tar -zxf openmpi-${MPI_VERSION}.tar.gz -C ompi-${MPI_VERSION} --strip-components=1 \
+    && cd ompi-${MPI_VERSION} \
+    && mkdir build \
+    && cd build \
+    && ../configure --prefix=${WORKDIR}/ompi-${MPI_VERSION}/install --with-ucx=${UCX_INSTALL_DIR} --disable-oshmem --disable-mpi-fortran \
+    && make -j 16 \
+    && make install \
+    && cd ../.. \
+    && rm openmpi-${MPI_VERSION}.tar.gz \
+    && rm -rf ompi-${MPI_VERSION}
+
+# Build RCCL with https://github.com/ROCm/rocm-systems/pull/8484
+# This commit `9e5e408` is on `develop` branch, commited on 2026-07-13.
+RUN rm -rf rocm-systems \
+    && git clone https://github.com/ROCm/rocm-systems.git \
+    && cd rocm-systems \
+    && git checkout 9e5e4084a4b8e1e86551b0eb054725c62354a926 \
+    && cd projects/rccl \
+    && ./install.sh -l \
+        --prefix build/ \
+        --amdgpu_targets="gfx942;gfx950" \
+    && cp -r build/release/librccl* /opt/rocm/lib/ \
+    && cd /workspace \
+    && rm -rf rocm-systems
+
+####### End of AINIC related installations #######
+
+# Secret scan will complain those files to be secrets. Explicitly remove them.
+RUN rm -f /workspace/Primus/.git/packed-refs /workspace/Primus/.git/modules/third_party/**/packed-refs
+
+# Clean cache
+RUN rm -rf /root/.cache
+
+# Training docker manifest
+ARG GIT_COMMIT_TAG=DEV
+ARG DOCKERFILE_PATH=Dockerfile
+
+# Copy patch files for training docker versioning
+RUN mkdir -p /workspace/.manifest \
+    && env > /workspace/.manifest/env.txt \
+    && pip list > /workspace/.manifest/requirements.txt \
+    && dpkg -l > /workspace/.manifest/dpkg-list.txt \
+    && echo "${GIT_COMMIT_TAG}" > /workspace/.manifest/training_docker_version
+
+COPY ${DOCKERFILE_PATH} /workspace/.manifest/Dockerfile
