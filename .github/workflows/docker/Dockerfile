@@ -64,6 +64,22 @@ RUN cd /opt && \
 
 RUN rm -rf /opt/Primus-Turbo
 
+# Primus-Turbo links librocshmem.a with -l: (not --whole-archive) under
+# -fgpu-rdc/--hip-link, so rocSHMEM's team.cpp.o (which defines the plain,
+# non-namespaced rocshmem::ROCSHMEM_TEAM_WORLD symbol) never gets pulled into
+# libprimus_turbo_kernels.so; since it's a shared object the missing symbol
+# only surfaces as an ImportError at dlopen/import time, not at build time.
+# Work around it by re-exporting that symbol from a tiny shim .so, placed on
+# libprimus_turbo_kernels.so's existing rpath and wired in via patchelf.
+RUN PT_LIB=$(python3 -c "import primus_turbo, os; print(os.path.join(os.path.dirname(primus_turbo.__file__), 'lib', 'libprimus_turbo_kernels.so'))") && \
+    mkdir -p /tmp/rocshmem_team_shim && cd /tmp/rocshmem_team_shim && \
+    ar x ${ROCSHMEM_HOME}/lib/librocshmem.a team.cpp.o && \
+    g++ -shared -fPIC -o ${ROCSHMEM_HOME}/lib/librocshmem_team_shim.so team.cpp.o \
+      -L${ROCSHMEM_HOME}/lib -l:librocshmem.a -L${MPI_HOME}/lib -l:libmpi.so \
+      -Wl,-rpath,${ROCSHMEM_HOME}/lib -Wl,-rpath,${MPI_HOME}/lib && \
+    patchelf --add-needed librocshmem_team_shim.so "${PT_LIB}" && \
+    cd / && rm -rf /tmp/rocshmem_team_shim
+
 # ---------------------------------------------------------------------------
 # Install Triton
 # ---------------------------------------------------------------------------
