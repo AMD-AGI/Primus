@@ -114,9 +114,25 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     rm -rf /opt/uccl; \
     fi
 
-# No origami in this image; primus_turbo falls back to heuristic kernel
-# selection for MoE grouped-gemm. To add it back:
-#   pip install "git+https://github.com/ROCm/rocm-libraries.git@223648a26928ebed7f3dd0ccdc044c09f1dccf9b#subdirectory=shared/origami/python"
+# Install origami (rocm-libraries@223648a). The v26.4 base image ships no
+# origami at all. primus_turbo's MoE grouped-gemm kernel selection tolerates
+# its absence (falls back to a heuristic, no measurable perf loss on gfx942),
+# but Primus's performance-projection tool (primus projection performance)
+# hard-depends on origami as its only supported GEMM simulation backend and
+# has no fallback (see primus/core/projection/simulation_backends/factory.py)
+# — dropping this install broke TestProjectionSimulate::* outright. Skipped
+# for JAX, where the projection tool isn't used.
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
+    rm -rf /tmp/rocm-libraries && \
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git /tmp/rocm-libraries && \
+    cd /tmp/rocm-libraries && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set shared/origami && \
+    git checkout 223648a26928ebed7f3dd0ccdc044c09f1dccf9b && \
+    (pip uninstall -y origami || true) && \
+    pip install --no-cache-dir ./shared/origami/python && \
+    rm -rf /tmp/rocm-libraries; \
+    fi
 
 # Set the default working directory
 WORKDIR /opt

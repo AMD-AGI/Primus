@@ -339,8 +339,6 @@ jobs:
           set -e
           pip install -r requirements.txt
           IN
-      # No origami in this image (see docker/Dockerfile); primus_turbo falls
-      # back to heuristic kernel selection for MoE grouped-gemm.
       - name: Set UT_LOG_PATH
         run: |
           ts="$(date +%Y%m%d-%H%M%S)"
