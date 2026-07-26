@@ -64,6 +64,15 @@ use_v4_csa_attention_backend: triton_v1
 # top-k path is preserved). Surface via PRIMUS_USE_V4_FP8_INDEXER.
 use_v4_fp8_indexer: false
 
+# Indexer distillation loss (CSA selector training). argTopK is not
+# differentiable, so the lightning indexer only learns through this auxiliary
+# KL against the real attention distribution. 0.0 keeps the loss off AND the
+# indexer frozen (correct when loading an already-trained indexer, and it keeps
+# the params out of the grad buckets so overlap_grad_reduce stays usable).
+# A from-scratch pretrain needs this on; Megatron's Flash recipe uses 1e-2.
+# Surface via PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF (see run_deepseek_v4.sh).
+v4_indexer_distill_loss_coeff: 0.0
+
 # Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
 # projection inside HyperMixer.compute_weights) with a cached
 # ``torch.compile(fullgraph=True, dynamic=False)`` build. Collapses the
