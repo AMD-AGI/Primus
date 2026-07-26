@@ -164,6 +164,12 @@ export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
 # in-container config regardless of env propagation.
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
 
+# Indexer distillation loss coefficient (CSA selector training). 0 keeps the
+# loss off and the indexer frozen -- correct when loading an already-trained
+# indexer. A from-scratch pretrain needs it ON (1e-2 is a reasonable starting
+# value), which also unfreezes the indexer params.
+export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-0.0}
+
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
 # cached torch.compile build. Default OFF here; the proxy script
 # (run_deepseek_v4_flash_proxy.sh) flips it ON. After G32 + G33b are
@@ -298,6 +304,7 @@ fi
   --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
   --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
+  --v4_indexer_distill_loss_coeff "$PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \

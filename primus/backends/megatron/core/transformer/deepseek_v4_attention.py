@@ -77,6 +77,10 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+    V4IndexerLossAutoScaler,
+    compute_indexer_distill_loss,
+)
 from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
@@ -648,25 +652,27 @@ class DeepseekV4Attention(MLASelfAttention):
         # ---- compressor / indexer (compressed branches only) ----
         self.compressor: Optional[nn.Module] = None
         self.indexer: Optional[nn.Module] = None
+        # Last indexer distillation loss (detached), for logging. None until a
+        # training step runs with the loss enabled.
+        self.last_indexer_distill_loss: Optional[torch.Tensor] = None
         if self.compress_ratio > 0:
             self.compressor = self._build_compressor(submodules.compressor)
             if self.compress_ratio == 4:
                 self.indexer = self._build_indexer(submodules.indexer)
-                # The Indexer is a non-differentiable top-K *selector*: the only
-                # consumed output is ``topk_idxs`` (argTopK indices); its scores
-                # are discarded (``topk_idxs, _ = self.indexer(...)`` in forward)
-                # and this model has no indexer auxiliary/distillation loss, so
-                # none of the Indexer's params can ever receive a gradient.
-                # Leaving them trainable inserts permanently-dead params into the
-                # distributed-optimizer grad buckets, which both wastes grad /
-                # optimizer state + cross-node grad-sync bandwidth AND trips
+                # ``topk`` is not differentiable and the forward only consumes
+                # ``topk_idxs``, so the Indexer can only learn through the
+                # distillation loss (see ``indexer_distill_loss``). Without it,
+                # leaving the params trainable inserts permanently-dead params
+                # into the distributed-optimizer grad buckets: that wastes grad /
+                # optimizer state plus cross-node grad-sync bandwidth AND trips
                 # Megatron's overlap_grad_reduce invariant (every bucket param
-                # must fire its grad-ready backward hook) -- the latter is what
-                # forced overlap_grad_reduce/param_gather OFF and crippled
-                # cross-node DP scaling. Freeze them so Megatron excludes them
-                # from the grad buckets entirely. Set PRIMUS_V4_INDEXER_TRAINABLE=1
-                # to re-enable (e.g. once an indexer aux loss is added).
-                if os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1":
+                # must fire its grad-ready backward hook), which is what forced
+                # overlap_grad_reduce / param_gather OFF and crippled cross-node
+                # DP scaling. So freeze unless the loss is actually enabled.
+                # PRIMUS_V4_INDEXER_TRAINABLE=1 still forces trainable.
+                if not self.indexer_distill_enabled and (
+                    os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
+                ):
                     for _indexer_param in self.indexer.parameters():
                         _indexer_param.requires_grad_(False)
 
@@ -935,6 +941,16 @@ class DeepseekV4Attention(MLASelfAttention):
     @property
     def rope(self) -> DualRoPE:
         return self._rope[0]
+
+    @property
+    def indexer_distill_coeff(self) -> float:
+        """Coefficient of the indexer distillation loss (``0`` = disabled)."""
+        return float(getattr(self.config, "v4_indexer_distill_loss_coeff", 0.0) or 0.0)
+
+    @property
+    def indexer_distill_enabled(self) -> bool:
+        """True when this layer trains its indexer via the distillation loss."""
+        return self.compress_ratio == 4 and self.indexer_distill_coeff > 0.0
 
     def _attention_scale(self) -> float:
         """Softmax temperature for every branch: plain ``1 / sqrt(head_dim)``.
@@ -1376,7 +1392,26 @@ class DeepseekV4Attention(MLASelfAttention):
         P = pool.shape[1]
 
         # 2) Indexer top-K per query.
-        topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
+        topk_idxs, topk_scores = self.indexer(hidden)  # [B, S, K]
+
+        # 2b) Indexer distillation. argTopK is not differentiable and the
+        # scores are otherwise discarded, so this loss is the indexer's only
+        # learning signal. It is attached to ``pool`` -- which every CSA
+        # backend consumes -- so the aux gradient is seeded no matter which
+        # kernel the layer dispatches to, without threading a second return
+        # value through all of them.
+        if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            indexer_loss = compute_indexer_distill_loss(
+                index_topk_scores=topk_scores,
+                topk_idxs=topk_idxs,
+                query=q_bh,
+                pool=pool,
+                softmax_scale=self._attention_scale(),
+                loss_coeff=self.indexer_distill_coeff,
+            )
+            self.last_indexer_distill_loss = indexer_loss.detach()
+            pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)
+
         # Dispatch on ``use_v4_csa_attention_backend``. gluon / triton_v2 /
         # triton_v1 consume (pool, topk) directly; eager / triton_v0 / flydsl_v0
         # use the per-query gathered [B, S, K, Dh] representation.
