@@ -1207,6 +1207,50 @@ class DeepseekV4Attention(MLASelfAttention):
         B, S, H, Dh = attn.shape
         return _projection_forward(self.linear_proj, attn.reshape(B, S, H * Dh))
 
+    def _apply_inverse_rope(self, attn: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """De-rotate the core-attention output (RoPE at ``position = -t``).
+
+        V4 shares a single latent between K and V, so the values entering the
+        softmax are already rotated and the naive output
+
+            ``o_t = sum_s P[t,s] * R(s) v_s``
+
+        carries *absolute* positions. Rotating it by ``-t`` turns every
+        contribution into ``R(s - t) v_s``, i.e. the relative encoding the
+        model expects. The released ``inference/model.py`` does exactly this
+        with ``apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)`` right
+        before ``wo_a``, and the inverse rotation must use the *same* per-layer
+        RoPE base that Q / KV were rotated with.
+
+        Implemented as a negated sine (``R(-t) == R(t)^T``) so the existing
+        eager and Triton kernels are reused unchanged. Returns a new tensor:
+        ``attn`` is what the attention backward saved and must not be mutated.
+        """
+        if self.rotary_dim == 0:
+            return attn
+        rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        cos, sin = rope(position_ids)
+        cos = cos[..., : self.rotary_dim // 2]
+        sin = sin[..., : self.rotary_dim // 2]
+        # The Triton path reshapes cos/sin to [prod(attn.shape[:-2]), rd/2],
+        # so a 1-D ``position_ids`` must be broadcast over the batch first.
+        lead = attn.shape[:-2]
+        if tuple(cos.shape[:-1]) != tuple(lead):
+            cos = cos.expand(*lead, -1)
+            sin = sin.expand(*lead, -1)
+        return apply_interleaved_partial_rope(attn, cos, -sin, rotary_dim=self.rotary_dim)
+
+    def _project_output(self, attn: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Inverse-RoPE then O projection -- the single exit for every branch.
+
+        Kept as one helper so no attention path can reach the O projection
+        without de-rotating first.
+        """
+        attn = self._apply_inverse_rope(attn, position_ids)
+        if self.linear_o_a is not None:
+            return self._grouped_o_projection(attn)
+        return self._flat_o_projection(attn)
+
     # ------------------------------------------------------------------
     # compressed branches (HCA / CSA)
     # ------------------------------------------------------------------
@@ -1595,9 +1639,7 @@ class DeepseekV4Attention(MLASelfAttention):
             out_bh = self._attention_forward_via_core(q, kv)
             out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
             out = out.to(dtype=dtype)
-            if self.linear_o_a is not None:
-                return self._grouped_o_projection(out)
-            return self._flat_o_projection(out)
+            return self._project_output(out, position_ids)
 
         # Broadcast K / V across the H query-head axis.
         k_h = kv.expand(B, S, self.num_heads, self.head_dim)
@@ -1652,9 +1694,7 @@ class DeepseekV4Attention(MLASelfAttention):
         out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
         out = out.to(dtype=dtype)
 
-        if self.linear_o_a is not None:
-            return self._grouped_o_projection(out)
-        return self._flat_o_projection(out)
+        return self._project_output(out, position_ids)
 
 
 __all__ = [

@@ -64,6 +64,35 @@ def _rms_norm_per_head(x: torch.Tensor, eps: float) -> torch.Tensor:
     return (x32 * rms).to(in_dtype)
 
 
+def _inverse_rope_reference(
+    out: torch.Tensor,
+    *,
+    position_ids: torch.Tensor,
+    rope: DualRoPE,
+    rotary_dim: int,
+    compress_ratio: int = 0,
+) -> torch.Tensor:
+    """Reference de-rotation of the attention output (RoPE at ``-t``).
+
+    Mirrors ``apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)`` from
+    the released ``inference/model.py``: the conjugate rotation, expressed
+    here by negating the sine.
+    """
+    from primus.backends.megatron.core.transformer.dual_rope import (
+        apply_interleaved_partial_rope,
+    )
+
+    cache = rope.get_rope(compress_ratio=compress_ratio)
+    cos, sin = cache(position_ids)
+    cos = cos[..., : rotary_dim // 2]
+    sin = sin[..., : rotary_dim // 2]
+    lead = out.shape[:-2]
+    if tuple(cos.shape[:-1]) != tuple(lead):
+        cos = cos.expand(*lead, -1)
+        sin = sin.expand(*lead, -1)
+    return apply_interleaved_partial_rope(out, cos, -sin, rotary_dim=rotary_dim)
+
+
 def _reference_v4_attention_forward(
     *,
     hidden: torch.Tensor,  # [B, S, D]
@@ -141,6 +170,10 @@ def _reference_v4_attention_forward(
         probs = probs[..., :-1].to(v_bh.dtype)
     out = torch.matmul(probs, v_bh.float()).to(hidden.dtype)
     out = out.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
+
+    # Inverse RoPE (position = -t) on the output tail: K == V, so the output
+    # carries absolute positions until it is de-rotated.
+    out = _inverse_rope_reference(out, position_ids=position_ids, rope=rope, rotary_dim=rotary_dim)
 
     # Grouped low-rank O.
     out_g = out.reshape(B, S, o_groups, (n_heads * head_dim) // o_groups)
@@ -678,6 +711,15 @@ def _reference_hca_forward(
     out = torch.matmul(probs, v_bh.float()).to(hidden.dtype)
     out = out.transpose(1, 2).contiguous()  # [B, S, H, Dh]
 
+    # Inverse RoPE (position = -t) using this layer's compress-base RoPE.
+    out = _inverse_rope_reference(
+        out,
+        position_ids=position_ids,
+        rope=attn.rope,
+        rotary_dim=rotary_dim,
+        compress_ratio=ratio,
+    )
+
     # Grouped low-rank O.
     G, r = attn.o_groups, attn.o_lora_rank
     out_g = out.reshape(B, S, G, (H * Dh) // G)
@@ -725,6 +767,121 @@ def test_hca_forward_matches_inline_reference():
 
     diff = (ours - ref).abs().max().item()
     assert diff < 1e-3, f"HCA forward mismatch: max abs diff = {diff:.3e}"
+
+
+def test_inverse_rope_round_trips():
+    """``R(-t)`` exactly undoes ``R(t)`` on the rotated tail.
+
+    Pure math property of the helper, independent of any attention branch.
+    """
+    torch.manual_seed(0)
+    # H must be a power of two: the Triton RoPE kernel tiles the head axis with
+    # BLOCK_H = _pick_block_h(H) and feeds it to tl.arange, which rejects
+    # non-power-of-2 ranges. Production runs H=64 (Q) / H=1 (KV), so this only
+    # ever bites contrived test shapes.
+    B, S, H, Dh, rotary_dim = 2, 6, 4, 16, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=H,
+        head_dim=Dh,
+        rotary_dim=rotary_dim,
+        q_lora_rank=32,
+        o_groups=1,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    x = torch.randn(B, S, H, Dh, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+
+    rotated = attn.rope.apply_rope(x, position_ids=position_ids, compress_ratio=0)
+    restored = attn._apply_inverse_rope(rotated, position_ids)
+
+    torch.testing.assert_close(restored, x, rtol=1e-5, atol=1e-5)
+    # The rotation must be non-trivial, otherwise the round-trip is vacuous.
+    assert not torch.allclose(rotated, x, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+def test_output_is_derotated_before_o_projection(compress_ratio):
+    """Every branch de-rotates the attention output before ``wo_a``.
+
+    Guards the wiring rather than the math: ``_project_output`` must apply the
+    inverse rotation, so feeding it a tensor and comparing against an explicit
+    de-rotate + O projection has to agree, and skipping the de-rotation must
+    not.
+    """
+    torch.manual_seed(0)
+    B, S = 2, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    if compress_ratio:
+        attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio)
+    else:
+        attn = _make_attention(config)
+    attn = attn.to(_TEST_DTYPE)
+
+    core_out = torch.randn(B, S, attn.num_heads, attn.head_dim, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+
+    with torch.no_grad():
+        ours = attn._project_output(core_out, position_ids)
+
+        derotated = _inverse_rope_reference(
+            core_out,
+            position_ids=position_ids,
+            rope=attn.rope,
+            rotary_dim=attn.rotary_dim,
+            compress_ratio=compress_ratio,
+        )
+        expected = attn._grouped_o_projection(derotated)
+        without_fix = attn._grouped_o_projection(core_out)
+
+    torch.testing.assert_close(ours, expected, rtol=1e-4, atol=1e-4)
+    assert not torch.allclose(ours, without_fix, rtol=1e-3, atol=1e-3)
+
+
+def test_inverse_rope_does_not_mutate_core_attention_output():
+    """De-rotation is out-of-place.
+
+    The attention backward keeps a reference to the core output, so mutating
+    it in place would corrupt the gradient.
+    """
+    torch.manual_seed(0)
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    core_out = torch.randn(2, 5, attn.num_heads, attn.head_dim, dtype=_TEST_DTYPE)
+    before = core_out.clone()
+    position_ids = torch.arange(5).unsqueeze(0).expand(2, 5)
+
+    with torch.no_grad():
+        rotated = attn._apply_inverse_rope(core_out, position_ids)
+
+    assert rotated is not core_out
+    torch.testing.assert_close(core_out, before, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(("compress_ratio", "num_pool_entries"), [(4, 4), (128, 2)])
