@@ -1220,10 +1220,15 @@ class DeepseekV4Attention(MLASelfAttention):
         pooled = self.compressor(hidden)  # [B, P, head_dim]
         B, P = pooled.shape[0], pooled.shape[1]
 
-        # Compress-base partial RoPE on compressed indices [0..P). Positions are
-        # the deterministic arange(P), so use the cached table instead of
-        # rebuilding arange -> outer -> cos/sin every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device)
+        # Compress-base partial RoPE. Compressed entry ``s`` stands for the
+        # window starting at original token ``s * compress_ratio``, so it is
+        # rotated at that position -- not at the bare block index ``s``. The
+        # queries are rotated at their own original positions, so using block
+        # indices here would put the two sides on different coordinate systems.
+        # Matches inference/model.py (``freqs_cis[:cutoff:ratio]``) and
+        # Megatron's ``cos[:total:ratio]``. Positions stay deterministic, so
+        # the cached table is still reused every forward.
+        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)

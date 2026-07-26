@@ -31,6 +31,11 @@ moe_router_topk_scaling_factor: 1.5
 # Indexer / Compressor
 index_topk: 512
 
+# RoPE base for the compressed (CSA / HCA) branches. The released
+# DeepSeek-V4-Flash inference/model.py uses compress_rope_theta = 40000.0;
+# the 160000 inherited from deepseek_v4_base.yaml is the V4-Pro value.
+compress_rope_theta: 40000.0
+
 # Per-layer compression schedule (from config.json:compress_ratios)
 # 0   = uncompressed dense layer (full attention with SWA)
 # 4   = CSA branch (overlap mode; per-query top-K from compressed pool via Indexer)
