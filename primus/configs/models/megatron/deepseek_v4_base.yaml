@@ -39,6 +39,9 @@ mtp_use_separate_hc_head: true
 hybrid_attention_enabled: true
 compress_ratios: null            # provided by the per-variant yaml (Flash / Pro);
                                  # entries: 0 = dense+SWA, 4 = CSA, 128 = HCA
+# RoPE base for the CSA / HCA (compressed) branches. 160000 is the V4-Pro
+# value; V4-Flash overrides this to 40000 in deepseek_v4_flash.yaml to match
+# the released DeepSeek-V4-Flash inference/model.py.
 compress_rope_theta: 160000.0
 index_topk: 512
 index_head_dim: 128

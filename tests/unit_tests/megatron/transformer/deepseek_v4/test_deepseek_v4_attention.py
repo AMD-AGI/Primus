@@ -631,7 +631,9 @@ def _reference_hca_forward(
     # Compressed pool from the attention's own Compressor + compress-base RoPE.
     pool = attn.compressor(hidden)  # [B, P, Dh]
     P = pool.shape[1]
-    comp_pos = torch.arange(P, device=hidden.device)
+    # Compressed entry s stands for the window starting at original token
+    # s * ratio, so it is rotated at that position (not at the block index).
+    comp_pos = torch.arange(P, device=hidden.device) * ratio
     cos, sin = attn.rope.compress_rope(comp_pos)
     cos = cos[..., : rotary_dim // 2]
     sin = sin[..., : rotary_dim // 2]
@@ -723,6 +725,66 @@ def test_hca_forward_matches_inline_reference():
 
     diff = (ours - ref).abs().max().item()
     assert diff < 1e-3, f"HCA forward mismatch: max abs diff = {diff:.3e}"
+
+
+@pytest.mark.parametrize(("compress_ratio", "num_pool_entries"), [(4, 4), (128, 2)])
+def test_compressed_pool_rope_uses_original_sequence_positions(compress_ratio, num_pool_entries):
+    """Compressed entry ``s`` is rotated at original token ``s * ratio``.
+
+    The queries are rotated at their own original positions, so rotating the
+    compressed KV at bare block indices would put the two sides on different
+    coordinate systems. ``inference/model.py`` slices ``freqs_cis[:cutoff:ratio]``
+    for prefill and indexes ``start_pos + 1 - ratio`` for decode; both land on
+    ``s * ratio``.
+    """
+    from primus.backends.megatron.core.transformer.dual_rope import (
+        apply_interleaved_partial_rope,
+    )
+
+    torch.manual_seed(0)
+    S = compress_ratio * num_pool_entries
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio).to(_TEST_DTYPE)
+    hidden = torch.randn(1, S, config.hidden_size, dtype=_TEST_DTYPE)
+
+    with torch.no_grad():
+        pooled_raw = attn.compressor(hidden)  # [B, P, Dh], pre-RoPE
+        ours = attn._build_compressed_pool(hidden)
+
+    P = pooled_raw.shape[1]
+    assert P == num_pool_entries, f"expected P={num_pool_entries}, got {P}"
+    rotary_dim = attn.rotary_dim
+
+    def _rope_at(positions: torch.Tensor) -> torch.Tensor:
+        cos, sin = attn.rope.compress_rope(positions)
+        cos = cos[..., : rotary_dim // 2].unsqueeze(0)
+        sin = sin[..., : rotary_dim // 2].unsqueeze(0)
+        rotated = apply_interleaved_partial_rope(
+            pooled_raw.unsqueeze(2), cos, sin, rotary_dim=rotary_dim
+        )
+        return rotated.squeeze(2)
+
+    block_idx = torch.arange(P, device=hidden.device)
+    expected = _rope_at(block_idx * compress_ratio)
+    torch.testing.assert_close(ours, expected, rtol=1e-4, atol=1e-4)
+
+    # The two conventions must actually differ, or the assertion above is
+    # vacuous (they coincide only at P == 1, which is why P > 1 here).
+    wrong = _rope_at(block_idx)
+    assert not torch.allclose(expected, wrong, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("compress_ratio", [0, 4, 128])

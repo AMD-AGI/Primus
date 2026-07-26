@@ -226,6 +226,32 @@ def test_yaml_does_not_set_retired_fields(parse_yaml_fn, yaml_name: str) -> None
 
 
 # ---------------------------------------------------------------------------
+# Compressed-branch RoPE base is variant-specific
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("yaml_name", "expected_theta"),
+    [
+        # The released DeepSeek-V4-Flash inference/model.py ships
+        # ``compress_rope_theta: float = 40000.0``. 160000 is the Pro value, and
+        # inheriting it in the Flash config was the bug this pins down.
+        ("deepseek_v4_flash.yaml", 40000.0),
+        ("deepseek_v4_pro.yaml", 160000.0),
+        ("deepseek_v4_base.yaml", 160000.0),
+    ],
+)
+def test_compress_rope_theta_matches_variant(parse_yaml_fn, yaml_name: str, expected_theta: float) -> None:
+    """Each variant pins the compressed-branch RoPE base it was trained with.
+
+    Getting this wrong silently de-tunes every CSA / HCA layer's positional
+    phase, so it is worth a hard assertion rather than relying on inheritance.
+    """
+    parsed = parse_yaml_fn(str(_YAML_DIR / yaml_name))
+    assert float(parsed["compress_rope_theta"]) == pytest.approx(expected_theta)
+
+
+# ---------------------------------------------------------------------------
 # V4-specific schema fields the runtime depends on (D5 / D6 hygiene)
 # ---------------------------------------------------------------------------
 
