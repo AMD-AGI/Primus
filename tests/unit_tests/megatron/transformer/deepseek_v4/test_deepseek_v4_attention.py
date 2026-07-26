@@ -658,7 +658,9 @@ def _reference_hca_forward(
     k_bh = k_full.transpose(1, 2)
     v_bh = v_full.transpose(1, 2)
 
-    scale = 1.0 / math.sqrt(Dh) * attn.rope.attn_scale(compress_ratio=ratio)
+    # Plain 1/sqrt(head_dim): the YaRN magnitude factor is not part of the
+    # softmax temperature (``inference/model.py`` uses ``head_dim ** -0.5``).
+    scale = 1.0 / math.sqrt(Dh)
     logits = torch.matmul(q_bh.float(), k_bh.float().transpose(-2, -1)) * scale
     logits = logits + full_mask
 
@@ -721,6 +723,55 @@ def test_hca_forward_matches_inline_reference():
 
     diff = (ours - ref).abs().max().item()
     assert diff < 1e-3, f"HCA forward mismatch: max abs diff = {diff:.3e}"
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+def test_attention_scale_is_pure_inv_sqrt_head_dim(compress_ratio):
+    """Softmax temperature is ``1/sqrt(head_dim)`` on every branch.
+
+    The released ``inference/model.py`` sets ``softmax_scale = head_dim ** -0.5``
+    unconditionally; the YaRN magnitude factor (``m_scale``) must not be folded
+    into the attention temperature even on the compressed layers, which run
+    with a YaRN-scaled RoPE. A non-unit ``yarn_factor`` is used here on purpose
+    so the assertion fails if ``m_scale`` ever leaks back in.
+    """
+    head_dim = 16
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=head_dim,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    yarn_factor = 16.0
+    rope = DualRoPE(
+        rotary_dim=config.qk_pos_emb_head_dim,
+        rope_theta=config.rotary_base,
+        compress_rope_theta=config.compress_rope_theta,
+        yarn_factor=yarn_factor,
+        original_max_position_embeddings=config.original_max_position_embeddings,
+    )
+    attn = DeepseekV4Attention(
+        config,
+        rope=rope,
+        compress_ratio=compress_ratio,
+        submodules=None,
+    )
+
+    expected = 1.0 / math.sqrt(head_dim)
+    assert attn._attention_scale() == pytest.approx(expected, rel=1e-12)
+
+    if compress_ratio:
+        # Guard the regression directly: the compressed RoPE really does carry
+        # a non-unit m_scale, so the assertion above is not vacuous.
+        assert rope.attn_scale(compress_ratio=compress_ratio) > 1.0
 
 
 # ---------------------------------------------------------------------------
