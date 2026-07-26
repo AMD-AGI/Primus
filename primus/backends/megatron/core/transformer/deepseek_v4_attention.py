@@ -937,9 +937,15 @@ class DeepseekV4Attention(MLASelfAttention):
         return self._rope[0]
 
     def _attention_scale(self) -> float:
-        base = 1.0 / math.sqrt(self.head_dim)
-        rope_scale = self.rope.attn_scale(compress_ratio=self.compress_ratio)
-        return base * rope_scale
+        """Softmax temperature for every branch: plain ``1 / sqrt(head_dim)``.
+
+        V4 keeps attention logits in range via the Q / KV RMSNorms, so the
+        YaRN magnitude factor (``m_scale``) is deliberately NOT folded in here
+        -- ``inference/model.py`` uses ``self.softmax_scale = head_dim ** -0.5``
+        for both the core attention and the indexer. The YaRN *frequency*
+        interpolation on ``inv_freq`` is unaffected.
+        """
+        return 1.0 / math.sqrt(self.head_dim)
 
     def _apply_q(self, hidden: torch.Tensor) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, H, head_dim]`` (Q after q_norm + q_rms)."""

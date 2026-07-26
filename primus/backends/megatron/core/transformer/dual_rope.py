@@ -146,7 +146,11 @@ class RoPECache(nn.Module):
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # YaRN's m_scale; exposed for the caller to multiply attention scale.
+        # YaRN's m_scale, kept for reference / diagnostics only. V4 does NOT
+        # fold it into the attention softmax temperature -- the released
+        # ``inference/model.py`` uses a plain ``head_dim ** -0.5`` and relies on
+        # the Q / KV RMSNorms to keep logits in range. Only the ``inv_freq``
+        # interpolation above is part of the model contract.
         self.attn_scale: float = _yarn_attn_scale(self.yarn_factor)
 
         # Memo of (cos, sin) tables keyed by (n, device) for arange(n) positions;
@@ -349,8 +353,8 @@ class DualRoPE(nn.Module):
         rope = self.get_rope(compress_ratio=compress_ratio)
         return apply_rope_from_positions(x, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
 
-    # Convenience accessors for callers who need the YaRN m_scale (e.g. to
-    # adjust attention softmax scale on compressed layers).
+    # Diagnostic accessor for the YaRN m_scale. Not used by the attention
+    # softmax scale -- see the note on ``RoPECache.attn_scale``.
     def attn_scale(self, *, compress_ratio: int) -> float:
         return self.get_rope(compress_ratio=compress_ratio).attn_scale
 
