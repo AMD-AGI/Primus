@@ -84,8 +84,13 @@ MEGATRON_METRIC_VALUE = rf"({MEGATRON_NUM})(?:\s*/\s*{MEGATRON_NUM})?"
 MEGATRON_ITERATION_REGEX = re.compile(
     rf"iteration\s+(\d+)/\s*\d+.*?"
     rf"elapsed time per iteration \(ms\):\s*{MEGATRON_METRIC_VALUE}.*?"
-    rf"throughput per GPU \(TFLOP/s/GPU\):\s*{MEGATRON_METRIC_VALUE}.*?"
-    rf"(?:tokens per GPU \(tokens/s/GPU\):\s*{MEGATRON_METRIC_VALUE}.*?)?"
+    # Compute (TFLOP/s/GPU) accepts both the current "compute per GPU (...)" label
+    # and the legacy "throughput per GPU (...)" label. Only the instantaneous value
+    # is captured; the "(avg Y)" / "/Y" suffix is absorbed by the trailing ".*?".
+    rf"(?:compute|throughput) per GPU \(TFLOP/s/GPU\):\s*{MEGATRON_METRIC_VALUE}.*?"
+    # Tokens accepts both the current "tokens/s/GPU inst/harmonic mean:" label and
+    # the legacy "tokens per GPU (tokens/s/GPU):" label.
+    rf"(?:(?:tokens per GPU \(tokens/s/GPU\)|tokens/s/GPU inst/harmonic mean):\s*{MEGATRON_METRIC_VALUE}.*?)?"
     rf"global batch size:\s*(\d+)",
     re.IGNORECASE,
 )
