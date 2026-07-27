@@ -13,15 +13,21 @@ from typing import Dict
 
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 ARG_PATTERN = re.compile(r"\]:\s+([a-zA-Z0-9_]+)\s+\.{3,}\s+(.*)$")
+# Field order matches the current Megatron training-log line, where the memory
+# segment is appended last (after tokens) rather than sitting between elapsed and
+# throughput as in the old format. Groups: elapsed inst/avg, tflops inst/avg,
+# tokens inst/avg, memory.
 ITERATION_PATTERN = re.compile(
     r"iteration\s+\d+/.*?elapsed time per iteration \(ms\): ([\d.]+)/([\d.]+).*?"
-    r"mem usages: ([\d.]+).*?"
     # Compute (TFLOP/s/GPU) accepts both the current "compute per GPU (...): X (avg Y)"
     # label and the legacy "throughput per GPU (...): X/Y" label.
     r"(?:compute|throughput) per GPU \(TFLOP/s/GPU\): ([\d.]+)(?:/| \(avg )([\d.]+)\)?.*?"
     # Tokens accepts both the current "tokens/s/GPU inst/harmonic mean: X/Y" label
     # and the legacy "tokens per GPU (tokens/s/GPU): X/Y" label.
-    r"(?:tokens per GPU \(tokens/s/GPU\)|tokens/s/GPU inst/harmonic mean): ([\d.]+)/([\d.]+)",
+    r"(?:tokens per GPU \(tokens/s/GPU\)|tokens/s/GPU inst/harmonic mean): ([\d.]+)/([\d.]+).*?"
+    # Memory accepts both the current "hip mem usage/free/total/usage_ratio: X GB/..."
+    # segment and the legacy "mem usages: X" segment. Only the used value is captured.
+    r"(?:hip mem usage/free/total/usage_ratio:\s*|mem usages:\s*)([\d.]+)(?:\s*G(?:i)?B)?",
     re.DOTALL,
 )
 
@@ -53,9 +59,9 @@ def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
 
     last = matches[-1]
     step_time_s = (float(last[0]) + float(last[1])) / 2000
-    mem_usage = float(last[2])
-    tflops = max(float(last[3]), float(last[4]))
-    tokens_per_gpu = (float(last[5]) + float(last[6])) / 2
+    tflops = max(float(last[2]), float(last[3]))
+    tokens_per_gpu = (float(last[4]) + float(last[5])) / 2
+    mem_usage = float(last[6])
 
     return {
         "TFLOP/s/GPU": round(tflops, 2),
