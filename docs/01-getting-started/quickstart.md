@@ -65,7 +65,7 @@ Install Primus in a virtual environment:
 ```bash
 python -m venv primus-env
 source primus-env/bin/activate
-pip install "primus==26.3.1" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+pip install "primus==26.4.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 ```
 
 > **Note:** This installs only the Primus CLI into your virtual environment (under `site-packages`), without other dependencies. Third-party submodules are downloaded on the first run of the container, and the complete training software stack is provided in the AMD-published Docker images. You can launch `primus-cli` from any directory.
