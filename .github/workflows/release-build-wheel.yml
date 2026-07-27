@@ -149,6 +149,12 @@ jobs:
           format: spdx-json
           artifact-name: primus-sbom.spdx.json
           output-file: dist/primus-sbom.spdx.json
+          # The "Attach wheel to release" step below is the single place that
+          # uploads release assets (with clobber semantics it controls). Let
+          # this action only produce the SBOM as a workflow artifact, so it
+          # doesn't race that step by also auto-uploading to the release on
+          # `release` events -- that always fails with "asset already exists".
+          upload-release-assets: false
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
