@@ -20,8 +20,9 @@ ARG_PATTERN = re.compile(r"\]:\s+([a-zA-Z0-9_]+)\s+\.{3,}\s+(.*)$")
 ITERATION_PATTERN = re.compile(
     r"iteration\s+\d+/.*?elapsed time per iteration \(ms\): ([\d.]+)/([\d.]+).*?"
     # Compute (TFLOP/s/GPU) accepts both the current "compute per GPU (...): X (avg Y)"
-    # label and the legacy "throughput per GPU (...): X/Y" label.
-    r"(?:compute|throughput) per GPU \(TFLOP/s/GPU\): ([\d.]+)(?:/| \(avg )([\d.]+)\)?.*?"
+    # label and the legacy "throughput per GPU (...): X/Y" label. The space before
+    # "(avg" is optional (some log sinks drop it).
+    r"(?:compute|throughput) per GPU \(TFLOP/s/GPU\): ([\d.]+)(?:/|\s*\(avg\s*)([\d.]+)\)?.*?"
     # Tokens accepts both the current "tokens/s/GPU inst/harmonic mean: X/Y" label
     # and the legacy "tokens per GPU (tokens/s/GPU): X/Y" label.
     r"(?:tokens per GPU \(tokens/s/GPU\)|tokens/s/GPU inst/harmonic mean): ([\d.]+)/([\d.]+).*?"
