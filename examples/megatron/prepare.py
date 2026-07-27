@@ -283,6 +283,10 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
         )
         return
     log_info(f"Building Emerging Optimizers in {emerging_optimizers_path}")
+    subprocess.run(
+        ["git", "config", "--global", "--add", "safe.directory", str(emerging_optimizers_path)],
+        check=False,
+    )
     ret = subprocess.run(
         ["pip", "install", "--no-build-isolation", "-e", str(emerging_optimizers_path)], check=True
     )

@@ -50,6 +50,7 @@ srun -N "${NNODES}" \
      --ntasks-per-node=1 \
      ${SLURM_TIME:+--time="${SLURM_TIME}"} \
      ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
+     ${SLURM_EXCLUDE:+--exclude="${SLURM_EXCLUDE}"} \
      ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "

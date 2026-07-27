@@ -18,6 +18,10 @@
 ###############################################################################
 set -euo pipefail
 
+# Allow git operations on repos owned by other users (e.g. host-mounted workspace
+# owned by a non-root user while the container runs as root).
+git config --global --add safe.directory '*' 2>/dev/null || true
+
 # First two args are the hook group/name injected by execute_hooks.sh (e.g. train pretrain)
 : "${1:?missing hook group}" "${2:?missing hook name}"
 shift 2

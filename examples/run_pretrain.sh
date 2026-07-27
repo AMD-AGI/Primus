@@ -93,7 +93,9 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
 LOG_INFO_RANK0 "Pip installing required packages ..."
-if [ "${BACKEND:-}" != "MaxText" ]; then
+if [ "${PRIMUS_SKIP_PIP:-0}" = "1" ]; then
+    LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1, skip pip install"
+elif [ "${BACKEND:-}" != "MaxText" ]; then
     pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 else
     pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
@@ -222,6 +224,11 @@ export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
 if [ "${BACKEND:-}" != "MaxText" ]; then
     export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
 fi
+
+# AIMA-219: first-iter turbo grouped-gemm/DeepEP JIT compile can exceed the
+# 480s NCCL heartbeat default and trip the monitor into aborting mid-warmup on
+# multi-node PP. Raise the heartbeat window so slow-compiling stages can finish.
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-3600}
 
 LOG_INFO_RANK0 "==========AMD-specific GPU optimizations=========="
 LOG_INFO_RANK0 "HSA_ENABLE_SDMA: $HSA_ENABLE_SDMA"
