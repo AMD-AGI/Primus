@@ -1,0 +1,18 @@
+{
+  "$schema-note": "Declarative registry for the single Pages bundle, aggregated by build_site_bundle.py. 'sections' = static site dirs (repo-relative 'source' with an index.html) mounted at /<name>/ — also add the source path to the deploy workflow push triggers. 'links' = homepage nav links only (nothing copied), e.g. the pip index; probe=true shows the link only when its path is reachable (hidden in local previews).",
+  "sections": [
+    {
+      "name": "deepseek-v4-projection",
+      "title": "DeepSeek-V4 Projection",
+      "source": "examples/deepseek-v4/projection/site"
+    }
+  ],
+  "links": [
+    {
+      "title": "Install (pip)",
+      "path": "./simple/",
+      "probe": true,
+      "hint": "pip install primus --extra-index-url <this-site>/simple/"
+    }
+  ]
+}
