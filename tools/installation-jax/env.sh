@@ -184,6 +184,15 @@ export HIP_FORCE_DEV_KERNARG=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export NCCL_DEBUG=VERSION
 
+# Bare-metal-only: force RCCL to use its built-in ROCm IB/RoCE transport instead
+# of any host NCCL net plugin. The rocm/jax-training image ships no
+# librccl-net.so and sets no NCCL_NET_PLUGIN, but on a host the system
+# /usr/local/lib/librccl-net.so is on the default loader path and is
+# ABI-incompatible with the from-source RCCL (undefined symbol
+# ncclNetPlugin_v11/_v10 -> falls back to v9 -> segfault at clique init).
+# NCCL_NET_PLUGIN=none makes RCCL ignore that host plugin, matching the image.
+export NCCL_NET_PLUGIN=none
+
 # NOT in the v26.5 Dockerfile: avoids a NaN-loss issue when training on gfx950
 # (no-op on gfx942). Keep it if you train on MI350/MI355; drop for exact parity.
 export RCCL_WARP_SPEED_AUTO=0

@@ -164,6 +164,11 @@ cd "$WORKSPACE_DIR/Primus"
   --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
 ```
 
+> Pick the config directory that matches your GPU: `examples/maxtext/configs/MI300X/`
+> for **gfx942** (MI300X/MI325X) and `examples/maxtext/configs/MI355X/` for
+> **gfx950** (MI350X/MI355X), e.g.
+> `--config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml`.
+
 ### What the scripts do NOT do
 
 - **System (`apt`) packages** (Section 2): skipped — they need root. A C++
@@ -271,14 +276,18 @@ For a **distributed (multi-node) JAX MaxText job** specifically, beyond JAX and
 ROCm you additionally need:
 
 - **RCCL** (AMD's collective library) — rebuilt from source into the ROCm tree
-  (see Section 3.11).
-- **UCX + OpenMPI** — point-to-point transport and the launcher.
+  (see Section 3.11). This is what MaxText's collectives run over.
 - **AMD AINIC / RDMA stack** (`libibverbs`, `rdma-core`, `libionic`) — for
   high-performance networking on AMD Pensando NICs.
 - Correct GPU/NIC device permissions and (often) hugepages / `ulimit -l unlimited`.
+- **UCX + OpenMPI** (Section 4) — **optional for MaxText**; carried over from the
+  reference image for MPI-launched / other JAX workloads. MaxText itself does not
+  use them (see the note in Section 4).
 
-> Unlike the PyTorch stack, the JAX MaxText image does **not** build rocSHMEM.
-> JAX distributes over RCCL + the JAX distributed coordinator (`JAX_COORDINATOR_IP`).
+> Unlike the PyTorch stack, the JAX MaxText image does **not** build rocSHMEM, and
+> MaxText does not launch via `mpirun`. JAX forms its process group through the
+> **JAX distributed coordinator** (`JAX_COORDINATOR_IP`, which Primus sets from
+> `MASTER_ADDR`) and runs collectives over **RCCL**.
 
 ---
 
@@ -675,6 +684,28 @@ These are only needed for **multi-node distributed** training. They build from
 source and install into user-writable prefixes (no root needed, except the AINIC
 `.deb` already handled in Section 2.4).
 
+> **Does JAX MaxText actually need UCX/OpenMPI?** For MaxText itself, **no** — JAX
+> forms its process group through the **JAX distributed coordinator**
+> (`JAX_COORDINATOR_IP`/`JAX_COORDINATOR_PORT`, which Primus sets from
+> `MASTER_ADDR`/`MASTER_PORT`) and runs collectives over **RCCL**; there is no
+> `mpirun` launch and no rocSHMEM. UCX/OpenMPI are carried over from the shared
+> reference image (used by MPI-launched / other JAX-based workloads) and are
+> installed here only for parity. **You can skip Section 4 entirely for
+> single- and multi-node MaxText pretraining.**
+
+> **Multi-node: make all local GPUs visible to each process.** On each node,
+> every rank/process must see all local GPUs, otherwise JAX enumerates only a
+> single device per node. Export `CUDA_VISIBLE_DEVICES` covering every local GPU
+> (the ROCm PJRT plugin honors the CUDA-named variable) before launching:
+>
+> ```bash
+> export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))   # e.g. 0,1,2,3,4,5,6,7
+> ```
+>
+> Add it to your activation script (Section 5) or your job launcher. It is
+> intentionally **not** hard-coded in `env.sh`, since the right value depends on
+> how ranks are pinned to GPUs on your host/scheduler.
+
 ### 4.1 UCX
 
 ```bash
@@ -768,6 +799,12 @@ export GPU_MAX_HW_QUEUES=2
 export HIP_FORCE_DEV_KERNARG=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export NCCL_DEBUG=VERSION
+# Bare-metal only: force RCCL to use its built-in ROCm IB/RoCE transport. On a
+# host, /usr/local/lib/librccl-net.so is on the default loader path and is
+# ABI-incompatible with the from-source RCCL (undefined symbol
+# ncclNetPlugin_v11/_v10 -> falls back to v9 -> segfault at clique init). The
+# v26.5 image ships no librccl-net.so, so this matches it.
+export NCCL_NET_PLUGIN=none
 
 # XLA / JAX runtime settings (v26.5 uses .9)
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.9
@@ -798,10 +835,12 @@ print('devices:', jax.devices())"
 # loads TE's shared lib, which is what fails on glibc < 2.38 with the prebuilt wheel)
 python -c "import jax, jaxlib, flax, transformer_engine.jax; print('JAX/flax/TE OK')"
 
-# Run a Primus MaxText training directly (no container)
+# Run a Primus MaxText training directly (no container). Use the config dir that
+# matches your GPU: MI300X/ for gfx942 (MI300X/MI325X), MI355X/ for gfx950 (MI350X/MI355X).
 cd ~/primus-jax-env/Primus   # or your Primus checkout
 ./primus-cli direct -- train pretrain \
   --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+  # gfx950: --config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml
 ```
 
 `jax.default_backend()` should report `gpu` (ROCm), and `jax.devices()` should

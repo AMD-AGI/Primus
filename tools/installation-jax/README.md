@@ -133,8 +133,9 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
 - **System packages** (build toolchain, `numactl`, `gcsfuse`, RDMA/verbs libs):
   a one-time root action, documented in Section 2 of the guide.
 - **AINIC** (`add-apt-repository`, `libionic-dev`): apt-only. Skipped.
-- **UCX + OpenMPI**: autotools source builds needed only for multi-node RDMA.
-  Single-node training works without them; see Section 4 of the guide.
+- **UCX + OpenMPI**: **optional for MaxText** — JAX uses its own distributed
+  coordinator + RCCL, not `mpirun`. Carried over from the reference image for
+  other/MPI-launched JAX workloads; skipped here. See Section 4 of the guide.
 - **gcsfuse**: only needed to mount GCS buckets for data; not required for
   synthetic-data or local-data runs.
 
@@ -153,11 +154,12 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus jaxreqs rccl manifest
 - **Two MaxText checkouts in the Docker image** (`/workspace/maxtext` and
   `Primus/third_party/maxtext`) are collapsed here: we install deps from one
   checkout and point `MAXTEXT_PATH` at it.
-- **Runtime-validated (single-node).** The default flow — with `te_source`
-  substituted for the prebuilt `te` — has been run end-to-end for single-node
-  MaxText pretraining on **gfx942 / Ubuntu 22.04 (glibc 2.35) / Python 3.12**.
-  On Ubuntu 24.04 (glibc ≥ 2.38) the prebuilt `te` wheel works directly. The
-  multi-node networking stack (UCX/OpenMPI/AINIC) is still not exercised here.
+- **Runtime-validated.** The default flow — with `te_source` substituted for the
+  prebuilt `te` — has been run end-to-end for single-node MaxText pretraining on
+  **gfx942 / Ubuntu 22.04 (glibc 2.35) / Python 3.12**, and a **2-node** run has
+  also been exercised (over the JAX distributed coordinator + RCCL, no
+  UCX/OpenMPI). On Ubuntu 24.04 (glibc ≥ 2.38) the prebuilt `te` wheel works
+  directly.
 
 Treat the reference `Dockerfile` as the authoritative, tested version
 combination; if you bump one pin you may need to bump the others.
