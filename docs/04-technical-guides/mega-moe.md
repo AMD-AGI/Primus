@@ -161,7 +161,47 @@ bash examples/run_pretrain_cli.sh \
 ```
 
 
-### Example 2 — 8-node EP8/PP8
+### Example 2 — single-node EP8 with full CUDA graph
+
+Same geometry as Example 1, plus TE full-scope CUDA graph capture
+(`--external_cuda_graph True` maps to `cuda_graph_impl="transformer_engine"`; scope `full` is
+normalized to `[]` by Megatron, i.e. capture the whole layer). MegaMoE is fully sync-free — no
+device-to-host sync or CPU-side wait in the expert path — so it captures cleanly and is
+`torch.compile`-friendly.
+
+```bash
+#!/bin/bash
+set -e
+
+export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
+export REBUILD_PRIMUS_TURBO=1
+export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
+export GPU_ARCHS=gfx950
+
+bash examples/run_pretrain_cli.sh \
+  --num_layers 4 \
+  --micro_batch_size 2 \
+  --global_batch_size 1024 \
+  --train_iters 15 \
+  --tensor_model_parallel_size 1 \
+  --pipeline_model_parallel_size 1 \
+  --expert_model_parallel_size 8 \
+  --moe_layer_freq 1 \
+  --moe_shared_expert_intermediate_size None \
+  --pipeline_model_parallel_layout null \
+  --recompute_granularity null \
+  --recompute_num_layers 0 \
+  --recompute_layer_ids null \
+  --moe_router_force_load_balancing_type uniform \
+  --external_cuda_graph True \
+  --cuda_graph_scope full \
+  --cuda_graph_warmup_steps 3 \
+  --enable_primus_turbo True \
+  --use_turbo_mega_moe True \
+  --mock_data True
+```
+
+### Example 3 — 8-node EP8/PP8
 
 8 nodes × 8 GPUs = 64 GPU, `TP=1 / PP=8 / EP=8` → `DP = 64/(TP*PP) = 8`,
 `GBS = MBS*DP*GA = 2*8*64 = 1024`.
