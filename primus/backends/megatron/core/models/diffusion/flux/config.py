@@ -178,7 +178,9 @@ class FluxConfig(BaseDiffusionConfig):
     # uses TE's native fp8_autocast with the MXFP4BlockScaling recipe (TE -> AITER
     # a4w4) instead of Primus-Turbo's primus_turbo_fp4_autocast, forcing
     # get_fp4_context onto the TE-native branch. Enables pure-TE MXFP4
-    # (enable_primus_turbo=false); requires use_turbo_gemm=false (native TE linears).
+    # (enable_primus_turbo=false); requires use_turbo_gemm=false (native TE linears)
+    # because PrimusTurboLinear quantizes only under the Turbo autocast and would
+    # otherwise fall back to BF16. Enforced in validate_args_on_rocm.
     fp4_use_native_te_autocast: bool = False
 
     # CUDA graph support

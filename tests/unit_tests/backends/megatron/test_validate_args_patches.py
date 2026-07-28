@@ -120,6 +120,8 @@ def _make_args(**overrides):
         fp4=False,
         fp8_recipe=None,
         fp4_recipe=None,
+        fp4_use_native_te_autocast=False,
+        transformer_impl="transformer_engine",
         use_turbo_gemm=False,
         dump_pp_data=False,
         pipeline_model_parallel_size=1,
@@ -336,3 +338,71 @@ class TestEndToEnd:
         assert args._validate_args_called is True
         assert len(rocm_calls) == 1
         assert result is args
+
+
+class TestFp4NativeTeAutocastTurboGemmGuard:
+    """``validate_args_on_rocm`` rejects TE-native FP4 autocast + Turbo GEMM linears.
+
+    The TE-native autocast never sets ``PRIMUS_TURBO_FP4_ENABLED``, which is the
+    only signal ``PrimusTurboLinear`` consults, so the combination would silently
+    run BF16 GEMMs instead of FP4.
+    """
+
+    def _validate(self, monkeypatch, **overrides):
+        _install_fake_megatron(monkeypatch)
+
+        from primus.backends.megatron.patches.args.rocm_arg_validation import (
+            validate_args_on_rocm,
+        )
+
+        validate_args_on_rocm(_make_args(**overrides))
+
+    def test_rejects_native_te_autocast_with_turbo_gemm(self, monkeypatch):
+        with pytest.raises(ValueError, match="fp4_use_native_te_autocast"):
+            self._validate(
+                monkeypatch,
+                fp4=True,
+                fp4_recipe="mxfp4",
+                use_turbo_gemm=True,
+                fp4_use_native_te_autocast=True,
+            )
+
+    def test_allows_native_te_autocast_without_turbo_gemm(self, monkeypatch):
+        """Pure-TE MXFP4: native TE linears honour the TE autocast."""
+        self._validate(
+            monkeypatch,
+            fp4=True,
+            fp4_recipe="mxfp4",
+            use_turbo_gemm=False,
+            fp4_use_native_te_autocast=True,
+        )
+
+    def test_allows_turbo_gemm_without_native_te_autocast(self, monkeypatch):
+        """Turbo FP4 autocast drives the Turbo linears."""
+        self._validate(
+            monkeypatch,
+            fp4=True,
+            fp4_recipe="mxfp4",
+            use_turbo_gemm=True,
+            fp4_use_native_te_autocast=False,
+        )
+
+    def test_allows_both_flags_when_fp4_disabled(self, monkeypatch):
+        """Neither autocast is built when FP4 is off, so there is nothing to mismatch."""
+        self._validate(
+            monkeypatch,
+            fp4=False,
+            use_turbo_gemm=True,
+            fp4_use_native_te_autocast=True,
+        )
+
+    def test_allows_local_transformer_impl(self, monkeypatch):
+        """Local spec providers quantize inside the module, ignoring the global flag."""
+        self._validate(
+            monkeypatch,
+            fp4=True,
+            fp4_recipe="mxfp4",
+            use_turbo_gemm=True,
+            fp4_use_native_te_autocast=True,
+            transformer_impl="local",
+        )
