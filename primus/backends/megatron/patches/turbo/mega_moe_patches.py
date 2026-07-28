@@ -29,8 +29,10 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
     """
     args = get_args(ctx)
     use_turbo_mega_moe = bool(getattr(args, "use_turbo_mega_moe", False))
+    bf16 = bool(getattr(args, "bf16", False))
+    ep_size = int(getattr(args, "expert_model_parallel_size", 1))
 
-    return use_turbo_mega_moe and is_primus_turbo_can_patch(ctx)
+    return use_turbo_mega_moe and bf16 and ep_size > 1 and is_primus_turbo_can_patch(ctx)
 
 
 @register_patch(
