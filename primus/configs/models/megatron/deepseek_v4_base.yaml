@@ -69,7 +69,7 @@ use_v4_fp8_indexer: false
 # KL against the real attention distribution. 0.0 keeps the loss off AND the
 # indexer frozen (correct when loading an already-trained indexer, and it keeps
 # the params out of the grad buckets so overlap_grad_reduce stays usable).
-# A from-scratch pretrain needs this on; Megatron's Flash recipe uses 1e-2.
+# A from-scratch pretrain needs this on; 1e-2 is a reasonable starting value.
 # Surface via PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF (see run_deepseek_v4.sh).
 v4_indexer_distill_loss_coeff: 0.0
 

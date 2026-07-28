@@ -11,22 +11,22 @@ query attends to. ``topk`` is not differentiable, so without an auxiliary
 objective the indexer never receives a gradient and a from-scratch run selects
 essentially at random.
 
-DeepSeek-V3.2 (and Megatron-LM's DSv4 port, ``compute_dsa_indexer_loss`` in
-``experimental_attention_variant/dsa.py``) trains it by distillation: the
-indexer's score distribution is pulled towards the distribution the *real*
-attention places over the same entries, via ``KL(attention || indexer)``.
+DeepSeek-V3.2 (section 2.1) trains it by distillation: the indexer's score
+distribution is pulled towards the distribution the *real* attention places over
+the same entries, via ``KL(attention || indexer)``.
 
 This module implements the sparse variant -- the loss is evaluated only on the
-entries the indexer actually selected, which is what Megatron's Flash recipe
-uses (``dsa_indexer_use_sparse_loss: true``). Because those entries are already
-gathered per query, the computation stays in the ``[B, S, K]`` top-k space and
+entries the indexer actually selected. That keeps the objective consistent with
+what the forward pass actually consumes, and because those entries are already
+gathered per query the computation stays in the ``[B, S, K]`` top-k space and
 never materialises the dense ``[B, H, S, P]`` score tensor.
 
-The loss is attached to the autograd graph with :class:`V4IndexerLossAutoScaler`
-(the same trick Megatron uses for MoE aux losses and MTP): it passes a tensor
-through untouched in forward and seeds the auxiliary loss with a gradient of
-one in backward, so the aux objective backpropagates without having to be
-threaded through every forward return signature.
+The loss is attached to the autograd graph with :class:`V4IndexerLossAutoScaler`,
+the same aux-loss autoscaler pattern this training stack already uses for the
+MoE auxiliary loss and the MTP loss: it passes a tensor through untouched in
+forward and seeds the auxiliary loss with a gradient of one in backward, so the
+aux objective backpropagates without having to be threaded through every forward
+return signature.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ __all__ = [
     "compute_indexer_distill_loss",
 ]
 
-# Guard for log(0) / division by zero; matches Megatron's constant.
+# Guard for log(0) / division by zero.
 _EPS = 1e-10
 
 
@@ -47,8 +47,8 @@ class V4IndexerLossAutoScaler(torch.autograd.Function):
 
     ``forward`` returns ``output`` unchanged; ``backward`` seeds ``aux_loss``
     with ``main_loss_backward_scale`` so its subgraph is differentiated as part
-    of the main backward. Mirrors Megatron's ``MoEAuxLossAutoScaler`` /
-    ``MTPLossAutoScaler``.
+    of the main backward. Same shape as the autoscalers already used for the MoE
+    auxiliary loss and the MTP loss.
     """
 
     main_loss_backward_scale: torch.Tensor = torch.tensor(1.0)

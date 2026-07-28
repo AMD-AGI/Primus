@@ -1285,9 +1285,10 @@ class DeepseekV4Attention(MLASelfAttention):
         # rotated at that position -- not at the bare block index ``s``. The
         # queries are rotated at their own original positions, so using block
         # indices here would put the two sides on different coordinate systems.
-        # Matches inference/model.py (``freqs_cis[:cutoff:ratio]``) and
-        # Megatron's ``cos[:total:ratio]``. Positions stay deterministic, so
-        # the cached table is still reused every forward.
+        # Matches inference/model.py, which slices ``freqs_cis[:cutoff:ratio]``
+        # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
+        # land on the window's first token. Positions stay deterministic, so the
+        # cached table is still reused every forward.
         cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]

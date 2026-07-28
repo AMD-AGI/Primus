@@ -9,10 +9,11 @@
 The Flash launcher overrides a handful of knobs on top of ``run_deepseek_v4.sh``.
 One of them -- ``USE_V4_FP8_INDEXER`` -- silently changes model numerics rather
 than just performance: the indexer picks which compressed KV entries each query
-attends to, so quantizing its QK inputs perturbs the selection itself. The
-Megatron-LM reference keeps the CSA compressor and indexer in high precision
-even under FP8 training (``get_fp8_disabled_context``), so Primus should not
-enable the fake-quant path by default either.
+attends to, so quantizing its QK inputs changes the selection itself. On top of
+that the knob is a fake quant (quantize/dequantize around a BF16 GEMM), so it
+costs throughput without buying any. Low-precision indexer QK is a legitimate
+thing to explore, but it should be opt-in rather than on by default in one
+launcher only.
 
 These tests parse the scripts as text: they need neither torch nor a GPU, so
 they run in any environment.
@@ -50,9 +51,9 @@ def test_fp8_indexer_defaults_off(script: Path) -> None:
     assert default is not None, f"{script.name} must define USE_V4_FP8_INDEXER with a ${{VAR:-...}} default"
     assert default == "False", (
         f"{script.name} defaults USE_V4_FP8_INDEXER to {default!r}. The indexer selects which "
-        "compressed KV entries each query sees, and the Megatron-LM reference keeps it in high "
-        "precision under FP8 training; enabling the fake-quant path by default changes model "
-        "numerics (and costs throughput, since the GEMM stays BF16)."
+        "compressed KV entries each query sees, so enabling the fake-quant path by default "
+        "changes model numerics -- and costs throughput while doing so, since the GEMM stays "
+        "BF16. Keep it opt-in."
     )
 
 

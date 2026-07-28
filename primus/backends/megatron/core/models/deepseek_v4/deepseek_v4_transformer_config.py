@@ -115,9 +115,8 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # ``topk`` is not differentiable, so the CSA lightning indexer only learns
     # through an auxiliary objective: KL between the indexer's score
     # distribution and the distribution the real attention places over the same
-    # compressed entries (DeepSeek-V3.2 2.1; Megatron's
-    # ``compute_dsa_indexer_loss`` / ``dsa_indexer_loss_coeff``, whose Flash
-    # recipe uses 1e-2).
+    # compressed entries (DeepSeek-V3.2 section 2.1). ``1e-2`` is a reasonable
+    # starting value.
     #
     # ``0.0`` (the default) disables the loss AND keeps the indexer parameters
     # frozen, which is the right setting when loading an already-trained

@@ -234,8 +234,8 @@ def test_yaml_does_not_set_retired_fields(parse_yaml_fn, yaml_name: str) -> None
     ("yaml_name", "expected_theta"),
     [
         # The released DeepSeek-V4-Flash inference/model.py ships
-        # ``compress_rope_theta: float = 40000.0``; Megatron-LM's Flash recipe
-        # agrees (``csa_compress_rotary_base: 40000``). 160000 is the Pro value.
+        # ``compress_rope_theta: float = 40000.0``. 160000 is the Pro value, and
+        # inheriting it in the Flash config was the bug this pins down.
         ("deepseek_v4_flash.yaml", 40000.0),
         ("deepseek_v4_pro.yaml", 160000.0),
         ("deepseek_v4_base.yaml", 160000.0),

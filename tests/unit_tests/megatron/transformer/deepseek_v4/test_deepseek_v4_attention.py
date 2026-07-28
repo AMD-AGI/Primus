@@ -891,7 +891,8 @@ def test_compressed_pool_rope_uses_original_sequence_positions(compress_ratio, n
     The queries are rotated at their own original positions, so rotating the
     compressed KV at bare block indices would put the two sides on different
     coordinate systems. ``inference/model.py`` slices ``freqs_cis[:cutoff:ratio]``
-    and Megatron slices ``cos[:total:ratio]``; both land on ``s * ratio``.
+    for prefill and indexes ``start_pos + 1 - ratio`` for decode; both land on
+    ``s * ratio``.
     """
     from primus.backends.megatron.core.transformer.dual_rope import (
         apply_interleaved_partial_rope,

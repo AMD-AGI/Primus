@@ -24,7 +24,7 @@ torch = pytest.importorskip("torch")
 
 mla_module = pytest.importorskip(
     "megatron.core.transformer.multi_latent_attention",
-    reason="Megatron MLA not importable in this environment",
+    reason="MLA base module not importable in this environment",
 )
 
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (  # noqa: E402

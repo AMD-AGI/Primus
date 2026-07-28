@@ -166,8 +166,8 @@ export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
 
 # Indexer distillation loss coefficient (CSA selector training). 0 keeps the
 # loss off and the indexer frozen -- correct when loading an already-trained
-# indexer. A from-scratch pretrain needs it ON (Megatron's Flash recipe uses
-# 1e-2), which also unfreezes the indexer params.
+# indexer. A from-scratch pretrain needs it ON (1e-2 is a reasonable starting
+# value), which also unfreezes the indexer params.
 export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-0.0}
 
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a

@@ -74,12 +74,12 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 
 # Keep the indexer QK in high precision. The indexer decides which 512
-# compressed KV entries each query attends to, so quantization error there
-# changes the selection itself; the Megatron-LM reference deliberately runs the
-# CSA compressor and indexer under get_fp8_disabled_context even when the rest
-# of the layer is FP8. Note this knob is a *fake* quant (quantize/dequantize
-# around a BF16 GEMM), so leaving it off also removes pure overhead. Set
-# USE_V4_FP8_INDEXER=True to opt back in for QAT experiments.
+# compressed KV entries each query attends to, so quantization error there does
+# not merely perturb a value -- it changes the selection itself, which is a
+# numerics change and should not be a silent default. Note this knob is also a
+# *fake* quant (quantize/dequantize around a BF16 GEMM), so leaving it off
+# removes pure overhead as well. Set USE_V4_FP8_INDEXER=True to opt back in for
+# QAT experiments.
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
 # V4 attention backend: default to PrimusTurbo native-FlyDSL sparse-MLA ("turbo")
 # for both the dense/HCA path and the CSA path.
