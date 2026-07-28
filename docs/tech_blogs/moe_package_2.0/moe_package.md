@@ -201,7 +201,7 @@ result. Keep the system-level break-even discussion (amax reduction, cast cost)
 honest but framed around how Primus mitigates it. Replace [X] placeholders.
 --->
 
-Low precision is one of the most direct levers for MoE training throughput, since expert GEMMs dominate compute. Primus supports FP8 training through Transformer Engine recipes with a Primus-Turbo operator overlay, covering **delayed**, **tensorwise (current) scaling**, **blockwise scaling**, and **MXFP8** recipes. For MoE specifically, the routed-expert path uses an FP8 **grouped GEMM** (`grouped_gemm_fp8`) with per-first-microbatch weight quantization and caching, and pads permuted tokens to the quantization block boundary so that dispatch, permutation, and expert GEMM all agree on the FP8 layout. These paths run on Primus-Turbo kernels supporting both FP8 tensorwise scaling and MXFP8 block scaling (`E4M3`, block size 32, `E8M0` scale).
+Low precision is one of the most direct levers for MoE training throughput, since expert GEMMs dominate compute. Primus supports FP8 training through Transformer Engine recipes with a Primus-Turbo operator overlay, covering **delayed**, **tensorwise (current) scaling**, **blockwise scaling**, and **MXFP8** recipes. For MoE specifically, the routed-expert path uses an FP8 **grouped GEMM** (`grouped_gemm_fp8`) with per-first-microbatch weight quantization and caching, and pads permuted tokens to the quantization block boundary so that dispatch, permutation, and expert GEMM all agree on the FP8 layout. These paths run on Primus-Turbo kernels supporting both FP8 tensorwise scaling and MXFP8 block scaling (`E4M3`, block size 32, `E8M0` scale). The FP8 GEMM and grouped-GEMM kernels behind the results in this section are authored in [FlyDSL](https://github.com/ROCm/FlyDSL).
 
 Key considerations for FP8 MoE training on AMD GPUs:
 
@@ -367,7 +367,7 @@ Looking ahead, we are pursuing several directions:
 
 <!--- OWNER / FILL: TBD — finalize the team/individual acknowledgments before publishing (see the first MoE blog for the format: CK, aiter, AIG-Models, ROCm/DeepEP, rocSHMEM, mori teams, plus the Primus TAS team and contributors to this blog). --->
 
-We thank the collaborating teams and individuals across the ROCm and Primus ecosystem — including the Composable Kernel, AITER, ROCm/DeepEP, and MaxText teams, and the AMD AI Brain – Training at Scale (TAS) team — whose contributions made this work possible.
+We thank the collaborating teams and individuals across the ROCm and Primus ecosystem — including the Composable Kernel, AITER, FlyDSL, ROCm/DeepEP, and MaxText teams, and the AMD AI Brain – Training at Scale (TAS) team — whose contributions made this work possible.
 
 ---
 
