@@ -18,11 +18,33 @@ The result JSON uses the whole-model schema consumed by
 batch (measured by subtracting a 1-token run from a K-token run so prefill and
 fixed overheads cancel).
 
+Reduce -> benchmark -> restore (matches the training layer benchmark)
+--------------------------------------------------------------------
+Like ``benchmark.py`` (which reduces the model to a few layers, times them, and
+lets ``performance.py`` restore the full model by layer count + parallelism), the
+vLLM backend supports the same policy for models too large to fit at full depth:
+pass ``--bench-layers`` with two or more REDUCED layer counts. The engine is built
+at each count, the step latency is fit vs layer count
+(``t(L) = overhead + L * per_layer``), and the FULL model (``--full-layers`` or the
+HF config) is RESTORED by evaluating the fit at the true depth. The emitted
+``measured``/``sweep`` are then genuine full-model latencies, which
+``performance.py`` consumes directly (the whole-model schema is used as-is, so the
+restore must happen here). Without ``--bench-layers`` the model is measured as
+configured (full depth, or a single sub-scale run via legacy
+``--num-hidden-layers`` with no restore).
+
 This module is intentionally dependency-light (only ``vllm`` + stdlib) so it can
 run inside a vLLM container that does not have Primus installed::
 
+    # full model (no reduction)
     python3 benchmark_vllm.py --model openai/gpt-oss-120b --tp 1 \
         --input-len 1024 --batch 16 --decode-steps 32 --save out.json
+
+    # reduce -> benchmark -> restore a large model from sub-scale runs
+    python3 benchmark_vllm.py --model deepseek-ai/DeepSeek-V3 --tp 8 \
+        --load-format dummy --enable-expert-parallel \
+        --bench-layers 4,8 --full-layers 61 \
+        --input-len 1024 --batches 4,16,64 --save out.json
 """
 
 from __future__ import annotations
@@ -201,6 +223,91 @@ def _enable_aiter() -> None:
     os.environ.setdefault("VLLM_ROCM_USE_AITER", "1")
 
 
+def _full_num_layers(model: str, trust_remote_code: bool) -> int:
+    """Best-effort full transformer layer count from the HF config (0 if unknown)."""
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+    except Exception:
+        return 0
+    for src in (cfg, getattr(cfg, "text_config", None)):
+        if src is None:
+            continue
+        for attr in ("num_hidden_layers", "n_layer", "num_layers"):
+            v = getattr(src, attr, None)
+            if isinstance(v, int) and v > 0:
+                return v
+    return 0
+
+
+def _parse_bench_layers(spec) -> list:
+    """Parse the ``--bench-layers`` comma list into a sorted list of unique ints."""
+    if not spec:
+        return []
+    out = []
+    for tok in str(spec).split(","):
+        tok = tok.strip()
+        if tok:
+            try:
+                v = int(tok)
+                if v > 0:
+                    out.append(v)
+            except ValueError:
+                pass
+    return sorted(set(out))
+
+
+def _linfit(points: list):
+    """Least-squares fit ``y = a + b*x`` over ``points`` = [(x, y), ...].
+
+    Returns ``(b, a)`` (slope=per-layer, intercept=fixed overhead). With a single
+    point, assumes zero overhead (``b = y/x``, ``a = 0``).
+    """
+    n = len(points)
+    if n == 1:
+        x, y = points[0]
+        return (y / x if x else 0.0), 0.0
+    sx = sum(x for x, _ in points)
+    sy = sum(y for _, y in points)
+    sxx = sum(x * x for x, _ in points)
+    sxy = sum(x * y for x, y in points)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        x, y = points[0]
+        return (y / x if x else 0.0), 0.0
+    b = (n * sxy - sx * sy) / denom
+    a = (sy - b * sx) / n
+    return b, a
+
+
+def _free_llm(llm) -> None:
+    """Release a vLLM engine and its GPU memory before building the next one."""
+    import gc
+
+    try:
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    except Exception:
+        pass
+    try:
+        del llm
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch
+
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _measure(llm, prompts, out_len: int, reps: int) -> float:
     """Best (min) wall time over ``reps`` runs of generating ``out_len`` tokens."""
     from vllm import SamplingParams
@@ -283,8 +390,6 @@ def run_vllm_benchmark(args) -> dict:
         os.environ["VLLM_MOE_ROUTING_SIMULATION_STRATEGY"] = "normal_routing"
         routing_applied = "normal_routing"
 
-    from vllm import LLM
-
     batches = (
         [int(b) for b in str(args.batches).split(",") if b.strip()]
         if args.batches
@@ -292,52 +397,122 @@ def run_vllm_benchmark(args) -> dict:
     )
     max_batch = max(batches)
     max_len = args.max_model_len or (args.input_len + args.decode_steps + 16)
-    kwargs = dict(
-        model=args.model,
-        tensor_parallel_size=args.tp,
-        load_format=args.load_format,
-        gpu_memory_utilization=args.gpu_mem_util,
-        max_model_len=max_len,
-        max_num_seqs=max(256, max_batch),
-        trust_remote_code=args.trust_remote_code,
-        enforce_eager=args.enforce_eager,
-    )
-    # The benchmark drives the engine purely with ``prompt_token_ids`` (never
-    # text), so the tokenizer is unnecessary. Skipping its init avoids a hard
-    # dependency on sentencepiece/tiktoken for models whose fast tokenizer can't
-    # be built in the container (e.g. DeepSeek-V4). Auto-on for dummy weights.
-    if args.skip_tokenizer_init or args.load_format == "dummy":
-        kwargs["skip_tokenizer_init"] = True
-    if args.quantization:
-        kwargs["quantization"] = args.quantization
-    if args.kv_cache_dtype:
-        kwargs["kv_cache_dtype"] = args.kv_cache_dtype
-    # Sub-scale ("reduced-layer") benchmarking: override the model's layer count
-    # so a huge model fits on fewer GPUs. The per-layer time is recovered by
-    # benchmarking two layer counts and differencing; the full model is then
-    # projected as fixed_overhead + num_layers x per_layer_time. Mirrors the
-    # training sub-node bench that times a few layers and scales up.
-    if args.num_hidden_layers:
-        kwargs["hf_overrides"] = {"num_hidden_layers": int(args.num_hidden_layers)}
-
-    llm = LLM(**kwargs)  # loaded once; reused across the batch sweep
-
     real_weights = args.load_format != "dummy"
     # Real weights => the trained router needs varied input to route realistically.
     random_tokens = args.random_tokens or real_weights
-    sweep = []
-    for b in batches:
-        entry = _measure_batch(llm, args.input_len, b, args.decode_steps,
-                               random_tokens=random_tokens, vocab=args.vocab)
-        sweep.append(entry)
-        print(f"[Primus:Inference:vLLM-Benchmark] batch={b} "
-              f"prefill={entry['prefill_ms']:.2f}ms decode_step={entry['decode_ms']:.2f}ms")
+
+    def _build_llm(num_layers_override):
+        """Build a vLLM engine, optionally overriding the transformer layer count."""
+        from vllm import LLM
+
+        kwargs = dict(
+            model=args.model,
+            tensor_parallel_size=args.tp,
+            load_format=args.load_format,
+            gpu_memory_utilization=args.gpu_mem_util,
+            max_model_len=max_len,
+            max_num_seqs=max(256, max_batch),
+            trust_remote_code=args.trust_remote_code,
+            enforce_eager=args.enforce_eager,
+        )
+        # Expert parallelism: shard MoE experts across the TP ranks (EP = TP)
+        # instead of tensor-slicing each expert. Required to expose the
+        # imbalance-sensitive effects — the MoE step is then gated by the BUSIEST
+        # rank's expert load plus the all-to-all dispatch/combine volume, which a
+        # single-rank (EP=1) grouped GEMM hides (FLOPs conserved under skew).
+        if args.enable_expert_parallel:
+            kwargs["enable_expert_parallel"] = True
+        # The benchmark drives the engine purely with ``prompt_token_ids`` (never
+        # text), so the tokenizer is unnecessary. Skipping its init avoids a hard
+        # dependency on sentencepiece/tiktoken for models whose fast tokenizer
+        # can't be built in the container. Auto-on for dummy weights.
+        if args.skip_tokenizer_init or args.load_format == "dummy":
+            kwargs["skip_tokenizer_init"] = True
+        if args.quantization:
+            kwargs["quantization"] = args.quantization
+        if args.kv_cache_dtype:
+            kwargs["kv_cache_dtype"] = args.kv_cache_dtype
+        if num_layers_override:
+            kwargs["hf_overrides"] = {"num_hidden_layers": int(num_layers_override)}
+        return LLM(**kwargs)
+
+    def _sweep(llm):
+        sweep = []
+        for b in batches:
+            entry = _measure_batch(llm, args.input_len, b, args.decode_steps,
+                                   random_tokens=random_tokens, vocab=args.vocab)
+            sweep.append(entry)
+            print(f"[Primus:Inference:vLLM-Benchmark] batch={b} "
+                  f"prefill={entry['prefill_ms']:.2f}ms decode_step={entry['decode_ms']:.2f}ms")
+        return sweep
+
+    # --- REDUCE -> BENCHMARK -> RESTORE -------------------------------------
+    # Mirrors the training layer benchmark (benchmark.py + performance.py): the
+    # engine is REDUCED to a few layer counts that fit on the available GPUs,
+    # BENCHMARKED at each, then the full model is RESTORED by fitting the measured
+    # step latency vs layer count (t(L) = overhead + L * per_layer) and evaluating
+    # at the true layer count. Because HF layer reduction keeps the first D
+    # (fixed) dense layers, the linear fit + restore is exact under a two-type
+    # (dense/MoE) homogeneity assumption as long as every benchmarked count keeps
+    # those D dense layers. This makes the emitted whole-model latency a genuine
+    # full-model projection, which performance.py consumes directly.
+    bench_counts = _parse_bench_layers(args.bench_layers)
+    restore_meta = None
+    if len(bench_counts) >= 2:
+        full_layers = int(args.full_layers or _full_num_layers(args.model, args.trust_remote_code) or 0)
+        if full_layers <= 0:
+            raise SystemExit(
+                "[Primus:Inference:vLLM-Benchmark] --bench-layers restore needs the full "
+                "layer count; could not read it from the HF config. Pass --full-layers."
+            )
+        print(f"[Primus:Inference:vLLM-Benchmark] REDUCE->BENCHMARK->RESTORE: "
+              f"bench layer counts {bench_counts} -> restore to {full_layers} layers")
+        bench_sweeps = {}
+        for li, L in enumerate(bench_counts):
+            print(f"[Primus:Inference:vLLM-Benchmark] --- benchmarking {L} layers ---")
+            llm = _build_llm(L)
+            bench_sweeps[L] = {e["batch"]: e for e in _sweep(llm)}
+            # Free every engine except keep-none: each count is a distinct model.
+            _free_llm(llm)
+
+        sweep = []
+        per_layer = []
+        for b in batches:
+            pre_pts = [(L, bench_sweeps[L][b]["prefill_ms"]) for L in bench_counts if b in bench_sweeps[L]]
+            dec_pts = [(L, bench_sweeps[L][b]["decode_ms"]) for L in bench_counts if b in bench_sweeps[L]]
+            bp, ap = _linfit(pre_pts)
+            bd, ad = _linfit(dec_pts)
+            full_prefill = max(1e-3, ap + bp * full_layers)
+            full_decode = max(1e-6, ad + bd * full_layers)
+            sweep.append({"batch": b, "prefill_ms": full_prefill, "decode_ms": full_decode})
+            per_layer.append({
+                "batch": b,
+                "per_layer_prefill_ms": bp, "overhead_prefill_ms": ap,
+                "per_layer_decode_ms": bd, "overhead_decode_ms": ad,
+            })
+            print(f"[Primus:Inference:vLLM-Benchmark] RESTORED batch={b} "
+                  f"prefill={full_prefill:.2f}ms decode_step={full_decode:.2f}ms "
+                  f"(per-layer decode={bd:.3f}ms, overhead={ad:.2f}ms)")
+        restore_meta = {
+            "bench_layers": bench_counts,
+            "full_layers": full_layers,
+            "per_layer": per_layer,
+            "bench_sweeps": {str(L): list(s.values()) for L, s in bench_sweeps.items()},
+        }
+        eff_layers = full_layers
+    else:
+        # No restore: measure the model as configured (full, or a single reduced
+        # count via legacy --num-hidden-layers). One engine, reused across batches.
+        llm = _build_llm(args.num_hidden_layers)
+        sweep = _sweep(llm)
+        eff_layers = args.num_hidden_layers
 
     ref = next((e for e in sweep if e["batch"] == args.batch), sweep[0])
     result = {
         "backend": "vllm",
         # ``measured.model`` is the single-batch anchor (projector compat);
-        # ``sweep`` carries the per-concurrency measured curve (preferred).
+        # ``sweep`` carries the per-concurrency curve (preferred). Both are the
+        # RESTORED full-model latencies when reduce/restore is used.
         "measured": {"model": {"prefill_ms": ref["prefill_ms"], "decode_ms": ref["decode_ms"]}},
         "sweep": sweep,
         "meta": {
@@ -345,7 +520,10 @@ def run_vllm_benchmark(args) -> dict:
             "input_len": args.input_len,
             "decode_steps": args.decode_steps,
             "tp": args.tp,
-            "num_hidden_layers": args.num_hidden_layers,
+            "ep": args.tp if args.enable_expert_parallel else 1,
+            "num_hidden_layers": eff_layers,
+            "restored": restore_meta is not None,
+            "restore": restore_meta,
             "quantization": args.quantization,
             "kv_cache_dtype": args.kv_cache_dtype,
             "enforce_eager": args.enforce_eager,
@@ -376,10 +554,21 @@ def main():
     ap.add_argument("--batch", type=int, default=16, help="ref batch (anchor) when no --batches")
     ap.add_argument("--batches", default=None, help="comma list to sweep, e.g. 4,8,16,32,64")
     ap.add_argument("--max-model-len", type=int, default=None)
+    ap.add_argument("--bench-layers", default=None,
+                    help="comma list of REDUCED layer counts to benchmark and "
+                         "RESTORE from, e.g. '4,8'. Enables the reduce->benchmark->"
+                         "restore policy: the engine is built at each count, the "
+                         "step latency is fit vs layer count, and the full model "
+                         "(--full-layers, or the HF config) is reconstructed. The "
+                         "emitted sweep is the restored full-model latency.")
+    ap.add_argument("--full-layers", type=int, default=None,
+                    help="full transformer layer count to restore to when using "
+                         "--bench-layers (default: read num_hidden_layers from the "
+                         "HF config)")
     ap.add_argument("--num-hidden-layers", type=int, default=None,
-                    help="override the model's transformer layer count (sub-scale "
-                         "benchmarking so a large model fits on fewer GPUs; recorded "
-                         "in meta as num_hidden_layers)")
+                    help="[legacy, no restore] override the model's transformer "
+                         "layer count for a single sub-scale run. Prefer "
+                         "--bench-layers for a full-model projection.")
     ap.add_argument("--load-format", default="dummy",
                     help="vLLM load_format: 'dummy' (random weights, needs an "
                          "imposed routing dist) or 'auto'/'safetensors' (REAL "
@@ -395,6 +584,10 @@ def main():
     ap.add_argument("--skip-tokenizer-init", action="store_true",
                     help="skip loading the tokenizer (benchmark uses token ids "
                          "directly; auto-on for --load-format dummy)")
+    ap.add_argument("--enable-expert-parallel", action="store_true",
+                    help="shard MoE experts across the TP ranks (EP=TP) instead of "
+                         "tensor-slicing each expert; exposes imbalance-sensitive "
+                         "busiest-rank + all-to-all effects")
     ap.add_argument("--enforce-eager", action="store_true")
     ap.add_argument("--no-aiter", action="store_true",
                     help="disable AMD AITER kernels (default: enabled on ROCm)")
