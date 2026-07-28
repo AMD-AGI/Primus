@@ -15,7 +15,7 @@ the load-balancing aux loss is computed internally and returned. Runtime target 
 
 ## Prerequisites
 
-- **Runtime**: ROCm ≥ 7.0, Python ≥ 3.10, PyTorch ≥ 2.6.0 (ROCm build); gfx942 / gfx950. The DeepEP
+- **Runtime**: ROCm ≥ 7.0, Python ≥ 3.10, PyTorch ≥ 2.6.0 (ROCm build); gfx950. The DeepEP
   baseline additionally needs the optional **rocSHMEM**. Image `rocm/primus:v26.3` is recommended.
 - **Primus-Turbo with MegaMoE**: MegaMoE requires Primus-Turbo
   (`https://github.com/AMD-AGI/Primus-Turbo.git`) at commit
@@ -84,7 +84,7 @@ Enable the fused MegaMoE layer in the training config:
 
 ```yaml
 enable_primus_turbo: true
-use_turbo_mega_moe: true   # full fused MoE layer replacement (EP-only / TP=1 / bf16)
+use_turbo_mega_moe: true   # MegaMoE layer replacement (EP-only / TP=1 / bf16)
 ```
 
 The patch is applied only when **all** of these hold: `enable_primus_turbo=True`,
@@ -172,8 +172,6 @@ set -e
 # Cluster geometry (8 nodes x 8 GPUs = 64 GPUs)
 export NNODES=8
 
-export CLEAN_DOCKER_CONTAINER=1
-
 export USING_AINIC=1
 
 # Toggle the fused MegaMoE layer + model config
@@ -189,7 +187,6 @@ bash examples/run_slurm_pretrain_cli.sh \
   --expert_model_parallel_size 8 \
   --moe_shared_expert_intermediate_size None \
   --mtp_num_layers 0 \
-  --moe_shared_expert_intermediate_size None \
   --recompute_granularity full \
   --recompute_method uniform \
   --recompute_num_layers 1 \

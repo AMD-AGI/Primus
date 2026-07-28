@@ -7,8 +7,8 @@
 """
 Primus Turbo Mega MoE Patches
 
-Replace Megatron's ``MoELayer`` with the fully fused PrimusTurbo ``MegaMoE``
-adapter. EP-only (TP==1) + bf16.
+Replace Megatron's ``MoELayer`` with the PrimusTurbo ``MegaMoE`` adapter.
+EP-only (TP==1) + bf16.
 """
 
 
@@ -37,12 +37,12 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
     "megatron.turbo.mega_moe",
     backend="megatron",
     phase="before_train",
-    description="Replace MoELayer with the fully fused PrimusTurbo MegaMoE layer",
+    description="Replace MoELayer with the PrimusTurbo MegaMoE layer",
     condition=_is_turbo_mega_moe_can_patch,
 )
 def patch_mega_moe(ctx: PatchContext):
     """
-    Patch Megatron to use the fully fused PrimusTurbo MegaMoE layer.
+    Patch Megatron to use the PrimusTurbo MegaMoE layer.
 
     Replaces ``MoELayer`` in both ``moe_layer`` and ``gpt.moe_module_specs`` so the
     ``== MoELayer`` identity check in ``transformer_layer.py`` stays consistent.

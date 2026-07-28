@@ -106,6 +106,7 @@ These arguments affect the internal architecture or layer implementations. They 
 | `turbo_deepep_num_cu`   | `32`       | v0.4.0  | Set the number of CUs to use for Primus-Turbo DeepEP. |   | 64 or 80 for ep8, 32 for ep16-64 is best practice.  |
 | `turbo_deepep_use_comm_stream`   | `false`       | v0.4.0  | Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, default used `current_stream` |   |  **Please both set`enable_primus_turbo=True` and `use_turbo_deepep=True` first**
 | `turbo_sync_free_moe_stage`   | `0`       | v0.4.0  | Primus Sync-Free MoE has 4 stages. See [RFC: Primus-Megatron SyncFree MoE](https://github.com/AMD-AGI/Primus/issues/203) for more details. |   |   stage 2 is recommended for better performance. **Please set`enable_primus_turbo=True` first**   |
+| `use_turbo_mega_moe`   | `false`       | v0.8.0  | Replace the whole MoE layer with the FlyDSL-based fused Primus-Turbo MegaMoE layer (fused router + `dispatch_grouped_gemm` → SwiGLU → `grouped_gemm_combine`). | `megatron.core.transformer.moe.moe_layer.MoELayer` | EP-only: requires `tensor_model_parallel_size=1`, `params_dtype=bf16`, and an EP process group; asserts on unsupported router options (sequence/global aux loss, z-loss, sinkhorn, input jitter, expert bias). Needs a Primus-Turbo build with MegaMoE. See [MegaMoE guide](../README_Mega_MoE.md). **Please set `enable_primus_turbo=True` first.** |
 
 ---
 
