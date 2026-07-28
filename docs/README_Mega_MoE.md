@@ -17,25 +17,66 @@ the load-balancing aux loss is computed internally and returned. Runtime target 
 
 - **Runtime**: ROCm ≥ 7.0, Python ≥ 3.10, PyTorch ≥ 2.6.0 (ROCm build); gfx942 / gfx950. The DeepEP
   baseline additionally needs the optional **rocSHMEM**. Image `rocm/primus:v26.3` is recommended.
-- **Primus-Turbo with MegaMoE**: MegaMoE requires the **`feat/flydsl_mega_kernel`** branch of
-  Primus-Turbo (`git@github.com:AMD-AGI/Primus-Turbo.git`, being merged into `main`). The default
-  image does not ship this kernel, so Primus-Turbo must be rebuilt from that branch. See upstream
-  [main README](https://github.com/AMD-AGI/Primus-Turbo/blob/feat/flydsl_mega_kernel/README.md) and
-  [MegaMoE doc](https://github.com/AMD-AGI/Primus-Turbo/blob/feat/flydsl_mega_kernel/docs/README_Mega_MoE.md)
+- **Primus-Turbo with MegaMoE**: MegaMoE requires Primus-Turbo
+  (`https://github.com/AMD-AGI/Primus-Turbo.git`) at commit
+  **`9b5d3092efcbc087657b233d8e9ae662cee6ec6b` or newer** on `main`. The default image does not ship
+  this kernel, so Primus-Turbo must be rebuilt from source. See upstream
+  [main README](https://github.com/AMD-AGI/Primus-Turbo/blob/main/README.md) and
+  [MegaMoE doc](https://github.com/AMD-AGI/Primus-Turbo/blob/main/docs/README_Mega_MoE.md)
   for build details. Install it via the rebuild hook:
 
 **Primus rebuild hook (build from source).** The system hook
-`runner/helpers/hooks/00_rebuild_primus_turbo.sh` clones + builds + installs the given branch before
+`runner/helpers/hooks/00_rebuild_primus_turbo.sh` clones + builds + installs the given ref before
 the training command; each node builds in a node-local dir so multi-node runs avoid shared-fs
-conflicts. Use it to track the branch's latest code:
+conflicts. Point it at a commit for reproducibility, or at `main` to track the latest code:
 
 ```bash
 export REBUILD_PRIMUS_TURBO=1                       # trigger the hook
-export PRIMUS_TURBO_REF=feat/flydsl_mega_kernel     # MegaMoE branch
+export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b   # min required commit (or main)
 export GPU_ARCHS="gfx950"                           # build only target arch (multiple: semicolon-separated)
 # Optional: custom build dir (default /tmp/primus_turbo_<hostname>)
 # export PRIMUS_TURBO_BUILD_DIR=/tmp/primus_turbo_build
 ```
+
+## Design: two stages + weight modules (for DDP overlap)
+
+The expert path could be exposed as a *single* fused op taking both `w1` and `w2`
+(`fused_mega_moe(x, topk_idx, topk_weights, w1, w2, group)` still exists in Primus-Turbo). Primus
+instead drives it as **two stages**, each owning one weight, wrapped in **two tiny weight modules**
+(`primus/backends/megatron/core/extensions/mega_moe.py`):
+
+```
+MegaMoEExperts
+├── fc1_weight : MegaMoEWeightModule   # w1 [g, 2I, H] gate+up ; forward() -> w1
+└── fc2_weight : MegaMoEWeightModule   # w2 [g, H, I]  down    ; forward() -> w2
+
+
+FORWARD (in order)                          BACKWARD (in order)
+──────────────────────────────────────      ──────────────────────────────────────
+w1 = fc1_weight()                           stage2.backward  ->  dW2
+  hook: all-gather(w1), wait
+                                            hook on fc2_weight
+stage1: dispatch + GEMM1        <──┐          -> reduce-scatter(dW2)  ──┐
+                                   │ overlap                            │ overlap
+w2 = fc2_weight()                  │        stage1.backward  ->  dW1  ──┘
+  hook: all-gather(w2)  ───────────┘
+                                            hook on fc1_weight
+stage2: SwiGLU + GEMM2 + combine              -> reduce-scatter(dW1)
+  (waits for w2 here)                         (overlaps the next layer)
+```
+
+`MegaMoEWeightModule` holds a single `torch.nn.Parameter` and its `forward()` just returns it. It
+computes nothing — its only job is to be a **hook site** for the two collectives Megatron's
+distributed optimizer wants to overlap, both of which are driven at module / parameter granularity:
+
+- **Parameter all-gather** (`overlap_param_gather`) rides the *forward pre-hook*, which is per
+  module. With a single call site taking `(w1, w2)` both gathers must land before any compute; split,
+  `w2`'s gather is issued at `fc2_weight` and overlaps stage1.
+- **Gradient reduce-scatter** (`overlap_grad_reduce`) rides the *grad hook*, which fires when a
+  parameter's `.grad` appears. One fused autograd node emits `dW1` and `dW2` together at the end of
+  the layer backward; split, `dW2` lands early and its reduce-scatter hides under stage1's backward.
+
+The split is purely at the Python/autograd level — the kernels are unchanged.
 
 ## Configuration
 
@@ -62,8 +103,26 @@ Unsupported (each raises an error): sequence-level / global aux loss, z-loss, si
 jitter (only the standard `aux_loss` is supported); aux-loss-free expert bias
 (`enable_expert_bias=True` raises `NotImplementedError`).
 
+### Router force load balancing (`moe_router_force_load_balancing_type`)
+
+The benchmark config sets `moe_router_force_load_balancing: true`, which discards the real router
+decision and forces every expert to receive a similar number of tokens — this removes run-to-run
+expert-imbalance noise so throughput numbers are comparable. `moe_router_force_load_balancing_type`
+selects *how* the balancing is done (it only has an effect when force load balancing is on):
+
+| value | behavior |
+| --- | --- |
+| `even` (Primus default) | Deterministic round-robin `(token_idx * topk + k) % num_experts`. Per-expert token counts are exactly equal **and identical every step**, so the grouped-GEMM shapes (`M_total`, per-expert `M`) never change. |
+| `uniform` | Megatron-LM's original behavior: the logits are replaced with random values before routing, so token counts are balanced only *statistically* and fluctuate step to step, like real routing. |
+
+**Use `uniform` for benchmarking.** `even` produces perfectly constant, aligned per-expert shapes
+that the non-fused (DeepEP / grouped-GEMM) baseline benefits from disproportionately — no autotune
+or shape-recompile churn, no padding waste — while MegaMoE is designed to absorb ragged, varying
+token counts. Measuring under `even` therefore understates MegaMoE's gain; `uniform` keeps the
+balancing (for reproducibility) but preserves the step-to-step shape variation of real training.
+
 The examples below use the rebuild hook (`REBUILD_PRIMUS_TURBO=1
-PRIMUS_TURBO_REF=feat/flydsl_mega_kernel`) to build Primus-Turbo from source.
+PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b`) to build Primus-Turbo from source.
 
 ### Example 1 — single-node EP8, 4 layers (`run_pretrain_cli.sh`)
 
@@ -78,7 +137,7 @@ set -e
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
 # Build Primus-Turbo from source before training (hook)
 export REBUILD_PRIMUS_TURBO=1
-export PRIMUS_TURBO_REF=feat/flydsl_mega_kernel
+export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 export GPU_ARCHS=gfx950
 
 # Parallelism (EP-only) + fused MegaMoE
@@ -95,6 +154,7 @@ bash examples/run_pretrain_cli.sh \
   --recompute_granularity null \
   --recompute_num_layers 0 \
   --recompute_layer_ids null \
+  --moe_router_force_load_balancing_type uniform \
   --enable_primus_turbo True \
   --use_turbo_mega_moe True \
   --mock_data True
@@ -134,6 +194,7 @@ bash examples/run_slurm_pretrain_cli.sh \
   --recompute_method uniform \
   --recompute_num_layers 1 \
   --recompute_layer_ids null \
+  --moe_router_force_load_balancing_type uniform \
   --enable_primus_turbo True \
   --use_turbo_mega_moe True \
   --mock_data True
