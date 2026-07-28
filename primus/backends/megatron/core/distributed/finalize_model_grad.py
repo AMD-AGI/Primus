@@ -17,7 +17,7 @@ from megatron.core.distributed.finalize_model_grads import (
 )
 from megatron.core.utils import get_model_config
 
-from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+from primus.backends.megatron.training.utils import is_v_schedule_enabled
 
 
 def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torch.Tensor] = None):

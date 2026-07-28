@@ -6,7 +6,7 @@ provides two estimates — **memory** and **performance** — each of which runs
 **benchmark-anchored by default** (measure what fits on a sub-node run, scale
 the rest analytically) with a fully analytical **no-GPU `simulate`** fallback.
 
-See [`docs/tuning_agent.md`](../../../docs/tuning_agent.md) — the full
+See [`docs/02-user-guide/tuning-agent.md`](../../../docs/02-user-guide/tuning-agent.md) — the full
 user/operator guide (modes, configuration, troubleshooting, worked example)
 plus the design write-up, paper-ready problem statement, and the list of
 deferred future features (cluster-spec retrieval, persistent memory cache,

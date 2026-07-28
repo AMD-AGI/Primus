@@ -33,7 +33,7 @@ from primus.core.pipeline_parallel.scheduler.schedule_table_factory import (
 )
 from primus.core.pipeline_parallel.scheduler.scheduler import ScheduleRunner
 from primus.core.pipeline_parallel.scheduler.scheduler_node import FuncType
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 
 class PrimusPipelineParallelLauncher:
@@ -309,7 +309,9 @@ class PrimusPipelineParallelLauncher:
                 node.args["pp_group"] = pg_collection.pp
 
         if args.dump_pp_data:
-            from primus.modules.trainer.megatron.utils import schedule_wrapper
+            from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+                schedule_wrapper,
+            )
 
             schedule_wrapper(self.schedule_runner.run)(self.schedule_table, self.pp_rank)
         else:

@@ -26,6 +26,7 @@ class Attention(TTAttention):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -33,6 +34,7 @@ class Attention(TTAttention):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            positions (torch.Tensor | None): Position indices used to access/shuffle the RoPE cache.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -50,14 +52,14 @@ class Attention(TTAttention):
         # the above linear ops.
         q = q.view(bsz, seqlen, -1, self.qk_head_dim)
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
+        q_pe = apply_rotary_emb(q_pe, freqs_cis, positions)
         q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)  # (bsz, seqlen, 1, qk_rope_head_dim)
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, positions)  # (bsz, seqlen, 1, qk_rope_head_dim)
 
         kv = self.wkv_b(self.kv_norm(kv))  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
@@ -99,7 +101,9 @@ class MultiHeadAttention(Llama4Attention):
                 self.dim = deepseek_args.dim
                 self.head_dim = deepseek_args.head_dim
 
-                self.use_flex_attn = deepseek_args.use_flex_attn
+                # Upstream v0.2.2 Attention.__init__ dispatches on ``attn_type``
+                # (the legacy ``use_flex_attn`` flag was removed).
+                self.attn_type = deepseek_args.attn_type
 
         # Initialize the parent class with the mock args
         super().__init__(
@@ -112,10 +116,11 @@ class MultiHeadAttention(Llama4Attention):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         # Always use llama4-style freqs_cis for this attention, regardless of input
         seqlen = x.shape[1]
         freqs_llama4 = llama4_precompute_freqs_cis(self.head_dim, seqlen, self.rope_theta)
         # Ensure freqs are on the same device as activations
         freqs_llama4 = freqs_llama4.to(x.device, dtype=x.dtype)
-        return super().forward(x, freqs_llama4, None)
+        return super().forward(x, freqs_llama4, None, positions)

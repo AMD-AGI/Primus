@@ -39,7 +39,9 @@ class SafeWrapper:
 
         self.PRIMUS_REPO = "https://github.com/AMD-AGI/Primus.git"
         self.PRIMUS_TURBO_REPO = "https://github.com/AMD-AGI/Primus-Turbo.git"
-        self.PRIMUS_TURBO_COMMIT = "3c39ef259aa6d724c77c481e926466e7a167e938"  # fix(moe): declare probs layout explicitly in moe_permute (#355)
+        self.PRIMUS_TURBO_COMMIT = (
+            "a04a233cbfb468dbe21600cbf9db70953428b25c"  # feat: force use nt layout gemm in bwd (#386)
+        )
         self.PRIMUS_WORKDIR = os.getenv("PRIMUS_WORKDIR", "")
         self.BENCHMARK_LOG_DIR = os.getenv("BENCHMARK_LOG_DIR", "")
 

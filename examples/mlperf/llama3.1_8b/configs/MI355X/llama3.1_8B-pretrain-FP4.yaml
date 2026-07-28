@@ -1,0 +1,113 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:llama3.1_8B-pretrain-mlperf}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama3.1_8B.yaml
+    overrides:
+      # --- Logging Config ---
+      stage: mlperf_pretrain
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: ERROR
+      log_interval: 999999
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      eval_iters: ${PRIMUS_EVAL_ITERS:32}  # 32 * GBS = 1024 eval samples
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:10} # 10 * GBS = 320 eval samples perform evaluation.
+
+      # --- Training Config ---
+      train_iters: ${PRIMUS_TRAIN_ITERS:200}
+      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:2}                # grad_acc = global_batch_size / (micro_batch_size * num_gpus) = 32 / (2 * 8) = 2
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:32}
+      seq_length: 8192
+      max_position_embeddings: 8192
+      seed: ${SEED:1234}
+      lr: ${PRIMUS_LR:0.0008}          # 8e-4
+      min_lr: ${PRIMUS_MIN_LR:0.00008}     # 10% of lr
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:64}
+      lr_decay_iters: 1199936
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-5
+      adam_eps: 1.0e-5
+      check_for_nan_in_loss_and_grad: false # default true
+      check_for_spiky_loss: false # default false, but setting it here explicitly
+      check_for_large_grads: false # default false, but setting it here explicitly
+
+      # --- Model Parallel Config ---
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+      masked_softmax_fusion: true
+      ddp_average_in_collective: true
+      fused_single_qkv_rope: true
+
+      # --- Data Config ---
+      mock_data: false
+      train_data_path: "/data/c4-train.en_6_text_document"
+      valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
+      test_data_path: null
+      mmap_bin_files: true
+      data_cache_path: null
+
+      # --- Profiling Config ---
+      profile: false
+      use_pytorch_profiler: true
+      profile_ranks: [0]           # Only profile rank 0 to save disk space
+      profile_step_start: 8        # Start after warmup (step 8)
+      profile_step_end: 13        # Profile 5 iterations (8-12)
+      disable_profiler_activity_cpu: false     # GPU kernels only (smaller files)
+      torch_profiler_record_shapes: false     # Disable for smaller traces
+      torch_profiler_with_stack: false        # Disable for smaller traces
+      torch_profiler_use_gzip: true           # Compress output
+
+      # --- Checkpointing Config ---
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 2000000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # --- FSDP Config ---
+      use_torch_fsdp2: false
+      use_distributed_optimizer: true # this is needed for fsdp2
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # --- Mixed Precision Config ---
+      fp4: e2m1
+      fp4_recipe: mxfp4
+      accumulate_allreduce_grads_in_fp32: false
+      grad_reduce_in_bf16: true
+      attention_softmax_in_fp32: false
+
+
+      # --- Primus Turbo Config ---
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_gemm: false              # can't use together with delayed recipe
+      use_turbo_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: false
+      enable_turbo_attention_float8 : false

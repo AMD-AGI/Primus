@@ -1,0 +1,66 @@
+# MLPerf Flux1 streaming ingest configuration
+#
+# Downloads pre-encoded Arrow files from MLCommons R2 and converts them
+# into Energon WebDataset tar shards in a single streaming pass.
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+#   primus data diffusion-ingest \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1.yaml
+#
+# Override output:
+#   primus data diffusion-ingest \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1.yaml \
+#     --output-dir /custom/path --max-files 5
+#
+# ============================================================================
+# Datasets
+# ============================================================================
+# Each entry runs a StreamingIngestPipeline: download Arrow files in parallel,
+# convert to WebDataset tar shards, delete Arrow files after conversion.
+
+datasets:
+  - name: cc12m
+    manifest_url: https://training.mlcommons-storage.org/metadata/flux-1-cc12m-preprocessed.uri
+    split_name: train
+
+  - name: coco
+    manifest_url: https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri
+    split_name: val
+
+# ============================================================================
+# Empty Encodings (for CFG dropout during training)
+# ============================================================================
+# Small .npy files downloaded separately (not Arrow).
+
+empty_encodings:
+  manifest_url: https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri
+  output_subdir: empty_encodings
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/mlperf_flux1
+
+# ============================================================================
+# Pipeline Configuration
+# ============================================================================
+
+pipeline:
+  max_workers: 4       # concurrent download threads
+  prefetch_depth: 6    # max Arrow files buffered on disk (~1.2 GB)
+  max_files: null      # null = all files (set to small number for testing)
+
+# ============================================================================
+# Required Training-Time Settings (not consumed by ingest, for reference)
+# ============================================================================
+# When training with this dataset, configure:
+#   vae_latent_mode: resample
+#   vae_scale: 0.3611
+#   vae_shift: 0.1159
+# These are required because forward_step.py unconditionally applies
+# vae_scale * (latents - vae_shift) after resampling from mean/logvar.

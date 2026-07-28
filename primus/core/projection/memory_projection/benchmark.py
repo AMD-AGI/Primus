@@ -174,7 +174,7 @@ def _run_bench(
         if reduction_info.get("benchmark_num_experts") is not None:
             bench_module.num_experts = reduction_info["benchmark_num_experts"]
 
-    profiling_results = _run_layer_benchmark(primus_config_bench, overrides, reduction_info)
+    profiling_results = _run_layer_benchmark(primus_config_bench, overrides, reduction_info, args=args)
 
     # Optionally persist the artifact.  We piggy-back on the perf saver so
     # that the JSON is identical-shape to the perf-side artifact (one

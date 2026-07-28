@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any, Optional
 
 from primus.backends.megatron.sft.dataset import build_train_valid_test_datasets
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _safe_signature(fn: Callable[..., Any]) -> inspect.Signature | None:

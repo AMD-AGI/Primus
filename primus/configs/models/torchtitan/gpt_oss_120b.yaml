@@ -1,0 +1,12 @@
+job:
+  dump_folder: "./outputs"
+  description: "GPT-OSS 120B training"
+
+model:
+  name: "gpt_oss"
+  flavor: "120b"
+  hf_assets_path: "openai/gpt-oss-120b"
+  # No model converter: GPT-OSS attention (learnable sinks + sliding window) is
+  # routed to Primus-Turbo via the torchtitan.primus_turbo.gptoss_sink_attention
+  # setup patch (functional flash_attn_func), not via the module-form converter.
+  converters: []

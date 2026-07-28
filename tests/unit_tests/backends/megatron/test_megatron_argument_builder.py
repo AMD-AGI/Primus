@@ -15,12 +15,25 @@ Focus areas:
     5. Integration: complete workflow from config to final namespace
 """
 
+import enum
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
+
+
+class _FakeAttnBackend(enum.Enum):
+    """Stand-in for Megatron's AttnBackend enum (plain int-valued enum)."""
+
+    flash = 1
+    fused = 2
+    auto = 3
+
+
+def _fake_enum_type(value: str) -> "_FakeAttnBackend":
+    return _FakeAttnBackend[value]
 
 
 class TestMegatronArgBuilderFiltering:
@@ -326,6 +339,104 @@ class TestMegatronArgBuilderChaining:
 
         assert result.num_layers == 32
         assert result.hidden_size == 4096
+
+
+class TestMegatronArgBuilderEnumCoercion:
+    """Test that enum override strings are coerced via Megatron's argparse converter.
+
+    Primus bypasses Megatron's argparse, so without coercion an enum arg like
+    ``attention_backend`` would arrive (and stay) a raw string and silently
+    break every downstream ``== AttnBackend.x`` comparison.
+    """
+
+    @patch("primus.backends.megatron.argument_builder._load_megatron_enum_types")
+    @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
+    def test_string_coerced_to_enum(self, mock_defaults, mock_types):
+        mock_defaults.return_value = {"attention_backend": _FakeAttnBackend.auto}
+        mock_types.return_value = {"attention_backend": _fake_enum_type}
+
+        builder = MegatronArgBuilder()
+        builder.update({"attention_backend": "fused"})
+
+        assert builder.overrides["attention_backend"] is _FakeAttnBackend.fused
+
+    @patch("primus.backends.megatron.argument_builder._load_megatron_enum_types")
+    @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
+    def test_auto_coerced_to_enum(self, mock_defaults, mock_types):
+        # Every enum value is coerced consistently, including "auto" (the ROCm
+        # incompatibility of megatron-core's auto branch is handled by a patch,
+        # not by leaving this a raw string).
+        mock_defaults.return_value = {"attention_backend": _FakeAttnBackend.auto}
+        mock_types.return_value = {"attention_backend": _fake_enum_type}
+
+        builder = MegatronArgBuilder()
+        builder.update({"attention_backend": "auto"})
+
+        assert builder.overrides["attention_backend"] is _FakeAttnBackend.auto
+
+    @patch("primus.backends.megatron.argument_builder._load_megatron_enum_types")
+    @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
+    def test_list_coerced_elementwise(self, mock_defaults, mock_types):
+        mock_defaults.return_value = {"some_enum_list": []}
+        mock_types.return_value = {"some_enum_list": _fake_enum_type}
+
+        builder = MegatronArgBuilder()
+        builder.update({"some_enum_list": ["flash", "fused"]})
+
+        assert builder.overrides["some_enum_list"] == [
+            _FakeAttnBackend.flash,
+            _FakeAttnBackend.fused,
+        ]
+
+    @patch("primus.backends.megatron.argument_builder._load_megatron_enum_types")
+    @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
+    def test_non_enum_and_none_pass_through(self, mock_defaults, mock_types):
+        # num_layers is not an enum arg -> no converter -> value left untouched.
+        mock_defaults.return_value = {"attention_backend": _FakeAttnBackend.auto, "num_layers": 12}
+        mock_types.return_value = {"attention_backend": _fake_enum_type}
+
+        builder = MegatronArgBuilder()
+        builder.update({"attention_backend": None, "num_layers": 32})
+
+        assert builder.overrides["attention_backend"] is None
+        assert builder.overrides["num_layers"] == 32
+
+    @patch("primus.backends.megatron.argument_builder._load_megatron_enum_types")
+    @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
+    def test_invalid_value_keeps_raw_without_raising(self, mock_defaults, mock_types):
+        mock_defaults.return_value = {"attention_backend": _FakeAttnBackend.auto}
+        mock_types.return_value = {"attention_backend": _fake_enum_type}
+
+        builder = MegatronArgBuilder()
+        # "bogus" is not a valid enum member -> conversion fails, raw value kept.
+        builder.update({"attention_backend": "bogus"})
+
+        assert builder.overrides["attention_backend"] == "bogus"
+
+
+class TestMegatronArgBuilderRealParser:
+    """Integration checks against the real Megatron argparse (no mocking).
+
+    The coercion tests above mock the enum-type map; these guard the actual
+    detection wiring so a change in how Megatron declares attention_backend
+    (its argparse type/choices) can't silently turn coercion back into a no-op.
+    """
+
+    def test_attention_backend_detected_as_enum_arg(self):
+        from primus.backends.megatron.argument_builder import _load_megatron_enum_types
+
+        pytest.importorskip("megatron")
+        assert "attention_backend" in _load_megatron_enum_types()
+
+    @pytest.mark.parametrize("value", ["fused", "unfused", "auto"])
+    def test_attention_backend_string_coerces_to_real_enum(self, value):
+        pytest.importorskip("megatron")
+        from megatron.core.transformer.enums import AttnBackend
+
+        builder = MegatronArgBuilder()
+        builder.update({"attention_backend": value})
+
+        assert builder.overrides["attention_backend"] is AttnBackend[value]
 
 
 if __name__ == "__main__":

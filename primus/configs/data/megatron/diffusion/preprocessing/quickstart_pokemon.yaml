@@ -1,0 +1,34 @@
+# Quickstart: Pokemon Dataset (256px, works out of the box)
+#
+# Minimal config for getting started quickly with a small public dataset.
+# Uses 256px images for fast processing, even on limited hardware.
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/quickstart_pokemon.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# The default encoder model (FLUX.1-dev) is gated and requires a
+# HuggingFace token. Get one at https://huggingface.co/settings/tokens
+# ============================================================================
+
+source:
+  type: huggingface
+  hf_dataset: diffusers/pokemon-gpt4-captions
+  hf_split: train
+
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/quickstart_pokemon
+  shard_size: 1000
+
+model:
+  model_path: black-forest-labs/FLUX.1-dev
+  precision: bf16
+  batch_size: 4
+
+image:
+  image_size: 256
+  center_crop: false

@@ -11,8 +11,9 @@ from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 
 class HummingbirdXTPosttrainTrainer(BaseTrainer):
-    def __init__(self, backend_args: Any):
-        super().__init__(backend_args=backend_args)
+    def __init__(self, backend_args: Any = None, **kwargs):
+        # Accept and forward runtime context kwargs so BaseTrainer can filter them.
+        super().__init__(backend_args=backend_args, **kwargs)
 
     def setup(self):
         pass

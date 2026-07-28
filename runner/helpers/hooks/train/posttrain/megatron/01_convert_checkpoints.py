@@ -126,6 +126,40 @@ def _prepend_sys_path(*paths: Path):
         sys.path[:] = original_sys_path
 
 
+@contextmanager
+def _unset_nvte_attention_env():
+    """Neutralize the TE attention-backend env vars around AutoBridge model construction.
+
+    This is a general posttrain fix, not a test-only workaround: this hook runs
+    for every native-Megatron SFT run, in a separate subprocess against
+    Megatron-Bridge's own bundled Megatron-LM that never sees Primus's
+    before_train patches (including the ROCm-safe attention_backend one). So it
+    hits *stock* megatron's ``auto`` validation: ``AutoBridge.import_ckpt`` builds
+    a plain ``MCoreGPTModel`` whose ``_set_attention_backend()`` asserts the three
+    ``NVTE_*_ATTN`` vars are unset-or-1, and the ROCm image's baked
+    ``NVTE_FLASH_ATTN=0`` trips it.
+
+    Checkpoint conversion only reshapes weights -- it computes no attention -- so
+    the backend is irrelevant here; the only goal is to get past that assert.
+    Rather than counteract one specific baked value, unset all three for the
+    duration (stock ``auto`` then accepts them and picks defaults harmlessly) and
+    restore whatever was there afterwards. This stays correct for any image: if a
+    future image leaves them unset or sets them to 1, the pop/restore is a no-op;
+    it never assumes a particular baked value. Mirrors the Flux/diffusion conftest
+    fix.
+    """
+    names = ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN")
+    saved = {name: os.environ.pop(name, None) for name in names}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def convert_checkpoint(hf_path: str, megatron_path: str):
     """
     Convert HuggingFace checkpoint to Megatron torch_dist format.
@@ -138,7 +172,7 @@ def convert_checkpoint(hf_path: str, megatron_path: str):
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
-    with _prepend_sys_path(bridge_path, bridge_megatron_path):
+    with _prepend_sys_path(bridge_path, bridge_megatron_path), _unset_nvte_attention_env():
         from megatron.bridge import AutoBridge
 
         # Convert using AutoBridge - creates torch_dist format checkpoint

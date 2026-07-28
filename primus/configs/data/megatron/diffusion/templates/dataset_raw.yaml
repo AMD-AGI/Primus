@@ -1,0 +1,112 @@
+# Local Dataset Configuration for Raw Diffusion Data (On-the-fly Encoding)
+#
+# This file should be placed in your raw dataset directory
+# as dataset.yaml (alongside the WebDataset tar files).
+#
+# Directory structure:
+#   /path/to/dataset_raw/
+#   ├── dataset.yaml          <- This file
+#   ├── train-000000.tar
+#   ├── train-000001.tar
+#   ├── ...
+#   └── .nv-meta/             <- Created by `energon prepare`
+#
+# After creating this file, run:
+#   energon prepare /path/to/dataset_raw --num-workers 8
+
+# Use CrudeWebdataset to enable cooker-based processing
+__module__: megatron.energon
+__class__: CrudeWebdataset
+
+# Subflavor indicates this dataset contains raw images/text
+# This routes samples to the on-the-fly encoding cooker in the task encoder
+subflavors:
+  encoding: raw
+
+# Optional: Filter which tar files to load
+# Uncomment and adjust to use specific shards
+# part_filter:
+#   - train-*.tar      # Load all training shards
+
+# Optional: Sample filtering
+# max_samples: 10000   # Limit total samples (useful for testing)
+
+# ============================================================================
+# Expected WebDataset Format
+# ============================================================================
+#
+# Each sample in the tar files should contain:
+#   - __key__: unique identifier (e.g., "sample_000001")
+#   - image.jpg: raw image file (JPEG/PNG/WebP)
+#   - caption.txt: text caption describing the image
+#   - metadata.json: sample metadata (optional)
+#
+# Example tar content:
+#   sample_000001.jpg
+#   sample_000001.txt
+#   sample_000001.metadata.json
+#
+# Image requirements:
+#   - Format: JPEG, PNG, or WebP
+#   - Resolution: Any (will be resized to target size during training)
+#   - Color: RGB (grayscale will be converted)
+#
+# Caption requirements:
+#   - Format: Plain text UTF-8
+#   - Length: Any (will be truncated to model max length)
+#   - Content: Descriptive text for the image
+#
+# ============================================================================
+# Preparation Steps
+# ============================================================================
+#
+# 1. Prepare raw dataset using the Primus CLI:
+#    tools/docker/primus data diffusion-raw \
+#      --source-type directory \
+#      --input-dir /path/to/raw_images \
+#      --output-dir /path/to/dataset_raw
+#
+# 2. Copy this template to the output directory as dataset.yaml
+#
+# 3. Run Energon indexing:
+#    energon prepare /path/to/dataset_raw --num-workers 8
+#
+# 4. Verify the dataset:
+#    energon info /path/to/dataset_raw
+#
+# 5. Configure encoders in your training config:
+#    data:
+#      dataset_path: /path/to/dataset_raw/dataset.yaml
+#      encoder_configs:
+#        vae:
+#          model_path: black-forest-labs/FLUX.1-dev
+#          device: cuda
+#          precision: bf16
+#        t5:
+#          model_path: black-forest-labs/FLUX.1-dev
+#          device: cuda
+#          precision: bf16
+#        clip:
+#          model_path: black-forest-labs/FLUX.1-dev
+#          device: cuda
+#          precision: bf16
+#
+# ============================================================================
+# Performance Notes
+# ============================================================================
+#
+# On-the-fly encoding is slower than pre-encoded mode:
+#   - Encoding adds ~100-200ms per image on MI300X
+#   - Requires additional GPU memory for encoders (~10-15GB)
+#   - Recommended for experimentation, not production
+#
+# For production training, use pre-encoded mode:
+#   1. Pre-encode your dataset once using diffusion-encoded
+#   2. Use dataset_preencoded.yaml configuration
+#   3. Enjoy 2-3x faster training
+#
+# For more information, see:
+#   - primus/configs/data/megatron/diffusion/README.md
+#   - examples/megatron/diffusion/README.md
+#   - primus/configs/models/megatron/diffusion/encoders.yaml
+#

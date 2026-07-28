@@ -50,8 +50,16 @@ def parse_args():
 
 
 def pip_install_editable(path: Path, name: str):
-    log_info(f"Installing {name} in editable mode via pip (path: {path})")
-    ret = subprocess.run(["pip", "install", "-e", ".", "-q"], cwd=path)
+    # TorchTitan v0.2.2 has PEP-420 namespace subpackages (e.g. torchtitan/tools,
+    # no __init__.py) that the default editable finder cannot resolve. Use compat
+    # mode (writes a .pth with the source root on sys.path) after uninstalling any
+    # stale torchtitan, so the training subprocess can import them.
+    log_info(f"Installing {name} in editable (compat) mode via pip (path: {path})")
+    subprocess.run(["pip", "uninstall", "-y", name.lower()], cwd=path)
+    ret = subprocess.run(
+        ["pip", "install", "-e", ".", "--config-settings", "editable_mode=compat", "-q"],
+        cwd=path,
+    )
     if ret.returncode != 0:
         log_error_and_exit(f"Failed to install {name} via pip.")
 

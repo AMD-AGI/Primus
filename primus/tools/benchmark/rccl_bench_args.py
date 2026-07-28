@@ -16,7 +16,7 @@ def add_rccl_parser(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--op",
         nargs="+",
-        default=["allreduce"],
+        default=["all_reduce"],
         choices=["all_reduce", "broadcast", "reduce_scatter", "all_gather", "alltoall"],
         help="Collectives to run",
     )
@@ -91,7 +91,7 @@ def add_rccl_parser(parser: argparse.ArgumentParser):
         "--trace-ops",
         type=str,
         default="",
-        help="Comma-separated ops to trace (e.g., 'alltoall,allreduce'). Empty = all.",
+        help="Comma-separated ops to trace (e.g., 'alltoall,all_reduce'). Empty = all.",
     )
     parser.add_argument(
         "--trace-sizes",

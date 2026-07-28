@@ -1,0 +1,110 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux Base Configuration
+# Common parameters for all Flux model variants (535M, 12B, custom)
+
+extends:
+  - ../diffusion_model.yaml
+
+# ==============================================================================
+# Core Architecture (Flux Standard)
+# ==============================================================================
+
+# Layer configuration (Flux uses joint + single layers, not standard num_layers)
+# num_layers will be computed in code as num_joint_layers + num_single_layers
+num_joint_layers: null     # To be set by specific variant (535M, 12B, etc.)
+num_single_layers: null    # To be set by specific variant (535M, 12B, etc.)
+
+# Dimensions (same across all Flux variants)
+hidden_size: 3072          # Transformer hidden dimension
+num_attention_heads: 24    # Number of attention heads
+ffn_hidden_size: null      # Auto-computed as hidden_size * 4 = 12288
+
+# Head dimension (computed): hidden_size / num_attention_heads = 128
+
+# ==============================================================================
+# Context Dimensions (Text Encoder Integration)
+# ==============================================================================
+
+context_dim: 4096          # T5-XXL hidden dimension (text embeddings)
+vec_in_dim: 768            # CLIP-L pooled dimension (pooled text)
+model_channels: 256        # Channels for timestep embedding MLPs
+
+# ==============================================================================
+# Input/Output Channels
+# ==============================================================================
+
+in_channels: 64            # VAE latent channels (16 * 4 from 2x2 packing)
+out_channels: 64           # Output channels (same as input for latent space)
+
+# ==============================================================================
+# Patchification
+# ==============================================================================
+
+patch_size: 1              # Flux uses 1x1 patches (no spatial patchification)
+
+# ==============================================================================
+# Position Embeddings (3D RoPE)
+# ==============================================================================
+
+theta: 10000               # Base frequency for RoPE
+axes_dim: [16, 56, 56]     # 3D RoPE dimensions: [channels, height, width]
+                           # Sum = 128 = head_dim
+
+# ==============================================================================
+# Transformer Configuration
+# ==============================================================================
+
+# LayerNorm
+layernorm_epsilon: 1.0e-6  # Epsilon for numerical stability
+
+# Residual connections
+apply_residual_connection_post_layernorm: false  # Flux uses pre-norm
+
+# Dropout (Flux typically uses none)
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+# ==============================================================================
+# Guidance (Classifier-Free Guidance)
+# ==============================================================================
+
+guidance_embed: false      # Set true to enable CFG embedding
+                           # FLUX.1 [dev]: true (supports CFG)
+                           # FLUX.1 [schnell]: false (distilled, no CFG)
+
+# ==============================================================================
+# CRITICAL: Activation Function & QKV Configuration
+# ==============================================================================
+
+# Activation function: defaults to openai_gelu_no_jit (non-JIT tanh GELU, ROCm-safe;
+# see FluxConfig.activation_func). Override via activation_func in your config:
+#   activation_func: openai_gelu   # fused F.gelu(approximate="tanh")
+#   activation_func: erf_gelu      # erf-based GELU
+# Changing the activation changes numerics: keep it consistent with the activation
+# used to train any checkpoint you load.
+
+# FluxConfig defaults that we intentionally inherit:
+#   activation_func: openai_gelu_no_jit (FluxConfig default, ROCm-safe)
+#   add_qkv_bias: true
+#   single_block_bias: true (new parameter)
+#   rotary_interleaved: true
+#   apply_rope_fusion: false
+
+# New parameter: single_block_bias
+#   Controls bias in single block linear layers independently from joint blocks
+#   Default: true (bias enabled in single blocks)
+#   Set to false to disable bias in single blocks only
+
+# These defaults are compatible with Primus training conventions
+
+# ==============================================================================
+# Notes
+# ==============================================================================
+
+# - This config defines Flux architecture shared across all variants
+# - Specific variants (535M, 12B) only override num_joint_layers, num_single_layers
+# - Activation function (openai_gelu) comes from FluxConfig class default
+# - All Flux variants share same hidden_size (3072) and num_heads (24)
+# - For custom variants, extend this file and override layer counts

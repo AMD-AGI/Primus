@@ -66,3 +66,71 @@ def test_load_subcommands_requires_func(monkeypatch):
 
     with pytest.raises(RuntimeError, match="set_defaults"):
         cli_main._load_subcommands(subparsers, module_paths)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _discover_subcommands
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_discover_subcommands_maps_name_to_module_path():
+    cmds = cli_main._discover_subcommands()
+    assert cmds["train"] == "primus.cli.subcommands.train"
+    assert "projection" in cmds and "benchmark" in cmds
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _extract_command (argv -> subcommand name)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["train", "--config", "x"], "train"),  # first positional
+        (["--debug", "train"], "train"),  # skip leading flags
+        (["--", "projection"], "projection"),  # token after --
+        (["--"], None),  # bare --
+        (["bogus"], "bogus"),  # unknown token returned verbatim
+        ([], None),  # empty
+        (["--debug"], None),  # all flags
+    ],
+)
+def test_extract_command(argv, expected):
+    assert cli_main._extract_command(argv, {"train", "projection"}) == expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _register_subcommand error paths
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _subparsers():
+    parser = argparse.ArgumentParser()
+    return parser.add_subparsers(dest="cmd")
+
+
+def test_register_subcommand_import_failure_raises(monkeypatch):
+    def boom(name):
+        raise ImportError("nope")
+
+    monkeypatch.setattr(cli_main.importlib, "import_module", boom)
+    with pytest.raises(RuntimeError, match="Failed to import"):
+        cli_main._register_subcommand(_subparsers(), "x.bad")
+
+
+def test_register_subcommand_missing_hook_raises(monkeypatch):
+    monkeypatch.setattr(cli_main.importlib, "import_module", lambda name: type("M", (), {})())
+    with pytest.raises(AttributeError, match="register_subcommand"):
+        cli_main._register_subcommand(_subparsers(), "x.nohook")
+
+
+def test_register_subcommand_returning_none_raises(monkeypatch):
+    def fake(name):
+        m = type("M", (), {})()
+        m.register_subcommand = lambda subparsers: None
+        return m
+
+    monkeypatch.setattr(cli_main.importlib, "import_module", fake)
+    with pytest.raises(RuntimeError, match="must return the parser"):
+        cli_main._register_subcommand(_subparsers(), "x.noret")

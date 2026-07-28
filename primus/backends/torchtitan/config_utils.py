@@ -20,8 +20,8 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
+from primus.core.utils.module_utils import log_rank_0
 from primus.core.utils.yaml_utils import dict_to_nested_namespace
-from primus.modules.module_utils import log_rank_0
 
 
 def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:

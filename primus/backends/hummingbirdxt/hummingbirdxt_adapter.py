@@ -9,7 +9,7 @@ from typing import Any
 from primus.backends.hummingbirdxt.argument_builder import HummingbirdXTArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class HummingbirdXTAdapter(BackendAdapter):

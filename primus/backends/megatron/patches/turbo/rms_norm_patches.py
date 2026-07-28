@@ -13,7 +13,7 @@ Patches for replacing RMSNorm with PrimusTurbo implementation.
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _is_turbo_rms_norm_can_patch(ctx: PatchContext) -> bool:

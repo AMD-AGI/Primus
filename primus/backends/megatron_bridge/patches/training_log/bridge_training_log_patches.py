@@ -36,7 +36,7 @@ import threading
 from typing import Optional
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # Per-step actual sequence length captured from prepare_finetuning_batch.
 # Accessed from the same training-loop thread; the lock guards against

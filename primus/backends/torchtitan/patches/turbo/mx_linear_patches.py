@@ -16,7 +16,7 @@ expressed as a backend patch so it can be managed via the Primus patch system.
 """
 
 from primus.core.patches import PatchContext, get_param, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 @register_patch(

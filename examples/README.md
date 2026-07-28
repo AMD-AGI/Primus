@@ -49,7 +49,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v26.3
+docker pull docker.io/rocm/primus:v26.4
 
 ```
 
@@ -126,7 +126,7 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.3"
+export DOCKER_IMAGE="docker.io/rocm/primus:v26.4"
 export NNODES=8
 
 # Example for megatron llama3.1_8B
@@ -208,6 +208,13 @@ The following models are supported out of the box via provided configuration fil
 | Mixtral-8x7B-v0.1 | [mistralai/Mixtral-8x7B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)           | [mixtral_8x7B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml)           | |
 | Mixtral-8x22B-v0.1 | [mistralai/Mixtral-8x22B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)           | [mixtral_8x22B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml)           | |
 
+### Diffusion Models
+
+- **Flux** - Flow-based diffusion model for text-to-image generation
+  - Training guide: [examples/megatron/diffusion/README.md](megatron/diffusion/README.md) (Flux 535M and 12B)
+  - Architecture & developer docs: [docs/04-technical-guides/diffusion-models/README.md](../docs/04-technical-guides/diffusion-models/README.md)
+  - FP8 training: [docs/04-technical-guides/diffusion-models/fp8_training.md](../docs/04-technical-guides/diffusion-models/fp8_training.md)
+
 ---
 
 ### 🏃‍♂️ How to Run a Supported Model
@@ -285,7 +292,7 @@ When using the `create` command to start a new training workload, the following 
 | `--gpu`        | Number of GPUs                                       | 8                                        |
 | `--exp`        | Path to experiment (training config) file (required) | —                                        |
 | `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.3` |
+| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.4` |
 | `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
 | `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
 | `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |

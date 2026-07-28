@@ -28,12 +28,45 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import (
+from primus.core.utils.module_utils import (
     error_rank_0,
     log_rank_0,
     set_logging_rank,
     warning_rank_0,
 )
+
+# Primus-internal params that are not part of MaxText's config schema. MaxText
+# v26.4's pyconfig raises on unknown fields (v26.3 merely warns), so these must
+# be stripped before the config is handed to ``pyconfig.initialize``.
+_PRIMUS_ONLY_PARAMS = (
+    "file_sink_level",
+    "stderr_sink_level",
+    "sink_level",
+    "trainable",
+    "model",
+)
+
+
+def _resolve_maxtext_train():
+    """Resolve MaxText's train entrypoints across MaxText versions.
+
+    MaxText v26.4+ ships as the ``maxtext`` package with the training loop at
+    ``maxtext.trainers.pre_train.train``. MaxText v26.3 and earlier expose it
+    as ``MaxText.train``. Prefer the newer layout and fall back to the legacy
+    one so a single Primus checkout works against both images.
+
+    Returns:
+        Tuple of ``(initialize, run, module_name)`` where ``module_name`` is the
+        importable module string to use as ``argv[0]`` for ``initialize``.
+    """
+    try:
+        from maxtext.trainers.pre_train.train import initialize, run
+
+        return initialize, run, "maxtext.trainers.pre_train.train"
+    except ImportError:
+        from MaxText.train import initialize, run
+
+        return initialize, run, "MaxText.train"
 
 
 class MaxTextPretrainTrainer(BaseTrainer):
@@ -41,13 +74,19 @@ class MaxTextPretrainTrainer(BaseTrainer):
     Trainer class for MaxText pre-training.
     """
 
-    def __init__(self, backend_args: Any):
-        super().__init__(backend_args=backend_args)
+    def __init__(self, backend_args: Any = None, **kwargs):
+        # The core runtime instantiates every trainer with BaseModule-style
+        # context kwargs (module_name, primus_config, module_rank, ...). MaxText
+        # does not need them; accept and forward so BaseTrainer can filter them.
+        super().__init__(backend_args=backend_args, **kwargs)
 
         # Training state (populated in init())
         self.train_config: Optional[Any] = None
         self.recorder: Optional[Any] = None
         self.diagnostic_config: Optional[Any] = None
+        # Raw tuple returned by MaxText's initialize(); forwarded verbatim to
+        # run() so we stay agnostic to its return arity across MaxText versions.
+        self._init_result: tuple = ()
 
         log_rank_0("Initialized MaxTextPretrainTrainer")
 
@@ -72,7 +111,7 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
-        from MaxText.train import initialize
+        initialize, _, module_name = _resolve_maxtext_train()
 
         from primus.backends.maxtext.argument_builder import (
             export_params_to_yaml,
@@ -83,15 +122,33 @@ class MaxTextPretrainTrainer(BaseTrainer):
         params_dict = namespace_to_dict(self.backend_args)
         params_dict.pop("override_model", None)
 
+        # Strip Primus-internal params that MaxText's config schema rejects.
+        for key in _PRIMUS_ONLY_PARAMS:
+            params_dict.pop(key, None)
+
         yaml_path = export_params_to_yaml(params_dict)
         try:
-            argv = ["MaxText.train", yaml_path]
-            self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
+            argv = [module_name, yaml_path]
+            init_result = initialize(argv, **override_model_args)
         finally:
             try:
                 os.unlink(yaml_path)
             except OSError as e:
                 error_rank_0(f"MaxTextPretrainTrainer: Failed to delete temporary YAML at {yaml_path}: {e}")
+
+        # MaxText's ``initialize()`` return arity changed across versions:
+        #   - v26.4 and earlier: ``(config, recorder, diagnostic_config)``
+        #   - v26.5+:            ``(config, recorder)`` (diagnostic_config dropped)
+        # Keep the raw tuple so ``train()`` can forward it verbatim to ``run()``,
+        # whose parameter count matches ``initialize()``'s arity in the same
+        # version. Unpacking a fixed number of names here is what previously
+        # crashed on v26.5 with "not enough values to unpack (expected 3, got 2)".
+        if not isinstance(init_result, tuple):
+            init_result = (init_result,)
+        self._init_result = init_result
+        self.train_config = init_result[0] if len(init_result) > 0 else None
+        self.recorder = init_result[1] if len(init_result) > 1 else None
+        self.diagnostic_config = init_result[2] if len(init_result) > 2 else None
 
         self._update_logger_rank()
         log_rank_0("MaxText training components initialized successfully")
@@ -170,8 +227,11 @@ class MaxTextPretrainTrainer(BaseTrainer):
 
         log_rank_0("Executing MaxText pretrain...")
 
-        from MaxText.train import run
+        _, run, _ = _resolve_maxtext_train()
 
-        run(self.train_config, self.recorder, self.diagnostic_config)
+        # Forward the exact tuple returned by initialize(); run()'s signature
+        # matches initialize()'s arity within a given MaxText version (3 args on
+        # v26.4 with diagnostic_config, 2 args on v26.5+).
+        run(*self._init_result)
 
         log_rank_0("MaxText pretrain execution completed.")

@@ -6,6 +6,7 @@
 import functools
 from contextlib import contextmanager
 
+import pytest
 import torch
 import torch.distributed as dist
 import transformer_engine as te
@@ -22,13 +23,21 @@ from torch.testing._internal.common_utils import (
 )
 from transformer_engine.pytorch import LayerNormLinear, Linear, fp8_autocast
 
-from primus.backends.transformer_engine import transformer_engine_torch as ptex
-from primus.backends.transformer_engine.pytorch.module.base import (
+# The Primus TE comm-overlap extension imports the ROCm ``hip`` Python module
+# (``primus.backends.transformer_engine.transformer_engine_torch.comm_overlap``).
+# Skip the whole module when ``hip`` isn't importable (non-ROCm or minimally
+# provisioned host) instead of failing at collection time.
+pytest.importorskip("hip", reason="ROCm 'hip' Python module not available")
+
+from primus.backends.transformer_engine import (  # noqa: E402
+    transformer_engine_torch as ptex,
+)
+from primus.backends.transformer_engine.pytorch.module.base import (  # noqa: E402
     get_workspace,
     initialize_ub,
 )
-from primus.core.utils import logger
-from primus.modules.module_utils import set_logging_rank
+from primus.core.utils import logger  # noqa: E402
+from primus.core.utils.module_utils import set_logging_rank  # noqa: E402
 
 
 @contextmanager

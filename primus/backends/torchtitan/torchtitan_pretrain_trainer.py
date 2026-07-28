@@ -17,11 +17,14 @@ from primus.core.trainer.base_trainer import BaseTrainer
 class TorchTitanPretrainTrainer(BaseTrainer):
     """Trainer class for TorchTitan pre-training."""
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, **kwargs):
         # Patch TorchTitan logger before any other initialization
         self._patch_torchtitan_logger()
 
-        super().__init__(backend_args=backend_args)
+        # The core runtime instantiates every trainer with BaseModule-style
+        # context kwargs (module_name, primus_config, module_rank, ...). Accept
+        # and forward them so BaseTrainer can filter them cooperatively.
+        super().__init__(backend_args=backend_args, **kwargs)
         self._trainer: Optional["Trainer"] = None  # type: ignore[name-defined]
 
     def _patch_torchtitan_logger(self):

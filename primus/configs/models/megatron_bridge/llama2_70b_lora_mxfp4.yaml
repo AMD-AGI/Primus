@@ -1,0 +1,4 @@
+# MXFP4 LoRA recipe for MLPerf Llama2-70B (MI355X)
+recipe: primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.llama2_custom
+flavor: llama2_70b_lora_mxfp4_config
+hf_path: meta-llama/Llama-2-70b-hf

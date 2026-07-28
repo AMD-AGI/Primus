@@ -22,7 +22,7 @@ from typing import Iterable, Set
 import torch
 from megatron.core.utils import unwrap_model
 
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 PEFT_RECOMPUTE_PATCHED: Set[int] = set()
 

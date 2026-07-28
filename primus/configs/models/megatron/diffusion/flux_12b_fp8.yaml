@@ -1,0 +1,122 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B with FP8 Configuration for AMD MI300X
+#
+# This configuration enables FP8 (8-bit floating point) training for Flux 12B,
+# providing ~2x memory reduction and 1.5-2x training speedup while maintaining
+# numerical stability through delayed scaling.
+#
+# Target Hardware:
+#   - AMD MI300X GPUs with ROCm 6.0+
+#   - Requires Transformer Engine 2.1.0+ with ROCm backend
+#
+# Benefits:
+#   - ~2x memory reduction (activations and weights)
+#   - 1.5-2x training speedup on MI300X
+#   - Maintains numerical stability via delayed scaling
+#   - Allows larger batch sizes or higher resolutions
+#
+# Use cases:
+#   - Memory-constrained training scenarios
+#   - Faster iteration during experimentation
+#   - Training with limited GPU resources
+#   - Production training with improved efficiency
+
+extends:
+  - flux_12b.yaml
+
+# ==============================================================================
+# FP8 Configuration
+# ==============================================================================
+
+# Enable FP8 precision for training
+fp8: "e4m3"  # Use E4M3 format for all FP8 tensors
+             # Alternative: "hybrid" (E4M3 for activations/weights, E5M2 for grad outputs)
+
+# FP8 Recipe: Controls scaling strategy
+fp8_recipe: "delayed"  # Delayed scaling for numerical stability (recommended)
+                       # Alternatives: "tensorwise", "blockwise", "mxfp8"
+                       # Note: delayed scaling is most stable for training
+
+# Scaling Factor Configuration
+fp8_margin: 0  # Margin for scaling factor computation (0 = no margin)
+fp8_amax_history_len: 1024  # History window length for delayed scaling
+                            # Larger = more stable, smaller = adapts faster
+fp8_amax_compute_algo: "most_recent"  # Algorithm for amax computation
+                                      # Options: "most_recent", "max"
+
+# FP8 Gradient Configuration
+fp8_wgrad: true  # Enable FP8 for weight gradients (recommended for memory)
+                 # Set to false if numerical issues occur
+
+# Attention Precision (keep in higher precision for stability)
+fp8_dot_product_attention: false  # Keep dot product attention in BF16/FP32
+fp8_multi_head_attention: false   # Keep multi-head attention in BF16/FP32
+
+# ==============================================================================
+# Optimization Adjustments for FP8
+# ==============================================================================
+
+# Gradient clipping is still important with FP8
+# May need adjustment if training becomes unstable
+clip_grad: 1.0
+
+# ==============================================================================
+# Hardware Requirements (FP8)
+# ==============================================================================
+
+# Training with FP8:
+#   - Minimum: 4x MI300X 192GB (vs 8x without FP8)
+#   - Recommended: 8x MI300X 192GB with RDMA
+#   - Batch size: Can increase by ~2x vs BF16
+#   - Memory: ~35-40GB per GPU (vs ~70GB BF16)
+
+# Inference with FP8:
+#   - Minimum: 1x MI300X 192GB
+#   - Memory: ~12-15GB for model weights + activations (vs ~24GB BF16)
+
+# ==============================================================================
+# Training Recommendations for FP8
+# ==============================================================================
+
+# Suggested Training Config (adjusted for FP8):
+#   micro_batch_size: 2 (vs 1 for BF16)
+#   global_batch_size: 256 (same as BF16)
+#   learning_rate: 1.0e-4 (same as BF16)
+#   weight_decay: 0.01 (same as BF16)
+#   warmup_steps: 1000 (same as BF16)
+#   total_steps: 100000 (same as BF16)
+
+# Parallelism Strategy (FP8):
+#   - Data Parallel (DP): 8
+#   - Tensor Parallel (TP): 1 (less memory pressure with FP8)
+#   - Pipeline Parallel (PP): 1
+#   - Sequence Parallel (SP): false
+
+# ==============================================================================
+# Troubleshooting
+# ==============================================================================
+
+# If training becomes unstable (NaN/Inf losses):
+#   1. Increase fp8_amax_history_len to 2048 or 4096
+#   2. Set fp8_wgrad: false (use higher precision for weight gradients)
+#   3. Increase fp8_margin to 1 or 2
+#   4. Try fp8_amax_compute_algo: "max" instead of "most_recent"
+#   5. Consider keeping first/last layers in BF16 (set first_last_layers_bf16: true)
+
+# If insufficient memory even with FP8:
+#   - Enable gradient checkpointing (recompute_granularity: "selective")
+#   - Increase tensor parallelism (tensor_model_parallel_size: 2)
+#   - Reduce batch size further
+
+# ==============================================================================
+# Verification
+# ==============================================================================
+
+# Before production use, verify:
+#   - Transformer Engine FP8 support: Check with setup_fp8_rocm.sh
+#   - Forward pass stability: Run test_flux_precision.py::test_flux_fp8_forward
+#   - Training convergence: Compare loss curves with BF16 baseline
+#   - Memory usage: Should be ~50% of BF16 training
+#   - Training speed: Should be 1.5-2x faster than BF16

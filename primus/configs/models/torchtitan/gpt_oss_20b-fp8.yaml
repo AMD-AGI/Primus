@@ -1,0 +1,14 @@
+job:
+  dump_folder: "./outputs"
+  description: "GPT-OSS 20B FP8 training"
+
+model:
+  name: "gpt_oss"
+  flavor: "20b"
+  hf_assets_path: "openai/gpt-oss-20b"
+  # Attention (sinks + sliding window) is routed to Primus-Turbo via the
+  # gptoss_sink_attention setup patch. FP8 dense linears are enabled through the
+  # quantize.linear.float8 converter, which the turbo_float8_linear patch swaps
+  # for the Primus-Turbo FP8 converter when use_turbo_float8_linear is set.
+  converters:
+    - quantize.linear.float8

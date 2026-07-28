@@ -227,7 +227,7 @@ def write_trial_yaml(arch: ArchitectureRecord, cfg: TrialConfig, out_dir: Path, 
     # enable ``use_turbo_gemm `` inside Primus's projection. Two
     # things go wrong on the v26.2 container ``primus_turbo==0.2.0``:
     #   * The default ``fp8_recipe: delayed`` is incompatible with that path
-    #     (``primus/modules/trainer/megatron/utils.py:464`` asserts).
+    #     (``primus/backends/megatron/patches/args/rocm_arg_validation.py`` asserts).
     #   * The dense FP8 GEMM op (``primus_turbo.pytorch.ops.gemm_fp8``) on
     #     this version raises ``ValueError: Unsupported FP8 format: HYBRID``
     #     for ``fp8: hybrid`` (a common DSv3 / Kimi-K2 configuration).

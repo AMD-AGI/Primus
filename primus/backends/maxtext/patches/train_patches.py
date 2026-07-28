@@ -16,7 +16,26 @@ import functools
 from typing import Any, Sequence
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
+
+
+def _resolve_train_and_pyconfig():
+    """Resolve MaxText's train module and pyconfig across MaxText versions.
+
+    MaxText v26.4+ exposes the training loop at
+    ``maxtext.trainers.pre_train.train`` and config at ``maxtext.configs.pyconfig``.
+    MaxText v26.3 and earlier expose ``MaxText.train`` and ``MaxText.pyconfig``.
+    """
+    try:
+        from maxtext.configs import pyconfig
+        from maxtext.trainers.pre_train import train as orig_train
+
+        return orig_train, pyconfig
+    except ImportError:
+        import MaxText.train as orig_train
+        from MaxText import pyconfig
+
+        return orig_train, pyconfig
 
 
 @register_patch(
@@ -28,13 +47,19 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
 )
 def patch_train(ctx: PatchContext) -> None:
     """
-    Monkey-patch ``MaxText.train.initialize`` so that callers can pass
+    Monkey-patch MaxText's ``train.initialize`` so that callers can pass
     ``**kwargs`` which are transparently forwarded to ``pyconfig.initialize``.
     """
     log_rank_0("[Patch:maxtext.train] Patching MaxText train module...")
 
-    import MaxText.train as orig_train
-    from MaxText import pyconfig
+    try:
+        orig_train, pyconfig = _resolve_train_and_pyconfig()
+    except ImportError as e:
+        warning_rank_0(
+            f"[Patch:maxtext.train] Could not locate MaxText train/pyconfig module; "
+            f"skipping override-forwarding patch: {e}"
+        )
+        return
 
     _upstream_initialize = orig_train.initialize
 

@@ -1,0 +1,184 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B Schnell Training — DDP + TransformerEngine Spec + BF16 (MI355X)
+#
+# BF16 training using Megatron DDP + distributed optimizer with
+# TransformerEngine modules (TEColumnParallelLinear / TERowParallelLinear /
+# TEDotProductAttention / TENorm). This is the BF16 baseline on the
+# TransformerEngine path; see the *_te_spec_fp8 variant for FP8.
+#
+# Key settings:
+#   bf16: true
+#   params_dtype: bfloat16
+#   micro_batch_size: 64 / global_batch_size: 512
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_12b_ddp_te_bf16}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: diffusion/flux_12b_rope_fusion.yaml
+
+    trainer_class: FluxPretrainTrainer
+
+    overrides:
+      model_type: flux_schnell
+
+      # ==========================================
+      # Flux Schnell training recipe
+      # ==========================================
+      timestep_sampling_strategy: "direct_uniform"
+      activation_func: "openai_gelu"
+      cfg_dropout_prob: 0.1
+
+      # VAE latent normalization (required for resample mode)
+      vae_scale: 0.3611
+      vae_shift: 0.1159
+
+      # Resample mode: re-draw latents from mean+logvar each step
+      vae_latent_mode: resample
+
+      # RoPE: must be interleaved to match Flux's EmbedND doubled-frequency layout
+      rotary_interleaved: true
+
+      # ==========================================
+      # TransformerEngine Spec (default)
+      # ==========================================
+      transformer_impl: "transformer_engine"
+
+      # ==========================================
+      # ENERGON DATASET CONFIGURATION
+      # ==========================================
+      data_path: ${PRIMUS_DIFFUSION_DATA_PATH:/path/to/energon/dataset}
+
+      # Training iterations (example value; increase for a full training run)
+      train_iters: 1000
+      eval_interval: 10000
+      eval_iters: 0
+      log_interval: 1
+      save_interval: 10000
+
+      # Batch configuration
+      micro_batch_size: 64
+      global_batch_size: 512
+      seq_length: 512
+
+      # ==========================================
+      # BF16 Precision
+      # ==========================================
+      bf16: true
+      fp16: false
+      params_dtype: bfloat16
+      grad_reduce_in_bf16: true
+
+      # Optimizer settings (identical to BF16 baseline)
+      optimizer: adam
+      lr: 2.0e-4
+      min_lr: 2.0e-4
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      clip_grad: 1.0
+
+      # Learning rate scheduler (warmup-hold, no decay)
+      lr_warmup_iters: 1600
+      lr_decay_iters: 4000
+      lr_decay_style: constant
+
+      # DataLoader settings
+      num_workers: 8
+      dataloader_type: external
+      max_samples_per_sequence: null
+
+      # ==========================================
+      # Megatron DDP + Distributed Optimizer
+      # ==========================================
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+
+      use_torch_fsdp2: false
+      use_megatron_fsdp: false
+      use_fsdp2_fp32_param_optimizer: false
+
+      ckpt_format: torch_dist
+
+      use_distributed_optimizer: true
+
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      overlap_param_gather_with_optimizer_step: false
+      use_precision_aware_optimizer: false
+
+      ddp_bucket_size: 256000000
+
+      gradient_accumulation_fusion: false
+
+      # ==========================================
+      # Memory Optimizations
+      # ==========================================
+
+      use_flash_attn: true
+
+      fp8: null
+
+      empty_unused_memory_level: 0
+
+      distributed_timeout_minutes: 60
+      distributed_backend: nccl
+
+      # Checkpointing (disabled)
+      finetune: false
+      save: null
+      load: null
+      no_save_optim: true
+      no_save_rng: true
+      auto_continue_train: false
+      disable_last_saving: true
+
+      # Logging
+      tensorboard_dir: output/tensorboard/flux_12b_ddp_te_bf16
+      wandb_project: flux_12b_ddp_te_bf16
+      log_throughput: true
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_memory_to_tensorboard: true
+
+      # PyTorch Profiler
+      profile: false
+      use_pytorch_profiler: true
+      profile_ranks: [0]
+      profile_step_start: 9
+      profile_step_end: 11
+      torch_profiler_record_shapes: true
+      torch_profiler_with_stack: true
+      torch_profiler_use_gzip: false
+      disable_profiler_activity_cpu: false
+
+      # Primus Turbo Configuration
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      seed: 2025
+      te_rng_tracker: true
+
+      # Torch Compile — stack strategy (compiles the double/single DiT block
+      # stacks as inductor regions). Required to fit micro_batch_size 64 in
+      # BF16 on the TE path; matches the MLPerf NeMo reference (COMPILE_DIT
+      # strategy=stack).
+      torch_compile:
+        enable: true
+        strategy: "stack"
+        backend: "inductor"
+        mode: "default"
+        fullgraph: false
+        compile_optimizer: false

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -14,11 +14,6 @@ import pytest
 
 import primus.core.backend.backend_registry as registry_module
 from primus.core.backend.backend_adapter import BackendAdapter
-
-_SUPPORTS_TRAINER_CLASS_REGISTRY = all(
-    hasattr(registry_module.BackendRegistry, attr)
-    for attr in ("_trainer_classes", "register_trainer_class", "get_trainer_class", "has_trainer_class")
-)
 
 
 class MockAdapter(BackendAdapter):
@@ -45,12 +40,6 @@ class TestBackendRegistryErrorHandling:
         # Save original state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
         registry_module.BackendRegistry._adapters.clear()
-        if hasattr(registry_module.BackendRegistry, "_trainer_classes"):
-            self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
-            registry_module.BackendRegistry._trainer_classes.clear()
-        else:
-            self._original_trainer_classes = None
-
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
@@ -58,11 +47,6 @@ class TestBackendRegistryErrorHandling:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
-        if (
-            hasattr(registry_module.BackendRegistry, "_trainer_classes")
-            and self._original_trainer_classes is not None
-        ):
-            registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
@@ -75,13 +59,6 @@ class TestBackendRegistryErrorHandling:
         # when the backend module doesn't exist.
         with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.non_existent'"):
             registry_module.BackendRegistry.get_adapter("non_existent")
-
-    def test_get_adapter_empty_registry_error(self):
-        """Test error message when no backends are registered."""
-        # get_adapter first calls _load_backend, which fails with ModuleNotFoundError
-        # when the backend module doesn't exist.
-        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.any_backend'"):
-            registry_module.BackendRegistry.get_adapter("any_backend")
 
     def test_get_adapter_creation_failure(self):
         """Test error handling when adapter creation fails."""
@@ -120,11 +97,6 @@ class TestBackendRegistryLazyLoading:
         # Reset adapter registry state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
         registry_module.BackendRegistry._adapters.clear()
-        if hasattr(registry_module.BackendRegistry, "_trainer_classes"):
-            self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
-            registry_module.BackendRegistry._trainer_classes.clear()
-        else:
-            self._original_trainer_classes = None
 
         # Ensure backend module can be re-imported so that lazy loading
         # re-runs registration even if other tests imported it earlier.
@@ -139,11 +111,6 @@ class TestBackendRegistryLazyLoading:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
-        if (
-            hasattr(registry_module.BackendRegistry, "_trainer_classes")
-            and self._original_trainer_classes is not None
-        ):
-            registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
         registry_module.log_rank_0 = self._orig_log_rank_0
 
         # Restore original backend module to avoid impacting other tests
@@ -156,11 +123,6 @@ class TestBackendRegistryLazyLoading:
         """Test that _try_load_backend handles non-existent backends gracefully."""
         with pytest.raises(ImportError):
             registry_module.BackendRegistry._try_load_backend("definitely_not_a_backend")
-
-    def test_try_load_backend_returns_bool(self):
-        """Test that _try_load_backend returns boolean."""
-        with pytest.raises(ImportError):
-            registry_module.BackendRegistry._try_load_backend("non_existent")
 
     def test_get_adapter_with_lazy_loading(self):
         """Test that get_adapter triggers lazy loading."""
@@ -188,25 +150,6 @@ class TestBackendRegistryLazyLoading:
         assert "backend1" in available
         assert "backend2" in available
         assert len(available) == 2
-
-    def test_list_available_backends_empty(self):
-        """Test listing when no backends registered."""
-        available = registry_module.BackendRegistry.list_available_backends()
-        assert available == []
-
-
-class TestBackendRegistryPathNames:
-    """Deprecated: path-name mapping removed; backend path resolution is owned by adapters."""
-
-    def test_path_name_mapping_removed(self):
-        pytest.skip("BackendRegistry path-name mapping removed; use adapter.third_party_dir_name.")
-
-
-class TestBackendRegistrySetupPath:
-    """Deprecated: setup_backend_path moved to BackendAdapter.setup_backend_path()."""
-
-    def test_setup_backend_path_removed(self):
-        pytest.skip("BackendRegistry.setup_backend_path removed; use adapter.setup_backend_path().")
 
 
 class TestBackendRegistryGetAdapterIntegration:
@@ -262,95 +205,6 @@ class TestBackendRegistryGetAdapterIntegration:
             registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
 
 
-class TestBackendRegistryHasAdapter:
-    """Test has_adapter functionality."""
-
-    def setup_method(self):
-        """Clear registry before each test."""
-        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        registry_module.BackendRegistry._adapters.clear()
-
-    def teardown_method(self):
-        """Restore registry after each test."""
-        registry_module.BackendRegistry._adapters = self._original_adapters
-
-    def test_has_adapter_true(self):
-        """Test has_adapter returns True for registered adapter."""
-        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
-
-        assert registry_module.BackendRegistry.has_adapter("test_backend") is True
-
-    def test_has_adapter_false(self):
-        """Test has_adapter returns False for non-registered adapter."""
-        assert registry_module.BackendRegistry.has_adapter("non_existent") is False
-
-
-@pytest.mark.skipif(
-    not _SUPPORTS_TRAINER_CLASS_REGISTRY,
-    reason="Trainer class registry is not available on BackendRegistry in this version.",
-)
-class TestBackendRegistryTrainerClasses:
-    """Test trainer class registration and retrieval."""
-
-    def setup_method(self):
-        """Clear trainer classes before each test."""
-        if not hasattr(registry_module.BackendRegistry, "_trainer_classes"):
-            pytest.skip("BackendRegistry has no _trainer_classes in this version.")
-        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
-        registry_module.BackendRegistry._trainer_classes.clear()
-
-    def teardown_method(self):
-        """Restore trainer classes after each test."""
-        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
-
-    def test_register_and_get_trainer_class(self):
-        """Test registering and retrieving trainer classes."""
-
-        class DummyTrainer:
-            pass
-
-        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend")
-
-        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend")
-        assert trainer_cls is DummyTrainer
-
-    def test_get_trainer_class_not_found(self):
-        """Test error when trainer class not registered."""
-        with pytest.raises(ValueError) as exc_info:
-            registry_module.BackendRegistry.get_trainer_class("non_existent_backend")
-
-        assert "No trainer class registered for backend 'non_existent_backend'" in str(exc_info.value)
-
-    def test_has_trainer_class(self):
-        """Test has_trainer_class reflects registration state."""
-
-        class DummyTrainer:
-            pass
-
-        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
-        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend")
-        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is True
-
-    def test_register_and_get_trainer_class_with_stage(self):
-        """Test trainer registration with explicit stage."""
-
-        class DummyTrainer:
-            pass
-
-        # Register with explicit stage "sft"
-        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend", stage="sft")
-
-        # Get with explicit stage "sft" should work
-        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend", stage="sft")
-        assert trainer_cls is DummyTrainer
-
-        # has_trainer_class with explicit stage should work
-        assert registry_module.BackendRegistry.has_trainer_class("test_backend", stage="sft") is True
-
-        # Default stage "pretrain" should not find it
-        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
-
-
 class TestBackendRegistrySetupHooks:
     """Test setup hook registration and execution."""
 
@@ -402,6 +256,68 @@ class TestBackendRegistrySetupHooks:
 
         assert "[Primus:BackendSetup] Running 1 setup hooks for backend 'test_backend'." in captured.out
         assert "Error in setup hook" in captured.out
+
+
+class TestBackendRegistryTrainerClass:
+    """Test the trainer-class registry API.
+
+    ``register_trainer_class`` / ``get_trainer_class`` / ``has_trainer_class``
+    back the stage-based fallback in ``MegatronAdapter.load_trainer_class`` (and
+    the other backend adapters), so they must keep (backend, stage) keying and
+    raise on lookups for unregistered combinations.
+    """
+
+    def setup_method(self):
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        registry_module.BackendRegistry._trainer_classes.clear()
+
+    def teardown_method(self):
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+
+    def test_register_and_get_trainer_class(self):
+        class DummyTrainer:
+            pass
+
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "megatron", stage="pretrain")
+
+        assert registry_module.BackendRegistry.get_trainer_class("megatron", stage="pretrain") is DummyTrainer
+        assert registry_module.BackendRegistry.has_trainer_class("megatron", stage="pretrain") is True
+
+    def test_register_defaults_to_pretrain_stage(self):
+        class DummyTrainer:
+            pass
+
+        # Default stage is "pretrain" for both register and lookup.
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "megatron")
+        assert registry_module.BackendRegistry.get_trainer_class("megatron") is DummyTrainer
+
+    def test_stage_is_part_of_the_key(self):
+        class PretrainTrainer:
+            pass
+
+        registry_module.BackendRegistry.register_trainer_class(PretrainTrainer, "megatron", stage="pretrain")
+
+        # A different stage for the same backend must NOT resolve to the
+        # pretrain class; it is a distinct registry key.
+        assert registry_module.BackendRegistry.has_trainer_class("megatron", stage="sft") is False
+        with pytest.raises(ValueError):
+            registry_module.BackendRegistry.get_trainer_class("megatron", stage="sft")
+
+    def test_get_unregistered_trainer_class_raises(self):
+        assert registry_module.BackendRegistry.has_trainer_class("nonexistent") is False
+        with pytest.raises(ValueError, match="No trainer class registered"):
+            registry_module.BackendRegistry.get_trainer_class("nonexistent")
+
+    def test_register_overwrites_same_key(self):
+        class TrainerA:
+            pass
+
+        class TrainerB:
+            pass
+
+        registry_module.BackendRegistry.register_trainer_class(TrainerA, "megatron", stage="pretrain")
+        registry_module.BackendRegistry.register_trainer_class(TrainerB, "megatron", stage="pretrain")
+        assert registry_module.BackendRegistry.get_trainer_class("megatron", stage="pretrain") is TrainerB
 
 
 if __name__ == "__main__":

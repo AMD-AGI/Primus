@@ -23,7 +23,7 @@ Config (YAML module param, mirrors PyTorch's DataLoader argument):
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 # Guard against double-patching (e.g. when the patch system runs twice in tests).
 _PATCHED_ATTR = "_primus_dataloader_mp_context_patched"

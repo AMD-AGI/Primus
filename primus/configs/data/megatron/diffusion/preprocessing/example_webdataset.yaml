@@ -1,0 +1,129 @@
+# Preprocessing Configuration Example: WebDataset Input
+#
+# This example shows how to prepare a dataset from existing WebDataset tar files.
+#
+# ============================================================================
+# Quick Start (Recommended - Single Command)
+# ============================================================================
+# Prepare and finalize dataset in one command:
+#
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# The default encoder model (FLUX.1-dev) is gated and requires a
+# HuggingFace token. Get one at https://huggingface.co/settings/tokens
+#
+# Finalization (dataset.yaml + energon prepare) runs automatically.
+# To skip it, pass --no-finalize.
+#
+# ============================================================================
+# Advanced Usage
+# ============================================================================
+# Custom paths:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-path '/your/input/*.tar' \
+#     --output-dir /your/output/path
+# ============================================================================
+
+# ============================================================================
+# Path Configuration
+# ============================================================================
+# Default paths use Docker mounted paths that persist to host:
+#   /workspace/Primus/data/...  →  <your-repo>/data/... on host
+#
+# EASY OVERRIDE: Customize paths with command-line flags:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-path '/your/input/*.tar' \
+#     --output-dir /your/output/path
+#
+# For /data/... paths, set: export DATA_PATH=/data (before starting container)
+# ============================================================================
+
+# ============================================================================
+# Source Configuration (WebDataset)
+# ============================================================================
+source:
+  type: webdataset
+  input_path: '/data/input_dataset/*.tar'  # Glob pattern for WebDataset tars
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/encoded_dataset  # Output directory (persisted to host)
+  shard_size: 1000                                    # Number of samples per output shard
+  max_samples: null                                   # Maximum samples to process (null = all)
+  compress: false                                     # Whether to compress output with gzip
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Base model path (HuggingFace repo or local path)
+  model_path: black-forest-labs/FLUX.1-dev
+
+  # Override individual encoder paths (null means use model_path)
+  vae_path: null    # Custom VAE path
+  t5_path: null     # Custom T5-XXL path
+  clip_path: null   # Custom CLIP-L path
+
+  # Model settings
+  precision: bf16   # Options: bf16, fp16, fp32
+  device: cuda      # Device for encoding
+  batch_size: 8     # Encoding batch size
+
+# ============================================================================
+# Image Preprocessing
+# ============================================================================
+image:
+  image_size: 1024    # Target image size (height and width)
+  center_crop: false  # Whether to center crop before resize
+
+# ============================================================================
+# Input WebDataset Format
+# ============================================================================
+#
+# Your input tar files should contain image-caption pairs:
+#
+# sample_000001.jpg
+# sample_000001.txt
+# sample_000002.jpg
+# sample_000002.txt
+# ...
+#
+# Supported image formats: .jpg, .jpeg, .png, .webp
+# Caption files should be plain text UTF-8 (.txt)
+#
+# ============================================================================
+# Usage
+# ============================================================================
+#
+# Single GPU (uses config paths):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Multi-GPU (8 GPUs):
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Override paths:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --input-path '/workspace/Primus/data/input/*.tar' \
+#     --output-dir /workspace/Primus/data/output
+#
+# Override specific values:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_webdataset.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /your/custom/path \
+#     --batch-size 16
+#

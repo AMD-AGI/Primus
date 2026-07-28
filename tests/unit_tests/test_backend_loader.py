@@ -8,12 +8,11 @@ import os
 import shutil
 import sys
 import tempfile
-import types
 from pathlib import Path
 
 import pytest
 
-from primus.pretrain import load_backend_trainer, setup_backend_path
+from primus.pretrain import setup_backend_path
 
 
 @pytest.fixture
@@ -64,23 +63,3 @@ def test_setup_backend_path_failure():
     """Test that FileNotFoundError is raised when no valid backend path exists."""
     with pytest.raises(FileNotFoundError):
         setup_backend_path(framework="nonexistent_backend")
-
-
-def test_load_backend_trainer_supported(monkeypatch):
-    """Test that load_backend_trainer returns correct class for supported frameworks."""
-    # Mock: Define a dummy class to simulate MegatronPretrainTrainer
-    dummy_class = type("DummyTrainer", (), {})
-    dummy_module = types.ModuleType("primus.modules.trainer.megatron.pre_trainer")
-    dummy_module.MegatronPretrainTrainer = dummy_class
-
-    # Inject into sys.modules to bypass real import
-    sys.modules["primus.modules.trainer.megatron.pre_trainer"] = dummy_module
-
-    trainer_cls = load_backend_trainer("megatron")
-    assert trainer_cls is dummy_class
-
-
-def test_load_backend_trainer_unsupported():
-    """Test that unsupported framework raises ValueError."""
-    with pytest.raises(ValueError, match="Unsupported framework"):
-        load_backend_trainer("invalid_framework")

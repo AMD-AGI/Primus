@@ -48,7 +48,7 @@ try:
     from primus_turbo.pytorch.kernels.quantization.quantization_impl import (
         quant_fp8_blockwise_for_weight_impl,
         quant_fp8_blockwise_impl,
-        quant_fp8_blockwise_segment_m_impl,
+        quant_fp8_blockwise_segment_m_row_col_impl,
     )
     from primus_turbo.pytorch.ops.quantization import quantize_fp8
 except Exception as _e:  # pragma: no cover - depends on environment availability
@@ -67,7 +67,7 @@ except Exception as _e:  # pragma: no cover - depends on environment availabilit
     grouped_gemm_variable_k_impl = None
     quant_fp8_blockwise_for_weight_impl = None
     quant_fp8_blockwise_impl = None
-    quant_fp8_blockwise_segment_m_impl = None
+    quant_fp8_blockwise_segment_m_row_col_impl = None
     quantize_fp8 = None
 
 
@@ -630,7 +630,7 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
                 num_cu=None,
                 default_backend=BackendType.CK.value,
             )
-            a_fp8_col, a_scale_inv_col, _, _ = quant_fp8_blockwise_segment_m_impl(
+            _, a_fp8_col, _, a_scale_inv_col, _, _ = quant_fp8_blockwise_segment_m_row_col_impl(
                 input,
                 fwd_dtype,
                 block_size,
@@ -776,11 +776,13 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
             )
 
             (
+                _,
                 grad_out_fp8_col,
+                _,
                 grad_out_scale_inv_col,
                 var_k_group_lens,
                 var_k_group_offs,
-            ) = quant_fp8_blockwise_segment_m_impl(
+            ) = quant_fp8_blockwise_segment_m_row_col_impl(
                 grad_out,
                 bwd_dtype,
                 block_size,

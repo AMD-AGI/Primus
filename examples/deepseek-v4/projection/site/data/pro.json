@@ -1,0 +1,1750 @@
+{
+  "schema_version": 1,
+  "model": "pro",
+  "analytic_flops": {
+    "per_cr_layer_flops": {
+      "0": 76885870510080,
+      "4": 95420801875968,
+      "128": 78425716948992
+    },
+    "output_flops": 22774064087040,
+    "mtp": {
+      "num_layers": 1,
+      "compress_ratio": 4,
+      "inner_layer_flops": 95420801875968,
+      "eh_proj_flops": 2525440770048,
+      "extra_logits_flops": 22774064087040,
+      "hc_head_flops": 5637144576
+    },
+    "seq": 4096,
+    "note": "per-layer and MTP (B=1) Megatron-convention FLOPs at capture seq; site multiplies by GA x DP"
+  },
+  "generated_at": "2026-06-30T13:59:43Z",
+  "provenance": {
+    "traces": {
+      "0": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_pro_cr0_seq4096_ep8/tensorboard/primus-megatron-exp[projection_pro_cr0_seq4096_ep8]-rank[0].1781792532762897620.pt.trace.json",
+      "4": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_pro_cr4_seq4096_ep8/tensorboard/primus-megatron-exp[projection_pro_cr4_seq4096_ep8]-rank[0].1781792606762968569.pt.trace.json",
+      "128": "/apps/tas/wenx/workspace/Primus-deepseek-v4/output/amd/tas-mi355x-20260618/projection_pro_cr128_seq4096_ep8/tensorboard/primus-megatron-exp[projection_pro_cr128_seq4096_ep8]-rank[0].1781792680203624431.pt.trace.json"
+    },
+    "graphed_crs_estimated_from_cr4": [],
+    "dropped_stall_us_per_mb": {
+      "0": 36705.7,
+      "4": 0.0,
+      "128": 0.0
+    },
+    "note": "cr in graphed_crs_estimated_from_cr4 were CUDA-graph/stream-captured (compute not visible in trace); their breakdown is copied from cr=4 as an estimate. Re-run those cr with graph capture disabled for exact numbers. dropped_stall_us_per_mb: per-mb layer-compute kernel time dropped as implausible one-off device stalls (> _MAX_PLAUSIBLE_LAUNCH_US)."
+  },
+  "capture": {
+    "gpu": "MI355X",
+    "seq_length": 4096,
+    "micro_batch_size": 1,
+    "tokens_per_microbatch": 4096,
+    "ep": 8,
+    "ga_for_capture": 2,
+    "optimizer": "adam",
+    "distributed_optimizer": false,
+    "recompute": "off",
+    "measured_iter_time_ms": null,
+    "measured_anchor": null
+  },
+  "model_config": {
+    "num_layers": 61,
+    "hidden_size": 7168,
+    "num_attention_heads": 128,
+    "kv_channels": 512,
+    "num_experts": 384,
+    "moe_router_topk": 6,
+    "moe_ffn_hidden_size": 3072,
+    "moe_shared_expert_intermediate_size": 3072,
+    "index_topk": 1024,
+    "vocab_size": 129280,
+    "mtp_num_layers": 1,
+    "mtp_compress_ratios": [
+      4
+    ],
+    "pipeline_layout": "",
+    "compress_ratios": [
+      128,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      4,
+      128,
+      0
+    ],
+    "cr_layer_counts": {
+      "0": 1,
+      "4": 29,
+      "128": 31
+    },
+    "total_params": 1597579198464
+  },
+  "hardware": {
+    "MI355X": {
+      "peak_tflops_bf16": 2500.0,
+      "hbm_bandwidth_gbps": 8000.0
+    },
+    "MI455X": {
+      "peak_tflops_bf16": 10000.0,
+      "hbm_bandwidth_gbps": 19600.0
+    }
+  },
+  "layers": {
+    "0": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.misc",
+            "time_us": 7402.198,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 1437.355
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1366.235
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1344.257
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 709.616
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 374.819
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 324.583
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 1623.031,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 1191719206912.0,
+            "tflops": 734.3,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 905.959
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 476.296
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 117.74
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 93.017
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 21.693
+              },
+              {
+                "name": "Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU4_VW4",
+                "time_us": 4.239
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 929.729,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 177.157
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 176.451
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 148.509
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 127.904
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
+                "time_us": 117.211
+              },
+              {
+                "name": "_apply_rope_fwd_kernel",
+                "time_us": 105.693
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 449.499,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 445.103
+              },
+              {
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 4.396
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.misc",
+            "time_us": 13148.636,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3024.544
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 2081.72
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1555.489
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1328.534
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
+                "time_us": 641.61
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
+                "time_us": 616.003
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 10065.546,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 5279185895424.0,
+            "tflops": 524.5,
+            "kernels": [
+              {
+                "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
+                "time_us": 4938.364
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 3769.201
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 489.093
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 201.328
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
+                "time_us": 168.756
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB0_AFC1",
+                "time_us": 161.16
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 1753.653,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_bwd_dkv_kernel",
+                "time_us": 867.357
+              },
+              {
+                "name": "_v4_attention_bwd_dq_kernel",
+                "time_us": 757.883
+              },
+              {
+                "name": "_v4_attention_bwd_preprocess_kernel",
+                "time_us": 123.454
+              },
+              {
+                "name": "_hc_compute_tail_bwd_kernel",
+                "time_us": 4.959
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 105.86,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 105.86
+              }
+            ]
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 4225.655,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 2683.892
+              },
+              {
+                "name": "_stack_grouped_weight_fwd_kernel",
+                "time_us": 1208.776
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 135.577
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 44.34
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
+                "time_us": 43.473
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 41.19
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 427.833,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 386.653
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 41.18
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 422.925,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 382.809
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
+                "time_us": 20.72
+              },
+              {
+                "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
+                "time_us": 19.396
+              }
+            ]
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 252.402,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x256x64_MI16x16x1_SN_LDSB0_AFC",
+                "time_us": 141.417
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 71.463
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 21.462
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
+                "time_us": 7.096
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 6.093
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
+                "time_us": 4.869
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 91.185,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 25.516
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 16.113
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
+                "time_us": 14.06
+              },
+              {
+                "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
+                "time_us": 7.365
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 6.666
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 5.559
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 5933.968,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 4446.509
+              },
+              {
+                "name": "_stack_grouped_weight_bwd_kernel",
+                "time_us": 1055.078
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 423.883
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
+                "time_us": 4.526
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
+                "time_us": 3.972
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 586.867,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 394.596
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 192.271
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 449.116,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 375.466
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
+                "time_us": 73.65
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 44.656,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_bwd_kernel",
+                "time_us": 44.656
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "4": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.misc",
+            "time_us": 7425.221,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 1447.247
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1378.227
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1342.16
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 709.102
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 378.692
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 323.907
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 2128.316,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_csa_attention_pool_sparse_merge_fwd_kernel",
+                "time_us": 1717.604
+              },
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 405.95
+              },
+              {
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 4.762
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 1622.73,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 1191719206912.0,
+            "tflops": 734.4,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 914.619
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 468.363
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 117.723
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 92.227
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 21.286
+              },
+              {
+                "name": "Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU4_VW4",
+                "time_us": 4.346
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 1021.024,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 206.375
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 177.044
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 160.454
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 127.904
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
+                "time_us": 123.664
+              },
+              {
+                "name": "_apply_rope_fwd_kernel",
+                "time_us": 107.629
+              }
+            ]
+          },
+          {
+            "module": "attn.indexer",
+            "time_us": 874.391,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 152.603
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 96.286
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
+                "time_us": 96.272
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 84.363
+              },
+              {
+                "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::n",
+                "time_us": 66.402
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 48.821
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.core",
+            "time_us": 15675.167,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_bwd_kernel",
+                "time_us": 10309.148
+              },
+              {
+                "name": "_v4_csa_attention_pool_sparse_bwd_partial_kernel",
+                "time_us": 4963.764
+              },
+              {
+                "name": "_v4_csa_attention_pool_segreduce_kernel",
+                "time_us": 276.325
+              },
+              {
+                "name": "_v4_attention_bwd_preprocess_kernel",
+                "time_us": 120.904
+              },
+              {
+                "name": "_hc_compute_tail_bwd_kernel",
+                "time_us": 5.026
+              }
+            ]
+          },
+          {
+            "module": "attn.misc",
+            "time_us": 14359.617,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3023.79
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 2219.844
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1570.513
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1332.678
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
+                "time_us": 898.568
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 890.739
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 10271.383,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 5399444979712.0,
+            "tflops": 525.7,
+            "kernels": [
+              {
+                "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
+                "time_us": 4991.694
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 3854.896
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 487.807
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 200.238
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
+                "time_us": 168.36
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB0_AFC1",
+                "time_us": 159.567
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 108.736,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 108.736
+              }
+            ]
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 4214.341,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 2677.845
+              },
+              {
+                "name": "_stack_grouped_weight_fwd_kernel",
+                "time_us": 1206.016
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 135.8
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 43.96
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
+                "time_us": 43.02
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 40.16
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 486.166,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 384.236
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
+                "time_us": 82.547
+              },
+              {
+                "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
+                "time_us": 19.383
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 470.04,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 385.316
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 84.724
+              }
+            ]
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 254.469,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x256x64_MI16x16x1_SN_LDSB0_AFC",
+                "time_us": 143.571
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 71.73
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 21.249
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
+                "time_us": 6.96
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 6.136
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
+                "time_us": 4.823
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 91.678,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 25.176
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 16.116
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
+                "time_us": 13.973
+              },
+              {
+                "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
+                "time_us": 7.535
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 6.562
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 5.852
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 5908.193,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 4400.005
+              },
+              {
+                "name": "_stack_grouped_weight_bwd_kernel",
+                "time_us": 1074.128
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 425.279
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
+                "time_us": 4.636
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
+                "time_us": 4.146
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 580.63,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 376.306
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
+                "time_us": 204.325
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 503.433,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 394.109
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 109.324
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 44.866,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_bwd_kernel",
+                "time_us": 44.866
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "128": {
+      "attention": {
+        "forward": [
+          {
+            "module": "attn.misc",
+            "time_us": 7410.422,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 1443.783
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::N",
+                "time_us": 1371.851
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+                "time_us": 1343.05
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+                "time_us": 708.356
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<float, fl",
+                "time_us": 377.102
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 327.05
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 1639.461,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 1191719206912.0,
+            "tflops": 726.9,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 919.326
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 478.756
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT32x64x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 117.167
+              },
+              {
+                "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x128_MI16x16x1_SN_LDSB1_AFC1_AF",
+                "time_us": 94.187
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 21.563
+              },
+              {
+                "name": "Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU4_VW4",
+                "time_us": 4.369
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 1623.015,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymo",
+                "time_us": 653.885
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 181.199
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 177.308
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 156.111
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 127.617
+              },
+              {
+                "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::M",
+                "time_us": 119.317
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 643.754,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_fwd_kernel",
+                "time_us": 639.152
+              },
+              {
+                "name": "_hc_compute_tail_fwd_kernel",
+                "time_us": 4.602
+              }
+            ]
+          },
+          {
+            "module": "attn.indexer",
+            "time_us": 127.799,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::(anonymous namespace)::cunn_SpatialSoftMaxForward<float, float,",
+                "time_us": 45.123
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x64_MI16x16x1_SN_LDSB1_AFC",
+                "time_us": 40.536
+              },
+              {
+                "name": "Cijk_SB_BiasS_HAS_ScaleAlphaVec_PostGSU4_VW4",
+                "time_us": 8.172
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 5.979
+              },
+              {
+                "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<c10::BFloat16, at::n",
+                "time_us": 5.803
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 4.566
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "attn.misc",
+            "time_us": 13440.13,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void at::native::vectorized_templated_elementwise_kernel<4, at::native::CUDAFunc",
+                "time_us": 3030.941
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 2198.898
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 1584.346
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
+                "time_us": 1330.558
+              },
+              {
+                "name": "void transformer_engine::normalization::rmsnorm_bwd_general_kernel<transformer_e",
+                "time_us": 641.923
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
+                "time_us": 621.813
+              }
+            ]
+          },
+          {
+            "module": "attn.proj",
+            "time_us": 10203.677,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": 5339315437568.0,
+            "tflops": 523.3,
+            "kernels": [
+              {
+                "name": "Cijk_Ailk_Bjlk_BSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB0_A",
+                "time_us": 4952.69
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 3794.003
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x32_MI16x16x1_SN_LDSB1_AFC1",
+                "time_us": 487.776
+              },
+              {
+                "name": "Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 201.361
+              },
+              {
+                "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x16_MI16x16x1_SN_LDSB0_AFC1_A",
+                "time_us": 169.553
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB0_AFC1",
+                "time_us": 160.704
+              }
+            ]
+          },
+          {
+            "module": "attn.core",
+            "time_us": 2569.999,
+            "class": "compute_bound",
+            "flop_class": "attn",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_v4_attention_bwd_dq_kernel",
+                "time_us": 928.591
+              },
+              {
+                "name": "_v4_attention_bwd_dkv_kernel",
+                "time_us": 892.0
+              },
+              {
+                "name": "_v4_attention_bwd_dkv_pool_mha_kernel",
+                "time_us": 619.438
+              },
+              {
+                "name": "_v4_attention_bwd_preprocess_kernel",
+                "time_us": 124.994
+              },
+              {
+                "name": "_hc_compute_tail_bwd_kernel",
+                "time_us": 4.976
+              }
+            ]
+          },
+          {
+            "module": "attn.norm",
+            "time_us": 108.186,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_apply_rope_bwd_kernel",
+                "time_us": 108.186
+              }
+            ]
+          }
+        ]
+      },
+      "moe": {
+        "forward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 4170.341,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 2687.575
+              },
+              {
+                "name": "_stack_grouped_weight_fwd_kernel",
+                "time_us": 1151.912
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 135.587
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kern",
+                "time_us": 44.276
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::(anonymous",
+                "time_us": 42.447
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 40.733
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 514.457,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 387.153
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 127.304
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 448.916,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 384.249
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::notify_dispatch<8>(int const*, int*, int ",
+                "time_us": 45.283
+              },
+              {
+                "name": "void primus_turbo::deep_ep::layout::get_dispatch_layout<256, 4, 8>(long const*, ",
+                "time_us": 19.383
+              }
+            ]
+          },
+          {
+            "module": "moe.shared_expert",
+            "time_us": 254.795,
+            "class": "compute_bound",
+            "flop_class": "gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT192x256x64_MI16x16x1_SN_LDSB0_AFC",
+                "time_us": 143.427
+              },
+              {
+                "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+                "time_us": 71.993
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel",
+                "time_us": 21.433
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::(anonymous namespa",
+                "time_us": 7.026
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::BinaryFunctor<c10:",
+                "time_us": 6.246
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_",
+                "time_us": 4.67
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 90.989,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_fwd_kernel",
+                "time_us": 25.629
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_",
+                "time_us": 16.009
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<bool>",
+                "time_us": 13.92
+              },
+              {
+                "name": "void at::native::_scatter_gather_elementwise_kernel<256, 4, at::native::_cuda_sc",
+                "time_us": 7.152
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespa",
+                "time_us": 6.402
+              },
+              {
+                "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel",
+                "time_us": 5.779
+              }
+            ]
+          }
+        ],
+        "backward": [
+          {
+            "module": "moe.grouped_gemm",
+            "time_us": 5906.347,
+            "class": "compute_bound",
+            "flop_class": "grouped_gemm",
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void ck_tile::kentry<1, ck_tile::GroupedGemmKernel<ck_tile::GemmSpatiallyLocalTi",
+                "time_us": 4397.548
+              },
+              {
+                "name": "_stack_grouped_weight_bwd_kernel",
+                "time_us": 1076.558
+              },
+              {
+                "name": "void primus_turbo::grouped_gemm_variable_k_postprocess<std::bfloat16_t>(std::bfl",
+                "time_us": 423.59
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_variable_k_args<std::bfloat16_t, std::bf",
+                "time_us": 4.516
+              },
+              {
+                "name": "void primus_turbo::compute_grouped_gemm_args<std::bfloat16_t, std::bfloat16_t, s",
+                "time_us": 4.136
+              }
+            ]
+          },
+          {
+            "module": "moe.combine",
+            "time_us": 479.096,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::combine<hip_bfloat16, 8, 1024, true>(hip_",
+                "time_us": 394.309
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_combine<8>(void**, int*, in",
+                "time_us": 84.787
+              }
+            ]
+          },
+          {
+            "module": "moe.dispatch",
+            "time_us": 408.969,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "void primus_turbo::deep_ep::intranode::dispatch<8, 1024, true>(HIP_vector_type<i",
+                "time_us": 375.616
+              },
+              {
+                "name": "void primus_turbo::deep_ep::intranode::cached_notify_dispatch<8>(int const*, int",
+                "time_us": 33.353
+              }
+            ]
+          },
+          {
+            "module": "moe.router",
+            "time_us": 45.489,
+            "class": "memory_bound",
+            "flop_class": null,
+            "flops": null,
+            "tflops": null,
+            "kernels": [
+              {
+                "name": "_sinkhorn_bwd_kernel",
+                "time_us": 45.489
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "non_layer": {
+    "embedding": {
+      "forward": [
+        {
+          "module": "embedding",
+          "time_us": 14.566,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": [
+            {
+              "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, lo",
+              "time_us": 14.566
+            }
+          ]
+        }
+      ],
+      "backward": [
+        {
+          "module": "embedding",
+          "time_us": 129.501,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": [
+            {
+              "name": "void at::native::(anonymous namespace)::compute_grad_weight<c10::BFloat16, long>",
+              "time_us": 60.12
+            },
+            {
+              "name": "void at::native::(anonymous namespace)::sum_and_scatter<c10::BFloat16, long>(lon",
+              "time_us": 38.046
+            },
+            {
+              "name": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002",
+              "time_us": 21.477
+            },
+            {
+              "name": "void rocprim::ROCPRIM_400200_NS::detail::init_lookback_scan_state_kernel<rocprim",
+              "time_us": 3.886
+            },
+            {
+              "name": "void at::native::(anonymous namespace)::krn_partials_per_segment<long>(long*, lo",
+              "time_us": 2.026
+            },
+            {
+              "name": "void at::native::(anonymous namespace)::krn_partial_segment_offset<long>(long*, ",
+              "time_us": 2.023
+            }
+          ]
+        }
+      ]
+    },
+    "output": {
+      "forward": [
+        {
+          "module": "output",
+          "time_us": 2688.195,
+          "class": "compute_bound",
+          "flop_class": "gemm",
+          "flops": 3799905206272.0,
+          "tflops": 1413.6,
+          "kernels": [
+            {
+              "name": "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0",
+              "time_us": 2634.481
+            },
+            {
+              "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x512_MI16x16x1_SN_LDSB1_AFC1_AF",
+              "time_us": 53.713
+            }
+          ]
+        }
+      ],
+      "backward": []
+    },
+    "loss": {
+      "forward": [
+        {
+          "module": "loss",
+          "time_us": 350.465,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": [
+            {
+              "name": "cross_entropy_kernel",
+              "time_us": 222.888
+            },
+            {
+              "name": "online_softmax_kernel",
+              "time_us": 127.577
+            }
+          ]
+        }
+      ],
+      "backward": [
+        {
+          "module": "loss",
+          "time_us": 195.848,
+          "class": "memory_bound",
+          "flop_class": null,
+          "flops": null,
+          "tflops": null,
+          "kernels": [
+            {
+              "name": "element_mul_kernel",
+              "time_us": 195.848
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "optimizer": {
+    "type": "adam",
+    "measured_params": null,
+    "time_us": 87037.8,
+    "bytes_per_param": 30,
+    "class": "memory_bound",
+    "note": "Adam mixed-precision step traffic in bytes/param; measured one-layer optimizer-step kernel time is a sanity reference"
+  },
+  "comm": {
+    "ep_dispatch_us": null,
+    "ep_combine_us": null,
+    "note": "EP dispatch/combine are memory_bound rows inside moe; informational"
+  }
+}

@@ -18,7 +18,7 @@ from megatron.core.optimizer.optimizer import (
     multi_tensor_applier,
 )
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.utils.module_utils import log_rank_all
 
 
 class ZeroBubblePPChainedOptimizer(ChainedOptimizer):

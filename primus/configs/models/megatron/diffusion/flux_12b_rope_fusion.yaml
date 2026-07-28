@@ -1,0 +1,50 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 12B with RoPE Fusion Optimization
+#
+# This configuration enables Transformer Engine's fused RoPE kernels for improved performance.
+#
+# ==============================================================================
+# CRITICAL REQUIREMENT: Same-Resolution Batches
+# ==============================================================================
+#
+# RoPE fusion requires ALL images in each training batch to have the SAME
+# resolution (height and width). This constraint exists because the fused kernel
+# expects position IDs with shape [1, H*W/4, 3] that broadcast across the batch.
+#
+# Variable-resolution batches will produce INCORRECT positional encodings and
+# degrade model quality. You will receive a warning at model initialization.
+#
+# Recommended data pipeline configurations:
+#   1. Fixed resolution: All images resized to same size (e.g., 512x512, 1024x1024)
+#   2. Resolution bucketing: Group images by resolution in separate batches
+#   3. Aspect ratio bucketing: Use bucketing with consistent dimensions per batch
+#
+# Technical details:
+# - Follows NVIDIA's MLPerf Flux implementation strategy (hsg_ngpu1152 config)
+# - Uses batch_size=1 for position ID generation (broadcasting handles actual batch)
+# - Compatible with both AMD ROCm and NVIDIA CUDA Transformer Engine forks
+# - Fused kernel requires freqs tensor shape: [S, 1, 1, D]
+#
+# ==============================================================================
+
+extends:
+  - flux_12b.yaml
+
+# ==============================================================================
+# RoPE Fusion Optimization - ENABLED
+# ==============================================================================
+
+apply_rope_fusion: true
+rotary_interleaved: true
+position_embedding_type: rope  # Prevents Megatron validate_args from overriding apply_rope_fusion
+
+# ==============================================================================
+# Transformer Implementation
+# ==============================================================================
+# Options:
+#  - transformer_impl: "transformer_engine" (default) - Use TransformerEngine
+#  - transformer_impl: "local" - Use native Megatron + Primus Turbo (NO TransformerEngine)
+# ==============================================================================
+# Override in training config if needed (default is "transformer_engine")

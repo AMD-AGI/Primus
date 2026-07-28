@@ -15,7 +15,7 @@ avoiding direct edits under ``third_party/Megatron-LM``.
 import inspect
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _te_general_gemm_workspace_mode():

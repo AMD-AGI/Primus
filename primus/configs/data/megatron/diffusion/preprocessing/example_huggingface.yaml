@@ -1,0 +1,124 @@
+# Preprocessing Configuration Example: HuggingFace Dataset
+#
+# This example shows how to prepare a dataset from HuggingFace Hub.
+#
+# ============================================================================
+# Quick Start (Recommended - Single Command)
+# ============================================================================
+# Prepare and finalize dataset in one command (no manual steps!):
+#
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# The default encoder model (FLUX.1-dev) is gated and requires a
+# HuggingFace token. Get one at https://huggingface.co/settings/tokens
+#
+# Finalization (dataset.yaml + energon prepare) runs automatically.
+# To skip it, pass --no-finalize.
+#
+# ============================================================================
+# Advanced Usage
+# ============================================================================
+# Skip auto-finalization (manual post-processing):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token --no-finalize
+#
+# Custom output path:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /your/custom/path
+#
+# Custom train/val/test split (default: 100% train):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --train-split 0.8  # 80% train, 10% val, 10% test
+# ============================================================================
+
+# ============================================================================
+# Path Configuration
+# ============================================================================
+# Default output_dir uses Docker mounted path that persists to host:
+#   /workspace/Primus/data/...  →  <your-repo>/data/... on host
+#
+# EASY OVERRIDE: Customize output location with --output-dir flag:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /your/custom/path
+#
+# For /data/... paths, set: export DATA_PATH=/data (before starting container)
+# ============================================================================
+
+# ============================================================================
+# Source Configuration (HuggingFace)
+# ============================================================================
+source:
+  type: huggingface
+  hf_dataset: diffusers/pokemon-gpt4-captions  # HuggingFace dataset name
+  hf_split: train                              # Dataset split to use
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/encoded_pokemon  # Output directory (persisted to host)
+  shard_size: 1000                                    # Number of samples per output shard
+  max_samples: null                                   # Maximum samples to process (null = all)
+  compress: false                                     # Whether to compress output with gzip
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Base model path (HuggingFace repo or local path)
+  model_path: black-forest-labs/FLUX.1-dev
+
+  # Override individual encoder paths (null means use model_path)
+  vae_path: null    # Custom VAE path
+  t5_path: null     # Custom T5-XXL path
+  clip_path: null   # Custom CLIP-L path
+
+  # Model settings
+  precision: bf16   # Options: bf16, fp16, fp32
+  device: cuda      # Device for encoding
+  batch_size: 8     # Encoding batch size
+
+# ============================================================================
+# Image Preprocessing
+# ============================================================================
+image:
+  image_size: 1024    # Target image size (height and width)
+  center_crop: false  # Whether to center crop before resize
+
+# ============================================================================
+# Usage
+# ============================================================================
+#
+# Single GPU (uses default output_dir from config):
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Multi-GPU (8 GPUs):
+#   primus-cli direct -- --nproc-per-node=8 data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token
+#
+# Override output directory:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /workspace/Primus/data/custom_output
+#
+# Override multiple values:
+#   primus-cli direct -- data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/example_huggingface.yaml \
+#     --hf-token-file /path/to/.hf_token \
+#     --output-dir /my/custom/path \
+#     --batch-size 16 \
+#     --max-samples 1000
+#

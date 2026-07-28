@@ -14,7 +14,7 @@ and divide seq_length accordingly, matching the legacy trainer behavior.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def _needs_seq_split_adjustment(ctx: PatchContext) -> bool:

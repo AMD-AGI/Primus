@@ -41,6 +41,10 @@ Primus uses or references the following third-party projects:
    - License: MIT License (Sea AI Lab, NVIDIA)
    - Repository: https://github.com/sail-sg/zero-bubble-pipeline-parallelism
 
+5. odc (On-Demand Communication)
+   - License: MIT License (Sea AI Lab)
+   - Repository: https://github.com/sail-sg/odc
+
 User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------

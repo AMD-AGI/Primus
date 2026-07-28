@@ -1,0 +1,135 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Base configuration for diffusion models
+# This file defines ARCHITECTURE ONLY - training params go in trainer config
+
+extends:
+  - primus_megatron_model.yaml
+
+# ==============================================================================
+# Model Parallelism
+# ==============================================================================
+
+# Parallelism configuration
+model_parallel_size: null
+tensor_model_parallel_size: 1
+encoder_tensor_model_parallel_size: 0
+context_parallel_size: 1
+cp_comm_type: p2p  # p2p, a2a, allgather or a2a+p2p
+hierarchical_context_parallel_sizes: null
+
+pipeline_model_parallel_size: 1
+pipeline_model_parallel_layout: null
+pipeline_model_parallel_comm_backend: null  # str: nccl, ucc
+encoder_pipeline_model_parallel_size: 0
+pipeline_model_parallel_split_rank: null
+decoder_first_pipeline_num_layers: null  # int
+decoder_last_pipeline_num_layers: null  # int
+num_layers_per_virtual_pipeline_stage: null  # int
+num_virtual_stages_per_pipeline_rank: null  # int
+microbatch_group_size_per_vp_stage: null  # int
+sequence_parallel: true
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: null  # int
+
+# ==============================================================================
+# Architecture Parameters
+# ==============================================================================
+
+# Model tying (required for FSDP2)
+untie_embeddings_and_output_weights: true
+
+# Layer configuration (will be overridden by specific model configs)
+num_layers: null  # Must be set by specific diffusion model configs
+encoder_num_layers: null
+decoder_num_layers: null
+
+# Position embeddings (diffusion models may use different positional encoding)
+max_position_embeddings: 8192  # Maximum sequence length
+
+# Tokenizer (diffusion models don't use tokenizers - text is pre-encoded)
+tokenizer_type: NullTokenizer  # Placeholder tokenizer for diffusion models
+vocab_size: 1  # Placeholder vocab size
+
+# Initialization (architecture-related)
+init_method_std: 0.02      # Standard deviation for weight initialization
+
+# MoE settings (diffusion models typically don't use MoE, but fields needed for compatibility)
+num_experts: null
+moe_layer_freq: 1  # int
+moe_ffn_hidden_size: null  # int
+moe_shared_expert_overlap: false
+moe_shared_expert_intermediate_size: null  # int
+moe_grouped_gemm: false
+moe_router_load_balancing_type: "aux_loss"
+moe_router_dtype: null
+moe_router_score_function: softmax
+moe_router_topk: 2
+moe_router_pre_softmax: false
+moe_router_num_groups: null
+moe_router_group_topk: null
+moe_router_topk_scaling_factor: null
+moe_router_enable_expert_bias: false
+moe_router_bias_update_rate: 1.0e-03
+moe_use_legacy_grouped_gemm: false
+moe_aux_loss_coeff: 0.0
+moe_z_loss_coeff: null
+moe_input_jitter_eps: null
+moe_token_dispatcher_type: allgather
+moe_enable_deepep: false
+moe_per_layer_logging: false
+moe_expert_capacity_factor: null
+moe_pad_expert_input_to_capacity: false
+moe_token_drop_policy: probs
+moe_layer_recompute: false
+moe_extended_tp: false
+moe_use_upcycling: false
+moe_permute_fusion: false
+disable_primus_topk_router: false
+moe_router_force_load_balancing: false
+use_deprecated_20241209_moe_layer: false
+delay_wgrad_compute: false
+
+# Tensor parallelism communication overlap settings
+tp_comm_overlap: false
+tp_comm_overlap_cfg: null
+tp_comm_overlap_ag: true
+tp_comm_overlap_rs: true
+tp_comm_overlap_rs_dgrad: false
+tp_comm_bulk_wgrad: true
+tp_comm_bulk_dgrad: true
+
+# Optimization flags
+gradient_accumulation_fusion: true  # Should be disabled for FSDP2
+
+# Other compatibility fields
+fused_padded_mla_attention: false
+
+# ==============================================================================
+# Important: Tokenizer Not Applicable
+# ==============================================================================
+
+# Diffusion models process image latents, not text tokens
+# DO NOT define: tokenizer_type, tokenizer_model, vocab_size, etc.
+# These parameters are only for language models
+
+# ==============================================================================
+# Training Parameters Removed
+# ==============================================================================
+
+# The following were REMOVED and belong in trainer config or overrides:
+# - seq_length, micro_batch_size, global_batch_size (trainer config)
+# - learning_rate, min_lr, weight_decay, clip_grad (trainer config)
+# - scheduler_type (trainer config)
+# - bf16, fp16 (trainer config)
+#
+# Override these in your training config's overrides section as needed.
+
+# ==============================================================================
+# Notes
+# ==============================================================================
+
+# - This config provides architecture defaults for all diffusion models
+# - Specific architectures (Flux, DiT) extend this and add their parameters
+# - Training parameters should be set in pre_trainer.yaml or overrides

@@ -115,4 +115,53 @@ class PrimusTopKRouter(TopKRouter):
         # so by the time we get here ``logits`` is already random when
         # ``args.moe_router_force_load_balancing`` is True. There is nothing
         # extra to do.
+        # ``moe_router_force_load_balancing_type`` selects the balancing mode
+        # (only relevant when ``moe_router_force_load_balancing`` is on):
+        #   * "even"    -> deterministic round-robin so per-expert counts are
+        #                  constant every step (constant M_total, no autotune/
+        #                  recompile churn); handled by ``_force_even_routing``.
+        #   * "uniform" -> Megatron-LM original random-logits balancing (already
+        #                  applied upstream in ``TopKRouter.forward``; nothing to
+        #                  do here).
+        force_load_balancing_type = getattr(args, "moe_router_force_load_balancing_type", "uniform")
+        if (
+            args.moe_router_force_load_balancing
+            and force_load_balancing_type == "even"
+            and not getattr(args, "moe_enable_deepep", False)
+        ):
+            scores, routing_map = self._force_even_routing(scores, routing_map)
+
         return scores, routing_map
+
+    def _force_even_routing(
+        self, scores: torch.Tensor, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Deterministically assign each token's top-k slots to experts in a
+        round-robin cycle ``(token_idx * topk + k) % num_experts`` so per-expert
+        token counts are exactly balanced and step-invariant (constant M_total).
+
+        The original top-k probability magnitudes are carried over to the new
+        expert positions (per-slot), keeping ``scores`` and ``routing_map``
+        mutually consistent so the MoE combine weights stay correct.
+        """
+        num_tokens = routing_map.shape[0]
+        num_experts = self.config.num_moe_experts
+        topk = self.topk
+        device = routing_map.device
+
+        # slot[t, k] = deterministic destination expert for token t's k-th slot.
+        # topk consecutive experts per token -> distinct while topk <= num_experts.
+        slot = (
+            torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % num_experts
+        )  # [num_tokens, topk], int64
+
+        new_routing_map = torch.zeros_like(routing_map)
+        new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))
+
+        # Carry the real per-token top-k probability magnitudes to the new slots.
+        # scores is non-zero only on the real top-k, so topk() extracts exactly them.
+        topk_vals, _ = torch.topk(scores, topk, dim=1)  # [num_tokens, topk]
+        new_scores = torch.zeros_like(scores)
+        new_scores.scatter_(1, slot, topk_vals.to(scores.dtype))
+
+        return new_scores, new_routing_map

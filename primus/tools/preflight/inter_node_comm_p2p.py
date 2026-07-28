@@ -5,32 +5,37 @@
 ###############################################################################
 
 import time
+from typing import Optional, Sequence
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
 from primus.tools.preflight.global_vars import (
-    ITERATION,
     LOCAL_RANK,
     LOCAL_WORLD_SIZE,
     RANK,
-    WARMUP,
     WORLD_SIZE,
     get_hostnames,
+    get_iteration,
+    get_warmup,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
+    format_int_range,
     log,
 )
 
 
-def run_inter_node_comm_p2p(args):
+def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
     device = torch.device(f"cuda:{LOCAL_RANK}")
-    sizes = [2**i * 1024 * 1024 for i in range(1, 11)]
-    # sizes = [2**i * 1024 * 1024 for i in range(1, 5)]
+    if sizes_mb is None or len(sizes_mb) == 0:
+        sizes_mb = [2**i for i in range(1, 11)]
+    sizes = [int(mb) * 1024 * 1024 for mb in sizes_mb]
+    warmup = get_warmup()
+    iteration = get_iteration()
     assert WORLD_SIZE % LOCAL_WORLD_SIZE == 0
     num_nodes = WORLD_SIZE // LOCAL_WORLD_SIZE
 
@@ -49,10 +54,14 @@ def run_inter_node_comm_p2p(args):
     bandwidth_results = {}
 
     num_adjacent_groups = num_nodes // adjacent_nodes
+    num_paired_ranks = num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE
     p2p_group = None
     is_src_rank = ((RANK // LOCAL_WORLD_SIZE) % 2) == 0
-    peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
-    assert peer_rank >= 0 and peer_rank < WORLD_SIZE
+    if RANK < num_paired_ranks:
+        peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
+        assert peer_rank >= 0 and peer_rank < WORLD_SIZE
+    else:
+        peer_rank = -1
     for i_group in range(num_adjacent_groups):
         for i_r in range(LOCAL_WORLD_SIZE):
             group_ranks = [
@@ -76,20 +85,20 @@ def run_inter_node_comm_p2p(args):
 
         tensor = torch.rand(size // 2, dtype=torch.bfloat16, device=device)
         dist.barrier(group=p2p_group, device_ids=[torch.cuda.current_device()])
-        for _ in range(WARMUP):
+        for _ in range(warmup):
             if is_src_rank:
                 dist.send(tensor, dst=peer_rank, group=p2p_group)
             else:
                 dist.recv(tensor, src=peer_rank, group=p2p_group)
         torch.cuda.synchronize()
         start = time.time()
-        for _ in range(ITERATION):
+        for _ in range(iteration):
             if is_src_rank:
                 dist.send(tensor, dst=peer_rank, group=p2p_group)
             else:
                 dist.recv(tensor, src=peer_rank, group=p2p_group)
         torch.cuda.synchronize()
-        elapsed = (time.time() - start) / ITERATION
+        elapsed = (time.time() - start) / iteration
         comm_size = size
         gb_per_sec = comm_size / elapsed / 1e9
         latency_results[f"{size//1024//1024}MB"] = elapsed * 1e6
@@ -98,6 +107,7 @@ def run_inter_node_comm_p2p(args):
     dist.barrier(device_ids=[torch.cuda.current_device()])
     if p2p_group is not None:
         dist.destroy_process_group(p2p_group)
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     all_latency_results = [None for _ in range(WORLD_SIZE)]
     all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
@@ -106,7 +116,7 @@ def run_inter_node_comm_p2p(args):
 
     if RANK == 0:
         keys = sorted(list({k for r in all_bandwidth_results for k in (r or {}).keys()}), key=extract_number)
-        max_len = max(len(s) for s in get_hostnames()) + 2
+        hostnames = get_hostnames()
 
         # result of src ranks will be print
         src_ranks = []
@@ -114,6 +124,8 @@ def run_inter_node_comm_p2p(args):
         src_rank_latency_results = []
         src_rank_bandwidth_results = []
         for rank, r in enumerate(all_bandwidth_results):
+            if rank >= num_paired_ranks:
+                continue
             is_src_rank = ((rank // LOCAL_WORLD_SIZE) % 2) == 0
             peer_rank = rank + LOCAL_WORLD_SIZE if is_src_rank else rank - LOCAL_WORLD_SIZE
             assert peer_rank >= 0 and peer_rank < WORLD_SIZE
@@ -124,44 +136,60 @@ def run_inter_node_comm_p2p(args):
             src_rank_latency_results.append(all_latency_results[rank])
             src_rank_bandwidth_results.append(r)
 
+        # Show only the leader (src) host. Both nodes appear in the Node column,
+        # and the Node->Hostname legend at the top of the report covers the rest.
+        def _row_for(src: int, peer: int):
+            host_str = hostnames[src]
+            node_str = format_int_range([src // LOCAL_WORLD_SIZE, peer // LOCAL_WORLD_SIZE])
+            rank_str = format_int_range([src, peer])
+            return host_str, node_str, rank_str
+
+        formatted_keys = [f"{key:<6}" for key in keys]
+        host_col_label = "Leader hostname"
+        host_col_w = max(20, len(host_col_label) + 2)
+        header_line = (
+            f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} " f"{' '.join(formatted_keys)}"
+        )
+
         with open(args.markdown_file, "a", encoding="utf-8") as f:
             f.write(f"=======InterNodeComm - {case_name} (us)=======\n")
             log(f"=======InterNodeComm - {case_name} (us)=======")
+            log(header_line)
 
-            f.write(f"| Hostname | Node | Rank | {' | '.join(keys)}|\n")
+            f.write(f"| {host_col_label} | Node | Rank | {' | '.join(keys)}|\n")
             f.write(f"|----------|----------|----------{'|----------' * len(keys)}|\n")
-
-            formatted_keys = [f"{key:<6}" for key in keys]
-            log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
             for i_r in range(len(src_ranks)):
-                rank = src_ranks[i_r]
-                hostname = get_hostnames()[rank]
-                node_id = rank // LOCAL_WORLD_SIZE
-
+                src = src_ranks[i_r]
+                peer = peer_ranks[i_r]
+                host_str, node_str, rank_str = _row_for(src, peer)
                 formatted_values = [f"{src_rank_latency_results[i_r].get(key, 0):<6.2f}" for key in keys]
-                log(f"{hostname:<{max_len}} {node_id:<5} {rank:<5} {' '.join(formatted_values)}")
-                f.write(f"| {hostname} | {node_id} | {rank} | {' | '.join(formatted_values)}|\n")
+                log(
+                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
+                )
+                f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
             f.write(f"\n")
 
             f.write(f"=======InterNodeComm - {case_name} (GB/s)=======\n")
             log(f"=======InterNodeComm - {case_name} (GB/s)=======")
+            log(header_line)
 
-            f.write(f"| Hostname | Node | Rank | {' | '.join(keys)}|\n")
+            f.write(f"| {host_col_label} | Node | Rank | {' | '.join(keys)}|\n")
             f.write(f"|----------|----------|----------{'|----------' * len(keys)}|\n")
-            formatted_keys = [f"{key:<6}" for key in keys]
-            log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
             for i_r in range(len(src_ranks)):
-                rank = src_ranks[i_r]
-                hostname = get_hostnames()[rank]
-                node_id = rank // LOCAL_WORLD_SIZE
-
+                src = src_ranks[i_r]
+                peer = peer_ranks[i_r]
+                host_str, node_str, rank_str = _row_for(src, peer)
                 formatted_values = [f"{src_rank_bandwidth_results[i_r].get(key, 0):<6.2f}" for key in keys]
-                log(f"{hostname:<{max_len}} {node_id:<5} {rank:<5} {' '.join(formatted_values)}")
-                f.write(f"| {hostname} | {node_id} | {rank} | {' | '.join(formatted_values)}|\n")
+                log(
+                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
+                )
+                f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
             f.write(f"\n")
 
         if not args.plot:
             return
+
+        import matplotlib.pyplot as plt
 
         log(f"=======Plot InterNode {case_name} Bandwidth=======")
         with open(args.markdown_file, "a", encoding="utf-8") as f:

@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .gpu_probe import probe_gpus
+from .sysfs_probe import sysfs_gpu_bdfs, sysfs_topology_summary
 from .utils import Finding, ProbeResult, run_cmd, which
+
+logger = logging.getLogger(__name__)
 
 
 def _device_consistency(devices: List[Dict[str, Any]]) -> List[Finding]:
@@ -29,9 +33,22 @@ def _device_consistency(devices: List[Dict[str, Any]]) -> List[Finding]:
 
 def _numa_mapping_best_effort() -> Optional[Dict[str, Any]]:
     """
-    Best-effort GPU<->NUMA mapping.
-    On many systems this requires PCI bus IDs; we attempt to use amd-smi if present.
+    Best-effort GPU<->NUMA mapping via sysfs (primary) or amd-smi (fallback).
+
+    Sysfs reads are safe from any rank (no subprocesses, no mutex).
+    amd-smi fallback only attempted on LOCAL_RANK == 0.
     """
+    bdfs = sysfs_gpu_bdfs()
+    if bdfs:
+        return {"rc": 0, "gpus": bdfs, "source": "sysfs"}
+
+    logger.debug("sysfs NUMA mapping unavailable; trying amd-smi fallback")
+
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
+    if LOCAL_RANK != 0:
+        return None
+
     if which("amd-smi") is None:
         return None
 
@@ -39,17 +56,15 @@ def _numa_mapping_best_effort() -> Optional[Dict[str, Any]]:
     if rc != 0 or not out:
         return {"rc": rc, "err": err, "note": "amd-smi list --csv failed"}
 
-    # amd-smi --csv format may vary; we do a very small heuristic:
-    # take 2nd column as PCI BDF if it looks like xxxx:xx:xx.x
     lines = [l for l in out.splitlines() if l.strip()]
-    bdfs: List[str] = []
+    bdf_list: List[str] = []
     for ln in lines[1:]:
         cols = [c.strip() for c in ln.split(",")]
         if len(cols) >= 2 and ":" in cols[1] and "." in cols[1]:
-            bdfs.append(cols[1])
+            bdf_list.append(cols[1])
 
     mapping: List[Dict[str, Any]] = []
-    for i, bdf in enumerate(bdfs):
+    for i, bdf in enumerate(bdf_list):
         node_path = f"/sys/bus/pci/devices/{bdf}/numa_node"
         numa = None
         if os.path.exists(node_path):
@@ -59,14 +74,29 @@ def _numa_mapping_best_effort() -> Optional[Dict[str, Any]]:
                 numa = None
         mapping.append({"gpu": i, "pci_bdf": bdf, "numa_node": numa})
 
-    return {"rc": rc, "gpus": mapping}
+    return {"rc": rc, "gpus": mapping, "source": "amd-smi"}
 
 
 def _xgmi_presence_best_effort() -> Optional[Dict[str, Any]]:
-    # Best-effort: use amd-smi topology if available; otherwise skip.
+    """
+    Best-effort topology (XGMI vs PCIe) via sysfs (primary) or amd-smi (fallback).
+
+    Sysfs reads are safe from any rank. amd-smi fallback only on LOCAL_RANK == 0.
+    """
+    topo = sysfs_topology_summary()
+    if topo is not None and topo.get("rc") == 0:
+        return topo
+
+    logger.debug("sysfs topology unavailable; trying amd-smi fallback")
+
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
+    if LOCAL_RANK != 0:
+        return None
+
     if which("amd-smi") is None:
         return None
-    rc, out, err = run_cmd(["amd-smi", "topo"], timeout_s=10)
+    rc, out, err = run_cmd(["amd-smi", "topology"], timeout_s=10)
     if rc != 0:
         return {"rc": rc, "err": err}
     return {"rc": rc, "out": out}
@@ -105,9 +135,14 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
     findings.extend(_device_consistency(probe.devices))
 
     # NUMA mapping / imbalance detection (best-effort).
+    # Prefers sysfs (safe for all ranks); falls back to amd-smi on LOCAL_RANK 0.
+    from primus.tools.preflight.global_vars import LOCAL_RANK
+
     numa = _numa_mapping_best_effort()
-    if numa is None:
-        findings.append(Finding("warn", "NUMA mapping unavailable (amd-smi not found); skipped", {}))
+    if numa is None and LOCAL_RANK != 0:
+        findings.append(Finding("info", "NUMA mapping skipped (non-zero LOCAL_RANK, no sysfs)", {}))
+    elif numa is None:
+        findings.append(Finding("warn", "NUMA mapping unavailable (sysfs/amd-smi not found); skipped", {}))
     else:
         nodes = [x.get("numa_node") for x in numa.get("gpus", []) if x.get("numa_node") is not None]
         imbalance = False
@@ -123,13 +158,16 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
     # Topology (XGMI vs PCIe) best-effort.
     if force_topology or probe.backend == "rocm":
         topo = _xgmi_presence_best_effort()
-        if topo is None:
-            findings.append(Finding("warn", "Topology check skipped (amd-smi not found)", {}))
+        if topo is None and LOCAL_RANK != 0:
+            findings.append(Finding("info", "Topology check skipped (non-zero LOCAL_RANK, no sysfs)", {}))
+        elif topo is None:
+            findings.append(Finding("warn", "Topology check skipped (sysfs/amd-smi not found)", {}))
         else:
-            findings.append(Finding("info", "GPU topology (amd-smi topo)", topo))
-            # Detect obvious PCIe fallback hint (heuristic on output).
-            out = str(topo.get("out", ""))
-            if out and ("PCIE" in out.upper() or "PCIe" in out):
+            source = topo.get("source", "amd-smi")
+            findings.append(Finding("info", f"GPU topology ({source})", topo))
+            out = str(topo.get("out", "") or topo.get("matrix", ""))
+            has_xgmi = topo.get("has_xgmi")
+            if has_xgmi is False or (out and "PCIE" in out.upper() and "XGMI" not in out.upper()):
                 findings.append(Finding("warn", "Topology indicates PCIe paths; XGMI may be absent", {}))
 
     # RCCL/NCCL env sanity (WARN-only).

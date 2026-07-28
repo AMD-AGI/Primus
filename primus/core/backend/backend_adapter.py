@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -40,7 +40,7 @@ class BackendAdapter(ABC):
         beyond `BackendRegistry.run_setup(self.framework)`.
         """
         from primus.core.backend.backend_registry import BackendRegistry
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         BackendRegistry.run_setup(self.framework)
         log_rank_0(f"[Primus:{self.framework}] Backend prepared")
@@ -57,7 +57,7 @@ class BackendAdapter(ABC):
         import sys
         from pathlib import Path
 
-        from primus.modules.module_utils import log_rank_0
+        from primus.core.utils.module_utils import log_rank_0
 
         def _use_path(path: str, error_msg: str) -> str:
             norm_path = os.path.abspath(os.path.normpath(str(path)))
@@ -117,12 +117,18 @@ class BackendAdapter(ABC):
     # ============================================================================
 
     @abstractmethod
-    def load_trainer_class(self, stage: str = "pretrain"):
+    def load_trainer_class(self, stage: str = "pretrain", trainer_class: Optional[str] = None):
         """
         Return backend Trainer class registered in `BackendRegistry`.
 
+        Args:
+            stage: Training stage (e.g., "pretrain", "sft"). Defaults to "pretrain".
+            trainer_class: Optional specific trainer class name for dynamic loading.
+                          If provided, this takes precedence over stage-based selection.
+
         Default behavior:
-          - Lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
+          - If `trainer_class` is provided, attempt to dynamically load it
+          - Otherwise, lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
 
         Backends can override this method if they need special resolution rules.
         """

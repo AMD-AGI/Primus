@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -15,7 +15,7 @@ from primus.backends.megatron.training.global_vars import (
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.env import flush_before_hard_exit
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -23,8 +23,83 @@ class MegatronBaseTrainer(BaseTrainer):
 
     def setup(self):
         """Setup Megatron runtime: set global vars and patch parse_args."""
+        self._ensure_megatron_path()
         set_primus_global_variables(self.backend_args)
         self._patch_parse_args()
+
+    def _ensure_megatron_path(self):
+        """Ensure Megatron-LM path is in sys.path before any megatron imports."""
+        import os
+        import sys
+        from pathlib import Path
+
+        # First, check if megatron is already importable
+        try:
+            import megatron  # type: ignore
+
+            return  # Path already set correctly
+        except ImportError:
+            pass
+
+        # Try multiple methods to find the Megatron-LM path
+        megatron_paths = []
+
+        # Method 1: From PRIMUS_PATH environment variable (most reliable)
+        primus_path = os.getenv("PRIMUS_PATH")
+        if primus_path:
+            megatron_path = Path(primus_path) / "third_party" / "Megatron-LM"
+            if megatron_path.exists():
+                megatron_paths.append(str(megatron_path))
+
+        # Method 2: From current working directory (works in container)
+        try:
+            cwd = Path.cwd()
+            # Check if we're in /workspace/Primus or a subdirectory
+            if "Primus" in str(cwd):
+                # Find the Primus root
+                primus_root = cwd
+                while primus_root.name != "Primus" and primus_root != primus_root.parent:
+                    primus_root = primus_root.parent
+                if primus_root.name == "Primus":
+                    megatron_path = primus_root / "third_party" / "Megatron-LM"
+                    if megatron_path.exists():
+                        megatron_paths.append(str(megatron_path))
+        except Exception:
+            pass
+
+        # Method 3: From current file location
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            megatron_path = repo_root / "third_party" / "Megatron-LM"
+            if megatron_path.exists():
+                megatron_paths.append(str(megatron_path))
+        except Exception:
+            pass
+
+        # Method 4: Check if already in sys.path
+        for path in sys.path:
+            path_obj = Path(path)
+            if path_obj.exists():
+                megatron_pkg = path_obj / "megatron"
+                if megatron_pkg.exists() and megatron_pkg.is_dir():
+                    return  # Path already set correctly
+
+        # Add paths to sys.path if not already present
+        for path in megatron_paths:
+            if path not in sys.path:
+                sys.path.insert(0, path)
+                log_rank_0(f"[Primus:MegatronBaseTrainer] Added Megatron-LM to sys.path: {path}")
+
+        # Verify the path was set correctly by trying to import
+        try:
+            import megatron  # type: ignore
+
+            log_rank_0("[Primus:MegatronBaseTrainer] Successfully verified megatron import")
+        except ImportError as e:
+            log_rank_0(
+                f"[Primus:MegatronBaseTrainer] WARNING: Failed to import megatron after path setup: {e}"
+            )
+            log_rank_0(f"[Primus:MegatronBaseTrainer] sys.path: {sys.path[:5]}")
 
     def init(self):
         """Initialize Megatron training components."""

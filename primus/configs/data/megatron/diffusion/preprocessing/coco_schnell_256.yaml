@@ -1,0 +1,36 @@
+# Pre-encode COCO for Flux-Schnell training (VAE resample mode)
+# 256px images, 256-token T5 sequences (pass --t5-max-length 256 on CLI)
+# vae_latent_mode: resample — stores mean+logvar so latents are re-drawn
+# via reparameterization (mean + exp(0.5*logvar) * randn) at every training step.
+#
+# Dataset: UCSC-VLAA/Recap-COCO-30K (30K COCO images with captions)
+# Fields: image (PIL), caption (str)
+#
+# Usage (8 GPU):
+#   torchrun --nproc_per_node=8 /workspace/Primus/primus/cli/main.py \
+#     data diffusion-encoded \
+#     --config primus/configs/data/megatron/diffusion/preprocessing/coco_schnell_256.yaml \
+#     --t5-max-length 256 \
+#     --hf-token-file /workspace/Primus/.hf_token
+
+source:
+  type: huggingface
+  hf_dataset: UCSC-VLAA/Recap-COCO-30K
+  hf_split: train
+
+output:
+  output_dir: ${PRIMUS_DATA_ROOT:/workspace/Primus/data}/coco_schnell_256_resample_encoded
+  shard_size: 1000
+  max_samples: null
+  compress: false
+
+model:
+  model_path: black-forest-labs/FLUX.1-schnell
+  precision: bf16
+  device: cuda
+  batch_size: 8
+  vae_latent_mode: resample
+
+image:
+  image_size: 256
+  center_crop: false

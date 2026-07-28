@@ -1,0 +1,19 @@
+extends:
+  - qwen2.5_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+
+# DeepSeek-R1-Distill-Qwen-1.5B (Qwen2 architecture) specific parameters.
+# This is the exact model the ODC reference repo (sail-sg/odc) uses in its
+# examples/llm_training default config, so we use it to validate ODC/LB-Mini
+# on Megatron at a size that fits a 64k-token micro-batch without OOM.
+hidden_size: 1536
+ffn_hidden_size: 8960
+num_layers: 28
+num_attention_heads: 12
+num_query_groups: 2
+
+# IMPORTANT: DeepSeek-R1-Distill-Qwen-1.5B uses rope_theta=10000, NOT the
+# Qwen2.5 default of 1000000 inherited from qwen2.5_base.yaml. Override it.
+rotary_base: 10000

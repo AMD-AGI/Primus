@@ -9,7 +9,7 @@
 from typing import Any
 
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 class MegatronSFTTrainer(MegatronBaseTrainer):
@@ -30,14 +30,15 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         - Common Megatron initialization patterns
     """
 
-    def __init__(self, backend_args: Any):
+    def __init__(self, backend_args: Any = None, **kwargs):
         """
         Initialize Megatron SFT trainer.
 
         Args:
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
+            **kwargs: Runtime context kwargs forwarded to BaseTrainer for filtering.
         """
-        super().__init__(backend_args=backend_args)
+        super().__init__(backend_args=backend_args, **kwargs)
 
         # Initialize LoRA if enabled
         self.peft = None

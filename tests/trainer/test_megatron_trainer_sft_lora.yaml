@@ -1,0 +1,103 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:test-megatron-sft-lora}
+workspace: ./output
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: qwen2.5_7B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_test_SFT_LoRA"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+
+      # required to select MegatronSFTTrainer
+      stage: sft
+
+      # The posttrain hook (01_convert_checkpoints.py) always HF->Megatron-
+      # converts `tokenizer_model` into the base checkpoint when
+      # pretrained_checkpoint/load are unset. Point it at a real-but-tiny,
+      # non-gated Qwen2 checkpoint (2 layers, hidden_size 8, ~2.4M params) so
+      # the converted checkpoint matches the tiny model config below and the
+      # test exercises both the base-checkpoint load and the LoRA wrap.
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
+      num_layers: 2
+      hidden_size: 8
+      ffn_hidden_size: 32
+      num_attention_heads: 4
+      num_query_groups: 2
+
+      # 8 GPUs as pure data parallelism, so global_batch_size=8 is the smallest
+      # value dividing evenly (1 micro-batch/rank/iter). The 8-sample jsonl
+      # fixture covers one global batch; cyclic dataloader loops for the rest.
+      train_iters: 3
+      micro_batch_size: 1
+      global_batch_size: 8
+      seq_length: 128
+      max_position_embeddings: 128
+
+      eval_iters: 0
+      eval_interval: 100
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 1
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # parallel: no TP/PP -- this suite's default launch uses all 8 node
+      # GPUs as pure data parallelism (see global_batch_size note above).
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # Disable Turbo attention: the tiny head_dim (hidden_size/heads = 2) is far
+      # below what fused/flash kernels expect (test_qwen2_sft_lora pins the
+      # unfused backend). linear_qkv/proj/fc1/fc2 still use TE's non-turbo Linear
+      # classes, so the PEFT module_matcher path is exercised.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+
+      # SFT data: tiny local fixture (alpaca schema) so this test has no
+      # network dependency on the HuggingFace Hub.
+      sft_dataset_name: "tests/trainer/fixtures/sft_lora_smoke.jsonl"
+      sft_conversation_format: "alpaca"
+      enable_packed_sequences: false
+
+      # Leave pretrained_checkpoint/load unset so the posttrain hook fills
+      # pretrained_checkpoint from the converted tokenizer_model checkpoint,
+      # driving MegatronSFTTrainer's pre-wrap base-checkpoint-load branch.
+      finetune: true
+      pretrained_checkpoint: null
+      load: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # LoRA: the activation switch for primus/backends/megatron/peft/*.py.
+      lora:
+        enabled: true
+        dim: 8
+        alpha: 8
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

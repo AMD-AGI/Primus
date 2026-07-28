@@ -118,8 +118,60 @@ if [[ -z "${SLURM_NODELIST:-}" ]]; then
     exit 2
 fi
 
-# Get all node hostnames (sorted, as needed)
-readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
+# Pure-bash expander for a SLURM/Spur nodelist. Handles comma-separated lists
+# and bracket forms like "prefix[01-04,06]" / "prefix[030,058]" (optional
+# suffix). Used as the portable fallback below.
+_expand_nodelist() {
+    local nl="$1"
+    local seg="" depth=0 i ch
+    local -a segs=()
+    for (( i=0; i<${#nl}; i++ )); do
+        ch="${nl:i:1}"
+        if [[ "$ch" == "[" ]]; then depth=$((depth+1)); seg+="$ch"
+        elif [[ "$ch" == "]" ]]; then depth=$((depth-1)); seg+="$ch"
+        elif [[ "$ch" == "," && $depth -eq 0 ]]; then segs+=("$seg"); seg=""
+        else seg+="$ch"; fi
+    done
+    [[ -n "$seg" ]] && segs+=("$seg")
+
+    local s pre body suf tok a b width n
+    for s in "${segs[@]}"; do
+        [[ -n "$s" ]] || continue
+        if [[ "$s" == *"["* ]]; then
+            pre="${s%%[*}"
+            body="${s#*[}"; body="${body%%]*}"
+            suf="${s#*]}"
+            local OLD_IFS="$IFS"; IFS=','
+            for tok in $body; do
+                if [[ "$tok" == *-* ]]; then
+                    a="${tok%%-*}"; b="${tok##*-}"; width=${#a}
+                    for (( n=10#$a; n<=10#$b; n++ )); do
+                        printf "%s%0*d%s\n" "$pre" "$width" "$n" "$suf"
+                    done
+                else
+                    printf "%s%s%s\n" "$pre" "$tok" "$suf"
+                fi
+            done
+            IFS="$OLD_IFS"
+        else
+            printf "%s\n" "$s"
+        fi
+    done
+}
+
+# Get all node hostnames. Prefer `scontrol show hostnames`, which correctly
+# expands compressed nodelists on stock Slurm. Some Slurm-compatible schedulers
+# (e.g. Spur) lack that subcommand, and CI containers / dev VMs may lack the
+# client entirely -- in both cases fall back to the pure-bash expander above so
+# every launcher behaves consistently, including bracket-range expansion.
+NODE_ARRAY=()
+if command -v scontrol >/dev/null 2>&1; then
+    readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST" 2>/dev/null || true)
+fi
+if [[ ${#NODE_ARRAY[@]} -eq 0 ]]; then
+    LOG_WARN "[slurm-entry] 'scontrol show hostnames' unavailable; expanding SLURM_NODELIST locally"
+    readarray -t NODE_ARRAY < <(_expand_nodelist "$SLURM_NODELIST")
+fi
 SLURM_MASTER_ADDR="${NODE_ARRAY[0]:-}"
 if [[ -z "$SLURM_MASTER_ADDR" ]]; then
     LOG_ERROR "[slurm-entry] Failed to resolve the first host from SLURM_NODELIST=$SLURM_NODELIST"
@@ -128,7 +180,11 @@ fi
 
 if [[ -z "${MASTER_ADDR:-}" ]]; then
     MASTER_ADDR="$SLURM_MASTER_ADDR"
-elif [[ "$MASTER_ADDR" != "$SLURM_MASTER_ADDR" ]]; then
+elif [[ "${MASTER_ADDR%%.*}" != "${SLURM_MASTER_ADDR%%.*}" ]]; then
+    # Compare only the leading hostname label so a scheduler-provided FQDN
+    # (e.g. Spur exports MASTER_ADDR=node.crusoe.amd.com) still matches the
+    # short name produced by nodelist expansion. A genuine mismatch (a
+    # different node entirely) is still caught.
     LOG_ERROR "[slurm-entry] MASTER_ADDR must match the first host in SLURM_NODELIST."
     LOG_ERROR "[slurm-entry] MASTER_ADDR=$MASTER_ADDR, expected=$SLURM_MASTER_ADDR"
     exit 2
@@ -156,8 +212,20 @@ validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distri
 
 # ------------- Dispatch based on mode ---------------
 
-# Parse mode (default: container)
+# Strip the entry-mode separator if present.
 [[ "${1:-}" == "--" ]] && shift
+
+# Parse entry mode (default: container). Supported keywords are the ones
+# advertised by primus-cli-slurm.sh: container | direct. Anything else is
+# treated as a primus subcommand and routed through the default container
+# chain (preserves the documented terse forms like `-- preflight`).
+ENTRY_MODE="container"
+if [[ "${1:-}" == "container" || "${1:-}" == "direct" ]]; then
+    ENTRY_MODE="$1"
+    shift
+fi
+[[ "${1:-}" == "--" ]] && shift
+LOG_INFO_RANK0 "[slurm-entry] Entry mode: $ENTRY_MODE"
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
@@ -175,8 +243,10 @@ SCRIPT_ARGS+=(
     --env "GPUS_PER_NODE=$GPUS_PER_NODE"
 )
 
-# Build script path (container mode only)
-script_path="$RUNNER_DIR/primus-cli-container.sh"
+# Dispatch to the chosen entry script. Both primus-cli-container.sh and
+# primus-cli-direct.sh already accept --env / --config / --debug, so no
+# downstream changes are needed.
+script_path="$RUNNER_DIR/primus-cli-${ENTRY_MODE}.sh"
 require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
 # Build full command

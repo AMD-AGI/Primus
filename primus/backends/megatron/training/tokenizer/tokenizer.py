@@ -26,11 +26,12 @@ except ImportError:
         HuggingFaceTokenizer as _HuggingFaceTokenizer,
     )
 
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 CUSTOM_TOKENIZER_TYPES = {
     "DeepSeekV2Tokenizer",
     "DeepSeekV3Tokenizer",
+    "DeepSeekV4Tokenizer",
     "Llama2Tokenizer",
     "Llama3Tokenizer",
     "MixtralTokenizer",

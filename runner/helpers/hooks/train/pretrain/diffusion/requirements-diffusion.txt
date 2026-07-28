@@ -1,0 +1,16 @@
+einops
+datasets
+webdataset
+huggingface_hub
+loguru
+safetensors
+sentencepiece
+numpy
+pillow
+packaging
+requests
+decord
+imageio[ffmpeg]
+wandb
+pydantic
+transformers==4.50.0

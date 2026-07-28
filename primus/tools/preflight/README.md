@@ -9,26 +9,32 @@ Torch / single node:
 
 ```bash
 primus-cli preflight \
-  --dump-path output/preflight \
-  --report-file-name preflight_report
+  --dump-path output/preflight
 ```
 
 Slurm (multi-node example):
 
 ```bash
 NUM_NODES=8 srun -N ${NUM_NODES} --ntasks-per-node=1 --cpus-per-task=256 \
-  primus-cli preflight --dump-path output/preflight --report-file-name preflight_report
+  primus-cli preflight --dump-path output/preflight
 ```
+
+If you omit `--report-file-name`, preflight auto-generates a unique
+timestamped basename of the form `preflight-${NNODES}N-YYYYMMDD-HHMMSS`
+so each run writes to a fresh path and never overwrites prior output.
+Pass `--report-file-name NAME` only when you want a stable, well-known
+filename.
 
 
 ## 📂 Output Directory
 
 After running **Preflight**, all test results and reports are generated under the `output/preflight` directory.
 
-The final reports are:
+The final reports (basename shown here is the auto-generated default; it
+reflects whatever `--report-file-name` resolves to) are:
 
-- `preflight_report.md` – a Markdown version of the test report
-- `preflight_report.pdf` – a PDF version of the same report
+- `<report-name>.md` – a Markdown version of the test report
+- `<report-name>.pdf` – a PDF version of the same report
 
 These reports summarize GPU performance, intra-node and inter-node communication results, and help identify potential issues within the cluster.
 
@@ -40,8 +46,8 @@ These reports summarize GPU performance, intra-node and inter-node communication
 output/preflight
 ├── inter_node_comm
 ├── intra_node_comm
-├── preflight_report.md
-├── preflight_report.pdf
+├── preflight-8N-20260715-142530.md
+├── preflight-8N-20260715-142530.pdf
 ├── square_gemm_tflops
 └── ...
 ```

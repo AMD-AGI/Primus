@@ -15,7 +15,26 @@ import logging
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils import checker
 from primus.core.utils.logger import _logger as primus_logger
-from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import error_rank_0, log_rank_0, warning_rank_0
+
+
+def _resolve_max_logging():
+    """Resolve MaxText's ``max_logging`` module across MaxText versions.
+
+    v26.4+ ships it at ``maxtext.utils.max_logging``; v26.3 and earlier expose
+    it as ``MaxText.max_logging``. Returns ``None`` if neither is importable.
+    """
+    try:
+        from maxtext.utils import max_logging as maxtext_logging
+
+        return maxtext_logging
+    except ImportError:
+        try:
+            import MaxText.max_logging as maxtext_logging
+
+            return maxtext_logging
+        except ImportError:
+            return None
 
 
 @register_patch(
@@ -31,16 +50,14 @@ def patch_maxtext_logger(ctx: PatchContext) -> None:
     """
     log_rank_0("[Patch:maxtext.logger] Patching MaxText logger...")
 
-    try:
-        import MaxText.max_logging as maxtext_logging
-
-        if hasattr(maxtext_logging, "log"):
-            maxtext_logging.log = primus_logger.info
-            warning_rank_0("[Patch:maxtext.logger] MaxText logger patched successfully.")
-        else:
-            error_rank_0("[Patch:maxtext.logger] MaxText logging module does not have a 'log' function.")
-    except ImportError:
+    maxtext_logging = _resolve_max_logging()
+    if maxtext_logging is None:
         error_rank_0("[Patch:maxtext.logger] Failed to import MaxText's logging module.")
+    elif hasattr(maxtext_logging, "log"):
+        maxtext_logging.log = primus_logger.info
+        warning_rank_0("[Patch:maxtext.logger] MaxText logger patched successfully.")
+    else:
+        error_rank_0("[Patch:maxtext.logger] MaxText logging module does not have a 'log' function.")
 
     # Configure JAX logger level based on module config
     level_map = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}

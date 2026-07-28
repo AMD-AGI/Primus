@@ -1,0 +1,85 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the Apache License, Version 2.0.
+
+# Flux 535M Configuration (Minimal Testing Variant)
+#
+# This is a scaled-down Flux configuration with only 1 joint + 1 single layer
+# for rapid prototyping, testing, and validation.
+#
+# Use cases:
+#   - Unit testing and CI/CD
+#   - Quick iteration during development
+#   - Validating training pipeline
+#   - Comparing against NeMo baseline
+#   - Single GPU training/testing
+
+extends:
+  - flux_base.yaml
+
+# ==============================================================================
+# Architecture: Layer Counts (ONLY difference from base)
+# ==============================================================================
+
+num_joint_layers: 1        # Multimodal (joint) transformer blocks
+num_single_layers: 1       # Image-only transformer blocks
+num_layers: 2              # Total layers for Megatron compatibility (joint + single)
+
+# Total layers: 1 + 1 = 2 (vs. 57 for Flux 12B)
+# Total parameters: ~535 million (vs. ~12 billion for Flux 12B)
+
+# ==============================================================================
+# All Other Parameters Inherited from flux_base.yaml
+# ==============================================================================
+
+# The following are inherited and should NOT be redefined here:
+#   - hidden_size: 3072
+#   - num_attention_heads: 24
+#   - context_dim: 4096
+#   - vec_in_dim: 768
+#   - in_channels: 64
+#   - activation_func: openai_gelu (from FluxConfig default)
+#   - add_qkv_bias: true (from FluxConfig default)
+#   - All other architectural parameters
+
+# ==============================================================================
+# Training Recommendations
+# ==============================================================================
+
+# Suggested training config for 535M:
+#   - micro_batch_size: 1-2
+#   - global_batch_size: 8-16
+#   - GPUs: 1-2 (fits on single H100 80GB)
+#   - Training time: ~10-100x faster than 12B
+#   - Use for: sanity checks, debugging, quick experiments
+
+# ==============================================================================
+# Comparison with Full Flux
+# ==============================================================================
+
+# Flux 535M (this config):
+#   - Layers: 1 joint + 1 single = 2 total
+#   - Parameters: ~535M
+#   - Training: Single GPU capable
+#   - Purpose: Testing/development
+
+# Flux 12B (production):
+#   - Layers: 19 joint + 38 single = 57 total
+#   - Parameters: ~12B
+#   - Training: Multi-GPU required
+#   - Purpose: Production deployment
+
+# ==============================================================================
+# NeMo Compatibility
+# ==============================================================================
+
+# This config matches NeMo's unit_test() recipe:
+#   nemo/scripts/flux/flux_training.py:252-278
+#
+#   recipe.model.flux_params.flux_config = run.Config(
+#       FluxConfig,
+#       num_joint_layers=1,
+#       num_single_layers=1,
+#       ...
+#   )
+
+# Checkpoints are interoperable between Primus and NeMo

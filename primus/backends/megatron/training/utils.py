@@ -10,6 +10,19 @@
 """General utilities."""
 import torch
 from megatron.core import mpu, parallel_state
+from megatron.training.global_vars import get_args
+
+
+def is_v_schedule_enabled(args=None):
+    """Return True when a V-shaped pipeline schedule (ZeroBubble-V / Primus-Pipe
+    zbv/v-half/v-min) is active for the current run."""
+    if args is None:
+        args = get_args()
+    return (
+        args.patch_zero_bubble
+        and args.enable_zero_bubble
+        and (args.zero_bubble_v_schedule or args.enable_1f1b_v)
+    ) or (args.pp_algorithm in ("zbv-formatted", "v-half", "v-min") and args.patch_primus_pipeline)
 
 
 def is_second_last_pipeline_stage():
@@ -31,8 +44,6 @@ def print_second_last_pipeline_stage(message):
 
 
 def is_pipeline_stage_containing_loss():
-    from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
-
     if is_v_schedule_enabled():
         return mpu.is_pipeline_first_stage(ignore_virtual=True)
     else:

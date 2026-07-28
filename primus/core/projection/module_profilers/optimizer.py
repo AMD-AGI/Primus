@@ -145,7 +145,7 @@ class OptimizerProfiler(BaseModuleProfiler):
         total_params_per_gpu = (non_expert_params + expert_params + shared_expert_params) // pp
 
         # Embedding + output layer params (only on first / last PP rank, amortise)
-        vocab_size = getattr(model_config, "vocab_size", 0) or 0
+        vocab_size = getattr(model_config, "padded_vocab_size", 0) or 0
         if vocab_size and pp > 0:
             embedding_params = vocab_size * hidden // tp
             output_params = vocab_size * hidden // tp

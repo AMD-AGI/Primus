@@ -8,6 +8,9 @@ from megatron.core.pipeline_parallel.combined_1f1b import combined_forward_backw
 from megatron.core.pipeline_parallel.schedules import backward_step
 from megatron.training.global_vars import get_args
 
+from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
+    fwd_bwd_wrapper,
+)
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 from primus.core.pipeline_parallel.handler.wgrad_handler import WGRAD_RUNNING_CACHE
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
@@ -15,7 +18,6 @@ from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     SchedulerNode,
 )
 from primus.core.pipeline_parallel.utils import find_prev_node_with_type
-from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
 
 
 def megatron_check_bwd_node_valid(node: SchedulerNode):

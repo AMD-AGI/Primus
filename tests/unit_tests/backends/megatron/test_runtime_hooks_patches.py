@@ -26,9 +26,9 @@ def _install_fake_megatron_initialize(monkeypatch: pytest.MonkeyPatch):
     training_pkg.initialize = init_mod
     megatron_mod.training = training_pkg
 
-    sys.modules["megatron"] = megatron_mod
-    sys.modules["megatron.training"] = training_pkg
-    sys.modules["megatron.training.initialize"] = init_mod
+    monkeypatch.setitem(sys.modules, "megatron", megatron_mod)
+    monkeypatch.setitem(sys.modules, "megatron.training", training_pkg)
+    monkeypatch.setitem(sys.modules, "megatron.training.initialize", init_mod)
     return init_mod, _orig_compile
 
 

@@ -13,7 +13,7 @@ from megatron.core import parallel_state
 from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+from primus.backends.megatron.training.utils import is_v_schedule_enabled
 
 
 def get_transformer_layer_offset(

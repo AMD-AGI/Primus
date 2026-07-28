@@ -121,9 +121,10 @@ def build_train_valid_test_datasets(
     HF / jsonl tokenize+pack pipeline and route to
     ``MlperfPackedDataset``. This lets a Native SFT run consume the exact
     byte-identical packs produced by the upstream mlperf
-    ``download_dataset.py + convert_dataset.py + create_metadata.py``
-    pipeline (used by ``examples/megatron_bridge/configs/MI355X/
-    llama2_70b_lora_posttrain.yaml``).
+    ``primus.backends.megatron_bridge.recipes.mlperf_llama2_70b`` dataset utilities
+    (``download_dataset.py + convert_dataset.py + create_metadata.py``)
+    pipeline (used by ``examples/mlperf/llama2_70b/configs/MI355X/
+    ``llama2_70b_lora_mlperf_posttrain.yaml``).
     """
     from primus.backends.megatron.sft.mlperf_packed_dataset import (
         build_mlperf_packed_datasets,

@@ -1,0 +1,15 @@
+model:
+  name: flux.1-schnell
+  config:
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    config:
+      trainable_modules: dit
+      guidance: ${FLUX_GUIDANCE:1.0}
+      autoencoder_scale_factor: 0.3611
+      autoencoder_shift_factor: 0.1159
+    # Required only for raw image-text data.
+    encoder:
+      t5_encoder: ${T5_ENCODER:}
+      clip_encoder: ${CLIP_ENCODER:}
+      autoencoder: ${VAE_CHECKPOINT:}
+      max_t5_length: ${MAX_T5_LENGTH:256}

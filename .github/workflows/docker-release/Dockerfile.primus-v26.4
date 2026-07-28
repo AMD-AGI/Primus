@@ -288,7 +288,7 @@ RUN git clone --recurse-submodules ${PRIMUS_REPO} \
 
 # Aiter
 ARG AITER_REPO=https://github.com/ROCm/aiter.git
-ARG AITER_COMMIT=b5e03ed191fca11ee423226537ef8d9435e432a6
+ARG AITER_COMMIT=0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e
 
 RUN pip uninstall aiter amd-aiter -y \
     && rm -rf aiter \
@@ -303,7 +303,7 @@ RUN pip uninstall aiter amd-aiter -y \
 # Primus-Turbo
 ARG TURBO_REPO=https://github.com/AMD-AGI/Primus-Turbo.git
 # Latest commit on `main` branch. Commited on 2026-06-03.
-ARG TURBO_COMMIT=3c39ef259aa6d724c77c481e926466e7a167e938
+ARG TURBO_COMMIT=a04a233cbfb468dbe21600cbf9db70953428b25c
 ENV MAX_JOBS=128
 ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
 

@@ -1,0 +1,13 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Torch Compile Configuration
+# Default values for torch.compile settings (Primus-specific)
+torch_compile:
+  enable: false
+  backend: "inductor"
+  mode: "default"
+  fullgraph: false

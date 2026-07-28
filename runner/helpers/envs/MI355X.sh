@@ -30,5 +30,8 @@ LOG_INFO_RANK0 "Loading MI355X-specific optimizations..."
 # APU may have different interconnect characteristics
 # Keep common_network.sh settings unless testing shows otherwise
 
+# Disable RCCL warp-speed auto-tuning on gfx950 (MI355X)
+export RCCL_WARP_SPEED_AUTO=${RCCL_WARP_SPEED_AUTO:-0}
+
 # log_exported_vars "MI355X-specific optimizations" \
-#     HSA_XNACK HSA_ENABLE_INTERRUPT GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE
+#     HSA_XNACK HSA_ENABLE_INTERRUPT GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE RCCL_WARP_SPEED_AUTO

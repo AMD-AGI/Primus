@@ -1,0 +1,60 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70b_lora_mlperf_posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: sft_trainer.yaml
+
+    # MXFP4 LoRA recipe (primus.backends.megatron_bridge.recipes.mlperf_llama2_70b.llama2_70b_lora_mxfp4_config)
+    model: llama2_70b_lora_mxfp4.yaml
+
+    overrides:
+      pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Llama-2-70b-hf}
+      stderr_sink_level: DEBUG
+      log_interval: 10
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      pipeline_dtype: null
+      virtual_pipeline_model_parallel_size: null
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+
+      peft: lora
+      dataset_type: mlperf_dataset
+      packed_sequence: true
+      packed_train_data_path: ${PACKED_DATA_DIR:/data}/train.npy
+      packed_val_data_path: ${PACKED_DATA_DIR:/data}/validation.npy
+      packed_metadata_path: ${PACKED_DATA_DIR:/data}/packed_metadata.jsonl
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:550}
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:8}
+      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:1}
+      seq_length: 8192
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:48}
+      eval_iters: ${PRIMUS_EVAL_ITERS:24}
+      save_interval: null
+
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      weight_decay: 0.0001
+      min_lr: 0.0
+      lr: ${LR:0.0006}
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:0}
+      lr_decay_iters: 550
+      clip_grad: 0.3
+
+      comm_overlap_config: null
+
+      seed: ${SEED:1234}
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_rms_norm: false
+      use_turbo_gemm: false
+
+      check_for_nan_in_loss: false

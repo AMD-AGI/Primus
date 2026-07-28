@@ -50,7 +50,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from primus.core.patches import PatchContext, get_param, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0
 
 
 def get_standard_model_config_fields() -> set:

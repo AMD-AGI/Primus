@@ -1,0 +1,116 @@
+### DeepSeek-R1-Distill-Qwen-1.5B ODC LB-Mini SFT example (single-node).
+### Sequence-length load balancing (LB-Mini) with the "fit" cost model on the
+### torch-FSDP2 + ODC path; packed (thd) attention enabled.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek1.5B-odc-lbmini}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: deepseek_r1_distill_qwen_1.5B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      tokenizer_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+
+      sft_dataset_name: "zai-org/LongAlign-10k"
+      sft_conversation_format: "messages"
+
+      # ODC on-demand communication (rocSHMEM/XGMI P2P gradient reduction) on the
+      # torch-FSDP2 path. Master switch (was the ODC_ENABLE env var).
+      enable_odc: true
+      odc_phase: 2
+
+      # thd segmented (packed) attention.
+      enable_packed_sequences: true
+      use_packed_attention: true
+      # LB-Mini sequence-length load balancing (was the ODC_LB_MINI env var).
+      enable_odc_lb_mini: true
+      # LB-Mini cost model: fit (attention-aware a*s^2 + b*s, 1.5B coefficients).
+      lb_mini_cost_model: fit
+      lb_mini_max_token_len: 32768
+
+      # ODC P2P backend: rocshmem (validated single-node host/XGMI-IPC). trainer_base default is mori.
+      odc_p2p_backend: rocshmem
+
+      wandb_project: "Primus_ODC_DeepSeek1.5B"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 100
+
+      train_iters: 50
+      micro_batch_size: 1
+      global_batch_size: 16
+
+      seq_length: 32768
+      max_position_embeddings: 32768
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: 100
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      seed: 1234
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      enable_fused_linear_ce: false
+
+      use_torch_fsdp2: true
+      use_megatron_fsdp: false
+      use_distributed_optimizer: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      finetune: true
+      load: null
+      save: null
+      save_interval: 1000
+      eval_interval: 1000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+
+      bf16: true
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: false
+
+      eval_iters: 0
+
+      profile: false
+      use_pytorch_profiler: true
+      use_nsys_profiler: false
+      profile_step_start: 10
+      profile_step_end: 11
+      profile_ranks: [0]
+      pytorch_profiler_collect_shapes: true
+      pytorch_profiler_collect_callstack: false
+      pytorch_profiler_collect_chakra: false
+      record_shapes: false
+      record_memory_history: false
+      nvtx_ranges: false
+
+      lora:
+        enabled: false

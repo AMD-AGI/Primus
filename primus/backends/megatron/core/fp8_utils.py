@@ -12,7 +12,7 @@ from megatron.core.fp8_utils import is_first_last_bf16_layer
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
-from primus.modules.module_utils import warning_rank_0
+from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -42,6 +42,16 @@ try:
 except (ImportError, ModuleNotFoundError):
     # Primus-Turbo not importable (not installed, or a transitive dep is broken).
     pass
+
+# gfx1250 / turbo-free FP8: on builds where primus_turbo is only an import shim
+# (not a real install), the turbo FP8 path (PrimusTurboQuantConfig +
+# primus_turbo_fp8_autocast) cannot run. Set PRIMUS_FP8_DISABLE_TURBO=1 to force
+# the TE-native FP8 branch (transformer_engine.pytorch.fp8_autocast), which needs
+# no turbo. Opt-in; the production turbo path is unaffected when unset.
+import os as _os
+
+if _os.environ.get("PRIMUS_FP8_DISABLE_TURBO", "0") == "1":
+    HAVE_TURBO = False
 
 
 SCALING_BLOCK_SIZE = 128
@@ -73,14 +83,19 @@ if HAVE_TE and HAVE_TURBO:
         return format_mapping[te_format]
 
     def get_fp8_recipe(config: TransformerConfig):
-        """Return fp8 recipe.
+        """Return fp8 recipe (Primus Turbo + TE variant).
 
         Arguments:
             config (TransformerConfig): Configuration object.
 
         Returns:
-            FP8 recipe: Transformer Engine FP8 recipe.
-            FP8 None reason: reason why the fp8 recipe is None.
+            Tuple of (fp8_recipe, fp8_recipe_none_reason):
+                - fp8_recipe: Transformer Engine FP8 recipe, or None.
+                - fp8_recipe_none_reason: reason why the fp8 recipe is None.
+
+        Note:
+            This variant (HAVE_TE + HAVE_TURBO) returns a tuple. The TE-only
+            variant returns a single recipe value.
         """
         if config.fp8 == "e4m3":
             fp8_format = transformer_engine.common.recipe.Format.E4M3

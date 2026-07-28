@@ -1,0 +1,10 @@
+cu_num,M,N,K,kernelId,splitK,kernelName,errRatio
+256,8192,10240,8192,45,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E,0.0
+256,8192,8192,8192,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,8192,57344,8192,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,8192,8192,28672,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,8192,8192,10240,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,8192,8192,57344,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,8192,28672,8192,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,10240,8192,8192,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0
+256,57344,8192,8192,54,0,_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E,0.0

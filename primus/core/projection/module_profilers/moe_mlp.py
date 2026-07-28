@@ -11,7 +11,7 @@ from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
-from .utils import benchmark_moe_layer_decomposed
+from .utils import benchmark_layer, benchmark_moe_layer_decomposed, v4_module_inputs
 
 # Efficiency fractions for non-GEMM MoE overhead estimation.
 # These express achievable bandwidth as a fraction of peak HBM bandwidth.
@@ -349,10 +349,25 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 self._a2a_fwd_ms = 0.0
                 self._a2a_bwd_ms = 0.0
             else:
-                fwd, bwd, act_mem, a2a_fwd, a2a_bwd = benchmark_moe_layer_decomposed(
-                    self.module,
-                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
-                )
+                hidden = self.config.model_config.hidden_size
+                tcfg = getattr(self.module, "config", None)
+                # DeepSeek-V4 MoE: forward(hidden[B,S,D], *, token_ids[B,S]).
+                # Feed V4-aware inputs (right layout + token_ids for hash routing).
+                v4 = v4_module_inputs(self.module, batch_size, seq_len, hidden, 1, "moe")
+                if v4 is not None:
+                    # DeepseekV4MoE has no stock .dispatch/.combine to decompose
+                    # A2A; benchmark the whole MoE forward. At EP=1 (single-GPU
+                    # benchmark) A2A is ~0 and is restored analytically later.
+                    ishapes, fkwargs = v4
+                    fwd, bwd, act_mem = benchmark_layer(
+                        self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
+                    )
+                    a2a_fwd = a2a_bwd = 0.0
+                else:
+                    fwd, bwd, act_mem, a2a_fwd, a2a_bwd = benchmark_moe_layer_decomposed(
+                        self.module,
+                        [(seq_len, batch_size, hidden)],
+                    )
                 self._cached_results = (fwd, bwd, act_mem)
                 self._a2a_fwd_ms = a2a_fwd
                 self._a2a_bwd_ms = a2a_bwd
