@@ -691,8 +691,7 @@ def apply_rope_from_positions(
 def is_triton_path_enabled() -> bool:
     """Return True iff the ``PRIMUS_ROPE_TRITON`` env knob is not ``"0"``.
 
-    Mirrors :func:`primus.backends.megatron.core.extensions._triton.stack_grouped_weight.is_triton_path_enabled`
-    (plan-6 P34).  Default-on, A/B toggle via ``PRIMUS_ROPE_TRITON=0``.
+    Default-on, A/B toggle via ``PRIMUS_ROPE_TRITON=0``.
     """
 
     return os.environ.get("PRIMUS_ROPE_TRITON", "1") != "0"
