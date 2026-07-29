@@ -62,6 +62,7 @@ Deep technical topics for advanced users.
 - [Collective operations](./04-technical-guides/collective-operations.md): NCCL/RCCL operations and their role in each parallelism strategy
 - [Performance tuning](./04-technical-guides/performance-tuning.md): HipBLASLt, Primus-Turbo, FP8, MoE optimization
 - [MoE training deep-dive](./04-technical-guides/moe-training.md): bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
+- [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md): FlyDSL-based fused MoE layer for EP-only bf16 training, setup and reproduction
 - [Data preparation](./04-technical-guides/data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](./04-technical-guides/checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](./04-technical-guides/multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
@@ -116,6 +117,7 @@ For contributors and maintainers.
 | Configure parallelism for my model | [Parallelism configuration](./04-technical-guides/parallelism-configuration.md) |
 | Tune training performance | [Performance tuning](./04-technical-guides/performance-tuning.md) |
 | Train a Mixture-of-Experts model | [MoE training deep-dive](./04-technical-guides/moe-training.md) |
+| Use the fused MegaMoE layer | [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md) |
 | Train a diffusion (Flux) model | [Diffusion models](./04-technical-guides/diffusion-models/README.md) |
 | Fine-tune with native SFT / LoRA | [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md) |
 | Auto-tune my training configuration | [Tuning agent](./02-user-guide/tuning-agent.md) |
