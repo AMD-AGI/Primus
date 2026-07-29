@@ -44,10 +44,10 @@ After running this tool, the YAML flips to:
 
 Usage
 -----
-    PYTHONPATH=/home/vanbhati@amd.com/flash-linear-attention \\
+    PYTHONPATH=/home/<user>/flash-linear-attention \\
       python3 tools/hybrid/convert_fla_kda_init_to_megatron.py \\
-        --fla-config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \\
-        --output-dir /home/vanbhati@amd.com/Primus/output/fla_init_kda_300M \\
+        --fla-config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \\
+        --output-dir output/fla_init_kda_300M \\
         --seed 42
 
 Verification (post-run)
@@ -121,7 +121,7 @@ def build_fla_init(fla_config_path: Path, seed: int) -> tuple[OrderedDict, dict]
             "transformers not installed: `pip install transformers`."
         ) from exc
 
-    fla_root = os.environ.get("FLA_ROOT", "/home/vanbhati@amd.com/flash-linear-attention")
+    fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
     if fla_root not in sys.path:
         sys.path.insert(0, fla_root)
     try:
@@ -131,7 +131,7 @@ def build_fla_init(fla_config_path: Path, seed: int) -> tuple[OrderedDict, dict]
         raise RuntimeError(
             "Could not import FLA's KDA model module.  Set FLA_ROOT to a "
             "checkout of https://github.com/fla-org/flash-linear-attention "
-            "(default: /home/vanbhati@amd.com/flash-linear-attention)."
+            "(default: ~/flash-linear-attention)."
         ) from exc
 
     set_seed(seed)
@@ -304,15 +304,16 @@ def write_megatron_checkpoint(mg_sd: OrderedDict, output_dir: Path) -> None:
 
 def main():
     p = argparse.ArgumentParser()
+    fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
     p.add_argument(
         "--fla-config",
         type=Path,
-        default=Path("/home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/kda_300M_pure.json"),
+        default=Path(fla_root) / "legacy" / "training" / "configs" / "kda_300M_pure.json",
     )
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/home/vanbhati@amd.com/Primus/output/fla_init_kda_300M"),
+        default=Path("output/fla_init_kda_300M"),
     )
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()

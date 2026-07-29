@@ -192,7 +192,8 @@ def main():
 
     # Default config path — auto-detect model size from checkpoint
     if args.config is None:
-        fla_configs_dir = Path("/home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs")
+        fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
+        fla_configs_dir = Path(fla_root) / "legacy" / "training" / "configs"
         alt_dir = Path(__file__).parent.parent.parent / "third_party" / "flash-linear-attention" / "legacy" / "training" / "configs"
         configs_dir = fla_configs_dir if fla_configs_dir.exists() else alt_dir
 

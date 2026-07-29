@@ -163,7 +163,7 @@ finetune: true
 auto_continue_train: false
 no_load_optim: true
 no_load_rng: true
-load: /home/vanbhati@amd.com/Primus/output/fla_init_ckpt_300M
+load: /home/<user>/Primus/output/fla_init_ckpt_300M
 ```
 
 ---
@@ -172,7 +172,7 @@ load: /home/vanbhati@amd.com/Primus/output/fla_init_ckpt_300M
 
 The full per-iteration log lives at `primus_gdn.log` once training
 finishes. Compare against FLA's log
-(`/home/vanbhati@amd.com/flash-linear-attention/legacy/training/train_gdn_bs32.log`)
+(`/home/<user>/flash-linear-attention/legacy/training/train_gdn_bs32.log`)
 using the parser in `tools/compare_losses.py` (or the inline parser
 documented in this file's history).
 

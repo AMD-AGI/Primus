@@ -466,7 +466,7 @@ modules:
       # FLAOrderGPTDataset overrides it when PRIMUS_FLA_DATA=1 + a valid
       # PRIMUS_FLA_CACHE_DIR are exported.  Point the launcher's
       # PRIMUS_FLA_CACHE_DIR at the sample-100BT cache (FLA has it on disk
-      # at /home/vanbhati@amd.com/flash-linear-attention/legacy/training/
+      # at /home/<user>/flash-linear-attention/legacy/training/
       # data/HuggingFaceFW/fineweb-edu/sample-100BT/train).
       #
       # The 10BT .bin/.idx is reused as a placeholder so Megatron's index
@@ -474,7 +474,7 @@ modules:
       # tokens are never read when FLAOrderGPTDataset is active.
       mock_data: false
       train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
+        data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
       valid_data_path: null
       test_data_path: null
 
@@ -482,7 +482,7 @@ modules:
       finetune: false
       auto_continue_train: true
       load: null
-      # FLA's `path=` for this run is /home/vanbhati@amd.com/checkpoints/
+      # FLA's `path=` for this run is /home/<user>/checkpoints/
       # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
       # the two runs' checkpoints can coexist on disk and downstream eval
       # tools (tools/hybrid/eval_gdn_lm_eval.py) can A/B them side-by-side.

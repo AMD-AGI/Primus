@@ -10,8 +10,17 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from pathlib import Path
 
-FLA_DATA = "/home/vanbhati@amd.com/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train"
-OUT_PREFIX = "/home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FLA_ROOT = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
+
+FLA_DATA = os.environ.get(
+    "FLA_DATA",
+    f"{_FLA_ROOT}/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train",
+)
+OUT_PREFIX = os.environ.get(
+    "OUT_PREFIX",
+    str(_REPO_ROOT / "data" / "fla_aligned" / "fla_fineweb_edu_10BT_text_sentence"),
+)
 
 _INDEX_HEADER = b"MMIDIDX\x00\x00"
 DTYPE_CODE_INT32 = 4

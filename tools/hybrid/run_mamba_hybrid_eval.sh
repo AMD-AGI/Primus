@@ -3,9 +3,9 @@
 # End-to-end evaluation of the 75% Hybrid Mamba2+MLA 300M model.
 #
 # Run this *inside the rocm/primus container* with the repo mounted at
-# /home/vanbhati@amd.com/Primus:
+# /home/<user>/Primus:
 #
-#   cd /home/vanbhati@amd.com/Primus && bash tools/hybrid/run_mamba_hybrid_eval.sh
+#   cd /home/<user>/Primus && bash tools/hybrid/run_mamba_hybrid_eval.sh
 #
 # What it does:
 #   1. Converts the Primus Megatron checkpoint → FLA HuggingFace
@@ -34,11 +34,11 @@ set -euo pipefail
 
 PRIMUS_CKPT=${PRIMUS_CKPT:-output/amd/root/zebra_llama_300M_mamba_hybrid-pretrain/checkpoints/iter_0004768}
 PRIMUS_HF_DIR=${PRIMUS_HF_DIR:-output/mamba_hybrid_300M_fla_hf}
-FLA_HF_DIR=${FLA_HF_DIR:-/home/vanbhati@amd.com/checkpoints/mamba2_hybrid_300M_10B/checkpoint-4768}
+FLA_HF_DIR=${FLA_HF_DIR:-$HOME/checkpoints/mamba2_hybrid_300M_10B/checkpoint-4768}
 RESULTS_DIR=${RESULTS_DIR:-output/mamba_hybrid_300M_eval_results}
 TASKS=${TASKS:-arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race}
 BATCH_SIZE=${BATCH_SIZE:-auto}
-TOKENIZER=${TOKENIZER:-/home/vanbhati@amd.com/checkpoints/gdn_pure_300M_10B}
+TOKENIZER=${TOKENIZER:-$HOME/checkpoints/gdn_pure_300M_10B}
 
 echo "==========[run_mamba_hybrid_eval.sh]=========="
 echo "PRIMUS_CKPT     = ${PRIMUS_CKPT}"

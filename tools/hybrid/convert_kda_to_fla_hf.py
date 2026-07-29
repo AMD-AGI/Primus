@@ -25,7 +25,7 @@ Usage
     python3 tools/hybrid/convert_kda_to_fla_hf.py \\
         --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \\
         --output-dir output/kda_pure_300M_fla_hf \\
-        --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/kda_300M_pure.json
+        --config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json
 
 Then evaluate with lm-eval:
     lm_eval --model hf \\
@@ -280,7 +280,8 @@ def main():
     args = p.parse_args()
 
     if args.config is None:
-        configs_dir = Path("/home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs")
+        fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
+        configs_dir = Path(fla_root) / "legacy" / "training" / "configs"
         if "300m" in str(args.checkpoint_path).lower():
             args.config = configs_dir / "kda_300M_pure.json"
         else:

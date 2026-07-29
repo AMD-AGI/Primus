@@ -244,7 +244,7 @@ def main() -> int:
     print(f"    python3 tools/hybrid/convert_gdn_to_fla_hf.py \\")
     print(f"        --checkpoint-path {args.output_dir} \\")
     print(f"        --output-dir output/gdn_pure_1B_fla_hf \\")
-    print(f"        --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json")
+    print(f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json")
     return 0
 
 

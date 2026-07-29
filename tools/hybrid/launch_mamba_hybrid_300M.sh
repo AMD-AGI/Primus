@@ -30,7 +30,7 @@
 #
 # Run inside the rocm/primus:v26.2 container:
 #
-#   cd /home/vanbhati@amd.com/Primus && bash tools/hybrid/launch_mamba_hybrid_300M.sh
+#   cd /home/<user>/Primus && bash tools/hybrid/launch_mamba_hybrid_300M.sh
 ###############################################################################
 
 set -euo pipefail
@@ -40,7 +40,7 @@ export PRIMUS_FUSED_CE=1
 export PRIMUS_FLA_SWIGLU=1
 export PRIMUS_FLA_NORM=1
 export PRIMUS_FLA_DATA=1
-export PRIMUS_FLA_CACHE_DIR=${PRIMUS_FLA_CACHE_DIR:-/home/vanbhati@amd.com/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train}
+export PRIMUS_FLA_CACHE_DIR=${PRIMUS_FLA_CACHE_DIR:-$HOME/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train}
 
 EXP=${EXP:-examples/megatron/configs/MI300X/zebra_llama_300M_mamba_hybrid-pretrain.yaml}
 LOG=${LOG:-primus_mamba_hybrid_300M.log}

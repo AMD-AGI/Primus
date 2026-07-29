@@ -32,7 +32,7 @@ Usage (inside the container):
     python tools/hybrid/convert_gdn_hybrid_to_fla_hf.py \
         --checkpoint-path output/amd/root/zebra_llama_300M_gdn_hybrid-pretrain/checkpoints/iter_0004768 \
         --output-dir output/gdn_hybrid_300M_fla_hf \
-        --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json
+        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json
 """
 import argparse
 import json
@@ -322,7 +322,10 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--config",
-        default="/home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json",
+        default=os.path.join(
+            os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention")),
+            "legacy", "training", "configs", "gated_deltanet_300M_hybrid.json",
+        ),
     )
     parser.add_argument(
         "--hybrid-pattern",
