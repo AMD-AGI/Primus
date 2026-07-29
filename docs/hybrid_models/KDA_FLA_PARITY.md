@@ -59,7 +59,7 @@ paper reports.
 | race                     | acc        |  25.00 | 25.07  | 25.45  | +0.38 pp         |
 | **mean absolute Δ**      |            |        |        |        | **0.58 pp**      |
 
-See [`docs/hybrid_models/README_KDA.md`](docs/hybrid_models/README_KDA.md) for
+See [`README_KDA.md`](README_KDA.md) for
 the exact `lm_eval` invocation that produced both rows.
 
 ---
@@ -273,4 +273,5 @@ tools/hybrid/
   eval_kda_lm_eval.py                              # lm-eval wrapper (registers KDA)
 docs/hybrid_models/
   README_KDA.md                                    # step-by-step recipe
+  KDA_FLA_PARITY.md                                # this file
 ```

@@ -29,7 +29,7 @@ After 4768 iterations (≈10B tokens) on FineWeb-Edu sample-10BT:
 
 Loss trajectories overlap from iter ~2000 onward; the only persistent gap
 is in the LR-warmup region (iter 50–500) and closes monotonically. See
-[`KDA_FLA_PARITY.md`](../../KDA_FLA_PARITY.md) for the deep-dive on every
+[`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) for the deep-dive on every
 patch and env var.
 
 ### lm-eval-harness (FLA-paper 8-task suite)
@@ -297,7 +297,7 @@ export PRIMUS_FLA_DATA=1
 export PRIMUS_FLA_CACHE_DIR=/home/<user>/Primus/data/huggingface
 ```
 
-See [`KDA_FLA_PARITY.md`](../../KDA_FLA_PARITY.md) for the cost-of-each-flag
+See [`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) for the cost-of-each-flag
 breakdown.
 
 ### 5.4 Output layout
@@ -531,8 +531,8 @@ benchmarks need to lift above noise).
 
 ```
 docs/hybrid_models/
-└── README_KDA.md                                  ← this file
-KDA_FLA_PARITY.md                                  ← deep-dive on every change
+├── README_KDA.md                                  ← this file
+└── KDA_FLA_PARITY.md                              ← deep-dive on every change
 megatron_patch.sh                                  ← idempotent patch applier (shared with GDN)
 megatron_patches/                                  ← same 6 patches as GDN
 examples/megatron/configs/MI300X/
@@ -634,6 +634,6 @@ meaningfully affects RACE.
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/hybrid_models/README_GDN.md`](README_GDN.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)
-- [`KDA_FLA_PARITY.md`](../../KDA_FLA_PARITY.md) — exhaustive list of
+- [`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) — exhaustive list of
   code/config/runtime changes that made KDA parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)

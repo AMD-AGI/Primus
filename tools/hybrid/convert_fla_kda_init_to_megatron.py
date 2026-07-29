@@ -4,7 +4,7 @@ Generate an FLA-equivalent random-init KDA-300M checkpoint and convert it
 into the Megatron sharded format that Primus loads.
 
 This is the KDA counterpart of the GDN init-checkpoint dance documented in
-GDN_FLA_PARITY.md.  It is the *only* code change that closed the residual
+docs/hybrid_models/GDN_FLA_PARITY.md.  It is the *only* code change that closed the residual
 loss-curve gap for GDN, and the same is expected to apply to KDA:
 
   1. Re-seed PyTorch with FLA's training seed (default 42).

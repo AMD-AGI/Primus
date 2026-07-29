@@ -5,7 +5,7 @@
 #
 #   cd /workspace/Primus && bash launch_hybrid_faflag.sh
 #
-# FLA-parity flags exported (matched to GDN_FLA_PARITY.md §A/B/D and the
+# FLA-parity flags exported (matched to docs/hybrid_models/GDN_FLA_PARITY.md §A/B/D and the
 # pure-KDA config that hit 1.46 s/iter on MI300X):
 #
 #   PRIMUS_FLA_MLA_ATTN=1  → MLA `core_attention` calls `flash_attn_func`

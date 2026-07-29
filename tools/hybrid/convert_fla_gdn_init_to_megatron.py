@@ -13,7 +13,7 @@ Usage:
         --no-te   # use no-TE key names (WrappedTorchNorm, ColumnParallelLinear)
 
 This script was reconstructed verbatim from the agent transcript dated 2026-05-13
-(see GDN_FLA_PARITY.md §"Files in the repo for this work").  It is one of the
+(see docs/hybrid_models/GDN_FLA_PARITY.md §"Files in the repo for this work").  It is one of the
 "forensics scripts" kept untracked in tools/hybrid/ per the parity-doc footnote.
 """
 

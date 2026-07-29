@@ -98,7 +98,7 @@ modules:
       # FLA-parity numerics (lifted verbatim from the validated 300M parity
       # YAML — these are the *exact* settings that produced the iter-1
       # bit-perfect match and the < 0.5% late-training residual documented
-      # in GDN_FLA_PARITY.md).  Skipping any of them re-introduces a known
+      # in docs/hybrid_models/GDN_FLA_PARITY.md).  Skipping any of them re-introduces a known
       # source of drift:
       #
       #   layernorm_epsilon  — Megatron's TransformerConfig defaults to 1e-5;
@@ -180,7 +180,7 @@ modules:
       # ColumnParallelLinear / TENorm wrappers introduce small numerical
       # differences (cast ordering, persistent buffers) that drift the loss
       # by ~0.1% per layer.  Using the no-TE spec aligns Megatron's layer
-      # numerics with FLA's.  (See GDN_FLA_PARITY.md §A.)
+      # numerics with FLA's.  (See docs/hybrid_models/GDN_FLA_PARITY.md §A.)
       # ─────────────────────────────────────────────────────────────────────
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec_no_te']
 
@@ -448,7 +448,7 @@ modules:
       #     for parity — same one FLA's reference run uses)
       #   • saves ~4 GB of backward-pass memory
       # All bit-perfect parity guarantees are preserved (this is in fact
-      # what we were claiming to do all along — see GDN_FLA_PARITY.md §B
+      # what we were claiming to do all along — see docs/hybrid_models/GDN_FLA_PARITY.md §B
       # patch 03 "mlp-fla-swiglu").
       # ─────────────────────────────────────────────────────────────────────
       bias_swiglu_fusion: false

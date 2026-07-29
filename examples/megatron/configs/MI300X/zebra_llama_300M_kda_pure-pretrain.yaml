@@ -84,7 +84,7 @@ modules:
       # inside the mixer via gate_norm, costing ~12-15 GiB activation memory
       # per layer × 12 = ~40 GiB peak, plus ~50 ms/iter for the extra norm
       # launches. The no-TE variant saves both, mirroring how GDN matched
-      # FLA in GDN_FLA_PARITY.md.
+      # FLA in docs/hybrid_models/GDN_FLA_PARITY.md.
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec_no_te']
       use_fla_triton_kda: true
 
@@ -120,7 +120,7 @@ modules:
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       # Plain DDP (no distributed optimizer) — required for FLA loss-curve
-      # parity per GDN_FLA_PARITY.md line 143-149. Megatron's
+      # parity per docs/hybrid_models/GDN_FLA_PARITY.md line 143-149. Megatron's
       # DistributedOptimizer (ZeRO-1) applies the optimizer update per-shard
       # then all-gathers, which is mathematically equivalent in fp64 but
       # NOT bit-identical to plain AdamW in bf16 → those ±1 ulp ordering
