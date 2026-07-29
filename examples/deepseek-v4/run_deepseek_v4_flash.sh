@@ -6,7 +6,7 @@ set -euo pipefail
 # the DeepSeek-V4 Flash multi-node runs. Detected via the `spur` command.
 if command -v spur >/dev/null 2>&1; then
     export PRIMUS_LAUNCHER=slurm
-    export SLURM_LAUNCH_CMD=sbatch
+    export SLURM_LAUNCH_CMD="${SLURM_LAUNCH_CMD:-srun}"
     export SLURM_PARTITION=amd-spur
     export SLURM_QOS=amd-burst-qos
     export SLURM_ACCOUNT=amd-primus
