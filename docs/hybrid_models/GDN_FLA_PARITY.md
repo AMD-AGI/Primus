@@ -33,10 +33,9 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 `/home/<user>/Primus`:
 
 ```bash
-# 1. (one time) apply the Megatron-LM patches
-bash tools/hybrid/megatron_patch.sh
-
-# 2. Launch training (8 GPUs by default).
+# Launch training (8 GPUs by default). The Megatron-LM behavioral patches
+# below are applied automatically at startup via Primus's patch system --
+# no separate apply step needed.
 EXP=examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml \
   bash examples/run_pretrain.sh 2>&1 | tee primus_gdn.log
 ```
@@ -86,21 +85,26 @@ submodule, YAML configs, and runtime knobs.
 | `primus/backends/megatron/core/models/hybrid/gated_delta_net_layer.py` | Forward `eps=self.config.layernorm_epsilon` to the pre-norm `build_module(...)` call; defer the `residual.to(fp32)` cast until after the optional pre-norm fusion path; expose `_fuse_prenorm_with_next` flag. | `WrappedTorchNorm`'s default `eps=1e-5` was silently overriding the YAML's `1e-6`, causing a ~1.1% per-layer divergence from FLA. The deferred fp32 cast lets the pre-norm/MLP fusion in `HybridStack` work correctly. |
 | `primus/backends/megatron/core/models/hybrid/hybrid_block.py` | If `config.fp32_residual_connection` is set, force `residual_in_fp32=True`; under `args.use_fla_fused_rmsnorm`, mark every GDN layer with `_fuse_prenorm_with_next=True` and rewrite the forward loop to fuse a GDN block's mixer-out with the next MLP block's pre-MLP layernorm in a single op. | The fp32-residual handling was previously silently dropped. The pre-norm fusion saves one normalization launch per GDN block when FLA-norm is enabled. (For TE-free builds use the `gdn_hybrid_stack_spec_no_te` spec from the YAML instead.) |
 | `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | Add a new `gdn_hybrid_stack_spec_no_te` ModuleSpec that uses `WrappedTorchNorm` and plain `Column/RowParallelLinear` everywhere, with the same submodule wiring as `gdn_hybrid_stack_spec`. | YAML can now select TE-free layers via `spec: [..., gdn_hybrid_stack_spec_no_te]` for FLA loss-curve alignment without touching code. |
-| `primus/modules/trainer/megatron/trainer.py` | In `train_valid_test_datasets_provider`, branch to `tools.fla_order_dataset.FLAOrderGPTDataset` when `args.use_fla_data=True` + `args.fla_cache_dir=<path>`. | Lets us bypass Megatron's `GPTDataset` shuffler and drive Primus with the exact same token order FLA's `DistributedSampler` produces, isolating data-ordering effects from model effects during comparison. |
+| `primus/backends/megatron/patches/mamba_fla_data_patches.py` | Wraps `pretrain_mamba.train_valid_test_datasets_provider`, branching to `tools.hybrid.fla_order_dataset.FLAOrderGPTDataset` when `args.use_fla_data=True` + `args.fla_cache_dir=<path>`. | Lets us bypass Megatron's `GPTDataset` shuffler and drive Primus with the exact same token order FLA's `DistributedSampler` produces, isolating data-ordering effects from model effects during comparison. |
 
-### B. Vendored Megatron-LM patches
+### B. Megatron-LM behavioral patches (Primus patch system)
 
-These live in `megatron_patches/*.patch` and are applied by
-`bash tools/hybrid/megatron_patch.sh`.
+Primus never forks the vendored `third_party/Megatron-LM` submodule.
+Instead these six patches are runtime monkey-patches registered with
+`@register_patch` and applied automatically at `phase="before_train"` by
+`primus/core/patches` -- see the
+[Backend Patch Explorer](../../.cursor/skills/backend-patch-explorer/SKILL.md)
+skill for how the engine works in general. Each patch's `condition=` gates
+it on the relevant config flag, so it's a no-op unless that flag is set.
 
-| Patch | File | Change | Reason |
+| Patch id | File | Change | Reason |
 |-------|------|--------|--------|
-| `01-mamba_model-fused-ce.patch` | `megatron/core/models/mamba/mamba_model.py` | Add `_use_fused_cross_entropy` path. Mode 1 = `FusedLinearCrossEntropyLoss` (chunked, never materializes the full logits tensor). Mode 2 = `FusedCrossEntropyLoss` (matches FLA exactly, materializes bf16 logits). Selected by `args.fused_ce_mode` via `get_args()`. | Megatron always materializes a `(batch*seq, vocab)` fp32 logits tensor before CE — for 1024 batch × 2048 seq × 32k vocab this is 256 GB at fp32. FLA chunks it. Massive memory + speed win. |
-| `02-optimizer-torch-fused-adam.patch` | `megatron/core/optimizer/__init__.py` | Add `PRIMUS_TORCH_OPTIM=1` opt-in path that selects `torch.optim.AdamW(fused=True)` over TE/Apex `FusedAdam`. | TE's FusedAdam has slightly different epsilon-handling internally; toggling this lets us prove that Primus's AdamW is bit-identical to FLA's when both use torch's fused kernel. |
-| `03-mlp-fla-swiglu.patch` | `megatron/core/transformer/mlp.py` | Replace the naive `silu(x_glu) * x_linear` (2 separate kernel launches + intermediate tensor) with FLA's Triton-fused `swiglu(x_glu, x_linear)` (1 fwd + 1 bwd kernel). Toggle: `args.use_fla_fused_swiglu` (default True) via `get_args()`. | Profiler shows ~3.8× fewer GPU cycles spent on the activation step. Saves ~20 ms/iter at our batch size. |
-| `04-torch_norm-fla-rmsnorm.patch` | `megatron/core/transformer/torch_norm.py` | When `args.use_fla_fused_rmsnorm=True`, return `fla.modules.RMSNorm` from `WrappedTorchNorm` instead of `torch.nn.RMSNorm`. Reads from `get_args()`. | FLA's RMSNorm is a fused Triton kernel that matches the reference run's normalization semantics bit-for-bit. |
-| `05-transformer_config-hybrid-init.patch` | `megatron/core/transformer/transformer_config.py` | For `is_hybrid_model`, set `output_layer_init_method = init_method_normal(self.init_method_std)` (uniform std, no depth scaling). | Megatron's default `scaled_init_method_normal` divides std by `sqrt(2 * num_layers)` — that's correct for transformers but **wrong** for hybrid GDN models, where FLA uses a uniform `initializer_range`. Without this fix the output layer started ~24× smaller than FLA's, causing the iter-1 loss to be 11.971 instead of 11.965. |
-| `06-pretrain_mamba-fla-data.patch` | `pretrain_mamba.py` | Add the FLA-order dataset shim (`args.use_fla_data` + `args.fla_cache_dir`) to `train_valid_test_datasets_provider` — `pretrain_mamba.py` provides its own provider used for Mamba/GDN models. Reads from `get_args()`. | Lets Mamba/GDN training consume the exact same token order FLA's `DistributedSampler` produces. |
+| `megatron.mamba.fla_fused_ce` | `mamba_fused_ce_patches.py` | Add `_use_fused_cross_entropy` path to `MambaModel`. Mode 1 = `FusedLinearCrossEntropyLoss` (chunked, never materializes the full logits tensor). Mode 2 = `FusedCrossEntropyLoss` (matches FLA exactly, materializes bf16 logits). Selected by `args.fused_ce_mode` via `get_args()`. | Megatron always materializes a `(batch*seq, vocab)` fp32 logits tensor before CE — for 1024 batch × 2048 seq × 32k vocab this is 256 GB at fp32. FLA chunks it. Massive memory + speed win. |
+| `megatron.optimizer.torch_fused_adam` | `torch_fused_adam_patches.py` | Add `PRIMUS_TORCH_OPTIM=1` opt-in path that selects `torch.optim.AdamW(fused=True)` over TE/Apex `FusedAdam`. | TE's FusedAdam has slightly different epsilon-handling internally; toggling this lets us prove that Primus's AdamW is bit-identical to FLA's when both use torch's fused kernel. |
+| `megatron.mlp.fla_swiglu` | `mlp_fla_swiglu_patches.py` | Replace the naive `silu(x_glu) * x_linear` (2 separate kernel launches + intermediate tensor) with FLA's Triton-fused `swiglu(x_glu, x_linear)` (1 fwd + 1 bwd kernel) in `MLP`. Toggle: `args.use_fla_fused_swiglu` (default True) via `get_args()`. | Profiler shows ~3.8× fewer GPU cycles spent on the activation step. Saves ~20 ms/iter at our batch size. |
+| `megatron.torch_norm.fla_rmsnorm` | `torch_norm_fla_rmsnorm_patches.py` | When `args.use_fla_fused_rmsnorm=True`, return `fla.modules.RMSNorm` from `WrappedTorchNorm` instead of `torch.nn.RMSNorm`. Reads from `get_args()`. | FLA's RMSNorm is a fused Triton kernel that matches the reference run's normalization semantics bit-for-bit. |
+| `megatron.transformer.hybrid_output_init` | `gdn_config_patches.py` | For `is_hybrid_model`, set `output_layer_init_method = init_method_normal(self.init_method_std)` (uniform std, no depth scaling) after `TransformerConfig.__post_init__` runs. | Megatron's default `scaled_init_method_normal` divides std by `sqrt(2 * num_layers)` — that's correct for transformers but **wrong** for hybrid GDN models, where FLA uses a uniform `initializer_range`. Without this fix the output layer started ~24× smaller than FLA's, causing the iter-1 loss to be 11.971 instead of 11.965. |
+| `megatron.mamba.fla_order_dataset` | `mamba_fla_data_patches.py` | Add the FLA-order dataset shim (`args.use_fla_data` + `args.fla_cache_dir`) to `pretrain_mamba.train_valid_test_datasets_provider` — `pretrain_mamba.py` provides its own provider used for Mamba/GDN models. Reads from `get_args()`. | Lets Mamba/GDN training consume the exact same token order FLA's `DistributedSampler` produces. |
 
 ### C. YAML configuration changes
 
@@ -203,14 +207,14 @@ within ±0.5% by iter 1000 even without it.
 ## Files in the repo for this work
 
 ```
-megatron_patches/
-  01-mamba_model-fused-ce.patch
-  02-optimizer-torch-fused-adam.patch
-  03-mlp-fla-swiglu.patch
-  04-torch_norm-fla-rmsnorm.patch
-  05-transformer_config-hybrid-init.patch
-  06-pretrain_mamba-fla-data.patch
-tools/hybrid/megatron_patch.sh           # idempotent applier for all 6 patches
+primus/backends/megatron/patches/
+  mamba_fused_ce_patches.py         # FLA fused cross-entropy for MambaModel
+  torch_fused_adam_patches.py       # PRIMUS_TORCH_OPTIM opt-in
+  mlp_fla_swiglu_patches.py         # FLA Triton SwiGLU for MLP
+  torch_norm_fla_rmsnorm_patches.py # FLA RMSNorm for WrappedTorchNorm
+  gdn_config_patches.py             # linear-attention config fields + hybrid init
+  fla_runtime_patches.py            # resolves PRIMUS_FLA_* knobs onto args
+  mamba_fla_data_patches.py         # FLA-order dataset shim wiring
 tools/hybrid/fla_order_dataset.py        # FLA-order dataset shim
 tools/profile_training.py         # NSight Compute / rocprof launcher
 tools/run_profiled_training.sh    # one-shot profiling driver

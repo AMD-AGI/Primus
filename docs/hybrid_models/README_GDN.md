@@ -178,28 +178,32 @@ train_data_path: >
 
 ---
 
-## Step 3: Apply Megatron-LM patches
+## Step 3: Megatron-LM patches (automatic — no action needed)
 
-The vendored `third_party/Megatron-LM` submodule needs six patches to support GDN parity training. They live in `megatron_patches/*.patch` and are applied by an idempotent script:
+GDN parity training needs six behavioral patches on top of the vendored
+`third_party/Megatron-LM` submodule. Unlike a typical vendored fork, Primus
+never modifies the third-party source: these patches are implemented as
+runtime monkey-patches using Primus's own patch system
+(`primus/core/patches`) and live under
+`[primus/backends/megatron/patches/](../../primus/backends/megatron/patches/)`.
+They register unconditionally but each carries a `condition=` gate on the
+relevant config flag, so they're a no-op unless you actually enable that
+flag — nothing to run by hand.
 
-```bash
-bash tools/hybrid/megatron_patch.sh           # apply all 6
-bash tools/hybrid/megatron_patch.sh --check   # dry-run (does not modify files)
-bash tools/hybrid/megatron_patch.sh --revert  # undo all
-```
+| Patch id                                   | File                            | Touches                 | Purpose                                                                                                                                                          |
+| ------------------------------------------- | -------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `megatron.mamba.fla_fused_ce`               | `mamba_fused_ce_patches.py`      | `MambaModel`            | Wires `FusedLinearCrossEntropyLoss` / `FusedCrossEntropyLoss` — never materializes the (batch×seq, vocab) logits tensor; gated by `fused_ce_mode` (default 1)   |
+| `megatron.optimizer.torch_fused_adam`       | `torch_fused_adam_patches.py`    | `optimizer/__init__.py` | Adds `PRIMUS_TORCH_OPTIM=1` opt-in for `torch.optim.AdamW(fused=True)` over TE/Apex FusedAdam                                                                    |
+| `megatron.mlp.fla_swiglu`                   | `mlp_fla_swiglu_patches.py`      | `MLP`                   | Routes SwiGLU through FLA's Triton-fused kernel (saves ~20 ms/iter); `use_fla_fused_swiglu` (default true)                                                       |
+| `megatron.torch_norm.fla_rmsnorm`           | `torch_norm_fla_rmsnorm_patches.py` | `WrappedTorchNorm`   | Routes RMSNorm through `fla.modules.RMSNorm` when `use_fla_fused_rmsnorm=true`                                                                                   |
+| `megatron.transformer.hybrid_output_init`   | `gdn_config_patches.py`          | `TransformerConfig`     | For hybrid models, uses uniform `init_method_normal` (no depth-scaled std) — required for bit-perfect iter-1 loss vs FLA                                         |
+| `megatron.mamba.fla_order_dataset`          | `mamba_fla_data_patches.py`      | `pretrain_mamba.py`     | FLA-order dataset shim (`use_fla_data=true` + `fla_cache_dir=<path>`)                                                                                            |
 
-The script is safe to re-run — already-applied patches are skipped. What each patch does (see `[megatron_patch.sh](../../tools/hybrid/megatron_patch.sh)` for the full breakdown):
-
-
-| Patch | Touches                 | Purpose                                                                                                                                                         |
-| ----- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 01    | `mamba_model.py`        | Wires `FusedLinearCrossEntropyLoss` / `FusedCrossEntropyLoss` — never materializes the (batch×seq, vocab) logits tensor; gated by `PRIMUS_FUSED_CE` (default 1) |
-| 02    | `optimizer/__init__.py` | Adds `PRIMUS_TORCH_OPTIM=1` opt-in for `torch.optim.AdamW(fused=True)` over TE/Apex FusedAdam                                                                   |
-| 03    | `transformer/mlp.py`    | Routes SwiGLU through FLA's Triton-fused kernel (saves ~20 ms/iter); `PRIMUS_FLA_SWIGLU` (default 1)                                                            |
-| 04    | `torch_norm.py`         | Routes RMSNorm through `fla.modules.RMSNorm` when `PRIMUS_FLA_NORM=1`                                                                                           |
-| 05    | `transformer_config.py` | For hybrid models, uses uniform `init_method_normal` (no depth-scaled std) — required for bit-perfect iter-1 loss vs FLA                                        |
-| 06    | `pretrain_mamba.py`     | FLA-order dataset shim (`PRIMUS_FLA_DATA=1` + `PRIMUS_FLA_CACHE_DIR=<path>`) and diagnostic iter-1 batch/activation dumps                                       |
-
+The `fused_ce_mode` / `use_fla_fused_swiglu` / `use_fla_fused_rmsnorm` /
+`use_fla_data` / `fla_cache_dir` knobs above are resolved once (env var >
+YAML field > default) by `fla_runtime_patches.py` before the patches in this
+table run. See `[GDN_FLA_PARITY.md](GDN_FLA_PARITY.md)` for the full
+per-patch deep-dive.
 
 ---
 
@@ -503,13 +507,14 @@ PY
 docs/hybrid_models/
 ├── README_GDN.md                                      ← this file
 └── GDN_FLA_PARITY.md                                  ← deep-dive on every patch & env var
-megatron_patches/
-├── 01-mamba_model-fused-ce.patch
-├── 02-optimizer-torch-fused-adam.patch
-├── 03-mlp-fla-swiglu.patch
-├── 04-torch_norm-fla-rmsnorm.patch
-├── 05-transformer_config-hybrid-init.patch
-└── 06-pretrain_mamba-fla-data.patch
+primus/backends/megatron/patches/
+├── mamba_fused_ce_patches.py                          ← FLA fused cross-entropy for MambaModel
+├── torch_fused_adam_patches.py                        ← PRIMUS_TORCH_OPTIM opt-in
+├── mlp_fla_swiglu_patches.py                          ← FLA Triton SwiGLU for MLP
+├── torch_norm_fla_rmsnorm_patches.py                  ← FLA RMSNorm for WrappedTorchNorm
+├── gdn_config_patches.py                              ← linear-attention config fields + hybrid init
+├── fla_runtime_patches.py                             ← resolves PRIMUS_FLA_* knobs onto args
+└── mamba_fla_data_patches.py                          ← FLA-order dataset shim wiring
 examples/megatron/configs/MI300X/
 └── zebra_llama_300M_gdn_pure-pretrain.yaml            ← training config
 primus/configs/models/megatron/
@@ -520,7 +525,6 @@ primus/backends/megatron/core/models/hybrid/
 ├── hybrid_block.py                                    ← HybridStack, fp32-residual + fusion
 └── hybrid_mamba_mla_layer_specs.py                    ← gdn_hybrid_stack_spec_no_te
 tools/hybrid/
-├── megatron_patch.sh                                  ← idempotent Megatron-LM patch applier
 ├── patch_fla_triton_autotune_hang.sh                  ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                         ← FLA Arrow → Megatron .bin/.idx
 ├── fla_order_dataset.py                               ← FLA-order dataset shim

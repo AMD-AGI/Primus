@@ -177,20 +177,17 @@ to match your home directory).
 
 ---
 
-## Step 3: Apply Megatron-LM patches
+## Step 3: Megatron-LM patches (automatic — no action needed)
 
 KDA uses the **same six patches** as GDN — no KDA-specific Megatron patch
-is required. They live in `megatron_patches/*.patch` and are applied by an
-idempotent script:
+is required. They're implemented as runtime monkey-patches using Primus's
+own patch system (`primus/core/patches`), living under
+`[primus/backends/megatron/patches/](../../primus/backends/megatron/patches/)`.
+Each patch registers unconditionally but is gated behind a `condition=` on
+the relevant config flag, so nothing needs to be run by hand.
 
-```bash
-bash tools/hybrid/megatron_patch.sh           # apply all 6
-bash tools/hybrid/megatron_patch.sh --check   # dry-run (does not modify files)
-bash tools/hybrid/megatron_patch.sh --revert  # undo all
-```
-
-See [`README_GDN.md`](README_GDN.md#step-3-apply-megatron-lm-patches) §3
-for the patch-by-patch breakdown.
+See [`README_GDN.md`](README_GDN.md#step-3-megatron-lm-patches-automatic--no-action-needed)
+§3 for the patch-by-patch breakdown.
 
 ---
 
@@ -539,7 +536,6 @@ benchmarks need to lift above noise).
 docs/hybrid_models/
 ├── README_KDA.md                                  ← this file
 └── KDA_FLA_PARITY.md                              ← deep-dive on every change
-megatron_patches/                                  ← same 6 patches as GDN
 examples/megatron/configs/MI300X/
 └── zebra_llama_300M_kda_pure-pretrain.yaml        ← training config
 primus/configs/models/megatron/
@@ -548,10 +544,15 @@ primus/backends/megatron/core/models/hybrid/
 ├── kimi_delta_attention.py                        ← FLA-aligned mixer (fused in_proj, FLA Triton paths)
 ├── kimi_delta_attention_layer.py                  ← eps propagation, optional pre-norm
 └── hybrid_mamba_mla_layer_specs.py                ← kda_hybrid_stack_spec_no_te
-primus/backends/megatron/patches/
-└── gdn_config_patches.py                          ← registers use_fla_triton_kda + fusion flags
+primus/backends/megatron/patches/                  ← same 6 patches as GDN (Primus patch system, shared)
+├── gdn_config_patches.py                          ← registers use_fla_triton_kda + fusion flags + hybrid init
+├── mamba_fused_ce_patches.py                      ← FLA fused cross-entropy for MambaModel
+├── torch_fused_adam_patches.py                    ← PRIMUS_TORCH_OPTIM opt-in
+├── mlp_fla_swiglu_patches.py                      ← FLA Triton SwiGLU for MLP
+├── torch_norm_fla_rmsnorm_patches.py              ← FLA RMSNorm for WrappedTorchNorm
+├── fla_runtime_patches.py                         ← resolves PRIMUS_FLA_* knobs onto args
+└── mamba_fla_data_patches.py                      ← FLA-order dataset shim wiring
 tools/hybrid/
-├── megatron_patch.sh                              ← idempotent Megatron-LM patch applier (shared with GDN)
 ├── patch_fla_triton_autotune_hang.sh              ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                     ← FLA Arrow → Megatron .bin/.idx (shared)
 ├── fla_order_dataset.py                           ← FLA-order dataset shim (shared)

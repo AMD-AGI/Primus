@@ -12,6 +12,7 @@ GatedDeltaNet and KimiDeltaAttention layers, so that no changes are needed
 in the third-party Megatron-LM codebase.
 """
 
+from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -67,3 +68,78 @@ def patch_gdn_config(ctx: PatchContext):
             f"[Patch:megatron.transformer.gdn_config] "
             f"TransformerConfig.{field_name} = {value}"
         )
+
+
+# -----------------------------------------------------------------------------
+# Hybrid-model output-layer init method
+# -----------------------------------------------------------------------------
+#
+# Upstream TransformerConfig.__post_init__ scales the output-layer init std
+# by depth (scaled_init_method_normal) or by mu-P width/depth
+# (mup_scaled_init_method_normal) -- both appropriate for pure transformers,
+# but not for hybrid models (GDN/KDA/Mamba), which FLA initializes with a
+# plain uniform `initializer_range` (init_method_normal, no depth scaling).
+# Without this, hybrid runs start from a different output-layer init than
+# FLA's reference training and the early loss curve doesn't line up.
+
+_HYBRID_INIT_PATCH_KEY = "megatron.transformer.hybrid_output_init"
+
+
+def _is_hybrid_model_run(args) -> bool:
+    """True for any HybridStack-based model (GDN/KDA/Mamba, pure or mixed
+    with MLA). Primus YAMLs set ``is_hybrid_model`` directly (it's a plain
+    ``TransformerConfig`` field, generically copied from ``args`` by
+    ``core_transformer_config_from_args``); fall back to the
+    ``hybrid_override_pattern`` / ``hybrid_layer_pattern`` derivation
+    upstream uses (see ``megatron.training.utils.is_hybrid_model``) in case
+    a config relies on that instead."""
+    return bool(
+        getattr(args, "is_hybrid_model", False)
+        or getattr(args, "hybrid_override_pattern", None)
+        or getattr(args, "hybrid_layer_pattern", None)
+    )
+
+
+def _install_hybrid_output_init_patch() -> None:
+    import megatron.core.transformer.transformer_config as config_mod
+    from megatron.core.utils import init_method_normal
+
+    TransformerConfig = config_mod.TransformerConfig
+    if is_patched(TransformerConfig, _HYBRID_INIT_PATCH_KEY):
+        log_rank_0(f"[Patch:{_HYBRID_INIT_PATCH_KEY}] TransformerConfig already patched; skipping.")
+        return
+
+    original_post_init = TransformerConfig.__post_init__
+
+    def patched_post_init(self):
+        # Only overriding output_layer_init_method's own None-guard mirrors
+        # upstream exactly: if the caller already set it explicitly, leave
+        # it untouched (same as upstream's `if self.output_layer_init_method
+        # is None:` gate).
+        was_none = self.output_layer_init_method is None
+        original_post_init(self)
+        if was_none and getattr(self, "is_hybrid_model", False):
+            self.output_layer_init_method = init_method_normal(self.init_method_std)
+
+    TransformerConfig.__post_init__ = patched_post_init
+    mark_patched(TransformerConfig, _HYBRID_INIT_PATCH_KEY)
+    log_rank_0(
+        f"[Patch:{_HYBRID_INIT_PATCH_KEY}] Patched TransformerConfig.__post_init__: "
+        "hybrid models now use uniform init_method_normal for the output layer "
+        "(matching FLA's initializer_range) instead of depth/mu-P-scaled init."
+    )
+
+
+@register_patch(
+    _HYBRID_INIT_PATCH_KEY,
+    backend="megatron",
+    phase="before_train",
+    description=(
+        "Hybrid models (GDN, KDA, Mamba) use uniform init_method_normal for the "
+        "output layer, matching FLA's initializer_range, instead of the "
+        "depth/mu-P-scaled init appropriate only for pure transformers."
+    ),
+    condition=lambda ctx: _is_hybrid_model_run(get_args(ctx)),
+)
+def patch_hybrid_output_init(ctx: PatchContext):
+    _install_hybrid_output_init_patch()

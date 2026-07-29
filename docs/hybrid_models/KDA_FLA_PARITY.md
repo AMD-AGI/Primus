@@ -70,14 +70,13 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 `/home/<user>/Primus`:
 
 ```bash
-# 1. (one time) apply the Megatron-LM patches (same set as GDN)
-bash tools/hybrid/megatron_patch.sh
-
-# 2. (one time) build the FLA-init KDA-300M checkpoint
+# 1. (one time) build the FLA-init KDA-300M checkpoint
 python tools/hybrid/convert_fla_kda_init_to_megatron.py
 #  → output/fla_init_kda_300M/iter_0000000/mp_rank_00/model_optim_rng.pt
 
-# 3. Launch training (8 GPUs by default)
+# 2. Launch training (8 GPUs by default). The Megatron-LM behavioral
+#    patches (same set as GDN) are applied automatically at startup via
+#    Primus's patch system -- no separate apply step needed.
 EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
   bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
 ```
@@ -127,15 +126,13 @@ in `GDN_FLA_PARITY.md`).
 | `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | Add a new `kda_hybrid_stack_spec_no_te` ModuleSpec — plain `WrappedTorchNorm`, plain `ColumnParallelLinear`, plain `RowParallelLinear`, mixer `gate_norm=IdentityOp` (FLA has no re-norm for the gate path). | YAML can now select TE-free KDA layers via `spec: [..., kda_hybrid_stack_spec_no_te]` for FLA loss-curve alignment without touching code. Mirrors `gdn_hybrid_stack_spec_no_te`. |
 | `primus/backends/megatron/patches/gdn_config_patches.py` | Register `use_fla_kda_in_kernel_gate` (default `True`) and `use_fla_fused_norm_gated` (default `None` → auto when `use_fla_triton_kda=True`) as `TransformerConfig` fields. | Lets the YAML `overrides:` block toggle the two KDA-specific fusion paths without touching code. |
 
-### B. Vendored Megatron-LM patches (shared with GDN)
+### B. Megatron-LM behavioral patches (shared with GDN, Primus patch system)
 
 KDA reuses the **exact same six patches** that GDN uses; no KDA-specific
-megatron-LM patch is required. See `GDN_FLA_PARITY.md` section B for the
-patch-by-patch breakdown. Applied via:
-
-```bash
-bash tools/hybrid/megatron_patch.sh
-```
+megatron-LM patch is required. These are runtime monkey-patches registered
+with `@register_patch` under `primus/backends/megatron/patches/` and applied
+automatically at `phase="before_train"` -- see `GDN_FLA_PARITY.md` section B
+for the patch-by-patch breakdown. Nothing needs to be run by hand.
 
 ### C. YAML configuration changes
 
@@ -247,20 +244,18 @@ iter 1000 even without it.
 ## Files in the repo for this work
 
 ```
-tools/hybrid/megatron_patch.sh                     # idempotent applier (shared with GDN)
-megatron_patches/                                  # 6 patches (same as GDN)
-  01-mamba_model-fused-ce.patch
-  02-optimizer-torch-fused-adam.patch
-  03-mlp-fla-swiglu.patch
-  04-torch_norm-fla-rmsnorm.patch
-  05-transformer_config-hybrid-init.patch
-  06-pretrain_mamba-fla-data.patch
 primus/backends/megatron/core/models/hybrid/
   kimi_delta_attention.py                          # FLA-aligned mixer
   kimi_delta_attention_layer.py                    # wrapper w/ pre-norm
   hybrid_mamba_mla_layer_specs.py                  # kda_hybrid_stack_spec_no_te
-primus/backends/megatron/patches/
-  gdn_config_patches.py                            # registers KDA fusion flags
+primus/backends/megatron/patches/                  # 6 patches (same as GDN), Primus patch system
+  gdn_config_patches.py                            # registers KDA fusion flags + hybrid init
+  mamba_fused_ce_patches.py                        # FLA fused cross-entropy for MambaModel
+  torch_fused_adam_patches.py                      # PRIMUS_TORCH_OPTIM opt-in
+  mlp_fla_swiglu_patches.py                        # FLA Triton SwiGLU for MLP
+  torch_norm_fla_rmsnorm_patches.py                # FLA RMSNorm for WrappedTorchNorm
+  fla_runtime_patches.py                           # resolves PRIMUS_FLA_* knobs onto args
+  mamba_fla_data_patches.py                        # FLA-order dataset shim wiring
 primus/configs/models/megatron/
   zebra_llama_300M_kda_pure.yaml                   # architecture-only
 examples/megatron/configs/MI300X/
