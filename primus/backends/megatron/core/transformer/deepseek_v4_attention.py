@@ -654,12 +654,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # TE-fused sink primitive can land as a new spec field once it
         # actually replaces the inline path.
         #
-        # Kept in FP32: it is FP32 in the released checkpoint, and every V4
-        # kernel already expects that -- the triton_v2 backend asserts
-        # ``attn_sink.dtype == torch.float32`` outright and the sparse-MLA
-        # adapter promotes with ``sink.float()`` before dispatch, then returns
-        # the gradient at the promoted dtype. Holding the parameter at FP32
-        # makes that round trip type-consistent instead of relying on the cast.
+        # FP32 in the released checkpoint, and the gluon / flydsl_v1 kernels
+        # assert ``attn_sink.dtype == torch.float32`` at their entry. That
+        # assertion is satisfied by the promotion the callers already do
+        # (``sink.float()`` in the sparse-MLA adapter and the eager reference),
+        # so the parameter itself may follow the model dtype. Pinning it to FP32
+        # is therefore opt-in via ``PRIMUS_V4_KEEP_FP32`` -- see
+        # ``keep_in_fp32`` for why holding a second parameter dtype is not free.
         if attn_sink_enabled:
             self.attn_sink = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
             mark_keep_in_fp32(self.attn_sink)

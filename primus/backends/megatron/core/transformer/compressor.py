@@ -105,9 +105,10 @@ class Compressor(KeepInFp32Mixin, nn.Module):
         # softmax score. After overlap, the effective window length is
         # ``2*ratio`` slots of size ``head_dim``; in non-overlap mode it's
         # ``ratio`` slots of size ``head_dim``.
-        # FP32 in the released checkpoint, and kept FP32 here: it is an additive
-        # bias on the pooling softmax scores, so its resolution is the
-        # resolution of the pooling weights themselves.
+        # FP32 in the released checkpoint. The pooling path promotes with
+        # ``score.float()`` before its softmax, so following the model dtype
+        # costs stored resolution only; pinning it is opt-in via
+        # ``PRIMUS_V4_KEEP_FP32`` (see ``keep_in_fp32``).
         ape_len = 2 * ratio if self.overlap else ratio
         self.ape = nn.Parameter(torch.zeros(ape_len, head_dim, dtype=torch.float32))
         nn.init.normal_(self.ape, std=0.02)

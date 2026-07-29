@@ -6,11 +6,16 @@
 
 """Tests for the keep-in-FP32 contract on ``ape`` and ``attn_sink``.
 
-Both are FP32 in the released DeepSeek-V4 checkpoint and both land directly in
-a softmax, so the framework's blanket ``module.bfloat16()`` must not reach them.
-Covers the mechanism in isolation, the two V4 parameters that use it, and the
-property that actually matters: the FP32 values survive *bit-exactly* rather
-than being round-tripped through BF16.
+Both are FP32 in the released DeepSeek-V4 checkpoint, so this mechanism can hold
+them at FP32 through the framework's blanket ``module.bfloat16()``. Covers the
+mechanism in isolation, the two V4 parameters that use it, and the property that
+actually matters when it is on: the FP32 values survive *bit-exactly* rather than
+being round-tripped through BF16.
+
+The mechanism is **off by default** (a second parameter dtype breaks the
+distributed optimizer's single-dtype assumption -- see the module docstring), so
+everything here opts in explicitly via the fixture below. The default-off
+behaviour has its own tests at the bottom.
 """
 
 from __future__ import annotations
@@ -35,11 +40,19 @@ from primus.backends.megatron.core.transformer.deepseek_v4_attention import (  #
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE  # noqa: E402
 from primus.backends.megatron.core.transformer.keep_in_fp32 import (  # noqa: E402
+    ENABLE_ENV_VAR,
     KeepInFp32Mixin,
+    is_enabled,
     is_marked_keep_in_fp32,
     mark_keep_in_fp32,
     unmark_keep_in_fp32,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enable_keep_in_fp32(monkeypatch):
+    """Opt in for this module: the mechanism ships disabled."""
+    monkeypatch.setenv(ENABLE_ENV_VAR, "1")
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +228,12 @@ def test_attn_sink_stays_fp32(compress_ratio: int):
     assert attn.linear_q_up_proj.weight.dtype == torch.bfloat16
 
 
-def test_attn_sink_fp32_matches_the_triton_v2_kernel_contract():
-    """``_triton_v2`` asserts the sink is contiguous FP32 with shape [H].
+def test_attn_sink_fp32_matches_the_gluon_kernel_contract():
+    """The gluon / flydsl_v1 kernels assert contiguous FP32 sink of shape [H].
 
-    Pin the parameter against that contract so the dispatch cannot start
-    depending on an implicit promotion at the call site.
+    Those kernels are satisfied by the promotion their callers already do, so
+    this only pins that *when* the mechanism is on, the parameter arrives in the
+    shape and layout they expect rather than needing a second cast.
     """
     attn = _make_attention(4)
     attn.bfloat16()
@@ -256,3 +270,61 @@ def test_attention_state_dict_dtypes_match_the_reference_checkpoint():
     assert weights, "expected some weight matrices to compare against"
     for key in weights:
         assert state[key].dtype == torch.bfloat16, f"{key} should follow the model dtype"
+
+
+# ---------------------------------------------------------------------------
+# Default-off behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_disabled_by_default(monkeypatch):
+    """Shipping default: a second parameter dtype breaks the distributed
+    optimizer (``single dtype supported, for now``), and on 4N/PP4 it aborted
+    every GPU with a memory access fault. So the model must come up uniform.
+    """
+    monkeypatch.delenv(ENABLE_ENV_VAR, raising=False)
+    assert not is_enabled()
+
+
+@pytest.mark.parametrize("value", ["0", "", "false", "True", "yes"])
+def test_only_exactly_one_enables(monkeypatch, value: str):
+    """Opt-in is ``"1"`` and nothing else -- a stray value must not half-enable
+    the mechanism, since the failure it causes is a GPU abort rather than an
+    exception.
+    """
+    monkeypatch.setenv(ENABLE_ENV_VAR, value)
+    assert not is_enabled()
+
+
+def test_parameters_follow_the_model_dtype_when_disabled(monkeypatch):
+    """The whole model is one dtype when off -- this is what makes the
+    distributed optimizer's single-dtype assumption hold.
+    """
+    monkeypatch.setenv(ENABLE_ENV_VAR, "0")
+
+    comp = Compressor(hidden_size=32, head_dim=16, ratio=4)
+    comp.bfloat16()
+    assert comp.ape.dtype == torch.bfloat16
+
+    attn = _make_attention(4)
+    attn.bfloat16()
+    assert attn.attn_sink.dtype == torch.bfloat16
+    assert attn.compressor.ape.dtype == torch.bfloat16
+    assert attn.indexer.indexer_compressor.ape.dtype == torch.bfloat16
+
+    dtypes = {p.dtype for p in attn.parameters()}
+    assert dtypes == {torch.bfloat16}, f"expected a single parameter dtype, got {dtypes}"
+
+
+def test_disabled_pooling_forward_still_runs(monkeypatch):
+    """Guard the path that actually matters: ``score.float()`` before the
+    softmax means a BF16 ``ape`` does not change the pooling result's finiteness.
+    """
+    monkeypatch.setenv(ENABLE_ENV_VAR, "0")
+
+    comp = Compressor(hidden_size=32, head_dim=16, ratio=4)
+    comp.bfloat16()
+    pooled = comp(torch.randn(1, 8, 32, dtype=torch.bfloat16))
+
+    assert pooled.shape == (1, 2, 16)
+    assert torch.isfinite(pooled.float()).all()

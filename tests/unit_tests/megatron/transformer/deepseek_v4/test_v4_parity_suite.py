@@ -369,8 +369,14 @@ def test_distillation_loss_reaches_only_the_indexer(monkeypatch):
 
 
 def test_ape_and_sink_receive_fp32_gradients(monkeypatch):
-    """The FP32 pinning must survive into the gradients the optimizer sees."""
+    """With the pinning opted in, it must survive into the gradients too.
+
+    ``PRIMUS_V4_KEEP_FP32`` ships off, so this asserts the opt-in path rather
+    than the default one -- a mixed-dtype model is exactly what the distributed
+    optimizer cannot take (see ``keep_in_fp32``).
+    """
     monkeypatch.delenv("PRIMUS_V4_INDEXER_TRAINABLE", raising=False)
+    monkeypatch.setenv("PRIMUS_V4_KEEP_FP32", "1")
     torch.manual_seed(0)
     attn = _make_csa_attention()
     attn.bfloat16()
