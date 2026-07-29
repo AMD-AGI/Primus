@@ -51,10 +51,15 @@ P14 phase-2 (this commit) — structural bring-up:
 * :attr:`local_expert_indices` exposed for compatibility with downstream
   tooling that expects the ``BaseMoELayer`` public surface.
 
-Aux-loss / z-loss inheritance via :class:`TopKRouter` is left as a
-follow-up: the V4 routers are standalone ``nn.Module``\\ s rather than
-subclasses of Megatron's :class:`TopKRouter` (the parent registers CUDA
-buffers in ``__init__`` and is impractical to instantiate on CPU). The
+Load balancing follows the paper: the auxiliary-loss-free expert bias plus a
+sequence-wise balance loss, the latter implemented directly on the learned
+router (see :mod:`...moe.v4_seq_balance_loss`) and driven by
+``moe_router_load_balancing_type: seq_aux_loss`` + ``moe_aux_loss_coeff``.
+It is not inherited from the framework's :class:`TopKRouter` for two reasons: the
+V4 routers are standalone ``nn.Module``\\ s (the parent registers CUDA buffers in
+``__init__`` and is impractical to instantiate on CPU), and the built-in aux-loss
+scores helper only handles ``softmax`` / ``sigmoid`` and rejects V4's
+``sqrtsoftplus``. z-loss remains unimplemented. The
 distributed re-validation phase (P19) will re-introduce that path
 behind a TopKRouter subclass once the CUDA-buffer init is gated by a
 device check upstream.
@@ -220,6 +225,9 @@ class DeepseekV4MoE(MegatronModule):
         self.grouped_experts: Optional[nn.Module] = None
         self.local_experts: Optional[nn.ModuleList] = None
         self.shared_expert: Optional[nn.Module] = None
+        # True once the dispatcher owns the shared expert, which also means the
+        # dispatcher adds its output (see ``_enable_shared_expert_overlap``).
+        self.shared_expert_overlap = False
 
         if pg_collection is None:
             self.local_experts = self._build_local_experts(intermediate_size=self.moe_intermediate_size)
@@ -239,6 +247,7 @@ class DeepseekV4MoE(MegatronModule):
                 self.shared_expert = self._build_shared_expert_module(
                     intermediate_size=int(self.config.moe_shared_expert_intermediate_size)
                 )
+                self.shared_expert_overlap = self._enable_shared_expert_overlap()
 
     # ------------------------------------------------------------------
 
@@ -252,6 +261,10 @@ class DeepseekV4MoE(MegatronModule):
         TopKRouter-rooted upgrades plug in without spec changes.
         """
         self.layer_number = layer_number
+        # The router is built before this runs, so forward the index it needs
+        # to attribute its balance loss to the right layer in the tracker.
+        if self.learned_router is not None:
+            self.learned_router.layer_number = layer_number
 
     def _build_local_experts(self, *, intermediate_size: int) -> nn.ModuleList:
         """Build a local :class:`nn.ModuleList` of clamped-SwiGLU experts.
@@ -338,7 +351,89 @@ class DeepseekV4MoE(MegatronModule):
             score_function=score_function,
             enable_expert_bias=enable_expert_bias,
             topk_scaling_factor=topk_scaling_factor,
+            seq_balance_loss_coeff=self._seq_balance_loss_coeff(),
+            seq_balance_reduce_group=self._seq_balance_reduce_group(),
+            layer_number=self.layer_number,
+            num_layers=self._total_layers_for_loss_logging(),
         )
+
+    def _seq_balance_loss_coeff(self) -> float:
+        """Coefficient of the sequence-wise balance loss, 0 when not selected.
+
+        V4 balances with the auxiliary-loss-free expert bias plus this
+        sequence-wise term (paper 2.1), which is what
+        ``moe_router_load_balancing_type: seq_aux_loss`` in the model yaml asks
+        for. Any other balancing type leaves the loss off -- the framework's
+        built-in aux-loss variants are not reachable from this router.
+        """
+        config = self.config
+        if str(getattr(config, "moe_router_load_balancing_type", "")) != "seq_aux_loss":
+            return 0.0
+        return float(getattr(config, "moe_aux_loss_coeff", 0.0) or 0.0)
+
+    def _seq_balance_reduce_group(self):
+        """Group the sequence axis is sharded over, or ``None`` if it is not.
+
+        The loss is per-sequence, so with sequence parallelism (TP) or context
+        parallelism a rank only sees part of each sequence and the expert counts
+        have to be summed across the shards.
+        """
+        tp_size = int(getattr(self.config, "tensor_model_parallel_size", 1) or 1)
+        cp_size = int(getattr(self.config, "context_parallel_size", 1) or 1)
+        sequence_parallel = bool(getattr(self.config, "sequence_parallel", False))
+        if cp_size == 1 and not (sequence_parallel and tp_size > 1):
+            return None
+        group = getattr(self.pg_collection, "tp_cp", None)
+        if group is not None:
+            return group
+        from megatron.core import parallel_state
+
+        return parallel_state.get_tensor_and_context_parallel_group()
+
+    def _total_layers_for_loss_logging(self) -> Optional[int]:
+        """Tracker width: decoder layers plus MTP layers, matching the framework."""
+        num_layers = getattr(self.config, "num_layers", None)
+        if not num_layers:
+            return None
+        return int(num_layers) + int(getattr(self.config, "mtp_num_layers", 0) or 0)
+
+    def _enable_shared_expert_overlap(self) -> bool:
+        """Hand the shared expert to the dispatcher so it runs under the A2A.
+
+        ``moe_shared_expert_overlap`` asks for the shared expert's GEMMs to be
+        interleaved with the dispatch / combine all-to-alls instead of running
+        after them. The token dispatcher already carries the hooks, and they sit
+        in exactly the decomposed calls :meth:`_dispatcher_forward` already
+        makes: ``dispatch_preprocess`` kicks off the input comm on a side stream,
+        ``dispatch_postprocess`` runs fc1 + activation, and
+        ``combine_postprocess`` runs fc2 and **adds the result into the output**.
+
+        That last part is why the return value matters to the caller: once the
+        dispatcher owns the shared expert, adding it again in ``forward`` would
+        double-count it.
+
+        Returns False (leaving the serial path in place) when the config asks for
+        no overlap or the dispatcher does not support it -- the flex dispatcher
+        raises ``NotImplementedError`` from ``set_shared_experts``.
+        """
+        if not bool(getattr(self.config, "moe_shared_expert_overlap", False)):
+            return False
+        if self.shared_expert is None or self.token_dispatcher is None:
+            return False
+        if not hasattr(self.shared_expert, "pre_forward_comm"):
+            # The CPU ClampedSwiGLUMLP has no overlap protocol.
+            return False
+        try:
+            self.token_dispatcher.set_shared_experts(self.shared_expert)
+        except NotImplementedError:
+            logger.warning(
+                "[V4-MoE] layer %s: %s does not support shared-expert overlap; "
+                "running the shared expert serially.",
+                self.layer_idx,
+                type(self.token_dispatcher).__name__,
+            )
+            return False
+        return True
 
     def _build_shared_expert_module(self, *, intermediate_size: int) -> nn.Module:
         shared_expert_spec = self.submodules.shared_expert
@@ -625,7 +720,9 @@ class DeepseekV4MoE(MegatronModule):
 
         # Production path: Megatron dispatcher + grouped experts.
         out = self._dispatcher_forward(hidden, probs, routing_map)
-        if self.shared_expert is not None:
+        # Under overlap the dispatcher already folded the shared expert into the
+        # combine output, so adding it here would double-count it.
+        if self.shared_expert is not None and not self.shared_expert_overlap:
             out = out + self.shared_expert(hidden)
         return out
 
