@@ -220,6 +220,7 @@ class DeepseekV4MoE(MegatronModule):
         self.grouped_experts: Optional[nn.Module] = None
         self.local_experts: Optional[nn.ModuleList] = None
         self.shared_expert: Optional[nn.Module] = None
+        self.mega_moe_experts: Optional[nn.Module] = None
 
         if pg_collection is None:
             self.local_experts = self._build_local_experts(intermediate_size=self.moe_intermediate_size)
@@ -230,6 +231,16 @@ class DeepseekV4MoE(MegatronModule):
                     intermediate_size=int(self.config.moe_shared_expert_intermediate_size),
                     alpha=self.clamp_alpha,
                     bias=False,
+                )
+        elif self._mega_moe_requested():
+            # MegaMoE fuses dispatch/combine into the grouped GEMMs, so it
+            # replaces the dispatcher *and* the grouped experts. The V4 routers
+            # and the shared expert are untouched.
+            self.mega_moe_experts = self._build_mega_moe_experts()
+            if self.use_shared_expert:
+                assert self.config.moe_shared_expert_intermediate_size is not None
+                self.shared_expert = self._build_shared_expert_module(
+                    intermediate_size=int(self.config.moe_shared_expert_intermediate_size)
                 )
         else:
             self.token_dispatcher = self._build_token_dispatcher()
@@ -252,6 +263,93 @@ class DeepseekV4MoE(MegatronModule):
         TopKRouter-rooted upgrades plug in without spec changes.
         """
         self.layer_number = layer_number
+
+    def _mega_moe_requested(self) -> bool:
+        """Whether the fused MegaMoE expert path was asked for.
+
+        The upstream patch that swaps Megatron's ``MoELayer`` cannot reach V4 --
+        :class:`DeepseekV4MoE` is built directly by ``deepseek_v4_block`` and
+        never instantiates ``MoELayer`` -- so V4 drives
+        :class:`MegaMoEExperts` itself.
+
+        The turbo switches live on the Megatron ``args`` namespace, not on
+        :class:`TransformerConfig` (same as ``args.enable_primus_turbo`` in
+        :mod:`primus.backends.megatron.core.transformer.moe.router`), so read
+        them from there. ``get_args`` raises before Megatron is initialized,
+        which is the CPU unit-test path -- treat that as "not requested".
+        """
+        try:
+            from megatron.training import get_args
+
+            args = get_args()
+        except Exception:
+            return False
+        return bool(getattr(args, "enable_primus_turbo", False)) and bool(
+            getattr(args, "use_turbo_mega_moe", False)
+        )
+
+    def _build_mega_moe_experts(self) -> nn.Module:
+        """Build the fused MegaMoE expert path, or explain why it cannot run.
+
+        Every unmet requirement raises rather than falling back: a silent
+        fallback leaves the run with neither MegaMoE nor the Turbo DeepEP
+        dispatcher that ``use_turbo_mega_moe`` disables, which shows up only as
+        an unexplained slowdown.
+        """
+        from primus.backends.megatron.core.extensions.mega_moe import MegaMoEExperts
+
+        reasons = []
+        if self.config.tensor_model_parallel_size != 1:
+            reasons.append(f"MegaMoE is EP-only (TP==1), got TP={self.config.tensor_model_parallel_size}")
+        if self.config.params_dtype != torch.bfloat16:
+            reasons.append(f"MegaMoE only supports bf16, got params_dtype={self.config.params_dtype}")
+        if self.ep_group is None or self.ep_size <= 1:
+            reasons.append(f"MegaMoE needs an expert-parallel group, got EP={self.ep_size}")
+        if self.num_routed_experts % self.ep_size != 0:
+            reasons.append(
+                f"MegaMoE needs num_experts divisible by EP size, got "
+                f"{self.num_routed_experts} % {self.ep_size} != 0"
+            )
+        if reasons:
+            raise ValueError(
+                "[DeepSeek-V4] use_turbo_mega_moe=True but the fused MegaMoE path cannot run here: "
+                + "; ".join(reasons)
+            )
+
+        logger.warning(
+            "[DeepSeek-V4] MegaMoE expert path enabled: the fused kernel hardcodes unclamped "
+            "SwiGLU, so swiglu_limit=%s is NOT applied to routed experts.",
+            self.clamp_alpha,
+        )
+        experts = MegaMoEExperts(
+            self.config,
+            self.local_num_routed_experts,
+            self.hidden_size,
+            self.moe_intermediate_size,
+            self.ep_group,
+        )
+        if self.config.perform_initialization:
+            experts.reset_parameters(self.ep_rank)
+        logger.info(
+            "[DeepSeek-V4] MoE expert path resolved to MegaMoEExperts "
+            "(fused dispatch/combine; token dispatcher and grouped experts not built)."
+        )
+        return experts
+
+    def _mega_moe_forward(self, hidden: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
+        """Run the fused MegaMoE expert path.
+
+        ``probs`` is the dense ``[N, E]`` router output while MegaMoE wants the
+        compact ``(topk_idx, topk_weights)`` pair. ``probs`` is zero outside the
+        selected experts, so ``topk`` recovers exactly the routed set -- the
+        same conversion :class:`PrimusTurboMegaMoELayer` performs.
+        """
+        assert self.mega_moe_experts is not None
+        in_shape = hidden.shape
+        topk_weights, topk_idx = probs.topk(self.moe_router_topk, dim=-1)
+        x = hidden.reshape(-1, self.hidden_size).to(torch.bfloat16)
+        y = self.mega_moe_experts(x, topk_idx, topk_weights.to(torch.float32))
+        return y.reshape(in_shape).to(hidden.dtype)
 
     def _build_local_experts(self, *, intermediate_size: int) -> nn.ModuleList:
         """Build a local :class:`nn.ModuleList` of clamped-SwiGLU experts.
@@ -623,8 +721,12 @@ class DeepseekV4MoE(MegatronModule):
                 flat_out = flat_out + self.shared_expert(flat_hidden)
             return flat_out.view(*shape)
 
-        # Production path: Megatron dispatcher + grouped experts.
-        out = self._dispatcher_forward(hidden, probs, routing_map)
+        # Production path: fused MegaMoE experts, or Megatron dispatcher +
+        # grouped experts.
+        if self.mega_moe_experts is not None:
+            out = self._mega_moe_forward(hidden, probs)
+        else:
+            out = self._dispatcher_forward(hidden, probs, routing_map)
         if self.shared_expert is not None:
             out = out + self.shared_expert(hidden)
         return out
