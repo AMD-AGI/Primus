@@ -37,6 +37,7 @@ return signature.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -50,6 +51,10 @@ __all__ = [
 
 # Guard for log(0) / division by zero.
 _EPS = 1e-10
+
+# Query rows per chunk when building the KL target; see ``_target_chunk_size``.
+_TARGET_CHUNK_ENV = "PRIMUS_V4_DISTILL_TARGET_CHUNK"
+_TARGET_CHUNK_DEFAULT = 512
 
 # Key under which the loss is reported. Shares the framework's MoE aux-loss
 # tracker, so it lands in the training log / TensorBoard / W&B next to the MoE
@@ -163,6 +168,79 @@ class V4IndexerLossAutoScaler(torch.autograd.Function):
         V4IndexerLossAutoScaler.main_loss_backward_scale = scale
 
 
+def _target_chunk_size(seq_len: int) -> int:
+    """Query rows per chunk when building the KL target.
+
+    The gathered pool is ``[B, S, K, head_dim]``, which at V4-Flash widths
+    (S=4096, K=512, head_dim=512) is 2.1 GB in BF16 for a single microbatch.
+    Materialising it whole costs more in HBM traffic than the GEMM that consumes
+    it, so slice the query axis. ``0`` disables chunking.
+    """
+    override = os.environ.get(_TARGET_CHUNK_ENV)
+    if override is not None:
+        try:
+            return max(int(override), 0)
+        except ValueError:
+            pass
+    return _TARGET_CHUNK_DEFAULT if seq_len > _TARGET_CHUNK_DEFAULT else 0
+
+
+def _target_distribution(
+    *,
+    query: torch.Tensor,
+    pool: torch.Tensor,
+    topk_idxs: torch.Tensor,
+    valid: torch.Tensor,
+    row_valid: torch.Tensor,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """Head-summed attention distribution over the selected entries: ``[B, S, K]``.
+
+    This is the KL target, and it is fully detached, so nothing here needs to be
+    kept for backward. Three things follow from that and keep it cheap:
+
+    * The gather and the GEMM run at the **model dtype** instead of being
+      promoted to fp32 first. Promoting the gathered pool costs
+      ``head_dim`` times more traffic than promoting the result, and the logits
+      the main attention actually produces are computed at the model dtype too,
+      so staying there tracks the distribution being imitated more closely, not
+      less.
+    * The head sum happens **inside** the loop, so the ``[B, H, S, K]`` logits
+      never exist in full either -- only ``[B, H, chunk, K]``.
+    * The query axis is chunked, so neither does the ``[B, S, K, head_dim]``
+      gather, which at V4-Flash widths would be 2.1 GB per microbatch.
+    """
+    B, H, S, _ = query.shape
+    K = topk_idxs.shape[-1]
+    q = query.detach()
+    kv = pool.detach()
+    batch_idx = torch.arange(B, device=pool.device).view(B, 1, 1)
+
+    def block(sl: slice) -> torch.Tensor:
+        idx = topk_idxs[:, sl]
+        # Clamp the -1 sentinels to a legal row; masked back out right after.
+        gathered = kv[batch_idx, idx.clamp_min(0)]
+        logits = torch.einsum("bhsd,bskd->bhsk", q[:, :, sl], gathered).float()
+        logits *= softmax_scale
+        logits.masked_fill_(~valid[:, sl].unsqueeze(1), float("-inf"))
+        # An all -inf row would softmax to NaN; flatten it and drop it after.
+        rows = row_valid[:, sl].view(B, 1, -1, 1)
+        logits.masked_fill_(~rows, 0.0)
+        probs = torch.softmax(logits, dim=-1)
+        probs.mul_(rows)
+        return probs.sum(dim=1)  # [B, chunk, K]
+
+    chunk = _target_chunk_size(S)
+    if chunk <= 0 or chunk >= S:
+        return block(slice(0, S))
+
+    out = torch.empty((B, S, K), device=query.device, dtype=torch.float32)
+    for start in range(0, S, chunk):
+        stop = min(start + chunk, S)
+        out[:, start:stop] = block(slice(start, stop))
+    return out
+
+
 def compute_indexer_distill_loss(
     *,
     index_topk_scores: torch.Tensor,
@@ -201,41 +279,36 @@ def compute_indexer_distill_loss(
         Scalar loss (fp32). Rows with no legal entry contribute nothing, so a
         fully-masked row can never produce NaN.
     """
-    B, H, S, _ = query.shape
+    B, _, S, _ = query.shape
     valid = topk_idxs >= 0  # [B, S, K]
     row_valid = valid.any(dim=-1)  # [B, S]
 
-    # Gather the selected pool entries: [B, S, K, head_dim]. Clamp the -1
-    # sentinels to a legal index first; they are masked out below.
-    batch_idx = torch.arange(B, device=pool.device).view(B, 1, 1)
-    gathered = pool.detach()[batch_idx, topk_idxs.clamp_min(0)]
+    # The KL target: the head-summed attention distribution over the same
+    # entries. Fully detached (see the note above), so it is built under
+    # ``no_grad`` and never has to materialise the dense per-head tensors.
+    with torch.no_grad():
+        target = _target_distribution(
+            query=query,
+            pool=pool,
+            topk_idxs=topk_idxs,
+            valid=valid,
+            row_valid=row_valid,
+            softmax_scale=softmax_scale,
+        )
+        # The head sum must span all heads before the renormalisation below.
+        if head_reduce_group is not None and torch.distributed.get_world_size(head_reduce_group) > 1:
+            target = target.contiguous()
+            torch.distributed.all_reduce(target, group=head_reduce_group)
+        # Renormalise to a distribution; L1 is enough since softmax outputs are
+        # already non-negative.
+        target /= target.sum(dim=-1, keepdim=True).clamp(min=_EPS)
 
-    # True attention logits over exactly the selected entries -- the KL target,
-    # hence detached (see the note above).
-    attn_logits = torch.einsum("bhsd,bskd->bhsk", query.detach().float(), gathered.float()) * softmax_scale
-    attn_logits = attn_logits.masked_fill(~valid.unsqueeze(1), float("-inf"))
-    idx_logits = index_topk_scores.float()
-
-    # Rows with zero legal entries would softmax over all -inf and yield NaN.
-    # Neutralise their logits before the softmax and drop their contribution
-    # after it, so no NaN is ever produced (and no gradient flows from them).
-    attn_row_mask = row_valid.view(B, 1, S, 1)
+    # The indexer side is the one that learns, so it stays attached. Rows with
+    # zero legal entries are neutralised before the softmax and dropped after,
+    # so a fully-masked row yields 0 rather than NaN and no gradient.
     idx_row_mask = row_valid.view(B, S, 1)
-    attn_logits = attn_logits.masked_fill(~attn_row_mask, 0.0)
-    idx_logits = idx_logits.masked_fill(~idx_row_mask, 0.0)
-
-    attn_probs = torch.softmax(attn_logits, dim=-1, dtype=torch.float32) * attn_row_mask.to(torch.float32)
+    idx_logits = index_topk_scores.float().masked_fill(~idx_row_mask, 0.0)
     idx_probs = torch.softmax(idx_logits, dim=-1, dtype=torch.float32) * idx_row_mask.to(torch.float32)
-
-    # The indexer emits one distribution per query while attention has H heads,
-    # so aggregate the heads and renormalise to a distribution (L1 is enough --
-    # softmax outputs are already non-negative). The head sum must span all
-    # heads before the renormalisation, hence the optional all-reduce.
-    target = attn_probs.sum(dim=1)  # [B, S, K]
-    if head_reduce_group is not None and torch.distributed.get_world_size(head_reduce_group) > 1:
-        target = target.contiguous()
-        torch.distributed.all_reduce(target, group=head_reduce_group)
-    target = target / target.sum(dim=-1, keepdim=True).clamp(min=_EPS)
 
     kl_per_row = (target * (torch.log(target + _EPS) - torch.log(idx_probs + _EPS))).sum(dim=-1)
     return kl_per_row.mean() * loss_coeff
