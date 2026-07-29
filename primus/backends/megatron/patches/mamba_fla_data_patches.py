@@ -50,10 +50,19 @@ def _install_mamba_fla_data_patch() -> None:
         fla_cache = getattr(args, "fla_cache_dir", "")
         print_rank_0(f"> [FLA-check] use_fla_data={fla_data_flag!r}, fla_cache_dir={fla_cache!r}")
         if fla_data_flag and fla_cache:
+            import importlib.util
+            import os
+
             from megatron.core import parallel_state
             from megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer
 
-            from tools.hybrid.fla_order_dataset import FLAOrderGPTDataset
+            _spec = importlib.util.spec_from_file_location(
+                "fla_order_dataset",
+                os.path.join(os.environ.get("PRIMUS_PATH", os.getcwd()), "tools", "hybrid", "fla_order_dataset.py"),
+            )
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            FLAOrderGPTDataset = _mod.FLAOrderGPTDataset
 
             dp_size = parallel_state.get_data_parallel_world_size()
             tokenizer = build_tokenizer(args)
