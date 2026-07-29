@@ -182,8 +182,8 @@ fi
 #   USE_V4_CSA_ATTENTION_BACKEND (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
 # gluon is gfx950/CDNA4-only (lazily imported; asserts arch when selected).
 # use_turbo_attention (when core_attention is built) still wins for the dense path.
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v2}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-turbo}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-turbo}
 
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
