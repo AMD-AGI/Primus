@@ -163,7 +163,7 @@ Installation and container-oriented setup are covered in [Installation](../01-ge
 
 | Area | Action |
 |------|--------|
-| GEMM / kernels | Enable **HipBLASLt tuning** (multi-stage workflow—see [Performance tuning](../04-technical-guides/performance-tuning.md)). |
+| GEMM / kernels | Enable **hipBLASLt tuning** (multi-stage workflow—see [Performance tuning](../04-technical-guides/performance-tuning.md)). |
 | Primus stack | Enable **`enable_primus_turbo: true`** where supported. |
 | Communication overlap | **`overlap_grad_reduce: true`**, **`overlap_param_gather: true`** (when applicable to your backend). |
 | MoE / scratch | Confirm **`HSA_NO_SCRATCH_RECLAIM=1`** when recommended for your model class. |

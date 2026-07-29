@@ -49,7 +49,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.3` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.4` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
 
 Image is picked in the priority order of `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -65,7 +65,7 @@ These apply across all backends. Set them up before running the recipes below.
 export HF_TOKEN=<your_hf_token>
 ```
 
-`runner/.primus.yaml` forwards `HF_TOKEN` into the container automatically. MaxText configurations may also read `${HF_TOKEN:""}` directly.
+`runner/.primus.yaml` forwards `HF_TOKEN` into the container automatically. MaxText configurations might also read `${HF_TOKEN:""}` directly.
 
 ### Mock vs. real data
 
@@ -94,7 +94,7 @@ For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_
 ### 1. Launch the container
 
 ```bash
-docker pull rocm/primus:v26.3
+docker pull rocm/primus:v26.4
 docker run -it \
     --device /dev/dri --device /dev/kfd --device /dev/infiniband \
     --network host --ipc host \
@@ -102,7 +102,7 @@ docker run -it \
     --security-opt seccomp=unconfined --privileged \
     -v $HOME:$HOME --shm-size 128G \
     --name primus_training_env \
-    rocm/primus:v26.3
+    rocm/primus:v26.4
 ```
 
 Access the container later with `docker start primus_training_env && docker exec -it primus_training_env bash`.
@@ -136,7 +136,7 @@ Switch model or precision by changing the config filename (e.g. `llama3.1_70B-FP
 **Model-specific notes:**
 
 - **Zebra-Llama** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/zebra_llama_{1B,3B,8B}-pretrain.yaml` and run via the standard core runtime; Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
-- **MoE models** (DeepSeek-V2-Lite, Mixtral) may need extra grouped-GEMM or router flags; [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) lists the exact flags per model.
+- **MoE models** (DeepSeek-V2-Lite, Mixtral) might need extra grouped-GEMM or router flags; [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) lists the exact flags per model.
 
 ### 3. Multi-node (Slurm mode)
 

@@ -39,9 +39,13 @@ modules:
       norm_epsilon: 1.0e-6
 
       # recompute
+      # Recomputing full MoE layers (router + permute + 128-expert grouped GEMM)
+      # is very expensive (~2k tokens/s per layer here), so recompute only 4 of
+      # 48 layers. FP8 weights leave enough memory headroom to keep the rest of
+      # the activations resident.
       recompute_granularity: full # full, selective
       recompute_method: block # uniform, block
-      recompute_num_layers: 5 # int
+      recompute_num_layers: 4 # int
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
@@ -82,6 +86,10 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
+      # NOTE: turbo attention is intentionally OFF for FP8. The BF16 turbo kernel
+      # inside the FP8 pipeline is ~8% slower than the default TE attention, and
+      # the FP8 flash-attention kernel (enable_turbo_attention_float8) is not
+      # compatible with this model's GQA head layout.
       use_turbo_attention: false
       use_turbo_grouped_gemm: false
       use_turbo_rms_norm: false # bug
@@ -91,7 +99,9 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice. 80 is required for
+      # the fast regime here: dropping below ~78 CUs cliffs throughput ~13%
+      # (DeepEP comm stalls), so keep 80.
       turbo_deepep_num_cu: 80
       turbo_deepep_use_comm_stream: false
 
@@ -105,5 +115,10 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
+      # FP8 delayed scaling (default) is fastest, but the delayed_fp8_scaling
+      # stream patches crash with a GPU memory fault (sum_and_scatter) at ~iter
+      # 6; disable them. Alternative: fp8_recipe=tensorwise (no patches).
+      fp8_recipe: delayed
+      disable_delayed_scaling_patches: true
       moe_use_legacy_grouped_gemm: true
       gradient_accumulation_fusion: true

@@ -156,7 +156,7 @@ Consult MaxText’s mesh documentation and your chosen model YAML for valid comb
 | Goal | What to change |
 |------|----------------|
 | Increase global batch without more per-GPU memory | Increase `gradient_accumulation_steps` (Megatron) or increase accumulation / GBS while keeping MBS fixed. |
-| Increase throughput per step | Increase `micro_batch_size` if memory allows; may require lowering accumulation to keep GBS fixed. |
+| Increase throughput per step | Increase `micro_batch_size` if memory allows; might require lowering accumulation to keep GBS fixed. |
 | Scale to more GPUs | Increase world size; often increase DP; keep GBS stable by adjusting accumulation. |
 
 ### Memory and convergence

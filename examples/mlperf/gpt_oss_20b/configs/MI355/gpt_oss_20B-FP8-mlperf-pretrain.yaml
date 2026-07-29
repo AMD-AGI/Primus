@@ -47,8 +47,8 @@ modules:
       # log_avg_reset_interval: 50
 
       # profile
-      profile: ${PRIMUS_PROFILE:false}
-      use_pytorch_profiler: ${PRIMUS_PROFILE:false}
+      profile: ${PRIMUS_PROFILE:False}
+      use_pytorch_profiler: ${PRIMUS_PROFILE:False}
       profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
       profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
       profile_ranks: [0,1,2,3,4,5,6,7]

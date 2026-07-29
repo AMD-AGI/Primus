@@ -14,7 +14,7 @@ primus-cli [global-options] <mode> [mode-args] -- [command]
 - **Mode** is one of `direct`, `container`, or `slurm`.
 - **`--` (required)** separates launcher options from the Primus Python CLI. Everything after the first `--` is passed to `primus/cli/main.py` (or another script if you override it in direct mode).
 
-From the repository root, invoke the launcher as `./runner/primus-cli` (or install/link it as `primus-cli` on your `PATH`).
+From the repository root, invoke the launcher as `./runner/primus-cli` (or install or link it as `primus-cli` on your `PATH`).
 
 ---
 
@@ -101,7 +101,7 @@ primus-cli container [options] -- <command>
 
 | Option | Description |
 | --- | --- |
-| `--image NAME` | Image tag (default from config: `rocm/primus:v26.3`). |
+| `--image NAME` | Image tag (default from config: `rocm/primus:v26.4`). |
 | `--volume HOST[:CONTAINER]` | Bind mount (repeatable). |
 | `--env KEY=VALUE` | Pass into the **inner** `primus-cli direct` as `--env` (repeatable). |
 | `--device PATH` | Extra device nodes (repeatable; defaults include GPU/RDMA devices). |

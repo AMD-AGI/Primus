@@ -32,7 +32,7 @@ From the root of the clone of the [Primus repository](https://github.com/AMD-AGI
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
-This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.3` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
+This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.4` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
 
 ### Example configurations under `examples/megatron/configs/MI300X/`
 
@@ -249,7 +249,7 @@ Set `mock_data: true` (Megatron/TorchTitan) or synthetic dataset settings (MaxTe
 
 Export `HF_TOKEN` on the host before launching **container** mode; `runner/.primus.yaml` lists `HF_TOKEN` under `container.options.env` so it can be forwarded into the container. MaxText configurations may reference `${HF_TOKEN:""}` directly.
 
-### HipBLASLt autotuning (three stages)
+### hipBLASLt autotuning (three stages)
 
 Controlled with `PRIMUS_HIPBLASLT_TUNING_STAGE` (see `examples/README.md`):
 

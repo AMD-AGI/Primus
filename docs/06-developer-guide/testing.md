@@ -54,7 +54,7 @@ bash ./tests/runner/run_all_tests.sh
 pytest tests/unit_tests/ --maxfail=1 -s
 ```
 
-**Trainer integration tests** (GPU and data; may require Hugging Face access):
+**Trainer integration tests** (GPU and data; might require Hugging Face access):
 
 ```bash
 # Megatron

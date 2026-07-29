@@ -132,7 +132,7 @@ Project resource usage **before** launching, without consuming a full cluster. E
 ./primus-cli direct -- projection performance --config <exp>.yaml --target-nodes 4
 ```
 
-Memory projection breaks VRAM down across parameters, gradients, activations, optimizer states, and mixed-precision overhead—invaluable for MoE/ultra-large models where activations dominate. See [Projection](../02-user-guide/projection.md) for the full reference.
+Memory projection breaks VRAM down across parameters, gradients, activations, optimizer states, and mixed-precision overhead—invaluable for MoE and ultra-large models where activations dominate. See [Projection](../02-user-guide/projection.md) for the full reference.
 
 ---
 

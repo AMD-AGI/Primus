@@ -153,7 +153,7 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 ## Summary
 
-1. Use **mock** / **synthetic** data to validate configs and performance before investing in large preprocessing jobs.
+1. Use **mock or synthetic** data to validate configs and performance before investing in large preprocessing jobs.
 2. For **Megatron**, convert JSON/JSONL to `.bin`/`.idx` with `preprocess_data.py` and point `data_path` or split paths at the outputs.
 3. For **TorchTitan**, set `training.dataset` / `dataset_path` and run **`examples/torchtitan/prepare.py`** to fetch tokenizer assets.
 4. For **MaxText**, configure `dataset_type` and `per_device_batch_size` per upstream `base.yml` and model YAMLs.
