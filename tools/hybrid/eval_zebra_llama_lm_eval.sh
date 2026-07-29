@@ -1,7 +1,7 @@
 #!/bin/bash
 
-args=$@
-for arg in $args; do
+args=("$@")
+for arg in "${args[@]}"; do
     eval "$arg"
 done
 
@@ -17,7 +17,7 @@ TASKS="arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande"
 pip install lm-eval --quiet 2>/dev/null
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}/../.."
+cd "${SCRIPT_DIR}/../.." || exit 1
 
 python -c "
 import sys; sys.path.insert(0, 'tools/hybrid')

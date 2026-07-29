@@ -19,11 +19,11 @@ This script was reconstructed verbatim from the agent transcript dated 2026-05-1
 
 import argparse
 import json
-import os
 import sys
-import torch
-from pathlib import Path
 from collections import OrderedDict
+from pathlib import Path
+
+import torch
 
 _primus_root = Path(__file__).resolve().parents[2]
 _fla_root = _primus_root.parent / "flash-linear-attention"
@@ -64,9 +64,9 @@ def convert_fla_to_megatron(fla_state, fla_cfg, use_te=True):
     """
     hidden_size = fla_cfg.hidden_size
     num_heads = fla_cfg.num_heads
-    num_v_heads = getattr(fla_cfg, 'num_v_heads', num_heads)
+    num_v_heads = getattr(fla_cfg, "num_v_heads", num_heads)
     head_dim = fla_cfg.head_dim
-    expand_v = getattr(fla_cfg, 'expand_v', 1.0)
+    expand_v = getattr(fla_cfg, "expand_v", 1.0)
     intermediate_size = fla_cfg.intermediate_size
     num_hidden_layers = fla_cfg.num_hidden_layers
 
@@ -83,65 +83,68 @@ def convert_fla_to_megatron(fla_state, fla_cfg, use_te=True):
 
     mg_state = OrderedDict()
 
-    mg_state['embedding.word_embeddings.weight'] = fla_state['model.embeddings.weight'].clone()
+    mg_state["embedding.word_embeddings.weight"] = fla_state["model.embeddings.weight"].clone()
 
     for fla_idx in range(num_hidden_layers):
         gdn_idx = fla_idx * 2
         mlp_idx = fla_idx * 2 + 1
-        fp = f'model.layers.{fla_idx}'
+        fp = f"model.layers.{fla_idx}"
 
         # ── GDN sub-layer ──
         if use_te:
-            mg_state[f'decoder.layers.{gdn_idx}.mixer.in_proj.layer_norm_weight'] = \
-                fla_state[f'{fp}.attn_norm.weight'].clone()
+            mg_state[f"decoder.layers.{gdn_idx}.mixer.in_proj.layer_norm_weight"] = fla_state[
+                f"{fp}.attn_norm.weight"
+            ].clone()
         else:
-            mg_state[f'decoder.layers.{gdn_idx}.norm.weight'] = \
-                fla_state[f'{fp}.attn_norm.weight'].clone()
+            mg_state[f"decoder.layers.{gdn_idx}.norm.weight"] = fla_state[f"{fp}.attn_norm.weight"].clone()
 
         # Fuse separate projections into in_proj: [q, k, v, gate, beta, alpha]
-        q_w = fla_state[f'{fp}.attn.q_proj.weight']
-        k_w = fla_state[f'{fp}.attn.k_proj.weight']
-        v_w = fla_state[f'{fp}.attn.v_proj.weight']
-        g_w = fla_state[f'{fp}.attn.g_proj.weight']
-        b_w = fla_state[f'{fp}.attn.b_proj.weight']
-        a_w = fla_state[f'{fp}.attn.a_proj.weight']
+        q_w = fla_state[f"{fp}.attn.q_proj.weight"]
+        k_w = fla_state[f"{fp}.attn.k_proj.weight"]
+        v_w = fla_state[f"{fp}.attn.v_proj.weight"]
+        g_w = fla_state[f"{fp}.attn.g_proj.weight"]
+        b_w = fla_state[f"{fp}.attn.b_proj.weight"]
+        a_w = fla_state[f"{fp}.attn.a_proj.weight"]
         in_proj_w = torch.cat([q_w, k_w, v_w, g_w, b_w, a_w], dim=0)
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.in_proj.weight'] = in_proj_w
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.in_proj.weight"] = in_proj_w
 
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.A_log'] = \
-            fla_state[f'{fp}.attn.A_log'].clone()
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.dt_bias'] = \
-            fla_state[f'{fp}.attn.dt_bias'].clone()
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.A_log"] = fla_state[f"{fp}.attn.A_log"].clone()
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.dt_bias"] = fla_state[f"{fp}.attn.dt_bias"].clone()
 
         # Fuse conv1d: [q_conv, k_conv, v_conv]
-        q_conv = fla_state[f'{fp}.attn.q_conv1d.weight']
-        k_conv = fla_state[f'{fp}.attn.k_conv1d.weight']
-        v_conv = fla_state[f'{fp}.attn.v_conv1d.weight']
+        q_conv = fla_state[f"{fp}.attn.q_conv1d.weight"]
+        k_conv = fla_state[f"{fp}.attn.k_conv1d.weight"]
+        v_conv = fla_state[f"{fp}.attn.v_conv1d.weight"]
         conv_w = torch.cat([q_conv, k_conv, v_conv], dim=0)
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.conv1d.weight'] = conv_w
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.conv1d.weight"] = conv_w
 
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.out_norm.weight'] = \
-            fla_state[f'{fp}.attn.o_norm.weight'].clone()
-        mg_state[f'decoder.layers.{gdn_idx}.mixer.out_proj.weight'] = \
-            fla_state[f'{fp}.attn.o_proj.weight'].clone()
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.out_norm.weight"] = fla_state[
+            f"{fp}.attn.o_norm.weight"
+        ].clone()
+        mg_state[f"decoder.layers.{gdn_idx}.mixer.out_proj.weight"] = fla_state[
+            f"{fp}.attn.o_proj.weight"
+        ].clone()
 
         # ── MLP sub-layer ──
         if use_te:
-            mg_state[f'decoder.layers.{mlp_idx}.mlp.linear_fc1.layer_norm_weight'] = \
-                fla_state[f'{fp}.mlp_norm.weight'].clone()
+            mg_state[f"decoder.layers.{mlp_idx}.mlp.linear_fc1.layer_norm_weight"] = fla_state[
+                f"{fp}.mlp_norm.weight"
+            ].clone()
         else:
-            mg_state[f'decoder.layers.{mlp_idx}.pre_mlp_layernorm.weight'] = \
-                fla_state[f'{fp}.mlp_norm.weight'].clone()
+            mg_state[f"decoder.layers.{mlp_idx}.pre_mlp_layernorm.weight"] = fla_state[
+                f"{fp}.mlp_norm.weight"
+            ].clone()
 
-        gate_w = fla_state[f'{fp}.mlp.gate_proj.weight']
-        up_w = fla_state[f'{fp}.mlp.up_proj.weight']
+        gate_w = fla_state[f"{fp}.mlp.gate_proj.weight"]
+        up_w = fla_state[f"{fp}.mlp.up_proj.weight"]
         fc1_w = torch.cat([gate_w, up_w], dim=0)
-        mg_state[f'decoder.layers.{mlp_idx}.mlp.linear_fc1.weight'] = fc1_w
+        mg_state[f"decoder.layers.{mlp_idx}.mlp.linear_fc1.weight"] = fc1_w
 
-        mg_state[f'decoder.layers.{mlp_idx}.mlp.linear_fc2.weight'] = \
-            fla_state[f'{fp}.mlp.down_proj.weight'].clone()
+        mg_state[f"decoder.layers.{mlp_idx}.mlp.linear_fc2.weight"] = fla_state[
+            f"{fp}.mlp.down_proj.weight"
+        ].clone()
 
-    mg_state['decoder.final_norm.weight'] = fla_state['model.norm.weight'].clone()
+    mg_state["decoder.final_norm.weight"] = fla_state["model.norm.weight"].clone()
 
     print(f"  Converted {len(mg_state)} parameter tensors")
     return mg_state
@@ -153,9 +156,9 @@ def save_megatron_checkpoint(mg_state, output_dir, iteration=0):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint = {
-        'iteration': iteration,
-        'model': mg_state,
-        'checkpoint_version': 3.0,
+        "iteration": iteration,
+        "model": mg_state,
+        "checkpoint_version": 3.0,
     }
 
     ckpt_path = ckpt_dir / "model_optim_rng.pt"
@@ -176,7 +179,7 @@ def verify_conversion(fla_state, mg_state, fla_cfg, use_te):
 
     # FLA has both model.embeddings.weight and lm_head.weight (tied).
     # Megatron only has embedding.word_embeddings.weight (output_layer shares).
-    fla_unique = fla_params - fla_state['model.embeddings.weight'].numel()
+    fla_unique = fla_params - fla_state["model.embeddings.weight"].numel()
 
     print(f"\nVerification:")
     print(f"  FLA params (unique): {fla_unique:,}")
@@ -188,30 +191,26 @@ def verify_conversion(fla_state, mg_state, fla_cfg, use_te):
         print(f"  OK -- param counts match")
 
     emb_match = torch.equal(
-        fla_state['model.embeddings.weight'],
-        mg_state['embedding.word_embeddings.weight']
+        fla_state["model.embeddings.weight"], mg_state["embedding.word_embeddings.weight"]
     )
-    norm_key = 'decoder.layers.0.norm.weight' if not use_te else \
-               'decoder.layers.0.mixer.in_proj.layer_norm_weight'
-    norm_match = torch.equal(
-        fla_state['model.layers.0.attn_norm.weight'],
-        mg_state[norm_key]
+    norm_key = (
+        "decoder.layers.0.norm.weight" if not use_te else "decoder.layers.0.mixer.in_proj.layer_norm_weight"
     )
+    norm_match = torch.equal(fla_state["model.layers.0.attn_norm.weight"], mg_state[norm_key])
     print(f"  Embedding match: {emb_match}")
     print(f"  Layer 0 norm match: {norm_match}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Initialize Primus checkpoint from FLA weights')
-    parser.add_argument('--fla-config', type=str, required=True,
-                        help='Path to FLA config JSON')
-    parser.add_argument('--output-dir', type=str, required=True,
-                        help='Output directory for Megatron checkpoint')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed for FLA model initialization')
-    parser.add_argument('--no-te', action='store_true',
-                        help='Use no-TE key names (WrappedTorchNorm, ColumnParallelLinear)')
+    parser = argparse.ArgumentParser(description="Initialize Primus checkpoint from FLA weights")
+    parser.add_argument("--fla-config", type=str, required=True, help="Path to FLA config JSON")
+    parser.add_argument(
+        "--output-dir", type=str, required=True, help="Output directory for Megatron checkpoint"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for FLA model initialization")
+    parser.add_argument(
+        "--no-te", action="store_true", help="Use no-TE key names (WrappedTorchNorm, ColumnParallelLinear)"
+    )
     args = parser.parse_args()
 
     print("=" * 70)
@@ -236,5 +235,5 @@ def main():
     print(f"{'='*70}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

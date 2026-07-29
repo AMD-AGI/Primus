@@ -13,35 +13,42 @@ Usage:
 
 import argparse
 import sys
+
 import torch
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Verify GDN checkpoint conversion')
-    parser.add_argument('--model-path', type=str, required=True,
-                        help='Path to converted FLA HuggingFace model directory')
-    parser.add_argument('--tokenizer', type=str, default='meta-llama/Llama-3.2-1B',
-                        help='Tokenizer to use')
+    parser = argparse.ArgumentParser(description="Verify GDN checkpoint conversion")
+    parser.add_argument(
+        "--model-path", type=str, required=True, help="Path to converted FLA HuggingFace model directory"
+    )
+    parser.add_argument("--tokenizer", type=str, default="meta-llama/Llama-3.2-1B", help="Tokenizer to use")
     args = parser.parse_args()
 
     print("=" * 60)
     print("GDN Conversion Verification")
     print("=" * 60)
 
-    from fla.models.gated_deltanet import GatedDeltaNetForCausalLM, GatedDeltaNetConfig
+    from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
     from transformers import AutoTokenizer
 
     print(f"\nLoading config from: {args.model_path}")
     config = GatedDeltaNetConfig.from_pretrained(args.model_path)
-    print(f"  hidden_size={config.hidden_size}, num_heads={config.num_heads}, "
-          f"num_v_heads={config.num_v_heads}, num_layers={config.num_hidden_layers}")
+    print(
+        f"  hidden_size={config.hidden_size}, num_heads={config.num_heads}, "
+        f"num_v_heads={config.num_v_heads}, num_layers={config.num_hidden_layers}"
+    )
 
     print(f"\nLoading model...")
-    model = GatedDeltaNetForCausalLM.from_pretrained(
-        args.model_path,
-        config=config,
-        torch_dtype=torch.bfloat16,
-    ).cuda().eval()
+    model = (
+        GatedDeltaNetForCausalLM.from_pretrained(
+            args.model_path,
+            config=config,
+            torch_dtype=torch.bfloat16,
+        )
+        .cuda()
+        .eval()
+    )
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {num_params / 1e9:.3f}B")
@@ -57,9 +64,9 @@ def main():
 
     all_passed = True
     for prompt in prompts:
-        inputs = tokenizer(prompt, return_tensors='pt').to('cuda')
+        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
         with torch.no_grad():
-            out = model(**inputs, labels=inputs['input_ids'])
+            out = model(**inputs, labels=inputs["input_ids"])
 
         loss = out.loss.item()
         logits = out.logits[0, -1]
@@ -78,12 +85,12 @@ def main():
                 temperature=1.0,
                 pad_token_id=tokenizer.eos_token_id or 0,
             )
-        cont = tokenizer.decode(gen[0, inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        cont = tokenizer.decode(gen[0, inputs["input_ids"].shape[1] :], skip_special_tokens=True)
 
-        print(f"\n  Prompt: \"{prompt}\"")
+        print(f'\n  Prompt: "{prompt}"')
         print(f"  Loss: {loss:.4f} [{status}]")
         print(f"  Top-5: {[tokenizer.decode(t) for t in top5.indices]}")
-        print(f"  Greedy continuation: \"{cont}\"")
+        print(f'  Greedy continuation: "{cont}"')
 
     print(f"\n{'=' * 60}")
     if all_passed:
@@ -100,5 +107,5 @@ def main():
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

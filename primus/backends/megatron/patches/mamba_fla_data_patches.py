@@ -58,7 +58,9 @@ def _install_mamba_fla_data_patch() -> None:
 
             _spec = importlib.util.spec_from_file_location(
                 "fla_order_dataset",
-                os.path.join(os.environ.get("PRIMUS_PATH", os.getcwd()), "tools", "hybrid", "fla_order_dataset.py"),
+                os.path.join(
+                    os.environ.get("PRIMUS_PATH", os.getcwd()), "tools", "hybrid", "fla_order_dataset.py"
+                ),
             )
             _mod = importlib.util.module_from_spec(_spec)
             _spec.loader.exec_module(_mod)

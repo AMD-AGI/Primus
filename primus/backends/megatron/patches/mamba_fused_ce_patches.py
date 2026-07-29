@@ -42,9 +42,7 @@ _PATCH_KEY = "megatron.mamba.fla_fused_ce"
 # in its setup code.
 _INIT_ORI = "self.setup_embeddings_and_output_layer()"
 _INIT_NEW = (
-    _INIT_ORI
-    + "\n\n"
-    + "        from megatron.training import get_args as _get_args\n"
+    _INIT_ORI + "\n\n" + "        from megatron.training import get_args as _get_args\n"
     "        _args = _get_args()\n"
     "        self._fused_ce_mode = 0\n"
     "        _ce_mode = getattr(_args, 'fused_ce_mode', 1)\n"

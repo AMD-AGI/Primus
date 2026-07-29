@@ -18,7 +18,6 @@ Usage:
         GPUS_PER_NODE=8 bash examples/run_pretrain.sh
 """
 
-import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -112,9 +111,7 @@ class FLAOrderGPTDataset(Dataset):
                 eod_positions = tokens == self.eod_token
                 loss_mask[eod_positions] = 0.0
             self._cached_loss_mask = loss_mask
-            self._cached_position_ids = torch.arange(
-                self.seq_length, dtype=torch.long
-            )
+            self._cached_position_ids = torch.arange(self.seq_length, dtype=torch.long)
 
         return {
             "tokens": tokens,

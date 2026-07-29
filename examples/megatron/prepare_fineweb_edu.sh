@@ -1,5 +1,7 @@
+#!/bin/bash
 # Set Python path
-export PYTHONPATH="$(pwd)/third_party/Megatron-LM:${PYTHONPATH}"
+megatron_path="$(pwd)/third_party/Megatron-LM"
+export PYTHONPATH="${megatron_path}:${PYTHONPATH}"
 
 # Verify the import works
 python3 -c "from megatron.core.datasets import indexed_dataset; print('Import successful')"

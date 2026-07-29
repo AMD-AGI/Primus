@@ -1,16 +1,14 @@
-
-import sys
-import os
 import json
+import os
+import sys
 from pathlib import Path
 
-import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 import lm_eval
 from lm_eval.utils import make_table
+from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from modeling_zebra_llama import ZebraLlamaForCausalLM, ZebraLlamaConfig
+from modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM
 
 AutoConfig.register("zebra_llama", ZebraLlamaConfig)
 AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
@@ -18,11 +16,13 @@ AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--tokenizer", type=str, default=None)
-    parser.add_argument("--tasks", type=str,
-                        default="arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande")
+    parser.add_argument(
+        "--tasks", type=str, default="arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande"
+    )
     parser.add_argument("--batch_size", type=str, default="auto")
     parser.add_argument("--num_fewshot", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
@@ -33,7 +33,9 @@ def main():
 
     tokenizer_path = args.tokenizer or args.model_path
     dtype_str = args.dtype if args.dtype != "auto" else "auto"
-    model_args = f"pretrained={args.model_path},tokenizer={tokenizer_path},trust_remote_code=True,dtype={dtype_str}"
+    model_args = (
+        f"pretrained={args.model_path},tokenizer={tokenizer_path},trust_remote_code=True,dtype={dtype_str}"
+    )
 
     print("=" * 72)
     print("Zebra-Llama lm-eval")

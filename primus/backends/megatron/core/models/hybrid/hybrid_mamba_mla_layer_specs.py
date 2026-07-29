@@ -10,7 +10,6 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
-from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
@@ -101,9 +100,10 @@ def _record_spec_import_marker() -> None:
             fh.write(f"_MLA_CORE_ATTENTION = {_MLA_CORE_ATTENTION!r}\n")
             try:
                 from megatron.training import get_args as _ga
-                _mla_val = getattr(_ga(), 'fla_mla_attn', '')
+
+                _mla_val = getattr(_ga(), "fla_mla_attn", "")
             except Exception:
-                _mla_val = '(args unavailable)'
+                _mla_val = "(args unavailable)"
             fh.write(f"args.fla_mla_attn   = {_mla_val!r}\n")
             fh.write(f"is_enabled()        = {_fla_mla_attn_enabled()}\n")
             fh.write(f"pid                 = {os.getpid()}\n")

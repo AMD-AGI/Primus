@@ -13,13 +13,10 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import ReplicaId, ShardedTensorFactory
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.inference.contexts import BaseInferenceContext
-from megatron.core.jit import jit_fuser
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
@@ -27,12 +24,16 @@ from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-from megatron.core.transformer.utils import (
-    # ensure_metadata_has_dp_cp_group,
+from megatron.core.transformer.utils import (  # ensure_metadata_has_dp_cp_group,
     make_sharded_tensors_for_checkpoint,
     sharded_state_dict_default,
 )
-from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import (
+    deprecate_inference_params,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
+from torch import Tensor
 
 # TODO: Implement GatedDeltaNetContextParallel
 # from .gated_delta_net_context_parallel import GatedDeltaNetContextParallel
@@ -133,7 +134,7 @@ class GatedDeltaNet(MegatronModule):
         self.hidden_size = config.hidden_size
         self.act_fn = config.activation_func
         self.activation = self.act_fn.__name__
-        self.use_short_conv = getattr(config, 'use_short_conv', True)
+        self.use_short_conv = getattr(config, "use_short_conv", True)
         self.conv_kernel_dim = config.linear_conv_kernel_dim
         self.key_head_dim = config.linear_key_head_dim
         self.value_head_dim = config.linear_value_head_dim
@@ -209,10 +210,11 @@ class GatedDeltaNet(MegatronModule):
 
         # Output layernorm before projection
         self._use_fla_fused_gated_norm = False
-        _use_fla_gated_norm = getattr(_get_args(), 'use_fla_fused_gated_norm', False)
+        _use_fla_gated_norm = getattr(_get_args(), "use_fla_fused_gated_norm", False)
         if _use_fla_gated_norm and config.normalization == "RMSNorm":
             try:
                 from fla.modules.fused_norm_gate import FusedRMSNormGated
+
                 self.out_norm = FusedRMSNormGated(
                     self.value_head_dim,
                     eps=self.config.layernorm_epsilon,
@@ -265,7 +267,9 @@ class GatedDeltaNet(MegatronModule):
                         self.num_v_heads_local_tp,
                         dtype=torch.float32,
                         device=torch.cuda.current_device(),
-                    ) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
+                    )
+                    * (math.log(dt_max) - math.log(dt_min))
+                    + math.log(dt_min)
                 ).clamp(min=1e-4)
                 inv_dt = dt + torch.log(-torch.expm1(-dt))
                 self.dt_bias.data.copy_(inv_dt)
@@ -354,7 +358,7 @@ class GatedDeltaNet(MegatronModule):
         # Convolution on qkv (or SiLU-only when use_short_conv=False)
         nvtx_range_push(suffix="conv1d")
         if self.use_short_conv:
-            _use_fla_conv = getattr(_get_args(), 'use_fla_short_conv', False)
+            _use_fla_conv = getattr(_get_args(), "use_fla_short_conv", False)
             if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
                 # FLA's Triton causal_conv1d expects [B, T, D] (no transpose needed)
                 # and matches FLA reference run bit-for-bit.
@@ -364,7 +368,7 @@ class GatedDeltaNet(MegatronModule):
                     weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
                     bias=self.conv1d.bias,
                     activation=self.activation,
-                    backend='triton',
+                    backend="triton",
                 )
             else:
                 qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
@@ -487,7 +491,7 @@ class GatedDeltaNet(MegatronModule):
             },  # parameters sharded across TP
             sharded_offsets=sharded_offsets,
             tp_group=(tp_group if tp_group is not None else self.pg_collection.tp),
-            dp_cp_group=metadata['dp_cp_group'],
+            dp_cp_group=metadata["dp_cp_group"],
         )
         # Submodules
         tp_group = tp_group if tp_group is not None else self.pg_collection.tp
@@ -504,7 +508,7 @@ class GatedDeltaNet(MegatronModule):
                     tp_sharding_map,
                     sharded_offsets,
                     tp_group=tp_group,
-                    dp_cp_group=metadata['dp_cp_group'],
+                    dp_cp_group=metadata["dp_cp_group"],
                 )
             else:
                 module_sharded_sd = sharded_state_dict_default(
@@ -537,14 +541,16 @@ class GatedDeltaNet(MegatronModule):
 
         if self.use_short_conv:
             conv_layer_name_list = ["conv1d.weight"]
-            assert (
-                sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp
-            ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.weight"])
+            assert sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp, (
+                self.conv_dim_local_tp,
+                sharded_state_dict[f"{prefix}conv1d.weight"],
+            )
             if self.conv_bias:
                 conv_layer_name_list.append("conv1d.bias")
-                assert (
-                    sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp
-                ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.bias"])
+                assert sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp, (
+                    self.conv_dim_local_tp,
+                    sharded_state_dict[f"{prefix}conv1d.bias"],
+                )
             for conv_layer_name in conv_layer_name_list:
                 sharded_state_dict[f"{prefix}{conv_layer_name}"] = _split_tensor_factory(
                     sharded_state_dict[f"{prefix}{conv_layer_name}"],
@@ -593,9 +599,7 @@ def _split_tensor_factory(
     assert len(split_sections) == len(split_names), (len(split_sections), len(split_names))
 
     @torch.no_grad()
-    def sh_ten_build_fn(
-        key: str, t: torch.Tensor, replica_id: ReplicaId, flattened_range: Optional[slice]
-    ):
+    def sh_ten_build_fn(key: str, t: torch.Tensor, replica_id: ReplicaId, flattened_range: Optional[slice]):
         factory_sh_ten = replace(
             orig_sh_ten_no_data,
             key=key,
@@ -645,12 +649,12 @@ def torch_chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel=False,
 ):
     # pylint: disable=line-too-long
-    '''
+    """
     Torch-native implementation of chunked gated delta rule for deterministic mode.
     Need this because FLA is not deterministic.
 
     Reference: https://github.com/huggingface/transformers/blob/144c8ce2809a2e21914017652700e1ecb450501e/src/transformers/models/qwen3_next/modeling_qwen3_next.py#L470-L547
-    '''
+    """
 
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
@@ -680,9 +684,7 @@ def torch_chunk_gated_delta_rule(
         for x in (query, key, value, k_beta, v_beta)
     ]
     g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0
-    )
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
 
     # chunk decay
     g = g.cumsum(dim=-1)
@@ -701,9 +703,7 @@ def torch_chunk_gated_delta_rule(
         else initial_state.to(value)
     )
     core_attn_out = torch.zeros_like(value)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1
-    )
+    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
 
     # for each chunk
     for i in range(0, total_sequence_length // chunk_size):

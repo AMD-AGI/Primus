@@ -40,9 +40,7 @@ _GDN_CONFIG_FIELDS = {
 
 
 def _has_any_gdn_field(args) -> bool:
-    return any(
-        getattr(args, name, None) is not None for name in _GDN_CONFIG_FIELDS
-    )
+    return any(getattr(args, name, None) is not None for name in _GDN_CONFIG_FIELDS)
 
 
 @register_patch(
@@ -64,10 +62,7 @@ def patch_gdn_config(ctx: PatchContext):
     for field_name, default in _GDN_CONFIG_FIELDS.items():
         value = getattr(args, field_name, default)
         setattr(config_mod.TransformerConfig, field_name, value)
-        log_rank_0(
-            f"[Patch:megatron.transformer.gdn_config] "
-            f"TransformerConfig.{field_name} = {value}"
-        )
+        log_rank_0(f"[Patch:megatron.transformer.gdn_config] " f"TransformerConfig.{field_name} = {value}")
 
 
 # -----------------------------------------------------------------------------

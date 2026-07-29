@@ -27,12 +27,12 @@ _orig_model_init = KDAModel.__init__
 
 
 def _patched_causal_init(self, config, *args, **kwargs):
-    kwargs.pop('dtype', None)
+    kwargs.pop("dtype", None)
     return _orig_causal_init(self, config, *args, **kwargs)
 
 
 def _patched_model_init(self, config, *args, **kwargs):
-    kwargs.pop('dtype', None)
+    kwargs.pop("dtype", None)
     return _orig_model_init(self, config, *args, **kwargs)
 
 

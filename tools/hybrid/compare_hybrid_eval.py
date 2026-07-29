@@ -22,14 +22,14 @@ from pathlib import Path
 
 # (display_name, lm-eval task id, [metrics])  — order = display order
 DEFAULT_REPORT = [
-    ("arc_easy",         "arc_easy",       ["acc", "acc_norm"]),
-    ("arc_challenge",    "arc_challenge",  ["acc", "acc_norm"]),
-    ("hellaswag",        "hellaswag",      ["acc", "acc_norm"]),
-    ("openbookqa",       "openbookqa",     ["acc", "acc_norm"]),
-    ("piqa",             "piqa",           ["acc", "acc_norm"]),
-    ("winogrande",       "winogrande",     ["acc"]),
-    ("mmlu (avg of 57)", "mmlu",           ["acc"]),
-    ("race",             "race",           ["acc"]),
+    ("arc_easy", "arc_easy", ["acc", "acc_norm"]),
+    ("arc_challenge", "arc_challenge", ["acc", "acc_norm"]),
+    ("hellaswag", "hellaswag", ["acc", "acc_norm"]),
+    ("openbookqa", "openbookqa", ["acc", "acc_norm"]),
+    ("piqa", "piqa", ["acc", "acc_norm"]),
+    ("winogrande", "winogrande", ["acc"]),
+    ("mmlu (avg of 57)", "mmlu", ["acc"]),
+    ("race", "race", ["acc"]),
 ]
 
 
@@ -161,10 +161,7 @@ def main():
             f"{'Mean of '+str(n)+' metrics':22} {'':9} {mean_p:8.4f} {'':>8}  {mean_f:8.4f} {'':>8}  "
             f"{mean_d:+8.4f}  {mean_z:8.2f}"
         )
-        print(
-            f"{'Mean |Δ|':22} {'':9} {'':>8} {'':>8}  {'':>8} {'':>8}  "
-            f"{mean_abs_d:8.4f}  {'':>8}"
-        )
+        print(f"{'Mean |Δ|':22} {'':9} {'':>8} {'':>8}  {'':>8} {'':>8}  " f"{mean_abs_d:8.4f}  {'':>8}")
         print(
             f"{'Max  |Δ|':22} {'':9} {'':>8} {'':>8}  {'':>8} {'':>8}  "
             f"{max_d_signed:+8.4f}  {max_z:8.2f}    ({max_label})"

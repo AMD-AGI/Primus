@@ -195,9 +195,13 @@ class HybridStack(MegatronModule):
             self.layers.append(layer)
 
         from megatron.training import get_args as _get_args
-        self._fuse_prenorm = getattr(_get_args(), 'use_fla_fused_rmsnorm', False)
+
+        self._fuse_prenorm = getattr(_get_args(), "use_fla_fused_rmsnorm", False)
         if self._fuse_prenorm:
-            from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer
+            from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import (
+                GatedDeltaNetLayer,
+            )
+
             for i, (lt, layer) in enumerate(zip(self.layer_type_list, self.layers)):
                 if lt == LayerSymbols.MAMBA and isinstance(layer, GatedDeltaNetLayer):
                     layer._fuse_prenorm_with_next = True
@@ -362,17 +366,13 @@ class HybridStack(MegatronModule):
                     if isinstance(layer, TransformerLayer) and _pending_fuse is not None:
                         mixer_out, block_residual = _pending_fuse
                         _pending_fuse = None
-                        normed, new_residual = layer.pre_mlp_layernorm(
-                            mixer_out, block_residual, True
-                        )
+                        normed, new_residual = layer.pre_mlp_layernorm(mixer_out, block_residual, True)
                         mlp_output_with_bias = layer.mlp(normed)
                         bda_fn = layer.mlp_bda(
                             training=self.training,
                             fused=self.config.bias_dropout_fusion,
                         )
-                        hidden_states = bda_fn(
-                            mlp_output_with_bias, new_residual, layer.hidden_dropout
-                        )
+                        hidden_states = bda_fn(mlp_output_with_bias, new_residual, layer.hidden_dropout)
                     elif isinstance(layer, TransformerLayer):
                         hidden_states, _ = layer(
                             hidden_states=hidden_states,

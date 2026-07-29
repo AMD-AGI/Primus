@@ -10,15 +10,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import ReplicaId, ShardedTensorFactory
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import MegatronModule
@@ -27,7 +24,12 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
     sharded_state_dict_default,
 )
-from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import (
+    deprecate_inference_params,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
+from torch import Tensor
 
 try:
     from fla.ops.kda import chunk_kda
@@ -53,6 +55,7 @@ except ImportError:
     causal_conv1d_fn = None
 
 from megatron.training import get_args as _get_args
+
 try:
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
 except ImportError:
@@ -72,8 +75,7 @@ def torch_kda_gate(g, A_log, dt_bias=None):
     return -A_log.view(H, 1).float().exp() * F.softplus(g)
 
 
-def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
-                          use_qk_l2norm_in_kernel=False):
+def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64, use_qk_l2norm_in_kernel=False):
     """Pure-PyTorch chunked KDA forward -- used for backward recomputation
     on ROCm where FLA Triton backward kernels hang."""
     initial_dtype = q.dtype
@@ -82,7 +84,7 @@ def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
     BT = chunk_size
 
     if scale is None:
-        scale = K ** -0.5
+        scale = K**-0.5
 
     if use_qk_l2norm_in_kernel:
         q = F.normalize(q.float(), p=2, dim=-1, eps=1e-6)
@@ -99,9 +101,7 @@ def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
     total_T = T + pad_size
     NT = total_T // BT
 
-    q, k, v, g, beta = [
-        x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)
-    ]
+    q, k, v, g, beta = [x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)]
     q = q * scale
 
     q = q.reshape(B, H, NT, BT, K)
@@ -125,9 +125,7 @@ def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
     A = -A.masked_fill(mask_upper, 0)
 
     for i in range(1, BT):
-        A[..., i, :i] = A[..., i, :i].clone() + (
-            A[..., i, :, None].clone() * A[..., :, :i].clone()
-        ).sum(-2)
+        A[..., i, :i] = A[..., i, :i].clone() + (A[..., i, :, None].clone() * A[..., :, :i].clone()).sum(-2)
 
     A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta.unsqueeze(-2)
     w = A @ k_eg
@@ -138,7 +136,7 @@ def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
     o = torch.zeros_like(v)
 
     for i in range(NT):
-        q_i, k_i, u_i, g_i, w_i = q[:,:,i], k[:,:,i], u[:,:,i], g[:,:,i], w[:,:,i]
+        q_i, k_i, u_i, g_i, w_i = q[:, :, i], k[:, :, i], u[:, :, i], g[:, :, i], w[:, :, i]
         A_qk = torch.zeros(B, H, BT, BT, dtype=torch.float, device=q.device)
         for j in range(BT):
             k_j = k_i[..., j, :]
@@ -237,7 +235,7 @@ class KimiDeltaAttention(MegatronModule):
         A_init_range: Tuple[float, float] = (1, 16),
         pg_collection: ProcessGroupCollection = None,
     ):
-        if not HAVE_FLA_KDA and getattr(config, 'use_fla_triton_kda', False):
+        if not HAVE_FLA_KDA and getattr(config, "use_fla_triton_kda", False):
             raise ImportError(
                 "use_fla_triton_kda is set but FLA KDA ops are not installed. "
                 "Install fla-core or remove the flag to use the pure-PyTorch default."
@@ -288,7 +286,7 @@ class KimiDeltaAttention(MegatronModule):
         # `fla/layers/kda.py:142-189`; numerically identical, but on ROCm each
         # separate matmul pays ~3-5 ms of HIP dispatch + autograd overhead, so
         # GDN's parity work measured this fusion alone at ~250 ms/iter saved.
-        self.gate_dim_local_tp = self.num_heads_local_tp * self.head_k_dim   # used below
+        self.gate_dim_local_tp = self.num_heads_local_tp * self.head_k_dim  # used below
         # NOTE on TP: the fused in_proj is a ColumnParallelLinear, which splits
         # its output evenly across TP ranks. For the gate-bottleneck slices
         # (f_a, g_a) this is incorrect — the low-rank gate REQUIRES each rank
@@ -306,9 +304,9 @@ class KimiDeltaAttention(MegatronModule):
         self.in_proj_dim = (
             self.qk_dim * 2
             + self.v_dim
-            + self.head_dim          # f_a output (bottleneck dim, = head_v_dim)
-            + self.head_dim          # g_a output (bottleneck dim, = head_v_dim)
-            + self.num_heads         # beta (per value-head scalar)
+            + self.head_dim  # f_a output (bottleneck dim, = head_v_dim)
+            + self.head_dim  # g_a output (bottleneck dim, = head_v_dim)
+            + self.num_heads  # beta (per value-head scalar)
         )
         self.in_proj = build_module(
             submodules.in_proj,
@@ -349,8 +347,10 @@ class KimiDeltaAttention(MegatronModule):
         # pre-norms hidden_states once, so submodules.gate_norm is
         # `IdentityOp` here and the call is a no-op.
         self.gate_norm = build_module(
-            submodules.gate_norm, config=self.config,
-            hidden_size=self.hidden_size, eps=self.config.layernorm_epsilon,
+            submodules.gate_norm,
+            config=self.config,
+            hidden_size=self.hidden_size,
+            eps=self.config.layernorm_epsilon,
         )
 
         # --- Low-rank gate expansion: f_b (bottleneck → gate_dim) ---
@@ -359,22 +359,34 @@ class KimiDeltaAttention(MegatronModule):
         # Gate g has shape [B, T, H, K] (per-key-dim gating); output dim
         # must match q/k after the optional repeat_interleave: num_heads * head_k_dim.
         self.f_b_proj = nn.Linear(
-            self.head_dim, self.gate_dim_local_tp, bias=False,
-            device=torch.cuda.current_device(), dtype=config.params_dtype,
+            self.head_dim,
+            self.gate_dim_local_tp,
+            bias=False,
+            device=torch.cuda.current_device(),
+            dtype=config.params_dtype,
         )
         setattr(self.f_b_proj.weight, "tensor_model_parallel", True)
 
         # --- A_log and dt_bias (TP-split per head) ---
-        self.A_log = nn.Parameter(torch.empty(
-            1, 1, self.num_heads_local_tp, 1,
-            dtype=torch.float32, device=torch.cuda.current_device(),
-        ))
+        self.A_log = nn.Parameter(
+            torch.empty(
+                1,
+                1,
+                self.num_heads_local_tp,
+                1,
+                dtype=torch.float32,
+                device=torch.cuda.current_device(),
+            )
+        )
         setattr(self.A_log, "tensor_model_parallel", True)
 
-        self.dt_bias = nn.Parameter(torch.empty(
-            self.gate_dim_local_tp,
-            dtype=torch.float32, device=torch.cuda.current_device(),
-        ))
+        self.dt_bias = nn.Parameter(
+            torch.empty(
+                self.gate_dim_local_tp,
+                dtype=torch.float32,
+                device=torch.cuda.current_device(),
+            )
+        )
         setattr(self.dt_bias, "tensor_model_parallel", True)
 
         # b_proj (hidden → num_v_heads) is now FUSED into the big in_proj
@@ -388,8 +400,11 @@ class KimiDeltaAttention(MegatronModule):
         # the output gate a learnable pre-sigmoid offset that compounds
         # across all KDA layers (fla/layers/kda.py:189).
         self.g_b_proj = nn.Linear(
-            self.head_dim, self.v_dim_local_tp, bias=True,
-            device=torch.cuda.current_device(), dtype=config.params_dtype,
+            self.head_dim,
+            self.v_dim_local_tp,
+            bias=True,
+            device=torch.cuda.current_device(),
+            dtype=config.params_dtype,
         )
         setattr(self.g_b_proj.weight, "tensor_model_parallel", True)
         setattr(self.g_b_proj.bias, "tensor_model_parallel", True)
@@ -401,10 +416,8 @@ class KimiDeltaAttention(MegatronModule):
         # per rank at micro_batch=128 vs the unfused (out_norm + _apply_gated_norm)
         # path. Enabled when fla.modules.FusedRMSNormGated is importable AND the
         # config opts in via use_fla_fused_norm_gated (default: True when use_fla_triton_kda).
-        self._use_fla_fused_norm_gated = (
-            HAVE_FUSED_RMS_NORM_GATED
-            and getattr(self.config, 'use_fla_fused_norm_gated',
-                        getattr(self.config, 'use_fla_triton_kda', False))
+        self._use_fla_fused_norm_gated = HAVE_FUSED_RMS_NORM_GATED and getattr(
+            self.config, "use_fla_fused_norm_gated", getattr(self.config, "use_fla_triton_kda", False)
         )
         if self._use_fla_fused_norm_gated:
             self.out_norm = FusedRMSNormGated(
@@ -444,7 +457,8 @@ class KimiDeltaAttention(MegatronModule):
                     nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
                 A = torch.empty(
                     self.num_heads_local_tp,
-                    dtype=torch.float32, device=torch.cuda.current_device(),
+                    dtype=torch.float32,
+                    device=torch.cuda.current_device(),
                 ).uniform_(*self.A_init_range)
                 self.A_log.data.copy_(torch.log(A).view(1, 1, -1, 1))
                 # Match FLA dt_bias init exactly (fla/layers/kda.py:180-184):
@@ -456,8 +470,11 @@ class KimiDeltaAttention(MegatronModule):
                 dt = torch.exp(
                     torch.rand(
                         self.gate_dim_local_tp,
-                        dtype=torch.float32, device=torch.cuda.current_device(),
-                    ) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+                        dtype=torch.float32,
+                        device=torch.cuda.current_device(),
+                    )
+                    * (math.log(0.1) - math.log(0.001))
+                    + math.log(0.001)
                 ).clamp(min=1e-4)
                 inv_dt = dt + torch.log(-torch.expm1(-dt))
                 self.dt_bias.data.copy_(inv_dt)
@@ -499,12 +516,16 @@ class KimiDeltaAttention(MegatronModule):
 
         local_seq_len, batch, _ = hidden_states.shape
         seq_len = local_seq_len * self.sp_size
-        use_fla_triton = (not self.config.deterministic_mode) and HAVE_FLA_KDA and getattr(self.config, 'use_fla_triton_kda', False)
+        use_fla_triton = (
+            (not self.config.deterministic_mode)
+            and HAVE_FLA_KDA
+            and getattr(self.config, "use_fla_triton_kda", False)
+        )
 
-        if not hasattr(self, '_kda_kernel_logged'):
+        if not hasattr(self, "_kda_kernel_logged"):
             self._kda_kernel_logged = True
-            use_hybrid = getattr(self.config, 'use_fla_triton_kda_hybrid', False)
-            in_kernel_gate = getattr(self.config, 'use_fla_kda_in_kernel_gate', True)
+            use_hybrid = getattr(self.config, "use_fla_triton_kda_hybrid", False)
+            in_kernel_gate = getattr(self.config, "use_fla_kda_in_kernel_gate", True)
             if use_fla_triton and use_hybrid:
                 mode = "Hybrid (Triton fwd, PyTorch bwd), gate materialized"
             elif use_fla_triton and in_kernel_gate:
@@ -514,7 +535,8 @@ class KimiDeltaAttention(MegatronModule):
             else:
                 mode = "Pure PyTorch fallback (gradient checkpointed)"
             norm_mode = (
-                "FusedRMSNormGated (FLA)" if self._use_fla_fused_norm_gated
+                "FusedRMSNormGated (FLA)"
+                if self._use_fla_fused_norm_gated
                 else "unfused (out_norm + sigmoid-multiply)"
             )
             logger.warning(
@@ -562,7 +584,7 @@ class KimiDeltaAttention(MegatronModule):
         #   (3) Pure-PyTorch fallback when neither is available or
         #       deterministic_mode is set.
         nvtx_range_push(suffix="kda_conv")
-        _use_fla_conv = getattr(_get_args(), 'use_fla_short_conv', False)
+        _use_fla_conv = getattr(_get_args(), "use_fla_short_conv", False)
         if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
             assert self.activation in ["silu", "swish"]
             qkv, _ = _fla_causal_conv1d(
@@ -570,7 +592,7 @@ class KimiDeltaAttention(MegatronModule):
                 weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
                 bias=self.conv1d.bias,
                 activation=self.activation,
-                backend='triton',
+                backend="triton",
             )
         else:
             qkv = qkv.transpose(1, 2).contiguous()  # b s d -> b d s
@@ -579,8 +601,10 @@ class KimiDeltaAttention(MegatronModule):
             else:
                 assert self.activation in ["silu", "swish"]
                 qkv = causal_conv1d_fn(
-                    x=qkv, weight=self.conv1d.weight.squeeze(1),
-                    bias=self.conv1d.bias, activation=self.activation,
+                    x=qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
                 )
             # b d s -> b s d. Do NOT contiguous() here — the downstream
             # torch.split produces non-contiguous views along dim=-1 regardless,
@@ -630,8 +654,8 @@ class KimiDeltaAttention(MegatronModule):
         #     activation memory.
         _use_in_kernel_gate = (
             use_fla_triton
-            and getattr(self.config, 'use_fla_kda_in_kernel_gate', True)
-            and not getattr(self.config, 'use_fla_triton_kda_hybrid', False)
+            and getattr(self.config, "use_fla_kda_in_kernel_gate", True)
+            and not getattr(self.config, "use_fla_triton_kda_hybrid", False)
         )
         if not _use_in_kernel_gate:
             if use_fla_triton:
@@ -662,14 +686,18 @@ class KimiDeltaAttention(MegatronModule):
             k = k.contiguous()
             v = v.contiguous()
         nvtx_range_push(suffix="kda_attn")
-        use_hybrid = getattr(self.config, 'use_fla_triton_kda_hybrid', False)
+        use_hybrid = getattr(self.config, "use_fla_triton_kda_hybrid", False)
         if _use_in_kernel_gate:
             # FLA's new (post-fusion) call site — fuses the gate compute and
             # qk-l2norm inside chunk_kda. Smallest activation footprint, but
             # the bf16 accumulator drifts ~+0.2 lm-loss vs the explicit-gate
             # path on ROCm at 12 layers depth.
             core_attn_out, _ = chunk_kda(
-                q, k, v, g, beta,
+                q,
+                k,
+                v,
+                g,
+                beta,
                 A_log=self.A_log.view(-1),
                 dt_bias=self.dt_bias,
                 use_qk_l2norm_in_kernel=True,
@@ -683,12 +711,21 @@ class KimiDeltaAttention(MegatronModule):
             # and to the explicit-gate Triton path; this is the configuration
             # that hit loss=4.7281 @ iter 500 vs FLA/8=4.7350.
             core_attn_out, _ = chunk_kda(
-                q, k, v, g, beta,
+                q,
+                k,
+                v,
+                g,
+                beta,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
             core_attn_out = _grad_checkpoint(
-                _torch_chunk_kda_ckpt, q, k, v, g, beta,
+                _torch_chunk_kda_ckpt,
+                q,
+                k,
+                v,
+                g,
+                beta,
                 use_reentrant=False,
             )
         nvtx_range_pop(suffix="kda_attn")
@@ -742,7 +779,7 @@ class KimiDeltaAttention(MegatronModule):
             },
             sharded_offsets=sharded_offsets,
             tp_group=(tp_group if tp_group is not None else self.pg_collection.tp),
-            dp_cp_group=metadata['dp_cp_group'],
+            dp_cp_group=metadata["dp_cp_group"],
         )
 
         tp_group = tp_group if tp_group is not None else self.pg_collection.tp
@@ -753,9 +790,12 @@ class KimiDeltaAttention(MegatronModule):
                 if self.conv_bias:
                     tp_sharding_map["bias"] = 0
                 module_sharded_sd = make_sharded_tensors_for_checkpoint(
-                    module_sd, f"{prefix}{name}.", tp_sharding_map,
-                    sharded_offsets, tp_group=tp_group,
-                    dp_cp_group=metadata['dp_cp_group'],
+                    module_sd,
+                    f"{prefix}{name}.",
+                    tp_sharding_map,
+                    sharded_offsets,
+                    tp_group=tp_group,
+                    dp_cp_group=metadata["dp_cp_group"],
                 )
             else:
                 module_sharded_sd = sharded_state_dict_default(
@@ -781,9 +821,9 @@ class KimiDeltaAttention(MegatronModule):
                 self.qk_dim // self.tp_size,
                 self.qk_dim // self.tp_size,
                 self.v_dim // self.tp_size,
-                self.head_dim,                    # f_a (bottleneck dim, not sharded)
-                self.head_dim,                    # g_a (bottleneck dim, not sharded)
-                self.num_heads // self.tp_size,   # beta
+                self.head_dim,  # f_a (bottleneck dim, not sharded)
+                self.head_dim,  # g_a (bottleneck dim, not sharded)
+                self.num_heads // self.tp_size,  # beta
             ],
             ["query", "key", "value", "f_a", "g_a", "beta"],
             0,
@@ -791,14 +831,16 @@ class KimiDeltaAttention(MegatronModule):
 
         # Split conv1d (same ordering as in_proj: Q, K, V)
         conv_layer_name_list = ["conv1d.weight"]
-        assert (
-            sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp
-        ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.weight"])
+        assert sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp, (
+            self.conv_dim_local_tp,
+            sharded_state_dict[f"{prefix}conv1d.weight"],
+        )
         if self.conv_bias:
             conv_layer_name_list.append("conv1d.bias")
-            assert (
-                sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp
-            ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.bias"])
+            assert sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp, (
+                self.conv_dim_local_tp,
+                sharded_state_dict[f"{prefix}conv1d.bias"],
+            )
         for conv_layer_name in conv_layer_name_list:
             sharded_state_dict[f"{prefix}{conv_layer_name}"] = _split_tensor_factory(
                 sharded_state_dict[f"{prefix}{conv_layer_name}"],
@@ -839,13 +881,14 @@ def _split_tensor_factory(
     assert len(split_sections) == len(split_names), (len(split_sections), len(split_names))
 
     @torch.no_grad()
-    def sh_ten_build_fn(
-        key: str, t: torch.Tensor, replica_id: ReplicaId, flattened_range: Optional[slice]
-    ):
+    def sh_ten_build_fn(key: str, t: torch.Tensor, replica_id: ReplicaId, flattened_range: Optional[slice]):
         factory_sh_ten = replace(
             orig_sh_ten_no_data,
-            key=key, data=t, dtype=t.dtype,
-            replica_id=replica_id, flattened_range=flattened_range,
+            key=key,
+            data=t,
+            dtype=t.dtype,
+            replica_id=replica_id,
+            flattened_range=flattened_range,
         )
 
         chunk_sh_tens = []
@@ -858,10 +901,12 @@ def _split_tensor_factory(
             split_start += split_size
 
         assert split_start == orig_sh_ten_no_data.local_shape[split_dim], (
-            split_start, orig_sh_ten_no_data.local_shape[split_dim],
+            split_start,
+            orig_sh_ten_no_data.local_shape[split_dim],
         )
         assert sum(sh_ten.data.numel() for sh_ten in chunk_sh_tens) == t.numel(), (
-            chunk_sh_tens, t.shape,
+            chunk_sh_tens,
+            t.shape,
         )
         return chunk_sh_tens
 

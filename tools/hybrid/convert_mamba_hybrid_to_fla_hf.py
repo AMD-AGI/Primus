@@ -58,9 +58,10 @@ import argparse
 import json
 import os
 import sys
-import torch
-from pathlib import Path
 from collections import OrderedDict
+from pathlib import Path
+
+import torch
 
 _megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
@@ -116,8 +117,7 @@ def _megatron_to_fla_rope_channels(w_rope, qk_rope_head_dim):
     """
     d = qk_rope_head_dim
     assert w_rope.shape[-1] == d, (
-        f"_megatron_to_fla_rope_channels: last dim {w_rope.shape[-1]} != "
-        f"qk_rope_head_dim {d}"
+        f"_megatron_to_fla_rope_channels: last dim {w_rope.shape[-1]} != " f"qk_rope_head_dim {d}"
     )
     even = w_rope[..., 0::2]
     odd = w_rope[..., 1::2]
@@ -149,7 +149,8 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
     q_down_w = state[f"decoder.layers.{sub_mixer}.self_attention.linear_q_down_proj.weight"]
     q_up_w = state[f"decoder.layers.{sub_mixer}.self_attention.linear_q_up_proj.weight"]
     q_norm_w, _ = _get_first(
-        state, f"decoder.layers.{sub_mixer}.self_attention.q_layernorm.weight",
+        state,
+        f"decoder.layers.{sub_mixer}.self_attention.q_layernorm.weight",
     )
     assert q_down_w.shape == (q_lora_rank, hidden_size)
     assert q_up_w.shape == (num_heads * qk_head_dim, q_lora_rank)
@@ -178,7 +179,8 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
     out[f"{prefix}.k_rope.weight"] = k_rope_fla
 
     kv_norm_w, _ = _get_first(
-        state, f"decoder.layers.{sub_mixer}.self_attention.kv_layernorm.weight",
+        state,
+        f"decoder.layers.{sub_mixer}.self_attention.kv_layernorm.weight",
     )
     assert kv_norm_w.shape == (kv_lora_rank,)
     out[f"{prefix}.kv_proj.1.weight"] = kv_norm_w
@@ -188,9 +190,7 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
     assert kv_up_w.shape == (expected_up_rows, kv_lora_rank)
     out[f"{prefix}.kv_proj.2.weight"] = kv_up_w
 
-    out[f"{prefix}.o_proj.weight"] = state[
-        f"decoder.layers.{sub_mixer}.self_attention.linear_proj.weight"
-    ]
+    out[f"{prefix}.o_proj.weight"] = state[f"decoder.layers.{sub_mixer}.self_attention.linear_proj.weight"]
     return out
 
 
@@ -215,7 +215,7 @@ def convert_mamba2_block(state, sub_mixer, prefix, fla_cfg):
     out = OrderedDict()
     hidden_size = fla_cfg["hidden_size"]
     expand = fla_cfg["expand"]
-    head_dim = fla_cfg["head_dim"]
+    fla_cfg["head_dim"]
     n_groups = fla_cfg["n_groups"]
     state_size = fla_cfg["state_size"]
     num_heads = fla_cfg["num_heads"]
@@ -234,9 +234,9 @@ def convert_mamba2_block(state, sub_mixer, prefix, fla_cfg):
 
     conv1d_w = state[f"decoder.layers.{sub_mixer}.mixer.conv1d.weight"]
     conv1d_b = state[f"decoder.layers.{sub_mixer}.mixer.conv1d.bias"]
-    assert conv1d_w.shape[0] == conv_dim, (
-        f"Mamba2 conv1d weight rows {conv1d_w.shape[0]} != expected {conv_dim}"
-    )
+    assert (
+        conv1d_w.shape[0] == conv_dim
+    ), f"Mamba2 conv1d weight rows {conv1d_w.shape[0]} != expected {conv_dim}"
     out[f"{prefix}.conv1d.weight"] = conv1d_w
     out[f"{prefix}.conv1d.bias"] = conv1d_b
 
@@ -248,9 +248,7 @@ def convert_mamba2_block(state, sub_mixer, prefix, fla_cfg):
     assert norm_w.shape == (intermediate,)
     out[f"{prefix}.norm.weight"] = norm_w
 
-    out[f"{prefix}.out_proj.weight"] = state[
-        f"decoder.layers.{sub_mixer}.mixer.out_proj.weight"
-    ]
+    out[f"{prefix}.out_proj.weight"] = state[f"decoder.layers.{sub_mixer}.mixer.out_proj.weight"]
     return out
 
 
@@ -335,9 +333,15 @@ def convert(checkpoint, hybrid_pattern, base_attn_cfg, primus_args_override=None
     primus_args = {}
     if ckpt_args is not None:
         for k in (
-            "hidden_size", "ffn_hidden_size", "padded_vocab_size",
-            "mamba_state_dim", "mamba_head_dim", "mamba_num_groups",
-            "mamba_expand", "max_position_embeddings", "norm_epsilon",
+            "hidden_size",
+            "ffn_hidden_size",
+            "padded_vocab_size",
+            "mamba_state_dim",
+            "mamba_head_dim",
+            "mamba_num_groups",
+            "mamba_expand",
+            "max_position_embeddings",
+            "norm_epsilon",
         ):
             v = getattr(ckpt_args, k, None)
             if v is not None:
@@ -408,14 +412,12 @@ def convert(checkpoint, hybrid_pattern, base_attn_cfg, primus_args_override=None
 
         fc1_w = state[f"decoder.layers.{sub_mlp}.mlp.linear_fc1.weight"]
         intermediate_size = fla_cfg["intermediate_size"]
-        assert fc1_w.shape[0] == intermediate_size * 2, (
-            f"MLP fc1 shape {tuple(fc1_w.shape)} expected ({intermediate_size*2},...)"
-        )
+        assert (
+            fc1_w.shape[0] == intermediate_size * 2
+        ), f"MLP fc1 shape {tuple(fc1_w.shape)} expected ({intermediate_size*2},...)"
         hf_state[f"{prefix}.mlp.gate_proj.weight"] = fc1_w[:intermediate_size]
         hf_state[f"{prefix}.mlp.up_proj.weight"] = fc1_w[intermediate_size:]
-        hf_state[f"{prefix}.mlp.down_proj.weight"] = state[
-            f"decoder.layers.{sub_mlp}.mlp.linear_fc2.weight"
-        ]
+        hf_state[f"{prefix}.mlp.down_proj.weight"] = state[f"decoder.layers.{sub_mlp}.mlp.linear_fc2.weight"]
 
     final_norm_w, _ = _get_first(
         state,
@@ -483,12 +485,12 @@ def main():
 
     try:
         from safetensors.torch import save_file
+
         # Untie lm_head <-> embeddings (safetensors disallows shared tensors).
         if (
             "lm_head.weight" in hf_state
             and "backbone.embeddings.weight" in hf_state
-            and hf_state["lm_head.weight"].data_ptr()
-            == hf_state["backbone.embeddings.weight"].data_ptr()
+            and hf_state["lm_head.weight"].data_ptr() == hf_state["backbone.embeddings.weight"].data_ptr()
         ):
             hf_state["lm_head.weight"] = hf_state["lm_head.weight"].clone()
         save_file(hf_state, str(output_dir / "model.safetensors"))
@@ -511,11 +513,14 @@ def main():
         json.dump(fla_cfg, f, indent=2)
     print(f"  Saved config.json")
     print(f"  hidden_size={fla_cfg['hidden_size']}, intermediate_size={fla_cfg['intermediate_size']}")
-    print(f"  n_groups={fla_cfg['n_groups']}, state_size={fla_cfg['state_size']}, num_heads={fla_cfg['num_heads']}")
+    print(
+        f"  n_groups={fla_cfg['n_groups']}, state_size={fla_cfg['state_size']}, num_heads={fla_cfg['num_heads']}"
+    )
 
     # Drop a copy of our custom modeling file next to the checkpoint so
     # `from_pretrained(..., trust_remote_code=True)` can pick it up.
     import shutil
+
     src_modeling = Path(__file__).parent / "_primus_mamba2_modeling.py"
     dst_modeling = output_dir / "modeling_mamba2_full_mlp.py"
     shutil.copy2(src_modeling, dst_modeling)
@@ -529,6 +534,7 @@ def main():
     src_tok = Path(args.tokenizer)
     if src_tok.exists():
         import shutil
+
         for name in (
             "tokenizer.json",
             "tokenizer_config.json",
@@ -545,9 +551,13 @@ def main():
 
     print()
     print("Done. To sanity-check then evaluate:")
-    print(f"  python -c \"from fla.models import Mamba2ForCausalLM; m = Mamba2ForCausalLM.from_pretrained('{output_dir}'); print(sum(p.numel() for p in m.parameters())/1e6, 'M params')\"")
+    print(
+        f"  python -c \"from fla.models import Mamba2ForCausalLM; m = Mamba2ForCausalLM.from_pretrained('{output_dir}'); print(sum(p.numel() for p in m.parameters())/1e6, 'M params')\""
+    )
     print()
-    print(f"  lm_eval --model hf --model_args pretrained={output_dir},trust_remote_code=True,dtype=bfloat16 \\")
+    print(
+        f"  lm_eval --model hf --model_args pretrained={output_dir},trust_remote_code=True,dtype=bfloat16 \\"
+    )
     print(f"    --tasks hellaswag,winogrande,piqa,arc_easy,arc_challenge,lambada_openai \\")
     print(f"    --batch_size 16 --output_path {output_dir}/lm_eval")
 

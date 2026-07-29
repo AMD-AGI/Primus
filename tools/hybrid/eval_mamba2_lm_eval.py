@@ -25,7 +25,7 @@ Usage (same CLI as lm_eval, just swap the command):
         --batch_size auto \
         --output_path eval_results/mamba_hybrid_300M_primus
 """
-import os
+
 import fla  # noqa: F401  — registers Mamba2 with AutoConfig/AutoModel
 
 # 1. dtype-kwarg patch (same trick as eval_gdn_lm_eval.py)
@@ -58,6 +58,7 @@ def _make_patch(orig):
             config.residual_in_fp32 = False
             print(f"[eval_mamba2_lm_eval] forced residual_in_fp32=False on {type(self).__name__}")
         return orig(self, config, *args, **kwargs)
+
     return _patched
 
 

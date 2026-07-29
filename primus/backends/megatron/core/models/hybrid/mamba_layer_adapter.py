@@ -29,6 +29,7 @@ the other hybrid layers), and never forwards it to `MambaLayer.__init__`.
 plumbing for the mamba leg anyway — pp_offset is applied separately to the
 TransformerLayer attention/MLP branches).
 """
+
 from __future__ import annotations
 
 from megatron.core.ssm.mamba_layer import MambaLayer

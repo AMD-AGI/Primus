@@ -38,9 +38,10 @@ import argparse
 import json
 import os
 import sys
-import torch
-from pathlib import Path
 from collections import OrderedDict
+from pathlib import Path
+
+import torch
 
 _megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
@@ -110,8 +111,7 @@ def _megatron_to_fla_rope_channels(w_rope, qk_rope_head_dim):
     """
     d = qk_rope_head_dim
     assert w_rope.shape[-1] == d, (
-        f"_megatron_to_fla_rope_channels: last dim {w_rope.shape[-1]} != "
-        f"qk_rope_head_dim {d}"
+        f"_megatron_to_fla_rope_channels: last dim {w_rope.shape[-1]} != " f"qk_rope_head_dim {d}"
     )
     even = w_rope[..., 0::2]
     odd = w_rope[..., 1::2]
@@ -146,7 +146,8 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
     q_down_w = state[f"decoder.layers.{sub_mixer}.self_attention.linear_q_down_proj.weight"]
     q_up_w = state[f"decoder.layers.{sub_mixer}.self_attention.linear_q_up_proj.weight"]
     q_norm_w, _ = _get_first(
-        state, f"decoder.layers.{sub_mixer}.self_attention.q_layernorm.weight",
+        state,
+        f"decoder.layers.{sub_mixer}.self_attention.q_layernorm.weight",
     )
     assert q_down_w.shape == (q_lora_rank, hidden_size)
     assert q_up_w.shape == (num_heads * qk_head_dim, q_lora_rank)
@@ -156,11 +157,11 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
     # (num_heads, qk_head_dim, q_lora_rank), split, permute rope, recombine.
     q_up_3d = q_up_w.view(num_heads, qk_head_dim, q_lora_rank)
     q_up_nope = q_up_3d[:, :qk_nope_head_dim, :]
-    q_up_rope_meg = q_up_3d[:, qk_nope_head_dim:, :]            # (h, rope, r)
-    q_up_rope_meg = q_up_rope_meg.transpose(-1, -2)             # (h, r, rope)
+    q_up_rope_meg = q_up_3d[:, qk_nope_head_dim:, :]  # (h, rope, r)
+    q_up_rope_meg = q_up_rope_meg.transpose(-1, -2)  # (h, r, rope)
     q_up_rope_fla = _megatron_to_fla_rope_channels(q_up_rope_meg, qk_rope_head_dim)
-    q_up_rope_fla = q_up_rope_fla.transpose(-1, -2)             # (h, rope, r)
-    q_up_fla = torch.cat([q_up_nope, q_up_rope_fla], dim=1)     # (h, qk_head_dim, r)
+    q_up_rope_fla = q_up_rope_fla.transpose(-1, -2)  # (h, rope, r)
+    q_up_fla = torch.cat([q_up_nope, q_up_rope_fla], dim=1)  # (h, qk_head_dim, r)
     q_up_fla = q_up_fla.reshape(num_heads * qk_head_dim, q_lora_rank).contiguous()
 
     out[f"{prefix}.attn.q_proj.0.weight"] = q_down_w
@@ -175,14 +176,15 @@ def convert_mla_block(state, sub_mixer, prefix, fla_cfg):
 
     # k_rope's output channels need the same permutation. Shape (rope, hidden):
     # rope dim is the output (last after transpose), so transpose → permute → back.
-    k_rope_meg = kv_down_w[kv_lora_rank:].contiguous()         # (rope, hidden)
-    k_rope_meg = k_rope_meg.transpose(0, 1)                    # (hidden, rope)
+    k_rope_meg = kv_down_w[kv_lora_rank:].contiguous()  # (rope, hidden)
+    k_rope_meg = k_rope_meg.transpose(0, 1)  # (hidden, rope)
     k_rope_fla = _megatron_to_fla_rope_channels(k_rope_meg, qk_rope_head_dim)
-    k_rope_fla = k_rope_fla.transpose(0, 1).contiguous()       # (rope, hidden)
+    k_rope_fla = k_rope_fla.transpose(0, 1).contiguous()  # (rope, hidden)
     out[f"{prefix}.attn.k_rope.weight"] = k_rope_fla
 
     kv_norm_w, _ = _get_first(
-        state, f"decoder.layers.{sub_mixer}.self_attention.kv_layernorm.weight",
+        state,
+        f"decoder.layers.{sub_mixer}.self_attention.kv_layernorm.weight",
     )
     assert kv_norm_w.shape == (kv_lora_rank,)
     out[f"{prefix}.attn.kv_proj.1.weight"] = kv_norm_w
@@ -211,21 +213,17 @@ def convert_gdn_block(state, sub_mixer, prefix, fla_cfg):
 
     in_proj_w = state[f"decoder.layers.{sub_mixer}.mixer.in_proj.weight"]
     expected_in = key_dim * 2 + value_dim * 2 + num_v_heads * 2
-    assert in_proj_w.shape[0] == expected_in, (
-        f"in_proj shape {tuple(in_proj_w.shape)} expected ({expected_in},{hidden_size})"
-    )
+    assert (
+        in_proj_w.shape[0] == expected_in
+    ), f"in_proj shape {tuple(in_proj_w.shape)} expected ({expected_in},{hidden_size})"
     out[f"{prefix}.attn.q_proj.weight"] = in_proj_w[:key_dim]
     out[f"{prefix}.attn.k_proj.weight"] = in_proj_w[key_dim : key_dim * 2]
     out[f"{prefix}.attn.v_proj.weight"] = in_proj_w[key_dim * 2 : key_dim * 2 + value_dim]
-    out[f"{prefix}.attn.g_proj.weight"] = in_proj_w[
-        key_dim * 2 + value_dim : key_dim * 2 + value_dim * 2
-    ]
+    out[f"{prefix}.attn.g_proj.weight"] = in_proj_w[key_dim * 2 + value_dim : key_dim * 2 + value_dim * 2]
     out[f"{prefix}.attn.b_proj.weight"] = in_proj_w[
         key_dim * 2 + value_dim * 2 : key_dim * 2 + value_dim * 2 + num_v_heads
     ]
-    out[f"{prefix}.attn.a_proj.weight"] = in_proj_w[
-        key_dim * 2 + value_dim * 2 + num_v_heads :
-    ]
+    out[f"{prefix}.attn.a_proj.weight"] = in_proj_w[key_dim * 2 + value_dim * 2 + num_v_heads :]
 
     out[f"{prefix}.attn.A_log"] = state[f"decoder.layers.{sub_mixer}.mixer.A_log"]
     out[f"{prefix}.attn.dt_bias"] = state[f"decoder.layers.{sub_mixer}.mixer.dt_bias"]
@@ -235,12 +233,8 @@ def convert_gdn_block(state, sub_mixer, prefix, fla_cfg):
     out[f"{prefix}.attn.k_conv1d.weight"] = conv_w[key_dim : key_dim * 2]
     out[f"{prefix}.attn.v_conv1d.weight"] = conv_w[key_dim * 2 :]
 
-    out[f"{prefix}.attn.o_norm.weight"] = state[
-        f"decoder.layers.{sub_mixer}.mixer.out_norm.weight"
-    ]
-    out[f"{prefix}.attn.o_proj.weight"] = state[
-        f"decoder.layers.{sub_mixer}.mixer.out_proj.weight"
-    ]
+    out[f"{prefix}.attn.o_norm.weight"] = state[f"decoder.layers.{sub_mixer}.mixer.out_norm.weight"]
+    out[f"{prefix}.attn.o_proj.weight"] = state[f"decoder.layers.{sub_mixer}.mixer.out_proj.weight"]
     return out
 
 
@@ -291,14 +285,12 @@ def convert(checkpoint, fla_config_path, hybrid_pattern):
         hf_state[f"{prefix}.mlp_norm.weight"] = mlp_norm_w
 
         fc1_w = state[f"decoder.layers.{sub_mlp}.mlp.linear_fc1.weight"]
-        assert fc1_w.shape[0] == intermediate_size * 2, (
-            f"MLP fc1 shape {tuple(fc1_w.shape)} expected ({intermediate_size*2},...)"
-        )
+        assert (
+            fc1_w.shape[0] == intermediate_size * 2
+        ), f"MLP fc1 shape {tuple(fc1_w.shape)} expected ({intermediate_size*2},...)"
         hf_state[f"{prefix}.mlp.gate_proj.weight"] = fc1_w[:intermediate_size]
         hf_state[f"{prefix}.mlp.up_proj.weight"] = fc1_w[intermediate_size:]
-        hf_state[f"{prefix}.mlp.down_proj.weight"] = state[
-            f"decoder.layers.{sub_mlp}.mlp.linear_fc2.weight"
-        ]
+        hf_state[f"{prefix}.mlp.down_proj.weight"] = state[f"decoder.layers.{sub_mlp}.mlp.linear_fc2.weight"]
 
     final_norm_w, _ = _get_first(
         state,
@@ -324,7 +316,10 @@ def main():
         "--config",
         default=os.path.join(
             os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention")),
-            "legacy", "training", "configs", "gated_deltanet_300M_hybrid.json",
+            "legacy",
+            "training",
+            "configs",
+            "gated_deltanet_300M_hybrid.json",
         ),
     )
     parser.add_argument(
@@ -351,8 +346,7 @@ def main():
         if (
             "lm_head.weight" in hf_state
             and "model.embeddings.weight" in hf_state
-            and hf_state["lm_head.weight"].data_ptr()
-            == hf_state["model.embeddings.weight"].data_ptr()
+            and hf_state["lm_head.weight"].data_ptr() == hf_state["model.embeddings.weight"].data_ptr()
         ):
             hf_state["lm_head.weight"] = hf_state["lm_head.weight"].clone()
         save_file(hf_state, str(output_dir / "model.safetensors"))

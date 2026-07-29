@@ -63,9 +63,16 @@ def main() -> None:
     primus_root = Path(__file__).resolve().parent.parent.parent
     sys.path.insert(0, str(primus_root))
 
-    from tools.hybrid.modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM  # noqa: E402
+    from tools.hybrid.modeling_zebra_llama import (  # noqa: E402
+        ZebraLlamaConfig,
+        ZebraLlamaForCausalLM,
+    )
 
-    ckpt_dir = (primus_root / args.checkpoint).resolve() if not Path(args.checkpoint).is_absolute() else Path(args.checkpoint)
+    ckpt_dir = (
+        (primus_root / args.checkpoint).resolve()
+        if not Path(args.checkpoint).is_absolute()
+        else Path(args.checkpoint)
+    )
     if not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint dir not found: {ckpt_dir}")
 
@@ -131,11 +138,11 @@ def main() -> None:
     #     if user == "/reset":
     #         history.clear()
     #         print("[Info] History cleared.\n")
-            # continue
+    # continue
 
     # history.append(("user", user))
     # prompt = build_prompt(history)
-    
+
     prompt = "Once upon a time, "
     inputs = tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(device)
@@ -159,10 +166,9 @@ def main() -> None:
     # Decode only the newly generated portion
     gen_ids = out_ids[0, input_ids.shape[1] :]
     assistant = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-    #history.append(("assistant", assistant))
+    # history.append(("assistant", assistant))
     print(f"OUTPUT> {prompt}{assistant}\n")
 
 
 if __name__ == "__main__":
     main()
-

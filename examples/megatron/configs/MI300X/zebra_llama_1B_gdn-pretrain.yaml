@@ -16,10 +16,10 @@ modules:
       stderr_sink_level: DEBUG
 
       eval_iters: 0
-      
+
       num_workers: 0
       create_attention_mask_in_dataloader: false
-      
+
       profile: false
       use_pytorch_profiler: false
       log_avg_skip_iterations: 2
@@ -29,7 +29,7 @@ modules:
       micro_batch_size: 4
       global_batch_size: 32
 
-      seq_length: 8192  
+      seq_length: 8192
       max_position_embeddings: 8192
       original_max_position_embeddings: 8192
 
@@ -45,11 +45,11 @@ modules:
 
       # Pure GDN hybrid spec
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec']
-      
+
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
       tokenizer_model: fla-hub/gla-1.3B-100B
-      
+
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1

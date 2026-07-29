@@ -25,13 +25,16 @@ from fla.models.gated_deltanet import GatedDeltaNetForCausalLM, GatedDeltaNetMod
 _orig_causal_init = GatedDeltaNetForCausalLM.__init__
 _orig_model_init = GatedDeltaNetModel.__init__
 
+
 def _patched_causal_init(self, config, *args, **kwargs):
-    kwargs.pop('dtype', None)
+    kwargs.pop("dtype", None)
     return _orig_causal_init(self, config, *args, **kwargs)
 
+
 def _patched_model_init(self, config, *args, **kwargs):
-    kwargs.pop('dtype', None)
+    kwargs.pop("dtype", None)
     return _orig_model_init(self, config, *args, **kwargs)
+
 
 GatedDeltaNetForCausalLM.__init__ = _patched_causal_init
 GatedDeltaNetModel.__init__ = _patched_model_init

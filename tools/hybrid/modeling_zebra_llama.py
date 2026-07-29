@@ -14,17 +14,18 @@ Notes / simplifications:
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.generation.utils import GenerationMixin
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 from transformers.utils import logging
-from transformers.activations import ACT2FN
 
 # KDA does not require mamba_ssm; pure PyTorch chunked attention is used.
 
@@ -241,7 +242,7 @@ class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon  = eps
+        self.variance_epsilon = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_dtype = x.dtype
@@ -253,6 +254,7 @@ class RMSNorm(nn.Module):
 
 class RMSNormWithBias(nn.Module):
     """RMSNorm with optional bias, matching Transformer Engine's RMSNorm."""
+
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -286,11 +288,17 @@ def build_norm(config: ZebraLlamaConfig, hidden_size: int) -> nn.Module:
         if getattr(config, "normalization", "LayerNorm") == "RMSNorm":
             te_rms = getattr(te, "RMSNorm", None) if te is not None else None
             if te_rms is not None:
-                return te_rms(**_filter_kwargs_for_init(te_rms, {"hidden_size": hidden_size, "eps": eps, "epsilon": eps}))
+                return te_rms(
+                    **_filter_kwargs_for_init(
+                        te_rms, {"hidden_size": hidden_size, "eps": eps, "epsilon": eps}
+                    )
+                )
             # TE may not ship RMSNorm; fall back below.
         te_ln = getattr(te, "LayerNorm", None) if te is not None else None
         if te_ln is not None:
-            return te_ln(**_filter_kwargs_for_init(te_ln, {"hidden_size": hidden_size, "eps": eps, "epsilon": eps}))
+            return te_ln(
+                **_filter_kwargs_for_init(te_ln, {"hidden_size": hidden_size, "eps": eps, "epsilon": eps})
+            )
 
     if getattr(config, "normalization", "LayerNorm") == "RMSNorm":
         return RMSNorm(hidden_size, eps=getattr(config, "layernorm_epsilon", 1e-5))
@@ -461,8 +469,13 @@ class YarnRotaryEmbedding(nn.Module):
             self.original_max_position_embeddings,
             self.correction_range_round_to_int,
         )
-        inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(low, high, self.dim // 2).to(device=device, dtype=torch.float32)
-        inv_freq = self.inv_freq_inter.to(device=device) * (1.0 - inv_freq_mask) + self.inv_freq_extra.to(device=device) * inv_freq_mask
+        inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(low, high, self.dim // 2).to(
+            device=device, dtype=torch.float32
+        )
+        inv_freq = (
+            self.inv_freq_inter.to(device=device) * (1.0 - inv_freq_mask)
+            + self.inv_freq_extra.to(device=device) * inv_freq_mask
+        )
         return inv_freq
 
     def forward(self, x: torch.Tensor, seq_len: int, offset: int = 0):
@@ -581,9 +594,9 @@ class MLAAttention(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,                # [B, L, D]
+        hidden_states: torch.Tensor,  # [B, L, D]
         attention_mask: Optional[torch.Tensor] = None,  # additive mask [B,1,1,S] with 0 or -inf
-        position_ids: Optional[torch.Tensor] = None,    # [B, L]
+        position_ids: Optional[torch.Tensor] = None,  # [B, L]
         past_key_value=None,
         output_attentions: bool = False,
         use_cache: bool = False,
@@ -591,8 +604,7 @@ class MLAAttention(nn.Module):
     ):
         # no cache support
         _ = past_key_value
-        use_cache = False
-        
+
         bsz, q_len, _ = hidden_states.shape
         if position_ids is None:
             position_ids = torch.arange(q_len, device=hidden_states.device, dtype=torch.long)[None, :]
@@ -610,7 +622,9 @@ class MLAAttention(nn.Module):
         k_pos_emb = kv_combined[..., self.kv_lora_rank :]  # [B,L,pos]
 
         # KV up projection
-        kv = self.linear_kv_up_proj(kv_comp).view(bsz, q_len, self.num_heads, self.qk_head_dim + self.v_head_dim)
+        kv = self.linear_kv_up_proj(kv_comp).view(
+            bsz, q_len, self.num_heads, self.qk_head_dim + self.v_head_dim
+        )
 
         # Split
         q_no_pe = q[..., : self.qk_head_dim]
@@ -625,9 +639,7 @@ class MLAAttention(nn.Module):
         k_pos = k_pos_emb.unsqueeze(2).expand(bsz, q_len, self.num_heads, self.qk_pos_emb_head_dim)
         q_pos = q_pos.transpose(1, 2)  # [B,H,L,pos]
         k_pos = k_pos.transpose(1, 2)
-        q_pos, k_pos = apply_rotary_pos_emb(
-            q_pos, k_pos, cos, sin, position_ids, multi_latent_attention=True
-        )
+        q_pos, k_pos = apply_rotary_pos_emb(q_pos, k_pos, cos, sin, position_ids, multi_latent_attention=True)
 
         # Concatenate and transpose to [B,H,L,D]
         q = torch.cat([q_no_pe.transpose(1, 2), q_pos], dim=-1)
@@ -652,14 +664,18 @@ class MLAAttention(nn.Module):
             )
             if can_use_flash:
                 # flash_attn expects [B,L,H,D]
-                attn_out = flash_attn_func(
-                    q.transpose(1, 2).contiguous(),
-                    k.transpose(1, 2).contiguous(),
-                    v.transpose(1, 2).contiguous(),
-                    dropout_p=dropout_p,
-                    softmax_scale=self.softmax_scale,
-                    causal=True,
-                ).transpose(1, 2).contiguous()
+                attn_out = (
+                    flash_attn_func(
+                        q.transpose(1, 2).contiguous(),
+                        k.transpose(1, 2).contiguous(),
+                        v.transpose(1, 2).contiguous(),
+                        dropout_p=dropout_p,
+                        softmax_scale=self.softmax_scale,
+                        causal=True,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )
             else:
                 sdpa_mask = None
                 if attention_mask is not None:
@@ -711,7 +727,6 @@ class MLAAttentionLayer(nn.Module):
     ):
         # No KV cache support for now.
         _ = past_key_value
-        use_cache = False
 
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -727,12 +742,15 @@ class MLAAttentionLayer(nn.Module):
         hidden_states = self.dropout(hidden_states) + residual
         return hidden_states, self_attn_weights
 
+
 # =============================================================================
 # KDA (Kimi Delta Attention)
 # =============================================================================
 
 
-def _torch_kda_gate(g: torch.Tensor, A_log: torch.Tensor, dt_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def _torch_kda_gate(
+    g: torch.Tensor, A_log: torch.Tensor, dt_bias: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Pure-PyTorch KDA gate: -exp(A_log) * softplus(g + dt_bias)."""
     H = g.shape[-2]
     g = g.float()
@@ -742,9 +760,13 @@ def _torch_kda_gate(g: torch.Tensor, A_log: torch.Tensor, dt_bias: Optional[torc
 
 
 def _torch_chunk_kda_fwd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    g: torch.Tensor, beta: torch.Tensor,
-    scale: Optional[float] = None, chunk_size: int = 64,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: Optional[float] = None,
+    chunk_size: int = 64,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> torch.Tensor:
     """Pure-PyTorch chunked KDA forward for inference."""
@@ -754,7 +776,7 @@ def _torch_chunk_kda_fwd(
     BT = chunk_size
 
     if scale is None:
-        scale = K ** -0.5
+        scale = K**-0.5
 
     if use_qk_l2norm_in_kernel:
         q = F.normalize(q.float(), p=2, dim=-1, eps=1e-6)
@@ -771,9 +793,7 @@ def _torch_chunk_kda_fwd(
     total_T = T + pad_size
     NT = total_T // BT
 
-    q, k, v, g, beta = [
-        x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)
-    ]
+    q, k, v, g, beta = [x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)]
     q = q * scale
 
     q = q.reshape(B, H, NT, BT, K)
@@ -797,9 +817,7 @@ def _torch_chunk_kda_fwd(
     A = -A.masked_fill(mask_upper, 0)
 
     for i in range(1, BT):
-        A[..., i, :i] = A[..., i, :i].clone() + (
-            A[..., i, :, None].clone() * A[..., :, :i].clone()
-        ).sum(-2)
+        A[..., i, :i] = A[..., i, :i].clone() + (A[..., i, :, None].clone() * A[..., :, :i].clone()).sum(-2)
 
     A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta.unsqueeze(-2)
     w = A @ k_eg
@@ -843,19 +861,20 @@ class KDAMixer(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.kda_num_heads
-        self.head_dim = config.kda_head_dim          # value head dim
-        self.head_k_dim = config.kda_key_head_dim    # key/query head dim
+        self.head_dim = config.kda_head_dim  # value head dim
+        self.head_k_dim = config.kda_key_head_dim  # key/query head dim
         self.num_k_heads = config.kda_num_key_heads  # may differ from num_heads (GQA-style)
         self.conv_kernel = config.kda_conv_kernel
 
-        self.v_dim = config.kda_v_dim         # num_heads * head_dim
-        self.qk_dim = config.kda_qk_dim       # num_k_heads * head_k_dim
-        self.gate_dim = config.kda_gate_dim   # num_heads * head_k_dim
-        proj_dim = config.kda_proj_dim         # qk_dim*2 + v_dim
+        self.v_dim = config.kda_v_dim  # num_heads * head_dim
+        self.qk_dim = config.kda_qk_dim  # num_k_heads * head_k_dim
+        self.gate_dim = config.kda_gate_dim  # num_heads * head_k_dim
+        proj_dim = config.kda_proj_dim  # qk_dim*2 + v_dim
 
         self.in_proj = nn.Linear(self.hidden_size, proj_dim, bias=False)
         self.conv1d = nn.Conv1d(
-            proj_dim, proj_dim,
+            proj_dim,
+            proj_dim,
             kernel_size=self.conv_kernel,
             groups=proj_dim,
             padding=self.conv_kernel - 1,
@@ -907,8 +926,12 @@ class KDAMixer(nn.Module):
         beta = self.b_proj(h).float().sigmoid()
 
         core_out = _torch_chunk_kda_fwd(
-            q.contiguous(), k.contiguous(), v.contiguous(),
-            g, beta, use_qk_l2norm_in_kernel=True,
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            g,
+            beta,
+            use_qk_l2norm_in_kernel=True,
         )
 
         gate = self.g_b_proj(self.g_a_proj(h))
@@ -966,7 +989,13 @@ class MLPLayer(nn.Module):
         self.dropout = nn.Dropout(float(getattr(config, "hidden_dropout", 0.0)))
         self.pre_mlp_layernorm = RMSNormWithBias(config.hidden_size, eps=config.layernorm_epsilon)
 
-    def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, inference_context=None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        inference_context=None,
+        **kwargs,
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.pre_mlp_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -1014,10 +1043,15 @@ class ZebraLlamaModel(PreTrainedModel):
     ):
         # No cache support
         _ = past_key_values
-        use_cache = False
 
-        output_attentions = output_attentions if output_attentions is not None else bool(self.config.output_attentions)
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else bool(self.config.output_hidden_states)
+        output_attentions = (
+            output_attentions if output_attentions is not None else bool(self.config.output_attentions)
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else bool(self.config.output_hidden_states)
+        )
         return_dict = return_dict if return_dict is not None else bool(self.config.use_return_dict)
 
         if input_ids is not None and inputs_embeds is not None:
@@ -1137,7 +1171,9 @@ class ZebraLlamaForCausalLM(PreTrainedModel, GenerationMixin):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1).to(shift_logits.device))
+            loss = loss_fct(
+                shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1).to(shift_logits.device)
+            )
 
         if not return_dict:
             out = (logits,) + outputs[1:]
@@ -1184,4 +1220,3 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM  # noqa: E4
 AutoConfig.register("zebra_llama", ZebraLlamaConfig)
 AutoModel.register(ZebraLlamaConfig, ZebraLlamaModel)
 AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
-

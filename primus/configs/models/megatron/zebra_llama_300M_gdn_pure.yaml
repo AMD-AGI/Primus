@@ -57,5 +57,3 @@ position_embedding_type: none
 add_position_embedding: true
 use_rotary_position_embeddings: false
 max_position_embeddings: 131072
-
-

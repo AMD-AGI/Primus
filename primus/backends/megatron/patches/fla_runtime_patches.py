@@ -68,7 +68,6 @@ from typing import Any
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-
 # ─── Knob definitions ────────────────────────────────────────────────────────
 #
 # (yaml_field, legacy_env_var, typed_default)
@@ -81,15 +80,15 @@ from primus.core.utils.module_utils import log_rank_0
 # ──────────────────────────────────────────────────────────────────────────────
 
 _FLA_RUNTIME_KNOBS: tuple = (
-    ("use_fla_fused_swiglu",     "PRIMUS_FLA_SWIGLU",      True),
-    ("use_fla_fused_rmsnorm",    "PRIMUS_FLA_NORM",        False),
-    ("use_fla_fused_gated_norm", "PRIMUS_FLA_NORM",        False),
-    ("use_fla_short_conv",       "PRIMUS_FLA_CONV",        False),
-    ("use_fla_data",             "PRIMUS_FLA_DATA",        False),
-    ("fla_cache_dir",            "PRIMUS_FLA_CACHE_DIR",   ""),
-    ("fused_ce_mode",            "PRIMUS_FUSED_CE",        1),
-    ("fused_ce_chunks",          "PRIMUS_FUSED_CE_CHUNKS", 32),
-    ("fla_mla_attn",             "PRIMUS_FLA_MLA_ATTN",    ""),
+    ("use_fla_fused_swiglu", "PRIMUS_FLA_SWIGLU", True),
+    ("use_fla_fused_rmsnorm", "PRIMUS_FLA_NORM", False),
+    ("use_fla_fused_gated_norm", "PRIMUS_FLA_NORM", False),
+    ("use_fla_short_conv", "PRIMUS_FLA_CONV", False),
+    ("use_fla_data", "PRIMUS_FLA_DATA", False),
+    ("fla_cache_dir", "PRIMUS_FLA_CACHE_DIR", ""),
+    ("fused_ce_mode", "PRIMUS_FUSED_CE", 1),
+    ("fused_ce_chunks", "PRIMUS_FUSED_CE_CHUNKS", 32),
+    ("fla_mla_attn", "PRIMUS_FLA_MLA_ATTN", ""),
 )
 
 
@@ -149,7 +148,4 @@ def patch_fla_runtime_knobs(ctx: PatchContext):
             source = f"default"
 
         setattr(args, field_name, resolved)
-        log_rank_0(
-            f"[Patch:megatron.fla_runtime_knobs] "
-            f"args.{field_name} = {resolved!r}  ({source})"
-        )
+        log_rank_0(f"[Patch:megatron.fla_runtime_knobs] " f"args.{field_name} = {resolved!r}  ({source})")

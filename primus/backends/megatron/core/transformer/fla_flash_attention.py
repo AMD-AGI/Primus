@@ -53,8 +53,8 @@ import time
 from typing import Any, Optional
 
 import torch
-from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.module import MegatronModule
 
 # TransformerEngine's pinned flash-attn version range.  When the installed
 # `flash_attn` is newer (e.g. 2.8.3 in the production container), TE silently
@@ -99,7 +99,8 @@ def is_enabled() -> bool:
     """
     try:
         from megatron.training import get_args
-        val = getattr(get_args(), 'fla_mla_attn', "")
+
+        val = getattr(get_args(), "fla_mla_attn", "")
     except Exception:
         val = ""
     if val:
@@ -175,11 +176,13 @@ class FLAFlashAttention(MegatronModule):
         if not _BANNER_PRINTED:
             try:
                 import flash_attn as _fa
+
                 _ver = getattr(_fa, "__version__", "unknown")
             except Exception:
                 _ver = "unknown"
             from megatron.training import get_args as _ga
-            _mla_val = getattr(_ga(), 'fla_mla_attn', "")
+
+            _mla_val = getattr(_ga(), "fla_mla_attn", "")
             if _mla_val == "1":
                 _reason = "args.fla_mla_attn='1'"
             elif not _mla_val:

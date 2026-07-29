@@ -27,7 +27,6 @@ import sys
 from argparse import ArgumentParser
 from functools import partial
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -209,7 +208,9 @@ def _add_script_args(parser: ArgumentParser) -> ArgumentParser:
     group.add_argument("--prompt", type=str, default="The capital of France is")
     group.add_argument("--topk", type=int, default=10)
     group.add_argument("--max-prompt-tokens", type=int, default=256)
-    group.add_argument("--save-logits", type=str, default=None, help="Optional .pt path to save logits tensor.")
+    group.add_argument(
+        "--save-logits", type=str, default=None, help="Optional .pt path to save logits tensor."
+    )
     group.add_argument(
         "--hf-dir",
         type=str,
@@ -350,6 +351,7 @@ def main() -> None:
 
     # Megatron imports (after sys.path is set)
     import megatron
+    from mamba_builders import mamba_builder
     from megatron.training import get_args, get_model, get_tokenizer, print_rank_0
     from megatron.training.arguments import parse_args, validate_args
     from megatron.training.checkpointing import checkpoint_exists, load_checkpoint
@@ -362,14 +364,19 @@ def main() -> None:
     )
     from megatron.training.utils import get_ltor_masks_and_position_ids
 
-    # Primus adds a thin wrapper around Megatron tokenizer building (used in training).
-    from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
-    from primus.backends.megatron.training.global_vars import set_primus_global_variables
-    from primus.modules.trainer.megatron.utils import set_wandb_writer_patch, validate_args_on_rocm
-
     # Builders for MCore Mamba/hybrid models
     from model_provider import model_provider
-    from mamba_builders import mamba_builder
+
+    from primus.backends.megatron.training.global_vars import (
+        set_primus_global_variables,
+    )
+
+    # Primus adds a thin wrapper around Megatron tokenizer building (used in training).
+    from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
+    from primus.modules.trainer.megatron.utils import (
+        set_wandb_writer_patch,
+        validate_args_on_rocm,
+    )
 
     # ---------------------------------------------------------------------
     # Primus-style initialization (matches MegatronTrainer.initialize_megatron)
@@ -529,7 +536,9 @@ def main() -> None:
 
     # Forward (logits)
     prof_mode = str(getattr(args, "torch_profiler", "off"))
-    prof_dir = Path(str(getattr(args, "torch_profiler_dir", None) or "profiler_traces")).expanduser().resolve()
+    prof_dir = (
+        Path(str(getattr(args, "torch_profiler_dir", None) or "profiler_traces")).expanduser().resolve()
+    )
     rank = int(torch.distributed.get_rank()) if torch.distributed.is_initialized() else 0
     do_profile_rank = bool(getattr(args, "torch_profiler_all_ranks", False)) or (rank == 0)
 
@@ -576,9 +585,8 @@ def main() -> None:
         # Optional HF comparison (requires a converted HF checkpoint dir)
         hf_dir = getattr(args, "hf_dir", None)
         if hf_dir:
-            from transformers import AutoTokenizer
-
             from modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM
+            from transformers import AutoTokenizer
 
             hf_dir_path = Path(str(hf_dir)).expanduser().resolve()
             cfg_path = hf_dir_path / "config.json"
@@ -611,9 +619,7 @@ def main() -> None:
                 for k in unexpected[:10]:
                     print_rank_0(f"  - {k}")
 
-            hf_tokenizer = AutoTokenizer.from_pretrained(
-                "meta-llama/Llama-3.2-1B", trust_remote_code=True
-            )
+            hf_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B", trust_remote_code=True)
             hf_ids = hf_tokenizer(prompt, add_special_tokens=False).input_ids
             if len(hf_ids) > max_prompt_tokens:
                 hf_ids = hf_ids[:max_prompt_tokens]
@@ -690,7 +696,9 @@ def main() -> None:
                         if not isinstance(h, torch.Tensor):
                             return
                         h_bsh = _to_bsh(h, seq_len=seq_len, batch_size=1).float()
-                        mg_layer_vecs.append(_repr_from_bsh(h_bsh, getattr(args, "layerwise_token", "last")).cpu())
+                        mg_layer_vecs.append(
+                            _repr_from_bsh(h_bsh, getattr(args, "layerwise_token", "last")).cpu()
+                        )
                         mg_layer_names.append(name)
 
                     return _hook
@@ -704,7 +712,9 @@ def main() -> None:
                         if not isinstance(h, torch.Tensor):
                             return
                         h_bsh = _to_bsh(h, seq_len=seq_len, batch_size=1).float()
-                        hf_layer_vecs.append(_repr_from_bsh(h_bsh, getattr(args, "layerwise_token", "last")).cpu())
+                        hf_layer_vecs.append(
+                            _repr_from_bsh(h_bsh, getattr(args, "layerwise_token", "last")).cpu()
+                        )
                         hf_layer_names.append(name)
 
                     return _hook
@@ -716,7 +726,9 @@ def main() -> None:
                     if mg_layers is None:
                         raise RuntimeError("Megatron model.decoder.layers not found for hooks.")
                     for i, layer in enumerate(mg_layers):
-                        mg_hooks.append(layer.register_forward_hook(_mk_mg_hook(f"mg[{i}]:{layer.__class__.__name__}")))
+                        mg_hooks.append(
+                            layer.register_forward_hook(_mk_mg_hook(f"mg[{i}]:{layer.__class__.__name__}"))
+                        )
                 except Exception as e:
                     print_rank_0(f"[Layerwise] Failed to attach Megatron hooks: {e}")
 
@@ -727,7 +739,9 @@ def main() -> None:
                     if hf_layers is None:
                         raise RuntimeError("HF model.model.layers not found for hooks.")
                     for i, layer in enumerate(hf_layers):
-                        hf_hooks.append(layer.register_forward_hook(_mk_hf_hook(f"hf[{i}]:{layer.__class__.__name__}")))
+                        hf_hooks.append(
+                            layer.register_forward_hook(_mk_hf_hook(f"hf[{i}]:{layer.__class__.__name__}"))
+                        )
                 except Exception as e:
                     print_rank_0(f"[Layerwise] Failed to attach HF hooks: {e}")
 
@@ -759,7 +773,9 @@ def main() -> None:
                         pass
 
                 n = min(len(mg_layer_vecs), len(hf_layer_vecs))
-                print_rank_0(f"Layerwise vectors collected: mg={len(mg_layer_vecs)} hf={len(hf_layer_vecs)} compare_n={n}")
+                print_rank_0(
+                    f"Layerwise vectors collected: mg={len(mg_layer_vecs)} hf={len(hf_layer_vecs)} compare_n={n}"
+                )
                 if n > 0:
                     print_rank_0("Per-layer diff (vector max/mean abs, cosine):")
                     for i in range(n):
@@ -807,7 +823,9 @@ def main() -> None:
                         if nmod is None:
                             continue
                         mg_io_hooks.append(
-                            nmod.register_forward_hook(_mk_io_hook(mg_pre, mg_post, mg_names, f"mg[{i}].{nname}"))
+                            nmod.register_forward_hook(
+                                _mk_io_hook(mg_pre, mg_post, mg_names, f"mg[{i}].{nname}")
+                            )
                         )
                 except Exception as e:
                     print_rank_0(f"[PreNorm] Failed to attach Megatron norm hooks: {e}")
@@ -821,7 +839,9 @@ def main() -> None:
                         if nmod is None:
                             continue
                         hf_io_hooks.append(
-                            nmod.register_forward_hook(_mk_io_hook(hf_pre, hf_post, hf_names, f"hf[{i}].{nname}"))
+                            nmod.register_forward_hook(
+                                _mk_io_hook(hf_pre, hf_post, hf_names, f"hf[{i}].{nname}")
+                            )
                         )
                 except Exception as e:
                     print_rank_0(f"[PreNorm] Failed to attach HF norm hooks: {e}")
@@ -854,7 +874,9 @@ def main() -> None:
                         pass
 
                 n = min(len(mg_pre), len(hf_pre), len(mg_post), len(hf_post))
-                print_rank_0(f"Pre/post norm vectors collected: mg={len(mg_pre)} hf={len(hf_pre)} compare_n={n}")
+                print_rank_0(
+                    f"Pre/post norm vectors collected: mg={len(mg_pre)} hf={len(hf_pre)} compare_n={n}"
+                )
                 if n > 0:
                     print_rank_0("Per-norm diff (PRE then POST): max/mean abs, cosine")
                     for i in range(n):
@@ -884,7 +906,9 @@ def main() -> None:
 
             # Optional: isolated per-layer compare (force identical input hidden per layer).
             if bool(getattr(args, "compare_layer_isolated", False)):
-                print_rank_0("Isolated layer comparison enabled: capturing Megatron per-layer inputs/outputs…")
+                print_rank_0(
+                    "Isolated layer comparison enabled: capturing Megatron per-layer inputs/outputs…"
+                )
                 seq_len = int(hf_input_ids.shape[1])
                 mode = str(getattr(args, "layerwise_token", "last"))
 
@@ -915,7 +939,10 @@ def main() -> None:
                                 if x_src is None:
                                     # Fallback: first tensor-ish value.
                                     for v in kwargs.values():
-                                        if isinstance(v, torch.Tensor) or (hasattr(v, "tensor") and isinstance(getattr(v, "tensor"), torch.Tensor)):
+                                        if isinstance(v, torch.Tensor) or (
+                                            hasattr(v, "tensor")
+                                            and isinstance(getattr(v, "tensor"), torch.Tensor)
+                                        ):
                                             x_src = v
                                             break
                             if x_src is None:
@@ -945,7 +972,9 @@ def main() -> None:
                         name = f"mg[{i}]:{layer.__class__.__name__}"
                         # Some Megatron layers are invoked with kwargs; capture those too.
                         try:
-                            mg_io_hooks.append(layer.register_forward_pre_hook(_mk_mg_pre_hook(i, name), with_kwargs=True))
+                            mg_io_hooks.append(
+                                layer.register_forward_pre_hook(_mk_mg_pre_hook(i, name), with_kwargs=True)
+                            )
                         except TypeError:
                             mg_io_hooks.append(layer.register_forward_pre_hook(_mk_mg_pre_hook(i, name)))
                         mg_io_hooks.append(layer.register_forward_hook(_mk_mg_post_hook(i)))
@@ -983,7 +1012,9 @@ def main() -> None:
                     # Compare only up to common layer count.
                     n = min(len(common), len(hf_layers))
                     common = common[:n]
-                    print_rank_0(f"[Isolated] Comparing {n} layers (mg_common={len(common)}, hf={len(hf_layers)}).")
+                    print_rank_0(
+                        f"[Isolated] Comparing {n} layers (mg_common={len(common)}, hf={len(hf_layers)})."
+                    )
                     print_rank_0("Per-layer isolated diff (output vector max/mean abs, cosine):")
 
                     hf_param_dtype = next(hf_model.parameters()).dtype
@@ -1129,4 +1160,3 @@ def main() -> None:
 if __name__ == "__main__":
     # Megatron relies on torchrun/torch.distributed init; initialize_megatron handles it.
     main()
-

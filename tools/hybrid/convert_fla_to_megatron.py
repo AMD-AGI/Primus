@@ -4,11 +4,15 @@ Convert FLA's preprocessed Arrow dataset to Megatron binary format (.bin + .idx)
 FAST: reads Arrow shard files directly with PyArrow, avoids HuggingFace datasets overhead.
 Each FLA 2048-token sequence becomes one "document" in Megatron.
 """
-import struct, time, glob, os
+
+import glob
+import os
+import struct
+import time
+from pathlib import Path
+
 import numpy as np
 import pyarrow as pa
-import pyarrow.ipc as ipc
-from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FLA_ROOT = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
@@ -65,9 +69,11 @@ def main():
             elapsed = time.time() - t0
             shard_elapsed = time.time() - t1
             pct = (i + 1) / len(shard_files) * 100
-            print(f"  Shard {i+1:>3}/{len(shard_files)} ({pct:5.1f}%) | "
-                  f"{num_samples:>10,} samples | {total_tokens:>13,} tokens | "
-                  f"shard: {shard_elapsed:.1f}s | total: {elapsed:.0f}s")
+            print(
+                f"  Shard {i+1:>3}/{len(shard_files)} ({pct:5.1f}%) | "
+                f"{num_samples:>10,} samples | {total_tokens:>13,} tokens | "
+                f"shard: {shard_elapsed:.1f}s | total: {elapsed:.0f}s"
+            )
 
     expected_tokens = num_samples * SEQ_LEN
     print(f"\n  Total: {num_samples:,} samples, {total_tokens:,} tokens")
@@ -92,7 +98,7 @@ def main():
 
     # ── Verify ──
     print("\nVerifying...")
-    data = np.memmap(bin_path, dtype=np.int32, mode='r')
+    data = np.memmap(bin_path, dtype=np.int32, mode="r")
     print(f"  Bin file tokens: {len(data):,}")
     print(f"  First 10: {data[:10].tolist()}")
     print(f"  Last 10:  {data[-10:].tolist()}")

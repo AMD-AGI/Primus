@@ -29,9 +29,8 @@ _PATCH_KEY = "megatron.torch_norm.fla_rmsnorm"
 
 
 def _install_fla_rmsnorm_patch() -> None:
-    from megatron.training import get_args as _get_args
-
     from megatron.core.transformer.torch_norm import WrappedTorchNorm
+    from megatron.training import get_args as _get_args
 
     if is_patched(WrappedTorchNorm, _PATCH_KEY):
         log_rank_0(f"[Patch:{_PATCH_KEY}] WrappedTorchNorm already patched; skipping.")

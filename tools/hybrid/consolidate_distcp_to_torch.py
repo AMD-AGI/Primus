@@ -65,7 +65,7 @@ def _is_model_weight_key(key: str) -> bool:
 
 def _strip_fsdp_prefix(key: str) -> str:
     assert key.startswith(FSDP_PREFIX), key
-    return key[len(FSDP_PREFIX):]
+    return key[len(FSDP_PREFIX) :]
 
 
 def _enumerate_model_keys(distcp_dir: Path) -> tuple[list[str], int]:
@@ -144,8 +144,7 @@ def _refuse_swiglu(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         v = pending_v.pop(base, None)
         if v is None:
             raise KeyError(
-                f"Found {base}_w but no matching {base}_v in checkpoint. "
-                "SwiGLU split is incomplete."
+                f"Found {base}_w but no matching {base}_v in checkpoint. " "SwiGLU split is incomplete."
             )
         if w.shape != v.shape:
             raise ValueError(
@@ -156,13 +155,10 @@ def _refuse_swiglu(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         fused += 1
 
     if pending_v:
-        raise KeyError(
-            f"Dangling weight_v entries with no weight_w: {list(pending_v)[:5]}"
-        )
+        raise KeyError(f"Dangling weight_v entries with no weight_w: {list(pending_v)[:5]}")
 
     if fused:
-        print(f"[fuse] re-fused {fused} SwiGLU linear_fc1 pairs "
-              f"(weight_w + weight_v -> weight)")
+        print(f"[fuse] re-fused {fused} SwiGLU linear_fc1 pairs " f"(weight_w + weight_v -> weight)")
     return out
 
 
@@ -189,7 +185,7 @@ def consolidate(distcp_dir: Path, output_dir: Path) -> Path:
         "model": fused,
         "iteration": iteration,
         "checkpoint_version": 3.0,  # arbitrary, matches Megatron's writer
-        "args": None,                # converters don't read this
+        "args": None,  # converters don't read this
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,19 +212,25 @@ def consolidate(distcp_dir: Path, output_dir: Path) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--distcp-dir", required=True, type=Path,
-                    help="Primus iter dir holding the .distcp shards "
-                         "(e.g. .../checkpoints/iter_0095368)")
-    ap.add_argument("--output-dir", required=True, type=Path,
-                    help="Where to write the consolidated mp_rank_00 layout. "
-                         "Typically '<distcp-dir-parent>_consolidated/<iter_name>'.")
+    ap.add_argument(
+        "--distcp-dir",
+        required=True,
+        type=Path,
+        help="Primus iter dir holding the .distcp shards " "(e.g. .../checkpoints/iter_0095368)",
+    )
+    ap.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="Where to write the consolidated mp_rank_00 layout. "
+        "Typically '<distcp-dir-parent>_consolidated/<iter_name>'.",
+    )
     args = ap.parse_args()
 
     if not args.distcp_dir.is_dir():
         ap.error(f"--distcp-dir does not exist or is not a directory: {args.distcp_dir}")
     if not (args.distcp_dir / ".metadata").is_file():
-        ap.error(f"No .metadata file in {args.distcp_dir} — "
-                 "is this an FSDP-dtensor checkpoint?")
+        ap.error(f"No .metadata file in {args.distcp_dir} — " "is this an FSDP-dtensor checkpoint?")
 
     print("=" * 78)
     print(" Primus FSDP-dtensor -> legacy mp_rank_00 consolidator")
@@ -237,14 +239,16 @@ def main() -> int:
     print(f"  dest     = {args.output_dir}")
     print()
 
-    out_path = consolidate(args.distcp_dir, args.output_dir)
+    consolidate(args.distcp_dir, args.output_dir)
     print()
     print("Done. Feed this directory to any of the FLA HF converters, e.g.:")
     print()
     print(f"    python3 tools/hybrid/convert_gdn_to_fla_hf.py \\")
     print(f"        --checkpoint-path {args.output_dir} \\")
     print(f"        --output-dir output/gdn_pure_1B_fla_hf \\")
-    print(f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json")
+    print(
+        f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json"
+    )
     return 0
 
 

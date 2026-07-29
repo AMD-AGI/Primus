@@ -4,8 +4,6 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Union
 
 import torch
-from torch import Tensor
-
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import apply_prefix_mapping
 from megatron.core.inference.contexts import BaseInferenceContext
@@ -15,6 +13,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import deprecate_inference_params
+from torch import Tensor
 
 
 @dataclass
@@ -115,23 +114,21 @@ class KimiDeltaAttentionLayer(MegatronModule):
         hidden_states = hidden_states.to(dtype=self.config.params_dtype)
         hidden_states = self.norm(hidden_states)
 
-        mixer_out_with_bias = self.mixer(
-            hidden_states, attention_mask, inference_context=inference_context
-        )
+        mixer_out_with_bias = self.mixer(hidden_states, attention_mask, inference_context=inference_context)
 
         with self.bias_dropout_add_exec_handler():
-            hidden_states = self.kda_bda(
-                training=self.training, fused=self.config.bias_dropout_fusion
-            )(mixer_out_with_bias, residual, self.hidden_dropout)
+            hidden_states = self.kda_bda(training=self.training, fused=self.config.bias_dropout_fusion)(
+                mixer_out_with_bias, residual, self.hidden_dropout
+            )
 
         return hidden_states
 
     def sharded_state_dict(
-        self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None
+        self, prefix: str = "", sharded_offsets: tuple = (), metadata: Optional[dict] = None
     ) -> ShardedStateDict:
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         prefixed_map = {
-            f'{prefix}{k}': f'{prefix}{v}'
+            f"{prefix}{k}": f"{prefix}{v}"
             for k, v in self.submodules_config.sharded_state_dict_keys_map.items()
         }
         if prefixed_map:

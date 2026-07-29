@@ -82,7 +82,6 @@ from typing import Optional
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-
 _DEFAULT_INTERVAL = 1
 
 
@@ -95,10 +94,7 @@ def _coerce(value, source: str) -> Optional[int]:
     except (TypeError, ValueError):
         # Best-effort warn; if logger is uninitialised (e.g. unit tests) we
         # fall back to print to avoid a secondary AttributeError.
-        msg = (
-            f"[Patch:megatron.empty_cache_interval] WARN: invalid "
-            f"{source}={value!r}, ignoring."
-        )
+        msg = f"[Patch:megatron.empty_cache_interval] WARN: invalid " f"{source}={value!r}, ignoring."
         try:
             log_rank_0(msg)
         except Exception:

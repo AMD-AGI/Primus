@@ -31,6 +31,12 @@
       "commit": "9577b1280eaadd60b9d7b0ce6df09ac80e87e323"
     },
     {
+      "name": "mamba",
+      "path": "third_party/mamba",
+      "url": "https://github.com/AndreasKaratzas/mamba.git",
+      "commit": "4d67c534d10b7299194ede55b36718cc7a1dd472"
+    },
+    {
       "name": "HummingbirdXT",
       "path": "third_party/HummingbirdXT",
       "url": "https://github.com/AMD-AGI/HummingbirdXT.git",

@@ -82,21 +82,23 @@ def _expected_megatron_keys(num_layers: int) -> set[str]:
     for i in range(num_layers):
         kda = 2 * i
         mlp = 2 * i + 1
-        keys.update({
-            f"decoder.layers.{kda}.norm.weight",
-            f"decoder.layers.{kda}.mixer.in_proj.weight",
-            f"decoder.layers.{kda}.mixer.conv1d.weight",
-            f"decoder.layers.{kda}.mixer.f_b_proj.weight",
-            f"decoder.layers.{kda}.mixer.A_log",
-            f"decoder.layers.{kda}.mixer.dt_bias",
-            f"decoder.layers.{kda}.mixer.g_b_proj.weight",
-            f"decoder.layers.{kda}.mixer.g_b_proj.bias",
-            f"decoder.layers.{kda}.mixer.out_norm.weight",
-            f"decoder.layers.{kda}.mixer.out_proj.weight",
-            f"decoder.layers.{mlp}.pre_mlp_layernorm.weight",
-            f"decoder.layers.{mlp}.mlp.linear_fc1.weight",
-            f"decoder.layers.{mlp}.mlp.linear_fc2.weight",
-        })
+        keys.update(
+            {
+                f"decoder.layers.{kda}.norm.weight",
+                f"decoder.layers.{kda}.mixer.in_proj.weight",
+                f"decoder.layers.{kda}.mixer.conv1d.weight",
+                f"decoder.layers.{kda}.mixer.f_b_proj.weight",
+                f"decoder.layers.{kda}.mixer.A_log",
+                f"decoder.layers.{kda}.mixer.dt_bias",
+                f"decoder.layers.{kda}.mixer.g_b_proj.weight",
+                f"decoder.layers.{kda}.mixer.g_b_proj.bias",
+                f"decoder.layers.{kda}.mixer.out_norm.weight",
+                f"decoder.layers.{kda}.mixer.out_proj.weight",
+                f"decoder.layers.{mlp}.pre_mlp_layernorm.weight",
+                f"decoder.layers.{mlp}.mlp.linear_fc1.weight",
+                f"decoder.layers.{mlp}.mlp.linear_fc2.weight",
+            }
+        )
     return keys
 
 
@@ -117,9 +119,7 @@ def build_fla_init(fla_config_path: Path, seed: int) -> tuple[OrderedDict, dict]
     try:
         from transformers import set_seed
     except ImportError as exc:
-        raise RuntimeError(
-            "transformers not installed: `pip install transformers`."
-        ) from exc
+        raise RuntimeError("transformers not installed: `pip install transformers`.") from exc
 
     fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
     if fla_root not in sys.path:
@@ -154,17 +154,17 @@ def build_fla_init(fla_config_path: Path, seed: int) -> tuple[OrderedDict, dict]
 
 def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
     """Map FLA HF state_dict → Primus Megatron-sharded state_dict (no-TE spec)."""
-    hidden_size      = cfg["hidden_size"]
-    num_heads        = cfg["num_heads"]
-    num_v_heads      = cfg.get("num_v_heads") or num_heads
-    head_dim         = cfg["head_dim"]
-    expand_v         = cfg.get("expand_v", 1.0)
-    intermediate     = cfg["intermediate_size"]
-    num_layers       = cfg["num_hidden_layers"]
+    hidden_size = cfg["hidden_size"]
+    num_heads = cfg["num_heads"]
+    num_v_heads = cfg.get("num_v_heads") or num_heads
+    head_dim = cfg["head_dim"]
+    expand_v = cfg.get("expand_v", 1.0)
+    intermediate = cfg["intermediate_size"]
+    num_layers = cfg["num_hidden_layers"]
 
     head_v_dim = int(head_dim * expand_v)
-    qk_dim     = num_heads * head_dim       # 256
-    v_dim      = num_v_heads * head_v_dim   # 512
+    qk_dim = num_heads * head_dim  # 256
+    v_dim = num_v_heads * head_v_dim  # 512
 
     print(
         f"[map ] hidden={hidden_size} num_heads={num_heads} num_v_heads={num_v_heads}\n"
@@ -175,7 +175,7 @@ def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
 
     out = OrderedDict()
     out["embedding.word_embeddings.weight"] = fla_sd["model.embeddings.weight"]
-    out["decoder.final_norm.weight"]        = fla_sd["model.norm.weight"]
+    out["decoder.final_norm.weight"] = fla_sd["model.norm.weight"]
 
     for i in range(num_layers):
         kda = 2 * i
@@ -193,18 +193,18 @@ def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
         # concatenating FLA's six independent `hidden_states → X` projections
         # in this exact order we make Primus's forward bit-identical to FLA's
         # while paying only ONE matmul launch per layer instead of six.
-        q_w   = fla_sd[f"{src}.attn.q_proj.weight"]
-        k_w   = fla_sd[f"{src}.attn.k_proj.weight"]
-        v_w   = fla_sd[f"{src}.attn.v_proj.weight"]
+        q_w = fla_sd[f"{src}.attn.q_proj.weight"]
+        k_w = fla_sd[f"{src}.attn.k_proj.weight"]
+        v_w = fla_sd[f"{src}.attn.v_proj.weight"]
         f_a_w = fla_sd[f"{src}.attn.f_proj.0.weight"]
         g_a_w = fla_sd[f"{src}.attn.g_proj.0.weight"]
-        b_w   = fla_sd[f"{src}.attn.b_proj.weight"]
-        assert q_w.shape   == (qk_dim,     hidden_size), q_w.shape
-        assert k_w.shape   == (qk_dim,     hidden_size), k_w.shape
-        assert v_w.shape   == (v_dim,      hidden_size), v_w.shape
+        b_w = fla_sd[f"{src}.attn.b_proj.weight"]
+        assert q_w.shape == (qk_dim, hidden_size), q_w.shape
+        assert k_w.shape == (qk_dim, hidden_size), k_w.shape
+        assert v_w.shape == (v_dim, hidden_size), v_w.shape
         assert f_a_w.shape == (head_v_dim, hidden_size), f_a_w.shape
         assert g_a_w.shape == (head_v_dim, hidden_size), g_a_w.shape
-        assert b_w.shape   == (num_v_heads, hidden_size), b_w.shape
+        assert b_w.shape == (num_v_heads, hidden_size), b_w.shape
         out[f"decoder.layers.{kda}.mixer.in_proj.weight"] = torch.cat(
             [q_w, k_w, v_w, f_a_w, g_a_w, b_w], dim=0
         )
@@ -221,7 +221,9 @@ def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
         out[f"decoder.layers.{kda}.mixer.f_b_proj.weight"] = fla_sd[f"{src}.attn.f_proj.1.weight"]
 
         # A_log: FLA stores [num_v_heads]; Primus stores [1, 1, num_heads_local_tp, 1].
-        out[f"decoder.layers.{kda}.mixer.A_log"] = fla_sd[f"{src}.attn.A_log"].view(1, 1, num_v_heads, 1).clone()
+        out[f"decoder.layers.{kda}.mixer.A_log"] = (
+            fla_sd[f"{src}.attn.A_log"].view(1, 1, num_v_heads, 1).clone()
+        )
 
         # dt_bias: same shape (gate_dim = num_v_heads * head_dim).
         out[f"decoder.layers.{kda}.mixer.dt_bias"] = fla_sd[f"{src}.attn.dt_bias"]
@@ -229,7 +231,7 @@ def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
         # g_proj.1 (low-rank output-gate expander):
         #   Linear(head_v_dim, value_dim, bias=True)
         out[f"decoder.layers.{kda}.mixer.g_b_proj.weight"] = fla_sd[f"{src}.attn.g_proj.1.weight"]
-        out[f"decoder.layers.{kda}.mixer.g_b_proj.bias"]   = fla_sd[f"{src}.attn.g_proj.1.bias"]
+        out[f"decoder.layers.{kda}.mixer.g_b_proj.bias"] = fla_sd[f"{src}.attn.g_proj.1.bias"]
 
         # output norm:  FusedRMSNormGated.weight shape == [head_v_dim]
         out[f"decoder.layers.{kda}.mixer.out_norm.weight"] = fla_sd[f"{src}.attn.o_norm.weight"]
@@ -255,9 +257,9 @@ def convert_fla_to_megatron(fla_sd: OrderedDict, cfg: dict) -> OrderedDict:
 
 def cross_check(mg_sd: OrderedDict, cfg: dict) -> None:
     expected = _expected_megatron_keys(cfg["num_hidden_layers"])
-    got      = set(mg_sd.keys())
-    missing  = expected - got
-    extra    = got - expected
+    got = set(mg_sd.keys())
+    missing = expected - got
+    extra = got - expected
     if missing:
         print(f"\n[FAIL] {len(missing)} expected Megatron keys are MISSING from the converted state_dict:")
         for k in sorted(missing)[:25]:
@@ -335,7 +337,9 @@ def main():
 
     print()
     print("✓ done. Now update the YAML to:")
-    print(f"    spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec_no_te']")
+    print(
+        f"    spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec_no_te']"
+    )
     print(f"    use_fla_kda_in_kernel_gate: true")
     print(f"    use_fla_fused_norm_gated: true")
     print(f"    finetune: true")
