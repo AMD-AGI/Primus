@@ -7,12 +7,16 @@ ARG AINIC_BUNDLE_PATH
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
+# `cmd | tee log` below reports only tee's exit code by default, silently
+# swallowing real failures; pipefail makes the RUN fail with `cmd` instead.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ---------------------------------------------------------------------------
 # Install build dependencies
 # ---------------------------------------------------------------------------
+# initramfs-tools: required by the AINIC install.sh below.
 RUN apt-get update && \
-    apt-get install jq dpkg-dev kmod xz-utils \
+    apt-get install jq dpkg-dev kmod xz-utils initramfs-tools \
     libfmt-dev libboost-all-dev \
     libibverbs-dev ibverbs-utils infiniband-diags -y
 
@@ -20,8 +24,18 @@ RUN apt-get update && \
 # Enviroment variables
 # ---------------------------------------------------------------------------
 ENV WORKDIR=/workspace
-ENV ROCM_PATH=/opt/rocm
-ENV MPI_PATH=/usr/lib/x86_64-linux-gnu/openmpi
+# ROCM_PATH/MPI_HOME already come from the base image; mirror MPI_HOME here
+# instead of hardcoding the old v26.3 OpenMPI path.
+ENV MPI_PATH=${MPI_HOME}
+
+# v26.4 moved ROCm to a pip-installed rocm-sdk-devel, so /opt/rocm no longer
+# exists, and rocm-sdk-devel/bin/amdclang++ can't find its sibling clang++
+# (now under llvm/bin/). rccl/amd-anp still hardcode both, so symlink them in
+# rather than patching those repos.
+RUN ln -sfn "${ROCM_PATH}" /opt/rocm && \
+    for f in "${ROCM_PATH}"/llvm/bin/clang*; do \
+        ln -sf "$f" "${ROCM_PATH}/bin/$(basename "$f")"; \
+    done
 
 # =============================== Build AINIC Driver ===============================
 # WARNING: Please ensure the following environment variables are correctly set:
