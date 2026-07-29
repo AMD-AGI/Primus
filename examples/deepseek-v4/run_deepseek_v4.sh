@@ -236,6 +236,20 @@ if [ "$FP8_PARAM_GATHER" = "True" ]; then
   fi
 fi
 
+# Force load balancing discards the real router decision so every expert receives
+# a similar number of tokens, removing run-to-run imbalance noise. This selects
+# *how*: `even` (Primus default) gives exactly equal, step-invariant per-expert
+# counts, so grouped-GEMM shapes never change; `uniform` balances only
+# statistically and keeps the step-to-step shape variation of real routing.
+# docs/04-technical-guides/mega-moe.md recommends `uniform` for benchmarking,
+# because `even` disproportionately favours the non-fused grouped-GEMM path.
+# Empty (default) leaves the config value alone.
+export MOE_FORCE_LB_TYPE=${MOE_FORCE_LB_TYPE:-}
+MOE_FORCE_LB_ARGS=()
+if [ -n "$MOE_FORCE_LB_TYPE" ]; then
+  MOE_FORCE_LB_ARGS=(--moe_router_force_load_balancing_type "$MOE_FORCE_LB_TYPE")
+fi
+
 PP_LAYOUT_ARGS=()
 if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
   PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
@@ -301,6 +315,7 @@ fi
   --pp_warmup "${PP_WARMUP:-True}" \
   "${PP_LAYOUT_ARGS[@]}" \
   --moe_router_force_load_balancing True \
+  "${MOE_FORCE_LB_ARGS[@]}" \
   --log_avg_skip_iterations 3 \
   --backend_path "$BACKEND_PATH" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
