@@ -6,7 +6,7 @@ run match the [Flash Linear Attention (FLA)](https://github.com/fla-org/flash-li
 reference implementation on **loss trajectory, step throughput, and
 downstream lm-eval accuracy** on 8× MI300X.
 
-This is the KDA-side companion to [`GDN_FLA_PARITY.md`](GDN_FLA_PARITY.md);
+This is the KDA-side companion to [`gdn-fla-parity.md`](gdn-fla-parity.md);
 because KDA shares Megatron-LM submodule patches with GDN, the architecture
 and tooling sections below focus on the KDA-specific deltas.
 
@@ -59,7 +59,7 @@ paper reports.
 | race                     | acc        |  25.00 | 25.07  | 25.45  | +0.38 pp         |
 | **mean absolute Δ**      |            |        |        |        | **0.58 pp**      |
 
-See [`README_KDA.md`](README_KDA.md) for
+See [`kda-guide.md`](kda-guide.md) for
 the exact `lm_eval` invocation that produced both rows.
 
 ---
@@ -110,7 +110,7 @@ KDA's TE/no-TE selection is done by the `spec:` line in the YAML
 
 The work splits into three layers: KDA-specific model code, KDA-specific
 runtime config flags, and shared Megatron-LM patches (already documented
-in `GDN_FLA_PARITY.md`).
+in `gdn-fla-parity.md`).
 
 ### A. Primus model code (KDA-specific)
 
@@ -131,7 +131,7 @@ in `GDN_FLA_PARITY.md`).
 KDA reuses the **exact same six patches** that GDN uses; no KDA-specific
 megatron-LM patch is required. These are runtime monkey-patches registered
 with `@register_patch` under `primus/backends/megatron/patches/` and applied
-automatically at `phase="before_train"` -- see `GDN_FLA_PARITY.md` section B
+automatically at `phase="before_train"` -- see `gdn-fla-parity.md` section B
 for the patch-by-patch breakdown. Nothing needs to be run by hand.
 
 ### C. YAML configuration changes
@@ -266,7 +266,7 @@ tools/hybrid/
   convert_fla_kda_init_to_megatron.py              # FLA HF init → Megatron sharded ckpt
   convert_kda_to_fla_hf.py                         # Megatron sharded ckpt → FLA HF
   eval_kda_lm_eval.py                              # lm-eval wrapper (registers KDA)
-docs/hybrid_models/
-  README_KDA.md                                    # step-by-step recipe
-  KDA_FLA_PARITY.md                                # this file
+docs/04-technical-guides/hybrid-models/
+  kda-guide.md                                    # step-by-step recipe
+  kda-fla-parity.md                                # this file
 ```

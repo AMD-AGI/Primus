@@ -8,7 +8,7 @@ tokenization → training → checkpoint conversion → lm-eval benchmark.
 
 The same recipe scales up to the 1B pure-KDA config (`zebra_llama_1B_kda_pure-pretrain.yaml`).
 
-It mirrors [`README_GDN.md`](README_GDN.md) and reuses the same Megatron-LM
+It mirrors [`gdn-guide.md`](gdn-guide.md) and reuses the same Megatron-LM
 patches, dataset shim, FLA-init flow, and lm-eval wrapper pattern.
 
 ---
@@ -29,7 +29,7 @@ After 4768 iterations (≈10B tokens) on FineWeb-Edu sample-10BT:
 
 Loss trajectories overlap from iter ~2000 onward; the only persistent gap
 is in the LR-warmup region (iter 50–500) and closes monotonically. See
-[`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) for the deep-dive on every
+[`kda-fla-parity.md`](kda-fla-parity.md) for the deep-dive on every
 patch and env var.
 
 ### lm-eval-harness (FLA-paper 8-task suite)
@@ -160,7 +160,7 @@ later command.
 ## Step 2: Dataset preparation
 
 Identical to the GDN recipe — see
-[`README_GDN.md`](README_GDN.md#step-2-dataset-preparation). KDA reuses the
+[`gdn-guide.md`](gdn-guide.md#step-2-dataset-preparation). KDA reuses the
 same FineWeb-Edu sample-10BT preprocessed Arrow shards and the same
 Llama-3.2-1B tokenizer.
 
@@ -186,7 +186,7 @@ own patch system (`primus/core/patches`), living under
 Each patch registers unconditionally but is gated behind a `condition=` on
 the relevant config flag, so nothing needs to be run by hand.
 
-See [`README_GDN.md`](README_GDN.md#step-3-megatron-lm-patches-automatic--no-action-needed)
+See [`gdn-guide.md`](gdn-guide.md#step-3-megatron-lm-patches-automatic--no-action-needed)
 §3 for the patch-by-patch breakdown.
 
 ---
@@ -300,7 +300,7 @@ export PRIMUS_FLA_DATA=1
 export PRIMUS_FLA_CACHE_DIR=/home/<user>/Primus/data/huggingface
 ```
 
-See [`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) for the cost-of-each-flag
+See [`kda-fla-parity.md`](kda-fla-parity.md) for the cost-of-each-flag
 breakdown.
 
 ### 5.4 Output layout
@@ -533,9 +533,9 @@ benchmarks need to lift above noise).
 ## Configs and tools used
 
 ```
-docs/hybrid_models/
-├── README_KDA.md                                  ← this file
-└── KDA_FLA_PARITY.md                              ← deep-dive on every change
+docs/04-technical-guides/hybrid-models/
+├── kda-guide.md                                  ← this file
+└── kda-fla-parity.md                              ← deep-dive on every change
 examples/megatron/configs/MI300X/
 └── zebra_llama_300M_kda_pure-pretrain.yaml        ← training config
 primus/configs/models/megatron/
@@ -637,10 +637,10 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/hybrid_models/README.md`](README.md) — full Zebra-Llama family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra-Llama family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
-- [`docs/hybrid_models/README_GDN.md`](README_GDN.md) — the GDN companion
+- [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)
-- [`KDA_FLA_PARITY.md`](KDA_FLA_PARITY.md) — exhaustive list of
+- [`kda-fla-parity.md`](kda-fla-parity.md) — exhaustive list of
   code/config/runtime changes that made KDA parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)

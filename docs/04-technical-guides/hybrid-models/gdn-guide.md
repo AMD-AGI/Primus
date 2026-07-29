@@ -22,7 +22,7 @@ After 4768 iterations (≈10B tokens) on FineWeb-Edu sample-10BT:
 | First Primus-below-FLA crossover                | —                 | iter 2100             | —                           |
 
 
-Loss trajectories overlap from iter ~2000 onward; the only persistent gap is in the LR-warmup region (iter 50–500) and closes monotonically. See [GDN_FLA_PARITY.md](GDN_FLA_PARITY.md) for the deep-dive on every patch and env var.
+Loss trajectories overlap from iter ~2000 onward; the only persistent gap is in the LR-warmup region (iter 50–500) and closes monotonically. See [gdn-fla-parity.md](gdn-fla-parity.md) for the deep-dive on every patch and env var.
 
 ---
 
@@ -202,7 +202,7 @@ flag — nothing to run by hand.
 The `fused_ce_mode` / `use_fla_fused_swiglu` / `use_fla_fused_rmsnorm` /
 `use_fla_data` / `fla_cache_dir` knobs above are resolved once (env var >
 YAML field > default) by `fla_runtime_patches.py` before the patches in this
-table run. See `[GDN_FLA_PARITY.md](GDN_FLA_PARITY.md)` for the full
+table run. See `[gdn-fla-parity.md](gdn-fla-parity.md)` for the full
 per-patch deep-dive.
 
 ---
@@ -295,7 +295,7 @@ export PRIMUS_FLA_DATA=1
 export PRIMUS_FLA_CACHE_DIR=/home/<user>/Primus/data/huggingface
 ```
 
-These add roughly +1.2 % per-iter overhead vs the all-defaults run, but they pin the loss curve to FLA's. On healthy hardware (tw006 in our cluster), the absolute wall is still ~18 s **below** FLA. On a slower node (tw029) it's ~75 s above. See [GDN_FLA_PARITY.md](GDN_FLA_PARITY.md) for the cost-of-each-flag breakdown.
+These add roughly +1.2 % per-iter overhead vs the all-defaults run, but they pin the loss curve to FLA's. On healthy hardware (tw006 in our cluster), the absolute wall is still ~18 s **below** FLA. On a slower node (tw029) it's ~75 s above. See [gdn-fla-parity.md](gdn-fla-parity.md) for the cost-of-each-flag breakdown.
 
 ### 5.4 Output layout
 
@@ -504,9 +504,9 @@ PY
 ## Configs and tools used
 
 ```
-docs/hybrid_models/
-├── README_GDN.md                                      ← this file
-└── GDN_FLA_PARITY.md                                  ← deep-dive on every patch & env var
+docs/04-technical-guides/hybrid-models/
+├── gdn-guide.md                                      ← this file
+└── gdn-fla-parity.md                                  ← deep-dive on every patch & env var
 primus/backends/megatron/patches/
 ├── mamba_fused_ce_patches.py                          ← FLA fused cross-entropy for MambaModel
 ├── torch_fused_adam_patches.py                        ← PRIMUS_TORCH_OPTIM opt-in
@@ -573,6 +573,6 @@ Expected with all four `PRIMUS_FLA_`* env vars set. The biggest single cost is `
 
 ## See also
 
-- `[docs/hybrid_models/README.md](README.md)` — full Zebra-Llama family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
-- `[GDN_FLA_PARITY.md](GDN_FLA_PARITY.md)` — exhaustive list of code/config/runtime changes that made parity possible
+- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Zebra-Llama family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
+- `[gdn-fla-parity.md](gdn-fla-parity.md)` — exhaustive list of code/config/runtime changes that made parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)

@@ -4,9 +4,17 @@ Zebra-Llama is a family of hybrid models that combine **recurrent layers** (Mamb
 
 This guide covers the complete workflow: environment setup, data preparation, pretraining, checkpoint conversion, and evaluation.
 
+> **FLA-validated recipes**: For runnable, FLA-parity-validated walkthroughs of the pure-recurrent
+> variants, see [Pure GDN guide](gdn-guide.md) and [Pure KDA guide](kda-guide.md). For the exhaustive
+> list of code/config/runtime changes required for exact parity with the
+> [Flash Linear Attention (FLA)](https://github.com/fla-org/flash-linear-attention) reference
+> implementation, see [GDN ⇄ FLA parity](gdn-fla-parity.md) and [KDA ⇄ FLA parity](kda-fla-parity.md).
+
 ---
 
 ## Table of Contents
+
+- [Related Guides](#related-guides)
 
 - [Architecture Overview](#architecture-overview)
 - [Available Configurations](#available-configurations)
@@ -21,6 +29,17 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 - [Step 5: Evaluation with lm-eval-harness](#step-5-evaluation-with-lm-eval-harness)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## Related Guides
+
+| Guide | Description |
+|-------|-------------|
+| [Pure GDN guide](gdn-guide.md) | End-to-end 300M pure Gated DeltaNet (GDN) recipe, FLA-validated on 8× MI300X |
+| [Pure KDA guide](kda-guide.md) | End-to-end 300M pure Kimi Delta Attention (KDA) recipe, FLA-validated on 8× MI300X |
+| [GDN ⇄ FLA parity](gdn-fla-parity.md) | Every Primus/Megatron-LM change required for GDN to match the FLA reference implementation |
+| [KDA ⇄ FLA parity](kda-fla-parity.md) | Every Primus/Megatron-LM change required for KDA to match the FLA reference implementation |
 
 ---
 
