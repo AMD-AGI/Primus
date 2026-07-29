@@ -251,6 +251,64 @@ def test_compress_rope_theta_matches_variant(parse_yaml_fn, yaml_name: str, expe
     assert float(parsed["compress_rope_theta"]) == pytest.approx(expected_theta)
 
 
+@pytest.mark.parametrize(
+    ("yaml_name", "expected_theta", "expected_factor"),
+    [
+        # The upstream open-source Flash recipe ships these as a pair
+        # (compressed rotary base 40000 + rotary_scaling_factor 4).
+        ("deepseek_v4_flash.yaml", 40000.0, 4.0),
+        ("deepseek_v4_pro.yaml", 160000.0, 16.0),
+        ("deepseek_v4_base.yaml", 160000.0, 16.0),
+    ],
+)
+def test_compressed_rope_base_and_yarn_factor_stay_paired(
+    parse_yaml_fn, yaml_name: str, expected_theta: float, expected_factor: float
+) -> None:
+    """``compress_rope_theta`` and ``rotary_scaling_factor`` parameterise one table.
+
+    ``RoPECache`` builds ``inv_freq`` from the base and then runs YaRN band
+    interpolation over it with ``rotary_scaling_factor``, so overriding the base
+    for a variant without overriding the factor leaves the low-frequency end
+    scaled by the wrong amount -- a partial fix that looks complete. Pin the
+    pair so a future variant cannot drift them apart.
+    """
+    parsed = parse_yaml_fn(str(_YAML_DIR / yaml_name))
+    assert float(parsed["compress_rope_theta"]) == pytest.approx(expected_theta)
+    assert float(parsed["rotary_scaling_factor"]) == pytest.approx(expected_factor)
+
+
+def test_yarn_factor_actually_reaches_the_compressed_rope(parse_yaml_fn) -> None:
+    """The Flash factor must land on the compress cache and nowhere else.
+
+    Guards the assertion above against becoming decorative: the value has to
+    change ``compress_rope.inv_freq`` while leaving the dense-layer table
+    (``main_rope``) untouched.
+    """
+    torch = pytest.importorskip("torch")
+    from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+
+    parsed = parse_yaml_fn(str(_YAML_DIR / "deepseek_v4_flash.yaml"))
+
+    def _build(factor: float) -> DualRoPE:
+        return DualRoPE(
+            rotary_dim=int(parsed["qk_pos_emb_head_dim"]),
+            rope_theta=float(parsed["rotary_base"]),
+            compress_rope_theta=float(parsed["compress_rope_theta"]),
+            yarn_factor=factor,
+            original_max_position_embeddings=int(parsed["original_max_position_embeddings"]),
+        )
+
+    configured = _build(float(parsed["rotary_scaling_factor"]))
+    pro_factor = _build(16.0)
+
+    assert not torch.allclose(
+        configured.compress_rope.inv_freq, pro_factor.compress_rope.inv_freq
+    ), "the YaRN factor does not affect the compressed inv_freq -- assertion is vacuous"
+    torch.testing.assert_close(
+        configured.main_rope.inv_freq, pro_factor.main_rope.inv_freq, rtol=0, atol=0
+    )
+
+
 # ---------------------------------------------------------------------------
 # V4-specific schema fields the runtime depends on (D5 / D6 hygiene)
 # ---------------------------------------------------------------------------

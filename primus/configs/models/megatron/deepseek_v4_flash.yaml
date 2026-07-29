@@ -31,10 +31,24 @@ moe_router_topk_scaling_factor: 1.5
 # Indexer / Compressor
 index_topk: 512
 
-# RoPE base for the compressed (CSA / HCA) branches. The released
-# DeepSeek-V4-Flash inference/model.py uses compress_rope_theta = 40000.0;
-# the 160000 inherited from deepseek_v4_base.yaml is the V4-Pro value.
+# Compressed-branch (CSA / HCA) RoPE. These two must be set together: they
+# parameterise the SAME inv_freq table, where rotary_scaling_factor is the YaRN
+# interpolation factor applied to the low-frequency band of a base-40000 table.
+# Aligning only the base leaves the low-frequency end off by 4x. The upstream
+# open-source Flash recipe ships them as a pair (compressed rotary base 40000 +
+# rotary_scaling_factor 4); the values inherited from deepseek_v4_base.yaml
+# (160000 / 16.0) are the V4-Pro ones.
+#
+# KNOWN GAP, deliberately not resolved here: the released inference/model.py
+# sets original_seq_len = 0, and its precompute_freqs_cis only interpolates when
+# original_seq_len > 0 -- so the *released* model effectively runs with YaRN
+# frequency interpolation OFF (its rope_factor = 40 never takes effect). The
+# pair below therefore follows the upstream training recipe, which does
+# interpolate; it is NOT the released checkpoint's effective configuration.
+# Resolving this needs the official config.json to say which one the weights
+# were trained under. See output/0729_fix/dsv4_fixes_0729.md.
 compress_rope_theta: 40000.0
+rotary_scaling_factor: 4.0
 
 # Per-layer compression schedule (from config.json:compress_ratios)
 # 0   = uncompressed dense layer (full attention with SWA)
