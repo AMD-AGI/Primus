@@ -51,9 +51,9 @@
 #       FLA's HuggingFace DistributedSampler.
 #
 # Usage:
-#   bash megatron_patch.sh           # apply all patches
-#   bash megatron_patch.sh --check   # dry-run (does not modify files)
-#   bash megatron_patch.sh --revert  # undo all patches
+#   bash tools/hybrid/megatron_patch.sh           # apply all patches
+#   bash tools/hybrid/megatron_patch.sh --check   # dry-run (does not modify files)
+#   bash tools/hybrid/megatron_patch.sh --revert  # undo all patches
 #
 # Runtime toggles (no re-patching needed):
 #   PRIMUS_FUSED_CE      0=off, 1=FusedLinearCE [default], 2=FusedCE-match-FLA
@@ -69,8 +69,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MEGATRON_DIR="${SCRIPT_DIR}/third_party/Megatron-LM"
-PATCH_DIR="${SCRIPT_DIR}/megatron_patches"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+MEGATRON_DIR="${REPO_ROOT}/third_party/Megatron-LM"
+PATCH_DIR="${REPO_ROOT}/megatron_patches"
 
 if [[ ! -d "$MEGATRON_DIR" ]]; then
     echo "ERROR: Megatron-LM directory not found: $MEGATRON_DIR"
@@ -182,7 +183,7 @@ case "$MODE" in
         run_all revert
         ;;
     *)
-        echo "Usage: bash megatron_patch.sh [--apply|--check|--revert]"
+        echo "Usage: bash tools/hybrid/megatron_patch.sh [--apply|--check|--revert]"
         exit 1
         ;;
 esac

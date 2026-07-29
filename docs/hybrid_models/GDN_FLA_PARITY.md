@@ -34,7 +34,7 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 
 ```bash
 # 1. (one time) apply the Megatron-LM patches
-bash megatron_patch.sh
+bash tools/hybrid/megatron_patch.sh
 
 # 2. Launch training (8 GPUs by default).
 EXP=examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml \
@@ -91,7 +91,7 @@ submodule, YAML configs, and runtime knobs.
 ### B. Vendored Megatron-LM patches
 
 These live in `megatron_patches/*.patch` and are applied by
-`bash megatron_patch.sh`.
+`bash tools/hybrid/megatron_patch.sh`.
 
 | Patch | File | Change | Reason |
 |-------|------|--------|--------|
@@ -203,7 +203,6 @@ within ±0.5% by iter 1000 even without it.
 ## Files in the repo for this work
 
 ```
-megatron_patch.sh                 # idempotent applier for all 6 patches
 megatron_patches/
   01-mamba_model-fused-ce.patch
   02-optimizer-torch-fused-adam.patch
@@ -211,6 +210,7 @@ megatron_patches/
   04-torch_norm-fla-rmsnorm.patch
   05-transformer_config-hybrid-init.patch
   06-pretrain_mamba-fla-data.patch
+tools/hybrid/megatron_patch.sh           # idempotent applier for all 6 patches
 tools/hybrid/fla_order_dataset.py        # FLA-order dataset shim
 tools/profile_training.py         # NSight Compute / rocprof launcher
 tools/run_profiled_training.sh    # one-shot profiling driver

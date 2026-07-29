@@ -183,12 +183,12 @@ train_data_path: >
 The vendored `third_party/Megatron-LM` submodule needs six patches to support GDN parity training. They live in `megatron_patches/*.patch` and are applied by an idempotent script:
 
 ```bash
-bash megatron_patch.sh           # apply all 6
-bash megatron_patch.sh --check   # dry-run (does not modify files)
-bash megatron_patch.sh --revert  # undo all
+bash tools/hybrid/megatron_patch.sh           # apply all 6
+bash tools/hybrid/megatron_patch.sh --check   # dry-run (does not modify files)
+bash tools/hybrid/megatron_patch.sh --revert  # undo all
 ```
 
-The script is safe to re-run — already-applied patches are skipped. What each patch does (see `[megatron_patch.sh](../../megatron_patch.sh)` for the full breakdown):
+The script is safe to re-run — already-applied patches are skipped. What each patch does (see `[megatron_patch.sh](../../tools/hybrid/megatron_patch.sh)` for the full breakdown):
 
 
 | Patch | Touches                 | Purpose                                                                                                                                                         |
@@ -503,7 +503,6 @@ PY
 docs/hybrid_models/
 ├── README_GDN.md                                      ← this file
 └── GDN_FLA_PARITY.md                                  ← deep-dive on every patch & env var
-megatron_patch.sh                                      ← idempotent patch applier
 megatron_patches/
 ├── 01-mamba_model-fused-ce.patch
 ├── 02-optimizer-torch-fused-adam.patch
@@ -521,6 +520,8 @@ primus/backends/megatron/core/models/hybrid/
 ├── hybrid_block.py                                    ← HybridStack, fp32-residual + fusion
 └── hybrid_mamba_mla_layer_specs.py                    ← gdn_hybrid_stack_spec_no_te
 tools/hybrid/
+├── megatron_patch.sh                                  ← idempotent Megatron-LM patch applier
+├── patch_fla_triton_autotune_hang.sh                  ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                         ← FLA Arrow → Megatron .bin/.idx
 ├── fla_order_dataset.py                               ← FLA-order dataset shim
 ├── convert_gdn_to_fla_hf.py                           ← Megatron → FLA HF (handles TE + no-TE)

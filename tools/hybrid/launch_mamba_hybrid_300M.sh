@@ -4,7 +4,7 @@
 # `train_mamba2_hybrid_300M.log` schedule: 4768 iter × 1024 batch × 2048 seq
 # ≈ 10B tokens on 8 GPUs).
 #
-# Full FLA-parity stack — same as launch_hybrid_faflag.sh (the GDN hybrid).
+# Full FLA-parity stack — same as tools/hybrid/launch_hybrid_faflag.sh (the GDN hybrid).
 # An early run without these flags reproduced the iter-1 bit-perfect parity
 # with FLA, then drifted +2.58 nats by iter 100 (the warm-up spike we already
 # debugged for GDN).  Enabling the fusion / data flags closes that gap and
@@ -30,7 +30,7 @@
 #
 # Run inside the rocm/primus:v26.2 container:
 #
-#   cd /home/vanbhati@amd.com/Primus && bash launch_mamba_hybrid_300M.sh
+#   cd /home/vanbhati@amd.com/Primus && bash tools/hybrid/launch_mamba_hybrid_300M.sh
 ###############################################################################
 
 set -euo pipefail

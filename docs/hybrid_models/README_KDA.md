@@ -184,9 +184,9 @@ is required. They live in `megatron_patches/*.patch` and are applied by an
 idempotent script:
 
 ```bash
-bash megatron_patch.sh           # apply all 6
-bash megatron_patch.sh --check   # dry-run (does not modify files)
-bash megatron_patch.sh --revert  # undo all
+bash tools/hybrid/megatron_patch.sh           # apply all 6
+bash tools/hybrid/megatron_patch.sh --check   # dry-run (does not modify files)
+bash tools/hybrid/megatron_patch.sh --revert  # undo all
 ```
 
 See [`README_GDN.md`](README_GDN.md#step-3-apply-megatron-lm-patches) §3
@@ -539,7 +539,6 @@ benchmarks need to lift above noise).
 docs/hybrid_models/
 ├── README_KDA.md                                  ← this file
 └── KDA_FLA_PARITY.md                              ← deep-dive on every change
-megatron_patch.sh                                  ← idempotent patch applier (shared with GDN)
 megatron_patches/                                  ← same 6 patches as GDN
 examples/megatron/configs/MI300X/
 └── zebra_llama_300M_kda_pure-pretrain.yaml        ← training config
@@ -552,6 +551,8 @@ primus/backends/megatron/core/models/hybrid/
 primus/backends/megatron/patches/
 └── gdn_config_patches.py                          ← registers use_fla_triton_kda + fusion flags
 tools/hybrid/
+├── megatron_patch.sh                              ← idempotent Megatron-LM patch applier (shared with GDN)
+├── patch_fla_triton_autotune_hang.sh              ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                     ← FLA Arrow → Megatron .bin/.idx (shared)
 ├── fla_order_dataset.py                           ← FLA-order dataset shim (shared)
 ├── convert_fla_kda_init_to_megatron.py            ← FLA HF init → Megatron sharded ckpt

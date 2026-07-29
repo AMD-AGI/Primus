@@ -3,7 +3,7 @@
 # Foolproof launcher for the 75% Hybrid GDN run with the FULL FLA-parity stack
 # enabled.  Run this *inside the container*:
 #
-#   cd /workspace/Primus && bash launch_hybrid_faflag.sh
+#   cd /workspace/Primus && bash tools/hybrid/launch_hybrid_faflag.sh
 #
 # FLA-parity flags exported (matched to docs/hybrid_models/GDN_FLA_PARITY.md §A/B/D and the
 # pure-KDA config that hit 1.46 s/iter on MI300X):

@@ -64,7 +64,7 @@ modules:
       # ─────────────────────────────────────────────────────────────────────
       # FLA runtime knobs — declarative YAML surface for the
       # PRIMUS_FLA_*/PRIMUS_FUSED_CE* env vars.  Mirror exactly the env
-      # vars `launch_mamba_hybrid_300M.sh` previously exported.
+      # vars `tools/hybrid/launch_mamba_hybrid_300M.sh` previously exported.
       # Consumed by primus.backends.megatron.patches.fla_runtime_patches
       # at phase="build_args".  Env vars on the launcher still win.
       # ─────────────────────────────────────────────────────────────────────

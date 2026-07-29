@@ -71,7 +71,7 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 
 ```bash
 # 1. (one time) apply the Megatron-LM patches (same set as GDN)
-bash megatron_patch.sh
+bash tools/hybrid/megatron_patch.sh
 
 # 2. (one time) build the FLA-init KDA-300M checkpoint
 python tools/hybrid/convert_fla_kda_init_to_megatron.py
@@ -134,7 +134,7 @@ megatron-LM patch is required. See `GDN_FLA_PARITY.md` section B for the
 patch-by-patch breakdown. Applied via:
 
 ```bash
-bash megatron_patch.sh
+bash tools/hybrid/megatron_patch.sh
 ```
 
 ### C. YAML configuration changes
@@ -247,7 +247,7 @@ iter 1000 even without it.
 ## Files in the repo for this work
 
 ```
-megatron_patch.sh                                  # idempotent applier (shared with GDN)
+tools/hybrid/megatron_patch.sh                     # idempotent applier (shared with GDN)
 megatron_patches/                                  # 6 patches (same as GDN)
   01-mamba_model-fused-ce.patch
   02-optimizer-torch-fused-adam.patch
