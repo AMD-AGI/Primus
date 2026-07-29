@@ -57,6 +57,7 @@ class FluxForTraining(GenAIModel, nn.Module):
         self.train_pipeline = train_pipeline
         self.model_config = model_config
         self.trainable_modules = trainable_modules
+        self.compute_dtype: torch.dtype | None = None
         self.config = FluxConfigShim(raw=raw_config or {})
 
     @property
@@ -89,8 +90,24 @@ class FluxForTraining(GenAIModel, nn.Module):
             unfreeze(self.dit)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        if hasattr(self.dit, "gradient_checkpointing"):
-            self.dit.gradient_checkpointing = True
+        del gradient_checkpointing_kwargs
+        if getattr(self.dit, "_torchtitan_checkpoint_wrapped", False):
+            return
+
+        # Match the MLPerf TorchTitan reference: wrap each transformer block
+        # before FSDP and do not preserve RNG state. The older in-forward
+        # torch.utils.checkpoint path is not equivalent and is unstable when
+        # composed with FSDP2 on ROCm.
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            checkpoint_wrapper,
+        )
+
+        for blocks_name in ("double_blocks", "single_blocks"):
+            blocks = getattr(self.dit, blocks_name)
+            for index, block in enumerate(blocks):
+                blocks[index] = checkpoint_wrapper(block, preserve_rng_state=False)
+        self.dit.gradient_checkpointing = False
+        self.dit._torchtitan_checkpoint_wrapped = True
 
     def forward(self, *args, **kwargs):
         if len(args) >= 1 and isinstance(args[0], dict):
@@ -107,6 +124,7 @@ class FluxForTraining(GenAIModel, nn.Module):
             clip_encoder=self.clip_encoder,
             batch=batch,
             model_config=self.model_config,
+            compute_dtype=self.compute_dtype,
         )
 
     def forward_inference(self, batch: dict[str, Any], **kwargs):

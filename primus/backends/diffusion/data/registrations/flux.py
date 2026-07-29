@@ -31,7 +31,10 @@ def _build_flux_dataset_from_config(dataset_config: dict, *, role: str):
     elif dataset_type == "precomputed":
         processor = FluxPrecomputedProcessor(processor_config)
         processor.build()
-        dataset = FluxPrecomputedDataset(dataset_config["dataset_path"])
+        dataset = FluxPrecomputedDataset(
+            dataset_config["dataset_path"],
+            require_timestep=role == "eval",
+        )
         logger.info(f"Built FLUX {role} precomputed dataset with {len(dataset)} samples")
     else:
         raise ValueError("FLUX dataset_type must be either 'precomputed' or 'raw'")

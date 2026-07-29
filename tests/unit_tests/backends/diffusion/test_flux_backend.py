@@ -10,15 +10,19 @@ from primus.backends.diffusion.attention import (
     set_attention_backend,
 )
 from primus.backends.diffusion.data.flux_precomputed import (
+    FluxPrecomputedDataset,
     FluxPrecomputedProcessor,
     FluxRawImageTextDataset,
     FluxRawImageTextProcessor,
 )
 from primus.backends.diffusion.models.flux.adapter import FluxForTraining
 from primus.backends.diffusion.models.flux.conditioner import HFEmbedder
+from primus.backends.diffusion.models.flux.layers import QKNorm
 from primus.backends.diffusion.models.flux.math import apply_rope
 from primus.backends.diffusion.models.flux.math import attention as flux_attention
 from primus.backends.diffusion.models.flux.math import rope
+from primus.backends.diffusion.models.flux.model import Flux, flux_1_schnell_params
+from primus.backends.diffusion.models.flux.train_pipeline import FluxFlowMatchTrainPipeline
 from primus.backends.diffusion.models.registrations.flux import build_flux_model
 from primus.backends.diffusion.trainers.fsdp2 import FSDP2Trainer
 
@@ -183,6 +187,25 @@ def test_flux_forward_uses_positional_scheduler():
     assert captured == {"batch": batch, "scheduler": scheduler}
 
 
+def test_flux_gradient_checkpointing_uses_torchtitan_block_wrappers():
+    dit = torch.nn.Module()
+    dit.double_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+    dit.single_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+    dit.gradient_checkpointing = False
+    model = FluxForTraining(
+        dit=dit,
+        train_pipeline=object(),
+        model_config=object(),
+    )
+
+    model.gradient_checkpointing_enable()
+
+    assert hasattr(dit.double_blocks[0], "_checkpoint_wrapped_module")
+    assert hasattr(dit.single_blocks[0], "_checkpoint_wrapped_module")
+    assert dit.gradient_checkpointing is False
+    assert dit._torchtitan_checkpoint_wrapped is True
+
+
 def test_fsdp2_compile_transformer_blocks_replaces_modules(monkeypatch):
     class CompiledBlock(torch.nn.Module):
         def __init__(self, original):
@@ -237,12 +260,15 @@ def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
         },
     ]
 
+    torch.manual_seed(123)
+    torch_rng_before = torch.random.get_rng_state()
     out = processor.prepare_batch(batch=batch, device=torch.device("cpu"), dtype=torch.float32)
 
     assert out["t5_encodings"].shape == (2, 3, 8)
     assert out["clip_encodings"].shape == (2, 4)
     assert torch.count_nonzero(out["t5_encodings"]) == 0
     assert torch.count_nonzero(out["clip_encodings"]) == 0
+    assert torch.equal(torch_rng_before, torch.random.get_rng_state())
 
 
 def test_flux_precomputed_processor_rejects_mismatched_empty_encoding(tmp_path):
@@ -269,6 +295,151 @@ def test_flux_precomputed_processor_rejects_mismatched_empty_encoding(tmp_path):
 
     with pytest.raises(ValueError, match="empty T5 encoding shape"):
         processor.prepare_batch(batch=batch, device=torch.device("cpu"), dtype=torch.float32)
+
+
+def test_flux_eval_dataset_preserves_integer_timestep(tmp_path):
+    datasets = pytest.importorskip("datasets")
+    path = tmp_path / "coco"
+    datasets.Dataset.from_dict(
+        {
+            "t5_encodings": [np.zeros((3, 8), dtype=np.float32)],
+            "clip_encodings": [np.zeros((4,), dtype=np.float32)],
+            "mean": [np.zeros((1, 2, 2), dtype=np.float32)],
+            "logvar": [np.zeros((1, 2, 2), dtype=np.float32)],
+            "timestep": [7],
+        }
+    ).save_to_disk(path)
+
+    dataset = FluxPrecomputedDataset(str(path), require_timestep=True)
+    sample = dataset[0]
+    assert sample["timestep"].dtype == torch.int64
+    assert sample["timestep"].item() == 7
+
+    processor = FluxPrecomputedProcessor({})
+    batch = processor.prepare_batch(batch=[sample], device=torch.device("cpu"), dtype=torch.bfloat16)
+    assert batch["timestep"].dtype == torch.int64
+
+
+def test_flux_eval_uses_fixed_mlperf_timesteps():
+    class CaptureDit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+            self.seen_timesteps = None
+
+        def forward(self, *, img, timesteps, **kwargs):
+            self.seen_timesteps = timesteps.detach().clone()
+            return torch.zeros_like(img)
+
+    dit = CaptureDit().eval()
+    pipeline = FluxFlowMatchTrainPipeline()
+    batch = {
+        "t5_encodings": torch.zeros(2, 3, 8),
+        "clip_encodings": torch.zeros(2, 4),
+        "mean": torch.zeros(2, 1, 2, 2),
+        "logvar": torch.zeros(2, 1, 2, 2),
+        "timestep": torch.tensor([0, 7]),
+    }
+
+    output = pipeline.compute_loss(dit=dit, batch=batch, model_config=object())
+
+    torch.testing.assert_close(dit.seen_timesteps, torch.tensor([0.0, 0.875]))
+    assert torch.isfinite(output["loss"])
+
+
+def test_flux_training_draws_fp32_timesteps_on_cpu_then_casts(monkeypatch):
+    class CaptureDit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros((), dtype=torch.bfloat16))
+            self.seen_timesteps = None
+
+        def forward(self, *, img, timesteps, **kwargs):
+            self.seen_timesteps = timesteps.detach().clone()
+            return torch.zeros_like(img)
+
+    original_rand = torch.rand
+    calls = []
+
+    def capture_rand(*size, **kwargs):
+        calls.append((size, kwargs.copy()))
+        return original_rand(*size, **kwargs)
+
+    monkeypatch.setattr(torch, "rand", capture_rand)
+    dit = CaptureDit().train()
+    batch = {
+        "t5_encodings": torch.zeros(2, 3, 8, dtype=torch.bfloat16),
+        "clip_encodings": torch.zeros(2, 4, dtype=torch.bfloat16),
+        "mean": torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16),
+        "logvar": torch.zeros(2, 1, 2, 2, dtype=torch.bfloat16),
+    }
+
+    FluxFlowMatchTrainPipeline().compute_loss(
+        dit=dit,
+        batch=batch,
+        model_config=object(),
+        compute_dtype=torch.bfloat16,
+    )
+
+    assert calls == [(((2,),), {"device": "cpu", "dtype": torch.float32})]
+    assert dit.seen_timesteps.dtype == torch.bfloat16
+
+
+def test_flux_eval_rejects_missing_timestep():
+    class DummyDit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+
+    batch = {
+        "t5_encodings": torch.zeros(1, 3, 8),
+        "clip_encodings": torch.zeros(1, 4),
+        "mean": torch.zeros(1, 1, 2, 2),
+        "logvar": torch.zeros(1, 1, 2, 2),
+    }
+    with pytest.raises(ValueError, match="timestep"):
+        FluxFlowMatchTrainPipeline().compute_loss(
+            dit=DummyDit().eval(),
+            batch=batch,
+            model_config=object(),
+        )
+
+
+def test_flux_torchtitan_initialization_is_deterministic_and_zeroes_output():
+    params = flux_1_schnell_params(
+        in_channels=4,
+        out_channels=4,
+        vec_in_dim=4,
+        context_in_dim=8,
+        hidden_size=12,
+        num_heads=2,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2],
+    )
+    torch.manual_seed(123)
+    first = Flux(params)
+    first.init_weights()
+    torch.manual_seed(123)
+    second = Flux(params)
+    second.init_weights()
+
+    for left, right in zip(first.parameters(), second.parameters()):
+        torch.testing.assert_close(left, right)
+    assert torch.count_nonzero(first.final_layer.linear.weight) == 0
+    assert torch.count_nonzero(first.final_layer.adaLN_modulation[-1].weight) == 0
+    assert torch.count_nonzero(first.double_blocks[0].img_mod.lin.weight) == 0
+
+
+def test_flux_qk_norm_uses_torchtitan_dtype_epsilon():
+    norm = QKNorm(4).to(torch.bfloat16)
+    reference = torch.nn.RMSNorm(4).to(torch.bfloat16)
+    reference.load_state_dict(norm.query_norm.state_dict())
+    q = torch.tensor([[[[1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3]]]], dtype=torch.bfloat16)
+
+    actual_q, _ = norm(q, q, q)
+
+    torch.testing.assert_close(actual_q, reference(q))
 
 
 def test_flux_raw_processor_prepares_images_and_prompts():
@@ -356,7 +527,7 @@ def test_tiny_flux_schnell_model_computes_without_guidance():
     assert torch.isfinite(outputs["loss"])
 
 
-def test_flux_position_ids_are_float32_regardless_of_model_dtype():
+def test_flux_position_ids_match_torchtitan_compute_dtype():
     model = build_flux_model(
         {
             "config": {
@@ -376,8 +547,8 @@ def test_flux_position_ids_are_float32_regardless_of_model_dtype():
             }
         }
     )
-    # Force a low-precision compute dtype; position ids must stay float32 so RoPE
-    # grid indices are not corrupted (bf16 only represents integers up to 256).
+    # TorchTitan casts position ids with `.to(latents)`, so BF16 training must
+    # also calculate the RoPE frequencies from BF16 ids.
     model.dit = model.dit.to(dtype=torch.bfloat16)
 
     captured = {}
@@ -398,8 +569,8 @@ def test_flux_position_ids_are_float32_regardless_of_model_dtype():
         }
     )
 
-    assert captured["img_ids_dtype"] == torch.float32
-    assert captured["txt_ids_dtype"] == torch.float32
+    assert captured["img_ids_dtype"] == torch.bfloat16
+    assert captured["txt_ids_dtype"] == torch.bfloat16
 
 
 def test_tiny_flux_model_computes_raw_loss_with_dummy_encoders():

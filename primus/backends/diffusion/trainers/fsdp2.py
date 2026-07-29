@@ -11,10 +11,14 @@ Wan PyTorch FSDP2 trainer
 from __future__ import annotations
 
 import os
+import random
+import re
+import shutil
 from contextlib import contextmanager
 from importlib import import_module
 
 import torch
+import torch.distributed as dist
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
@@ -67,11 +71,16 @@ class FSDP2Trainer(BaseWanTrainer):
         # - "dtcp_model_only": save only model via DTCP
         # - "dtcp_trainable": DTCP save only trainable params + optimizer
         self.save_strategy = str(self.args.get("save_strategy", "dit_only")).lower()
+        self.save_total_limit = int(self.args.get("save_total_limit", 3))
 
         # Checkpoint loading (after optimizer & scheduler are fully initialized)
         resume_from = self.args.get("resume_from_checkpoint")
         if resume_from:
-            self._load_checkpoint(resume_from)
+            path = self._latest_checkpoint() if str(resume_from).lower() in {"auto", "latest"} else resume_from
+            if path:
+                self._load_checkpoint(path)
+            elif str(resume_from).lower() not in {"auto", "latest"}:
+                raise FileNotFoundError(f"Checkpoint not found: {resume_from}")
 
     # ------------------------------------------------------------------ #
     #                       Parallelism                                    #
@@ -85,6 +94,8 @@ class FSDP2Trainer(BaseWanTrainer):
         self.mesh = create_device_mesh(self.world_size, sp_size=sp_size, dp_replicate=dp_replicate)
         self.sp_group = self.mesh.get_group("ulysses") if (self.mesh is not None and sp_size > 1) else None
         self.model.to(self.device)
+        if hasattr(self.model, "compute_dtype"):
+            self.model.compute_dtype = self._resolve_dtype()
 
         # Freeze non-trainable params BEFORE FSDP and optimizer creation
         if hasattr(self.model, "freeze_except"):
@@ -98,14 +109,12 @@ class FSDP2Trainer(BaseWanTrainer):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
 
-        # ---- Mixed-precision policy (aligned with DeepSpeed bf16) ----
-        #   1. Pre-cast params to bf16 BEFORE FSDP wrapping  (bf16 storage)
-        #   2. reduce_dtype = bf16  (gradient reduce matches DeepSpeed bf16 all-reduce)
-        #   3. AdamWFP32State maintains fp32 master weights and writes back to bf16
+        # Match TorchTitan: FP32 parameter/optimizer storage, BF16 forward
+        # parameters, and FP32 gradient reduction.
         if mp_dtype != torch.float32:
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=mp_dtype,
-                reduce_dtype=mp_dtype,  # bf16 reduce (matches DeepSpeed bf16)
+                reduce_dtype=torch.float32,
             )
         else:
             mp_policy = None
@@ -126,12 +135,12 @@ class FSDP2Trainer(BaseWanTrainer):
             else self.model
         )
 
-        # Pre-cast to bf16 before FSDP wrapping so parameters are stored in bf16,
-        # matching DiffSynth/DeepSpeed bf16 behavior.
-        if mp_dtype != torch.float32:
-            wrap_root.to(dtype=mp_dtype)
-            if self.rank == 0:
-                logger.info(f"FSDP2: pre-cast '{wrap_target or '<model>'}' to {mp_dtype} (DiffSynth-aligned)")
+        non_fp32_params = [name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32]
+        if non_fp32_params:
+            raise ValueError(
+                "TorchTitan-aligned FSDP2 requires FP32 parameter storage before wrapping; "
+                f"found non-FP32 parameters including {non_fp32_params[:3]}."
+            )
 
         if self.world_size == 1:
             if self.rank == 0:
@@ -190,8 +199,10 @@ class FSDP2Trainer(BaseWanTrainer):
                 seen.add(id(module))
                 if module is wrap_root:
                     continue
-                if (cls_objs and isinstance(module, tuple(cls_objs))) or (
-                    cls_names and module.__class__.__name__ in cls_names
+                checkpointed_module = getattr(module, "_checkpoint_wrapped_module", None)
+                target_module = checkpointed_module if checkpointed_module is not None else module
+                if (cls_objs and isinstance(target_module, tuple(cls_objs))) or (
+                    cls_names and target_module.__class__.__name__ in cls_names
                 ):
                     fully_shard(
                         module,
@@ -199,6 +210,8 @@ class FSDP2Trainer(BaseWanTrainer):
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
+                    if checkpointed_module is not None:
+                        seen.add(id(checkpointed_module))
                     wrapped_count += 1
 
             if self.rank == 0:
@@ -299,13 +312,16 @@ class FSDP2Trainer(BaseWanTrainer):
             },
             **kwargs,
         )
+        self._finalize_checkpoint(path)
 
     def _save_checkpoint(self):
         path = os.path.join(self.output_dir, f"checkpoint-{self.global_step}")
         if self.save_strategy == "dit_only":
             self._save_dit(os.path.join(path, "dit_model.safetensors"))
+            self._finalize_checkpoint(path)
         else:
             self._save_dtcp(path)
+        self._prune_checkpoints()
 
     def _load_checkpoint(self, path):
         if self.rank == 0:
@@ -356,6 +372,59 @@ class FSDP2Trainer(BaseWanTrainer):
             except Exception as exc:
                 if self.rank == 0:
                     logger.warning(f"Failed to restore lr_scheduler state: {exc}")
+        self._restore_rng_state(path)
+
+    def _latest_checkpoint(self):
+        if not os.path.isdir(self.output_dir):
+            return None
+        checkpoints = []
+        for name in os.listdir(self.output_dir):
+            match = re.fullmatch(r"checkpoint-(\d+)", name)
+            path = os.path.join(self.output_dir, name)
+            if match and os.path.isfile(os.path.join(path, ".complete")):
+                checkpoints.append((int(match.group(1)), path))
+        return max(checkpoints, default=(None, None))[1]
+
+    def _finalize_checkpoint(self, path):
+        os.makedirs(path, exist_ok=True)
+        torch.save(
+            {
+                "python": random.getstate(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state(self.device),
+            },
+            os.path.join(path, f"rng-rank-{self.rank}.pt"),
+        )
+        if self.world_size > 1:
+            dist.barrier()
+        if self.rank == 0:
+            open(os.path.join(path, ".complete"), "a", encoding="utf-8").close()
+        if self.world_size > 1:
+            dist.barrier()
+
+    def _restore_rng_state(self, path):
+        rng_path = os.path.join(path, f"rng-rank-{self.rank}.pt")
+        if not os.path.isfile(rng_path):
+            if self.rank == 0:
+                logger.warning("Checkpoint has no RNG state; resumed trajectory may differ")
+            return
+        state = torch.load(rng_path, map_location="cpu", weights_only=False)
+        random.setstate(state["python"])
+        torch.set_rng_state(state["torch"])
+        torch.cuda.set_rng_state(state["cuda"], self.device)
+
+    def _prune_checkpoints(self):
+        if self.rank != 0 or self.save_total_limit <= 0:
+            return
+        checkpoints = []
+        for name in os.listdir(self.output_dir):
+            match = re.fullmatch(r"checkpoint-(\d+)", name)
+            path = os.path.join(self.output_dir, name)
+            if match and os.path.isfile(os.path.join(path, ".complete")):
+                checkpoints.append((int(match.group(1)), path))
+        for _, path in sorted(checkpoints)[: -self.save_total_limit]:
+            shutil.rmtree(path)
+            logger.info(f"Removed old checkpoint: {path}")
 
     def _save_dit(self, save_path: str) -> None:
         """

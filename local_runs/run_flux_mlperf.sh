@@ -25,28 +25,41 @@ export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
 export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
 export PROMPT_DROPOUT_PROB=${PROMPT_DROPOUT_PROB:-0.1}
 
-export ATTENTION_BACKEND=${ATTENTION_BACKEND:-flash_attn_aiter}
+export ATTENTION_BACKEND=${ATTENTION_BACKEND:-sdpa}
 export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
 export WARMUP_STEPS=${WARMUP_STEPS:-1600}
-export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-false}
+export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
+export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-false}
 export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-true}
-export SAVE_STRATEGY=${SAVE_STRATEGY:-none}
+export SAVE_STEPS=${SAVE_STEPS:-100}
+export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
+export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
+export RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-latest}
 export LOG_FREQ=${LOG_FREQ:-10}
 export MLPERF_ENABLE=${MLPERF_ENABLE:-true}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.586}
 export VAL_CHECK_INTERVAL=${VAL_CHECK_INTERVAL:-262144}
+export SEED=${SEED:-10007}
+export MLPERF_CLEAR_CACHES=${MLPERF_CLEAR_CACHES:-true}
 export RUN_TAG=${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}
 export BENCH_SKIP_STEPS=${BENCH_SKIP_STEPS:-1}
+export TORCHRUN_TEE=${TORCHRUN_TEE:-true}
 
 LOG_FILE=${LOG_FILE:-local_runs/flux_mlperf_${RUN_TAG}.log}
 SUMMARY_FILE=${SUMMARY_FILE:-local_runs/flux_mlperf_${RUN_TAG}_summary.txt}
-OUTPUT_DIR=${OUTPUT_DIR:-local_runs/flux_mlperf_${RUN_TAG}_output}
+OUTPUT_DIR=${OUTPUT_DIR:-local_runs/flux_mlperf_output}
 MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-local_runs/flux_mlperf_${RUN_TAG}_mllog.txt}
 RANK_LOG_DIR=${RANK_LOG_DIR:-local_runs/flux_mlperf_${RUN_TAG}_ranklogs}
 export OUTPUT_DIR
 export MLLOG_OUTPUT_FILE
+export ENABLE_WANDB_LOGGER=${ENABLE_WANDB_LOGGER:-false}
+export WANDB_PROJECT=${WANDB_PROJECT:-mlperf-flux1}
+export WANDB_RUN_NAME=${WANDB_RUN_NAME:-flux-mlperf}
+export WANDB_SAVE_DIR=${WANDB_SAVE_DIR:-$OUTPUT_DIR/wandb}
+export WANDB_OFFLINE=${WANDB_OFFLINE:-false}
+export WANDB_JOB_TYPE=${WANDB_JOB_TYPE:-train}
 
 require_file() {
   local path=$1
@@ -77,6 +90,23 @@ preflight() {
   require_dir "$EMPTY_ENCODINGS_PATH"
   require_file "$EMPTY_ENCODINGS_PATH/t5_empty.npy"
   require_file "$EMPTY_ENCODINGS_PATH/clip_empty.npy"
+}
+
+clear_os_caches() {
+  if [[ "${MLPERF_ENABLE,,}" != "true" && "$MLPERF_ENABLE" != "1" ]]; then
+    return
+  fi
+  if [[ "${MLPERF_CLEAR_CACHES,,}" != "true" && "$MLPERF_CLEAR_CACHES" != "1" ]]; then
+    echo "[run_flux_mlperf] WARNING: OS cache clear disabled; run is not submission-compliant" >&2
+    return
+  fi
+  sync
+  if [[ "$(id -u)" == "0" ]]; then
+    echo 3 > /proc/sys/vm/drop_caches
+  else
+    sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+  fi
+  echo "[run_flux_mlperf] cleared OS caches on node_rank=$NODE_RANK"
 }
 
 summarize_metrics() {
@@ -147,6 +177,9 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"max_steps: {os.environ.get('MAX_STEPS', '')}\n")
     handle.write(f"lr: {os.environ.get('LR', '')}\n")
     handle.write(f"warmup_steps: {os.environ.get('WARMUP_STEPS', '')}\n")
+    handle.write(f"save_steps: {os.environ.get('SAVE_STEPS', '')}\n")
+    handle.write(f"resume_from_checkpoint: {os.environ.get('RESUME_FROM_CHECKPOINT', '')}\n")
+    handle.write(f"seed: {os.environ.get('SEED', '')}\n")
     handle.write(f"dataset_path: {os.environ.get('DATASET_PATH', '')}\n")
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
@@ -169,8 +202,22 @@ print(summary_path.read_text(encoding="utf-8"), end="")
 PY
 }
 
+terminate_training() {
+  trap - INT TERM
+  local children=()
+  mapfile -t children < <(jobs -pr)
+  for child in "${children[@]}"; do
+    kill -INT "$child" 2>/dev/null || true
+  done
+  for child in "${children[@]}"; do
+    wait "$child" 2>/dev/null || true
+  done
+  exit 130
+}
+
 preflight
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$SUMMARY_FILE")" "$OUTPUT_DIR" "$RANK_LOG_DIR"
+clear_os_caches
 
 echo "[run_flux_mlperf] config=$CONFIG"
 echo "[run_flux_mlperf] dataset_path=$DATASET_PATH"
@@ -183,8 +230,15 @@ echo "[run_flux_mlperf] mllog_output_file=$MLLOG_OUTPUT_FILE"
 echo "[run_flux_mlperf] rank_log_dir=$RANK_LOG_DIR"
 echo "[run_flux_mlperf] nnodes=$NNODES node_rank=$NODE_RANK gpus_per_node=$GPUS_PER_NODE"
 echo "[run_flux_mlperf] steps=$MAX_STEPS local_batch_size=$LOCAL_BATCH_SIZE lr=$LR warmup_steps=$WARMUP_STEPS"
-echo "[run_flux_mlperf] mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
+echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATEST resume=$RESUME_FROM_CHECKPOINT"
+echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
+echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
 
+trap terminate_training INT TERM
+torchrun_log_args=()
+if [[ "${TORCHRUN_TEE,,}" == "true" || "$TORCHRUN_TEE" == "1" ]]; then
+  torchrun_log_args=(--log-dir="$RANK_LOG_DIR" --tee=3)
+fi
 set +e
 PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}" \
 PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}" \
@@ -192,11 +246,12 @@ torchrun \
   --nnodes="$NNODES" --node_rank="$NODE_RANK" \
   --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
   --nproc_per_node="$GPUS_PER_NODE" \
-  --log-dir="$RANK_LOG_DIR" --tee=3 \
+  "${torchrun_log_args[@]}" \
   -m primus.cli.main train pretrain \
   --config "$CONFIG" 2>&1 | tee "$LOG_FILE"
 train_status=${PIPESTATUS[0]}
 set -e
+trap - INT TERM
 
 summary_status=0
 summarize_metrics || summary_status=$?

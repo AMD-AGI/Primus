@@ -132,14 +132,17 @@ def _build_flux_dit(params) -> Flux:
     local_rank = os.environ.get("LOCAL_RANK")
     use_cuda = local_rank is not None and torch.cuda.is_available()
     device = torch.device(f"cuda:{local_rank}") if use_cuda else torch.device("cpu")
-    old_dtype = torch.get_default_dtype()
-    try:
-        if use_cuda:
-            torch.set_default_dtype(torch.bfloat16)
-        with torch.device(device):
-            dit = Flux(params)
-    finally:
-        torch.set_default_dtype(old_dtype)
+    init_seed = torch.cuda.initial_seed() if use_cuda else torch.initial_seed()
+    with torch.device(device):
+        dit = Flux(params)
+    # Constructor defaults consume RNG even though explicit TorchTitan
+    # initialization overwrites them. Reset so init_weights starts at the
+    # configured common model seed, as it does with TorchTitan meta creation.
+    if use_cuda:
+        torch.cuda.manual_seed(init_seed)
+    else:
+        torch.manual_seed(init_seed)
+    dit.init_weights()
     return dit
 
 

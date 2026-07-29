@@ -106,6 +106,15 @@ class DiffusionPretrainTrainer(BaseTrainer, BaseModule):
         dataset_config = dataset_cfg["config"]
         trainer_args = trainer_cfg["args"]
 
+        # All ranks must initialize identical model weights. The trainer will
+        # reseed with a DP-rank offset after sharding so training randomness is
+        # distinct across ranks, matching the TorchTitan FLUX reference.
+        seed = trainer_args.get("seed")
+        if seed is not None:
+            from primus.backends.diffusion.utils.train_utils import set_seed
+
+            set_seed(int(seed))
+
         log_rank_0(
             f"[Primus:Diffusion] Building model={model_name}, dataset={dataset_name}, trainer={trainer_name}"
         )
