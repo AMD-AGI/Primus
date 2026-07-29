@@ -854,6 +854,44 @@ def test_output_is_derotated_before_o_projection(compress_ratio):
     assert not torch.allclose(ours, without_fix, rtol=1e-3, atol=1e-3)
 
 
+def test_inverse_rope_matches_the_negated_sine_formulation():
+    """The fused de-rotation equals the explicit ``-sin`` rotation.
+
+    ``_apply_inverse_rope`` negates the *angle* inside the fused kernel rather
+    than building cos / sin eagerly and negating the sine, which saves three
+    launches and a materialised cos / sin tensor per layer. ``cos`` is even and
+    ``sin`` odd, so the two are the same rotation -- pinned here because the
+    optimisation is only safe as long as that stays true.
+    """
+    torch.manual_seed(0)
+    B, S, H, Dh, rotary_dim = 2, 6, 4, 16, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=H,
+        head_dim=Dh,
+        rotary_dim=rotary_dim,
+        q_lora_rank=32,
+        o_groups=1,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    x = torch.randn(B, S, H, Dh, dtype=_TEST_DTYPE)
+    # Offset positions so position 0 (where the rotation is the identity) does
+    # not dominate the comparison.
+    position_ids = torch.arange(1, S + 1).unsqueeze(0).expand(B, S)
+
+    with torch.no_grad():
+        ours = attn._apply_inverse_rope(x, position_ids)
+        ref = _inverse_rope_reference(
+            x, position_ids=position_ids, rope=attn.rope, rotary_dim=rotary_dim
+        )
+
+    torch.testing.assert_close(ours, ref, rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(ours, x, rtol=1e-3, atol=1e-3)
+
+
 def test_inverse_rope_does_not_mutate_core_attention_output():
     """De-rotation is out-of-place.
 

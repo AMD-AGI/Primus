@@ -35,10 +35,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.keep_in_fp32 import (
+    KeepInFp32Mixin,
+    mark_keep_in_fp32,
+)
 from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 
 
-class Compressor(nn.Module):
+class Compressor(KeepInFp32Mixin, nn.Module):
     """V4 Compressor block.
 
     Args:
@@ -79,6 +83,14 @@ class Compressor(nn.Module):
 
         proj_out = self.coff * head_dim
         self._proj_out = proj_out
+        # Plain ``nn.Linear``, deliberately: the compressor has no low-precision
+        # path. It builds the KV entries every query reads and the pooling
+        # weights that mix them, and the open-source reference keeps it out of
+        # FP8 for that reason -- it wraps exactly this projection plus the
+        # indexer in an fp8-disabled context. ``nn.Linear`` is also immune to the
+        # enclosing TE / Turbo quantization context, so "high precision" here
+        # needs no guard beyond not adding a quantized branch.
+        #
         # Fuse the kv + gate projections into ONE [hidden -> 2*proj_out] GEMM
         # (default-on): ~1.5x on the projection and one launch instead of two.
         # PRIMUS_COMPRESS_FUSE_PROJ=0 restores the two separate linears.
@@ -93,9 +105,13 @@ class Compressor(nn.Module):
         # softmax score. After overlap, the effective window length is
         # ``2*ratio`` slots of size ``head_dim``; in non-overlap mode it's
         # ``ratio`` slots of size ``head_dim``.
+        # FP32 in the released checkpoint, and kept FP32 here: it is an additive
+        # bias on the pooling softmax scores, so its resolution is the
+        # resolution of the pooling weights themselves.
         ape_len = 2 * ratio if self.overlap else ratio
-        self.ape = nn.Parameter(torch.zeros(ape_len, head_dim))
+        self.ape = nn.Parameter(torch.zeros(ape_len, head_dim, dtype=torch.float32))
         nn.init.normal_(self.ape, std=0.02)
+        mark_keep_in_fp32(self.ape)
 
         self.kv_norm = LocalRMSNorm(head_dim, eps=rmsnorm_eps)
 
