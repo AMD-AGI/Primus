@@ -59,7 +59,7 @@ paper reports.
 | race                     | acc        |  25.00 | 25.07  | 25.45  | +0.38 pp         |
 | **mean absolute Δ**      |            |        |        |        | **0.58 pp**      |
 
-See [`docs/zebra_llama/README_KDA.md`](docs/zebra_llama/README_KDA.md) for
+See [`docs/hybrid_models/README_KDA.md`](docs/hybrid_models/README_KDA.md) for
 the exact `lm_eval` invocation that produced both rows.
 
 ---
@@ -271,6 +271,6 @@ tools/hybrid/
   convert_fla_kda_init_to_megatron.py              # FLA HF init → Megatron sharded ckpt
   convert_kda_to_fla_hf.py                         # Megatron sharded ckpt → FLA HF
   eval_kda_lm_eval.py                              # lm-eval wrapper (registers KDA)
-docs/zebra_llama/
+docs/hybrid_models/
   README_KDA.md                                    # step-by-step recipe
 ```

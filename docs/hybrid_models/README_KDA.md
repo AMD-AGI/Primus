@@ -530,7 +530,7 @@ benchmarks need to lift above noise).
 ## Configs and tools used
 
 ```
-docs/zebra_llama/
+docs/hybrid_models/
 └── README_KDA.md                                  ← this file
 KDA_FLA_PARITY.md                                  ← deep-dive on every change
 megatron_patch.sh                                  ← idempotent patch applier (shared with GDN)
@@ -630,9 +630,9 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/zebra_llama/README.md`](README.md) — full Zebra-Llama family
+- [`docs/hybrid_models/README.md`](README.md) — full Zebra-Llama family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
-- [`docs/zebra_llama/README_GDN.md`](README_GDN.md) — the GDN companion
+- [`docs/hybrid_models/README_GDN.md`](README_GDN.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)
 - [`KDA_FLA_PARITY.md`](../../KDA_FLA_PARITY.md) — exhaustive list of
   code/config/runtime changes that made KDA parity possible

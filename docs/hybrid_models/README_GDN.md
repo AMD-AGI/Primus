@@ -496,7 +496,7 @@ PY
 ## Configs and tools used
 
 ```
-docs/zebra_llama/
+docs/hybrid_models/
 └── README_GDN.md                                      ← this file
 GDN_FLA_PARITY.md                                      ← deep-dive on every patch & env var
 megatron_patch.sh                                      ← idempotent patch applier
@@ -565,7 +565,7 @@ Expected with all four `PRIMUS_FLA_`* env vars set. The biggest single cost is `
 
 ## See also
 
-- `[docs/zebra_llama/README.md](README.md)` — full Zebra-Llama family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
+- `[docs/hybrid_models/README.md](README.md)` — full Zebra-Llama family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
 - `[GDN_FLA_PARITY.md](../../GDN_FLA_PARITY.md)` — exhaustive list of code/config/runtime changes that made parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
 

@@ -5,8 +5,8 @@
 # This script applies all Megatron-LM submodule changes that Primus needs
 # for FLA-parity training of the hybrid linear-attention recipes:
 #
-#   * Gated DeltaNet (GDN)        — docs/zebra_llama/README_GDN.md
-#   * Kimi Delta Attention (KDA)  — docs/zebra_llama/README_KDA.md
+#   * Gated DeltaNet (GDN)        — docs/hybrid_models/README_GDN.md
+#   * Kimi Delta Attention (KDA)  — docs/hybrid_models/README_KDA.md
 #
 # Both architectures consume the same six patches below. All KDA-specific
 # code lives in primus/ (kimi_delta_attention.py,
