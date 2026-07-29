@@ -67,7 +67,7 @@ Guided by real workload requirements and by the industry's recent optimization f
 - **Kernel-level fusion** — a fused MoE *megakernel* that combines expert dispatch, grouped GEMM, activation, and combine into a single persistent kernel to overlap communication and compute at tile granularity.
 - **Low-precision operators** — FP8/MXFP8 expert GEMMs and the surrounding quantization pipeline, with attention to accuracy and system-level break-even.
 - **General framework optimizations** — the broad set of Primus + Primus-Turbo improvements that benefit every MoE workload.
-- **Time-to-train (TTT)** — end-to-end optimization of real large-model runs, using DeepSeek-V3 as the flagship case study (fine-grained recompute, scaling, and long-duration runs).
+- **Time-to-train (TTT)** — end-to-end optimization of real large-model runs, using DeepSeek-V3 as the flagship case study (pipeline layout, fine-grained recompute, scaling, and long-duration runs).
 - **Small-model MoE and cross-vendor comparison** — optimizations for smaller MoE models, benchmarked against NVIDIA B200.
 - **Framework backends** — both the Megatron-LM and JAX (MaxText) training paths.
 - **Performance projection** — estimating memory and throughput before committing cluster time.
@@ -275,31 +275,132 @@ Time-to-train measures what actually matters to users: how long a full training 
 
 #### DeepSeek-V3 performance optimization
 
-<!---
-OWNER / FILL: Lihuan Zhang. Fill in each sub-topic with the concrete recipe and
-measured results. DeepSeek-V3 reference config in Primus:
-  examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh
-  (61 layers, EP8, PP16, VPP2, per-stage pipeline layout, per-scale recompute IDs).
-Add a scaling chart and, if available, a 24-hour run summary.
---->
+This case study applies two of the general capabilities listed above — arbitrary pipeline partitioning and selective-layer recompute — to DeepSeek-V3 on the Megatron-LM backend. The reference recipe is [`examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh`](https://github.com/AMD-AGI/Primus/blob/main/examples/moe_package/run_deepseek_v3_pretrain_mi355x.sh):
 
-DeepSeek-V3 (61 layers, 256 routed experts, top-8, MLA attention) is representative of frontier MoE training. Our Primus recipe combines the general and communication optimizations above with pipeline and recompute strategies tuned specifically for its scale.
+| Setting | Value |
+|---|---|
+| Model | 61 layers (3 dense + 58 MoE), 256 routed experts, top-8, MLA |
+| Parallelism | TP1 / PP16 / VPP2 / EP8 |
+| Batch | MBS 2, sequence length 4096, global batch size 128 x nodes |
+| Precision | FP8 |
+| Measured scales | 32 to 128 nodes (256 to 1024 MI355X GPUs) |
 
-- **Fine-grained recompute.** Rather than recomputing a fixed number of layers everywhere, Primus supports recomputing an explicit list of layer IDs (`--recompute_layer_ids`), so recompute is concentrated on the pipeline stages that need the memory headroom most. The optimal set of recompute IDs changes with cluster size, letting each scale trade compute for memory precisely rather than uniformly.
+The recipe also enables DeepEP dispatch (`turbo_deepep_num_cu: 80`), the distributed optimizer with overlapped gradient reduce and parameter gather, and the precision-aware optimizer, fused cross-entropy/RoPE, `pp_warmup`, manual GC, and NUMA binding described earlier.
 
-<!--- OWNER / FILL: Lihuan Zhang — describe the recompute-ID selection method and show memory/throughput impact. --->
+Two conventions apply to every number below:
 
-- **Scaling.** Primus pairs a custom per-stage pipeline layout (`pipeline_model_parallel_layout`) with interleaved pipeline parallelism (VPP) to keep the pipeline-bubble ratio low as node count grows, while EP-scaled all-to-all is accelerated by DeepEP.
+- The global batch size scales with node count, so the micro-batch count per iteration stays at 128 at every scale and only the data-parallel width grows.
+- Iteration times are comparable only within a scale. All throughput ratios are against the baseline at the *same* scale, measured over the first few dozen iterations.
 
-<!--- OWNER / FILL: Lihuan Zhang — add the scaling curve (throughput vs node count) at imgs/dsv3_scaling.png and the parallelism configuration table. --->
+**Pipeline layout: put the short stage where memory peaks.** PP16 with VPP2 gives 32 virtual stages for 61 decoder layers, so three stages hold one layer instead of two. Two placements are forced — PP0's first stage also carries the embedding, PP15's last stage carries the loss — leaving exactly one free choice.
 
-- **24-hour run.** [TODO: summarize a long-duration DeepSeek-V3 run — sustained throughput, stability (manual GC / NUMA binding), and any tokens-processed / time-to-target milestone.]
+Megatron's default layout spends that free choice on PP15, which is the wrong rank:
 
-<!--- OWNER / FILL: Lihuan Zhang — add remaining sub-topics as needed. --->
+- Under 1F1B, the earliest ranks hold the most in-flight activations and the last rank the fewest.
+- The memory peak is therefore PP1, the first *fully loaded* rank.
+- Measured on 32 nodes: PP1 runs at 88% of HBM while PP15 idles at 23% — a 64-point spread across ranks doing nominally equal work.
 
-![Figure 7: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X](imgs/dsv3_scaling.png)
+Primus exposes the layout as a string, so moving the free short stage from PP15 to PP1 is a one-line change:
 
-**Figure 7: DeepSeek-V3 training scaling and time-to-train on AMD Instinct MI355X** _(placeholder — asset and numbers to be finalized)_
+```text
+default:  Et|(tt|)*14,t|(tt|)*15,tL
+tuned:    Et|t|(tt|)*29,tL
+```
+
+Both place all 61 decoder layers, and they differ on only two ranks:
+
+| PP rank | Default (VPP0 / VPP1) | Tuned (VPP0 / VPP1) |
+|---|---|---|
+| 0 | `E` + 1 layer / 2 layers | `E` + 1 layer / 2 layers |
+| 1 | 2 layers / 2 layers | **1 layer** / 2 layers |
+| 2–14 | 2 layers / 2 layers | 2 layers / 2 layers |
+| 15 | **1 layer** / 1 layer + `L` | 2 layers / 1 layer + `L` |
+
+A flat memory profile is not the goal in itself. The headroom it frees on the peak ranks is what pays for the next step: less recompute.
+
+**Fine-grained recompute with `--recompute_layer_ids`.** The default strategy (`--recompute_num_layers 1 --recompute_method block`) recomputes one layer in every virtual stage — 32 of the 61 layers — whether or not a given rank needs the memory. Primus instead accepts an explicit list of global layer IDs, so recompute lands exactly where the pressure is:
+
+```bash
+--recompute_layer_ids "0,1,2,4,6,8,10,12,14" --recompute_granularity full
+```
+
+The list is chosen against the measured memory profile, following one loop:
+
+1. Dump per-rank memory and pipeline timings (`--dump_pp_data`, visualized with [`tools/visualization/pp_vis/vis.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis)).
+2. Find the ranks with unused headroom.
+3. Drop their layers from the recompute list.
+4. Repeat until the peak rank approaches the HBM ceiling.
+
+**How we actually walk that loop.** Not by hand. We are building a tuning agent that searches the configuration space — legal parallelism combinations, pipeline layouts, and recompute sets — scoring each candidate with the Primus projection tool (covered below) as its oracle, so most of the search costs no cluster time. The agent is still under development, so both the layout string above and the layer-ID lists below are **semi-automated**: the agent narrows the space, and engineering judgement settles the final choice. We plan to open-source it once it is ready.
+
+Figure 7 shows the endpoints of that loop at two scales.
+
+<table>
+  <tr>
+    <td><img src="imgs/dsv3_mem_dist_32n.png" alt="Per-PP-rank memory usage on 32 nodes, default vs tuned" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="imgs/dsv3_mem_dist_128n.png" alt="Per-PP-rank memory usage on 128 nodes, default vs tuned" width="100%"></td>
+  </tr>
+</table>
+
+**Figure 7: Per-pipeline-rank peak memory on 32 nodes (top) and 128 nodes (bottom), default configuration versus tuned layout plus selective recompute.** Flattening the profile converts idle HBM into a smaller recompute budget: the 32-node spread narrows from 64 points to 28, and the 128-node spread from 50 points to 36.
+
+**The right number of recomputed layers is a property of the scale, not the model.** The global batch size grows with node count while the micro-batch count per iteration stays fixed, so a larger run has a wider data-parallel group. The distributed optimizer shards optimizer state and gradient buffers across that wider group more finely, handing static memory back to every GPU — and that returned memory buys fewer recomputed layers:
+
+| Nodes | Data-parallel size | Recompute layer IDs | Layers recomputed |
+|---|---|---|---|
+| 32 | 16 | `0,1,2,4,6,8,10,12,14,16,34,36,38,40,50` | 15 of 61 |
+| 64 | 32 | `0,1,2,4,6,8,10,12,14,16,34,36` | 12 of 61 |
+| 128 | 64 | `0,1,2,4,6,8,10,12,14` | 9 of 61 |
+
+The boundary is sharp rather than gradual. Trimming the 128-node list by a single ID, to `0,1,2,4,6,8,10,12`, still runs fine at 128 nodes but goes OOM at both 32 and 64 — the same eight layers that leave headroom on a wide data-parallel group overflow a narrow one. An explicit ID list makes this per-scale re-tuning cheap; a uniform layer count cannot express it at all.
+
+**Combined effect.** Layout and recompute together shorten the step at both scales, and the win grows with scale because the recompute budget shrinks faster than the pipeline bubble grows:
+
+| Nodes | Configuration | Iteration time (s) | Throughput vs baseline |
+|---|---|---|---|
+| 32 | Default layout, 1 recompute layer per virtual stage | 23.21 | 1.00x |
+| 32 | Tuned layout + 15 recompute IDs | 22.59 | **1.028x** |
+| 128 | Default layout, 1 recompute layer per virtual stage | 23.75 | 1.00x |
+| 128 | Tuned layout + 9 recompute IDs | 21.68 | **1.095x** |
+
+**What did not work.** Two rejected configurations are worth recording, because they show the tuning is not simply "more freedom is better":
+
+- **VPP1** costs 14–21% in step time even with its own layout and recompute tuning, and on this stack it required disabling gradient-reduce/all-gather overlap to run at all.
+- **An aggressively non-uniform layout** (1–3 layers per virtual stage, chosen to equalize memory) is 21% slower than the VPP2 baseline. It does flatten memory, but it unbalances compute, and the pipeline then runs at the speed of its slowest stage.
+
+Balanced compute per stage dominates. Memory balance is only worth chasing once compute is already even.
+
+Figure 8 shows why the tuned configuration is faster, using the pipeline visualizer on 128 nodes.
+
+![Figure 8: 128-node pipeline schedule, default configuration versus tuned layout and recompute IDs](imgs/dsv3_pp_schedule_128n.png)
+
+**Figure 8: Pipeline schedule for one iteration on 128 nodes** — default configuration (top) versus tuned layout and recompute IDs (bottom). Forward chunks are blue, backward chunks green, bubbles grey; per-rank bubble percentage is annotated on the right.
+
+Two things to read out of it:
+
+- Bubble on the two boundary ranks drops from 30.6% and 35.1% to 22.0% and 11.7%, and the sampled iteration time drops from 22.6 s to 21.3 s.
+- Several *interior* ranks report a higher bubble percentage after tuning. With nine layers recomputed instead of 32, the non-bubble work itself shrinks, so the same absolute bubble becomes a larger fraction of a shorter step. Iteration time, not bubble ratio, is the metric that matters.
+
+**Scaling from 32 to 128 nodes.**
+
+- **Fixed configuration:** 128 nodes retain 98.5% of the 32-node per-GPU throughput — a 1.5% loss over a 4x growth in GPU count.
+- **Re-tuned per scale:** 128 nodes reach 104.1% of the 32-node reference. Not because communication got cheaper, but because the wider data-parallel group frees enough memory to cut recompute from 15 layers to 9, and the compute saved outweighs the extra collective cost.
+
+![Figure 9: DeepSeek-V3 scaling from 32 to 128 nodes on AMD Instinct MI355X](imgs/dsv3_scaling.png)
+
+**Figure 9: DeepSeek-V3 normalized per-GPU throughput from 32 to 128 nodes on AMD Instinct MI355X** — a single fixed configuration (left) versus recompute IDs re-selected per scale (right), both normalized to the 32-node result.
+
+**Cluster and throughput stability.** A short benchmark cannot show whether a 1024-GPU job holds together, so we ran the tuned 128-node configuration on real C4 data for 1700 consecutive steps — 10 hours 37 minutes:
+
+- **No interruption.** 1700 steps back to back on 1024 GPUs: no restart, no failed rank, no operator intervention, and no skipped step.
+- **Step time holds.** Median 22.08 s, with 93.2% of steps within ±2% of it.
+- **No degradation over time.** Comparing the first tenth of the run against the last shows +1.8% drift across 10.6 hours.
+- **Rare outliers, not a trend.** About 2% of steps run slower (the slowest is 89 s), consistent with periodic host-side and network interference.
+- **Startup is bounded.** Steps 1 and 2 cost 307 s and 165 s for lazy initialization and kernel autotuning; step 3 onward is already at steady state.
+
+The long-run median (22.08 s) sits about 2% above the short-benchmark step time quoted earlier (21.68 s). That gap is the drift above, which is why benchmark and long-run numbers are reported separately rather than mixed.
 
 ### JAX MoE training optimization
 
@@ -335,17 +436,18 @@ These are wired into MaxText behind two config flags — `use_turbo_grouped_gemm
   </tr>
 </table>
 
-**Figure 8: Dropless MoE on the JAX (MaxText) path on DeepSeek-V3 671B (8×8 MI355X, FSDP=8, bf16) — (left) per-device throughput (TGS) for the grouped-GEMM + DeepEP dropless config vs. capacity-factor dropping and the `ragged_all_to_all` dropless baseline; (right) C4 training-loss convergence for the same configs.**
+**Figure 10: Dropless MoE on the JAX (MaxText) path on DeepSeek-V3 671B (8×8 MI355X, FSDP=8, bf16) — (left) per-device throughput (TGS) for the grouped-GEMM + DeepEP dropless config vs. capacity-factor dropping and the `ragged_all_to_all` dropless baseline; (right) C4 training-loss convergence for the same configs.**
 
 For the full treatment — the FFI / `custom_vjp` integration, the fan-out/fan-in and out-of-group-masking correctness details, and the complete throughput and convergence tables — see the dedicated [Dropless MoE Training in JAX with Primus-Turbo](https://rocm.blogs.amd.com/software-tools-optimization/maxtext-dropless-moe/README.html) blog.
 
 ### Primus Projection
 
-Estimating memory and throughput before committing cluster time is essential at MoE scale, where a single misconfiguration can OOM a large run or leave hardware underutilized. Primus includes a **projection** tool that answers "Will it fit?" and "How fast will it be?" without a full-scale run — via analytical memory estimation and a hybrid benchmark/simulation performance projection that models parallelism, communication, and pipeline scheduling. For MoE models in particular, it captures the `topk`-scaled activation footprint and grouped-GEMM/all-to-all behavior that dominate memory and time.
+At MoE scale, a misconfigured run can OOM after hours of queueing or leave much of the cluster underutilized. Primus ships a **projection** tool that answers "Will it fit?" and "How fast will it be?" before any GPU time is committed:
 
-For a full treatment of the projection tool — including memory and performance modes, sub-node benchmarking, pure-CPU simulation, and validation within 10% of measured multi-node results — see the dedicated [Primus Projection blog](https://rocm.blogs.amd.com/software-tools-optimization/primus-projection/README.html).
+- **Memory** — analytical per-GPU estimation of parameters, optimizer state, and activations, including the `topk`-scaled MoE activation footprint that dominates at high expert counts.
+- **Performance** — benchmarks representative layers on as few as one GPU, then projects to multi-node clusters using communication and pipeline-schedule models; a pure-CPU simulation mode requires no GPU at all.
 
-<!--- OWNER / FILL: Lihuan Zhang — confirm the final published URL for the projection blog and keep this section short. --->
+Every published validation case lands within 10% of measured throughput, and the MoE case — 8-node Mixtral 8x22B at EP8 / PP4 / VPP2 — is within 1.4%. For the full treatment, see [Primus Projection: Estimate Memory and Performance Before You Train](https://rocm.blogs.amd.com/software-tools-optimization/primus-projection/README.html).
 
 ---
 
