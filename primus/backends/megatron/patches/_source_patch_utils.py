@@ -58,9 +58,26 @@ def patch_method_source(
         f"upstream source may have changed. Anchor: {ori_code!r}"
     )
     modified_source = textwrap.dedent(source.replace(ori_code, new_code))
+
+    # IMPORTANT: exec'ing `modified_source` as a bare top-level `def` (not
+    # nested in a class body) silently loses the implicit `__class__` closure
+    # cell that zero-arg `super()` depends on: the function still compiles
+    # and defines fine, but crashes at *call* time with
+    # `RuntimeError: super(): __class__ cell not found` the first time the
+    # method runs. Compiling inside a throwaway wrapper class makes the
+    # compiler wire up that closure normally; we then retarget the cell from
+    # the throwaway class to the real owning `cls` (required for `super()`'s
+    # MRO walk to actually find `cls` in `type(self).__mro__`).
+    wrapper_source = "class _PrimusPatchWrapper:\n" + textwrap.indent(modified_source, "    ")
     namespace: dict = {}
-    exec(modified_source, original.__globals__, namespace)  # noqa: S102
-    new_func = namespace[original.__name__]
+    exec(wrapper_source, original.__globals__, namespace)  # noqa: S102
+    wrapper_cls = namespace["_PrimusPatchWrapper"]
+    new_func = wrapper_cls.__dict__[original.__name__]
+    if new_func.__closure__:
+        for cell in new_func.__closure__:
+            if cell.cell_contents is wrapper_cls:
+                cell.cell_contents = cls
+    new_func.__qualname__ = f"{cls.__qualname__}.{method_name}"
     setattr(cls, method_name, new_func)
     return new_func
 
