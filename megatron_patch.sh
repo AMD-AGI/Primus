@@ -47,7 +47,7 @@
 #   06-pretrain_mamba-fla-data.patch
 #       Adds an opt-in FLA-order dataset shim activated by
 #       PRIMUS_FLA_DATA=1 + PRIMUS_FLA_CACHE_DIR=<path>; uses
-#       tools/fla_order_dataset.py to feed the exact same token order as
+#       tools/hybrid/fla_order_dataset.py to feed the exact same token order as
 #       FLA's HuggingFace DistributedSampler.
 #
 # Usage:

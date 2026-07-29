@@ -6,7 +6,7 @@ Creates a fake Megatron checkpoint directory that Primus can load via --load,
 ensuring both frameworks start from identical weights for loss-curve comparison.
 
 Usage:
-    python tools/convert_fla_gdn_init_to_megatron.py \
+    python tools/hybrid/convert_fla_gdn_init_to_megatron.py \
         --fla-config /path/to/gated_deltanet_300M_pure.json \
         --output-dir output/fla_init_ckpt_300M \
         --seed 42 \
@@ -14,7 +14,7 @@ Usage:
 
 This script was reconstructed verbatim from the agent transcript dated 2026-05-13
 (see GDN_FLA_PARITY.md §"Files in the repo for this work").  It is one of the
-"forensics scripts" kept untracked in tools/ per the parity-doc footnote.
+"forensics scripts" kept untracked in tools/hybrid/ per the parity-doc footnote.
 """
 
 import argparse
@@ -25,7 +25,7 @@ import torch
 from pathlib import Path
 from collections import OrderedDict
 
-_primus_root = Path(__file__).resolve().parents[1]
+_primus_root = Path(__file__).resolve().parents[2]
 _fla_root = _primus_root.parent / "flash-linear-attention"
 if str(_fla_root) not in sys.path:
     sys.path.insert(0, str(_fla_root))

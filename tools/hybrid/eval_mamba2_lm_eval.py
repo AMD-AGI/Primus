@@ -18,7 +18,7 @@ Adds the same three workarounds we needed for GDN, plus one extra:
 
 Usage (same CLI as lm_eval, just swap the command):
 
-    python tools/eval_mamba2_lm_eval.py \
+    python tools/hybrid/eval_mamba2_lm_eval.py \
         --model hf \
         --model_args pretrained=output/mamba_hybrid_300M_fla_hf,dtype=bfloat16,trust_remote_code=True \
         --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \

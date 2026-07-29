@@ -485,7 +485,7 @@ modules:
       # FLA's `path=` for this run is /home/vanbhati@amd.com/checkpoints/
       # gdn_pure_1B_100B. We save to a sibling dir prefixed with `primus_` so
       # the two runs' checkpoints can coexist on disk and downstream eval
-      # tools (tools/eval_gdn_lm_eval.py) can A/B them side-by-side.
+      # tools (tools/hybrid/eval_gdn_lm_eval.py) can A/B them side-by-side.
       save: /tmp/primus_perf_exp_ckpt_unused
       # FLA's 100B launcher passes `save=99999` (HF `--save_steps 99999`),
       # meaning over 95368 iters HF never writes an intermediate ckpt — only

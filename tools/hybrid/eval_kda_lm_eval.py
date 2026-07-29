@@ -9,7 +9,7 @@ Without this import, AutoConfig.from_pretrained fails with
 
 Usage (same CLI as lm_eval, just swap the command):
 
-    python tools/eval_kda_lm_eval.py \
+    python tools/hybrid/eval_kda_lm_eval.py \
         --model hf \
         --model_args pretrained=output/kda_pure_300M_fla_hf,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
         --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \

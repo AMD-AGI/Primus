@@ -17,10 +17,10 @@ TASKS="arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande"
 pip install lm-eval --quiet 2>/dev/null
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}/.."
+cd "${SCRIPT_DIR}/../.."
 
 python -c "
-import sys; sys.path.insert(0, 'tools')
+import sys; sys.path.insert(0, 'tools/hybrid')
 from modeling_zebra_llama import ZebraLlamaForCausalLM, ZebraLlamaConfig
 from transformers import AutoConfig, AutoModelForCausalLM
 AutoConfig.register('zebra_llama', ZebraLlamaConfig)

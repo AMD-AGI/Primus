@@ -211,17 +211,17 @@ megatron_patches/
   04-torch_norm-fla-rmsnorm.patch
   05-transformer_config-hybrid-init.patch
   06-pretrain_mamba-fla-data.patch
-tools/fla_order_dataset.py        # FLA-order dataset shim
+tools/hybrid/fla_order_dataset.py        # FLA-order dataset shim
 tools/profile_training.py         # NSight Compute / rocprof launcher
 tools/run_profiled_training.sh    # one-shot profiling driver
-tools/convert_fla_to_megatron.py  # FLA HF checkpoint → Megatron sharded ckpt
-tools/convert_gdn_to_fla_hf.py    # Megatron sharded ckpt → FLA HF checkpoint
-tools/verify_gdn_conversion.py    # validates round-trip checkpoint conversion
-tools/eval_gdn_lm_eval.py         # lm-eval-harness wrapper for GDN models
+tools/hybrid/convert_fla_to_megatron.py  # FLA HF checkpoint → Megatron sharded ckpt
+tools/hybrid/convert_gdn_to_fla_hf.py    # Megatron sharded ckpt → FLA HF checkpoint
+tools/hybrid/verify_gdn_conversion.py    # validates round-trip checkpoint conversion
+tools/hybrid/eval_gdn_lm_eval.py         # lm-eval-harness wrapper for GDN models
 ```
 
 The `tools/compare_*.py`, `tools/diff_*.py`, `tools/dump_*.py`,
-`tools/forensic_*.py`, `tools/inspect_*.py`, `tools/convert_fla_gdn_init_to_megatron.py`,
+`tools/forensic_*.py`, `tools/inspect_*.py`, `tools/hybrid/convert_fla_gdn_init_to_megatron.py`,
 `tools/prove_*.py`, `tools/single_*.py` and `tools/check_*.py` scripts
 were used as one-off forensics during the parity hunt and are kept
 untracked under `tools/`. They reference the env-var-gated dump paths

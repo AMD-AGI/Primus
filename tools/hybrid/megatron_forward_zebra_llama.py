@@ -2,7 +2,7 @@
 Run a single forward pass with a Megatron (mcore) Zebra-Llama checkpoint.
 
 This is intended for *numerical parity* checks against the HF implementation in
-`tools/modeling_zebra_llama.py`:
+`tools/hybrid/modeling_zebra_llama.py`:
   - same tokenizer ids
   - same logits for a fixed prompt (within dtype tolerance)
 
@@ -10,7 +10,7 @@ Usage (1 GPU):
   cd /vfs/silo/mingyyan/home_backup/Primus
   export PYTHONPATH="$(pwd):$(pwd)/third_party/Megatron-LM:${PYTHONPATH}"
 
-  torchrun --nproc_per_node=1 tools/megatron_forward_zebra_llama.py \
+  torchrun --nproc_per_node=1 tools/hybrid/megatron_forward_zebra_llama.py \
     --load output/zebra_llama_1B-pretrain/iter_0150000 \
     --prompt "The capital of France is" \
     --topk 10
@@ -34,9 +34,9 @@ import torch
 
 def _setup_sys_path() -> None:
     """Make sure Primus + Megatron are importable when run from anywhere."""
-    primus_root = Path(__file__).resolve().parent.parent
+    primus_root = Path(__file__).resolve().parent.parent.parent
     megatron_root = primus_root / "third_party" / "Megatron-LM"
-    tools_root = primus_root / "tools"
+    tools_root = primus_root / "tools" / "hybrid"
 
     for p in (str(primus_root), str(megatron_root), str(tools_root)):
         if p not in sys.path:

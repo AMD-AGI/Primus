@@ -33,7 +33,7 @@ This script reverses both transforms and writes a single
 
 Usage
 -----
-    python3 tools/consolidate_distcp_to_torch.py \
+    python3 tools/hybrid/consolidate_distcp_to_torch.py \
         --distcp-dir output/amd/root/zebra_llama_1B_gdn_pure_100B-pretrain/checkpoints/iter_0095368 \
         --output-dir output/amd/root/zebra_llama_1B_gdn_pure_100B-pretrain/checkpoints_consolidated/iter_0095368
 
@@ -241,7 +241,7 @@ def main() -> int:
     print()
     print("Done. Feed this directory to any of the FLA HF converters, e.g.:")
     print()
-    print(f"    python3 tools/convert_gdn_to_fla_hf.py \\")
+    print(f"    python3 tools/hybrid/convert_gdn_to_fla_hf.py \\")
     print(f"        --checkpoint-path {args.output_dir} \\")
     print(f"        --output-dir output/gdn_pure_1B_fla_hf \\")
     print(f"        --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json")

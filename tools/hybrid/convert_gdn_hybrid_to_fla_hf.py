@@ -29,7 +29,7 @@ and `kv_proj.1` RMSNorm weights would be missing and the FLA model would NaN.
 
 Usage (inside the container):
 
-    python tools/convert_gdn_hybrid_to_fla_hf.py \
+    python tools/hybrid/convert_gdn_hybrid_to_fla_hf.py \
         --checkpoint-path output/amd/root/zebra_llama_300M_gdn_hybrid-pretrain/checkpoints/iter_0004768 \
         --output-dir output/gdn_hybrid_300M_fla_hf \
         --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/gated_deltanet_300M_hybrid.json
@@ -42,7 +42,7 @@ import torch
 from pathlib import Path
 from collections import OrderedDict
 
-_megatron_path = str(Path(__file__).resolve().parents[1] / "third_party" / "Megatron-LM")
+_megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
 

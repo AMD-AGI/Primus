@@ -6,7 +6,7 @@ Primus uses fused projections (in_proj, conv1d, mlp.linear_fc1) and alternating
 GDN/MLP sublayers. FLA uses separate projections and combined layers.
 
 Usage:
-    python tools/convert_gdn_to_fla_hf.py \
+    python tools/hybrid/convert_gdn_to_fla_hf.py \
         --checkpoint-path output/amd/root/zebra_llama_1B_gdn_pure-pretrain/checkpoints/iter_0076294 \
         --output-dir output/gdn_pure_1B_fla_hf \
         --config /path/to/gated_deltanet_1B_pure.json
@@ -22,7 +22,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 # Ensure Megatron is importable (needed for torch.load to unpickle checkpoint)
-_megatron_path = str(Path(__file__).resolve().parents[1] / "third_party" / "Megatron-LM")
+_megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
 
@@ -193,7 +193,7 @@ def main():
     # Default config path — auto-detect model size from checkpoint
     if args.config is None:
         fla_configs_dir = Path("/home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs")
-        alt_dir = Path(__file__).parent.parent / "third_party" / "flash-linear-attention" / "legacy" / "training" / "configs"
+        alt_dir = Path(__file__).parent.parent.parent / "third_party" / "flash-linear-attention" / "legacy" / "training" / "configs"
         configs_dir = fla_configs_dir if fla_configs_dir.exists() else alt_dir
 
         # Detect from checkpoint path name

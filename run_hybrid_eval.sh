@@ -9,7 +9,7 @@
 #
 # What it does:
 #   1. Converts the Primus Megatron checkpoint → FLA HuggingFace format
-#      (uses tools/convert_gdn_hybrid_to_fla_hf.py — handles the 3 MLA + 9 GDN
+#      (uses tools/hybrid/convert_gdn_hybrid_to_fla_hf.py — handles the 3 MLA + 9 GDN
 #      sublayer mix and FLA's nn.Sequential(Linear→RMSNorm→Linear) LoRA packing)
 #   2. Runs lm-eval on the Primus-converted HF model
 #   3. Runs lm-eval on FLA's HF checkpoint (apples-to-apples comparison)
@@ -45,7 +45,7 @@ mkdir -p "${RESULTS_DIR}"
 if [ ! -f "${PRIMUS_HF_DIR}/model.safetensors" ]; then
     echo
     echo "==========[Step 1] Converting Primus → FLA HF =========="
-    python tools/convert_gdn_hybrid_to_fla_hf.py \
+    python tools/hybrid/convert_gdn_hybrid_to_fla_hf.py \
         --checkpoint-path "${PRIMUS_CKPT}" \
         --output-dir "${PRIMUS_HF_DIR}" \
         --config "${FLA_CONFIG}"
@@ -69,7 +69,7 @@ done
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 2] lm-eval on Primus HF =========="
-python tools/eval_gdn_lm_eval.py \
+python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
     --model_args "pretrained=${PRIMUS_HF_DIR},dtype=bfloat16,trust_remote_code=True" \
     --tasks "${TASKS}" \
@@ -82,7 +82,7 @@ python tools/eval_gdn_lm_eval.py \
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 3] lm-eval on FLA HF =========="
-python tools/eval_gdn_lm_eval.py \
+python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
     --model_args "pretrained=${FLA_HF_DIR},dtype=bfloat16,trust_remote_code=True" \
     --tasks "${TASKS}" \
@@ -95,7 +95,7 @@ python tools/eval_gdn_lm_eval.py \
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 4] Side-by-side scoreboard =========="
-python tools/compare_hybrid_eval.py \
+python tools/hybrid/compare_hybrid_eval.py \
     --primus-dir "${RESULTS_DIR}/primus" \
     --fla-dir "${RESULTS_DIR}/fla" \
     2>&1 | tee "${RESULTS_DIR}/scoreboard.txt"

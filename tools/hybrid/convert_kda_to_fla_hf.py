@@ -2,7 +2,7 @@
 """
 Convert Primus (Megatron) Pure KDA checkpoint → FLA HuggingFace format.
 
-This is the inverse of `tools/convert_fla_kda_init_to_megatron.py`. It takes
+This is the inverse of `tools/hybrid/convert_fla_kda_init_to_megatron.py`. It takes
 the trained `iter_NNNNNNN/mp_rank_00/model_optim_rng.pt` file Primus writes
 and emits a directory loadable by `transformers.AutoModelForCausalLM` via
 FLA's `KDAForCausalLM` (`trust_remote_code=True`).
@@ -22,7 +22,7 @@ so `fla_layer_idx` maps to `gdn_idx = 2*i` and `mlp_idx = 2*i+1`.
 
 Usage
 -----
-    python3 tools/convert_kda_to_fla_hf.py \\
+    python3 tools/hybrid/convert_kda_to_fla_hf.py \\
         --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \\
         --output-dir output/kda_pure_300M_fla_hf \\
         --config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/kda_300M_pure.json
@@ -45,7 +45,7 @@ import torch
 
 # Megatron must be on sys.path so torch.load can unpickle the ShardedTensor
 # wrappers Primus writes into the checkpoint.
-_megatron_path = str(Path(__file__).resolve().parents[1] / "third_party" / "Megatron-LM")
+_megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
 

@@ -49,7 +49,7 @@ downstream lm-eval can score each on its own merits.
 
 Usage (inside the container):
 
-    python tools/convert_mamba_hybrid_to_fla_hf.py \
+    python tools/hybrid/convert_mamba_hybrid_to_fla_hf.py \
         --checkpoint-path output/amd/root/zebra_llama_300M_mamba_hybrid-pretrain/checkpoints/iter_0004768 \
         --output-dir output/mamba_hybrid_300M_fla_hf \
         --tokenizer /home/vanbhati@amd.com/checkpoints/gdn_pure_300M_10B
@@ -62,7 +62,7 @@ import torch
 from pathlib import Path
 from collections import OrderedDict
 
-_megatron_path = str(Path(__file__).resolve().parents[1] / "third_party" / "Megatron-LM")
+_megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
 

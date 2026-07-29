@@ -74,7 +74,7 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 bash megatron_patch.sh
 
 # 2. (one time) build the FLA-init KDA-300M checkpoint
-python tools/convert_fla_kda_init_to_megatron.py
+python tools/hybrid/convert_fla_kda_init_to_megatron.py
 #  → output/fla_init_kda_300M/iter_0000000/mp_rank_00/model_optim_rng.pt
 
 # 3. Launch training (8 GPUs by default)
@@ -265,7 +265,7 @@ primus/configs/models/megatron/
   zebra_llama_300M_kda_pure.yaml                   # architecture-only
 examples/megatron/configs/MI300X/
   zebra_llama_300M_kda_pure-pretrain.yaml          # training config
-tools/
+tools/hybrid/
   convert_fla_to_megatron.py                       # FLA Arrow → Megatron .bin/.idx (shared)
   fla_order_dataset.py                             # FLA-order dataset shim (shared)
   convert_fla_kda_init_to_megatron.py              # FLA HF init → Megatron sharded ckpt

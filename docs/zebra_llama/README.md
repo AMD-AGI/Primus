@@ -347,7 +347,7 @@ Convert a Megatron checkpoint to HuggingFace format for inference and evaluation
 Pure GDN models use a dedicated converter that maps Primus's fused projections to FLA's native `GatedDeltaNetForCausalLM` format:
 
 ```bash
-python tools/convert_gdn_to_fla_hf.py \
+python tools/hybrid/convert_gdn_to_fla_hf.py \
     --checkpoint-path output/amd/root/zebra_llama_1B_gdn_pure-pretrain/checkpoints/iter_0076294 \
     --output-dir output/gdn_pure_1B_fla_hf \
     --config /path/to/gated_deltanet_1B_pure.json
@@ -363,7 +363,7 @@ This handles:
 After conversion, verify with the sanity check:
 
 ```bash
-python tools/verify_gdn_conversion.py --model-path output/gdn_pure_1B_fla_hf
+python tools/hybrid/verify_gdn_conversion.py --model-path output/gdn_pure_1B_fla_hf
 ```
 
 Expected output: Loss ~2-4, top prediction for "The capital of France is" should be "Paris".
@@ -374,12 +374,12 @@ The general converter auto-detects architecture from the checkpoint's saved argu
 
 ```bash
 # KDA+MLA hybrid model
-python tools/convert_zebra_llama_to_hf.py \
+python tools/hybrid/convert_zebra_llama_to_hf.py \
     --checkpoint-path output/zebra_llama_1B_kda-pretrain/iter_0028000 \
     --output-dir output/zebra_llama_1B_kda_hf_iter_0028000
 
 # Pure KDA model
-python tools/convert_zebra_llama_to_hf.py \
+python tools/hybrid/convert_zebra_llama_to_hf.py \
     --checkpoint-path output/zebra_llama_1B_kda_pure-pretrain/iter_0038000 \
     --output-dir output/zebra_llama_1B_kda_pure_hf
 ```
@@ -415,10 +415,10 @@ The script prints a summary of missing, extra, and shape-mismatched keys. A succ
 
 ### 5.1 Pure GDN Models (FLA format)
 
-Pure GDN models use a dedicated eval wrapper (`tools/eval_gdn_lm_eval.py`) that pre-registers FLA's `GatedDeltaNetForCausalLM` with transformers' `AutoModel` and patches compatibility issues with transformers >= 4.55:
+Pure GDN models use a dedicated eval wrapper (`tools/hybrid/eval_gdn_lm_eval.py`) that pre-registers FLA's `GatedDeltaNetForCausalLM` with transformers' `AutoModel` and patches compatibility issues with transformers >= 4.55:
 
 ```bash
-python tools/eval_gdn_lm_eval.py \
+python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
     --model_args pretrained=output/gdn_pure_1B_fla_hf,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
@@ -433,7 +433,7 @@ python tools/eval_gdn_lm_eval.py \
 KDA and hybrid models use the custom `ZebraLlamaForCausalLM` architecture, which requires a dedicated lm-eval wrapper:
 
 ```bash
-python3 tools/lm_harness_eval.py --model zebra_llama \
+python3 tools/hybrid/lm_harness_eval.py --model zebra_llama \
     --model_args pretrained=output/zebra_llama_1B_kda_pure_hf,dtype=bfloat16 \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch_size auto
@@ -442,7 +442,7 @@ python3 tools/lm_harness_eval.py --model zebra_llama \
 ### 5.3 Using the Eval Shell Script (KDA/Hybrid)
 
 ```bash
-bash tools/eval_zebra_llama_lm_eval.sh \
+bash tools/hybrid/eval_zebra_llama_lm_eval.sh \
     --checkpoint output/zebra_llama_1B_kda_pure_hf \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
     --batch-size auto \
@@ -450,7 +450,7 @@ bash tools/eval_zebra_llama_lm_eval.sh \
     --output eval_results/zebra_llama_1B_kda_pure
 ```
 
-> **Important**: The eval script internally invokes `python3 tools/lm_harness_eval.py --model zebra_llama` (not `lm_eval --model hf`). This ensures the custom model architecture is properly registered.
+> **Important**: The eval script internally invokes `python3 tools/hybrid/lm_harness_eval.py --model zebra_llama` (not `lm_eval --model hf`). This ensures the custom model architecture is properly registered.
 
 ### 5.4 Available Benchmarks
 
@@ -525,7 +525,7 @@ export PYTHONPATH="$(pwd)/third_party/Megatron-LM:${PYTHONPATH}"
 
 ### Checkpoint Conversion Shape Mismatches
 
-Ensure the `modeling_zebra_llama.py` model definition matches the architecture of your checkpoint (Mamba vs KDA vs GDN). The converter auto-detects architecture from checkpoint args, but the HF model code in `tools/modeling_zebra_llama.py` must support the target architecture. Common causes of shape mismatches:
+Ensure the `modeling_zebra_llama.py` model definition matches the architecture of your checkpoint (Mamba vs KDA vs GDN). The converter auto-detects architecture from checkpoint args, but the HF model code in `tools/hybrid/modeling_zebra_llama.py` must support the target architecture. Common causes of shape mismatches:
 
 - Mismatched `hybrid_attention_ratio` between config and checkpoint
 - Incorrect `kda_num_heads` or head dimension settings
@@ -536,7 +536,7 @@ Ensure the `modeling_zebra_llama.py` model definition matches the architecture o
 This occurs when using `lm_eval --model hf` directly instead of the custom wrapper. Always use:
 
 ```bash
-python3 tools/lm_harness_eval.py --model zebra_llama ...
+python3 tools/hybrid/lm_harness_eval.py --model zebra_llama ...
 ```
 
 Or the eval shell script, which handles this automatically.
@@ -578,18 +578,19 @@ Primus/
 │   ├── zebra_llama_3B.yaml                      # 3B model architecture
 │   └── zebra_llama_8B.yaml                      # 8B model architecture
 ├── tools/
-│   ├── convert_zebra_llama_to_hf.py             # Megatron → HF converter (KDA/hybrid)
-│   ├── convert_gdn_to_fla_hf.py                 # Megatron → FLA HF converter (pure GDN)
-│   ├── verify_gdn_conversion.py                 # Post-conversion sanity check (pure GDN)
-│   ├── eval_gdn_lm_eval.py                      # lm-eval wrapper for GDN (registers FLA)
-│   ├── convert_zebra_llama_to_hf.sh             # Converter shell wrapper
-│   ├── modeling_zebra_llama.py                  # HF model definition (KDA/hybrid)
-│   ├── lm_harness_eval.py                       # lm-eval wrapper
-│   ├── eval_zebra_llama_lm_eval.sh              # Eval shell wrapper
-│   ├── run_zebra_eval.sh                        # Quick eval script
-│   ├── chat_zebra_llama.py                      # Interactive chat
+│   ├── hybrid/
+│   │   ├── convert_zebra_llama_to_hf.py         # Megatron → HF converter (KDA/hybrid)
+│   │   ├── convert_gdn_to_fla_hf.py             # Megatron → FLA HF converter (pure GDN)
+│   │   ├── verify_gdn_conversion.py             # Post-conversion sanity check (pure GDN)
+│   │   ├── eval_gdn_lm_eval.py                  # lm-eval wrapper for GDN (registers FLA)
+│   │   ├── convert_zebra_llama_to_hf.sh         # Converter shell wrapper
+│   │   ├── modeling_zebra_llama.py              # HF model definition (KDA/hybrid)
+│   │   ├── lm_harness_eval.py                   # lm-eval wrapper
+│   │   ├── eval_zebra_llama_lm_eval.sh          # Eval shell wrapper
+│   │   ├── run_zebra_eval.sh                    # Quick eval script
+│   │   ├── chat_zebra_llama.py                  # Interactive chat
+│   │   └── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
 │   └── docker/start_container.sh                # Dev container launcher
-├── convert_fla_to_megatron.py                    # FLA Arrow → Megatron binary converter
 ├── examples/
 │   ├── run_local_pretrain.sh                    # Single-node Docker launcher
 │   ├── run_slurm_pretrain.sh                    # Slurm launcher

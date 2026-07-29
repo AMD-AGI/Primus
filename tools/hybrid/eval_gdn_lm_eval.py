@@ -9,7 +9,7 @@ with 'model type gated_deltanet not recognized'.
 
 Usage (same CLI as lm_eval, just swap the command):
 
-    python tools/eval_gdn_lm_eval.py \
+    python tools/hybrid/eval_gdn_lm_eval.py \
         --model hf \
         --model_args pretrained=output/gdn_pure_1B_fla_hf,dtype=bfloat16,trust_remote_code=True \
         --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \

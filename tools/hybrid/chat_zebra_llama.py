@@ -3,7 +3,7 @@
 Simple interactive chat for Zebra-Llama (HF-converted checkpoint).
 
 Loads:
-  - model code from: tools/modeling_zebra_llama.py
+  - model code from: tools/hybrid/modeling_zebra_llama.py
   - weights from:    output/zebra_llama_1B_hf_iter_0150000
 
 Notes:
@@ -60,10 +60,10 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None, help="cpu/cuda (default: auto)")
     args = parser.parse_args()
 
-    primus_root = Path(__file__).resolve().parent.parent
+    primus_root = Path(__file__).resolve().parent.parent.parent
     sys.path.insert(0, str(primus_root))
 
-    from tools.modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM  # noqa: E402
+    from tools.hybrid.modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM  # noqa: E402
 
     ckpt_dir = (primus_root / args.checkpoint).resolve() if not Path(args.checkpoint).is_absolute() else Path(args.checkpoint)
     if not ckpt_dir.exists():

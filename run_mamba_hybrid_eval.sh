@@ -9,7 +9,7 @@
 #
 # What it does:
 #   1. Converts the Primus Megatron checkpoint → FLA HuggingFace
-#      `Mamba2ForCausalLM` format using tools/convert_mamba_hybrid_to_fla_hf.py
+#      `Mamba2ForCausalLM` format using tools/hybrid/convert_mamba_hybrid_to_fla_hf.py
 #      (handles the 3 MLA + 9 Mamba2 sublayer mix; MLA path reuses the same
 #      channel-permutation fix as the GDN-hybrid converter)
 #   2. Runs lm-eval on the Primus-converted HF model
@@ -58,7 +58,7 @@ mkdir -p "${RESULTS_DIR}"
 if [ ! -f "${PRIMUS_HF_DIR}/model.safetensors" ]; then
     echo
     echo "==========[Step 1] Converting Primus → FLA HF (Mamba2ForCausalLM) =========="
-    python tools/convert_mamba_hybrid_to_fla_hf.py \
+    python tools/hybrid/convert_mamba_hybrid_to_fla_hf.py \
         --checkpoint-path "${PRIMUS_CKPT}" \
         --output-dir "${PRIMUS_HF_DIR}" \
         --tokenizer "${TOKENIZER}"
@@ -92,7 +92,7 @@ PRIMUS_HF_DIR="${PRIMUS_HF_DIR}" FLA_HF_DIR="${FLA_HF_DIR}" python tools/_sanity
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 2] lm-eval on Primus HF (mamba2 hybrid) =========="
-python tools/eval_mamba2_lm_eval.py \
+python tools/hybrid/eval_mamba2_lm_eval.py \
     --model hf \
     --model_args "pretrained=${PRIMUS_HF_DIR},dtype=bfloat16,trust_remote_code=True" \
     --tasks "${TASKS}" \
@@ -105,7 +105,7 @@ python tools/eval_mamba2_lm_eval.py \
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 3] lm-eval on FLA HF (mamba2 hybrid) =========="
-python tools/eval_mamba2_lm_eval.py \
+python tools/hybrid/eval_mamba2_lm_eval.py \
     --model hf \
     --model_args "pretrained=${FLA_HF_DIR},dtype=bfloat16,trust_remote_code=True" \
     --tasks "${TASKS}" \
@@ -118,7 +118,7 @@ python tools/eval_mamba2_lm_eval.py \
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "==========[Step 4] Side-by-side scoreboard =========="
-python tools/compare_hybrid_eval.py \
+python tools/hybrid/compare_hybrid_eval.py \
     --primus-dir "${RESULTS_DIR}/primus" \
     --fla-dir "${RESULTS_DIR}/fla" \
     2>&1 | tee "${RESULTS_DIR}/scoreboard.txt"

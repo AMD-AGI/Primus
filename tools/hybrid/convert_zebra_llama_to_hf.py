@@ -15,8 +15,8 @@ from pathlib import Path
 from collections import OrderedDict
 
 # Add Megatron-LM to Python path
-sys.path.insert(0, str(Path(__file__).parent.parent / "third_party" / "Megatron-LM"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "third_party" / "Megatron-LM"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def load_megatron_checkpoint(checkpoint_path):

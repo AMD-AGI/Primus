@@ -151,12 +151,12 @@ python preprocess.py \
 
 This writes Arrow shard files to `legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train/data-*.arrow`.
 
-**Step B.2 — Convert the Arrow shards to Megatron binary** using the script at `[tools/convert_fla_to_megatron.py](../../tools/convert_fla_to_megatron.py)`:
+**Step B.2 — Convert the Arrow shards to Megatron binary** using the script at `[tools/hybrid/convert_fla_to_megatron.py](../../tools/hybrid/convert_fla_to_megatron.py)`:
 
 ```bash
 cd /home/<user>/Primus
 # Edit FLA_DATA and OUT_PREFIX at the top of the script if your paths differ
-python tools/convert_fla_to_megatron.py
+python tools/hybrid/convert_fla_to_megatron.py
 ```
 
 The script reads each Arrow shard directly with PyArrow (zero HuggingFace `datasets` overhead), writes a single `.bin` containing flat int32 token IDs, and emits a Megatron `.idx` file where each 2048-token chunk is one document. It cross-checks the first 10 tokens of the output against the first sample of the first Arrow shard before finishing.
@@ -210,7 +210,7 @@ no_load_optim: true
 no_load_rng: true
 ```
 
-The Primus repo includes `tools/convert_fla_gdn_init_to_megatron.py` (the GDN counterpart of `tools/convert_fla_kda_init_to_megatron.py`) that takes the FLA HuggingFace random-init checkpoint and writes a Megatron-shape `iter_0000000/mp_rank_00/model_optim_rng.pt`. Skip this step if you're happy with Primus's own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
+The Primus repo includes `tools/hybrid/convert_fla_gdn_init_to_megatron.py` (the GDN counterpart of `tools/hybrid/convert_fla_kda_init_to_megatron.py`) that takes the FLA HuggingFace random-init checkpoint and writes a Megatron-shape `iter_0000000/mp_rank_00/model_optim_rng.pt`. Skip this step if you're happy with Primus's own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
 
 ---
 
@@ -344,10 +344,10 @@ Final wall time on a healthy MI300X box: **6832 s vs FLA 6840 s** = Primus 8 s f
 
 ## Step 7: Convert checkpoint to HuggingFace format
 
-Use `[tools/convert_gdn_to_fla_hf.py](../../tools/convert_gdn_to_fla_hf.py)` to translate the Megatron checkpoint into FLA's native `GatedDeltaNetForCausalLM` HF format:
+Use `[tools/hybrid/convert_gdn_to_fla_hf.py](../../tools/hybrid/convert_gdn_to_fla_hf.py)` to translate the Megatron checkpoint into FLA's native `GatedDeltaNetForCausalLM` HF format:
 
 ```bash
-python tools/convert_gdn_to_fla_hf.py \
+python tools/hybrid/convert_gdn_to_fla_hf.py \
     --checkpoint-path output/amd/root/zebra_llama_300M_gdn_pure-pretrain/checkpoints/iter_0004768 \
     --output-dir      output/gdn_pure_300M_fla_hf_final
 ```
@@ -382,10 +382,10 @@ For the 1B pure-GDN model, same command but use the 1B checkpoint path — the c
 
 ## Step 8: Verify conversion
 
-Run the sanity check at `[tools/verify_gdn_conversion.py](../../tools/verify_gdn_conversion.py)`:
+Run the sanity check at `[tools/hybrid/verify_gdn_conversion.py](../../tools/hybrid/verify_gdn_conversion.py)`:
 
 ```bash
-python tools/verify_gdn_conversion.py \
+python tools/hybrid/verify_gdn_conversion.py \
     --model-path output/gdn_pure_300M_fla_hf_final
 ```
 
@@ -444,14 +444,14 @@ If cosine < 0.5 → permutation bug. If 0.5–0.95 → likely missing-key issue 
 
 ## Step 9: Run lm-eval-harness benchmarks
 
-Use `[tools/eval_gdn_lm_eval.py](../../tools/eval_gdn_lm_eval.py)`, which imports `fla` first (so `AutoConfig` recognizes the `gated_deltanet` model type) and patches the FLA model `__init__` to accept the `dtype` kwarg that `transformers ≥ 4.55` passes internally.
+Use `[tools/hybrid/eval_gdn_lm_eval.py](../../tools/hybrid/eval_gdn_lm_eval.py)`, which imports `fla` first (so `AutoConfig` recognizes the `gated_deltanet` model type) and patches the FLA model `__init__` to accept the `dtype` kwarg that `transformers ≥ 4.55` passes internally.
 
 **Do not** invoke `lm_eval --model hf ...` directly — `AutoConfig.from_pretrained` will fail with `model type gated_deltanet not recognized`.
 
 ### 9.1 Standard six-task suite (~15–30 min on one MI300X)
 
 ```bash
-python tools/eval_gdn_lm_eval.py \
+python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
     --model_args pretrained=output/gdn_pure_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
@@ -462,7 +462,7 @@ python tools/eval_gdn_lm_eval.py \
 ### 9.2 Full FLA-paper suite (adds MMLU + RACE, ~1–2 h)
 
 ```bash
-python tools/eval_gdn_lm_eval.py \
+python tools/hybrid/eval_gdn_lm_eval.py \
     --model hf \
     --model_args pretrained=output/gdn_pure_300M_fla_hf_final,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,mmlu,openbookqa,piqa,race,winogrande \
@@ -516,7 +516,7 @@ primus/backends/megatron/core/models/hybrid/
 ├── gated_delta_net_layer.py                           ← eps propagation, pre-norm fusion
 ├── hybrid_block.py                                    ← HybridStack, fp32-residual + fusion
 └── hybrid_mamba_mla_layer_specs.py                    ← gdn_hybrid_stack_spec_no_te
-tools/
+tools/hybrid/
 ├── convert_fla_to_megatron.py                         ← FLA Arrow → Megatron .bin/.idx
 ├── fla_order_dataset.py                               ← FLA-order dataset shim
 ├── convert_gdn_to_fla_hf.py                           ← Megatron → FLA HF (handles TE + no-TE)
@@ -551,7 +551,7 @@ Cold MIOpen + Triton autotune caches. Normal on a freshly-rebooted node. The run
 
 ### Eval fails with `model type gated_deltanet not recognized`
 
-You ran `lm_eval --model hf` directly instead of the wrapper. Use `python tools/eval_gdn_lm_eval.py --model hf ...` — it imports `fla` first to register the model class.
+You ran `lm_eval --model hf` directly instead of the wrapper. Use `python tools/hybrid/eval_gdn_lm_eval.py --model hf ...` — it imports `fla` first to register the model class.
 
 ### Eval truncation warnings
 

@@ -45,7 +45,7 @@ After running this tool, the YAML flips to:
 Usage
 -----
     PYTHONPATH=/home/vanbhati@amd.com/flash-linear-attention \\
-      python3 tools/convert_fla_kda_init_to_megatron.py \\
+      python3 tools/hybrid/convert_fla_kda_init_to_megatron.py \\
         --fla-config /home/vanbhati@amd.com/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \\
         --output-dir /home/vanbhati@amd.com/Primus/output/fla_init_kda_300M \\
         --seed 42

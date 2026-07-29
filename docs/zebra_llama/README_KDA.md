@@ -204,7 +204,7 @@ no_load_rng: true
 Generate it once with:
 
 ```bash
-python tools/convert_fla_kda_init_to_megatron.py
+python tools/hybrid/convert_fla_kda_init_to_megatron.py
 #   → output/fla_init_kda_300M/iter_0000000/mp_rank_00/model_optim_rng.pt
 ```
 
@@ -359,12 +359,12 @@ Primus 126 s faster.
 
 ## Step 7: Convert checkpoint to HuggingFace format
 
-Use [`tools/convert_kda_to_fla_hf.py`](../../tools/convert_kda_to_fla_hf.py)
+Use [`tools/hybrid/convert_kda_to_fla_hf.py`](../../tools/hybrid/convert_kda_to_fla_hf.py)
 to translate the Megatron checkpoint into FLA's native
 `KDAForCausalLM` HF format:
 
 ```bash
-python tools/convert_kda_to_fla_hf.py \
+python tools/hybrid/convert_kda_to_fla_hf.py \
     --checkpoint-path output/amd/root/zebra_llama_300M_kda_pure-pretrain/checkpoints/iter_0004768 \
     --output-dir      output/kda_pure_300M_fla_hf \
     --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \
@@ -443,7 +443,7 @@ auto-registration in `fla/models/kda/__init__.py` fires on import.
 
 ## Step 9: Run lm-eval-harness benchmarks
 
-Use [`tools/eval_kda_lm_eval.py`](../../tools/eval_kda_lm_eval.py), which
+Use [`tools/hybrid/eval_kda_lm_eval.py`](../../tools/hybrid/eval_kda_lm_eval.py), which
 imports `fla` first (so `AutoConfig` recognizes the `kda` model type) and
 patches `KDAForCausalLM.__init__` / `KDAModel.__init__` to accept the
 `dtype` kwarg that `transformers ≥ 4.55` passes internally.
@@ -459,7 +459,7 @@ mkdir -p output/kda_pure_300M_eval_results_primus
 PYTHONPATH=/home/<user>/flash-linear-attention \
 HIP_VISIBLE_DEVICES=0 \
 TOKENIZERS_PARALLELISM=false \
-python tools/eval_kda_lm_eval.py \
+python tools/hybrid/eval_kda_lm_eval.py \
     --model hf \
     --model_args pretrained=output/kda_pure_300M_fla_hf,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
@@ -476,7 +476,7 @@ mkdir -p output/kda_pure_300M_eval_results_fla
 PYTHONPATH=/home/<user>/flash-linear-attention \
 HIP_VISIBLE_DEVICES=1 \
 TOKENIZERS_PARALLELISM=false \
-python tools/eval_kda_lm_eval.py \
+python tools/hybrid/eval_kda_lm_eval.py \
     --model hf \
     --model_args pretrained=/home/<user>/checkpoints/kda_pure_300M_10B,dtype=bfloat16,trust_remote_code=True,tokenizer=meta-llama/Llama-3.2-1B \
     --tasks arc_easy,arc_challenge,hellaswag,openbookqa,piqa,winogrande,mmlu,race \
@@ -545,7 +545,7 @@ primus/backends/megatron/core/models/hybrid/
 └── hybrid_mamba_mla_layer_specs.py                ← kda_hybrid_stack_spec_no_te
 primus/backends/megatron/patches/
 └── gdn_config_patches.py                          ← registers use_fla_triton_kda + fusion flags
-tools/
+tools/hybrid/
 ├── convert_fla_to_megatron.py                     ← FLA Arrow → Megatron .bin/.idx (shared)
 ├── fla_order_dataset.py                           ← FLA-order dataset shim (shared)
 ├── convert_fla_kda_init_to_megatron.py            ← FLA HF init → Megatron sharded ckpt
@@ -569,14 +569,14 @@ on import. Either:
   in your script BEFORE the `transformers` import, OR
 - `pip install -e /home/<user>/flash-linear-attention` once and forget
   about `PYTHONPATH`, OR
-- Use the wrapper: `python tools/eval_kda_lm_eval.py ...`
+- Use the wrapper: `python tools/hybrid/eval_kda_lm_eval.py ...`
 
 ### Conversion: `KeyError: 'decoder.layers.0.mixer.in_proj.weight'`
 
 You trained with an older code branch that still had six separate
 projections. Either re-train with the current fused-in_proj branch or
 patch the converter to read the unfused `q_proj_weight`/`k_proj_weight`/…
-keys (see git history of `tools/convert_kda_to_fla_hf.py`).
+keys (see git history of `tools/hybrid/convert_kda_to_fla_hf.py`).
 
 ### Iter 1 loss ~12.05 instead of ~11.97
 
