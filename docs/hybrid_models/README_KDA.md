@@ -124,7 +124,13 @@ Training schedule (matched to FLA's `kda_300M_pure.json`):
 ### 1.1 Start the dev container
 
 ```bash
-bash bash-docker.sh
+docker run -it \
+  --device /dev/dri --device /dev/kfd \
+  --device=/dev/infiniband --network host --ipc host \
+  --group-add video --cap-add SYS_PTRACE \
+  --security-opt seccomp=unconfined --privileged \
+  -v $HOME:$HOME -v $(pwd):$(pwd) -w $(pwd) --shm-size 64G --name primus_hybrid_new \
+  rocm/primus:v26.2
 ```
 
 This runs the `rocm/primus:v26.2` image with `/dev/dri`, `/dev/kfd`, IB
@@ -551,7 +557,6 @@ tools/hybrid/
 ├── convert_fla_kda_init_to_megatron.py            ← FLA HF init → Megatron sharded ckpt
 ├── convert_kda_to_fla_hf.py                       ← Megatron sharded ckpt → FLA HF
 └── eval_kda_lm_eval.py                            ← lm-eval wrapper (registers KDA)
-bash-docker.sh                                     ← one-shot container launcher
 ```
 
 ---

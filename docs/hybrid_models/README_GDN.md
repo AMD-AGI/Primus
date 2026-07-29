@@ -79,10 +79,14 @@ Training schedule (matched to FLA's `gated_deltanet_300M_pure.json`):
 
 ### 1.1 Start the dev container
 
-The repo ships with `bash-docker.sh` (see `[bash-docker.sh](../../bash-docker.sh)`):
-
 ```bash
-bash bash-docker.sh
+docker run -it \
+  --device /dev/dri --device /dev/kfd \
+  --device=/dev/infiniband --network host --ipc host \
+  --group-add video --cap-add SYS_PTRACE \
+  --security-opt seccomp=unconfined --privileged \
+  -v $HOME:$HOME -v $(pwd):$(pwd) -w $(pwd) --shm-size 64G --name primus_hybrid_new \
+  rocm/primus:v26.2
 ```
 
 This runs the `rocm/primus:v26.2` image with `/dev/dri`, `/dev/kfd`, IB devices, `--privileged`, your `$HOME` mounted in-place, and `--shm-size 64G`. The container is named `primus_hybrid_new`.
@@ -522,7 +526,6 @@ tools/hybrid/
 ├── convert_gdn_to_fla_hf.py                           ← Megatron → FLA HF (handles TE + no-TE)
 ├── verify_gdn_conversion.py                           ← loss + greedy generation sanity check
 └── eval_gdn_lm_eval.py                                ← lm-eval wrapper (registers FLA)
-bash-docker.sh                                         ← one-shot container launcher
 ```
 
 ---
