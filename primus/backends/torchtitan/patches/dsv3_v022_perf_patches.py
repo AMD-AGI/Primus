@@ -77,7 +77,7 @@ def patch_moe_force_load_balance_compat(ctx: PatchContext) -> None:
 )
 def patch_whole_block_compile(ctx: PatchContext) -> None:
     """Replace v0.2.2 apply_compile with v0.1.0-style whole TransformerBlock compile."""
-    from torchtitan.config.job_config import CompileConfig
+    from torchtitan.config.job_config import Compile as CompileConfig
     from torchtitan.models.llama4.infra import parallelize as parallelize_module
     from torchtitan.tools.logging import logger
 
