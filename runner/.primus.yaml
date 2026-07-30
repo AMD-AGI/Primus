@@ -78,6 +78,7 @@ container:
       - "WANDB_API_KEY"
       - "ENABLE_NUMA_BINDING"
       - "REBUILD_PRIMUS_TURBO"
+      - "GPU_ARCHS"
       - "USING_AINIC"
       - "PATCH_TE_FLASH_ATTN"
       - "REBUILD_BNXT"
