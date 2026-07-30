@@ -50,6 +50,29 @@ def _primus_turbo_enabled() -> bool:
         return False
 
 
+_UNSET = object()
+
+
+def _mxfp4_gradient_sr_enabled(config: TransformerConfig) -> bool:
+    """Resolve gradient stochastic rounding from model config or global args.
+
+    Megatron's ``TransformerConfig`` only receives declared dataclass fields,
+    while this Primus option lives on the global args namespace. Diffusion
+    configs declare the field directly, so an explicit config value takes
+    precedence over the args fallback.
+    """
+    value = getattr(config, "mxfp4_gradient_stochastic_rounding", _UNSET)
+    if value is not _UNSET:
+        return bool(value)
+
+    try:
+        from megatron.training.global_vars import get_args
+
+        return bool(getattr(get_args(), "mxfp4_gradient_stochastic_rounding", False))
+    except Exception:
+        return False
+
+
 MXFP4_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
@@ -120,7 +143,7 @@ if HAVE_TE and HAVE_TURBO:
             format=Format.E2M1_X2,
             block_size=MXFP4_SCALING_BLOCK_SIZE,
             scale_dtype=ScaleDtype.E8M0,
-            use_gradient_sr=getattr(config, "mxfp4_gradient_stochastic_rounding", False),
+            use_gradient_sr=_mxfp4_gradient_sr_enabled(config),
         )
         return fp4_quant_config, ""
 
