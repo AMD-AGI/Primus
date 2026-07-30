@@ -57,9 +57,49 @@ class MegaMoEExperts(MegatronModule):
     ) -> None:
         super().__init__(config)
         self.ep_group = ep_group
+        self.experts_per_rank = experts_per_rank
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
         self.fc1_weight = MegaMoEWeightModule(config, (experts_per_rank, 2 * intermediate_size, hidden_size))
         self.fc2_weight = MegaMoEWeightModule(config, (experts_per_rank, hidden_size, intermediate_size))
+        # Expert weights are already EP-sharded, so the DP allreduce hook must
+        # not touch them.
+        expert_parallel = config.expert_model_parallel_size > 1
+        for p in (self.fc1_weight.weight, self.fc2_weight.weight):
+            setattr(p, "allreduce", not expert_parallel)
+
+    def reset_parameters(self, ep_rank: int) -> None:
+        """Init expert weights exactly like Megatron TEGroupedLinear."""
+        init_fc1 = self.config.init_method
+        init_fc2 = self.config.output_layer_init_method
+        assert init_fc1 is not None and init_fc2 is not None, "config init methods are unset"
+        # fc1 <- init_method, fc2 <- output_layer_init_method
+        weights = (
+            (self.fc1_weight.weight, init_fc1),
+            (self.fc2_weight.weight, init_fc2),
+        )
+
+        if self.config.use_cpu_initialization:
+            # cpu rng is rank-identical: draw all experts, keep this rank's shard
+            first_expert = ep_rank * self.experts_per_rank
+            for weight, init_method in weights:
+                master = torch.empty(weight.shape[1:], dtype=torch.float32)
+                for e in range(self.config.num_moe_experts):
+                    init_method(master)
+                    if first_expert <= e < first_expert + self.experts_per_rank:
+                        weight.data[e - first_expert].copy_(master)
+            return
+
+        tracker = get_cuda_rng_tracker()
+        rng_fork = (
+            tracker.fork(get_expert_parallel_rng_tracker_name())
+            if tracker.is_initialized()
+            else contextlib.nullcontext()
+        )
+        with rng_fork:
+            # init each expert as a 2D [out, in] slice, like TE per-gemm weights
+            for weight, init_method in weights:
+                for expert_weight in weight.data:
+                    init_method(expert_weight)
 
     def forward(self, x, topk_idx, topk_weights):
         w1 = self.fc1_weight()
@@ -120,11 +160,6 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         if config.perform_initialization:
             self.reset_parameters()
 
-        # skip DP allreduce hook when EP>1
-        expert_parallel = config.expert_model_parallel_size > 1
-        for p in (self.experts.fc1_weight.weight, self.experts.fc2_weight.weight):
-            setattr(p, "allreduce", not expert_parallel)
-
         # optional shared expert
         self.use_shared_expert = config.moe_shared_expert_intermediate_size is not None
         if self.use_shared_expert:
@@ -139,37 +174,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
 
     def reset_parameters(self) -> None:
         """Init expert weights exactly like Megatron TEGroupedLinear."""
-        init_fc1 = self.config.init_method
-        init_fc2 = self.config.output_layer_init_method
-        assert init_fc1 is not None and init_fc2 is not None, "config init methods are unset"
-        # fc1 <- init_method, fc2 <- output_layer_init_method
-        weights = (
-            (self.experts.fc1_weight.weight, init_fc1),
-            (self.experts.fc2_weight.weight, init_fc2),
-        )
-
-        if self.config.use_cpu_initialization:
-            # cpu rng is rank-identical: draw all experts, keep this rank's shard
-            first_expert = self.ep_rank * self.experts_per_rank
-            for weight, init_method in weights:
-                master = torch.empty(weight.shape[1:], dtype=torch.float32)
-                for e in range(self.config.num_moe_experts):
-                    init_method(master)
-                    if first_expert <= e < first_expert + self.experts_per_rank:
-                        weight.data[e - first_expert].copy_(master)
-            return
-
-        tracker = get_cuda_rng_tracker()
-        rng_fork = (
-            tracker.fork(get_expert_parallel_rng_tracker_name())
-            if tracker.is_initialized()
-            else contextlib.nullcontext()
-        )
-        with rng_fork:
-            # init each expert as a 2D [out, in] slice, like TE per-gemm weights
-            for weight, init_method in weights:
-                for expert_weight in weight.data:
-                    init_method(expert_weight)
+        self.experts.reset_parameters(self.ep_rank)
 
     @staticmethod
     def _assert_supported_config(config: TransformerConfig) -> None:
