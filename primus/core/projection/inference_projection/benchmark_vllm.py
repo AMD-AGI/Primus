@@ -20,18 +20,30 @@ fixed overheads cancel).
 
 Reduce -> benchmark -> restore (matches the training layer benchmark)
 --------------------------------------------------------------------
-Like ``benchmark.py`` (which reduces the model to a few layers, times them, and
-lets ``performance.py`` restore the full model by layer count + parallelism), the
-vLLM backend supports the same policy for models too large to fit at full depth:
-pass ``--bench-layers`` with two or more REDUCED layer counts. The engine is built
-at each count, the step latency is fit vs layer count
-(``t(L) = overhead + L * per_layer``), and the FULL model (``--full-layers`` or the
-HF config) is RESTORED by evaluating the fit at the true depth. The emitted
-``measured``/``sweep`` are then genuine full-model latencies, which
-``performance.py`` consumes directly (the whole-model schema is used as-is, so the
-restore must happen here). Without ``--bench-layers`` the model is measured as
-configured (full depth, or a single sub-scale run via legacy
-``--num-hidden-layers`` with no restore).
+Like ``benchmark.py`` (which reduces the model, times it, and lets
+``performance.py`` restore the full model by layer count + parallelism), the vLLM
+backend supports the same policy along two axes:
+
+* **Depth** — pass ``--bench-layers`` with two or more REDUCED layer counts. The
+  engine is built at each count, step latency is fit vs layer count
+  (``t(L) = overhead + L * per_layer``), and the FULL model (``--full-layers`` or
+  the HF config) is RESTORED by evaluating the fit at the true depth.
+* **Parallelism** — pass ``--benchmark-gpus`` smaller than the target ``TP*PP``.
+  Parallelism is reduced in the same ``pp -> ep -> tp`` order as the Megatron
+  sub-node benchmark to fit the GPUs on hand (e.g. ``--tp 8 --benchmark-gpus 1``
+  runs TP=1 on 1 GPU); the artifact records both the target (``tp``/``ep``/``pp``)
+  and benchmark (``benchmark_tp``/``benchmark_ep``/``benchmark_pp``) parallelism,
+  and ``performance.py`` RESTORES the whole-model latency to the target the same
+  way it restores the per-layer Megatron bench (strip bench comm, scale shardable
+  compute by ``bench_tp/target_tp``, add target EP/TP comm + PP delta). In vLLM
+  (no data parallelism) EP == TP and the request batch is shared across the group,
+  so per-rank expert compute already scales ~1/EP and is captured by the TP
+  compute-scaling term — ``num_experts`` is left unchanged; use ``--bench-layers``
+  for MoE memory fit.
+
+Both axes compose. Without ``--bench-layers`` the model is measured at full depth
+(or a single sub-scale run via legacy ``--num-hidden-layers``); without
+``--benchmark-gpus`` it runs at the full target parallelism (no restore needed).
 
 This module is intentionally dependency-light (only ``vllm`` + stdlib) so it can
 run inside a vLLM container that does not have Primus installed::
@@ -41,8 +53,9 @@ run inside a vLLM container that does not have Primus installed::
         --input-len 1024 --batch 16 --decode-steps 32 --save out.json
 
     # reduce -> benchmark -> restore a large model from sub-scale runs
+    # (depth: 4,8 layers -> 61; parallelism: TP=1 on 1 GPU -> TP=8/EP=8)
     python3 benchmark_vllm.py --model deepseek-ai/DeepSeek-V3 --tp 8 \
-        --load-format dummy --enable-expert-parallel \
+        --load-format dummy --enable-expert-parallel --benchmark-gpus 1 \
         --bench-layers 4,8 --full-layers 61 \
         --input-len 1024 --batches 4,16,64 --save out.json
 """
@@ -119,6 +132,46 @@ def _num_experts(model: str, trust_remote_code: bool) -> int:
             if isinstance(v, int) and v > 1:
                 return v
     return 0
+
+
+def _reduce_parallelism(target_tp, target_pp, target_ep, benchmark_gpus):
+    """Reduce parallelism to fit ``benchmark_gpus`` GPUs, in the same
+    ``pp -> ep -> tp`` order as the Megatron sub-node benchmark
+    (``_calculate_single_node_config``).
+
+    In vLLM (without data parallelism) the world size is ``tp * pp`` and expert
+    parallelism is NOT an independent GPU axis: ``EP == TP`` and the request batch
+    is *shared* across the TP/EP group (KV duplicated per GPU), so each rank's
+    expert-GEMM work already scales as ~1/EP. That reduction is captured by the
+    TP compute-scaling term (``bench_tp/target_tp``) on restore — we do NOT touch
+    ``num_experts`` (cutting it would change the model's compute, not preserve it,
+    unlike Megatron where per-rank token load is fixed by the local micro-batch).
+    Memory fit for large MoE models is handled by depth reduction
+    (``--bench-layers``) instead. So after collapsing PP, the only GPU-count
+    reduction is TP, and EP follows it.
+
+    Returns ``(bench_tp, bench_pp, bench_ep)``.
+    """
+    tp = max(1, int(target_tp))
+    pp = max(1, int(target_pp))
+    ep = max(1, int(target_ep))
+    if benchmark_gpus is None or benchmark_gpus >= tp * pp:
+        return tp, pp, ep
+
+    # Step 1: PP -> 1 (cheapest to add back — a single P2P delta on restore).
+    bench_pp = 1
+    bench_tp = tp
+
+    # Steps 2/3: EP then TP. EP is tied to TP in vLLM, so reducing TP reduces EP.
+    if bench_tp * bench_pp > benchmark_gpus:
+        max_tp = max(1, benchmark_gpus // bench_pp)
+        bench_tp = 1
+        for cand in (max_tp, max_tp // 2, 1):
+            if 1 <= cand <= max_tp and tp % cand == 0:
+                bench_tp = cand
+                break
+    bench_ep = bench_tp if target_ep > 1 else 1
+    return bench_tp, bench_pp, bench_ep
 
 
 _ZIPF_MARKER = "PRIMUS_ZIPF_ROUTING"
@@ -401,13 +454,35 @@ def run_vllm_benchmark(args) -> dict:
     # Real weights => the trained router needs varied input to route realistically.
     random_tokens = args.random_tokens or real_weights
 
+    # --- REDUCE PARALLELISM (pp -> ep -> tp) to fit --benchmark-gpus ----------
+    # Target parallelism is what we PROJECT to; the benchmark may run at a smaller
+    # parallelism that fits the GPUs on hand (e.g. TP=1 on 1 GPU). performance.py
+    # then RESTORES the whole-model latency to the target TP/EP/PP the same way
+    # the Megatron per-layer path does. In vLLM (no DP) EP == TP and the request
+    # batch is shared across the group, so per-rank expert compute scales ~1/EP
+    # and is handled by the TP compute-scaling term on restore; num_experts is
+    # left untouched (use --bench-layers for MoE memory fit).
+    target_tp = max(1, int(args.tp))
+    target_pp = max(1, int(getattr(args, "pp", 1) or 1))
+    target_ep = target_tp if args.enable_expert_parallel else 1
+    benchmark_gpus = getattr(args, "benchmark_gpus", None)
+    bench_tp, bench_pp, bench_ep = _reduce_parallelism(
+        target_tp, target_pp, target_ep, benchmark_gpus
+    )
+    reduced_parallelism = (bench_tp, bench_pp, bench_ep) != (target_tp, target_pp, target_ep)
+    if reduced_parallelism:
+        print(f"[Primus:Inference:vLLM-Benchmark] REDUCE PARALLELISM (pp->ep->tp) to fit "
+              f"{benchmark_gpus} GPU(s): TP {target_tp}->{bench_tp}, EP {target_ep}->{bench_ep}, "
+              f"PP {target_pp}->{bench_pp} (performance.py restores to target)")
+
     def _build_llm(num_layers_override):
-        """Build a vLLM engine, optionally overriding the transformer layer count."""
+        """Build a vLLM engine at the (possibly reduced) benchmark parallelism,
+        optionally overriding the transformer layer count."""
         from vllm import LLM
 
         kwargs = dict(
             model=args.model,
-            tensor_parallel_size=args.tp,
+            tensor_parallel_size=bench_tp,
             load_format=args.load_format,
             gpu_memory_utilization=args.gpu_mem_util,
             max_model_len=max_len,
@@ -415,12 +490,14 @@ def run_vllm_benchmark(args) -> dict:
             trust_remote_code=args.trust_remote_code,
             enforce_eager=args.enforce_eager,
         )
+        if bench_pp > 1:
+            kwargs["pipeline_parallel_size"] = bench_pp
         # Expert parallelism: shard MoE experts across the TP ranks (EP = TP)
         # instead of tensor-slicing each expert. Required to expose the
         # imbalance-sensitive effects — the MoE step is then gated by the BUSIEST
         # rank's expert load plus the all-to-all dispatch/combine volume, which a
         # single-rank (EP=1) grouped GEMM hides (FLOPs conserved under skew).
-        if args.enable_expert_parallel:
+        if bench_ep > 1:
             kwargs["enable_expert_parallel"] = True
         # The benchmark drives the engine purely with ``prompt_token_ids`` (never
         # text), so the tokenizer is unnecessary. Skipping its init avoids a hard
@@ -432,6 +509,8 @@ def run_vllm_benchmark(args) -> dict:
             kwargs["quantization"] = args.quantization
         if args.kv_cache_dtype:
             kwargs["kv_cache_dtype"] = args.kv_cache_dtype
+        # HF override: reduced layer count only (depth restore). num_experts is
+        # deliberately NOT reduced — see the reduce-parallelism note above.
         if num_layers_override:
             kwargs["hf_overrides"] = {"num_hidden_layers": int(num_layers_override)}
         return LLM(**kwargs)
@@ -519,8 +598,15 @@ def run_vllm_benchmark(args) -> dict:
             "batch": ref["batch"],
             "input_len": args.input_len,
             "decode_steps": args.decode_steps,
-            "tp": args.tp,
-            "ep": args.tp if args.enable_expert_parallel else 1,
+            # Target parallelism (what performance.py restores TO)...
+            "tp": target_tp,
+            "ep": target_ep,
+            "pp": target_pp,
+            # ...and the parallelism the benchmark actually RAN at (restore FROM).
+            "benchmark_tp": bench_tp,
+            "benchmark_ep": bench_ep,
+            "benchmark_pp": bench_pp,
+            "benchmark_gpus": benchmark_gpus,
             "num_hidden_layers": eff_layers,
             "restored": restore_meta is not None,
             "restore": restore_meta,
@@ -545,7 +631,17 @@ def run_vllm_benchmark(args) -> dict:
 def main():
     ap = argparse.ArgumentParser(description="vLLM inference benchmark backend")
     ap.add_argument("--model", required=True, help="HF model id or local path")
-    ap.add_argument("--tp", type=int, default=1, help="tensor parallel size")
+    ap.add_argument("--tp", type=int, default=1,
+                    help="TARGET tensor parallel size to project to (the benchmark "
+                         "may run at a smaller TP via --benchmark-gpus and restore).")
+    ap.add_argument("--pp", type=int, default=1,
+                    help="TARGET pipeline parallel size to project to.")
+    ap.add_argument("--benchmark-gpus", type=int, default=None,
+                    help="GPUs available for the actual vLLM run. When smaller than "
+                         "TP*PP, parallelism is reduced (pp->ep->tp) to fit and "
+                         "performance.py restores the whole-model latency to the "
+                         "target TP/EP/PP. E.g. --tp 8 --benchmark-gpus 1 runs TP=1 "
+                         "on 1 GPU and projects to TP=8.")
     ap.add_argument("--quantization", default=None, help="e.g. fp8, mxfp4 (None=from config)")
     ap.add_argument("--kv-cache-dtype", default=None, help="e.g. fp8 (None=auto)")
     ap.add_argument("--input-len", type=int, default=1024)

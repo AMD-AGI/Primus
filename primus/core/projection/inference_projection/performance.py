@@ -348,6 +348,11 @@ class InferencePerformanceProjector:
         # curve; fall back to the single ``model`` anchor at ``ref_batch``.
         model_step = measured.get("model")
         if model_step:
+            # Restore a reduced-parallelism (benchmark) whole-model measurement to
+            # the target TP/EP/PP, in the same pp -> ep -> tp order as the Megatron
+            # per-layer path. Builds the bench/target collective models; a no-op
+            # when the benchmark already ran at the target parallelism.
+            self._setup_restoration()
             sweep = benchmark_layer_times.get("sweep") or []
             pre_pts, dec_pts = [], []
             for e in sweep:
@@ -363,6 +368,10 @@ class InferencePerformanceProjector:
                 pre_pts = [(ref_batch, float(model_step["prefill_ms"]))]
             if not dec_pts and model_step.get("decode_ms"):
                 dec_pts = [(ref_batch, float(model_step["decode_ms"]))]
+            if self._restore:
+                # Prefill processes ``ref_input`` tokens/seq; decode 1 token/step.
+                pre_pts = [(b, self._restore_whole(ms, b, ref_input)) for b, ms in pre_pts]
+                dec_pts = [(b, self._restore_whole(ms, b, 1)) for b, ms in dec_pts]
             self._meas_whole = {
                 k: v for k, v in (("prefill", sorted(pre_pts)), ("decode", sorted(dec_pts))) if v
             }
@@ -441,6 +450,34 @@ class InferencePerformanceProjector:
         if not self._restore:
             return 0.0
         return self._comm_tgt.pp_p2p_ms(batch, tokens) - self._comm_bench.pp_p2p_ms(batch, tokens)
+
+    def _restore_whole(self, ms_bench: float, batch: int, tokens: int) -> float:
+        """Restore a whole-model (vLLM) step latency measured at the benchmark's
+        reduced parallelism to the target TP/EP/PP, training-style and in the same
+        ``pp -> ep -> tp`` order as the Megatron per-layer path:
+
+          * strip the benchmark's per-layer communication (summed over layers) so
+            only shardable compute remains,
+          * scale that compute by ``bench_tp / target_tp`` (TP),
+          * add the target communication back — which includes the target EP
+            all-to-all and TP all-reduce (EP + TP), and
+          * add the ``(pp-1)`` P2P delta for the target PP (PP).
+
+        No-op when bench and target parallelism match, mirroring
+        ``_restore_per_layer`` but applied to the full-model total (the whole-model
+        vLLM step is not separable per layer, so comm is composed by layer count)."""
+        if not self._restore or ms_bench <= 0.0:
+            return ms_bench
+
+        def _comm_total(cm) -> float:
+            dense = cm.layer_comm_ms(batch, tokens, is_moe=False).total_ms if self._n_dense else 0.0
+            moe = cm.layer_comm_ms(batch, tokens, is_moe=True).total_ms if self._n_moe else 0.0
+            return self._n_dense * dense + self._n_moe * moe
+
+        comm_bench = _comm_total(self._comm_bench)
+        comm_tgt = _comm_total(self._comm_tgt)
+        compute = max(0.0, ms_bench - comm_bench) * (self._bench_tp / self._tgt_tp)
+        return compute + comm_tgt + self._restore_pp_ms(batch, tokens)
 
     # -- per-pass forward time -------------------------------------------------
 
