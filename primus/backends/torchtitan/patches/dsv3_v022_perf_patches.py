@@ -93,9 +93,7 @@ def patch_whole_block_compile(ctx: PatchContext) -> None:
     from torchtitan.models.llama4.infra import parallelize as parallelize_module
     from torchtitan.tools.logging import logger
 
-    def apply_compile_patched(
-        model: nn.Module, compile_config: CompileConfig, ep_enabled: bool
-    ) -> None:
+    def apply_compile_patched(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool) -> None:
         # Match v0.1.0: do NOT set capture_scalar_outputs=True (avoids fragmentation).
         for layer_id, transformer_block in model.layers.named_children():
             fullgraph = not transformer_block.moe_enabled
@@ -138,9 +136,7 @@ def _moe_forward_bf16_combine(self: Any, x: torch.Tensor) -> torch.Tensor:
     routed_input = x[token_indices_experts_sorted // self.router.top_k]
 
     if self.score_before_experts:
-        routed_input = (
-            routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
-        ).to(x.dtype)
+        routed_input = (routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
 
     routed_output = self.experts(routed_input, num_tokens_per_expert)
 
@@ -155,9 +151,7 @@ def _moe_forward_bf16_combine(self: Any, x: torch.Tensor) -> torch.Tensor:
     routed_output_unsorted = routed_output_unsorted.reshape(-1, self.router.top_k, dim)
 
     if not self.score_before_experts:
-        out_experts = (
-            routed_output_unsorted * top_scores.reshape(-1, self.router.top_k, 1)
-        ).sum(dim=1)
+        out_experts = (routed_output_unsorted * top_scores.reshape(-1, self.router.top_k, 1)).sum(dim=1)
     else:
         out_experts = routed_output_unsorted.sum(dim=1)
 
