@@ -5,17 +5,30 @@
 ###############################################################################
 
 """
-Distributed initialization patches (FSDP2 only).
+Distributed initialization patches (opt-in, FSDP2 only).
 
 Patches Megatron's _initialize_distributed to pass device_id to
 torch.distributed.init_process_group. Without device_id, RCCL guesses
-the GPU-to-rank mapping, which causes deadlocks on MI355X after the
-first FSDP2 iteration.
+the GPU-to-rank mapping, which was reported to cause deadlocks on MI355X
+after the first FSDP2 iteration.
 
-This patch is gated on use_torch_fsdp2 because device_id triggers eager
-RCCL communicator creation for the world PG and all ~26 Megatron sub-groups,
-consuming ~768 MiB of additional GPU memory. Under DDP this extra allocation
-pushes large models over the GPU memory limit.
+device_id triggers eager RCCL communicator creation for the world PG and all
+~26 Megatron sub-groups. That is expensive, so the patch is opt-in via
+enable_init_process_group_device_id (default false):
+
+- +16.0 GiB/GPU peak VRAM and +9.9 s startup, measured on llama3-70B BF16
+  FSDP2, 1 node x 8 MI355X, TP/PP/EP=1, ROCm 26.5. The memory is invisible to
+  the torch caching allocator (max reserved is byte-identical across arms), so
+  it is communicator-side, not activations or parameters.
+- No throughput effect there (-0.07 %, within run-to-run noise over two
+  interleaved repeats per arm).
+- Under ODC the eager communicators also serialize XGMI copy streams; see the
+  condition below.
+
+The deadlock this guards against did not reproduce on that recipe with the
+patch disabled, on either ROCm 26.5 or 26.3, so it must not be assumed
+necessary everywhere. It has not been tested multi-node or with TP/PP/EP > 1,
+which is why the patch is kept rather than removed. See AIMA-227.
 """
 
 import os
@@ -32,9 +45,14 @@ from primus.core.utils.module_utils import log_rank_0
     phase="before_train",
     description=(
         "Inject device_id into torch.distributed.init_process_group to "
-        "prevent RCCL device mapping deadlocks on MI355X (FSDP2 only)."
+        "prevent RCCL device mapping deadlocks on MI355X "
+        "(opt-in, FSDP2 only)."
     ),
     priority=10,
+    # Opt-in: the eager communicator creation costs +16.0 GiB/GPU and +9.9 s of
+    # startup for no throughput gain on llama3-70B FSDP2 (see module docstring),
+    # so callers must ask for it on the configurations where it buys liveness.
+    #
     # ODC (enable_odc=true) drives gradient exchange over rocSHMEM P2P, not RCCL, and
     # relies on those P2P copy streams overlapping with compute in the backward pass.
     # The device_id injection here eagerly creates the world + ~26 sub-group RCCL
@@ -45,7 +63,9 @@ from primus.core.utils.module_utils import log_rank_0
     # under ODC. Safe on MI300X (the MI355X deadlock this guards does not trigger
     # here; commits before this patch existed ran ODC correctly).
     condition=lambda ctx: (
-        getattr(get_args(ctx), "use_torch_fsdp2", False) and not getattr(get_args(ctx), "enable_odc", False)
+        getattr(get_args(ctx), "enable_init_process_group_device_id", False)
+        and getattr(get_args(ctx), "use_torch_fsdp2", False)
+        and not getattr(get_args(ctx), "enable_odc", False)
     ),
 )
 def patch_init_process_group_device_id(ctx: PatchContext):
