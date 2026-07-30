@@ -17,6 +17,7 @@ This is the MaxText counterpart of ``TorchTitanAdapter``. It is responsible for:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,44 @@ class MaxTextAdapter(BackendAdapter):
     def __init__(self, framework: str = "maxtext"):
         super().__init__(framework)
         self.third_party_dir_name = "maxtext"
+
+    def prepare_backend(self, config: Any):
+        """
+        Prepare the MaxText/JAX backend environment before trainer construction.
+
+        In addition to the base setup, apply MaxText/ROCm architecture defaults
+        via ``os.environ.setdefault`` so they NEVER override values already set by
+        the environment or by a per-config top-level ``env:`` block (which the
+        runtime applies earlier in :meth:`TrainRuntime._apply_config_env`).
+
+        Effective precedence (highest wins):
+            per-config ``env:``  >  these arch defaults  >  image-baked defaults
+        """
+        self._apply_arch_env_defaults()
+        super().prepare_backend(config)
+
+    @staticmethod
+    def _apply_arch_env_defaults() -> None:
+        """Set backend/arch env defaults (only when unset) before JAX/XLA init."""
+        # gfx950 (MI350X/MI355X) NaN/hang workaround; harmless / no-op on gfx942.
+        if MaxTextAdapter._is_gfx950():
+            if os.environ.setdefault("RCCL_WARP_SPEED_AUTO", "0") == "0":
+                log_rank_0("[Primus:maxtext] gfx950 detected: RCCL_WARP_SPEED_AUTO=0 (default)")
+
+    @staticmethod
+    def _is_gfx950() -> bool:
+        """Best-effort detection of a gfx950 (MI350X/MI355X) device via rocminfo."""
+        import shutil
+        import subprocess
+
+        rocminfo = shutil.which("rocminfo") or "/opt/rocm/bin/rocminfo"
+        try:
+            out = subprocess.run(
+                [rocminfo], capture_output=True, text=True, timeout=15
+            ).stdout
+        except Exception:  # noqa: BLE001 - detection must never abort a run
+            return False
+        return "gfx950" in out
 
     def setup_backend_path(self, backend_path=None) -> str:
         """

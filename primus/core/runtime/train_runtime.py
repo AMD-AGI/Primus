@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,6 +99,9 @@ class PrimusRuntime:
         try:
             # 1) Initialize configuration (PrimusConfig + module_config + CLI overrides)
             self._initialize_configuration(module_name, overrides)
+            # 1.5) Apply per-config environment overrides (top-level `env:`) before
+            #      any backend / distributed / JAX initialization consumes them.
+            self._apply_config_env()
             # 2) Initialize runtime environment (paths, distributed, logging)
             self._initialize_runtime_environment()
             # 3) Initialize backend and execute trainer lifecycle
@@ -143,6 +147,8 @@ class PrimusRuntime:
 
         # 1) Configuration (optionally injected, so callers can pre-mutate it)
         self._initialize_configuration(module_name, overrides, primus_config=primus_config)
+        # 1.5) Apply per-config environment overrides (top-level `env:`).
+        self._apply_config_env()
         # 2) Runtime environment (paths, distributed, logging)
         self._initialize_runtime_environment()
         # 3) Backend adapter + trainer (convert config, build_args patches, instantiate)
@@ -297,6 +303,59 @@ class PrimusRuntime:
         base_params_dict = nested_namespace_to_dict(module_cfg.params)
         merged_params_dict = deep_merge(base_params_dict, override_dict)
         module_cfg.params = dict_to_nested_namespace(merged_params_dict)
+
+    def _apply_config_env(self) -> None:
+        """Apply a top-level ``env:`` mapping from the experiment YAML into ``os.environ``.
+
+        This is the single, launcher-agnostic hook for per-config environment
+        overrides (e.g. ``XLA_FLAGS``, ``XLA_PYTHON_CLIENT_MEM_FRACTION``,
+        ``RCCL_WARP_SPEED_AUTO``). It runs after configuration is loaded but
+        BEFORE the runtime environment, distributed init, backend adapter, or any
+        ``import jax`` — so exported flags take effect for JAX/XLA and RCCL.
+
+        The block lives at the top level of the YAML (a sibling of ``modules:``),
+        NOT inside a module, so it is never swept into ``module_config.params``
+        and therefore never forwarded to the backend (MaxText/Megatron) args:
+
+            env:
+              XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
+              RCCL_WARP_SPEED_AUTO: "0"
+
+        Semantics:
+          - Values are stringified and ``os.environ[k] = str(v)`` unconditionally,
+            so a per-config ``env:`` WINS over values baked into the image.
+          - ``$VAR`` / ``${VAR}`` references are expanded via ``os.path.expandvars``
+            (bash ``${VAR:-default}`` syntax is NOT expanded).
+          - Best-effort: a malformed or missing ``env:`` never aborts the run.
+        """
+        cfg_path = getattr(self.ctx, "config_path", None) if self.ctx is not None else None
+        if not cfg_path:
+            return
+        try:
+            import yaml
+
+            cfg_path = Path(cfg_path)
+            if not cfg_path.exists():
+                return
+            with open(cfg_path) as f:
+                raw = yaml.safe_load(f) or {}
+            env_block = raw.get("env") if isinstance(raw, dict) else None
+            if not env_block:
+                return
+            if not isinstance(env_block, dict):
+                # NOTE: logger is not initialized yet at this stage (see
+                # _initialize_runtime_environment), so use print() like _apply_overrides.
+                print(
+                    f"[Primus:Runtime] Ignoring non-mapping top-level `env:` in {cfg_path.name} "
+                    f"(type={type(env_block).__name__})"
+                )
+                return
+            for key, value in env_block.items():
+                resolved = os.path.expandvars(str(value))
+                os.environ[str(key)] = resolved
+                print(f"[Primus:Runtime] env override: {key}={resolved}")
+        except Exception as exc:  # noqa: BLE001 - env overrides must never abort a run
+            print(f"[Primus:Runtime] WARNING: could not apply top-level `env:` from config: {exc}")
 
     def _initialize_distributed_context(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before distributed init."

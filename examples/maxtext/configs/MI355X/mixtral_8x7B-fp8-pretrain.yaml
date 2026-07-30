@@ -3,6 +3,13 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-fp8-pretrain}
 workspace: ./output
 
+# Per-config environment (single source of truth in Primus). TrainRuntime applies
+# this top-level `env:` before JAX/XLA init, overriding the base image's baked value.
+# mixtral_8x7B bs11 peaks ~270-274 GB / 288 GB HBM and needs a larger XLA client pool than
+# the image default (0.9); combined with moe_dispatch_no_expert_sharding it fits on one GPU.
+env:
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
+
 modules:
   pre_trainer:
     framework: maxtext
@@ -32,6 +39,11 @@ modules:
       ici_fsdp_parallelism: 1
       ici_data_parallelism: 1
       ici_expert_parallelism: -1
+
+      # MoE dispatch keeps experts unsharded across the expert axis (AMD-AGI/Primus#921):
+      # required for mixtral_8x7B so dispatch does not materialize a full unsharded expert
+      # tensor that OOMs a single MI355X device.
+      moe_dispatch_no_expert_sharding: true
 
       sparse_matmul: false
       megablox: false
