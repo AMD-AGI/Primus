@@ -1,3 +1,12 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions of this file are copied and modified from ROCm/aiter
+# (https://github.com/ROCm/aiter), PR #2922 (aiter/ops/triton/_gluon_kernels/gfx950).
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Gluon dQ backward kernel for DeepSeek V4 sparse MLA (gfx950 / MI355X).
 

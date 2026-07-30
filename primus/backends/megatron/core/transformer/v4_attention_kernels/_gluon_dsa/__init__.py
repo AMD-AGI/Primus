@@ -1,5 +1,8 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions of this package are copied and modified from ROCm/aiter
+# (https://github.com/ROCm/aiter), PR #2922 (``aiter/ops/triton/_gluon_kernels/gfx950``).
 #
 # See LICENSE for license information.
 ###############################################################################

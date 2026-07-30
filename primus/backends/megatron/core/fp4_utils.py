@@ -1,6 +1,9 @@
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
+# Portions of this file are copied and modified from Megatron-LM
+# (https://github.com/NVIDIA/Megatron-LM), megatron/core/fp4_utils.py.
+#
 # See LICENSE for license information.
 ###############################################################################
 
