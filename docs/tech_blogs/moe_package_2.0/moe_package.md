@@ -39,7 +39,7 @@ review, so its placeholders do not sit unmarked next to measured results.
 
 # MoE Training Optimization with Primus
 
-_Mixture-of-Experts (MoE) is now the default architecture for frontier-scale language models, and our users increasingly train large MoE models on AMD Instinct™ GPUs. This post walks through the MoE training optimizations we built in Primus in response to those workloads, working bottom-up through the stack: the general **Primus + Primus-Turbo** framework optimizations every MoE run inherits, kernel-level work (**low-precision expert GEMMs** and a fused MoE **megakernel**), **time-to-train** optimization of DeepSeek-V3 at up to 1024 GPUs, the different bottleneck regime of **small MoE models** benchmarked against **NVIDIA B200**, our **JAX (MaxText)** training path, and the **projection** tool that sizes a run before it starts. Both the Megatron-LM and JAX backends of Primus are covered. For the foundational optimizations this work builds on, see our earlier [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) post._
+_Mixture-of-Experts (MoE) is now the default architecture for frontier-scale language models, and our users increasingly train large MoE models on AMD Instinct™ GPUs. This post walks through the MoE training optimizations we built in Primus in response to those workloads, working bottom-up through the stack: the general **Primus + Primus-Turbo** framework optimizations every MoE run inherits, kernel-level work (**low-precision expert GEMMs** and a fused MoE **megakernel**), **time-to-train** case studies spanning DeepSeek-V3 at up to 1024 GPUs and the GPT-OSS-20B MLPerf workflow, the different bottleneck regime of **small MoE models** benchmarked against **NVIDIA B200**, our **JAX (MaxText)** training path, and the **projection** tool that sizes a run before it starts. Both the Megatron-LM and JAX backends of Primus are covered. For the foundational optimizations this work builds on, see our earlier [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) post._
 
 All feature demonstrations and benchmarking results in this guide are built on Primus. [Primus/Primus-LM](https://github.com/AMD-AGI/Primus) is a flexible, high-performance framework for large-scale foundation model training and inference on AMD GPUs. As the training-framework layer of the Primus ecosystem, Primus-LM works alongside [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) (high-performance operators) and [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) (stability and platform infrastructure) to deliver a scalable, production-ready solution for state-of-the-art large-model development.
 
@@ -69,16 +69,17 @@ Representative models in this generation include DeepSeek-V3, Qwen3-235B-A22B an
 
 ### Where the time goes, and what this post covers
 
-Those trends mean MoE training efficiency is no longer about fast GEMMs alone. A modern MoE step is limited by four different things at once, and an optimization that attacks only one of them tends to expose the next. The table below maps each bottleneck to the work described in this post, so you can jump straight to what is limiting your own runs.
+Those trends mean MoE training efficiency is no longer about fast GEMMs alone. A modern MoE step is limited by several different things at once, and an optimization that attacks only one of them tends to expose the next. The table below maps each bottleneck to the work described in this post, so you can jump straight to what is limiting your own runs.
 
 | Bottleneck | What we did about it | Section |
 |---|---|---|
 | **Expert GEMM throughput** — expert FFNs dominate FLOPs | FP8/MXFP8 grouped GEMM, FlyDSL kernels, quantized-weight caching | [Low-precision expert GEMMs](#low-precision-expert-gemms) |
 | **All-to-all dispatch/combine** — grows with top-k and EP width | DeepEP dispatch, 1F1B all-to-all overlap, and tile-granularity fusion inside a single kernel | [Framework foundation](#the-foundation-primus--primus-turbo), [Megakernel](#research-preview-the-moe-megakernel) |
 | **Memory ceiling** — sets micro-batch size and recompute cost | Precision-aware optimizer, pipeline layout, fine-grained recompute, ahead-of-time projection | [DeepSeek-V3 at scale](#time-to-train-deepseek-v3-at-256-1024-gpus), [Projection](#planning-before-you-train-primus-projection) |
+| **End-to-end time-to-quality** — throughput alone does not determine TTT | Topology correction, lower data movement, full-path fusion, warm-up, and convergence-aware batch sizing | [GPT-OSS-20B time-to-train](#time-to-train-gpt-oss-20b) |
 | **Host and launch overhead** — dominates when layers are small | Sync-free MoE, NUMA binding and launch tuning, pipeline warm-up | [Framework foundation](#the-foundation-primus--primus-turbo), [Small MoE models](#small-moe-models-a-different-bottleneck-regime) |
 
-Two sections sit outside that grid: the [JAX (MaxText) path](#beyond-megatron-lm-the-jax-maxtext-path), which brings the same grouped-GEMM and DeepEP primitives to a second backend, and [Primus Projection](#planning-before-you-train-primus-projection), which answers "will it fit, and how fast?" before any cluster time is spent.
+The [JAX (MaxText) path](#beyond-megatron-lm-the-jax-maxtext-path) sits outside that bottleneck grid, bringing the same grouped-GEMM and DeepEP primitives to a second backend.
 
 ### Results at a glance
 
@@ -386,6 +387,71 @@ The long-run median (22.08 s) sits about 2% above the short-benchmark step time 
 
 ---
 
+## Time-to-Train: GPT-OSS-20B
+
+The DeepSeek-V3 study shows how memory and pipeline scheduling determine throughput at scale. GPT-OSS-20B exposes a different time-to-train problem: reaching a fixed quality target on one node means accounting for initialization and kernel warm-up, training steps, periodic evaluation, communication, input-pipeline work, and failed or restarted runs—not just maximizing steady-state tokens per second.
+
+### GPT-OSS-20B optimization journey
+
+This discussion is scoped to the validated single-node recipe; later multi-node development is intentionally excluded. The public Primus entry points are the [GPT-OSS-20B training config](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml), [MI355X system configuration](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh), and [outer timing script](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/run_and_time.sh). The shell configuration deliberately overrides several YAML defaults; the effective recipe is:
+
+| Setting | Value |
+|---|---|
+| Hardware | 1 node × 8 AMD Instinct MI355X GPUs |
+| Model | 20B total parameters, approximately 3.6B active per token, 24 layers, 32 experts, top-4 routing |
+| Attention | Alternating sliding-window and full attention, sequence length 8192 |
+| Parallelism | TP1 / PP1 / EP1 / DP8 |
+| Batch | MBS 4 / GBS 32 |
+| Precision | E4M3 tensorwise FP8 for linear layers |
+| Grouped-GEMM backend | Triton |
+| Data | Tokenized C4 |
+| Quality target | Validation log perplexity ≤ 3.34 |
+| Evaluation | Every 12,288 training samples, over 1024 validation sequences |
+
+The fixed quality and evaluation contract is the first optimization guardrail. Evaluation is expressed in *samples*, not iterations, so changing global batch size does not silently change evaluation frequency or thoroughness. Within an A/B test at a given scale, a performance change is retained only if it preserves the same optimizer schedule and reaches the same quality target.
+
+The recipe evolved in four stages:
+
+| Stage | Main change | Why it improves TTT |
+|---|---|---|
+| Initial baseline | EP8, DeepEP/flex dispatch, sync-free MoE stage 2, MBS 2, hybrid/delayed FP8 | Established a functional MoE baseline, but carried communication and synchronization machinery that was not optimal for this single-node model |
+| Topology correction | EP1, all-to-all dispatcher, grouped GEMM, MBS 4, fused cross-entropy | Removed unnecessary expert-parallel communication and increased work per launch while preserving GBS 32 |
+| Critical-path reduction | BF16 gradient reduction, eight DDP buckets, overlapped reduce/gather, identity-sort elimination, tensorwise FP8, tuned RMSNorm | Reduced communication bytes, tensor movement, CPU synchronization, and high-frequency kernel overhead |
+| Final recipe hardening | Fused residual/RMSNorm, SwiGLU no-cat, fused router/activation, tuned attention/RoPE, RCCL parameter gather, offline GEMM selection, warm-up and log suppression | Hardened a reproducible single-node recipe without changing its quality contract |
+
+**Choose parallelism for the workload, not for the architecture label.** The original EP8 path divided 32 experts across the eight GPUs and therefore required expert dispatch collectives. GPT-OSS-20B is small enough for each MI355X to hold the complete expert set, so the final single-node recipe uses EP1 and DP8. DeepEP and sync-free MoE are disabled (`use_turbo_deepep: false`, `turbo_sync_free_moe_stage: 0`), while grouped GEMM remains enabled locally. At TP1/EP1, the per-expert index can be an identity permutation; `MOE_SKIP_IDENTITY_SORT=1` detects that case and removes two otherwise redundant sort/copy paths. After the accompanying memory and kernel tuning, MBS rises from 2 to 4 without changing GBS.
+
+**Reduce data movement before adding more compute kernels.** Gradient reduction runs in BF16, DDP uses multiple buckets, and gradient reduction overlaps parameter gathering. We also evaluated moving parameter shards through SDMA peer copies, but the v26.5 stack keeps the RCCL path by default after the SDMA path exposed a barrier-related regression; the experimental path should not be counted as part of the validated recipe.
+
+**Optimize the complete token path.** E4M3 tensorwise FP8 replaces the initial hybrid/delayed recipe. The expert path combines grouped GEMM with fused router/activation work, residual-plus-RMSNorm fusion, and a SwiGLU backward path that writes gate and up gradients directly into their final layout instead of concatenating and splitting temporary tensors. For attention, GPT-OSS alternates sliding-window and full-attention layers; backend selection therefore treats dense/SWA and forward/backward shapes separately. Native SBHD execution removes layout-conversion transposes, the dataloader stops constructing and copying a dense `(B, 1, S, S)` CPU mask every step, and eligible gfx950 head-dimension-64 shapes use tuned forward/backward kernels.
+
+**GBS-tuned recipes expose a statistical-efficiency trade-off.** The public [MLCommons RCP logs](https://github.com/mlcommons/training/tree/master/small_llm_moe_pretraining/primus/rcp_logs) contain 20 convergence runs for each of GBS 16, 32, and 64. These are reference convergence characterizations, not performance logs from the single-node FP8 recipe described above. They also tune learning rate and warm-up with GBS, so the comparison must not be read as a single-variable causal experiment. Using the first evaluation at or below the 3.34 target:
+
+| GBS | LR / warm-up updates | Median samples to target | Mean ± std. samples | Range across 20 runs | Median optimizer updates |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 4e-4 / 128 | 196,608 | 194,765 ± 8,243 | 184,320–208,896 | 12,288 |
+| 32 | 8e-4 / 128 | 233,472 | 234,701 ± 7,873 | 221,184–245,760 | 7,296 |
+| 64 | 1e-3 / 192 | 294,912 | 301,670 ± 15,168 | 282,624–331,776 | 4,608 |
+
+Across these tuned RCP recipes, moving from GBS 16 to 32 raises the median number of samples needed for convergence by **18.8%**; moving from 32 to 64 raises it by another **26.3%**. GBS 64 therefore uses **50% more samples** than GBS 16 at the median, even though it reaches the target in fewer optimizer updates. Because evaluation occurs every 12,288 training samples, the observed counts are quantized to that interval: the median run reaches the target at the 16th, 19th, and 24th evaluation for GBS 16, 32, and 64, respectively.
+
+The RCP files log `eval_samples` metadata of 1024, 2048, and 4096 for GBS 16, 32, and 64, whereas the validated single-node recipe explicitly fixes evaluation to 1024 sequences. We therefore use the RCP logs only for their training `samples_count` convergence points, not to compare evaluation cost or to claim FP8 convergence. The GBS 32 recipe is a system-level compromise: its larger micro-batch improves device utilization, but its extra training samples must still be paid for in TTT.
+
+This relationship can be summarized as:
+
+`TTT ≈ samples-to-target / sustained sample throughput + number-of-evaluations × evaluation time + initialization and warm-up time`
+
+**Account for lifecycle overhead explicitly.** The recipe runs three synthetic warm-up steps before the MLPerf `RUN_START` event, preselects hipBLASLt solutions for recurring shapes, and suppresses high-frequency non-MLPerf logging. The outer `run_and_time.sh` timer starts before `torchrun`, so launch-to-finish time still includes process initialization and warm-up even though the MLPerf timed interval does not. We therefore treat these as two distinct metrics:
+
+- **User-visible TTT:** process launch to the first evaluation that reaches 3.34, including initialization and warm-up.
+- **MLPerf timed interval:** `RUN_START` to the qualifying evaluation, following the benchmark rules.
+
+An MLPerf score requires 10 consecutive runs: discard the fastest and slowest, average the remaining eight `RUN_START`-to-`RUN_STOP` durations, and validate the run set with the RCP checker. The benchmark recipe disables checkpointing and final saving, so this score does not include the checkpoint/recovery overhead expected in a production training job.
+
+The repository history records the major configuration evolution, but it does not contain the repeated baseline and final result logs needed to publish an aggregate TTT speedup. We therefore do not add component wins together or reuse the **9.7%** GPT-OSS throughput uplift from Figure 2: that A/B test uses sequence length 4096, MBS 2, GBS 16, and a FlyDSL backend, while the MLPerf time-to-quality recipe uses sequence length 8192, MBS 4, GBS 32, and a different validated kernel stack. An official TTT claim should report both timing boundaries above, the eight-run score and dispersion, and confirmation that the run set reaches validation log perplexity 3.34 and passes the RCP checker.
+
+---
+
 ## Small MoE Models: a Different Bottleneck Regime
 
 <!---
@@ -401,7 +467,7 @@ section; this section is the end-to-end training comparison. Keep the two clearl
 scoped so the B200 reference does not read as duplicated.
 --->
 
-Everything above was constrained by memory and collective traffic. Small MoE models invert that: compute per layer is modest, so framework overhead, gradient reduction, and normalization/activation kernels dominate instead. Working from a GPT-OSS-class MoE model (32 experts, top-4, 8K sequence length) on a single 8×MI355X node, we tuned a set of optimizations that are broadly applicable in this regime:
+The GPT-OSS case study above also illustrates how small MoE models differ from trillion-parameter workloads: compute per layer is modest, so framework overhead, gradient reduction, and normalization/activation kernels dominate instead. On the same GPT-OSS-class MoE model (32 experts, top-4, 8K sequence length) and a single 8×MI355X node, we isolated a set of optimizations that are broadly applicable in this regime:
 
 - **BF16 gradient reduction** (`grad_reduce_in_bf16`) — the single largest step-time win here, reducing communication volume and freeing significant memory.
 - **Tuned normalization kernels** — a fast RMSNorm path that avoids regressions seen with generic implementations on this stack.
