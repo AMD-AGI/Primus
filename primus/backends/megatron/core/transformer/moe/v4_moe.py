@@ -65,7 +65,7 @@ from __future__ import annotations
 import logging
 from copy import copy
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -202,6 +202,7 @@ class DeepseekV4MoE(MegatronModule):
         # ---- routers ----
         self.router = None
         self.learned_router = None
+        self._force_lb_mode = self._resolve_force_load_balancing_mode()
         self._build_router_modules(
             hash_vocab_size=layer_hash_vocab_size,
             hash_seed=layer_hash_seed,
@@ -287,6 +288,81 @@ class DeepseekV4MoE(MegatronModule):
         return bool(getattr(args, "enable_primus_turbo", False)) and bool(
             getattr(args, "use_turbo_mega_moe", False)
         )
+
+    @staticmethod
+    def _resolve_force_load_balancing_mode() -> Optional[str]:
+        """Return the requested force-load-balancing mode, or ``None`` if off.
+
+        Read from the Megatron ``args`` namespace like
+        :meth:`_mega_moe_requested`; ``get_args`` raises before Megatron is
+        initialized (the CPU unit-test path), which counts as "off".
+        """
+        try:
+            from megatron.training import get_args
+
+            args = get_args()
+        except Exception:
+            return None
+        if not bool(getattr(args, "moe_router_force_load_balancing", False)):
+            return None
+        mode = str(getattr(args, "moe_router_force_load_balancing_type", "uniform"))
+        if mode not in ("even", "uniform"):
+            raise ValueError(
+                f"moe_router_force_load_balancing_type must be 'even' or 'uniform', got {mode!r}"
+            )
+        return mode
+
+    def _apply_force_load_balancing(
+        self, probs: torch.Tensor, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Rewrite the routed expert set so every expert gets a similar share.
+
+        Benchmark aid, mirroring ``moe_router_force_load_balancing`` on Megatron's
+        ``TopKRouter``. V4's routers are plain ``nn.Module``s rather than
+        ``TopKRouter`` subclasses, so neither upstream's ``apply_random_logits``
+        (``TopKRouter.forward``) nor ``PrimusTopKRouter._force_even_routing``
+        reaches this path -- this is the V4 equivalent of both, and it covers the
+        hash-routed layers too (force load balancing exists to discard the
+        router's decision, hash tables included).
+
+        Both modes carry the real per-token top-k probability magnitudes over to
+        the new slots, so ``probs`` and ``routing_map`` stay mutually consistent
+        and the combine weights keep their true scale:
+
+        * ``even``    -- round-robin ``(token_idx * topk + k) % num_experts``.
+          Per-expert counts are exactly equal and step-invariant, so
+          grouped-GEMM shapes never change. This is the same cycle
+          ``PrimusTurboDeepEPTokenDispatcher.dispatch_preprocess`` derives on its
+          own, so when Turbo DeepEP re-applies it the two agree instead of
+          dispatching to one expert set while weighting by another.
+        * ``uniform`` -- a fresh random k-subset per token every step, i.e. the
+          selection ``apply_random_logits`` + top-k produces upstream. Balanced
+          only statistically, so it keeps the step-to-step shape variation of
+          real routing.
+        """
+        if self._force_lb_mode is None:
+            return probs, routing_map
+
+        num_tokens = routing_map.shape[0]
+        topk = self.moe_router_topk
+        num_experts = self.num_routed_experts
+        device = routing_map.device
+
+        if self._force_lb_mode == "even":
+            # topk consecutive experts per token -> distinct while topk <= num_experts.
+            slot = torch.arange(num_tokens * topk, device=device).view(num_tokens, topk) % num_experts
+        else:
+            slot = torch.rand(num_tokens, num_experts, device=device).topk(topk, dim=-1).indices
+
+        new_routing_map = torch.zeros_like(routing_map)
+        new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))
+
+        # probs is non-zero only on the real top-k, so topk() extracts exactly them.
+        topk_vals, _ = torch.topk(probs, topk, dim=1)
+        new_probs = torch.zeros_like(probs)
+        new_probs.scatter_(1, slot, topk_vals.to(probs.dtype))
+
+        return new_probs, new_routing_map
 
     def _build_mega_moe_experts(self) -> nn.Module:
         """Build the fused MegaMoE expert path, or explain why it cannot run.
@@ -545,6 +621,9 @@ class DeepseekV4MoE(MegatronModule):
         Hash-routed layers feed both ``hidden`` (for the learned routing
         weights) AND ``token_ids`` (for the static expert ids from
         ``tid2eid``); learned layers only consume ``hidden``.
+
+        The routed set then goes through :meth:`_apply_force_load_balancing`,
+        which is a no-op unless ``moe_router_force_load_balancing`` is set.
         """
         if self.use_hash_router:
             assert self.router is not None
@@ -553,9 +632,11 @@ class DeepseekV4MoE(MegatronModule):
                     f"layer {self.layer_idx} uses DeepseekV4HashRouter; "
                     "token_ids is required (shape [B, S])."
                 )
-            return self.router(hidden, token_ids)
-        assert self.learned_router is not None
-        return self.learned_router(hidden)
+            probs, routing_map = self.router(hidden, token_ids)
+        else:
+            assert self.learned_router is not None
+            probs, routing_map = self.learned_router(hidden)
+        return self._apply_force_load_balancing(probs, routing_map)
 
     # ------------------------------------------------------------------
 
