@@ -29,9 +29,21 @@ from primus.core.patches import PatchContext, get_param, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 
+def _model_name_str(ctx: PatchContext) -> str:
+    """Normalize ctx.model_name (str or model namespace) to a plain string."""
+    model = ctx.model_name
+    if model is None:
+        return ""
+    if isinstance(model, str):
+        return model
+    name = getattr(model, "name", None)
+    if name is not None:
+        return str(name)
+    return str(model)
+
+
 def _is_deepseek_model(ctx: PatchContext) -> bool:
-    name = (ctx.model_name or "").lower()
-    return "deepseek" in name
+    return "deepseek" in _model_name_str(ctx).lower()
 
 
 def _compile_enabled(ctx: PatchContext) -> bool:
