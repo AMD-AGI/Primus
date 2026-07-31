@@ -6,6 +6,12 @@ enable_primus_turbo: false
 # enable turbo auto-tuning
 use_turbo_autotune: false
 
+# ===== MXFP4 =====
+# Use stochastic rounding when quantizing MXFP4 gradients. This is disabled by
+# default and requires a Primus-Turbo grouped GEMM implementation with matching
+# activation and gradient layouts.
+mxfp4_gradient_stochastic_rounding: false
+
 # ===== Attention =====
 # operator switch
 use_turbo_attention: false
@@ -41,6 +47,10 @@ turbo_deepep_use_comm_stream: false
 
 # ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0
+
+# ===== Mega MoE =====
+# fused MegaMoE layer replacement (EP-only/TP=1/bf16)
+use_turbo_mega_moe: false
 
 # ===== Layer Norm =====
 # operator switch

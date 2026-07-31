@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions adapted from FlyDSL Project Contributors (Apache-2.0); see
+# primus/backends/megatron/core/transformer/v4_attention_kernels/_flydsl_v0_deprecated/kernels/.
 
 """dsa_fwd_v4_flydsl_kernel: DeepSeek-V4 sparse-MLA attention forward (FlyDSL MFMA).
 

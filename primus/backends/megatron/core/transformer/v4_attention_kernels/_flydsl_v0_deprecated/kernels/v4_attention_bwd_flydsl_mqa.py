@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """V4 SWA attention backward FlyDSL launcher (Phase B STEP 1b, cr=0, SWA-only).
 
 API contract (matches the Triton ``_launch_v4_attention_bwd`` signature; the

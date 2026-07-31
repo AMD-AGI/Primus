@@ -1,3 +1,12 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions of this file are copied and modified from ROCm/aiter
+# (https://github.com/ROCm/aiter) gluon sparse-MLA kernels; see _gluon_v3/.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from __future__ import annotations
 
 import torch
