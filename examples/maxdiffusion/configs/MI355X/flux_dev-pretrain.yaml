@@ -1,0 +1,50 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_dev-pretrain}
+workspace: ./output
+
+# Per-config environment (ported from base_flux_dev_env.sh). NOTE: the retired
+# shell env also set JAX_USE_SHARDY_PARTITIONER=0, but the default maxdiffusion
+# image (docker/jax_maxdiffusion.jax_the_rock_ci_45156b7_20260701) patches
+# attention_flax.py to FORCE Shardy on for cudnn_flash_te (GSPMD aborts there on
+# JAX 0.10 + TE 2.14). We therefore leave Shardy at the image default; set
+# JAX_USE_SHARDY_PARTITIONER here only if you switch to an older image.
+env:
+  KERAS_BACKEND: "jax"
+  JAX_SPMD_MODE: "allow_all"
+  JAX_TRACEBACK_FILTERING: "off"
+  JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
+  TOKENIZERS_PARALLELISM: "1"
+  SKIP_GCS: "1"
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
+  TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
+  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  NVTE_FUSED_ATTN: "1"
+  NVTE_FUSED_ATTN_CK: "1"
+  NVTE_FUSED_ATTN_AOTRITON: "0"
+  NVTE_CK_USES_BWD_V3: "1"
+  NVTE_CK_USES_FWD_V3: "1"
+  NVTE_CK_IS_V3_ATOMIC_FP32: "0"
+  NVTE_CK_HOW_V3_BF16_CVT: "2"
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: "1"
+
+modules:
+  pre_trainer:
+    framework: maxdiffusion
+    config: pre_trainer.yaml
+
+    model: flux_dev.yaml
+    maxdiffusion_entrypoint: flux
+
+    overrides:
+      run_name: "flux_dev_pretrain"
+      output_dir: "./output/flux_dev-pretrain"
+      base_output_directory: "./output/flux_dev-pretrain"
+      max_train_steps: ${MAX_STEPS:20}
+      dataset_type: "synthetic"
+      hardware: "gpu"
+      checkpoint_every: -1
+      enable_profiler: false
+      per_device_batch_size: 14
+      ici_data_parallelism: 1
+      ici_tensor_parallelism: 1
