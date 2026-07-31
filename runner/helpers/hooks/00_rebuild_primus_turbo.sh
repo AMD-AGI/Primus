@@ -59,6 +59,13 @@ if [[ -n "$PRIMUS_TURBO_REF" ]]; then
     git checkout "${PRIMUS_TURBO_REF}"
 fi
 
+# The image already ships a built Primus-Turbo, and its wheel installs a top-level
+# `tools` package into site-packages. setup.py does `from tools.build_utils import
+# build_ck_backend`, which then resolves to that stale copy instead of the one in
+# this checkout, so the build dies with ImportError. Drop the installed dist first.
+LOG_INFO_RANK0 "Uninstalling the pre-installed Primus-Turbo..."
+pip3 uninstall -y primus_turbo || true
+
 LOG_INFO_RANK0 "Installing Primus-Turbo build dependencies..."
 pip3 install -r requirements.txt
 

@@ -1,3 +1,13 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions of this file are copied and modified from ROCm/aiter
+# (https://github.com/ROCm/aiter), leonling-ll/aiter branch liyang/dsa
+# (ROCm/aiter#3456); see module docstring.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """
 Gluon dKV-intermediate backward kernel for DeepSeek V4 sparse MLA (gfx950 / MI355X).
 

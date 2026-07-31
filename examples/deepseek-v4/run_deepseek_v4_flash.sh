@@ -31,7 +31,39 @@ if command -v spur >/dev/null 2>&1; then
     # keeps the secret out of this git-tracked file.
     export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-}"
     export DOCKER_LOGIN_KEY="${DOCKER_LOGIN_KEY:-}"
-    export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/tasimage/primus:pr-898-ainic}"
+    export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/tasimage/primus:pr-927-ainic}"
+else
+    # dccs cluster (the partition / node defaults in run_deepseek_v4.sh are dccs).
+    #
+    # Socket interface: run_deepseek_v4.sh falls back to `lo`, which leaves
+    # multi-node rendezvous hanging. The dccs front-end NIC is `fenic` (the RDMA
+    # devices are benic1p1..benic8p1 / ionic_0..7). runner/helpers/hooks/
+    # 10_auto_nccl_net.sh would auto-detect it, but only when these are unset, and
+    # the `lo` fallback sets them -- so pin them here.
+    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-fenic}"
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-fenic}"
+
+    # Optionally reuse one held allocation instead of queueing per run, so a sweep
+    # keeps landing on the same (known-good) nodes:
+    #   salloc --no-shell -N 4 --exclusive --partition=Compute-DCPT --mem=0
+    #   SLURM_ALLOC_JOB_ID=<granted id> bash examples/deepseek-v4/run_deepseek_v4_flash.sh
+    # srun then joins that allocation rather than asking for new nodes; --no-shell
+    # keeps it alive independently of any terminal, and `scancel <id>` releases it.
+    # Left unset by default: a job id is only valid for the life of its allocation,
+    # so a hardcoded one would send every later run at an allocation that no longer
+    # exists.
+    SLURM_ALLOC_JOB_ID="${SLURM_ALLOC_JOB_ID:-}"
+    if [ -n "$SLURM_ALLOC_JOB_ID" ]; then
+        export SLURM_JOB_ID="${SLURM_JOB_ID:-$SLURM_ALLOC_JOB_ID}"
+        export SLURM_JOBID="${SLURM_JOBID:-$SLURM_ALLOC_JOB_ID}"
+        # Let the step share nodes the allocation already holds.
+        export SLURM_OVERLAP="${SLURM_OVERLAP:-1}"
+        # srun rejects a --nodelist that is not inside the allocation, so take the
+        # allocation's own list. Empty (allocation still pending) is fine and
+        # wins over the 17-node dccs default in run_deepseek_v4.sh, which uses
+        # ${VAR-default}; srun then just uses every node it was given.
+        export SLURM_NODELIST="${SLURM_NODELIST:-$(squeue -h -j "$SLURM_ALLOC_JOB_ID" -o '%N' 2>/dev/null || true)}"
+    fi
 fi
 
 export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-43}

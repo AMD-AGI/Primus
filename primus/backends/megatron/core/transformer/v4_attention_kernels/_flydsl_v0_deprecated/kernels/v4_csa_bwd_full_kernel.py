@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """v4_csa_bwd_full: V4 CSA backward kernel, full output set (STEP 3b).
 
 Emits dq + dk_local + dv_local + dgathered + dsink in one launch.

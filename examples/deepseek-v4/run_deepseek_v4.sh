@@ -24,7 +24,9 @@ export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-898-ainic"}
+# pr-927 ships the Primus-Turbo build (0.3.2.dev55) that carries the MegaMoE
+# kernels; the older pr-882 turbo cannot run USE_TURBO_MEGA_MOE=True.
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-927-ainic"}
 export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
 export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
 export MASTER_PORT=${MASTER_PORT:-29500}
@@ -61,11 +63,21 @@ export PROFILE=${PROFILE:-False}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
 export LEGACY_GG=${LEGACY_GG:-False}
+# MegaMoE: FlyDSL-based fused MoE layer replacing Megatron's MoELayer (see
+# docs/04-technical-guides/mega-moe.md). It owns the whole expert path --
+# dispatch/combine all-to-all is fused into the grouped GEMMs -- so it is
+# mutually exclusive with turbo DeepEP; force DeepEP off rather than letting
+# both patch the MoE layer. Requires EP-only (TP=1) + bf16 + EP>1.
+export USE_TURBO_MEGA_MOE=${USE_TURBO_MEGA_MOE:-False}
+if [ "$USE_TURBO_MEGA_MOE" = "True" ]; then
+  export USE_TURBO_DEEPEP=False
+fi
 # Plan-3 P22 / P23: PrimusTurbo gate (must be on for turbo attention /
 # turbo deepep to take effect; enable_primus_turbo gates the
 # `before_train` patches that re-bind the spec provider).
 export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-False}
-if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True" ]; then
+if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True" ] ||
+  [ "$USE_TURBO_MEGA_MOE" = "True" ]; then
   ENABLE_PRIMUS_TURBO=True
 fi
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
@@ -100,6 +112,20 @@ if [ "$USE_TURBO_DEEPEP" = "True" ]; then
     --turbo_deepep_use_comm_stream "$TURBO_DEEPEP_USE_COMM_STREAM"
     --moe_router_dtype "$MOE_ROUTER_DTYPE"
     --moe_shared_expert_overlap "$MOE_SHARED_EXPERT_OVERLAP"
+  )
+fi
+
+# TransformerEngine full-scope CUDA graph capture. `--external_cuda_graph True`
+# maps to cuda_graph_impl="transformer_engine"; scope `full` is normalized to []
+# by Megatron, i.e. capture the whole layer. Pairs well with MegaMoE, which is
+# sync-free (no device-to-host sync in the expert path) and captures cleanly.
+export ENABLE_CUDA_GRAPH=${ENABLE_CUDA_GRAPH:-False}
+CUDA_GRAPH_CLI_ARGS=()
+if [ "$ENABLE_CUDA_GRAPH" = "True" ]; then
+  CUDA_GRAPH_CLI_ARGS=(
+    --external_cuda_graph True
+    --cuda_graph_scope "${CUDA_GRAPH_SCOPE:-full}"
+    --cuda_graph_warmup_steps "${CUDA_GRAPH_WARMUP_STEPS:-3}"
   )
 fi
 
@@ -156,8 +182,8 @@ fi
 #   USE_V4_CSA_ATTENTION_BACKEND (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
 # gluon is gfx950/CDNA4-only (lazily imported; asserts arch when selected).
 # use_turbo_attention (when core_attention is built) still wins for the dense path.
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v2}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-turbo}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-turbo}
 
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
@@ -210,6 +236,20 @@ if [ "$FP8_PARAM_GATHER" = "True" ]; then
   fi
 fi
 
+# Force load balancing discards the real router decision so every expert receives
+# a similar number of tokens, removing run-to-run imbalance noise. This selects
+# *how*: `even` (Primus default) gives exactly equal, step-invariant per-expert
+# counts, so grouped-GEMM shapes never change; `uniform` balances only
+# statistically and keeps the step-to-step shape variation of real routing.
+# docs/04-technical-guides/mega-moe.md recommends `uniform` for benchmarking,
+# because `even` disproportionately favours the non-fused grouped-GEMM path.
+# Empty (default) leaves the config value alone.
+export MOE_FORCE_LB_TYPE=${MOE_FORCE_LB_TYPE:-}
+MOE_FORCE_LB_ARGS=()
+if [ -n "$MOE_FORCE_LB_TYPE" ]; then
+  MOE_FORCE_LB_ARGS=(--moe_router_force_load_balancing_type "$MOE_FORCE_LB_TYPE")
+fi
+
 PP_LAYOUT_ARGS=()
 if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
   PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
@@ -260,7 +300,12 @@ else
   # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
   # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
   [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ] && LAUNCHER_ARGS+=(--exclusive)
-  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa --patch runner/helpers/patches/10_fix_libionic_abi4.sh)
+  # Each patch self-skips (exit 2) when its PRIMUS_* env gate is unset, so both
+  # can be passed unconditionally.
+  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean --
+    --numa
+    --patch runner/helpers/patches/10_fix_libionic_abi4.sh
+    --patch runner/helpers/patches/11_fix_lld_stub.sh)
 fi
 
 ./primus-cli "${LAUNCHER_ARGS[@]}" \
@@ -270,6 +315,7 @@ fi
   --pp_warmup "${PP_WARMUP:-True}" \
   "${PP_LAYOUT_ARGS[@]}" \
   --moe_router_force_load_balancing True \
+  "${MOE_FORCE_LB_ARGS[@]}" \
   --log_avg_skip_iterations 3 \
   --backend_path "$BACKEND_PATH" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
@@ -301,6 +347,8 @@ fi
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
+  --use_turbo_mega_moe "$USE_TURBO_MEGA_MOE" \
+  "${CUDA_GRAPH_CLI_ARGS[@]}" \
   --use_turbo_grouped_gemm "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   "${OPTIMIZER_CLI_ARGS[@]}" \
