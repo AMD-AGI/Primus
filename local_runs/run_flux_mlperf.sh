@@ -20,7 +20,7 @@ fi
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 export CONFIG=${CONFIG:-examples/diffusion/configs/MI355X/flux.1_schnell_t2i-pretrain.yaml}
-export DATASET_PATH=${DATASET_PATH:-/data/cc12m-preprocessed}
+export DATASET_PATH=${DATASET_PATH:-/data/cc12m_preprocessed}
 export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
 export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
 export PROMPT_DROPOUT_PROB=${PROMPT_DROPOUT_PROB:-0.1}
@@ -31,8 +31,9 @@ export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
 export WARMUP_STEPS=${WARMUP_STEPS:-1600}
 export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
-export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-false}
-export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-true}
+export GRADIENT_CHECKPOINTING_RATIO=${GRADIENT_CHECKPOINTING_RATIO:-0.25}
+export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-true}
+export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-false}
 export SAVE_STEPS=${SAVE_STEPS:-100}
 export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
 export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
@@ -184,6 +185,9 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
+    handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
+    handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
+    handle.write(f"fsdp2_reshard_after_forward: {os.environ.get('FSDP2_RESHARD_AFTER_FORWARD', '')}\n")
     handle.write(f"mlperf_enable: {os.environ.get('MLPERF_ENABLE', '')}\n")
     handle.write(f"target_accuracy: {os.environ.get('TARGET_ACCURACY', '')}\n")
     handle.write(f"val_check_interval: {os.environ.get('VAL_CHECK_INTERVAL', '')}\n")
@@ -233,6 +237,7 @@ echo "[run_flux_mlperf] steps=$MAX_STEPS local_batch_size=$LOCAL_BATCH_SIZE lr=$
 echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATEST resume=$RESUME_FROM_CHECKPOINT"
 echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
+echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
 
 trap terminate_training INT TERM
 torchrun_log_args=()
