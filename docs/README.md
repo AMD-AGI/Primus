@@ -37,6 +37,7 @@ Core workflows and day-to-day usage.
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
 - [Backend training recipes](./02-user-guide/training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
 - [Post-training](./02-user-guide/posttraining.md): SFT and LoRA fine-tuning via Megatron Bridge
+- [MI355X native LoRA](./02-user-guide/mi355x-lora-posttrain.md): Llama 2 70B @ 128k, Qwen3-235B Alpaca, and GovReport LoRA on native Megatron
 - [Benchmarking](./02-user-guide/benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md): memory and performance projection tools

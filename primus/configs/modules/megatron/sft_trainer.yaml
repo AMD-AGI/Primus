@@ -63,6 +63,8 @@ use_distributed_optimizer: true
 # Note: These are typically overridden in the experiment config
 sft_dataset_name: "tatsu-lab/alpaca"
 sft_conversation_format: "alpaca"
+# HuggingFace hub config name (e.g. gov_report for tau/scrolls).
+sft_dataset_config: null
 # HuggingFace dataset split to load. Some datasets have no "train" split (e.g.
 # SWE-bench/SWE-smith-trajectories use tool/xml/ticks); override here.
 sft_dataset_split: "train"

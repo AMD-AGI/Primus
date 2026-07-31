@@ -242,7 +242,13 @@ def create_formatter(name: str) -> ConversationFormatter:
         return OpenAIMessagesFormatter()
     if name in {"squad", "bridge_squad"}:
         return SquadFormatter()
-    raise ValueError(f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages, squad")
+    if name in {"hf_chat", "chat_template", "qwen_chat"}:
+        # Tokenization uses primus.backends.megatron.sft.chat_template.
+        return SquadFormatter()
+    raise ValueError(
+        f"Unknown formatter: {name}. Supported: alpaca, chatml, openai, messages, "
+        "squad, hf_chat"
+    )
 
 
 __all__ = [

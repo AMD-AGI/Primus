@@ -1,0 +1,131 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-lora-128k-longalign}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Llama-2-70B LoRA SFT (BF16) @ 128k — LongAlign-10k (native Megatron)
+# =============================================================================
+# Hardware: 1 node × 8× MI355X (288 GB HBM/GPU).
+#
+# Dataset: THUDM/LongAlign-10k → packed 131072-token bins (HF cache under
+# ${DATA_PATH}/huggingface when DATA_PATH=/data).
+#
+# Container layout (bind-mount once; yaml defaults below — no exports required):
+#   /data/megatron_checkpoints/Llama-2-70b-hf/  — Megatron torch_dist base
+#   /data/huggingface/                          — HF datasets/tokenizers (HF_HOME)
+#
+# Parallelism (TP × CP = 8). Activation memory scales with seq_length / CP:
+#   Default TP=2, CP=4  (~70 GB base weights/rank, 32k tokens/rank)
+#   TP=4, CP=2 often OOMs at 128k (64k tokens/rank)
+#   TP=1, CP=8 if memory is still tight (16k tokens/rank)
+#
+# Required ROCm allocator:
+#   export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+#
+# Launch:
+#   ./runner/primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI355X/llama2_70B-BF16-lora-128k-longalign.yaml
+#
+# First run tokenizes and packs LongAlign (rank 0 only; can take a while). Later
+# runs reuse primus_packed cache under HF_DATASETS_CACHE when the cache key matches.
+# Default train_iters=5 is a connectivity smoke; override for real training:
+#   export PRIMUS_TRAIN_ITERS=500
+#
+# User guide: docs/02-user-guide/mi355x-lora-posttrain.md
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: llama2_70B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: meta-llama/Llama-2-70b-hf
+      tokenizer_model: meta-llama/Llama-2-70b-hf
+
+      sft_dataset_name: ${LONGALIGN_DATASET:THUDM/LongAlign-10k}
+      sft_conversation_format: openai
+
+      enable_packed_sequences: true
+      # ROCm: keep false — thd packed attention can hang; implicit packing is safe.
+      use_packed_attention: false
+
+      stderr_sink_level: DEBUG
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:5}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:8}
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:131072}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
+
+      lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:5}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1.0e-8
+
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: ${PRIMUS_TP:2}
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: ${PRIMUS_CP:4}
+      cp_comm_type: ${PRIMUS_CP_COMM:all_gather}
+      sequence_parallel: false
+
+      use_distributed_optimizer: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      apply_rope_fusion: false
+      masked_softmax_fusion: true
+      attention_softmax_in_fp32: false
+
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 80
+
+      finetune: true
+      pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Llama-2-70b-hf}
+      load: null
+      save: null
+      save_interval: 1000000
+      eval_interval: 1000000
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: assume_ok_unexpected
+
+      bf16: true
+
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      cross_entropy_loss_fusion: false
+
+      eval_iters: 0
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

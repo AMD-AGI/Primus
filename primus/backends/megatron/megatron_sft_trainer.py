@@ -226,6 +226,17 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                     ckpt_dir = release_sub if os.path.isdir(release_sub) else _stripped
                 log_rank_0(f"[PEFT pre-wrap] Resolved ckpt dir: {ckpt_dir}")
 
+                if not os.path.isdir(ckpt_dir):
+                    raise FileNotFoundError(
+                        f"Megatron pretrained checkpoint directory does not exist: {ckpt_dir!s}. "
+                        "Mount or copy a torch_dist base checkpoint there (expect "
+                        "latest_checkpointed_iteration.txt and a release/ or iter_* shard tree). "
+                        "The posttrain 01_convert_checkpoints hook is skipped when "
+                        "pretrained_checkpoint is set in the yaml — comment out that field "
+                        "(or omit pretrained_checkpoint) to HF→Megatron convert on first run "
+                        "via hf_path/tokenizer_model into $DATA_PATH/megatron_checkpoints/."
+                    )
+
                 # ----------------------------------------------------------
                 # Pick a "canary" base param to verify the load actually
                 # mutated model weights (not just streamed bytes off disk).
@@ -277,12 +288,19 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                         lambda: getattr(layer0.self_attention.linear_qkv, "layer_norm_weight", None),
                     )
                     _try("L0.attn.linear_proj.weight", lambda: layer0.self_attention.linear_proj.weight)
-                    _try("L0.mlp.linear_fc1.weight", lambda: layer0.mlp.linear_fc1.weight)
-                    _try(
-                        "L0.mlp.linear_fc1.layer_norm_weight",
-                        lambda: getattr(layer0.mlp.linear_fc1, "layer_norm_weight", None),
-                    )
-                    _try("L0.mlp.linear_fc2.weight", lambda: layer0.mlp.linear_fc2.weight)
+                    mlp = layer0.mlp
+                    if hasattr(mlp, "linear_fc1"):
+                        _try("L0.mlp.linear_fc1.weight", lambda: mlp.linear_fc1.weight)
+                        _try(
+                            "L0.mlp.linear_fc1.layer_norm_weight",
+                            lambda: getattr(mlp.linear_fc1, "layer_norm_weight", None),
+                        )
+                        _try("L0.mlp.linear_fc2.weight", lambda: mlp.linear_fc2.weight)
+                    else:
+                        _try(
+                            "L0.mlp.router.weight",
+                            lambda: getattr(getattr(mlp, "router", None), "weight", None),
+                        )
                     _try("final_layernorm.weight", lambda: model.decoder.final_layernorm.weight)
                     _try("embedding.word_embeddings.weight", lambda: model.embedding.word_embeddings.weight)
                     _try("output_layer.weight", lambda: model.output_layer.weight)

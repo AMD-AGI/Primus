@@ -36,9 +36,10 @@ max=783 s on run native_llama2_70b_faststart_20260513_105737).
 to a per-config ``.pt`` file. A hashed cache key covers every input that
 affects the pack content (dataset name, split, formatter, max_seq_length,
 pad_id, tokenizer identity, plus ``PACK_FORMAT_VERSION`` so a code change
-forces a rebuild). Concurrent ranks serialize through a ``filelock``:
-the first rank to acquire the lock builds + saves under the lock; the
-remaining ranks find the file on disk and load it.
+forces a rebuild). On a cache miss, **global rank 0** builds and saves;
+other ranks poll for the ``.pt`` file (no ``filelock`` wait on shared NFS).
+Rank 0 still uses a node-local ``filelock`` when ``PRIMUS_PACK_LOCK_DIR`` is
+set to avoid cross-node stale-handle races on the lock file itself.
 
 Where the cache lives:
     1. ``$PRIMUS_PACK_CACHE_DIR`` if set
@@ -53,6 +54,7 @@ the old per-run rebuild path).
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -466,6 +468,43 @@ def _build_pack_cache_key(
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def _global_rank() -> int:
+    """Best-effort global process rank for cache-build coordination."""
+    rank_env = os.environ.get("RANK")
+    if rank_env is not None and rank_env != "":
+        return int(rank_env)
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank()
+    except Exception:
+        pass
+    return 0
+
+
+def _wait_for_pack_cache_file(cache_file: Path, *, label: str) -> None:
+    """Block until ``cache_file`` exists (written atomically by rank 0)."""
+    timeout_sec = float(os.environ.get("PRIMUS_PACK_WAIT_TIMEOUT", "86400"))
+    poll_sec = float(os.environ.get("PRIMUS_PACK_WAIT_POLL_SEC", "0.5"))
+    log_every_sec = float(os.environ.get("PRIMUS_PACK_WAIT_LOG_EVERY_SEC", "30"))
+    start = time.monotonic()
+    last_log = start
+    while not cache_file.is_file():
+        elapsed = time.monotonic() - start
+        if elapsed > timeout_sec:
+            raise TimeoutError(
+                f"[Pack] Timed out after {timeout_sec:.0f}s waiting for {label}: {cache_file}"
+            )
+        if time.monotonic() - last_log >= log_every_sec:
+            log_rank_0(
+                f"[Pack] rank {_global_rank()} still waiting for {label} "
+                f"({cache_file.name}, {elapsed:.0f}s elapsed)..."
+            )
+            last_log = time.monotonic()
+        time.sleep(poll_sec)
+
+
 class PackedSFTDataset(Dataset):
     """SFT dataset whose ``__getitem__`` returns a packed multi-sample sequence.
 
@@ -492,6 +531,7 @@ class PackedSFTDataset(Dataset):
         self.formatter = create_formatter(formatter)
         self.pad_id = _resolve_pad_token_id(tokenizer)
         self.bridge_compat_inline_bos = bool(bridge_compat_inline_bos)
+        self._hf_chat_task = kwargs.pop("hf_chat_task", "gov_report")
         if self.bridge_compat_inline_bos:
             log_rank_0(
                 "[Pack] bridge_compat_inline_bos=True: per-segment tokenize "
@@ -560,37 +600,55 @@ class PackedSFTDataset(Dataset):
             )
             return
 
-        with FileLock(str(lock_file)):
-            if cache_file.exists():
-                log_rank_0(
-                    f"[Pack] CACHE HIT key={cache_key} ({cache_file.name}); "
-                    "loading packed dataset from disk."
-                )
-                self._packed = torch.load(cache_file, weights_only=False)
-                log_rank_0(f"[Pack] Loaded {len(self._packed)} packed sequences from cache.")
-                return
-
+        if cache_file.exists():
             log_rank_0(
-                f"[Pack] CACHE MISS key={cache_key} ({cache_file}); "
-                "building packed dataset under filelock."
+                f"[Pack] CACHE HIT key={cache_key} ({cache_file.name}); "
+                "loading packed dataset from disk."
             )
-            self._packed = self._build_packs_in_memory(
-                dataset_name=dataset_name,
-                tokenizer=tokenizer,
-                max_seq_length=max_seq_length,
-                split=split,
-                formatter=formatter,
-                seed=seed,
-                **kwargs,
+            self._packed = torch.load(cache_file, weights_only=False)
+            log_rank_0(f"[Pack] Loaded {len(self._packed)} packed sequences from cache.")
+            return
+
+        rank = _global_rank()
+        if rank == 0:
+            with FileLock(str(lock_file)):
+                if cache_file.exists():
+                    log_rank_0(
+                        f"[Pack] CACHE HIT key={cache_key} ({cache_file.name}); "
+                        "loading packed dataset from disk."
+                    )
+                    self._packed = torch.load(cache_file, weights_only=False)
+                    log_rank_0(f"[Pack] Loaded {len(self._packed)} packed sequences from cache.")
+                    return
+
+                log_rank_0(
+                    f"[Pack] CACHE MISS key={cache_key} ({cache_file}); "
+                    "building packed dataset on global rank 0."
+                )
+                self._packed = self._build_packs_in_memory(
+                    dataset_name=dataset_name,
+                    tokenizer=tokenizer,
+                    max_seq_length=max_seq_length,
+                    split=split,
+                    formatter=formatter,
+                    seed=seed,
+                    **kwargs,
+                )
+                tmp_file = cache_file.with_suffix(".pt.tmp")
+                torch.save(self._packed, tmp_file)
+                os.replace(tmp_file, cache_file)
+                log_rank_0(f"[Pack] Cached packed dataset to {cache_file}")
+        else:
+            log_rank_0(
+                f"[Pack] rank {rank} waiting for global rank 0 to build "
+                f"key={cache_key} ({cache_file.name})..."
             )
-            # Atomic rename to avoid leaving a half-written file behind if the
-            # process dies mid-save (e.g. user Ctrl-C during the torch.save
-            # call). Concurrent ranks waiting on the filelock will observe
-            # either the absent file or the complete file -- never a partial.
-            tmp_file = cache_file.with_suffix(".pt.tmp")
-            torch.save(self._packed, tmp_file)
-            os.replace(tmp_file, cache_file)
-            log_rank_0(f"[Pack] Cached packed dataset to {cache_file}")
+            _wait_for_pack_cache_file(cache_file, label="packed cache")
+            self._packed = torch.load(cache_file, weights_only=False)
+            log_rank_0(
+                f"[Pack] Loaded {len(self._packed)} packed sequences from cache "
+                f"(rank {rank})."
+            )
 
     def _build_packs_in_memory(
         self,
@@ -622,19 +680,36 @@ class PackedSFTDataset(Dataset):
         # Bypass SFTDataset.__getitem__ (which pads) and read the underlying HF
         # dataset directly to tokenize without padding.
         raw_dataset = base.dataset
-        log_rank_0(f"[Pack] Tokenizing {len(raw_dataset)} samples for packing...")
+        num_raw = len(raw_dataset)
+        log_rank_0(f"[Pack] Tokenizing {num_raw} samples for packing...")
 
         tokenized: List[Dict[str, np.ndarray]] = []
         dropped_too_long = 0
-        for i in range(len(raw_dataset)):
+        log_interval = max(1, num_raw // 20)
+        hf_chat = formatter in ("hf_chat", "chat_template", "qwen_chat")
+        for i in range(num_raw):
+            if i > 0 and i % log_interval == 0:
+                log_rank_0(f"[Pack] Tokenized {i}/{num_raw} samples...")
             sample = normalize_sft_sample(raw_dataset[i])
-            formatted = self.formatter.format_sample(sample)
-            tok = _tokenize_no_pad(
-                formatted,
-                tokenizer,
-                max_seq_length,
-                bridge_compat_inline_bos=self.bridge_compat_inline_bos,
-            )
+            if hf_chat:
+                from primus.backends.megatron.sft.chat_template import (
+                    tokenize_chat_sft_sample_no_pad,
+                )
+
+                tok = tokenize_chat_sft_sample_no_pad(
+                    sample,
+                    tokenizer,
+                    max_seq_length,
+                    task=self._hf_chat_task,
+                )
+            else:
+                formatted = self.formatter.format_sample(sample)
+                tok = _tokenize_no_pad(
+                    formatted,
+                    tokenizer,
+                    max_seq_length,
+                    bridge_compat_inline_bos=self.bridge_compat_inline_bos,
+                )
             if tok["length"] <= 0:
                 continue
             # Bridge-parity dataset filter: NeMo Megatron-Bridge's

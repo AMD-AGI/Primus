@@ -57,6 +57,45 @@ def load_jsonl_file(file_path: str) -> List[Dict[str, Any]]:
     return data
 
 
+def resolve_sft_dataset_path(dataset_name: str, split: str) -> str:
+    """Resolve ``sft_dataset_name`` to a hub id or concrete local file.
+
+    If ``dataset_name`` is a directory, load ``{split}.jsonl`` or
+    ``{split}.json`` (e.g. unpacked SCROLLS GovReport exports).
+    """
+    if not os.path.isdir(dataset_name):
+        return dataset_name
+
+    split_aliases = (split,)
+    if split == "validation":
+        split_aliases = ("validation", "valid", "val")
+    elif split == "train":
+        split_aliases = ("train", "training")
+
+    for split_name in split_aliases:
+        for ext in (".jsonl", ".json"):
+            candidate = os.path.join(dataset_name, f"{split_name}{ext}")
+            if os.path.isfile(candidate):
+                log_rank_0(f"Resolved SFT dataset directory to {candidate}")
+                return candidate
+
+    raise FileNotFoundError(
+        f"SFT dataset directory {dataset_name!r} has no file for split {split!r}. "
+        f"Expected one of: {{split}}.jsonl or {{split}}.json"
+    )
+
+
+def local_sft_split_available(dataset_name: str, split: str) -> bool:
+    """Return True if a local directory dataset has a file for ``split``."""
+    if not os.path.isdir(dataset_name):
+        return True
+    try:
+        resolve_sft_dataset_path(dataset_name, split)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def load_local_records(file_path: str) -> List[Dict[str, Any]]:
     """Load local JSON/JSONL records for Megatron offline SFT."""
     if file_path.endswith(".jsonl"):
@@ -235,8 +274,10 @@ def tokenize_formatted_sft_sample(
 __all__ = [
     "load_jsonl_file",
     "load_local_records",
+    "local_sft_split_available",
     "log_rank_0",
     "normalize_sft_sample",
+    "resolve_sft_dataset_path",
     "tokenize_formatted_sft_sample",
     "tokenize_text",
 ]

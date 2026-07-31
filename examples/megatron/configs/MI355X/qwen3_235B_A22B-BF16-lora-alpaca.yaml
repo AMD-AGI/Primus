@@ -1,0 +1,145 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-lora-alpaca}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen3-235B-A22B LoRA SFT (BF16) — Alpaca (native Megatron)
+# =============================================================================
+# Hardware: 1 node × 8× MI355X — TP=1, PP=1, EP=8.
+#
+# Dataset: tatsu-lab/alpaca → 4096-token packing (auto-download; cache under
+# ${DATA_PATH}/huggingface when DATA_PATH=/data).
+#
+# Container layout (bind-mount once; yaml defaults below — no exports required):
+#   /data/megatron_checkpoints/Qwen3-235B-A22B/  — Megatron torch_dist base
+#   /data/huggingface/                           — HF datasets/tokenizers (HF_HOME)
+#
+# For SCROLLS GovReport LoRA at 8192 with hf_chat, see:
+#   examples/megatron/configs/MI355X/qwen3_235B_A22B-BF16-lora-govreport.yaml
+#
+# Launch:
+#   ./runner/primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI355X/qwen3_235B_A22B-BF16-lora-alpaca.yaml
+#
+# User guide: docs/02-user-guide/mi355x-lora-posttrain.md
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: qwen3_235B_A22B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: Qwen/Qwen3-235B-A22B
+      tokenizer_model: Qwen/Qwen3-235B-A22B
+
+      sft_dataset_name: tatsu-lab/alpaca
+      sft_conversation_format: alpaca
+
+      enable_packed_sequences: true
+      use_packed_attention: false
+
+      wandb_project: Primus_Qwen3_235B_A22B_LoRA
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:200}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:8}
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      lr: 1.0e-4
+      min_lr: 1.0e-5
+      lr_warmup_iters: 20
+      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:200}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      apply_rope_fusion: true
+      enable_experimental: true
+      moe_router_force_load_balancing: false
+
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      finetune: true
+      pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Qwen3-235B-A22B}
+      load: null
+      save: null
+      save_interval: 50
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: assume_ok_unexpected
+
+      bf16: true
+
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:94}
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: false
+
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      moe_use_legacy_grouped_gemm: true
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      cross_entropy_fusion_impl: te
+      cross_entropy_loss_fusion: true
+
+      manual_gc: true
+      manual_gc_interval: 1
+
+      eval_iters: ${PRIMUS_EVAL_ITERS:24}
+
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

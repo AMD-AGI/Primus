@@ -47,6 +47,7 @@ def create_sft_datasets_provider() -> Callable:
 
         dataset_name = getattr(args, "sft_dataset_name", "tatsu-lab/alpaca")
         conversation_format = getattr(args, "sft_conversation_format", "alpaca")
+        dataset_config = getattr(args, "sft_dataset_config", None)
         enable_packed_sequences = bool(getattr(args, "enable_packed_sequences", False))
         use_packed_attention = bool(getattr(args, "use_packed_attention", False))
         # Opt-in: reproduce NeMo Megatron-Bridge's packed-parquet token layout
@@ -83,6 +84,7 @@ def create_sft_datasets_provider() -> Callable:
             seed=args.seed,
             enable_packed_sequences=enable_packed_sequences,
             bridge_compat_inline_bos=bridge_compat_inline_bos,
+            **({"name": dataset_config} if dataset_config else {}),
         )
 
     # Required by Megatron pretrain dataset setup path.

@@ -1,0 +1,153 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen2.5_72B-lora-128k-longalign}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen2.5-72B LoRA SFT (BF16) — LongAlign-10k (native Megatron)
+# =============================================================================
+# Default seq **131072 (128k)** with **TP=2 CP=4** and **recompute 80** (matches Llama-2
+# 70B @ 128k memory recipe: shard weights across TP, split seq across CP ~32k/rank).
+# use_turbo_attention: false when CP>1.
+#
+# Required before launch (ROCm fragmentation; OOM logs may say CUDA_ALLOC_CONF):
+#   export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+#
+# If iter-1 still OOM in LoRA MLP (linear_fc1 adapter):
+#   1) PRIMUS_SEQ_LENGTH=65536 PRIMUS_MAX_POSITION_EMBEDDINGS=65536 PRIMUS_DISABLE_PACK_CACHE=1
+#   2) LoRA on attention only — remove linear_fc1/linear_fc2 from lora.target_modules below
+#   3) PRIMUS_TP=1 PRIMUS_CP=8 only if you have headroom after (weights replicate on every GPU)
+#
+# After a stable run, try more throughput (if VRAM headroom):
+#   export PRIMUS_RECOMPUTE_LAYERS=8
+# Shorter smoke: PRIMUS_SEQ_LENGTH=8192 PRIMUS_CP=1 PRIMUS_RECOMPUTE_LAYERS=8
+#
+# Hardware: 1 node × 8× MI355X (288 GB HBM/GPU).
+#
+# Dataset: THUDM/LongAlign-10k → packed bins (HF cache under ${DATA_PATH}/huggingface).
+#
+# Container layout (bind-mount once; yaml defaults below — no exports required):
+#   /data/megatron_checkpoints/Qwen2.5-72B/  — Megatron torch_dist base
+#   /data/huggingface/                       — HF datasets/tokenizers (HF_HOME)
+#
+# Parallelism: TP×CP=8. Defaults TP=2 CP=4 (weight shard + 32k tokens/CP rank).
+#
+# Launch:
+#   ./runner/primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI355X/qwen2.5_72B-BF16-lora-128k-longalign.yaml
+#
+# User guide: docs/02-user-guide/mi355x-lora-posttrain.md
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: qwen2.5_72B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: Qwen/Qwen2.5-72B
+      tokenizer_model: Qwen/Qwen2.5-72B
+
+      sft_dataset_name: ${LONGALIGN_DATASET:THUDM/LongAlign-10k}
+      sft_conversation_format: openai
+
+      enable_packed_sequences: true
+      use_packed_attention: false
+
+      stderr_sink_level: DEBUG
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:50}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:8}
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:131072}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
+
+      lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:50}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.98
+      adam_eps: 1.0e-8
+
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: ${PRIMUS_TP:2}
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: ${PRIMUS_CP:4}
+      cp_comm_type: ${PRIMUS_CP_COMM:all_gather}
+      sequence_parallel: false
+
+      apply_rope_fusion: false
+      enable_experimental: true
+      masked_softmax_fusion: true
+      attention_softmax_in_fp32: false
+
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      
+
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:80}
+
+      finetune: true
+      #pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Qwen2.5-72B}
+      load: null
+      save: null
+      save_interval: 1000000
+      eval_interval: 1000000
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: assume_ok_unexpected
+
+      bf16: true
+
+      enable_primus_turbo: true
+      use_turbo_gemm: true
+      use_turbo_rms_norm: true
+      # CP>1 uses flash_attn_usp_func; keep false unless primus_turbo + CP path validated
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Qwen vocab 151680 @ 128k — avoid materializing full [seq, vocab] logits
+      enable_fused_linear_ce: true
+
+      cross_entropy_fusion_impl: te
+      cross_entropy_loss_fusion: true
+
+      manual_gc: true
+      manual_gc_interval: ${PRIMUS_MANUAL_GC_INTERVAL:10}
+
+      eval_iters: 0
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

@@ -108,9 +108,18 @@ else
 fi
 export PRIMUS_IMPORT_ROOT
 
-# Set data paths
-export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+# Set data paths: prefer /data when writable (container bind-mount); else ./data under the repo.
+if [[ -z "${DATA_PATH:-}" ]]; then
+    if [[ -d /data && -w /data ]]; then
+        export DATA_PATH="/data"
+    else
+        export DATA_PATH="${PRIMUS_PATH}/data"
+    fi
+else
+    export DATA_PATH="${DATA_PATH}"
+fi
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
+export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-"${HF_HOME}/datasets"}
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
 if [[ -n "$site_packages" ]]; then
@@ -120,7 +129,7 @@ else
 fi
 
 log_exported_vars "Python Path and Data Paths" \
-    PRIMUS_PATH PRIMUS_IMPORT_ROOT DATA_PATH HF_HOME PYTHONPATH
+    PRIMUS_PATH PRIMUS_IMPORT_ROOT DATA_PATH HF_HOME HF_DATASETS_CACHE PYTHONPATH
 
 # =============================================================================
 # NCCL and Network Configuration
