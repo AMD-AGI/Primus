@@ -63,10 +63,28 @@ run inside a vLLM container that does not have Primus installed::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import statistics
+import sys
 import time
+
+# Shared regime/config keying (stdlib-only module) so the result cache uses the
+# exact same scheme as the anchor store. benchmark_vllm.py runs as a standalone
+# script inside a bare vLLM container, so import defensively: add this file's
+# directory to the path and fall back to inline hashing if unavailable.
+try:  # pragma: no cover - import shim for in-container script execution
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from search.regime import (  # type: ignore
+        config_key as _regime_config_key,
+        recipe_from_bench_args as _regime_recipe_from_bench_args,
+        regime_signature as _regime_signature,
+    )
+    _HAVE_REGIME = True
+except Exception:  # noqa: BLE001 - any import failure => inline fallback
+    _HAVE_REGIME = False
 
 
 # --- MoE expert-load imbalance <-> Zipf exponent --------------------------------
@@ -449,6 +467,14 @@ def run_vllm_benchmark(args) -> dict:
         else [args.batch]
     )
     max_batch = max(batches)
+    # Seeds are swept inside a SINGLE engine build (no re-init per seed): each
+    # seed re-rolls the random token content (real weights / --random-tokens) and
+    # provides an independent timing sample, giving a cheap noise estimate.
+    seeds = (
+        [int(s) for s in str(args.seeds).split(",") if s.strip()]
+        if getattr(args, "seeds", None)
+        else [int(getattr(args, "seed", 0) or 0)]
+    )
     max_len = args.max_model_len or (args.input_len + args.decode_steps + 16)
     real_weights = args.load_format != "dummy"
     # Real weights => the trained router needs varied input to route realistically.
@@ -516,14 +542,46 @@ def run_vllm_benchmark(args) -> dict:
         return LLM(**kwargs)
 
     def _sweep(llm):
+        """Sweep every (batch, seed) in ONE engine build and aggregate per batch.
+
+        Multiple seeds are measured back-to-back on the *same* warm engine (no
+        re-init between seeds), so a whole seed set costs one engine build. The
+        returned per-batch entry carries the mean plus the min and std across
+        seeds; ``raw`` keeps every individual (batch, seed) sample.
+        """
+        raw = []
+        for b in batches:
+            for sd in seeds:
+                entry = _measure_batch(llm, args.input_len, b, args.decode_steps,
+                                       random_tokens=random_tokens, vocab=args.vocab,
+                                       seed=sd)
+                entry["seed"] = sd
+                raw.append(entry)
+                if len(seeds) > 1:
+                    print(f"[Primus:Inference:vLLM-Benchmark]   batch={b} seed={sd} "
+                          f"prefill={entry['prefill_ms']:.2f}ms "
+                          f"decode_step={entry['decode_ms']:.2f}ms")
         sweep = []
         for b in batches:
-            entry = _measure_batch(llm, args.input_len, b, args.decode_steps,
-                                   random_tokens=random_tokens, vocab=args.vocab)
+            pts = [e for e in raw if e["batch"] == b]
+            dvals = [e["decode_ms"] for e in pts]
+            pvals = [e["prefill_ms"] for e in pts]
+            entry = {
+                "batch": b,
+                "prefill_ms": statistics.mean(pvals),
+                "decode_ms": statistics.mean(dvals),
+                "decode_ms_min": min(dvals),
+                "decode_ms_std": statistics.pstdev(dvals) if len(dvals) > 1 else 0.0,
+                "prefill_ms_std": statistics.pstdev(pvals) if len(pvals) > 1 else 0.0,
+                "n_seeds": len(dvals),
+            }
             sweep.append(entry)
+            spread = (f" (+/-{entry['decode_ms_std']:.2f} over {len(dvals)} seeds)"
+                      if len(dvals) > 1 else "")
             print(f"[Primus:Inference:vLLM-Benchmark] batch={b} "
-                  f"prefill={entry['prefill_ms']:.2f}ms decode_step={entry['decode_ms']:.2f}ms")
-        return sweep
+                  f"prefill={entry['prefill_ms']:.2f}ms "
+                  f"decode_step={entry['decode_ms']:.2f}ms{spread}")
+        return sweep, raw
 
     # --- REDUCE -> BENCHMARK -> RESTORE -------------------------------------
     # Mirrors the training layer benchmark (benchmark.py + performance.py): the
@@ -537,6 +595,7 @@ def run_vllm_benchmark(args) -> dict:
     # full-model projection, which performance.py consumes directly.
     bench_counts = _parse_bench_layers(args.bench_layers)
     restore_meta = None
+    sweep_raw = None
     if len(bench_counts) >= 2:
         full_layers = int(args.full_layers or _full_num_layers(args.model, args.trust_remote_code) or 0)
         if full_layers <= 0:
@@ -550,7 +609,7 @@ def run_vllm_benchmark(args) -> dict:
         for li, L in enumerate(bench_counts):
             print(f"[Primus:Inference:vLLM-Benchmark] --- benchmarking {L} layers ---")
             llm = _build_llm(L)
-            bench_sweeps[L] = {e["batch"]: e for e in _sweep(llm)}
+            bench_sweeps[L] = {e["batch"]: e for e in _sweep(llm)[0]}
             # Free every engine except keep-none: each count is a distinct model.
             _free_llm(llm)
 
@@ -583,7 +642,7 @@ def run_vllm_benchmark(args) -> dict:
         # No restore: measure the model as configured (full, or a single reduced
         # count via legacy --num-hidden-layers). One engine, reused across batches.
         llm = _build_llm(args.num_hidden_layers)
-        sweep = _sweep(llm)
+        sweep, sweep_raw = _sweep(llm)
         eff_layers = args.num_hidden_layers
 
     ref = next((e for e in sweep if e["batch"] == args.batch), sweep[0])
@@ -594,10 +653,13 @@ def run_vllm_benchmark(args) -> dict:
         # RESTORED full-model latencies when reduce/restore is used.
         "measured": {"model": {"prefill_ms": ref["prefill_ms"], "decode_ms": ref["decode_ms"]}},
         "sweep": sweep,
+        # Per-(batch, seed) raw samples when a seed set was swept in one engine.
+        "sweep_raw": sweep_raw,
         "meta": {
             "batch": ref["batch"],
             "input_len": args.input_len,
             "decode_steps": args.decode_steps,
+            "seeds": seeds,
             # Target parallelism (what performance.py restores TO)...
             "tp": target_tp,
             "ep": target_ep,
@@ -625,7 +687,53 @@ def run_vllm_benchmark(args) -> dict:
             "model": args.model,
         },
     }
+    # Stamp the regime signature so the anchor store can index without
+    # re-deriving it (falls back silently if the shared module is unavailable).
+    if _HAVE_REGIME:
+        try:
+            env = {"VLLM_ROCM_USE_AITER": os.environ.get("VLLM_ROCM_USE_AITER", "0")}
+            result["meta"]["regime_signature"] = _regime_signature(
+                _regime_recipe_from_bench_args(args, env)
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return result
+
+
+# --- result cache ---------------------------------------------------------
+# Every benchmark pays a large fixed cost (container/import, engine init,
+# torch.compile, CUDA-graph capture) that dwarfs the actual measurement. Since
+# a run is fully determined by its config, we key results by the config-
+# affecting args (+ the AITER env) and reuse them: a cache HIT skips the vLLM
+# import and engine init entirely.
+_CACHE_IGNORE_ARGS = {"save", "cache_dir", "no_cache", "force"}
+
+# Args that change the measured number but not the regime/transport axes; keyed
+# as ``extra`` so the cache stays exact while regime/transport come from the
+# shared signature scheme.
+_CACHE_EXTRA_ARGS = (
+    "decode_steps", "batches", "bench_layers", "full_layers", "benchmark_gpus",
+    "random_tokens", "vocab", "gpu_mem_util", "routing_dist", "zipf_s",
+    "moe_imbalance", "load_format", "skip_tokenizer_init", "no_aiter",
+    "max_model_len", "output_len", "seed", "seeds",
+)
+
+
+def _cache_key(args) -> str:
+    env = {"VLLM_ROCM_USE_AITER": os.environ.get("VLLM_ROCM_USE_AITER", "0")}
+    if _HAVE_REGIME:
+        recipe = _regime_recipe_from_bench_args(args, env)
+        extra = {k: getattr(args, k, None) for k in _CACHE_EXTRA_ARGS}
+        return _regime_config_key(recipe, extra)
+    # Inline fallback: hash every config-affecting arg + the AITER env.
+    payload = {k: v for k, v in sorted(vars(args).items()) if k not in _CACHE_IGNORE_ARGS}
+    payload["_env_VLLM_ROCM_USE_AITER"] = env["VLLM_ROCM_USE_AITER"]
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _cache_path(cache_dir: str, key: str) -> str:
+    return os.path.join(cache_dir, f"vllm_bench_{key}.json")
 
 
 def main():
@@ -649,6 +757,13 @@ def main():
     ap.add_argument("--decode-steps", type=int, default=32, help="K for decode-step timing")
     ap.add_argument("--batch", type=int, default=16, help="ref batch (anchor) when no --batches")
     ap.add_argument("--batches", default=None, help="comma list to sweep, e.g. 4,8,16,32,64")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="single RNG seed for random token content (default 0)")
+    ap.add_argument("--seeds", default=None,
+                    help="comma list of seeds to sweep in ONE engine build, e.g. "
+                         "'0,1,2'. Each seed re-rolls random token content and adds "
+                         "an independent timing sample; the emitted sweep carries the "
+                         "per-batch mean + std across seeds (no engine re-init).")
     ap.add_argument("--max-model-len", type=int, default=None)
     ap.add_argument("--bench-layers", default=None,
                     help="comma list of REDUCED layer counts to benchmark and "
@@ -700,11 +815,41 @@ def main():
                          "measured/expected production value (random data ~ low I, "
                          "domain-clustered traffic ~ higher I).")
     ap.add_argument("--save", required=True)
+    ap.add_argument("--cache-dir", default=os.environ.get("PRIMUS_BENCH_CACHE"),
+                    help="Directory of cached results keyed by run config. On a "
+                         "cache HIT the vLLM engine is never built (skips ~all the "
+                         "wall time). Defaults to $PRIMUS_BENCH_CACHE; caching is "
+                         "off when neither is set.")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Ignore any cached result and do not write one.")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-run and OVERWRITE the cached result for this config.")
     args = ap.parse_args()
+
+    cache_dir = args.cache_dir
+    key = _cache_key(args) if cache_dir else None
+    cpath = _cache_path(cache_dir, key) if cache_dir else None
+
+    if cache_dir and not args.no_cache and not args.force and os.path.exists(cpath):
+        with open(cpath) as f:
+            result = json.load(f)
+        with open(args.save, "w") as f:
+            json.dump(result, f)
+        print(f"[Primus:Inference:vLLM-Benchmark] CACHE HIT {cpath} "
+              f"(config key {key}); skipped vLLM run")
+        print("[Primus:Inference:vLLM-Benchmark] " + json.dumps(result))
+        print(f"[Primus:Inference:vLLM-Benchmark] wrote {args.save}")
+        return
 
     result = run_vllm_benchmark(args)
     with open(args.save, "w") as f:
         json.dump(result, f)
+    if cache_dir and not args.no_cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cpath, "w") as f:
+            json.dump(result, f)
+        print(f"[Primus:Inference:vLLM-Benchmark] cached result -> {cpath} "
+              f"(config key {key})")
     print("[Primus:Inference:vLLM-Benchmark] " + json.dumps(result))
     print(f"[Primus:Inference:vLLM-Benchmark] wrote {args.save}")
 

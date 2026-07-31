@@ -45,7 +45,6 @@ from .collectives import (
     deepep_overlap_efficiency,
 )
 
-
 def _safe_forward(profiler, batch: int, seq_len: int) -> float:
     """Forward time of a sub-profiler, or 0 if it does not implement timing.
 
@@ -264,12 +263,62 @@ class InferencePerformanceProjector:
                 return v0 + w * (v1 - v0)
         return pts[-1][1]
 
+    # -- batch transport (measured anchor x analytical shape) ------------------
+
+    def _sim_decode_step_ms(self, batch: int) -> float:
+        """Pure analytical decode step latency at ``batch`` — used ONLY as a
+        *shape* to carry a measured anchor across batch. Context is held fixed so
+        the ratio isolates the batch response; absolute simulator bias cancels in
+        the ratio. Returns 0 if the simulator is unavailable (→ caller falls
+        back to interpolation)."""
+        try:
+            ctx = int(self._meas_ref_input or self.cfg.request_config.input_seq_len or 1)
+            return self._forward_times(max(1, batch), 1, "decode", ctx).total_ms
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _sim_prefill_ms(self, batch: int) -> float:
+        """Pure analytical prefill latency at ``batch`` (fixed prompt length), as
+        a shape for batch transport; see :meth:`_sim_decode_step_ms`."""
+        try:
+            tok = int(self._meas_ref_input or self.cfg.request_config.input_seq_len or 1)
+            return self._forward_times(max(1, batch), tok, "prefill", tok).total_ms
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    @staticmethod
+    def _nearest_anchor(batch: int, pts: list):
+        """Nearest measured point to ``batch`` in log-space (batch grids are
+        geometric, e.g. 1/4/16/64)."""
+        lb = math.log(max(1, batch))
+        return min(pts, key=lambda p: abs(lb - math.log(max(1, p[0]))))
+
+    def _transport_batch(self, batch: int, pts: list, sim_fn) -> float:
+        """Transport a measured (batch -> ms) curve to an arbitrary ``batch`` by
+        scaling the NEAREST measured anchor by the analytical simulate ratio
+        ``sim(batch) / sim(anchor)`` — instead of linear interpolation /
+        end-point clamping. This keeps the absolute value anchored to real
+        silicon while following the physically-correct (non-linear, memory→
+        compute knee) batch shape, and extrapolates sanely past the measured
+        max. Falls back to piecewise-linear interpolation when the simulator is
+        unavailable (ratio undefined)."""
+        if not pts:
+            return 0.0
+        for b0, v0 in pts:
+            if b0 == batch:
+                return v0
+        b0, v0 = self._nearest_anchor(batch, pts)
+        s_t, s_0 = sim_fn(batch), sim_fn(b0)
+        if s_t > 0.0 and s_0 > 0.0:
+            return v0 * (s_t / s_0)
+        return self._interp(batch, pts)
+
     # -- measured-time accessors (benchmark-based projection) ------------------
 
     def _measured_decode_step_ms(self, batch: int) -> float:
         """Measured whole-model / composed decode *step* latency at ``batch``."""
         if self._meas_whole.get("decode"):
-            return self._interp(batch, self._meas_whole["decode"])
+            return self._transport_batch(batch, self._meas_whole["decode"], self._sim_decode_step_ms)
         # Per-layer schema: restore each layer to the target TP/EP, then sum by
         # layer count. Decode processes 1 token/step.
         d = self._restore_per_layer("dense", self._meas_layer.get(("decode", "dense"), 0.0), batch, 1)
@@ -279,7 +328,7 @@ class InferencePerformanceProjector:
     def _measured_full_prefill_ms(self, batch: int) -> float:
         """Measured whole-model / composed prefill latency for the full prompt."""
         if self._meas_whole.get("prefill"):
-            return self._interp(batch, self._meas_whole["prefill"])
+            return self._transport_batch(batch, self._meas_whole["prefill"], self._sim_prefill_ms)
         tok = self._meas_ref_input or 1
         d = self._restore_per_layer("dense", self._meas_layer.get(("prefill", "dense"), 0.0), batch, tok)
         m = self._restore_per_layer("moe", self._meas_layer.get(("prefill", "moe"), 0.0), batch, tok)
@@ -557,24 +606,29 @@ class InferencePerformanceProjector:
 
         comm = CommBreakdown()
         if self._comm is not None:
-            # Feature B: explicit, knob-driven communication model.
-            overlap = (
-                float(self._cc.prefill_overlap)
-                if phase == "prefill"
-                else float(self._cc.decode_overlap)
-            )
-            overlap = min(max(overlap, 0.0), 1.0)
-            keep = 1.0 - overlap
-
+            # Feature B: explicit, knob-driven communication model with a
+            # batch-dependent compute/comm overlap. The exposed comm is hidden
+            # behind the SAME layer-type compute up to the configured ceiling
+            # (see _overlap_keep), so dense and MoE layers get different exposure
+            # and the residual at high batch is captured analytically.
             new_tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
             new_ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
 
-            dense_fwd = dense_compute + (new_tp_ar * keep if has_dense else 0.0)
-            moe_fwd = moe_compute + ((new_tp_ar + new_ep_a2a) * keep if has_moe else 0.0)
+            dense_comm = new_tp_ar
+            moe_comm = new_tp_ar + new_ep_a2a
+            keep_dense = self._overlap_keep(phase, dense_comm, dense_compute) if has_dense else 1.0
+            keep_moe = self._overlap_keep(phase, moe_comm, moe_compute) if has_moe else 1.0
 
-            comm.tp_allreduce_ms = (self._n_dense + self._n_moe) * new_tp_ar * keep
-            comm.ep_a2a_ms = self._n_moe * new_ep_a2a * keep
-            comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
+            dense_fwd = dense_compute + (dense_comm * keep_dense if has_dense else 0.0)
+            moe_fwd = moe_compute + (moe_comm * keep_moe if has_moe else 0.0)
+
+            # TP-AR appears in both layer types; charge each at its own exposure.
+            comm.tp_allreduce_ms = (
+                self._n_dense * new_tp_ar * keep_dense + self._n_moe * new_tp_ar * keep_moe
+            )
+            comm.ep_a2a_ms = self._n_moe * new_ep_a2a * keep_moe
+            pp_keep = keep_moe if has_moe else keep_dense
+            comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * pp_keep
         else:
             # Implicit comm: add the built-in cost back onto (calibrated)
             # compute. When DeepEP/SyncFree is enabled, the EP A2A overlaps
@@ -921,6 +975,33 @@ class InferencePerformanceProjector:
             return (1.0 - accept ** (spec_k + 1)) / (1.0 - accept)
         return float(spec_k + 1 if spec_k > 0 else 1)
 
+    def _overlap_keep(self, phase: str, comm_ms: float, compute_ms: Optional[float]) -> float:
+        """Exposed-comm fraction (1 - hidden) after compute/comm overlap.
+
+        The configured ``prefill_overlap`` / ``decode_overlap`` is the *ceiling*
+        (max fraction of comm hideable behind compute). Physically you cannot
+        hide more comm than there is compute to overlap it with, so the
+        achievable overlap is ``min(ceiling, compute/comm)``. This makes the
+        exposed comm naturally **batch-dependent** and fixes the residual seen at
+        high batch: at small batch compute is small relative to the (partly
+        fixed) comm, so more comm is exposed; as batch grows compute dominates
+        and the overlap saturates at the ceiling.
+
+        ``compute_ms=None`` (e.g. the benchmark-mode reporting path, where layer
+        compute is not separately modelled) falls back to the constant ceiling,
+        preserving the previous behaviour there.
+        """
+        ceiling = float(
+            self._cc.prefill_overlap if phase == "prefill" else self._cc.decode_overlap
+        )
+        ceiling = min(max(ceiling, 0.0), 1.0)
+        if ceiling <= 0.0:
+            return 1.0
+        if compute_ms is None or comm_ms <= 0.0:
+            return 1.0 - ceiling
+        hideable = min(ceiling, max(0.0, compute_ms) / comm_ms)
+        return 1.0 - min(1.0, max(0.0, hideable))
+
     def _comm_breakdown(self, batch: int, q_len: int, phase: str) -> CommBreakdown:
         """Explicit per-phase communication breakdown (ms).
 
@@ -932,10 +1013,10 @@ class InferencePerformanceProjector:
         comm = CommBreakdown()
         if self._comm is None:
             return comm
-        overlap = (
-            float(self._cc.prefill_overlap) if phase == "prefill" else float(self._cc.decode_overlap)
-        )
-        keep = 1.0 - min(max(overlap, 0.0), 1.0)
+        # Reporting path (no separated compute → constant ceiling, matching the
+        # historical breakdown). The projection path applies the batch-dependent
+        # overlap in _phase_forward_times.
+        keep = self._overlap_keep(phase, 1.0, None)
         tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
         ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
         comm.tp_allreduce_ms = (self._n_dense + self._n_moe) * tp_ar * keep
@@ -964,6 +1045,82 @@ class InferencePerformanceProjector:
 
     # -- top level -------------------------------------------------------------
 
+    def _resolve_hbm_gb(self) -> tuple[float, str]:
+        """Per-GPU HBM capacity + where it came from, resolved in order:
+        explicit ``--hbm-capacity-gb`` → live device query (GPU node). No default
+        is assumed — if neither is available this raises, so the sustainable-
+        concurrency number is never computed against a guessed memory size. The
+        source string is surfaced so it always states the size it used."""
+        args = self._args_ref
+        hbm = getattr(args, "hbm_capacity_gb", None) if args else None
+        if hbm:
+            return float(hbm), "--hbm-capacity-gb"
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                return props.total_memory / (1024.0 ** 3), f"device({props.name})"
+        except Exception:
+            pass
+        raise ValueError(
+            "Per-GPU HBM capacity is required but was not provided: pass "
+            "--hbm-capacity-gb (e.g. 192 for MI300X, 256 for MI325X, 288 for "
+            "MI355X) or run on a GPU node where the device can be queried. "
+            "No default is assumed."
+        )
+
+    def _sustainable_concurrency(self) -> tuple[Optional[int], float, str]:
+        """KV-feasible max concurrent sequences at the target context length,
+        i.e. how many sequences fit in the HBM left after weights + activations.
+        Reuses the memory projection so there is a single sizing formula. Returns
+        ``(max_conc_or_None, hbm_gb, hbm_source)``."""
+        hbm_gb, source = self._resolve_hbm_gb()
+        try:
+            from .memory import project_inference_memory
+
+            mem = project_inference_memory(
+                self.cfg, hbm_capacity_gb=hbm_gb, verbose=False
+            )
+            return mem.max_concurrent_sequences, hbm_gb, source
+        except Exception:
+            return None, hbm_gb, source
+
+    def _effective_concurrency(self) -> dict:
+        """Concurrency that drives throughput, reconciled against the KV-feasible
+        ceiling (cap + report):
+
+          * no explicit ``max_concurrency`` → use the KV-derived sustainable max
+            (instead of ``batch_size``), so a config that frees HBM is scored at
+            the load it can actually serve;
+          * explicit ``max_concurrency`` above the ceiling → clamp to it and flag;
+          * HBM unknown / KV sizing unavailable → fall back to the prior
+            ``resolved_max_concurrency()`` behaviour.
+
+        Always records the sustainable max, the concurrency actually used, and
+        the HBM capacity + source in ``extras``."""
+        req = self.cfg.request_config
+        explicit = req.max_concurrency
+        sustainable, hbm_gb, hbm_source = self._sustainable_concurrency()
+        capped = False
+        if sustainable and sustainable > 0:
+            if explicit is None:
+                concurrency = sustainable
+            else:
+                concurrency = min(int(explicit), sustainable)
+                capped = int(explicit) > sustainable
+        else:
+            concurrency = req.resolved_max_concurrency()
+        concurrency = max(1, int(concurrency))
+        extras = {
+            "sustainable_concurrency": int(sustainable) if sustainable else 0,
+            "concurrency_used": concurrency,
+            "hbm_capacity_gb": float(hbm_gb),
+            "hbm_capacity_source": hbm_source,
+            "concurrency_capped": 1.0 if capped else 0.0,
+        }
+        return {"concurrency": concurrency, "extras": extras}
+
     def project(self) -> InferencePerfResult:
         if self.cfg.disaggregation_config and self.cfg.disaggregation_config.enabled:
             return self._project_disaggregated()
@@ -975,13 +1132,15 @@ class InferencePerformanceProjector:
         input_len = max(1, req.input_seq_len)
         output_len = max(0, req.output_seq_len)
 
-        concurrency = max(1, req.resolved_max_concurrency())
+        conc = self._effective_concurrency()
+        concurrency = conc["concurrency"]
         spec_k = int(req.speculative_num_tokens or 0)
         q_len = (spec_k + 1) if spec_k > 0 else 1
         replica_gpus = _replica_gpus(self.cfg)
 
         ttft = self.prefill_latency_ms(batch, input_len)
         extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
+        extras.update(conc["extras"])
 
         if self._use_continuous_batching(concurrency, output_len):
             # Continuous batching: TPOT is the blended pure/mixed steady state.

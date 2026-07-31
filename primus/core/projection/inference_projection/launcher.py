@@ -167,6 +167,16 @@ def _print_performance(inference_config, perf) -> None:
         print("  Serving model: STATIC (pure-decode batch)")
     src = "BENCHMARK (GPU-calibrated)" if perf.extras.get("benchmark_calibrated") else "SIMULATION"
     print(f"  Profiling source: {src}")
+    if "sustainable_concurrency" in perf.extras:
+        sc = int(perf.extras.get("sustainable_concurrency", 0) or 0)
+        used = int(perf.extras.get("concurrency_used", 0) or 0)
+        hbm = float(perf.extras.get("hbm_capacity_gb", 0.0) or 0.0)
+        hbm_src = perf.extras.get("hbm_capacity_source", "")
+        capped = bool(perf.extras.get("concurrency_capped", 0.0))
+        sc_s = str(sc) if sc > 0 else "n/a (HBM/KV sizing unavailable)"
+        print(f"  Max sustainable concurrency: {sc_s}  (HBM={hbm:.0f} GB via {hbm_src})")
+        cap_note = "  [capped to sustainable max]" if capped else ""
+        print(f"  Concurrency used: {used}{cap_note}")
     print("-" * 100)
     print(f"  TTFT (time to first token):      {perf.ttft_ms:.2f} ms")
     if perf.is_disaggregated:

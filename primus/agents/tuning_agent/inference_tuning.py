@@ -648,6 +648,8 @@ _OBJECTIVE_ALIASES = {
     "throughput": "decode_throughput_tps_per_gpu",
     "tokens_per_s_per_gpu": "decode_throughput_tps_per_gpu",
     "max_concurrency": "max_concurrent_sequences",
+    "sustainable_concurrency": "max_sustainable_concurrency",
+    "max_sustainable_concurrency": "max_sustainable_concurrency",
 }
 
 DEFAULT_INFERENCE_OBJECTIVE = "decode_throughput_tps_per_gpu"
@@ -688,6 +690,8 @@ _RE_PREFILL_TPS = re.compile(rf"Prefill throughput:\s*{_FLOAT}\s*tok/s", re.IGNO
 _RE_TOTAL_MEM = re.compile(rf"Projected Total Memory:\s*{_FLOAT}\s*GB", re.IGNORECASE)
 _RE_KV = re.compile(rf"KV cache[^:]*:\s*{_FLOAT}\s*GB", re.IGNORECASE)
 _RE_MAXCONC = re.compile(r"Max concurrent sequences:\s*(\d+)", re.IGNORECASE)
+_RE_SUSTAINABLE = re.compile(r"Max sustainable concurrency:\s*(\d+)", re.IGNORECASE)
+_RE_CONC_USED = re.compile(r"Concurrency used:\s*(\d+)", re.IGNORECASE)
 
 
 def _f(m) -> float | None:
@@ -714,4 +718,8 @@ def parse_inference_metrics(stdout: str) -> dict[str, Any]:
         out["kv_cache_gb"] = _f(m)
     if (m := _RE_MAXCONC.search(stdout)):
         out["max_concurrent_sequences"] = int(m.group(1))
+    if (m := _RE_SUSTAINABLE.search(stdout)):
+        out["max_sustainable_concurrency"] = int(m.group(1))
+    if (m := _RE_CONC_USED.search(stdout)):
+        out["concurrency_used"] = int(m.group(1))
     return out
