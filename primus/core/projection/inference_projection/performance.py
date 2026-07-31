@@ -221,6 +221,11 @@ class InferencePerformanceProjector:
         #
         # Empty => pure simulation.
         self._meas_whole: Dict[str, list] = {}   # {"prefill": [(batch, ms)], "decode": [...]}
+        # When the benchmark swept the decode curve at the engine's CUDA-graph
+        # capture sizes, runtime pads the decode batch UP to the nearest captured
+        # size — so decode latency is a staircase and we look it up by bucket
+        # rather than interpolating. Set from meta in set_benchmark_calibration.
+        self._decode_pad_to_capture: bool = False
         self._meas_prefill_rate_ms_per_tok: float = 0.0  # for sub-prompt prefill pieces
         self._meas_layer: Dict[tuple, float] = {}        # {(phase, ltype): ms}
         self._meas_ref_input: int = 0
@@ -293,32 +298,83 @@ class InferencePerformanceProjector:
         lb = math.log(max(1, batch))
         return min(pts, key=lambda p: abs(lb - math.log(max(1, p[0]))))
 
+    @staticmethod
+    def _bucket_up(batch: int, pts: list) -> float:
+        """Decode value with the runtime CUDA-graph padding applied: the batch is
+        padded UP to the nearest captured size, so return the measured value at
+        the smallest measured (capture-aligned) batch >= ``batch``. Clamp to the
+        largest measured point above the top capture size. ``pts`` sorted asc."""
+        for b0, v0 in pts:
+            if b0 >= batch:
+                return v0
+        return pts[-1][1]
+
+    @staticmethod
+    def _loglog_transport(batch: int, pts: list) -> float:
+        """Piecewise power-law (log-log linear) interpolation of a measured
+        ``(batch -> ms)`` curve; extrapolate with the nearest end segment's
+        slope. ``pts`` must be sorted with >= 2 points.
+
+        Interpolating the *measured* curve directly is more accurate than
+        modulating the analytical simulator, which can carry a spurious knee
+        (e.g. an MoE expert-coverage bump) that the real silicon does not show.
+        Latency-vs-batch is close to a local power law between adjacent measured
+        points, so a straight line in (log batch, log ms) tracks it tightly and
+        extrapolates monotonically."""
+        lb = math.log(max(1, batch))
+        xs = [(math.log(max(1, b)), math.log(max(1e-9, v))) for b, v in pts]
+        if lb <= xs[0][0]:
+            (x0, y0), (x1, y1) = xs[0], xs[1]
+        elif lb >= xs[-1][0]:
+            (x0, y0), (x1, y1) = xs[-2], xs[-1]
+        else:
+            (x0, y0), (x1, y1) = xs[0], xs[1]
+            for i in range(len(xs) - 1):
+                if xs[i][0] <= lb <= xs[i + 1][0]:
+                    (x0, y0), (x1, y1) = xs[i], xs[i + 1]
+                    break
+        slope = (y1 - y0) / (x1 - x0) if x1 != x0 else 0.0
+        return math.exp(y0 + slope * (lb - x0))
+
     def _transport_batch(self, batch: int, pts: list, sim_fn) -> float:
-        """Transport a measured (batch -> ms) curve to an arbitrary ``batch`` by
-        scaling the NEAREST measured anchor by the analytical simulate ratio
-        ``sim(batch) / sim(anchor)`` — instead of linear interpolation /
-        end-point clamping. This keeps the absolute value anchored to real
-        silicon while following the physically-correct (non-linear, memory→
-        compute knee) batch shape, and extrapolates sanely past the measured
-        max. Falls back to piecewise-linear interpolation when the simulator is
-        unavailable (ratio undefined)."""
+        """Transport a measured ``(batch -> ms)`` curve to an arbitrary
+        ``batch``.
+
+        * **>= 2 measured points** (a benchmark sweep): interpolate/extrapolate
+          the measured curve directly in log-log space (:meth:`_loglog_transport`).
+          Interpolating real measurements between adjacent anchors is more
+          accurate than scaling by the analytical simulate ratio, whose shape
+          can carry a spurious knee the silicon does not have.
+        * **single anchor** (e.g. an anchor-store reconstruction): there is no
+          curve to interpolate, so carry the lone point across batch by the
+          analytical simulate ratio ``sim(batch) / sim(anchor)`` — the physical,
+          non-linear batch shape. Falls back to holding the anchor value when
+          the simulator is unavailable.
+
+        Returns the exact measured value when ``batch`` is itself measured."""
         if not pts:
             return 0.0
-        for b0, v0 in pts:
+        P = sorted(pts)
+        for b0, v0 in P:
             if b0 == batch:
                 return v0
-        b0, v0 = self._nearest_anchor(batch, pts)
+        if len(P) >= 2:
+            return self._loglog_transport(batch, P)
+        b0, v0 = P[0]
         s_t, s_0 = sim_fn(batch), sim_fn(b0)
         if s_t > 0.0 and s_0 > 0.0:
             return v0 * (s_t / s_0)
-        return self._interp(batch, pts)
+        return v0
 
     # -- measured-time accessors (benchmark-based projection) ------------------
 
     def _measured_decode_step_ms(self, batch: int) -> float:
         """Measured whole-model / composed decode *step* latency at ``batch``."""
         if self._meas_whole.get("decode"):
-            return self._transport_batch(batch, self._meas_whole["decode"], self._sim_decode_step_ms)
+            pts = self._meas_whole["decode"]
+            if self._decode_pad_to_capture:
+                return self._bucket_up(batch, pts)
+            return self._transport_batch(batch, pts, self._sim_decode_step_ms)
         # Per-layer schema: restore each layer to the target TP/EP, then sum by
         # layer count. Decode processes 1 token/step.
         d = self._restore_per_layer("dense", self._meas_layer.get(("decode", "dense"), 0.0), batch, 1)
@@ -389,6 +445,7 @@ class InferencePerformanceProjector:
         self._bench_tp = int(meta.get("benchmark_tp") or meta.get("tp") or 1)
         self._bench_ep = int(meta.get("benchmark_ep") or meta.get("ep") or 1)
         self._bench_pp = int(meta.get("benchmark_pp") or meta.get("pp") or 1)
+        self._decode_pad_to_capture = bool(meta.get("decode_pad_to_capture"))
 
         self._meas_ref_input = ref_input
 

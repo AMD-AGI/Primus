@@ -427,6 +427,39 @@ def _measure_batch(llm, input_len: int, batch: int, decode_steps: int,
     return {"batch": batch, "prefill_ms": prefill_ms, "decode_ms": decode_ms}
 
 
+def _engine_capture_sizes(llm):
+    """Best-effort read of the decode CUDA-graph capture sizes from a built
+    engine (sorted asc), or None if unavailable (caller then uses the default
+    list). These are the batch sizes vLLM captured graphs for; at runtime a
+    decode batch is padded UP to the nearest one."""
+    try:
+        sizes = llm.llm_engine.vllm_config.compilation_config.cudagraph_capture_sizes
+        return sorted({int(s) for s in sizes if int(s) > 0}) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _default_capture_sizes(cap: int) -> list:
+    """Fallback capture-size list matching vLLM's default shape (1, 2, 4 then
+    multiples of 8), extended to the first bucket that covers ``cap`` so ``cap``
+    rounds up to a measured point. Used only when the engine list can't be read."""
+    sizes, s = [1, 2, 4], 8
+    while s < cap:
+        sizes.append(s)
+        s += 8
+    sizes.append(s)
+    return sorted({x for x in sizes if 0 < x})
+
+
+def _capture_batches_up_to(caps: list, concurrency: int) -> list:
+    """Capture sizes up to ``concurrency``, plus the one bucket that covers it
+    (smallest capture >= concurrency), so the projector can round any batch up
+    to a measured point."""
+    ge = [s for s in caps if s >= concurrency]
+    bucket = min(ge) if ge else max(caps)
+    return sorted({s for s in caps if s <= concurrency} | {bucket})
+
+
 def run_vllm_benchmark(args) -> dict:
     if not args.no_aiter:
         _enable_aiter()
@@ -461,12 +494,21 @@ def run_vllm_benchmark(args) -> dict:
         os.environ["VLLM_MOE_ROUTING_SIMULATION_STRATEGY"] = "normal_routing"
         routing_applied = "normal_routing"
 
-    batches = (
-        [int(b) for b in str(args.batches).split(",") if b.strip()]
-        if args.batches
-        else [args.batch]
-    )
-    max_batch = max(batches)
+    # --concurrency: derive the sweep from the engine's CUDA-graph capture sizes
+    # (up to the concurrency) after the engine is built; decode is then looked up
+    # by capture bucket at projection time. Otherwise use the explicit batches.
+    concurrency = int(args.concurrency) if getattr(args, "concurrency", None) else None
+    capture_sizes = None
+    if concurrency:
+        batches = None
+        max_batch = concurrency
+    else:
+        batches = (
+            [int(b) for b in str(args.batches).split(",") if b.strip()]
+            if args.batches
+            else [args.batch]
+        )
+        max_batch = max(batches)
     # Seeds are swept inside a SINGLE engine build (no re-init per seed): each
     # seed re-rolls the random token content (real weights / --random-tokens) and
     # provides an independent timing sample, giving a cheap noise estimate.
@@ -566,10 +608,17 @@ def run_vllm_benchmark(args) -> dict:
             pts = [e for e in raw if e["batch"] == b]
             dvals = [e["decode_ms"] for e in pts]
             pvals = [e["prefill_ms"] for e in pts]
+            # ``decode_ms``/``prefill_ms`` use the MEDIAN over seeds: it is
+            # robust to both transient contention (spuriously slow) and
+            # scheduling artifacts (spuriously fast) that a single seed can hit
+            # on a shared node, unlike mean (contaminated by any outlier) or min
+            # (rejects only slow ones). Mean/min/std are kept for diagnostics.
             entry = {
                 "batch": b,
-                "prefill_ms": statistics.mean(pvals),
-                "decode_ms": statistics.mean(dvals),
+                "prefill_ms": statistics.median(pvals),
+                "decode_ms": statistics.median(dvals),
+                "decode_ms_mean": statistics.mean(dvals),
+                "prefill_ms_mean": statistics.mean(pvals),
                 "decode_ms_min": min(dvals),
                 "decode_ms_std": statistics.pstdev(dvals) if len(dvals) > 1 else 0.0,
                 "prefill_ms_std": statistics.pstdev(pvals) if len(pvals) > 1 else 0.0,
@@ -582,6 +631,17 @@ def run_vllm_benchmark(args) -> dict:
                   f"prefill={entry['prefill_ms']:.2f}ms "
                   f"decode_step={entry['decode_ms']:.2f}ms{spread}")
         return sweep, raw
+
+    def _resolve_capture_batches(llm):
+        """Read the engine's capture sizes (fallback to the default list) and
+        return the sweep batches up to ``concurrency`` + the covering bucket."""
+        engine_caps = _engine_capture_sizes(llm)
+        caps = engine_caps or _default_capture_sizes(concurrency)
+        bs = _capture_batches_up_to(caps, concurrency)
+        print(f"[Primus:Inference:vLLM-Benchmark] concurrency={concurrency} -> "
+              f"capture-size batches {bs} "
+              f"(source={'engine' if engine_caps else 'default'})")
+        return bs, caps
 
     # --- REDUCE -> BENCHMARK -> RESTORE -------------------------------------
     # Mirrors the training layer benchmark (benchmark.py + performance.py): the
@@ -609,6 +669,8 @@ def run_vllm_benchmark(args) -> dict:
         for li, L in enumerate(bench_counts):
             print(f"[Primus:Inference:vLLM-Benchmark] --- benchmarking {L} layers ---")
             llm = _build_llm(L)
+            if batches is None:
+                batches, capture_sizes = _resolve_capture_batches(llm)
             bench_sweeps[L] = {e["batch"]: e for e in _sweep(llm)[0]}
             # Free every engine except keep-none: each count is a distinct model.
             _free_llm(llm)
@@ -642,6 +704,8 @@ def run_vllm_benchmark(args) -> dict:
         # No restore: measure the model as configured (full, or a single reduced
         # count via legacy --num-hidden-layers). One engine, reused across batches.
         llm = _build_llm(args.num_hidden_layers)
+        if batches is None:
+            batches, capture_sizes = _resolve_capture_batches(llm)
         sweep, sweep_raw = _sweep(llm)
         eff_layers = args.num_hidden_layers
 
@@ -685,6 +749,11 @@ def run_vllm_benchmark(args) -> dict:
             "moe_imbalance_realized": imbalance_realized,
             "num_experts": n_experts or None,
             "model": args.model,
+            # Capture-size sweep mode: the projector pads decode UP to the
+            # nearest captured size (staircase lookup) instead of interpolating.
+            "concurrency": concurrency,
+            "capture_sizes": capture_sizes,
+            "decode_pad_to_capture": concurrency is not None,
         },
     }
     # Stamp the regime signature so the anchor store can index without
@@ -715,7 +784,7 @@ _CACHE_EXTRA_ARGS = (
     "decode_steps", "batches", "bench_layers", "full_layers", "benchmark_gpus",
     "random_tokens", "vocab", "gpu_mem_util", "routing_dist", "zipf_s",
     "moe_imbalance", "load_format", "skip_tokenizer_init", "no_aiter",
-    "max_model_len", "output_len", "seed", "seeds",
+    "max_model_len", "output_len", "seed", "seeds", "concurrency",
 )
 
 
@@ -757,6 +826,11 @@ def main():
     ap.add_argument("--decode-steps", type=int, default=32, help="K for decode-step timing")
     ap.add_argument("--batch", type=int, default=16, help="ref batch (anchor) when no --batches")
     ap.add_argument("--batches", default=None, help="comma list to sweep, e.g. 4,8,16,32,64")
+    ap.add_argument("--concurrency", type=int, default=None,
+                    help="derive the sweep from the engine's CUDA-graph capture "
+                         "sizes up to this concurrency (overrides --batch/--batches). "
+                         "Decode is then looked up by padding the batch UP to the "
+                         "nearest captured size at projection time.")
     ap.add_argument("--seed", type=int, default=0,
                     help="single RNG seed for random token content (default 0)")
     ap.add_argument("--seeds", default=None,
