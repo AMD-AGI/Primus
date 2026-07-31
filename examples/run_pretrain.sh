@@ -38,6 +38,16 @@ LOG_INFO_RANK0() {
 }
 LOG_ERROR() { echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*"; }
 
+# JAX backends (MaxText, MaxDiffusion) are launched WITHOUT torchrun, install
+# requirements-jax.txt, and skip the torch/NCCL-only env. Returns 0 (true) for
+# any JAX backend, matched case-insensitively against $BACKEND.
+_is_jax_backend() {
+    case "$(printf '%s' "${BACKEND:-}" | tr '[:upper:]' '[:lower:]')" in
+        maxtext|maxdiffusion) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 EXAMPLE_FAULT_TOLERANCE() {
     for arg in "$@"; do
         case "$arg" in
@@ -99,7 +109,7 @@ if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
     LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
 else
     LOG_INFO_RANK0 "Pip installing required packages ..."
-    if [ "${BACKEND:-}" != "MaxText" ]; then
+    if ! _is_jax_backend; then
         pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
     else
         pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
@@ -226,7 +236,7 @@ export RCCL_MSCCLPP_ENABLE=0
 export RCCL_MSCCLPP_FORCE_ENABLE=0
 export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024))
 export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-if [ "${BACKEND:-}" != "MaxText" ]; then
+if ! _is_jax_backend; then
     export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
 fi
 
@@ -240,7 +250,7 @@ LOG_INFO_RANK0 ""
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-if [ "${BACKEND:-}" != "MaxText" ]; then
+if ! _is_jax_backend; then
     export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 fi
 
@@ -363,7 +373,9 @@ fi
 
 
 # -------------------- Launch Training --------------------
-if [ "${BACKEND:-}" == "MaxText" ]; then
+if _is_jax_backend; then
+    # JAX backends (MaxText, MaxDiffusion) manage devices themselves; launch a
+    # single plain-python process (no torchrun).
     CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 else
     DISTRIBUTED_ARGS=(
