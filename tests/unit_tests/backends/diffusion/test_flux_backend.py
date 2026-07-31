@@ -48,6 +48,7 @@ def test_flux_argument_builder_selects_flux_defaults():
                 "lr_scheduler_type": "constant_with_warmup",
                 "warmup_steps": 11,
             },
+            "runtime": {"gradient_checkpointing_ratio": 0.25},
         }
     )
 
@@ -60,6 +61,7 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.trainer["args"]["per_device_train_batch_size"] == 3
     assert args.trainer["args"]["lr_scheduler_type"] == "constant_with_warmup"
     assert args.trainer["args"]["warmup_steps"] == 11
+    assert args.trainer["args"]["gradient_checkpointing_ratio"] == 0.25
     assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"
     assert args.trainer["args"]["compile_transformer_blocks"] is True
@@ -113,15 +115,17 @@ def test_flux_attention_dispatch_matches_sdpa_layout():
     set_attention_backend("sdpa")
     try:
         torch.manual_seed(7)
-        q = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
-        k = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
-        v = torch.randn(2, 3, 5, 4, dtype=torch.bfloat16)
+        q = torch.randn(2, 5, 3, 4, dtype=torch.bfloat16)
+        k = torch.randn(2, 5, 3, 4, dtype=torch.bfloat16)
+        v = torch.randn(2, 5, 3, 4, dtype=torch.bfloat16)
         pos = torch.arange(5, dtype=torch.float32).repeat(2, 1)
-        pe = rope(pos, dim=4, theta=10000).unsqueeze(1)
+        pe = rope(pos, dim=4, theta=10000).unsqueeze(2)
 
         actual = flux_attention(q, k, v, pe=pe)
         q_rope, k_rope = apply_rope(q, k, pe)
-        expected = torch.nn.functional.scaled_dot_product_attention(q_rope, k_rope, v)
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            q_rope.transpose(1, 2), k_rope.transpose(1, 2), v.transpose(1, 2)
+        )
         expected = expected.transpose(1, 2).flatten(2)
 
         torch.testing.assert_close(actual, expected)
@@ -189,8 +193,8 @@ def test_flux_forward_uses_positional_scheduler():
 
 def test_flux_gradient_checkpointing_uses_torchtitan_block_wrappers():
     dit = torch.nn.Module()
-    dit.double_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
-    dit.single_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+    dit.double_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
+    dit.single_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
     dit.gradient_checkpointing = False
     model = FluxForTraining(
         dit=dit,
@@ -198,39 +202,35 @@ def test_flux_gradient_checkpointing_uses_torchtitan_block_wrappers():
         model_config=object(),
     )
 
-    model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable({"ratio": 0.5})
 
     assert hasattr(dit.double_blocks[0], "_checkpoint_wrapped_module")
-    assert hasattr(dit.single_blocks[0], "_checkpoint_wrapped_module")
+    assert hasattr(dit.double_blocks[1], "_checkpoint_wrapped_module")
+    assert not hasattr(dit.single_blocks[0], "_checkpoint_wrapped_module")
+    assert not hasattr(dit.single_blocks[1], "_checkpoint_wrapped_module")
     assert dit.gradient_checkpointing is False
     assert dit._torchtitan_checkpoint_wrapped is True
 
 
-def test_fsdp2_compile_transformer_blocks_replaces_modules(monkeypatch):
-    class CompiledBlock(torch.nn.Module):
-        def __init__(self, original):
-            super().__init__()
-            self.original = original
-
+def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
     root = torch.nn.Module()
     root.double_blocks = torch.nn.ModuleList([torch.nn.Identity(), torch.nn.ReLU()])
     root.single_blocks = torch.nn.ModuleList([torch.nn.Sigmoid()])
+    original_blocks = [*root.double_blocks, *root.single_blocks]
     compiled_inputs = []
 
     def fake_compile(module, *, fullgraph):
         assert fullgraph is True
         compiled_inputs.append(module)
-        return CompiledBlock(module)
 
-    monkeypatch.setattr(torch, "compile", fake_compile)
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
     trainer = FSDP2Trainer.__new__(FSDP2Trainer)
     trainer.rank = 1
 
     trainer._compile_transformer_blocks(root)
 
-    assert len(compiled_inputs) == 3
-    assert all(isinstance(block, CompiledBlock) for block in root.double_blocks)
-    assert all(isinstance(block, CompiledBlock) for block in root.single_blocks)
+    assert compiled_inputs == original_blocks
+    assert [*root.double_blocks, *root.single_blocks] == original_blocks
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):

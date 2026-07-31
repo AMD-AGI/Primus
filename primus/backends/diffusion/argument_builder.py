@@ -114,6 +114,7 @@ class DiffusionArgBuilder:
             "per_device_eval_batch_size": 1,
             "gradient_accumulation_steps": 1,
             "gradient_checkpointing": False,
+            "gradient_checkpointing_ratio": 1.0,
             "attention_backend": "flash_attn_aiter",
             "learning_rate": 2.0e-4,
             "lr_scheduler_type": "constant_with_warmup",
@@ -364,6 +365,7 @@ class DiffusionArgBuilder:
             ("bf16",): ("bf16",),
             ("fp16",): ("fp16",),
             ("gradient_checkpointing",): ("gradient_checkpointing",),
+            ("gradient_checkpointing_ratio",): ("gradient_checkpointing_ratio",),
             ("compile_transformer_blocks",): ("compile_transformer_blocks",),
             ("fsdp2_reshard_after_forward",): ("fsdp2_reshard_after_forward",),
         }

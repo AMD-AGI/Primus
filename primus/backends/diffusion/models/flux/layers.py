@@ -28,7 +28,7 @@ class EmbedND(nn.Module):
     def forward(self, ids: Tensor) -> Tensor:
         n_axes = ids.shape[-1]
         emb = torch.cat([rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)], dim=-3)
-        return emb.unsqueeze(1)
+        return emb.unsqueeze(2)
 
 
 def timestep_embedding(t: Tensor, dim: int, max_period: int = 10000, time_factor: float = 1000.0) -> Tensor:
@@ -104,7 +104,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         x = attention(q, k, v, pe=pe)
         return self.proj(x)
@@ -173,17 +173,17 @@ class DoubleStreamBlock(nn.Module):
 
         img_modulated = (1 + img_mod1.scale) * self.img_norm1(img) + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         txt_modulated = (1 + txt_mod1.scale) * self.txt_norm1(txt) + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-        q = torch.cat((txt_q, img_q), dim=2)
-        k = torch.cat((txt_k, img_k), dim=2)
-        v = torch.cat((txt_v, img_v), dim=2)
+        q = torch.cat((txt_q, img_q), dim=1)
+        k = torch.cat((txt_k, img_k), dim=1)
+        v = torch.cat((txt_v, img_v), dim=1)
         attn = attention(q, k, v, pe=pe)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
@@ -224,7 +224,7 @@ class SingleStreamBlock(nn.Module):
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         attn = attention(q, k, v, pe=pe)
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))

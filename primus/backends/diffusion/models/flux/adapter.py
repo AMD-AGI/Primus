@@ -90,9 +90,12 @@ class FluxForTraining(GenAIModel, nn.Module):
             unfreeze(self.dit)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        del gradient_checkpointing_kwargs
         if getattr(self.dit, "_torchtitan_checkpoint_wrapped", False):
             return
+
+        ratio = float((gradient_checkpointing_kwargs or {}).get("ratio", 1.0))
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError(f"gradient_checkpointing_ratio must be in [0, 1], got {ratio}")
 
         # Match the MLPerf TorchTitan reference: wrap each transformer block
         # before FSDP and do not preserve RNG state. The older in-forward
@@ -102,10 +105,15 @@ class FluxForTraining(GenAIModel, nn.Module):
             checkpoint_wrapper,
         )
 
-        for blocks_name in ("double_blocks", "single_blocks"):
-            blocks = getattr(self.dit, blocks_name)
+        block_lists = [getattr(self.dit, name) for name in ("double_blocks", "single_blocks")]
+        checkpoint_count = round(sum(len(blocks) for blocks in block_lists) * ratio)
+        block_number = 0
+        for blocks in block_lists:
             for index, block in enumerate(blocks):
+                if block_number >= checkpoint_count:
+                    break
                 blocks[index] = checkpoint_wrapper(block, preserve_rng_state=False)
+                block_number += 1
         self.dit.gradient_checkpointing = False
         self.dit._torchtitan_checkpoint_wrapped = True
 

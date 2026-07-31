@@ -183,11 +183,16 @@ class BaseWanTrainer:
         # --- Gradient Checkpointing ---
         if self.args.get("gradient_checkpointing", False):
             if hasattr(self.model, "gradient_checkpointing_enable"):
-                self.model.gradient_checkpointing_enable()
+                self.model.gradient_checkpointing_enable(
+                    {"ratio": float(self.args.get("gradient_checkpointing_ratio", 1.0))}
+                )
             elif hasattr(self.model, "dit") and hasattr(self.model.dit, "gradient_checkpointing"):
                 self.model.dit.gradient_checkpointing = True
             if self.rank == 0:
-                logger.info("Gradient checkpointing enabled")
+                logger.info(
+                    "Gradient checkpointing enabled "
+                    f"(ratio={float(self.args.get('gradient_checkpointing_ratio', 1.0)):.3f})"
+                )
 
         # --- W&B ---
         self._setup_wandb()

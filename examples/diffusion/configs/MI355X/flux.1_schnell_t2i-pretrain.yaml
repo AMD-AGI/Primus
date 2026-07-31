@@ -57,6 +57,7 @@ modules:
         seed: ${SEED:10007}
         attention_backend: ${ATTENTION_BACKEND:sdpa}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:true}
+        gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO:1.0}
         compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
 
