@@ -11,7 +11,8 @@ This is the MaxDiffusion counterpart of ``MaxTextAdapter``. MaxDiffusion is a
 JAX training stack, so (like MaxText) it is launched without torchrun and its
 config is a MaxDiffusion ``pyconfig`` file. The adapter is responsible for:
 
-    - Preparing the MaxDiffusion/JAX backend environment (arch env defaults)
+    - Declaring the MaxDiffusion/JAX arch env defaults (applied by the base
+      adapter before JAX/XLA import, via the shared env_registry mechanism)
     - Making the ``maxdiffusion`` package importable
     - Converting Primus module config -> MaxDiffusion config namespace
     - Providing the MaxDiffusion trainer class to Primus
@@ -22,10 +23,12 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from primus.backends.maxdiffusion.argument_builder import MaxDiffusionConfigBuilder
+from primus.backends.maxdiffusion.env_spec import maxdiffusion_env_defaults
 from primus.core.backend.backend_adapter import BackendAdapter
+from primus.core.backend.env_registry import EnvVar
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # Where the Dockerfile clones/installs MaxDiffusion (`git clone ... /workspace/maxdiffusion`).
@@ -39,40 +42,18 @@ class MaxDiffusionAdapter(BackendAdapter):
         super().__init__(framework)
         self.third_party_dir_name = "maxdiffusion"
 
-    def prepare_backend(self, config: Any):
-        """Prepare the MaxDiffusion/JAX backend environment before trainer construction.
+    def env_defaults(self) -> List[EnvVar]:
+        """Declare MaxDiffusion arch env defaults (single source of truth).
 
-        Applies MaxDiffusion/ROCm arch defaults via ``os.environ.setdefault`` so
-        they never override values already set by the environment or a per-config
-        top-level ``env:`` block (applied earlier in
-        ``TrainRuntime._apply_config_env``).
+        Returns the declarative env spec from ``env_spec.py``. The base adapter
+        applies it via the shared ``env_registry`` mechanism in
+        ``prepare_backend`` -> ``apply_env_defaults`` (before JAX/XLA import), so
+        this adapter no longer overrides ``prepare_backend`` itself.
 
         Effective precedence (highest wins):
-            per-config ``env:``  >  these arch defaults  >  image-baked defaults
+            per-config ``env:``  >  outer/shell env  >  these defaults  >  image-baked
         """
-        self._apply_arch_env_defaults()
-        super().prepare_backend(config)
-
-    @staticmethod
-    def _apply_arch_env_defaults() -> None:
-        """Set backend/arch env defaults (only when unset) before JAX/XLA init."""
-        # gfx950 (MI350X/MI355X) NaN/hang workaround; harmless / no-op on gfx942.
-        if MaxDiffusionAdapter._is_gfx950():
-            if os.environ.setdefault("RCCL_WARP_SPEED_AUTO", "0") == "0":
-                log_rank_0("[Primus:maxdiffusion] gfx950 detected: RCCL_WARP_SPEED_AUTO=0 (default)")
-
-    @staticmethod
-    def _is_gfx950() -> bool:
-        """Best-effort detection of a gfx950 (MI350X/MI355X) device via rocminfo."""
-        import shutil
-        import subprocess
-
-        rocminfo = shutil.which("rocminfo") or "/opt/rocm/bin/rocminfo"
-        try:
-            out = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15).stdout
-        except Exception:  # noqa: BLE001 - detection must never abort a run
-            return False
-        return "gfx950" in out
+        return maxdiffusion_env_defaults()
 
     def setup_backend_path(self, backend_path=None) -> str:
         """Make the ``maxdiffusion`` package importable.
