@@ -65,6 +65,11 @@ modules:
       # default log_period=100 emits nothing at 20 steps, so perf came back empty
       # and madengine silently reused a stale CSV.
       log_period: 1
+      # Bound to run.sh's PERF_METRICS_FILE: the trainer writes per-step JSON
+      # metrics here (max_utils.write_metrics_locally). This is the reliable perf
+      # source; the per-step stdout "completed step:" line is dropped under the
+      # Primus launcher. Empty when unset -> no-op (upstream default).
+      metrics_file: "${PERF_METRICS_FILE:}"
       dataset_type: "synthetic"
       hardware: "gpu"
       checkpoint_every: -1
