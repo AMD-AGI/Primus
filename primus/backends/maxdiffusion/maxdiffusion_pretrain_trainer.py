@@ -202,7 +202,6 @@ class MaxDiffusionPretrainTrainer(BaseTrainer):
             raise RuntimeError("MaxDiffusionPretrainTrainer.init() must be called before train().")
 
         module_name, trainer_path, init_kwargs = _FAMILY_SPECS[self._family]
-        trainer_cls = self._import_trainer_class(trainer_path)
 
         from maxdiffusion import pyconfig
         from maxdiffusion.train_utils import transformer_engine_context, validate_train_config
@@ -219,6 +218,15 @@ class MaxDiffusionPretrainTrainer(BaseTrainer):
 
                 self._update_logger_rank()
 
+                # Import the trainer class (which pulls in the TransformerEngine
+                # attention layers) INSIDE the TE mesh-guard, exactly as upstream
+                # train_wan.main()/train() does: it imports WanTrainer within the
+                # `with transformer_engine_context()` block. Importing it outside
+                # the guard leaves TE's fused/sharded attention unconfigured (the
+                # global_shard_guard MeshResource is not active), so attention
+                # falls back to a full, unsharded S^2 matmul -> ~221 GiB OOM on
+                # long WAN video sequences. See train_wan.py / train_flux.py.
+                trainer_cls = self._import_trainer_class(trainer_path)
                 trainer = trainer_cls(config)
                 trainer.start_training()
         finally:

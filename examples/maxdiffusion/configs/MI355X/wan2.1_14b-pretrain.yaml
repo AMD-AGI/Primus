@@ -10,8 +10,14 @@ env:
   JAX_SPMD_MODE: "allow_all"
   JAX_TRACEBACK_FILTERING: "off"
   JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
-  JAX_COMPILATION_CACHE_DIR: "/app/.cache/jax/"
-  MIOPEN_CUSTOM_CACHE_DIR: "/app/.cache/miopen/"
+  # Persist the XLA compilation cache on the bind-mounted workspace (NFS) instead
+  # of the ephemeral in-container /app/.cache/jax. The WAN fused-attention graph
+  # (long video sequence + autotune_level=5) can take 30-50 min to compile on a
+  # cold cache; without persistence every run recompiles from scratch and can
+  # exceed the launcher timeout before a single step runs. /myworkspace is the
+  # container bind-mount of the repo root.
+  JAX_COMPILATION_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_14b"
+  MIOPEN_CUSTOM_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_14b/miopen"
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
