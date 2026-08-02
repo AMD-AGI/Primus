@@ -1,6 +1,6 @@
 # TorchTitan/ALTO MXFP8/MXFP4 实现分析与 Primus Flux 迁移计划
 
-> 状态：已完成静态分析、迁移设计和 Gate 0；已在独立 `dev/zirui/flux-mxfp8` worktree 增加最小 TorchAO MXFP8 Primus 适配，并在独立 TorchAO worktree 修复 gfx950 dim1 路由和 scale layout。单算子、真实 Flux GEMM shape、两 rank完整 Flux FSDP2、block compile、AC ratio=0.25、DTCP save/resume 和单元测试已通过。短程同口径性能显示当前 MXFP8 无加速且 compile 启动开销显著，暂不具备性能 recipe 价值；8 GPU、长程数值与完整收敛尚未验收。当前 Primus 原工作树已有独立完成的 native TorchAO dynamic tensor-wise FP8 实现和运行证据，本文将其作为 MXFP8 的正式回归基线。
+> 状态：已完成静态分析、迁移设计和 Gate 0；已在独立 `dev/zirui/flux-mxfp8` worktree（实现 commit `fdbe4d00b91854960e93ae8c1ed9a21e1b62bd8b`）增加最小 TorchAO MXFP8 Primus 适配，并在独立 TorchAO worktree 修复 gfx950 dim1 路由和 scale layout。单算子、真实 Flux GEMM shape、两 rank完整 Flux FSDP2、block compile、AC ratio=0.25、DTCP save/resume 和单元测试已通过。短程同口径性能显示当前 MXFP8 无加速且 compile 启动开销显著，暂不具备性能 recipe 价值；8 GPU、长程数值与完整收敛尚未验收。当前 Primus 原工作树已有独立完成的 native TorchAO dynamic tensor-wise FP8 实现和运行证据，本文将其作为 MXFP8 的正式回归基线。
 >
 > 结论先行：**支持并验证单阶段 MXFP8 是首要目标。`MXFP8 → MXFP4` 两阶段只是潜在提升训练效率的备选实验方案，不是当前交付前提。** 现有 ALTO MXFP4/两阶段实验相对 BF16 有较大精度损失，因此只有在 MXFP8 性能和收敛稳定后，且新的短程数值证据显示收益值得继续投入时，才进入 MXFP4。第一版只降低 Flux DiT transformer block 内大 `Linear` GEMM 的计算精度，参数、优化器、FSDP 通信、checkpoint、非 Linear 算子继续保持 FP32/BF16。
 
