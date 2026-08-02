@@ -154,6 +154,16 @@ def build_flux_model(model_config: dict[str, Any]):
     configs such as `flux.1-dev` and `flux.1-schnell`.
     """
     cfg_dict: dict[str, Any] = dict(model_config.get("config", {}) or {})
+    low_precision_provider = str(cfg_dict.get("low_precision_provider") or "").strip().lower()
+    low_precision_recipe = str(cfg_dict.get("low_precision_recipe") or "").strip().lower()
+    if (low_precision_provider, low_precision_recipe) not in {
+        ("", ""),
+        ("torchao", "mxfp8"),
+    }:
+        raise ValueError(
+            "Unsupported FLUX low-precision configuration: "
+            f"provider={low_precision_provider!r}, recipe={low_precision_recipe!r}"
+        )
     preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
     preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
@@ -174,6 +184,71 @@ def build_flux_model(model_config: dict[str, Any]):
         logger.info(f"Loading FLUX DiT weights from {pretrained_path}")
         default_filename = "flux1-dev.safetensors" if preset == "flux-dev" else "flux1-schnell.safetensors"
         _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
+
+    if low_precision_recipe == "mxfp8":
+        try:
+            from torchao.prototype.moe_training.mxfp8_linear import MXFP8Linear
+        except ImportError as exc:
+            raise ImportError("TorchAO MXFP8 training support is required") from exc
+
+        replacements = []
+        for fqn, module in dit.named_modules():
+            if type(module) is not torch.nn.Linear:
+                continue
+            parts = fqn.split(".", 2)
+            if len(parts) != 3:
+                continue
+            suffix = parts[2]
+            selected = (
+                parts[0] == "double_blocks"
+                and suffix
+                in {
+                    "img_attn.qkv",
+                    "img_attn.proj",
+                    "img_mlp.0",
+                    "img_mlp.2",
+                    "txt_attn.qkv",
+                    "txt_attn.proj",
+                    "txt_mlp.0",
+                    "txt_mlp.2",
+                }
+            ) or (
+                parts[0] == "single_blocks" and suffix in {"linear1", "linear2"}
+            )
+            if selected:
+                replacements.append((fqn, module, suffix.endswith("attn.qkv")))
+
+        for fqn, module, high_precision_wgrad in replacements:
+            devices = [module.weight.device] if module.weight.is_cuda else []
+            with torch.random.fork_rng(devices=devices):
+                replacement = MXFP8Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                    wgrad_with_hp=high_precision_wgrad,
+                )
+            with torch.no_grad():
+                replacement.weight.copy_(module.weight)
+                if module.bias is not None:
+                    replacement.bias.copy_(module.bias)
+            dit.set_submodule(fqn, replacement)
+
+        expected = len(dit.double_blocks) * 8 + len(dit.single_blocks) * 2
+        high_precision_wgrad_count = sum(item[2] for item in replacements)
+        expected_high_precision = len(dit.double_blocks) * 2
+        if len(replacements) != expected or high_precision_wgrad_count != expected_high_precision:
+            raise RuntimeError(
+                f"FLUX MXFP8 selected {len(replacements)} Linear modules "
+                f"({high_precision_wgrad_count} high-precision wgrad); expected "
+                f"{expected} ({expected_high_precision} high-precision wgrad)"
+            )
+        logger.info(
+            f"Enabled TorchAO MXFP8 for {len(replacements)} FLUX block Linear modules; "
+            f"wgrad=MXFP8 for {len(replacements) - high_precision_wgrad_count} and "
+            f"high precision for {high_precision_wgrad_count} QKV modules"
+        )
 
     encoder_cfg = dict(model_config.get("encoder", {}) or cfg_dict.get("encoder", {}) or {})
     dtype = torch.bfloat16

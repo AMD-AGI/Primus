@@ -4,6 +4,8 @@ model:
     load_from_pretrained_path: ${PRETRAINED_PATH:}
     config:
       trainable_modules: dit
+      low_precision_provider: ${FLUX_LOW_PRECISION_PROVIDER:}
+      low_precision_recipe: ${FLUX_LOW_PRECISION_RECIPE:}
       guidance: ${FLUX_GUIDANCE:1.0}
       autoencoder_scale_factor: 0.3611
       autoencoder_shift_factor: 0.1159

@@ -431,6 +431,84 @@ def test_flux_torchtitan_initialization_is_deterministic_and_zeroes_output():
     assert torch.count_nonzero(first.double_blocks[0].img_mod.lin.weight) == 0
 
 
+def test_flux_rejects_invalid_low_precision_configuration():
+    with pytest.raises(ValueError, match="low-precision"):
+        build_flux_model(
+            {
+                "config": {
+                    "low_precision_provider": "alto",
+                    "low_precision_recipe": "mxfp8",
+                }
+            }
+        )
+
+
+def test_flux_mxfp8_converts_only_block_linears(monkeypatch):
+    mxfp8_module = pytest.importorskip(
+        "torchao.prototype.moe_training.mxfp8_linear"
+    )
+    original_values = {}
+    original_keys = set()
+
+    def fake_load_weights(dit, *args, **kwargs):
+        original_values.update(
+            {name: param.detach().clone() for name, param in dit.named_parameters()}
+        )
+        original_keys.update(dit.state_dict())
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.models.registrations.flux._load_flux_weights",
+        fake_load_weights,
+    )
+    model = build_flux_model(
+        {
+            "pretrained_path": "unused",
+            "config": {
+                "model_preset": "flux.1-schnell",
+                "low_precision_provider": "torchao",
+                "low_precision_recipe": "mxfp8",
+                "params": {
+                    "in_channels": 16,
+                    "out_channels": 16,
+                    "vec_in_dim": 16,
+                    "context_in_dim": 16,
+                    "hidden_size": 16,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 4],
+                },
+            },
+        }
+    )
+
+    converted = {
+        fqn: module
+        for fqn, module in model.dit.named_modules()
+        if type(module) is mxfp8_module.MXFP8Linear
+    }
+    assert set(converted) == {
+        "double_blocks.0.img_attn.qkv",
+        "double_blocks.0.img_attn.proj",
+        "double_blocks.0.img_mlp.0",
+        "double_blocks.0.img_mlp.2",
+        "double_blocks.0.txt_attn.qkv",
+        "double_blocks.0.txt_attn.proj",
+        "double_blocks.0.txt_mlp.0",
+        "double_blocks.0.txt_mlp.2",
+        "single_blocks.0.linear1",
+        "single_blocks.0.linear2",
+    }
+    assert converted["double_blocks.0.img_attn.qkv"].wgrad_with_hp is True
+    assert converted["double_blocks.0.txt_attn.qkv"].wgrad_with_hp is True
+    assert sum(module.wgrad_with_hp for module in converted.values()) == 2
+    assert type(model.dit.img_in) is torch.nn.Linear
+    assert type(model.dit.final_layer.linear) is torch.nn.Linear
+    assert set(model.dit.state_dict()) == original_keys
+    for name, param in model.dit.named_parameters():
+        torch.testing.assert_close(param, original_values[name])
+
+
 def test_flux_qk_norm_uses_torchtitan_dtype_epsilon():
     norm = QKNorm(4).to(torch.bfloat16)
     reference = torch.nn.RMSNorm(4).to(torch.bfloat16)

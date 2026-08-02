@@ -26,6 +26,8 @@ export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
 export PROMPT_DROPOUT_PROB=${PROMPT_DROPOUT_PROB:-0.1}
 
 export ATTENTION_BACKEND=${ATTENTION_BACKEND:-sdpa}
+export FLUX_LOW_PRECISION_PROVIDER=${FLUX_LOW_PRECISION_PROVIDER:-}
+export FLUX_LOW_PRECISION_RECIPE=${FLUX_LOW_PRECISION_RECIPE:-}
 export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
@@ -185,6 +187,8 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
+    handle.write(f"low_precision_provider: {os.environ.get('FLUX_LOW_PRECISION_PROVIDER', '')}\n")
+    handle.write(f"low_precision_recipe: {os.environ.get('FLUX_LOW_PRECISION_RECIPE', '')}\n")
     handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
     handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
     handle.write(f"fsdp2_reshard_after_forward: {os.environ.get('FSDP2_RESHARD_AFTER_FORWARD', '')}\n")
@@ -238,6 +242,7 @@ echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATE
 echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
 echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
+echo "[run_flux_mlperf] low_precision=${FLUX_LOW_PRECISION_PROVIDER:-bf16}/${FLUX_LOW_PRECISION_RECIPE:-none}"
 
 trap terminate_training INT TERM
 torchrun_log_args=()
