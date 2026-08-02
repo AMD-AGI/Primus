@@ -13,33 +13,30 @@ before JAX/XLA is imported, consumed by :class:`MaxDiffusionAdapter` via
 ``env_defaults()`` and applied by the base adapter through the shared
 ``primus.core.backend.env_registry`` mechanism.
 
-Unlike MaxText, MaxDiffusion keeps all of its JAX/XLA/NVTE performance tuning in
+Unlike MaxText, MaxDiffusion keeps *all* of its JAX/XLA/NVTE/RCCL/HIP tuning in
 the per-config top-level ``env:`` block of each wrapper config
 (``examples/maxdiffusion/configs/**``), which TrainRuntime applies before JAX
-init. The adapter therefore only needs to own the single arch-gated knob that is
-not (and should not be) hard-coded per config:
+init. Those blocks are a faithful, complete copy of the verified-good
+``scripts/jax-maxdiffusion/env_scripts/base_*_env.sh`` from the
+``clairlee/feat/maxdiffusion_support`` baseline.
 
-  * gfx950 (MI350X/MI355X): ``RCCL_WARP_SPEED_AUTO=0`` — WarpSpeed is default-on in
-    gfx950 RCCL builds and can cause NaN losses / hangs; harmless on gfx942.
+The adapter therefore contributes *no* environment of its own. In particular it
+must NOT inject ``RCCL_WARP_SPEED_AUTO`` — the known-good MaxDiffusion baseline
+never sets it, and forcing it here diverged from that baseline (contributing to
+an RCCL init hang on gfx950). Any arch-specific diffusion knob belongs in the
+per-config ``env:`` block alongside the rest of the tuning.
 
-Precedence (see env_registry): per-config ``env:`` > outer/shell env > this
-default > image-baked.
+Precedence (see env_registry): per-config ``env:`` > outer/shell env > image-baked.
 """
 
 from __future__ import annotations
 
 from typing import List
 
-from primus.core.backend.env_registry import ARCH_GFX950, EnvVar
+from primus.core.backend.env_registry import EnvVar
 
 
 def maxdiffusion_env_defaults() -> List[EnvVar]:
-    """Return the declarative MaxDiffusion arch env defaults for the current run."""
-    return [
-        EnvVar(
-            "RCCL_WARP_SPEED_AUTO",
-            "0",
-            arch=ARCH_GFX950,
-            note="gfx950 WarpSpeed default-on can cause NaN losses / hangs",
-        ),
-    ]
+    """MaxDiffusion owns no adapter-level env; the per-config ``env:`` block is the
+    single source of truth (see module docstring)."""
+    return []

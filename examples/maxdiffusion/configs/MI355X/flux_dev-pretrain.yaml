@@ -14,11 +14,28 @@ env:
   JAX_SPMD_MODE: "allow_all"
   JAX_TRACEBACK_FILTERING: "off"
   JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
+  JAX_COMPILATION_CACHE_DIR: "/app/.cache/jax/"
+  MIOPEN_CUSTOM_CACHE_DIR: "/app/.cache/miopen/"
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
   TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
   XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  # ROCm/HIP + RCCL/NCCL knobs. These MUST match the verified-good
+  # base_flux_dev_env.sh: dropping NCCL_PROTO=Simple / HSA_NO_SCRATCH_RECLAIM=1 /
+  # GPU_MAX_HW_QUEUES / HIP_FORCE_DEV_KERNARG / RCCL_MSCCL_ENABLE caused an RCCL
+  # init hang (GPUs 0%, CPU busy-wait) during model construction.
+  HSA_FORCE_FINE_GRAIN_PCIE: "1"
+  HSA_NO_SCRATCH_RECLAIM: "1"
+  GPU_MAX_HW_QUEUES: "2"
+  HIP_FORCE_DEV_KERNARG: "1"
+  RCCL_MSCCL_ENABLE: "0"
+  NCCL_MAX_NCHANNELS: "112"
+  NCCL_IB_TC: "41"
+  NCCL_IB_SL: "0"
+  NCCL_DEBUG: "WARN"
+  NCCL_PROTO: "Simple"
+  LIBTPU_INIT_ARGS: ""
   NVTE_FUSED_ATTN: "1"
   NVTE_FUSED_ATTN_CK: "1"
   NVTE_FUSED_ATTN_AOTRITON: "0"
@@ -41,6 +58,11 @@ modules:
       output_dir: "./output/flux_dev-pretrain"
       base_output_directory: "./output/flux_dev-pretrain"
       max_train_steps: ${MAX_STEPS:20}
+      # Log throughput every step: the perf extractor parses the per-step
+      # "completed step: N, seconds: X, TFLOP/s/device: Y" line. The image
+      # default log_period=100 emits nothing at 20 steps, so perf came back empty
+      # and madengine silently reused a stale CSV.
+      log_period: 1
       dataset_type: "synthetic"
       hardware: "gpu"
       checkpoint_every: -1
