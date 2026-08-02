@@ -736,7 +736,20 @@ Gate 0 决策：
 7. **两 rank完整 Flux FSDP2、compile 和 AC 已通过。** `local_runs/probe_mxfp8_fsdp.py` 先验证两个 `MXFP8Linear`、BF16 param all-gather、FP32 reduce、fused AdamW 的 2 GPU step；随后 `local_runs/probe_primus_cli.py` 保留每 rank traceback并运行完整 228-layer Flux。compile-off 和 57 个 transformer block `fullgraph=True` compile-on 均完成 forward/backward/optimizer step，loss/grad norm finite；交付配置的 gradient checkpoint ratio `0.25` + compile-on 也通过。代表性一步记录为 loss `1.6148`、grad norm `3.3907`、peak memory `95.29 GB/GPU`；该单步时延包含首次编译和 warmup，不能作为性能结果。
 8. **DTCP full save/resume 已通过。** 2 GPU 在 step 1 保存 `checkpoint-1`，新进程从该 checkpoint 恢复 model、optimizer、scheduler 和 global step，明确日志 `Resumed from step 1`，随后完成 step 2（loss `1.6042`）并保存 final checkpoint。当前 checkpoint 尚未加入 provider/fingerprint metadata，因此只证明同一代码/依赖/recipe 的恢复链可用，不允许据此开放跨 provider 或依赖漂移恢复。
 9. **短程同口径性能未显示收益。** 2 GPU、local batch 1/GPU、SDPA、FSDP2、block compile、AC ratio `0.25` 下各运行 12 step，排除 step 1 后统计 steps 2-12：BF16 mean/median step time 为 `1.0927/1.0700 s`，MXFP8 为 `1.0991/1.0900 s`，即 MXFP8 mean 慢 `0.58%`、mean throughput 低 `0.14%`；peak allocated memory 都是 `97.97 GB`，MXFP8 steady reserved memory 从 `104.68 GB` 增至 `111.62 GB`；首次 compile/warmup step 从 BF16 `28.33 s` 增至 MXFP8 `112.69 s`。进一步对 `M=256,K=3072,N={3072,9216,12288}` 做 20 次 Linear FWD/BWD 探针，compiled BF16 为 `0.332-0.346 ms`，compiled MXFP8 为 `1.194-1.246 ms`，MXFP8 慢 `3.46-3.76×`；将 `(M,3072,3072)` 的 M 扩到 `512/1024/2048` 后仍慢 `3.52×/3.49×/2.98×`，测试范围内没有 crossover。因此瓶颈明确在动态 cast/GEMM 路径，不只是模型其他算子掩盖收益。结果见 `/shared_nfs/zirui/runs/mxfp8_perf/summary.md`。当前实现只达到功能实验能力，不晋升为性能 recipe。
-10. **短程 loss 已开始分叉但尚不能作收敛判断。** 两者 step 1/2 loss 相同到 4 位，step 3 后出现小差异，至 step 12 BF16/MXFP8 分别为 `2.1421/1.9621`，grad norm 也不同；12 step 太短且 batch 太小，不能判断优劣。剩余 P1 工作是固定 TorchAO patch commit/wheel和镜像，profile cast/`_scaled_mm`/compile overhead，验证更大 local batch或 8 GPU 是否有收益，并做至少 100-step loss/grad norm 对照；若仍不优于 BF16和现有 tensor-wise FP8，则只保留实验入口，不进入默认训练配置。
+10. **短程 loss 已开始分叉但尚不能作收敛判断。** 两者 step 1/2 loss 相同到 4 位，step 3 后出现小差异，至 step 12 BF16/MXFP8 分别为 `2.1421/1.9621`，grad norm 也不同；12 step 太短且 batch 太小，不能判断优劣。若继续某个 provider，应做至少 100-step loss/grad norm 对照；若仍不优于 BF16和现有 tensor-wise FP8，则只保留实验入口，不进入默认训练配置。
+
+#### 当前 provider 路线决策
+
+Kernel 性能工作已明确由独立方向承担，并且 ALTO 的 ROCm MXFP8 kernel 正有人单独优化。因此，Primus 下一步**不应在本任务中重复投入优化当前 TorchAO native kernel**；更合适的是保留已经功能闭环的 TorchAO provider 作为正确性/上游 API 基线，同时把优化后的 ALTO kernel 纳入受限 A/B。
+
+这里的“纳入 ALTO”分两层，不能直接等同于建设第二套完整生产 provider：
+
+1. **先做 P2a kernel contract 对比。** ALTO 优化分支必须复用本次相同的 shape、输入分布、RCEIL/E4M3/E8M0语义、FWD/dgrad/wgrad、bias、190/38 wgrad policy和 profiler 口径；先回答 ALTO kernel 是否真正快于 BF16和 TorchAO。这个阶段不修改 Primus trainer、checkpoint 或公共配置。
+2. **只有 kernel 明显胜出才做 P2b 最小 provider。** 建议门槛为代表性 Flux shape 稳态优于 BF16，且 2 GPU完整 Flux 至少有可重复的端到端收益；同时必须修复 ALTO 当前 `PendingUnbackedSymbolNotFound` compile blocker、无副作用 import、固定 PyTorch/TorchAO/ALTO identity。未满足时不把 ALTO 接进 Primus。
+3. **TorchAO 暂不继续做本地性能 fork。** 仅保留已验证的 gfx950 correctness patch，优先上游或固定 wheel；若 TorchAO 上游后续提供更快 kernel，再用同一 contract 回归。避免 Primus 团队同时维护 TorchAO 和 ALTO 两套 kernel fork。
+4. **若 ALTO 胜出，TorchAO仍保留实验基线。** 单次 run 固定 provider；两个 provider 共用 228 FQN、190/38 策略和 BF16 FSDP通信。生产默认只能由端到端性能、compile、DTCP和短程数值共同决定，而不是仅看单 GEMM。
+
+因此当前推荐顺序是：`ALTO 优化 kernel 的独立 A/B → compile/import gate → 按结果决定是否最小接入 ALTO`，而不是立即继续优化 TorchAO native，也不是现在就无条件支持双 provider。
 
 ### P0：固定基线和环境能力
 
@@ -803,9 +816,11 @@ P1 验收标准：
 - MXFP8 至少优于 BF16；若不优于 native tensor-wise FP8且不能提供明确的收敛、显存或可维护性价值，则只保留为实验 recipe，不进入默认训练配置；
 - 记录相对 NeMo delayed FP8 的 gap 是否缩小，不能只报告相对 BF16 的收益。
 
-### P2：ALTO 单阶段 MXFP8
+### P2：ALTO 单阶段 MXFP8（先 A/B，后按结果接入）
 
-前置条件：MXFP4 目标在 P1 结果后仍有明确需求；ALTO LPT core 可无副作用独立 import，且公共 FQN、checkpoint fingerprint 和 FSDP 验证框架已建立。P2 顺序执行，不与 P1 并行扩大初始交付范围。
+P2a 前置条件：ALTO ROCm kernel 优化分支提供固定 commit/build identity，并能按公共 Flux shape contract 独立运行。P2a 只比较 kernel，不要求 MXFP4 目标继续成立，也不修改 Primus。
+
+P2b 前置条件：ALTO 在 P2a 中明显优于当前 TorchAO并具备相对 BF16 的性能价值；LPT core 可无副作用独立 import；`fullgraph=True` blocker 已修复；公共 FQN、checkpoint fingerprint 和 FSDP 验证框架已建立。只有满足这些条件才执行以下最小接入：
 
 最小实现步骤：
 
@@ -975,7 +990,7 @@ P1 验收标准：
 4. 在进入 Primus 前，先接通并证明 TorchAO gfx950 dim1 Triton/FlyDSL 和原生 `torch._scaled_mm`；当前 TorchTitan-main 的 SM100+ preset 不是 ROCm 证据。
 5. 将当前内联 tensorwise FP8 和未来 MX provider 收敛到一个 `precision.py`，共用 228 个 Flux block Linear profile，并继承 190 个低精度 wgrad + 38 个 QKV 高精度 wgrad 起点；不引入 manager/registry/类体系。
 6. P1 bring-up 可关闭 compile，但正式性能和收敛验收必须恢复当前逐 block `fullgraph=True`，并同时比较 BF16、native tensor-wise FP8、MXFP8 和 NeMo delayed FP8。
-7. 只有 MXFP4 目标在 P1 后仍有明确价值时，才顺序接入 ALTO 单阶段 MXFP8；ALTO 必须先完成 LPT core 无副作用导入。单次运行固定 provider。
+7. 当前 TorchAO 保留为正确性和上游 API 基线，不在 Primus 任务内继续维护性能 kernel fork。先对正在优化的 ALTO ROCm MXFP8 kernel 做独立 P2a A/B；只有其明显优于 BF16/TorchAO，并通过无副作用 import 与 `fullgraph=True` gate，才做 P2b 最小 provider。单次运行固定 provider。
 8. 保持 master weight、现有 optimizer policy 和 FSDP 通信为 FP32/BF16；full resume 在状态加载前严格校验 provider fingerprint。跨 provider model-only warm start 只有在 canonical dense 导出/加载完成后才支持。
 9. ALTO 单阶段完成 FSDP、compile、resume 和短程数值验证后，再增加 `mxfp8_e4m3 → mxfp4`。两阶段由 `global_step + 1` 控制 dispatch，不替换 Parameter，不保存冗余 phase；DTCP 必须保存并校验 schedule fingerprint。
 10. 对 MXFP4 采用“功能、短程数值、阶段 resume、完整收敛”四层 gate。根据用户提供的既有实验观察，特定 FP4 schedule 与 BF16 存在较大 gap；当前目标 `MXFP8→MXFP4` 尚无同口径收敛证据，因此默认不进入主训练配方。
