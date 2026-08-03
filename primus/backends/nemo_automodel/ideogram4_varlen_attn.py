@@ -83,8 +83,26 @@ def assume_dense_enabled() -> bool:
     ``PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1`` to skip the analysis and go straight to dense
     flash, keeping the compiled per-layer graph break-free. EXACT only for equal-length /
     no-pad batches (e.g. fixed-text); do NOT set it for ragged/padded batches.
+
+    Superseded in practice by :func:`precompute_cu_seqlens_enabled` -- when the adapter
+    hands the packing in, the processor prefers it and this flag never fires.
     """
     return os.getenv("PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE", "0") in _TRUTHY
+
+
+def precompute_cu_seqlens_enabled() -> bool:
+    """Whether the adapter precomputes ``cu_seqlens`` on the host. Default ON.
+
+    The adapter already holds the per-sample text lengths as Python ints, so it can build
+    the var-len packing itself and pass it into the processor as a plain tensor -- a graph
+    INPUT rather than something derived from the mask mid-graph. That removes the
+    device->host syncs, so the exact var-len path compiles on ragged batches.
+
+    Set ``PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS=0`` to restore the previous behaviour
+    (mask-derived packing, or dense flash under ``ASSUME_DENSE``). Kept as an escape hatch
+    for A/B measurement and rollback, not as a routine knob.
+    """
+    return os.getenv("PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS", "1") in _TRUTHY
 
 
 # --------------------------------------------------------------------------- #
