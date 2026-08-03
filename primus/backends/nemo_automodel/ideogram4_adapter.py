@@ -302,6 +302,17 @@ def _build_ideogram4_adapter_class():
             max_text = inputs.pop("_max_text")
             h_p = inputs.pop("_h_p")
             w_p = inputs.pop("_w_p")
+            cu_seqlens = inputs.pop("_cu_seqlens", None)
+            max_seqlen = inputs.pop("_max_seqlen", None)
+
+            # ``attention_kwargs`` is the only free-form channel diffusers gives us into the
+            # attention processor. The model pops the LoRA ``scale`` and forwards the rest
+            # down to each block, which splats it into the attention module; the module then
+            # keeps only the keys the processor declares by name. One tensor, built once in
+            # prepare_inputs, shared by every layer -- not rebuilt per layer.
+            attention_kwargs = None
+            if cu_seqlens is not None:
+                attention_kwargs = {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen}
 
             out = model(
                 hidden_states=inputs["hidden_states"],
@@ -310,7 +321,7 @@ def _build_ideogram4_adapter_class():
                 position_ids=inputs["position_ids"],
                 segment_ids=inputs["segment_ids"],
                 indicator=inputs["indicator"],
-                attention_kwargs=None,
+                attention_kwargs=attention_kwargs,
                 return_dict=False,
             )
             pred = self.post_process_prediction(out)  # [B, S, 128]
