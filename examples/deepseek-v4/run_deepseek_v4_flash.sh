@@ -80,21 +80,21 @@ if [ "$NNODES" -ge 8 ]; then
     export PRIMUS_TP=${PRIMUS_TP:-1}
     export PRIMUS_PP=${PRIMUS_PP:-8}
     export PRIMUS_EP=${PRIMUS_EP:-8}
-    export PRIMUS_RECOMPUTE_LAYERS=0
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
     if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4mL'
+      export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*4|t*5|(t*6|)*5,t*4mL}"
     else
-      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4L'
+      export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*4|t*5|(t*6|)*5,t*4L}"
     fi
 elif [ "$NNODES" -eq 4 ]; then
     export PRIMUS_TP=${PRIMUS_TP:-1}
     export PRIMUS_PP=${PRIMUS_PP:-4}
     export PRIMUS_EP=${PRIMUS_EP:-8}
-    export PRIMUS_RECOMPUTE_LAYERS=3
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
     if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
+      export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*12|t*12|t*9mL}"
     else
-      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
+      export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*11|t*11|t*11L}"
     fi
 fi
 
