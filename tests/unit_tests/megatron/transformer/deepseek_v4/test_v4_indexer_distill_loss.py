@@ -498,9 +498,7 @@ def test_kl_leaves_the_backbone_gradients_untouched(monkeypatch):
     # Guard against a vacuous pass: the loss really was active and large.
     assert on.last_indexer_distill_loss is not None
     assert on.last_indexer_distill_loss.abs().item() > 0.0
-    indexer_grad = sum(
-        p.grad.abs().sum().item() for p in on.indexer.parameters() if p.grad is not None
-    )
+    indexer_grad = sum(p.grad.abs().sum().item() for p in on.indexer.parameters() if p.grad is not None)
     assert indexer_grad > 0.0, "the indexer itself received no gradient"
 
 
@@ -599,9 +597,7 @@ def test_unnumbered_layers_are_not_reported(monkeypatch, layer_number):
     recorded = []
     import megatron.core.transformer.moe.moe_utils as moe_utils
 
-    monkeypatch.setattr(
-        moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a)
-    )
+    monkeypatch.setattr(moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a))
 
     log_indexer_distill_loss(
         torch.tensor(1.0),
@@ -619,9 +615,7 @@ def test_eval_does_not_report_a_stale_loss(monkeypatch):
 
     import megatron.core.transformer.moe.moe_utils as moe_utils
 
-    monkeypatch.setattr(
-        moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a)
-    )
+    monkeypatch.setattr(moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a))
 
     attn = _make_csa_attention(coeff=1e-2).to(_DTYPE)
     attn.last_indexer_distill_loss = torch.tensor(7.0)

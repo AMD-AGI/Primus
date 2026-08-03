@@ -336,12 +336,7 @@ class DeepseekV4LearnedRouter(nn.Module):
         # that ``flat`` just collapsed. V4 carries activations as [B, S, D]
         # throughout (not the framework's usual [S, B, D]), so the sequence is
         # axis -2.
-        if (
-            self.seq_balance_loss_enabled
-            and self.training
-            and torch.is_grad_enabled()
-            and hidden.dim() >= 3
-        ):
+        if self.seq_balance_loss_enabled and self.training and torch.is_grad_enabled() and hidden.dim() >= 3:
             seq_length = int(hidden.shape[-2])
             num_tokens = flat.shape[0]
             if seq_length > 0 and num_tokens % seq_length == 0:

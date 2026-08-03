@@ -115,7 +115,9 @@ class TestInverse:
         B, S, H, D, rd = 1, 32, 4, 512, 64
         x = torch.randn((B, S, H, D), dtype=torch.float32, device="cuda")
         before = x.detach().clone()
-        out = apply_rope_from_positions(x, torch.arange(S, device="cuda"), _inv_freq(rd), rotary_dim=rd, inverse=True)
+        out = apply_rope_from_positions(
+            x, torch.arange(S, device="cuda"), _inv_freq(rd), rotary_dim=rd, inverse=True
+        )
 
         assert out.data_ptr() != x.data_ptr()
         torch.testing.assert_close(x, before, rtol=0, atol=0)

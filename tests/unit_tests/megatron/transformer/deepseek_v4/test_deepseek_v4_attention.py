@@ -884,9 +884,7 @@ def test_inverse_rope_matches_the_negated_sine_formulation():
 
     with torch.no_grad():
         ours = attn._apply_inverse_rope(x, position_ids)
-        ref = _inverse_rope_reference(
-            x, position_ids=position_ids, rope=attn.rope, rotary_dim=rotary_dim
-        )
+        ref = _inverse_rope_reference(x, position_ids=position_ids, rope=attn.rope, rotary_dim=rotary_dim)
 
     torch.testing.assert_close(ours, ref, rtol=1e-5, atol=1e-5)
     assert not torch.allclose(ours, x, rtol=1e-3, atol=1e-3)
@@ -967,9 +965,7 @@ def test_compressed_pool_rope_uses_original_sequence_positions(compress_ratio, n
         cos, sin = attn.rope.compress_rope(positions)
         cos = cos[..., : rotary_dim // 2].unsqueeze(0)
         sin = sin[..., : rotary_dim // 2].unsqueeze(0)
-        rotated = apply_interleaved_partial_rope(
-            pooled_raw.unsqueeze(2), cos, sin, rotary_dim=rotary_dim
-        )
+        rotated = apply_interleaved_partial_rope(pooled_raw.unsqueeze(2), cos, sin, rotary_dim=rotary_dim)
         return rotated.squeeze(2)
 
     block_idx = torch.arange(P, device=hidden.device)

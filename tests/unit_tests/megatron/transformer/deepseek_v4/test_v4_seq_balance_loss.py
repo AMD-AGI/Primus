@@ -55,9 +55,7 @@ def test_balanced_sequence_scores_exactly_the_coefficient():
     coefficient is measurable imbalance.
     """
     scores, routing_map = _balanced(batch=2, seq=8, experts=4, topk=2)
-    loss = sequence_balance_loss(
-        scores=scores, routing_map=routing_map, topk=2, coeff=1e-3
-    )
+    loss = sequence_balance_loss(scores=scores, routing_map=routing_map, topk=2, coeff=1e-3)
     assert loss.item() == pytest.approx(1e-3, rel=1e-5)
 
 
@@ -71,9 +69,7 @@ def test_collapsed_sequence_is_penalised():
     collapsed_scores = torch.zeros(batch, seq, experts, dtype=torch.float32)
     collapsed_scores[..., :topk] = 0.5
 
-    balanced = sequence_balance_loss(
-        scores=balanced_scores, routing_map=balanced_map, topk=topk, coeff=1.0
-    )
+    balanced = sequence_balance_loss(scores=balanced_scores, routing_map=balanced_map, topk=topk, coeff=1.0)
     collapsed = sequence_balance_loss(
         scores=collapsed_scores, routing_map=collapsed_map, topk=topk, coeff=1.0
     )
@@ -113,9 +109,7 @@ def test_loss_is_per_sequence_not_per_batch():
     # Whereas the batch-pooled view of the same routing looks perfectly balanced.
     pooled_map = routing_map.reshape(1, 2 * seq, experts)
     pooled_scores = scores.reshape(1, 2 * seq, experts)
-    pooled = sequence_balance_loss(
-        scores=pooled_scores, routing_map=pooled_map, topk=topk, coeff=1.0
-    )
+    pooled = sequence_balance_loss(scores=pooled_scores, routing_map=pooled_map, topk=topk, coeff=1.0)
     assert pooled.item() < loss.item()
 
 
@@ -227,9 +221,7 @@ def test_unnumbered_layers_are_not_reported(monkeypatch, layer_number):
     import megatron.core.transformer.moe.moe_utils as moe_utils
 
     recorded = []
-    monkeypatch.setattr(
-        moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a)
-    )
+    monkeypatch.setattr(moe_utils, "save_to_aux_losses_tracker", lambda *a, **kw: recorded.append(a))
     log_seq_balance_loss(torch.tensor(1.0), layer_number=layer_number, num_layers=44)
     assert not recorded
 
@@ -254,9 +246,7 @@ def test_router_enables_the_loss_from_its_coefficient():
         DeepseekV4LearnedRouter,
     )
 
-    router = DeepseekV4LearnedRouter(
-        hidden_size=16, num_experts=8, topk=2, seq_balance_loss_coeff=1e-3
-    )
+    router = DeepseekV4LearnedRouter(hidden_size=16, num_experts=8, topk=2, seq_balance_loss_coeff=1e-3)
     assert router.seq_balance_loss_enabled is True
 
 

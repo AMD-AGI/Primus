@@ -78,9 +78,7 @@ def test_overlap_hands_the_shared_expert_to_the_dispatcher():
 
 def test_overlap_off_leaves_the_dispatcher_alone():
     dispatcher = _Dispatcher()
-    layer = _layer(
-        overlap=False, shared_expert=_OverlapCapableSharedExpert(), dispatcher=dispatcher
-    )
+    layer = _layer(overlap=False, shared_expert=_OverlapCapableSharedExpert(), dispatcher=dispatcher)
 
     assert layer._enable_shared_expert_overlap() is False
     assert dispatcher.received is None

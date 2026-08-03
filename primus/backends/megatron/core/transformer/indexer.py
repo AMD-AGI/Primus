@@ -80,7 +80,9 @@ from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
-from primus.backends.megatron.core.transformer.hadamard_rotation import rotate_activation
+from primus.backends.megatron.core.transformer.hadamard_rotation import (
+    rotate_activation,
+)
 
 # E4M3 finite max magnitude (float8_e4m3fn): largest representable value.
 _FP8_E4M3_MAX = 448.0
@@ -266,8 +268,7 @@ class Indexer(nn.Module):
             # The Hadamard rotation spans the whole head, so fail here with the
             # config name rather than deep inside the transform.
             raise ValueError(
-                f"index_head_dim must be a power of two for the Hadamard rotation, "
-                f"got {index_head_dim}"
+                f"index_head_dim must be a power of two for the Hadamard rotation, got {index_head_dim}"
             )
         # FP8 (E4M3) fake-quant of the QK scoring inputs (V4 low-precision
         # indexer QK path). See ``fake_quantize_fp8_e4m3`` / config flag
@@ -410,9 +411,7 @@ class Indexer(nn.Module):
         if tuple(cos.shape[:-1]) != (B, S):
             cos = cos.expand(B, S, -1)
             sin = sin.expand(B, S, -1)
-        return rotate_activation(
-            apply_interleaved_partial_rope(q_i, cos, sin, rotary_dim=self.rotary_dim)
-        )
+        return rotate_activation(apply_interleaved_partial_rope(q_i, cos, sin, rotary_dim=self.rotary_dim))
 
     def forward(
         self,

@@ -34,7 +34,9 @@ mla_module = pytest.importorskip(
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (  # noqa: E402
     DeepSeekV4TransformerConfig,
 )
-from primus.backends.megatron.core.transformer.compressor import Compressor  # noqa: E402
+from primus.backends.megatron.core.transformer.compressor import (  # noqa: E402
+    Compressor,
+)
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (  # noqa: E402
     DeepseekV4Attention,
 )

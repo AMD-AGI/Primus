@@ -70,6 +70,4 @@ def test_flash_defaults_agree_with_base_script() -> None:
     divergent default here is exactly how the FP8 indexer ended up enabled in
     production while the yaml and the generic script both said otherwise.
     """
-    assert _default_of(_FLASH_SCRIPT, "USE_V4_FP8_INDEXER") == _default_of(
-        _BASE_SCRIPT, "USE_V4_FP8_INDEXER"
-    )
+    assert _default_of(_FLASH_SCRIPT, "USE_V4_FP8_INDEXER") == _default_of(_BASE_SCRIPT, "USE_V4_FP8_INDEXER")

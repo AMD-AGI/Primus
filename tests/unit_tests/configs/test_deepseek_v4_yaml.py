@@ -304,9 +304,7 @@ def test_yarn_factor_actually_reaches_the_compressed_rope(parse_yaml_fn) -> None
     assert not torch.allclose(
         configured.compress_rope.inv_freq, pro_factor.compress_rope.inv_freq
     ), "the YaRN factor does not affect the compressed inv_freq -- assertion is vacuous"
-    torch.testing.assert_close(
-        configured.main_rope.inv_freq, pro_factor.main_rope.inv_freq, rtol=0, atol=0
-    )
+    torch.testing.assert_close(configured.main_rope.inv_freq, pro_factor.main_rope.inv_freq, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------

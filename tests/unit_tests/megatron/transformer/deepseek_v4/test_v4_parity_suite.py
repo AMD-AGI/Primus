@@ -116,9 +116,7 @@ def _make_csa_attention(coeff: float = 0.0) -> DeepseekV4Attention:
         yarn_factor=1.0,
         original_max_position_embeddings=config.original_max_position_embeddings,
     )
-    attn = DeepseekV4Attention(
-        config, rope=rope, compress_ratio=_RATIO, submodules=None, layer_number=1
-    )
+    attn = DeepseekV4Attention(config, rope=rope, compress_ratio=_RATIO, submodules=None, layer_number=1)
     return attn.to(_DTYPE)
 
 
@@ -347,9 +345,7 @@ def test_distillation_loss_reaches_only_the_indexer(monkeypatch):
         hidden = base.clone().requires_grad_(True)
         module(hidden, position_ids).sum().backward()
         inputs[tag] = hidden.grad.clone()
-        grads[tag] = {
-            n: p.grad.clone() for n, p in module.named_parameters() if p.grad is not None
-        }
+        grads[tag] = {n: p.grad.clone() for n, p in module.named_parameters() if p.grad is not None}
 
     for name in _backbone_names(off):
         if name not in grads["off"]:

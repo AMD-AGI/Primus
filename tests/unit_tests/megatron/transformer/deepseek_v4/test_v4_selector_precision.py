@@ -31,9 +31,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from primus.backends.megatron.core.transformer import indexer as indexer_mod  # noqa: E402
-from primus.backends.megatron.core.transformer.compressor import Compressor  # noqa: E402
-
+from primus.backends.megatron.core.transformer import (  # noqa: E402
+    indexer as indexer_mod,
+)
+from primus.backends.megatron.core.transformer.compressor import (  # noqa: E402
+    Compressor,
+)
 
 # ---------------------------------------------------------------------------
 # Indexer projections
