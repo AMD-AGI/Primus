@@ -108,13 +108,17 @@ class FSDP2Trainer(BaseWanTrainer):
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
+        reduce_dtype_name = os.getenv("FSDP2_REDUCE_DTYPE", "fp32").lower()
+        if reduce_dtype_name not in {"fp32", "bf16"}:
+            raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
+        reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
 
-        # Match TorchTitan: FP32 parameter/optimizer storage, BF16 forward
-        # parameters, and FP32 gradient reduction.
+        # Keep FP32 parameter/optimizer storage while allowing an explicit
+        # reduction-dtype experiment around the FP32-qualified default.
         if mp_dtype != torch.float32:
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=mp_dtype,
-                reduce_dtype=torch.float32,
+                reduce_dtype=reduce_dtype,
             )
         else:
             mp_policy = None
@@ -224,19 +228,26 @@ class FSDP2Trainer(BaseWanTrainer):
             mp_policy=mp_policy,
         )
         if self.rank == 0:
-            logger.info(f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' with mp={mp_dtype}")
+            logger.info(
+                f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
+                f"with mp={mp_dtype}, reduce={reduce_dtype}"
+            )
 
     def _compile_transformer_blocks(self, root: torch.nn.Module) -> None:
         compiled = 0
+        compile_mode = os.getenv("TORCH_COMPILE_MODE", "").strip() or None
         for attr in ("double_blocks", "single_blocks"):
             blocks = getattr(root, attr, None)
             if blocks is None:
                 continue
             for block in blocks:
-                block.compile(fullgraph=True)
+                block.compile(fullgraph=True, mode=compile_mode)
                 compiled += 1
         if self.rank == 0:
-            logger.info(f"FSDP2: compiled {compiled} FLUX transformer blocks with torch.compile")
+            logger.info(
+                f"FSDP2: compiled {compiled} FLUX transformer blocks "
+                f"with torch.compile mode={compile_mode or 'default'}"
+            )
 
     @staticmethod
     def _get_module_by_path(root: torch.nn.Module, path: str, *, option_name: str) -> torch.nn.Module:

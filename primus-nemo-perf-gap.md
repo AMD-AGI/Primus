@@ -11,6 +11,28 @@
 - compile 后 step time 比上一版低 `34.9%`、吞吐高 `55.1%`；当前 BF16 稳态吞吐为 NeMo 的 `148.9%`，原有性能 GAP 已反转。该结论仍是短测吞吐，不等同于 time-to-quality 对齐。
 - 当前默认配置三次收敛全部通过：seed `10007/10008/10009` 分别在 step `13824/14336/13824` 达到 validation loss `<=0.586`；中位收敛 step 为 `13824`，中位 time-to-quality 为 `33742.86 s`（`9.37 h`）。
 
+2026-08-01 又完成 NeMo FP8 `delayed_short` 与 Primus native dynamic FP8 的
+三节点配对短测。统一为 500 steps、seed `10007`、GBS/MBS=`512/64`，排除前
+100 steps，并关闭 validation、periodic checkpoint 和 W&B：
+
+- NeMo `delayed_short` 中位数：`0.9743 s/step`、`525.5 global samples/s`。
+- Primus 当前 P0（checkpoint ratio `0.25`）：`1.3620 s/step`、`375.9 global samples/s`，吞吐低 `28.48%`。
+- Primus P1（checkpoint ratio `0`）：`1.3148 s/step`、`389.5 global samples/s`，吞吐仍低 `25.89%`。
+- 关闭 Primus activation checkpoint 仅提升 `3.62%`，同时峰值显存从 `174.36 GiB` 增至 `214.05 GiB`；它只解释约 `9%` 的原始绝对 throughput gap。
+- rank-0、5-step Torch profiler 显示 Primus 的主要 GPU 侧增量是 attention `+77.8 ms/step`、norm/pointwise `+56.6 ms/step` 和 BF16 GEMM/optimizer `+31.8 ms/step`；FP8 GEMM + cast/scale 反而比 NeMo 少 `38.3 ms/step` kernel work。
+- 将 loss 和 gradient norm 的 `.item()` 延后到 optimizer 之后的日志点，P0 吞吐提升约 `2.5%` 至 `385.2 samples/s`，P1 提升约 `3.2%` 至 `404.4 samples/s`；峰值显存不变。
+- `max-autotune-no-cudagraphs` 与 BF16 gradient reduction 组合在三节点达到 `408.0-410.3 samples/s`，中位 `409.1 samples/s`，比 deferred-sync control 高 `6.1%`，但仍比 NeMo 低 `22.1%`。
+- 完整 seed `10007` convergence 中，优化后的 ratio `0.25` 在 step `14336` 达标，time-to-quality `26,841.915 s`；no-AC 在 step `14848` 达标，time-to-quality `26,396.741 s`。两者都生成完整 final checkpoint。
+- 显式 `flash_attn_aiter` 将两节点稳态吞吐提高到 `444.6-457.2 samples/s`，平均 `450.9 samples/s`；三 seed median TTQ 为 `24,275.36 s`，比 SDPA candidate 快 `9.6%`。
+- 六组真实 FLUX shape 的 FP8 raw-GEMM 筛选没有找到 `_scaled_mm` 替代：HipBLASLt、CK、Triton、FlyDSL 的 18-case 总延迟分别慢 `56.0%/1060.7%/35.2%/5.5%`；短测中的局部 FlyDSL 收益在 100-iteration 复测中消失。
+
+因此 BF16 GAP 已反转，但 FP8 GAP 仍然存在且可稳定复现。compile/reduction
+优化将 production steady step 压到 `1.2508 s`；AITER 进一步把稳态吞吐提高
+到平均 `450.9 samples/s`，并在相同 median convergence step 下把三 seed
+median TTQ 降低 `9.6%`。下一步应先重新 profile 这一最终 AITER 组合，再根据
+新 trace 处理 norm/pointwise 或 host/GPU scheduling；通用 FP8 GEMM 替换已
+停止，不再继续改变 FSDP topology。
+
 这组对齐数据已经排除 FP8 GEMM 是当前 GAP 的必要解释。阶段 1 的主要差异是：
 
 - **Primus reference**：全 block activation checkpoint、逐 block FSDP2 reshard、SDPA、普通 PyTorch BF16 Linear、FP32 gradient reduction。
@@ -99,6 +121,190 @@ NeMo launcher 在该节点因 `/dev/fd` 不可用未走完整 wrapper，最终�
 - AITER：commit `d6de77692` 的 tuned BF16 GEMM、trainable RoPE 和 fused QK norm/RoPE。
 
 各候选均先过 eager backward 和 fullgraph 门禁，再记录 GPU event 中位时间。Linear 使用 6 次、RMSNorm 使用 10 次、RoPE 使用 20 次稳定迭代；首次编译和 AITER JIT 时间不计入。详细结果见 5.3、5.5 和 5.6。结论是所有候选均未达到 block `3%` 或端到端 `1.5%` 的接收门槛，因此没有修改模型实现，也无需为本轮重跑 convergence。
+
+### 2026-08-01 FP8 三节点配对短测
+
+三组实验分别在 `crsuse2-m2m-118/119/234` 顺序运行 NeMo N0、Primus P0
+和 Primus P1。共同条件为 1 node x 8 MI355X、seed `10007`、MBS/GBS
+`64/512`、500 steps、compile enabled、无 validation、无 periodic checkpoint、
+无 W&B；统计窗口为 steps 101-500。
+
+| Node | NeMo N0 samples/s | Primus P0 samples/s | P0 gap | Primus P1 no-AC samples/s | P1 gap |
+|---|---:|---:|---:|---:|---:|
+| `118` | `525.505` | `375.855` | `28.48%` | `388.607` | `26.05%` |
+| `119` | `527.308` | `377.931` | `28.33%` | `392.126` | `25.64%` |
+| `234` | `523.667` | `375.530` | `28.29%` | `389.465` | `25.63%` |
+| **Median** | **`525.505`** | **`375.855`** | **`28.48%`** | **`389.465`** | **`25.89%`** |
+
+NeMo 解析配置确认 `fp8_amax_history_len=4`、MBS/GBS `64/512`、stack
+compile、`enable_checkpointing=false` 和 `recompute_granularity=None`。Primus
+P0/P1 均为 `float8_recipe=tensorwise`、block compile、no-reshard；唯一消融是
+checkpoint ratio `0.25 -> 0`。P1 峰值显存为 `214.05 GiB`，没有 OOM、NaN
+或非有限 gradient，但尚未做 convergence qualification。
+
+产物目录：
+
+`/shared_nfs/zirui/runs/flux_fp8_nemo_throughput_20260801T043638Z/`
+
+### 2026-08-01 FP8 profiler 与 deferred-sync 消融
+
+NeMo 和 Primus 分别采集 rank 0 的 5 个 active Torch profiler steps。原始
+`kernel` events 按类别聚合，避免 key-averages 同时包含 parent operator 和
+child kernel 导致重复计时：
+
+| Kernel group | Primus P1 | NeMo N0 | Delta |
+|---|---:|---:|---:|
+| FP8 GEMM + cast/scale | `604.0 ms/step` | `642.2 ms/step` | `-38.3 ms` |
+| Attention | `152.9 ms/step` | `75.1 ms/step` | `+77.8 ms` |
+| Norm + pointwise | `349.0 ms/step` | `292.4 ms/step` | `+56.6 ms` |
+| BF16/other GEMM + optimizer | `57.1 ms/step` | `25.3 ms/step` | `+31.8 ms` |
+| Communication | `265.0 ms/step` | `273.5 ms/step` | `-8.5 ms` |
+
+kernel work 可以跨 stream overlap，不能直接相加为 step wall time；但该结果
+排除了“主要慢在 TorchAO dynamic cast/scale”的假设。Primus attention 使用
+SDPA，NeMo 使用 AITER/TE fused attention，是最大的单项 GPU 侧差异。
+
+CPU trace 进一步发现 Primus 每 step 在 backward 前对 loss `.item()`，并在
+optimizer 前对 gradient norm `.item()`，分别等待约 `250-308 ms` 和
+`697-707 ms`。实现已改为保留 detached tensor，只在 logging step、optimizer
+之后转为 Python scalar。该变化不修改 loss、gradient clipping 或 optimizer
+数学。
+
+| Run | Step time | Global throughput | Peak memory |
+|---|---:|---:|---:|
+| P0 deferred sync, ratio `0.25` | `1.3293 s` | `385.2 samples/s` | `174.36 GiB` |
+| P1 deferred sync, ratio `0` | `1.2658 s` | `404.4 samples/s` | `214.05 GiB` |
+
+P0 比原三节点中位数提升约 `2.5%`；P1 在 matched node `009` 上比修改前提升
+约 `3.2%`。早期 AITER 消融使用了错误 backend 名称；后续显式
+`flash_attn_aiter` 已完成 fullgraph、500-step 和三 seed convergence 验收。
+
+产物：
+
+- `/shared_nfs/zirui/runs/flux_fp8_torchprof_20260801T064822Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_deferred_sync_20260801T070916Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_deferred_sync_p0_20260801T073524Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_deferred_sync_aiter_20260801T073300Z/`
+
+### 2026-08-01 FP8 第二轮优化与 convergence
+
+第二轮使用 6 个 MI355X 节点并行筛选，所有有效对照保持 seed `10007`、
+MBS/GBS `64/512`、checkpoint ratio `0.25`、block FSDP 和 no-reshard：
+
+| Experiment | Step time | Global samples/s | Result |
+|---|---:|---:|---|
+| Deferred-sync control | `1.3280 s` | `385.7` | Baseline |
+| SDPA CK preference | `1.3203 s` | `387.9` | `+0.6%`, not material |
+| No clipping | `1.3090 s` | `391.1` | Numerical risk, reject |
+| `max-autotune-no-cudagraphs` | `1.2937 s` | `395.7` | Keep |
+| BF16 reduce | `1.2905 s` | `396.6` | Keep as candidate |
+| K2 + BF16 reduce, 3-node median | `1.2508 s` | `409.1` | Best production candidate |
+| K2 + BF16 reduce + no-AC | `1.1883 s` | `430.8` | Fastest, `214.01 GiB` |
+| HSDP `dp_replicate=2` | `1.4195 s` | `360.5` | Reject |
+| Root-only FSDP | `1.3003 s` | `393.9` | Reject |
+| `reduce-overhead` | `6.0790 s` | `84.2` | Reject |
+
+`crsuse2-m2m-234` 对所有非默认 compile-mode 配置稳定回退到 `7-8 s/step`，
+同配置在其他节点正常；该节点的 compile-mode 数据不进入候选统计。
+
+完整 convergence 结果：
+
+| Metric | Optimized ratio `0.25` | Optimized no-AC |
+|---|---:|---:|
+| Convergence step | `14336` | `14848` |
+| Samples | `7,340,032` | `7,602,176` |
+| Validation loss | `0.585999` | `0.585429` |
+| Time-to-quality | `26,841.915 s` | `26,396.741 s` |
+| E2E throughput | `273.5 samples/s` | `288.0 samples/s` |
+| Peak memory | `174.33 GiB` | `214.03 GiB` |
+
+旧 qualified FP8 seed `10007` 为 step `13824`、`26,535.193 s`。新的 ratio
+`0.25` 虽稳态更快，但晚一个 validation interval，TTQ 反而慢 `1.2%`；no-AC
+晚两个 interval，TTQ 只快 `0.5%`。因此 no-AC 不设默认，BF16 reduce 与新
+compile mode 仍需更多 seed 才能替代 convergence baseline。
+
+获胜候选的新 profiler 显示 Primus/NeMo profiled step 为 `1.2896/1.0209 s`。
+剩余 kernel-work 重点为 attention `+108.4 ms/step`、norm + pointwise
+`+77.0 ms/step`、FP8 GEMM + cast/scale `+86.2 ms/step` 和 BF16 GEMM +
+optimizer `+46.5 ms/step`。这些值包含 stream overlap，只用于目标排序。
+
+产物：
+
+- `/shared_nfs/zirui/runs/flux_fp8_opt_wave2_20260801T082156Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_opt_wave3_20260801T092129Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_opt_wave4_20260801T104350Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_winner_convergence_20260801T143043Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_winner_torchprof_20260801T220505Z/`
+
+### 2026-08-02 AITER attention 三 seed qualification
+
+显式 `flash_attn_aiter` 与 ROCm FlashAttention 2 都通过 compiled FSDP2
+forward/backward 和 500-step 稳定性测试。AITER 性能更高：
+
+| Backend | Step time | Global samples/s | Peak memory |
+|---|---:|---:|---:|
+| SDPA winner | `1.2508 s` | `409.1` | `174.33 GiB` |
+| FlashAttention 2 | `1.1870 s` | `431.5` | `177.19 GiB` |
+| AITER node `009` | `1.1198 s` | `457.2` | `185.64 GiB` |
+| AITER node `235` | `1.1527 s` | `444.6` | `185.64 GiB` |
+
+AITER 两节点平均为 `450.9 samples/s`，比 SDPA winner 高约 `10.2%`，相对
+NeMo `525.5 samples/s` 的 gap 缩小到约 `14.2%`。
+
+| Seed | Convergence step | Samples | Validation loss | TTQ |
+|---:|---:|---:|---:|---:|
+| `10007` | `14336` | `7,340,032` | `0.585916` | `24,275.36 s` |
+| `10008` | `13312` | `6,815,744` | `0.585952` | `22,730.13 s` |
+| `10009` | `14336` | `7,340,032` | `0.585817` | `24,293.85 s` |
+| **Median** | **`14336`** | **`7,340,032`** | | **`24,275.36 s`** |
+
+三次均为 `run_stop=success` 并生成完整 final checkpoint。SDPA compile/reduce
+candidate 的三 seed median TTQ 为 `26,841.92 s`；AITER 在 median convergence
+step 不变时将 TTQ 降低 `9.6%`，validation-inclusive median throughput 从约
+`276.5` 提升到 `302.1 samples/s`。
+
+MLPerf launcher 现在只在 `FLUX_FLOAT8_RECIPE=tensorwise` 且调用方未显式设置
+attention backend 时默认选择 `flash_attn_aiter`；BF16 和其他 recipe 继续使用
+SDPA。
+
+产物：
+
+- `/shared_nfs/zirui/runs/flux_fp8_attention_perf_20260802T111746Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_attention_perf_repeat_20260802T115356Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_aiter_convergence_20260802T115356Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_aiter_convergence_seeds_20260802T184439Z/`
+
+### 2026-08-03 FP8 raw-GEMM 筛选
+
+在 `zirui3/mlperf-rocm:v0.1-flydsl-v0.2.3` 中为 gfx950 build
+Primus-Turbo `56c789e5`，并在全新容器中只通过只读 mount 加载 build 产物。
+对六组 `(tokens,input_features,output_features)` shape 的 forward、dgrad 和
+wgrad 使用已量化 E4M3/E5M2 operand 与 tensor-wise inverse scale，直接比较
+TorchAO/TorchTitan `_scaled_mm` 和 Primus-Turbo backend：
+
+| Backend | 18-case raw latency sum | 相对 `_scaled_mm` | 结论 |
+|---|---:|---:|---|
+| TorchAO/TorchTitan `_scaled_mm` | `11.886 ms` | control | 保留 |
+| HipBLASLt | `18.539 ms` | `+56.0%` | 拒绝 |
+| CK | `137.972 ms` | `+1060.7%` | 拒绝 |
+| Triton | `16.072 ms` | `+35.2%` | 拒绝 |
+| FlyDSL `0.2.3` | `12.539 ms` | `+5.5%` | 拒绝 |
+
+TorchTitan 在这里是 TorchAO control-plane 参考，不是独立 GEMM kernel；相关
+路径同样落到 `_scaled_mm`。FlyDSL 数值输出有限并与 control 的 reported
+relative L2 一致，但两个 fused single-stream shape 的三种 pass 均没有稳定
+收益。10-iteration 初筛中的 QKV forward/dgrad 和 MLP-up forward 局部收益在
+`10 warmup + 100 iterations` 复测中分别变成 `0.6%/0.3%/1.7%` 回退。
+
+因此不增加 private TorchAO hook、Primus-Turbo raw bridge 或 shape dispatch
+表，也不进入 block/full-training qualification。只有新 kernel 在真实 pass/layout
+组合稳定超过 `3%` 时才重开该方向。
+
+产物：
+
+- `/shared_nfs/zirui/runs/primus_turbo_flydsl_build_20260803/`
+- `/shared_nfs/zirui/runs/flux_fp8_gemm_flydsl_corrected_full_20260803T053501Z/`
+- `/shared_nfs/zirui/runs/flux_fp8_gemm_flydsl_candidates_20260803T054443Z/`
 
 ### Primus
 
@@ -461,11 +667,13 @@ NeMo 启动脚本还执行：
 | 已落地 | eager block | 原地 `Module.compile` + `B,L,H,D` 布局 | step time `-34.9%`，吞吐 `+55.1%` | 首 step 编译约 `44.8 s` |
 | 已评估，不替换 | compiled BF16 `nn.Linear` | TE / Primus-Turbo / AITER | Turbo 六个 shape 均更慢；TE 不支持当前 fullgraph | 保留 `nn.Linear` |
 | 已评估，不替换 | compiled RoPE + `nn.RMSNorm` | AITER RoPE / Turbo RMSNorm | AITER RoPE 慢 `70%~75%`；Turbo RMSNorm 慢 `11.7~14.5x` | 保留 Inductor 路径 |
-| P1 | PyTorch SDPA | AITER FlashAttention | 实测 step time `-4.1%` | 保留 loss 验证；不是第一瓶颈 |
-| P2 | FP32 gradient reduction | 与 NeMo 一致的 BF16 reduction 实验 | 量化数值路径与通信差异 | 可能影响收敛，不能直接设默认 |
-| P2 | fused AdamW / DataLoader | 仅在 profiler 证明瓶颈后优化 | 避免无数据的重写 | 当前无主要瓶颈证据 |
+| 已落地 | PyTorch SDPA | AITER FlashAttention | FP8 稳态吞吐平均 `+10.2%`，三 seed median TTQ `-9.6%` | 峰值增加 `11.31 GiB`，已通过 convergence |
+| 已评估，不替换 | TorchAO `_scaled_mm` | Turbo HipBLASLt/CK/Triton/FlyDSL | 18-case 总延迟均回退 | 不增加 raw bridge |
+| P1 | compiled norm/pointwise | 仅针对新 profiler 热点做融合 | 处理剩余 GPU 小算子与 launch 开销 | 先采集 AITER winner trace |
+| P2 | fused AdamW / DataLoader / scheduling | 仅在 profiler 证明瓶颈后优化 | 避免无数据的重写 | 当前无主要瓶颈证据 |
 
-FP8/MXFP8 Linear 属于阶段 2，不列入本轮 BF16 P0/P1。
+BF16 gradient reduction 和 compile mode 已进入 AITER 三 seed candidate；不再
+把它们作为未验证的单独默认变更。MXFP8/其他 scaling recipe 属于独立精度项目。
 
 ---
 
@@ -492,6 +700,7 @@ FP8/MXFP8 Linear 属于阶段 2，不列入本轮 BF16 P0/P1。
 3. 若继续阶段 1，只 profile RCCL、recompute、checkpoint I/O 和 optimizer；AITER attention 直接带入候选组合，不扩展多套 attention 后端。
 4. 最后单独量化 `grad_reduce_in_fp32=false`，改动后必须重新跑 convergence。
 5. 保留 compile eager fallback；只有 PyTorch/ROCm/TE/AITER 版本变化后才重跑本节 kernel 筛选。
+6. FP8 rank-0 profiler、scalar-sync、AITER attention 和 raw-GEMM 筛选已完成；下一轮先 profile 最终 AITER winner，再量化 norm/pointwise 与 FSDP/optimizer scheduling。
 
 阶段 1 的近期目标是先把 BF16 GAP 稳定压缩，并保持可接受显存与 convergence。单节点 replicated DDP 仅在 no-reshard/selective checkpoint 仍明显落后时再测，避免同时引入新的训练策略。
 
@@ -511,7 +720,7 @@ FP8/MXFP8 Linear 属于阶段 2，不列入本轮 BF16 P0/P1。
 6. 分别报告 BF16 与 FP8，不把不同 precision 的 RCP 混为一个结果；
 7. 至少重复 3 次，报告中位数和波动；
 8. profiler 证明优化命中了预期 kernel，而不是只依赖环境变量；
-9. 对齐或显式区分 gradient reduction dtype：NeMo 当前为 BF16，Primus 当前为 FP32；任何切换都要重新跑 convergence。
+9. 对齐或显式区分 gradient reduction dtype：NeMo 为 BF16，Primus qualified default 为 FP32；BF16 candidate 必须单独做 convergence qualification。
 
 当前 A8 默认已满足三次独立 seed 和 target loss 验收；尚未完成的是同条件 NeMo BF16 time-to-quality 对照、profiler 热点确认，以及清缓存等正式 submission 环境要求。
 
@@ -527,11 +736,19 @@ BF16 优化配置已将 Primus 吞吐从 NeMo 的 `69.2%` 提升到 `148.9%`，�
 - compile 失败根因是 single block SDPA backward 的布局 stride mismatch，不是 FSDP2 不兼容；对齐 TorchTitan 的 `B,L,H,D` 布局后已通过单 block、完整 FSDP2 和 80-step 回归；
 - 三次独立 seed 均达到 `validation_loss <= 0.586`，收敛 step 为 `13824/14336/13824`，中位 time-to-quality 为 `9.37 h`，当前 BF16 默认的收敛与重复性风险已关闭；
 - NeMo 仍有 TE BF16 Linear、fused RoPE、distributed optimizer overlap 和 BF16 gradient reduction 等实现差异；其中 Linear/RMSNorm/RoPE 已证实不能通过当前 ROCm 候选直接缩小 GAP，不能仅为模块名称对齐而修改。
+- FP8 结论与 BF16 不同：Primus P0 native dynamic FP8 中位吞吐为 `375.9 samples/s`，仅为 NeMo `delayed_short` 的 `71.5%`；关闭 activation checkpoint 后也只有 `389.5 samples/s`，为 NeMo 的 `74.1%`。
+- deferred sync、compile mode 和 BF16 reduction 将 production steady throughput 提高到 `409.1 samples/s`，但仍比 NeMo 低 `22.1%`。
+- full convergence 晚一个 validation interval，说明单 seed time-to-quality 尚未从 steady throughput 优化中获益。
+- pre-AITER profiler 曾将目标排序为 attention、norm/pointwise 和 fused native FP8 GEMM；后续 AITER 已落地，而 raw-GEMM 筛选无胜者，HSDP/root-only FSDP 也已实测回退。
+- AITER attention 已完成三 seed qualification，将稳态吞吐提高到平均 `450.9 samples/s`，三 seed median TTQ 改善 `9.6%`，当前相对 NeMo steady gap 约 `14.2%`。
 
 最简实施路径是：
 
 1. **保留当前 compile 默认及三次收敛结果作为 BF16 回归基线。**
 2. **停止落地当前 TE/Turbo/AITER BF16 Linear、RMSNorm 和 RoPE 候选；后续只 profile checkpoint I/O、RCCL、optimizer 和 reduction dtype。**
 3. **补充同条件 NeMo BF16 time-to-quality 对照；随后进入 native PyTorch + ROCm kernel 的 FP8/MXFP8 阶段，不引入 TE。**
+4. **保留 deferred scalar sync、block FSDP、checkpoint ratio `0.25`；不把 no-AC 设为默认。**
+5. **FP8 MLPerf 默认使用已通过三 seed qualification 的 AITER attention；BF16 继续使用 SDPA。**
+6. **先 profile 最终 AITER winner，再按实测结果处理 norm/pointwise 或 host/GPU scheduling；不落地当前 FP8 raw-GEMM backend，也不扩展 FSDP topology。**
 
-Primus 当前 BF16 默认已经完成三次收敛与重复性验证，且 80-step 稳态性能超过本次 NeMo BF16 reference。由于缺少同条件 NeMo BF16 完整长跑，当前仍不能声称两者 time-to-quality 已对齐；下一步应补齐该对照或进入阶段 2，而不是继续无数据地堆叠 BF16 kernel 改动。
+Primus 当前 BF16 默认已经完成三次收敛与重复性验证，且 80-step 稳态性能超过本次 NeMo BF16 reference。由于缺少同条件 NeMo BF16 完整长跑，当前仍不能声称两者 time-to-quality 已对齐。FP8 AITER production candidate 已完成三 seed convergence，稳态吞吐提高到平均 `450.9 samples/s`，相对 NeMo gap 约 `14.2%`。现有通用 FP8 GEMM backend 已全部筛除；下一步必须以 AITER winner 的新 profiler 归因为准。

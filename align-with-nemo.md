@@ -89,7 +89,7 @@ Primus/TorchTitan 的单 seed RCP512 convergence parity，并表明 NeMo FP8 路
 
 ### 数据与日志产物
 
-- Primus train/eval：`/shared_nfs/zirui/data/cc12m-preprocessed`、
+- Primus train/eval：`/shared_nfs/zirui/data/cc12m_preprocessed`、
   `/shared_nfs/zirui/data/coco_preprocessed`
 - NeMo Energon：`/shared_nfs/zirui/data/energon_mlperf`；tar 样本包含 `t5.bytes`、
   `clip.bytes`、`mean.bytes`、`logvar.bytes`
@@ -159,8 +159,8 @@ loss `0.703868`）和截至约 5.5M samples 的未完成 run 均不作为 RCP512
 
 当前节点首次启动暴露了两个环境问题，修复后短跑和正式训练均成功：
 
-- 完整训练集实际路径为 `/data/cc12m-preprocessed`；旧默认
-  `/data/cc12m_preprocessed` 缺少 26/4762 个 Arrow shards。
+- 训练集统一使用 MLPerf 官方命名 `/data/cc12m_preprocessed`；原先的
+  `/data/cc12m-preprocessed` 是同一份数据的误命名目录。
 - 当前 Python 环境缺少 `mlperf_common`，补装与 NeMo requirements 一致的 commit
   `b86d175a05849d650a8ff69c1e2c37b9f4e61d51`。
 - `run_flux_mlperf.sh` 增加 `torchrun --tee=3 --log-dir=...`，保留逐 rank stdout/stderr。
@@ -171,7 +171,7 @@ loss `0.703868`）和截至约 5.5M samples 的未完成 run 均不作为 RCP512
 | --- | --- |
 | 节点/GPU | 1 节点，8× AMD Instinct MI355X |
 | precision | BF16 mixed precision |
-| train/eval data | `/data/cc12m-preprocessed` / `/data/coco_preprocessed` |
+| train/eval data | `/data/cc12m_preprocessed` / `/data/coco_preprocessed` |
 | local/global batch | 64 / 512 |
 | LR / warmup | `2e-4` / 1600 steps（canonical `flux_ref_512`） |
 | optimizer | AdamW，beta `0.9/0.95`，eps `1e-8`，weight decay `0.1` |
@@ -335,7 +335,7 @@ NeMo：
 
 Primus 原始状态：
 
-- 默认 `DATASET_PATH=/data/cc12m-preprocessed`
+- 默认 `DATASET_PATH=/data/cc12m_preprocessed`
 - 使用 HF `load_from_disk` 风格的 precomputed dataset
 - `EMPTY_ENCODINGS_PATH=/data/empty_encodings`
 - 使用独立 `/data/coco_preprocessed` eval dataset

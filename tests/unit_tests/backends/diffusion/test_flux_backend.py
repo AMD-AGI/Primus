@@ -219,17 +219,18 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
     original_blocks = [*root.double_blocks, *root.single_blocks]
     compiled_inputs = []
 
-    def fake_compile(module, *, fullgraph):
+    def fake_compile(module, *, fullgraph, mode):
         assert fullgraph is True
-        compiled_inputs.append(module)
+        compiled_inputs.append((module, mode))
 
     monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    monkeypatch.setenv("TORCH_COMPILE_MODE", "reduce-overhead")
     trainer = FSDP2Trainer.__new__(FSDP2Trainer)
     trainer.rank = 1
 
     trainer._compile_transformer_blocks(root)
 
-    assert compiled_inputs == original_blocks
+    assert compiled_inputs == [(block, "reduce-overhead") for block in original_blocks]
     assert [*root.double_blocks, *root.single_blocks] == original_blocks
 
 
@@ -429,6 +430,104 @@ def test_flux_torchtitan_initialization_is_deterministic_and_zeroes_output():
     assert torch.count_nonzero(first.final_layer.linear.weight) == 0
     assert torch.count_nonzero(first.final_layer.adaLN_modulation[-1].weight) == 0
     assert torch.count_nonzero(first.double_blocks[0].img_mod.lin.weight) == 0
+
+
+def test_flux_rejects_unsupported_float8_recipe():
+    with pytest.raises(ValueError, match="float8_recipe"):
+        build_flux_model({"config": {"float8_recipe": "delayed"}})
+
+
+def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
+    torchao_float8 = pytest.importorskip("torchao.float8")
+    float8_linear = pytest.importorskip("torchao.float8.float8_linear")
+    real_convert = torchao_float8.convert_to_float8_training
+    events = []
+    original_param_ids = {}
+    original_param_values = {}
+    original_state_keys = set()
+
+    def tracked_convert(module, *, module_filter_fn, config):
+        events.append("convert")
+        return real_convert(module, module_filter_fn=module_filter_fn, config=config)
+
+    monkeypatch.setattr(torchao_float8, "convert_to_float8_training", tracked_convert)
+
+    def fake_load_weights(dit, *args, **kwargs):
+        events.append("load")
+        original_param_ids.update({name: id(param) for name, param in dit.named_parameters()})
+        original_param_values.update(
+            {name: param.detach().clone() for name, param in dit.named_parameters()}
+        )
+        original_state_keys.update(dit.state_dict())
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.models.registrations.flux._load_flux_weights",
+        fake_load_weights,
+    )
+    model = build_flux_model(
+        {
+            "pretrained_path": "unused",
+            "config": {
+                "model_preset": "flux.1-schnell",
+                "float8_recipe": "tensorwise",
+                "params": {
+                    "in_channels": 16,
+                    "out_channels": 16,
+                    "vec_in_dim": 16,
+                    "context_in_dim": 16,
+                    "hidden_size": 16,
+                    "num_heads": 2,
+                    "depth": 1,
+                    "depth_single_blocks": 1,
+                    "axes_dim": [2, 2, 4],
+                },
+            },
+        }
+    )
+
+    converted_fqns = {
+        fqn
+        for fqn, module in model.dit.named_modules()
+        if type(module) is float8_linear.Float8Linear
+    }
+    assert events == ["load", "convert", "convert"]
+    assert len(converted_fqns) == 10
+    assert converted_fqns == {
+        "double_blocks.0.img_attn.qkv",
+        "double_blocks.0.img_attn.proj",
+        "double_blocks.0.img_mlp.0",
+        "double_blocks.0.img_mlp.2",
+        "double_blocks.0.txt_attn.qkv",
+        "double_blocks.0.txt_attn.proj",
+        "double_blocks.0.txt_mlp.0",
+        "double_blocks.0.txt_mlp.2",
+        "single_blocks.0.linear1",
+        "single_blocks.0.linear2",
+    }
+    assert type(model.dit.img_in) is torch.nn.Linear
+    assert type(model.dit.final_layer.linear) is torch.nn.Linear
+    assert {name: id(param) for name, param in model.dit.named_parameters()} == original_param_ids
+    for name, param in model.dit.named_parameters():
+        torch.testing.assert_close(param, original_param_values[name])
+    assert set(model.dit.state_dict()) == original_state_keys
+    assert model.dit.double_blocks[0].img_attn.qkv.config.pad_inner_dim is False
+    assert model.dit.double_blocks[0].img_attn.qkv.config.enable_fsdp_float8_all_gather is False
+    assert (
+        model.dit.double_blocks[0].img_attn.qkv.config.cast_config_input_for_grad_weight.scaling_type.value
+        == "disabled"
+    )
+    assert (
+        model.dit.double_blocks[0].img_attn.qkv.config.cast_config_grad_output_for_grad_weight.scaling_type.value
+        == "disabled"
+    )
+    assert (
+        model.dit.double_blocks[0].img_mlp[0].config.cast_config_input_for_grad_weight.scaling_type.value
+        == "dynamic"
+    )
+    assert (
+        model.dit.single_blocks[0].linear1.config.cast_config_input_for_grad_weight.scaling_type.value
+        == "dynamic"
+    )
 
 
 def test_flux_qk_norm_uses_torchtitan_dtype_epsilon():

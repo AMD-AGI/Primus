@@ -25,7 +25,16 @@ export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
 export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
 export PROMPT_DROPOUT_PROB=${PROMPT_DROPOUT_PROB:-0.1}
 
-export ATTENTION_BACKEND=${ATTENTION_BACKEND:-sdpa}
+export FLUX_FLOAT8_RECIPE=${FLUX_FLOAT8_RECIPE:-}
+if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
+  if [[ "$FLUX_FLOAT8_RECIPE" == "tensorwise" ]]; then
+    export ATTENTION_BACKEND=flash_attn_aiter
+  else
+    export ATTENTION_BACKEND=sdpa
+  fi
+else
+  export ATTENTION_BACKEND
+fi
 export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
@@ -34,6 +43,8 @@ export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
 export GRADIENT_CHECKPOINTING_RATIO=${GRADIENT_CHECKPOINTING_RATIO:-0.25}
 export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-true}
 export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-false}
+export TORCH_COMPILE_MODE=${TORCH_COMPILE_MODE:-}
+export FSDP2_REDUCE_DTYPE=${FSDP2_REDUCE_DTYPE:-fp32}
 export SAVE_STEPS=${SAVE_STEPS:-100}
 export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
 export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
@@ -185,9 +196,12 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
+    handle.write(f"float8_recipe: {os.environ.get('FLUX_FLOAT8_RECIPE', '')}\n")
     handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
     handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
     handle.write(f"fsdp2_reshard_after_forward: {os.environ.get('FSDP2_RESHARD_AFTER_FORWARD', '')}\n")
+    handle.write(f"torch_compile_mode: {os.environ.get('TORCH_COMPILE_MODE', '')}\n")
+    handle.write(f"fsdp2_reduce_dtype: {os.environ.get('FSDP2_REDUCE_DTYPE', '')}\n")
     handle.write(f"mlperf_enable: {os.environ.get('MLPERF_ENABLE', '')}\n")
     handle.write(f"target_accuracy: {os.environ.get('TARGET_ACCURACY', '')}\n")
     handle.write(f"val_check_interval: {os.environ.get('VAL_CHECK_INTERVAL', '')}\n")
@@ -238,6 +252,8 @@ echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATE
 echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
 echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
+echo "[run_flux_mlperf] compile_mode=$TORCH_COMPILE_MODE fsdp2_reduce_dtype=$FSDP2_REDUCE_DTYPE"
+echo "[run_flux_mlperf] float8_recipe=${FLUX_FLOAT8_RECIPE:-bf16}"
 
 trap terminate_training INT TERM
 torchrun_log_args=()
