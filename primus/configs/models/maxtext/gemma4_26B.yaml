@@ -1,0 +1,20 @@
+extends:
+  - model_base.yaml
+
+# Gemma 4 26B (MoE, 128 experts / 8 active). Architecture comes from MaxText's
+# configs/models/gemma4-26b.yml (selected via model_name).
+#
+# KNOWN LIMITATION (validated on gfx950 / jax_the_rock_ci_45156b7 + jaxlib 0.10.0):
+# gemma4 does NOT currently run on this JAX-ROCm stack -- the efficient attention
+# kernels crash natively during XLA compile for gemma4's head_dim=256 +
+# bidirectional sliding-window attention (fails even at per_device_batch_size=1;
+# not a memory issue), and dot_product cannot compile in reasonable time at
+# max_target_length=8192. Kept ready for when gemma4 attention is supported;
+# intentionally excluded from the active MAD sweep. See gemma4_31B.yaml for details.
+model_name: "gemma4-26b"
+
+# Gemma 4 is not published on HF; synthetic pretraining generates data from
+# vocab_size (262144) and does not load a tokenizer. Point at the bundled
+# Gemma 3 SentencePiece tokenizer (same vocab) for any non-data code paths.
+tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.gemma3"
+tokenizer_type: "sentencepiece"
