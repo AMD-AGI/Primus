@@ -4,7 +4,14 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""MegaMoE layer, drop-in for Megatron MoELayer (EP-only, bf16)."""
+"""MegaMoE layer, drop-in for Megatron MoELayer (EP-only, bf16 params).
+
+``turbo_mega_moe_precision`` selects the expert class out of ``EXPERTS_BY_PRECISION``; the flavours
+differ only in which stage pair they call, so precision is decided once when the layer is built and
+nowhere else. ``mxfp8`` is an op-internal change: w1/w2 stay bf16 parameters and the op maintains
+their mxfp8 quant in a cache keyed on ``w._version``, so initialization, checkpointing and the
+optimizer are untouched.
+"""
 
 import contextlib
 from typing import Optional, Tuple
@@ -27,6 +34,36 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
     fused_mega_moe_stage2,
 )
 
+try:  # older Primus-Turbo builds ship only the bf16 stage pair
+    from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
+        fused_mega_moe_fp8_stage1,
+        fused_mega_moe_fp8_stage2,
+    )
+except ImportError:
+    fused_mega_moe_fp8_stage1 = fused_mega_moe_fp8_stage2 = None
+
+
+MEGA_MOE_PRECISIONS = ("bf16", "mxfp8")
+
+
+def mega_moe_precision() -> str:
+    """Read ``turbo_mega_moe_precision`` off the Megatron args namespace.
+
+    ``get_args`` raises before Megatron is initialized (the CPU unit-test path); that counts as
+    the default, matching how ``v4_moe`` probes ``use_turbo_mega_moe``.
+    """
+    try:
+        from megatron.training import get_args
+
+        args = get_args()
+    except Exception:
+        return "bf16"
+    precision = getattr(args, "turbo_mega_moe_precision", "bf16") or "bf16"
+    assert (
+        precision in MEGA_MOE_PRECISIONS
+    ), f"turbo_mega_moe_precision must be one of {MEGA_MOE_PRECISIONS}, got {precision!r}"
+    return precision
+
 
 class MegaMoEWeightModule(MegatronModule):
     """Callable expert-weight module used as a DDP overlap boundary."""
@@ -45,7 +82,7 @@ class MegaMoEWeightModule(MegatronModule):
 
 
 class MegaMoEExperts(MegatronModule):
-    """Two-stage expert with separately wrapped w1/w2 parameters."""
+    """Two-stage bf16 expert with separately wrapped w1/w2 parameters."""
 
     def __init__(
         self,
@@ -56,6 +93,7 @@ class MegaMoEExperts(MegatronModule):
         ep_group,
     ) -> None:
         super().__init__(config)
+        self._assert_supported_config(config)
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
@@ -66,6 +104,10 @@ class MegaMoEExperts(MegatronModule):
         expert_parallel = config.expert_model_parallel_size > 1
         for p in (self.fc1_weight.weight, self.fc2_weight.weight):
             setattr(p, "allreduce", not expert_parallel)
+
+    @staticmethod
+    def _assert_supported_config(config: TransformerConfig) -> None:
+        """Constraints of this expert flavour; the layer checks the ones common to both."""
 
     def reset_parameters(self, ep_rank: int) -> None:
         """Init expert weights exactly like Megatron TEGroupedLinear."""
@@ -102,6 +144,7 @@ class MegaMoEExperts(MegatronModule):
                     init_method(expert_weight)
 
     def forward(self, x, topk_idx, topk_weights):
+        # w2 is fetched only after stage1 so the two weight modules keep their fc1-then-fc2 order.
         w1 = self.fc1_weight()
         l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2 = self.fc2_weight()
@@ -111,6 +154,43 @@ class MegaMoEExperts(MegatronModule):
         # match native fc2-then-fc1 order
         self.fc2_weight.backward_dw()
         self.fc1_weight.backward_dw()
+
+
+class MegaMoEFP8Experts(MegaMoEExperts):
+    """MXFP8 sibling: same parameters and same two-stage shape, different stage pair.
+
+    The fp8 stages thread an extra opaque ``state`` from stage1 to stage2, which carries the
+    quantized operands that cannot ride autograd's gradient slots.
+    """
+
+    @staticmethod
+    def _assert_supported_config(config: TransformerConfig) -> None:
+        """Constraints that only the MXFP8 path has.
+
+        Activation recompute re-runs the expert forward, but the fp8 path holds a live symmetric
+        buffer and does a cross-rank spin-wait handshake, so a replayed forward races the backward
+        consuming the same pool. Untested and expected to hang -- refuse it up front rather than
+        fail deep in the kernels. (CUDA-graph capture is rejected by the op itself for the same
+        reason.)
+        """
+        assert (
+            fused_mega_moe_fp8_stage1 is not None
+        ), "turbo_mega_moe_precision=mxfp8 needs a Primus-Turbo build with the fp8 MegaMoE stages"
+        assert not config.moe_layer_recompute, "MegaMoE fp8 does not support moe_layer_recompute"
+        assert (
+            config.recompute_granularity != "full"
+        ), "MegaMoE fp8 does not support recompute_granularity=full"
+
+    def forward(self, x, topk_idx, topk_weights):
+        w1 = self.fc1_weight()
+        l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
+        w2 = self.fc2_weight()
+        return fused_mega_moe_fp8_stage2(
+            l1_out, dwib, handle, state, topk_idx, topk_weights, w2, self.ep_group
+        )
+
+
+EXPERTS_BY_PRECISION = {"bf16": MegaMoEExperts, "mxfp8": MegaMoEFP8Experts}
 
 
 class PrimusTurboMegaMoELayer(MegatronModule):
@@ -150,7 +230,8 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
 
         # separate w1/w2 modules give DDP overlap boundaries
-        self.experts = MegaMoEExperts(
+        experts_cls = EXPERTS_BY_PRECISION[mega_moe_precision()]
+        self.experts = experts_cls(
             config,
             self.experts_per_rank,
             self.hidden_size,
@@ -180,7 +261,8 @@ class PrimusTurboMegaMoELayer(MegatronModule):
     def _assert_supported_config(config: TransformerConfig) -> None:
         """Only kernel-level constraints; routing features are handled by the router."""
         assert config.tensor_model_parallel_size == 1, "MegaMoE is EP-only (TP==1)"
-        assert config.params_dtype == torch.bfloat16, "MegaMoE only supports bf16"
+        # Holds for the fp8 path too: fp8 is internal to the op, the parameters stay bf16.
+        assert config.params_dtype == torch.bfloat16, "MegaMoE only supports bf16 params"
         assert config.gated_linear_unit, "MegaMoE hardcodes a gated SwiGLU MLP"
         assert config.activation_func in (F.silu, torch.nn.SiLU), "MegaMoE hardcodes SiLU"
         assert (
