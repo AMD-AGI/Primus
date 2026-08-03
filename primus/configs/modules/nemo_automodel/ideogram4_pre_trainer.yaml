@@ -49,7 +49,9 @@ data:
     latent_scale: 1.0
     seed: 1234
     shuffle: true
-    drop_last: false
+    # Keep the batch size constant: cu_seqlens has 2*B+1 entries, so a short final
+    # batch changes its shape (and hidden_states') and recompiles the graph.
+    drop_last: true
     num_workers: 0
     pin_memory: true
 
