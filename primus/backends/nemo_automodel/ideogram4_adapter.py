@@ -49,6 +49,8 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
+from primus.backends.nemo_automodel.ideogram4_varlen_attn import assume_dense_enabled
+
 logger = logging.getLogger(__name__)
 
 # Per-token role / layout constants live with the diffusers transformer definition.
@@ -162,6 +164,21 @@ def _build_ideogram4_adapter_class():
                 text_lengths = [max_text] * B
             elif torch.is_tensor(text_lengths):
                 text_lengths = text_lengths.tolist()
+            text_lengths = [int(t) for t in text_lengths]
+
+            # ASSUME_DENSE tells the attention processor to skip the block-diagonal
+            # analysis and run dense flash over the whole row. That is exact only when no
+            # row has padding; on a ragged batch it lets pad tokens attend and leaks
+            # attention across segments, corrupting training with no error. The lengths are
+            # already on the host here, so refusing costs nothing.
+            distinct = sorted(set(text_lengths))
+            if assume_dense_enabled() and len(distinct) > 1:
+                raise ValueError(
+                    "PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 requires every sample in the batch to have "
+                    f"the same text length, but this batch has lengths {distinct}. Dense flash would "
+                    "let padding tokens attend and silently corrupt training. Unset the flag to use "
+                    "the exact var-len path, or pin min_text_tokens == max_text_tokens."
+                )
 
             text_z = torch.zeros(B, max_text, C, device=device, dtype=dtype)
             hidden_states = torch.cat([text_z, img_tokens], dim=1)  # [B, S, 128]
