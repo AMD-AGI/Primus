@@ -4,7 +4,23 @@ from types import SimpleNamespace
 
 import torch
 
+import primus.backends.diffusion.trainers.base as trainer_base
 from primus.backends.diffusion.trainers.base import BaseWanTrainer, ContiguousDistributedSampler
+
+
+class RecordingWandb:
+    def __init__(self):
+        self.definitions = []
+        self.logs = []
+
+    def init(self, **kwargs):
+        self.init_kwargs = kwargs
+
+    def define_metric(self, name, **kwargs):
+        self.definitions.append((name, kwargs))
+
+    def log(self, payload, step):
+        self.logs.append((payload, step))
 
 
 class RecordingLogger:
@@ -88,6 +104,37 @@ def _trainer() -> BaseWanTrainer:
     trainer.global_step = 512
     trainer.mlperf_run_success = False
     return trainer
+
+
+def test_wandb_compatibility_metrics(monkeypatch):
+    recorder = RecordingWandb()
+    monkeypatch.setattr(trainer_base, "wandb", recorder)
+    monkeypatch.setattr(trainer_base, "get_memory", lambda: (1.0, 2.0, 3.0))
+
+    trainer = BaseWanTrainer.__new__(BaseWanTrainer)
+    trainer.rank = 0
+    trainer.args = {"report_to": "wandb", "run_name": "test"}
+    trainer.optimizer = SimpleNamespace(param_groups=[{"lr": 2.0e-4}])
+    trainer.per_device_train_batch_size = 4
+    trainer.grad_accum_steps = 2
+    trainer.data_parallel_world_size = 8
+    trainer.world_size = 8
+    trainer.global_step = 3
+    trainer._setup_wandb()
+    trainer._log_step(1.0, throughput_samples_per_gpu_s=2.5)
+
+    assert recorder.definitions == [
+        ("validation_metrics/samples_count", {}),
+        (
+            "validation_metrics/loss_vs_samples",
+            {"step_metric": "validation_metrics/samples_count"},
+        ),
+    ]
+    payload, step = recorder.logs[-1]
+    assert step == 3
+    assert payload["train/samples_count"] == payload["train/samples_seen"] == 192
+    assert payload["throughput(global_samples/s)"] == 20.0
+    assert payload["train/global_samples_per_second"] == 20.0
 
 
 def test_mlperf_logs_configured_base_lr_before_warmup():

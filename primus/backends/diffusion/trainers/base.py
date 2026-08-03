@@ -426,6 +426,11 @@ class BaseWanTrainer:
         if kwargs["id"]:
             kwargs["resume"] = os.environ.get("WANDB_RESUME", "allow")
         wandb.init(**{key: value for key, value in kwargs.items() if value is not None})
+        wandb.define_metric("validation_metrics/samples_count")
+        wandb.define_metric(
+            "validation_metrics/loss_vs_samples",
+            step_metric="validation_metrics/samples_count",
+        )
         self.use_wandb = True
 
     def _setup_mlperf(self):
@@ -786,6 +791,7 @@ class BaseWanTrainer:
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/samples_count": self.global_step * global_batch_size,
+                "train/samples_seen": self.global_step * global_batch_size,
                 "loss_metrics/global_avg_loss": loss_value,
                 "lr": lr,
                 "mem/allocated_gb": alloc,
@@ -800,6 +806,9 @@ class BaseWanTrainer:
                     throughput_samples_per_gpu_s * self.world_size
                 )
                 payload["throughput(global_samples/s)"] = (
+                    throughput_samples_per_gpu_s * self.world_size
+                )
+                payload["train/global_samples_per_second"] = (
                     throughput_samples_per_gpu_s * self.world_size
                 )
             if elapsed is not None:
@@ -926,9 +935,16 @@ class BaseWanTrainer:
                                 f"loss={val_loss:.6f} target={self.mlperf_target_eval_loss:.6f}"
                             )
                             if self.use_wandb:
+                                validation_samples = self.global_step * (
+                                    self.per_device_train_batch_size
+                                    * self.grad_accum_steps
+                                    * self.data_parallel_world_size
+                                )
                                 payload = {
                                     "val/loss": val_loss,
                                     "validation_metrics/loss": val_loss,
+                                    "validation_metrics/loss_vs_samples": val_loss,
+                                    "validation_metrics/samples_count": validation_samples,
                                 }
                                 if val_loss <= self.mlperf_target_eval_loss and self.mlperf_train_start_time:
                                     payload["time_metrics/time_to_converge(s)"] = (
