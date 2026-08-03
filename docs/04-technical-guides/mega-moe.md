@@ -91,6 +91,26 @@ The patch is applied only when **all** of these hold: `enable_primus_turbo=True`
 `use_turbo_mega_moe=True`, `tensor_model_parallel_size==1`, `params_dtype==bf16`, and an EP process
 group exists.
 
+### Expert precision
+
+```yaml
+turbo_mega_moe_precision: mxfp8   # bf16 (default) | mxfp8; read only when use_turbo_mega_moe is on
+```
+
+`mxfp8` runs the two expert stages in MXFP8 (dispatch + fc1, SwiGLU, fc2 + combine, and the dW1/dW2
+wgrads). This is deliberately **not** wired to Megatron's `--fp8`, which selects a TE fp8 recipe for
+the dense layers and has no path to this fused op — keeping them separate lets the MoE be A/B'd on
+its own, and avoids a TE recipe change silently altering MoE behaviour it does not describe.
+
+Parameters stay bf16. The op maintains the mxfp8 weight quant in an internal cache keyed on
+`w._version`, so it is re-quantized only on an optimizer step and initialization, checkpointing and
+the optimizer see nothing new.
+
+Not supported on the fp8 path: activation recompute (`moe_layer_recompute`,
+`recompute_granularity=full`) and CUDA-graph capture. Both replay the forward while the op still
+holds a live symmetric buffer and a cross-rank spin-wait handshake; the layer asserts on the
+recompute settings up front.
+
 The following model settings are **required** — MegaMoE asserts on anything else:
 
 ```yaml

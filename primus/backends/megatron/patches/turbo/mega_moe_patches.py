@@ -8,7 +8,12 @@
 Primus Turbo Mega MoE Patches
 
 Replace Megatron's ``MoELayer`` with the PrimusTurbo ``MegaMoE`` adapter.
-EP-only (TP==1) + bf16.
+EP-only (TP==1) + bf16 params.
+
+``turbo_mega_moe_precision`` (``bf16`` | ``mxfp8``) picks the expert flavour once the layer is
+patched in. It is deliberately NOT wired to Megatron's ``--fp8``: that selects a TE fp8 recipe for
+the dense layers and has no path to this fused op, so the MoE stays switchable on its own for A/B
+runs.
 """
 
 
@@ -56,7 +61,12 @@ def patch_mega_moe(ctx: PatchContext):
         PrimusTurboMegaMoELayer,
     )
 
-    log_rank_0("[Patch:megatron.turbo.mega_moe] Patching MoELayer with fused MegaMoE...")
+    # read off ctx, not the layer's helper: megatron's get_args is not up yet in this phase
+    precision = getattr(get_args(ctx), "turbo_mega_moe_precision", "bf16")
+    log_rank_0(
+        "[Patch:megatron.turbo.mega_moe] Patching MoELayer with fused MegaMoE "
+        f"({precision} experts)..."
+    )
 
     moe_layer.MoELayer = PrimusTurboMegaMoELayer
     log_rank_0(
