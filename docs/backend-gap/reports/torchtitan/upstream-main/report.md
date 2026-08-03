@@ -1,114 +1,88 @@
 # Primus TorchTitan vs Upstream `main` Comparison Report
 
-> Date: 2026-04-21
+> Date: 2026-08-03
 > Scope: Current TorchTitan bundled in `Primus` vs upstream `pytorch/torchtitan` `origin/main`
 
 ## High-Level Comparison
 
 | Item | Current TorchTitan in Primus | Upstream `pytorch/torchtitan` `main` |
 | --- | --- | --- |
-| Submodule version | `0.1.0` | `0.2.2` |
-| Pinned commit | `5fb7cc2e` | `fc54b897` |
-| Commit date | 2025-10-15 | 2026-04-20 |
-| Commit gap | Behind by `493` commits | - |
-| Git relation | `merge-base(HEAD, origin/main) = HEAD` | - |
-| Diff size | `447 files changed, 56071 insertions, 17716 deletions` | - |
+| Submodule version (`assets/version.txt`) | `0.2.2` | `0.2.2` (dev toward next release) |
+| Pinned commit | `73a0e697` (**v0.2.2** tag) | `681fd4b5` |
+| Commit date | 2026-02-20 | 2026-08-01 |
+| Commit gap | Behind by `741` commits | - |
+| Git relation | `merge-base(HEAD, origin/main) = HEAD` (pin is ancestor of upstream main) | - |
+| Diff size | `698 files changed, 123580 insertions, 35965 deletions` | - |
 | Integration model | `third_party/torchtitan` + Primus outer layer (`adapter / trainer / patches`) | Upstream mainline |
-| Integration footprint | `primus/backends/torchtitan/` has about `90` files; total across report-covered directories is about `147` files | No Primus integration layer |
-| Private submodule commits | None | - |
-| Extra private requirements | `requirements-torchtitan.txt` has comments only, with no effective dependency entries | - |
+| Integration footprint | `primus/backends/torchtitan/` has about `57` files; total torchtitan-related Python across the Primus tree is about `70` files | No Primus integration layer |
+| Private submodule commits | None (pin is the upstream `v0.2.2` tag commit) | - |
+
+> **Change since the previous report (2026-04-21).** Primus advanced the
+> torchtitan pin from `5fb7cc2e` (v0.1.0, 2025-10-15) to `73a0e697` (the tagged
+> **v0.2.2** release, 2026-02-20) in Primus PR #871 (merged 2026-07-17). The pin
+> now sits on a maintained tagged release rather than an unreleased mainline
+> commit, but upstream `main` has since advanced `741` commits past v0.2.2.
 
 ## Torch / TorchAO / Dependency Comparison
 
 ### Install Channels and Version Semantics
 
-| Item | Current TorchTitan in Primus | Upstream `main` |
+| Item | Current TorchTitan in Primus (`v0.2.2`) | Upstream `main` |
 | --- | --- | --- |
-| README nightly channel | `nightly/cu126` | `nightly/cu130` |
-| Workflow install channel | `nightly/cu126` | `nightly/cu130`; ROCm uses `nightly/rocm7.1` |
-| Workflow `torch-version` parameter | No explicit fixed version | Empty string in `set-matrix.yaml` |
-| `v0.1.0` release anchor | `torch-2.8.0.dev20250617+cu126` / `torchao-0.12.0.dev20250617+cu126` | - |
-| `v0.2.2` release anchor | - | `torch-2.12.0.dev20260220+cu126` / `torchao-0.17.0.dev20260220+cu126` |
+| `assets/version.txt` | `0.2.2` | `0.2.2` (not yet bumped for the next tag) |
+| Release anchor | `v0.2.2` tag (`torch-2.12.0.dev20260220+cu126` / `torchao-0.17.0.dev20260220+cu126`) | Tracks the latest nightly at HEAD time |
+| Nightly channel trajectory | `cu126` generation at the v0.2.2 tag | Upstream `main` continues to advance nightly `torch` / `torchao` and ROCm channels |
 
-### Python Dependency Differences
+> Note: because Primus is now pinned to the upstream `v0.2.2` **tag**, the
+> torch / torchao dependency semantics at the pin match upstream's own v0.2.2
+> release anchors. The remaining gap is the `741` commits upstream `main` has
+> merged since that tag.
 
-| Dependency | Current TorchTitan in Primus | Upstream `main` |
-| --- | --- | --- |
-| `torchdata` | `>=0.8.0` | Explicitly installed as `0.12.0.dev20260327` in workflow |
-| `datasets` | `>=2.21.0` | `>=3.6.0`, constrained to `<4.8.0` in CI |
-| `tokenizers` | No fixed lower bound | `>=0.15.0` |
-| `safetensors` | Not present | Added |
-| `wandb` | Dev-only dependency | Moved into runtime dependencies |
-| `einops` | Not present | Added |
-| `pillow` | Not present | Added |
-| `av` | Not present | Added for VLM-related dependencies |
-| `torchvision` | Not present | Added in VLM / CPU tests |
-| `expecttest` | Pinned at `0.1.6` | `>=0.2.0` |
-| `pyrefly` | Not present | `==0.45.1` |
-| `numpy` | Not present | Added to dev / CI dependencies |
-| `tyro` | No fixed lower bound | Raised to `>=1.0.5` in CI dependencies |
-| `tomli` | Present in runtime dependencies | Removed from runtime dependencies |
+### Python Dependency Notes
 
-## Directory and Capability Differences
+- Primus does not add effective private dependency entries for torchtitan beyond
+  the upstream package; the outer integration layer reuses upstream torchtitan
+  dependencies.
+- Upstream `main` has continued to evolve its dependency and CI matrix since
+  v0.2.2 (tokenizer download support for newer `transformers` / `hub`, expanded
+  test dependencies). These changes are part of the `741`-commit gap.
+
+## Directory and Capability Differences (upstream `main` since the `v0.2.2` pin)
 
 ### Model Directories
 
-The current TorchTitan in Primus still follows an earlier model layout. Upstream `main` has added new model families and shared abstractions:
-
-- Added `torchtitan/models/common/` with shared modules: `attention / decoder / embedding / feed_forward / linear / moe / param_init / rmsnorm / rope / token_dispatcher`
-- Added `torchtitan/models/gpt_oss/`
-- Added `torchtitan/models/qwen3_vl/`
-- Added `torchtitan/models/flux/`; `flux` was moved from `experiments/flux`
-- `llama3 / llama4 / qwen3 / deepseek_v3` were reorganized into a more unified shape around `config_registry.py`, `parallelize.py`, and `state_dict_adapter.py`
+- Added `torchtitan/models/kimi_k2_7/` (Kimi K2, upstream #3532)
+- Added `torchtitan/models/qwen3_5/` (Qwen 3.5)
+- Added `torchtitan/models/gpt_oss/` and GPT-OSS enablement under `spmd_types`
+- Added shared `torchtitan/models/common/` abstractions and moved `flux` into `torchtitan/models/flux/`
+- `deepseek_v3` gained mxfp8 debug config and compile fixes
 
 ### `experiments/` Directory
 
-The current TorchTitan in Primus keeps an earlier experiments layout. Upstream `main` added or moved the following:
-
-- Added `torchtitan/experiments/autoparallel/`
-- Added `torchtitan/experiments/graph_trainer/`
-- Added `torchtitan/experiments/rl/`
-- Added `torchtitan/experiments/transformers_modeling_backend/`
-- Added `torchtitan/experiments/ft/`; content from `components/ft` moved here
-- Main content from `torchtitan/experiments/flux/` moved into `torchtitan/models/flux/`
-- Multiple files in `torchtitan/experiments/simple_fsdp/` were removed or moved
-- Multiple files in `torchtitan/experiments/torchcomms/` were removed
+- Added `torchtitan/experiments/graph_trainer/` (GraphPP runner, EP overlap/chunking passes, FSDP collective splitting, dI/dW backward splitting)
+- Added `torchtitan/experiments/rl/` (GRPO/DAPO examples, cudagraph knobs, `DPRequestRouter`, entropy/perf metrics)
+- Added `torchtitan/experiments/transformers_modeling_backend/` (MoE support #2679, SFT #3243)
+- Added `torchtitan/experiments/torchft/` (fault-tolerant training)
 
 ### `distributed/` and `components/`
 
-The current TorchTitan in Primus keeps older distributed/components layouts. Upstream `main` added or continuously evolved these paths:
-
-- Added `torchtitan/distributed/compile.py`
-- Added `torchtitan/distributed/context_parallel.py`
-- Added `torchtitan/distributed/deepep/`
-- Added `torchtitan/distributed/fsdp.py`
-- `torchtitan/distributed/tensor_parallel.py` continuously updated
-- `torchtitan/distributed/pipeline_parallel.py` continuously updated
-- `torchtitan/distributed/expert_parallel.py` continuously updated
-- Added `torchtitan/components/quantization/module_utils.py`
-- `torchtitan/components/quantization/float8.py` continuously updated
-- `torchtitan/components/quantization/mx.py` continuously updated
-- `torchtitan/components/metrics.py` continuously updated
-- `torchtitan/components/optimizer.py` continuously updated
-- `torchtitan/components/tokenizer.py` continuously updated
+- Upgraded DeepEP to **v2 APIs** enabling cudagraphable mode (#3808); added `deepep/hybridep.py`
+- Added `torchtitan/distributed/minimal_async_ep/` async-EP kernels (int32 overflow fix)
+- Added `torchtitan/distributed/compile.py`, `fsdp.py`, `full_dtensor.py`, `spmd_types.py`
+- Removed legacy `torchtitan/distributed/expert_parallel.py` and `dual_pipe_v.py`
+- Continuous updates to `tensor_parallel.py`, `pipeline_parallel.py`, `context_parallel.py`, `activation_checkpoint.py`
 
 ## Change Hotspots
 
-| Area | Representative changes |
+| Area | Representative changes since the `v0.2.2` pin |
 | --- | --- |
-| `tests/unit_tests/` | Broader unit-test coverage |
-| `.github/workflows/` | Added `integration_test_4gpu_rl.yaml`, `integration_test_8gpu_autoparallel.yaml`, `integration_test_8gpu_graph_trainer.yaml`, `integration_test_8gpu_rl_h100.yaml`, `integration_test_8gpu_transformers_modeling_backend.yaml`, `set-matrix.yaml` |
-| `torchtitan/experiments/graph_trainer/` | Added `compile.py / cudagraph.py / precompile.py / passes.py / storage.py`; covers `llama3 / deepseek_v3 / qwen3`; includes `tests/test_profiler.py` |
-| `torchtitan/models/common/` | Added `attention / decoder / embedding / feed_forward / linear / moe / param_init / rmsnorm / rope / token_dispatcher` |
-| `docs/` | Added `docs/mxfp8.md`, `docs/bf16_optimizer_states.md`, and updated docs such as `release / debugging / metrics / datasets / checkpoint` |
-| `torchtitan/models/flux/` | `flux` moved from `experiments/flux` into `models/flux` |
-| `torchtitan/distributed/` | Added `compile.py`, `context_parallel.py`, `deepep/deepep.py`, `deepep/hybridep.py`, `fsdp.py` |
-| `torchtitan/experiments/rl/` | Added `actors/`, `models/vllm_wrapper.py`, `simple_grpo_sum_digits.py` |
-| `torchtitan/components/` | Added `module_utils`; continuous updates in `float8 / mx / metrics / optimizer / tokenizer / validate` |
-| `torchtitan/models/gpt_oss/` | Added `gpt_oss` |
-| `torchtitan/models/qwen3_vl/` | Added `qwen3_vl` |
-| `torchtitan/experiments/autoparallel/` | Added `llama3`, `deepseek_v3`, `local_map_deepseek_v3` |
-| `torchtitan/experiments/transformers_modeling_backend/` | Added transformers-based modeling backend experiments |
+| `torchtitan/models/` | Added `kimi_k2_7`, `qwen3_5`; GPT-OSS enablement; shared `models/common` layer |
+| `torchtitan/experiments/graph_trainer/` | GraphPP runner integration, EP overlap/chunking passes, FSDP collective splitting |
+| `torchtitan/experiments/rl/` | GRPO/DAPO examples, cudagraph capture knobs, `DPRequestRouter`, batch-invariant FSDP |
+| `torchtitan/distributed/` | DeepEP v2 cudagraphable APIs, `minimal_async_ep` kernels, `compile.py`, `fsdp.py`, `full_dtensor.py`, `spmd_types.py` |
+| `torchtitan/components/quantization/` | mxfp8 MoE `ep=1` enablement (#3935); continued float8 / mx updates |
+| Checkpoint | Remote fsspec checkpoint paths (e.g. `gs://`) via filesystem helpers (#3887) |
+| `.github/workflows/` | AMD 8-GPU-feature CI fixes, AutoParallel device-agnostic tests |
 
 ## Primus Outer Integration Layer
 
@@ -116,32 +90,39 @@ The current TorchTitan in Primus keeps older distributed/components layouts. Ups
 
 The Primus outer integration layer is mainly distributed across:
 
-- `primus/backends/torchtitan/`
-- `primus/modules/trainer/torchtitan/`
+- `primus/backends/torchtitan/` (adapter, argument builder, models, patches, primus-turbo extensions)
+- `primus/backends/torchtitan/torchtitan_pretrain_trainer.py`
 - `primus/configs/modules/torchtitan/`
 - `examples/torchtitan/`
-- `runner/helpers/hooks/train/pretrain/torchtitan/`
-- `tests/unit_tests/backends/torchtitan/`
 - `tests/trainer/test_torchtitan_trainer.py`
+- `tests/unit_tests/modules/trainer/torchtitan/`
 
-### Directly Referenced Upstream Paths
+> The prior report's `primus/modules/trainer/torchtitan/` path no longer exists:
+> Primus PR #851 (merged 2026-07-08) removed `primus/modules` and migrated
+> still-used code into `primus/core` and `primus/backends`. The torchtitan
+> trainer now lives at `primus/backends/torchtitan/torchtitan_pretrain_trainer.py`.
+
+### Directly Referenced Upstream Paths (verified on Primus `main`)
 
 | Primus code location | Direct upstream dependency path |
 | --- | --- |
-| `primus/modules/trainer/torchtitan/pre_trainer.py` | `torchtitan.config.job_config.JobConfig`, `torchtitan.train.Trainer` |
-| `primus/backends/torchtitan/patches/turbo/attention_patches.py` | `torchtitan.models.llama3.model.model`, `torchtitan.models.llama4.model.model`, `torchtitan.models.deepseek_v3.model.model` |
-| `primus/backends/torchtitan/patches/turbo/fp8_linear_patches.py` | `torchtitan.components.quantization.float8` |
-| `primus/backends/torchtitan/patches/turbo/mx_linear_patches.py` | `torchtitan.components.quantization.mx` |
+| `primus/backends/torchtitan/torchtitan_pretrain_trainer.py` | `torchtitan.train.Trainer`, `torchtitan.tools.logging` |
+| `primus/backends/torchtitan/patches/turbo/attention_patches.py` | `torchtitan.models.llama3.model.model`, `torchtitan.models.llama4.model.model`, `torchtitan.models.deepseek_v3.model.model`, `torchtitan.models.qwen3.model.model` |
+| `primus/backends/torchtitan/patches/turbo/fp8_linear_patches.py` | `torchtitan.components.quantization.float8`, `torchtitan.protocols.model_converter` |
+| `primus/backends/torchtitan/patches/turbo/mx_linear_patches.py` | `torchtitan.components.quantization.mx`, `torchtitan.protocols.model_converter` |
 | `primus/backends/torchtitan/patches/turbo/moe_grouped_mm_patches.py` | `torchtitan.models.moe.moe` |
+
+Additional coupling added since the prior report includes GPT-OSS sink-attention
+and DeepSeek-V3 classic-attention turbo patches, async-TP patches, and
+`primus_turbo_extensions` model converters — all under
+`primus/backends/torchtitan/patches/` and `primus/backends/torchtitan/primus_turbo_extensions/`.
 
 ## Evidence Sources
 
-- `third_party/torchtitan/pyproject.toml`
-- `third_party/torchtitan/README.md`
-- `third_party/torchtitan/docs/release.md`
-- `third_party/torchtitan/.github/workflows/*`
+- `third_party/torchtitan` submodule pin in Primus `main` (`73a0e697`, v0.2.2 tag)
+- `third_party/torchtitan/assets/version.txt` (`0.2.2` at both pin and upstream main)
 - [pytorch/torchtitan](https://github.com/pytorch/torchtitan)
-- [pytorch/torchtitan/docs/release.md](https://github.com/pytorch/torchtitan/blob/main/docs/release.md)
-- `primus/backends/torchtitan/*`
-- `primus/modules/trainer/torchtitan/*`
-- `docs/backends/torchtitan/patch-notes.md`
+- [pytorch/torchtitan `v0.2.2` tag](https://github.com/pytorch/torchtitan/releases/tag/v0.2.2)
+- [compare `73a0e697...main`](https://github.com/pytorch/torchtitan/compare/73a0e6979dd10b6b1904098eb3c8f62c18ab87ce...main)
+- `primus/backends/torchtitan/*` (adapter, trainer, patches, primus-turbo extensions)
+- Primus PR [#871](https://github.com/AMD-AGI/Primus/pull/871) (torchtitan v0.2.2 bump), PR [#851](https://github.com/AMD-AGI/Primus/pull/851) (primus/modules removal)

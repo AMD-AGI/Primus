@@ -1,0 +1,86 @@
+{
+  "id": "torchtitan-upstream-main-2026-08-03",
+  "title": "Primus TorchTitan vs upstream main",
+  "backend": {
+    "key": "torchtitan",
+    "label": "TorchTitan"
+  },
+  "generated_at": "2026-08-03",
+  "status": "verified",
+  "scope": "Current TorchTitan bundled in Primus vs upstream pytorch/torchtitan origin/main.",
+  "local": {
+    "source_path": "third_party/torchtitan",
+    "version": "0.2.2",
+    "commit": "73a0e697",
+    "commit_date": "2026-02-20"
+  },
+  "upstream": {
+    "repo": "https://github.com/pytorch/torchtitan",
+    "ref": "origin/main",
+    "version": "0.2.2",
+    "commit": "681fd4b5",
+    "commit_date": "2026-08-01"
+  },
+  "stats": {
+    "commit_gap": 741,
+    "diff_files": 698,
+    "insertions": 123580,
+    "deletions": 35965
+  },
+  "integration": {
+    "backend_files": 57,
+    "tracked_files": 70,
+    "integration_model": "third_party/torchtitan + Primus outer adapter / trainer / patches"
+  },
+  "highlights": [
+    "Primus advanced the torchtitan pin from 5fb7cc2e (v0.1.0) to 73a0e697 (the tagged v0.2.2 release) in PR #871 (merged 2026-07-17).",
+    "The pin now sits on a maintained tagged release, but upstream main has advanced 741 commits (698 files, +123580/-35965) past v0.2.2.",
+    "Primus has a non-trivial outer integration layer with direct dependencies on upstream internal paths."
+  ],
+  "dashboard_summary": {
+    "headline": "TorchTitan is pinned to the tagged v0.2.2 release and is 741 commits behind upstream main.",
+    "recommendation": "plan sync",
+    "why_it_matters": [
+      "Primus bumped the pin from v0.1.0 (5fb7cc2e) to the v0.2.2 tag (73a0e697) in PR #871 on 2026-07-17.",
+      "The pin is now a maintained tagged release rather than an unreleased mainline commit.",
+      "Upstream main is 741 commits ahead of v0.2.2, a 698-file diff, so a further sync is still a substantial change.",
+      "Primus trainer, adapter, and patch layers directly depend on upstream internal paths."
+    ],
+    "feature_deltas": [
+      "New model families: Kimi K2 (kimi_k2_7) and Qwen 3.5",
+      "GPT-OSS enablement via spmd_types",
+      "graph_trainer, rl, transformers_modeling_backend, and torchft experiments",
+      "DeepEP v2 cudagraphable APIs and minimal_async_ep kernels",
+      "Remote fsspec (gs://) checkpoint paths and mxfp8 MoE ep=1"
+    ],
+    "dependency_deltas": [
+      "Pin now matches upstream v0.2.2 torch/torchao release anchors (torch-2.12.0.dev20260220+cu126).",
+      "Upstream main has continued to advance nightly torch/torchao and CI dependencies since v0.2.2.",
+      "Tokenizer download support for newer transformers/hub versions landed after the pin."
+    ],
+    "integration_risks": [
+      "Primus trainer imports torchtitan.train.Trainer and torchtitan.tools.logging.",
+      "Turbo attention patches reference upstream llama3, llama4, deepseek_v3, and qwen3 internals.",
+      "FP8 and MX patches depend on torchtitan.components.quantization.float8/mx and torchtitan.protocols.model_converter.",
+      "MoE grouped-mm patch depends on torchtitan.models.moe.moe."
+    ]
+  },
+  "artifacts": [
+    {
+      "label": "Detailed Report (PDF)",
+      "path": "./reports/torchtitan/upstream-main/report.pdf",
+      "format": "pdf",
+      "language": "en",
+      "kind": "detail",
+      "primary": true
+    },
+    {
+      "label": "One-Page Summary (PDF)",
+      "path": "./reports/torchtitan/upstream-main/summary.pdf",
+      "format": "pdf",
+      "language": "en",
+      "kind": "summary",
+      "primary": false
+    }
+  ]
+}
