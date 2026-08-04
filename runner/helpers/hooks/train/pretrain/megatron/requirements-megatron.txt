@@ -1,4 +1,5 @@
 # Add Megatron pretrain hook private Python deps here when needed.
 # Qwen3.5 / gated-delta-net attention (Megatron core GatedDeltaNet) needs FLA.
-flash-linear-attention==0.5.1
+# 0.5.2 fixes TileLang being enabled by default on ROCm (0.5.0/0.5.1 regressed qwen3_5).
+flash-linear-attention==0.5.2
 causal-conv1d~=1.5

@@ -10,10 +10,9 @@ if command -v spur >/dev/null 2>&1; then
     export SLURM_PARTITION=amd-spur
     export SLURM_QOS=amd-burst-qos
     export SLURM_ACCOUNT=amd-primus
-    # Empty = let the scheduler allocate nodes (skip the hardcoded smci355 default
-    # in run_deepseek_v4.sh, whose SLURM_NODELIST uses ${VAR-default} so empty wins).
-    # Honor an incoming SLURM_NODELIST so callers can pin to specific good nodes
-    # (e.g. to work around a bad node that keeps causing JobLaunchFailure).
+    # Empty = let the scheduler allocate nodes. Honor an incoming SLURM_NODELIST
+    # so callers can pin to specific good nodes (e.g. to work around a bad node
+    # that keeps causing JobLaunchFailure).
     export SLURM_NODELIST="${SLURM_NODELIST:-}"
     # ABI-4 libionic provider .so to swap into the container at launch (fixes ionic
     # RDMA on AINIC images whose bundled libionic only advertises uverbs ABI 1).
@@ -33,7 +32,8 @@ if command -v spur >/dev/null 2>&1; then
     export DOCKER_LOGIN_KEY="${DOCKER_LOGIN_KEY:-}"
     export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/tasimage/primus:pr-927-ainic}"
 else
-    # dccs cluster (the partition / node defaults in run_deepseek_v4.sh are dccs).
+    # dccs cluster. Partition / nodelist are not pinned here; export
+    # SLURM_PARTITION / SLURM_NODELIST to target specific hardware.
     #
     # Socket interface: run_deepseek_v4.sh falls back to `lo`, which leaves
     # multi-node rendezvous hanging. The dccs front-end NIC is `fenic` (the RDMA
@@ -45,7 +45,7 @@ else
 
     # Optionally reuse one held allocation instead of queueing per run, so a sweep
     # keeps landing on the same (known-good) nodes:
-    #   salloc --no-shell -N 4 --exclusive --partition=Compute-DCPT --mem=0
+    #   salloc --no-shell -N 4 --exclusive --partition=<partition> --mem=0
     #   SLURM_ALLOC_JOB_ID=<granted id> bash examples/deepseek-v4/run_deepseek_v4_flash.sh
     # srun then joins that allocation rather than asking for new nodes; --no-shell
     # keeps it alive independently of any terminal, and `scancel <id>` releases it.
@@ -59,9 +59,8 @@ else
         # Let the step share nodes the allocation already holds.
         export SLURM_OVERLAP="${SLURM_OVERLAP:-1}"
         # srun rejects a --nodelist that is not inside the allocation, so take the
-        # allocation's own list. Empty (allocation still pending) is fine and
-        # wins over the 17-node dccs default in run_deepseek_v4.sh, which uses
-        # ${VAR-default}; srun then just uses every node it was given.
+        # allocation's own list. Empty (allocation still pending) is fine; srun
+        # then just uses every node it was given.
         export SLURM_NODELIST="${SLURM_NODELIST:-$(squeue -h -j "$SLURM_ALLOC_JOB_ID" -o '%N' 2>/dev/null || true)}"
     fi
 fi
