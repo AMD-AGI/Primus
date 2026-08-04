@@ -226,6 +226,14 @@ class InferencePerformanceProjector:
         # size — so decode latency is a staircase and we look it up by bucket
         # rather than interpolating. Set from meta in set_benchmark_calibration.
         self._decode_pad_to_capture: bool = False
+        # Attention KV term for the FULL decode step: the step grows with context
+        # by an ~batch-independent additive per-token amount (measured: the rise
+        # over context is nearly the same at low and high batch, so it is NOT
+        # proportional to batch). Fit from the benchmark's decode-vs-context grid;
+        # 0 => flat (no grid), preserving prior behaviour.
+        self._decode_kv_slope_ms: float = 0.0     # ms per KV token (batch-independent)
+        self._decode_ctx_ref: float = 0.0         # context the batch curve was measured at
+        self._decode_ctx_max: float = 0.0         # largest measured context (guard)
         self._meas_prefill_rate_ms_per_tok: float = 0.0  # for sub-prompt prefill pieces
         self._meas_layer: Dict[tuple, float] = {}        # {(phase, ltype): ms}
         self._meas_ref_input: int = 0
@@ -298,6 +306,34 @@ class InferencePerformanceProjector:
         lb = math.log(max(1, batch))
         return min(pts, key=lambda p: abs(lb - math.log(max(1, p[0]))))
 
+    def _fit_decode_kv_slope(self, decode_ctx: list, ref_ctx: float) -> None:
+        """Fit the FULL-decode attention KV term from the benchmark's
+        decode-vs-context grid: ``step(b, c) = bucket(b) + slope * (c - ref)``.
+        ``slope`` is the median per-token increment (``(step - bucket) / (c-ref)``)
+        over the measured points — batch-independent, because the measured rise
+        with context is ~the same at low and high batch. 0 when no grid (→ decode
+        stays flat in context, prior behaviour). Skipped under parallelism restore
+        (the grid is only emitted un-restored)."""
+        self._decode_ctx_ref = ref_ctx
+        self._decode_ctx_max = ref_ctx
+        dec = self._meas_whole.get("decode")
+        if not decode_ctx or not dec or self._restore or ref_ctx <= 0:
+            return
+        slopes = []
+        for e in decode_ctx:
+            try:
+                b, c, ms = int(e["batch"]), float(e["context"]), float(e["decode_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            self._decode_ctx_max = max(self._decode_ctx_max, c)
+            if b > 0 and c > ref_ctx:
+                s = (ms - self._bucket_up(b, dec)) / (c - ref_ctx)
+                if s > 0:
+                    slopes.append(s)
+        if slopes:
+            slopes.sort()
+            self._decode_kv_slope_ms = slopes[len(slopes) // 2]
+
     @staticmethod
     def _bucket_up(batch: int, pts: list) -> float:
         """Decode value with the runtime CUDA-graph padding applied: the batch is
@@ -368,13 +404,21 @@ class InferencePerformanceProjector:
 
     # -- measured-time accessors (benchmark-based projection) ------------------
 
-    def _measured_decode_step_ms(self, batch: int) -> float:
-        """Measured whole-model / composed decode *step* latency at ``batch``."""
+    def _measured_decode_step_ms(self, batch: int, context: Optional[float] = None) -> float:
+        """Measured whole-model / composed decode *step* latency at ``batch``.
+
+        ``context`` (the resident KV length) adds the fitted attention KV term on
+        top of the batch-bucket value; omitting it (or a zero slope / no grid)
+        reproduces the flat-in-context behaviour."""
         if self._meas_whole.get("decode"):
             pts = self._meas_whole["decode"]
             if self._decode_pad_to_capture:
-                return self._bucket_up(batch, pts)
-            return self._transport_batch(batch, pts, self._sim_decode_step_ms)
+                base = self._bucket_up(batch, pts)
+            else:
+                base = self._transport_batch(batch, pts, self._sim_decode_step_ms)
+            if context is not None and self._decode_kv_slope_ms > 0.0 and self._decode_ctx_ref > 0.0:
+                base += self._decode_kv_slope_ms * max(0.0, float(context) - self._decode_ctx_ref)
+            return base
         # Per-layer schema: restore each layer to the target TP/EP, then sum by
         # layer count. Decode processes 1 token/step.
         d = self._restore_per_layer("dense", self._meas_layer.get(("decode", "dense"), 0.0), batch, 1)
@@ -486,6 +530,9 @@ class InferencePerformanceProjector:
             if pre_pts and ref_input > 0:
                 rates = [ms / (b * ref_input) for b, ms in pre_pts if b > 0]
                 self._meas_prefill_rate_ms_per_tok = sum(rates) / len(rates) if rates else 0.0
+            self._fit_decode_kv_slope(
+                benchmark_layer_times.get("decode_ctx") or [], float(ref_input)
+            )
             return
 
         # Per-layer schema (Megatron worker): measured forward time of one dense
@@ -774,7 +821,7 @@ class InferencePerformanceProjector:
         # Benchmark-based: use the measured decode step directly (memory-bound,
         # ~flat in context over a generation, so no simulator context-scaling).
         if self._measured_mode:
-            per_token = self._measured_decode_step_ms(batch)
+            per_token = self._measured_decode_step_ms(batch, kv_len)
             step = per_token * q_len if q_len > 1 else per_token  # verify q_len tokens/step
             return step + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
         ft = self._forward_times(batch, q_len, "decode", kv_len)
@@ -809,7 +856,7 @@ class InferencePerformanceProjector:
         if self._measured_mode:
             spec = q_len if q_len > 1 else 1
             prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
-            dec_piece = self._measured_decode_step_ms(num_decode) * spec if num_decode > 0 else 0.0
+            dec_piece = self._measured_decode_step_ms(num_decode, decode_ctx) * spec if num_decode > 0 else 0.0
             return (prefill_piece + dec_piece) * (1.0 + penalty) + ov
         prefill_piece = self._forward_times(1, chunk_tokens, "prefill", max(1, prefill_kv_len)).total_ms
         dec_piece = (
@@ -913,14 +960,22 @@ class InferencePerformanceProjector:
         ov = self._decode_step_overhead_ms()
 
         if self._measured_mode:
-            # Benchmark-based: measured decode is ~flat in context, so the pure
-            # and mixed steps are constant across the generation window.
+            # Benchmark-based: average the pure/mixed step over the context window
+            # [ISL, ISL+OSL]. The measured decode step carries its fitted KV term,
+            # so this is flat only when that slope is ~0 (prior behaviour).
             spec = q_len if q_len > 1 else 1
-            draft = self._draft_overhead_ms(self._measured_decode_step_ms(C))
-            t_pure = self._measured_decode_step_ms(C) * spec + draft + ov
-            prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
-            dec_piece = self._measured_decode_step_ms(max(1, C - 1)) * spec
-            t_mixed = (prefill_piece + dec_piece) * (1.0 + penalty) + ov
+            n_samples = min(8, max(2, int(OSL)))
+            pure, mixed = [], []
+            for i in range(n_samples):
+                frac = i / (n_samples - 1) if n_samples > 1 else 0.0
+                ctx = int(ISL + frac * OSL)
+                d_pure = self._measured_decode_step_ms(C, ctx)
+                pure.append(d_pure * spec + self._draft_overhead_ms(d_pure) + ov)
+                prefill_piece = self._measured_prefill_tokens_ms(chunk_tokens)
+                dec_piece = self._measured_decode_step_ms(max(1, C - 1), ctx) * spec
+                mixed.append((prefill_piece + dec_piece) * (1.0 + penalty) + ov)
+            t_pure = sum(pure) / len(pure)
+            t_mixed = sum(mixed) / len(mixed)
         else:
             # Simulation: average pure/mixed step latency over the (uniform)
             # context distribution [ISL, ISL+OSL].

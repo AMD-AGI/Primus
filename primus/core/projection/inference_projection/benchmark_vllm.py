@@ -440,13 +440,17 @@ def _engine_capture_sizes(llm):
 
 
 def _default_capture_sizes(cap: int) -> list:
-    """Fallback capture-size list matching vLLM's default shape (1, 2, 4 then
-    multiples of 8), extended to the first bucket that covers ``cap`` so ``cap``
-    rounds up to a measured point. Used only when the engine list can't be read."""
+    """Fallback capture-size ladder mirroring vLLM's default shape — 1, 2, 4,
+    then step 8 up to 256, then step 16 — extended to the first bucket that
+    covers ``cap`` so ``cap`` rounds up to a measured point. Used only when the
+    engine's real capture list can't be read."""
     sizes, s = [1, 2, 4], 8
-    while s < cap:
+    while s < cap and s < 256:
         sizes.append(s)
         s += 8
+    while s < cap:
+        sizes.append(s)
+        s += 16
     sizes.append(s)
     return sorted({x for x in sizes if 0 < x})
 
@@ -517,7 +521,21 @@ def run_vllm_benchmark(args) -> dict:
         if getattr(args, "seeds", None)
         else [int(getattr(args, "seed", 0) or 0)]
     )
+    # Capture mode also characterizes the decode step vs KV/context length so the
+    # projector need not assume decode is flat in context: the FULL decode graph
+    # is fixed in batch but its attention reads the whole KV, so the step grows
+    # with context. Measured in the SAME engine at the smallest + top capture
+    # batch across a few context lengths >= input_len.
+    decode_ctx_grid = None
+    if concurrency:
+        if getattr(args, "decode_context_grid", None):
+            decode_ctx_grid = [int(x) for x in str(args.decode_context_grid).split(",") if x.strip()]
+        else:
+            decode_ctx_grid = [args.input_len, 2 * args.input_len, 4 * args.input_len]
+        decode_ctx_grid = sorted({c for c in decode_ctx_grid if c >= args.input_len})
     max_len = args.max_model_len or (args.input_len + args.decode_steps + 16)
+    if decode_ctx_grid:
+        max_len = max(max_len, max(decode_ctx_grid) + args.decode_steps + 16)
     real_weights = args.load_format != "dummy"
     # Real weights => the trained router needs varied input to route realistically.
     random_tokens = args.random_tokens or real_weights
@@ -643,6 +661,22 @@ def run_vllm_benchmark(args) -> dict:
               f"(source={'engine' if engine_caps else 'default'})")
         return bs, caps
 
+    def _measure_decode_context(llm):
+        """Decode step vs KV/context length at the smallest + top capture batch
+        (one seed, same engine). Lets the projector fit the attention KV term
+        instead of assuming decode is flat in context."""
+        ctx_batches = sorted({1, batches[-1]})
+        pts = []
+        for c in decode_ctx_grid:
+            for b in ctx_batches:
+                e = _measure_batch(llm, c, b, args.decode_steps,
+                                   random_tokens=random_tokens, vocab=args.vocab,
+                                   seed=seeds[0])
+                pts.append({"batch": b, "context": c, "decode_ms": e["decode_ms"]})
+                print(f"[Primus:Inference:vLLM-Benchmark]   decode-ctx b={b} "
+                      f"ctx={c} decode_step={e['decode_ms']:.2f}ms")
+        return pts
+
     # --- REDUCE -> BENCHMARK -> RESTORE -------------------------------------
     # Mirrors the training layer benchmark (benchmark.py + performance.py): the
     # engine is REDUCED to a few layer counts that fit on the available GPUs,
@@ -656,6 +690,7 @@ def run_vllm_benchmark(args) -> dict:
     bench_counts = _parse_bench_layers(args.bench_layers)
     restore_meta = None
     sweep_raw = None
+    decode_ctx = None
     if len(bench_counts) >= 2:
         full_layers = int(args.full_layers or _full_num_layers(args.model, args.trust_remote_code) or 0)
         if full_layers <= 0:
@@ -707,6 +742,8 @@ def run_vllm_benchmark(args) -> dict:
         if batches is None:
             batches, capture_sizes = _resolve_capture_batches(llm)
         sweep, sweep_raw = _sweep(llm)
+        if decode_ctx_grid:
+            decode_ctx = _measure_decode_context(llm)
         eff_layers = args.num_hidden_layers
 
     ref = next((e for e in sweep if e["batch"] == args.batch), sweep[0])
@@ -719,6 +756,9 @@ def run_vllm_benchmark(args) -> dict:
         "sweep": sweep,
         # Per-(batch, seed) raw samples when a seed set was swept in one engine.
         "sweep_raw": sweep_raw,
+        # Decode step vs context (KV) at a couple of batches; lets the projector
+        # fit the attention KV term instead of assuming decode is flat in context.
+        "decode_ctx": decode_ctx,
         "meta": {
             "batch": ref["batch"],
             "input_len": args.input_len,
@@ -785,6 +825,7 @@ _CACHE_EXTRA_ARGS = (
     "random_tokens", "vocab", "gpu_mem_util", "routing_dist", "zipf_s",
     "moe_imbalance", "load_format", "skip_tokenizer_init", "no_aiter",
     "max_model_len", "output_len", "seed", "seeds", "concurrency",
+    "decode_context_grid",
 )
 
 
@@ -831,6 +872,11 @@ def main():
                          "sizes up to this concurrency (overrides --batch/--batches). "
                          "Decode is then looked up by padding the batch UP to the "
                          "nearest captured size at projection time.")
+    ap.add_argument("--decode-context-grid", default=None,
+                    help="[capture mode] comma list of context (KV) lengths to "
+                         "measure the decode step at (default: input_len x {1,2,4}), "
+                         "so the projector fits the attention KV term instead of "
+                         "assuming decode is flat in context.")
     ap.add_argument("--seed", type=int, default=0,
                     help="single RNG seed for random token content (default 0)")
     ap.add_argument("--seeds", default=None,
