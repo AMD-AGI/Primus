@@ -29,6 +29,8 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
+
+from primus.core.utils.module_utils import log_rank_0
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
     fused_mega_moe_stage1,
     fused_mega_moe_stage2,
@@ -191,6 +193,7 @@ class MegaMoEFP8Experts(MegaMoEExperts):
 
 
 EXPERTS_BY_PRECISION = {"bf16": MegaMoEExperts, "mxfp8": MegaMoEFP8Experts}
+_LOGGED_EXPERT_CLASSES: set = set()
 
 
 class PrimusTurboMegaMoELayer(MegatronModule):
@@ -230,7 +233,14 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
 
         # separate w1/w2 modules give DDP overlap boundaries
-        experts_cls = EXPERTS_BY_PRECISION[mega_moe_precision()]
+        precision = mega_moe_precision()
+        experts_cls = EXPERTS_BY_PRECISION[precision]
+        # deduped: every MoE layer builds the same flavour, so one line per run is the useful signal
+        if experts_cls not in _LOGGED_EXPERT_CLASSES:
+            _LOGGED_EXPERT_CLASSES.add(experts_cls)
+            log_rank_0(
+                f"[MegaMoE] turbo_mega_moe_precision={precision} -> experts={experts_cls.__name__}"
+            )
         self.experts = experts_cls(
             config,
             self.experts_per_rank,
