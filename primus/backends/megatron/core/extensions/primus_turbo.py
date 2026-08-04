@@ -1717,6 +1717,11 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
+        # TEGroupedLinear clears parallel_mode when explicit_expert_comm is set
+        # (EP>1 or TP>1 on experts). TEColumn/RowParallelGroupedLinear still
+        # shard by the original mode in sharded_state_dict; keep it here.
+        self._grouped_checkpoint_parallel_mode = parallel_mode
+
         super().__init__(
             num_gemms,
             input_size,
@@ -1734,6 +1739,12 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         tp_size = get_pg_size(self._tp_group)
         assert tp_size == 1, "PrimusTurboGroupedLinear only supports tensor parallel size = 1"
 
+        # Re-home TE's per-expert Parameters into one contiguous buffer for
+        # grouped_gemm, but keep ``weight{i}`` as the trainable Parameters (as TE
+        # does) so distributed checkpoint + optimizer sharding stay compatible.
+        # Consolidating into a single ``weights`` Parameter broke save because
+        # the optimizer tracked ``weights`` while sharded_state_dict emitted
+        # ``weight{i}`` slice views (integration/FINDINGS.md §1).
         w0 = self.weight0
         buffer = torch.empty(
             self.num_gemms,
@@ -1742,63 +1753,47 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             device=w0.device,
             dtype=w0.dtype,
         )
-
+        saved_weight_attrs = []
         with torch.no_grad():
             for i in range(self.num_gemms):
-                weight = getattr(self, f"weight{i}")
-                buffer[i].copy_(weight)
+                old = getattr(self, f"weight{i}")
+                saved_weight_attrs.append(dict(old.__dict__))
+                buffer[i].copy_(old)
 
-        self.register_parameter("weights", torch.nn.Parameter(buffer))
-
-        # Capture the per-expert weights' extra attributes BEFORE deleting them.
-        saved_weight_attrs = [dict(getattr(self, f"weight{i}").__dict__) for i in range(self.num_gemms)]
-
-        # All experts share the same routing/parallel markers, so weight0's are
-        # representative for the consolidated parameter.
-        for attr_name, attr_val in saved_weight_attrs[0].items():
-            setattr(self.weights, attr_name, attr_val)
-
-        # Free the per-expert weight{i} Parameters now that their data has been
-        # consolidated into self.weights.
         for i in range(self.num_gemms):
-            name = f"weight{i}"
-            if name in self._parameters:
-                del self._parameters[name]
+            del self._parameters[f"weight{i}"]
+
+        for i in range(self.num_gemms):
+            param = torch.nn.Parameter(buffer[i], requires_grad=True)
+            for attr_name, attr_val in saved_weight_attrs[i].items():
+                setattr(param, attr_name, attr_val)
+            self.register_parameter(f"weight{i}", param)
+
+        self._weights = buffer
 
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Defer weight{i} view registration until after DDP has remapped
-        # self.weights into the distributed-optimizer param buffer. Registering
-        # views here would pin the pre-remap storage and leave a duplicate copy
-        # of the consolidated weights resident on GPU.
-        self._saved_weight_attrs = saved_weight_attrs
-        self._weight_views_registered = False
-        self.register_forward_pre_hook(self._forward_pre_hook_ensure_weight_views)
-
         self.register_buffer("quantized_weight_buffer", None, persistent=False)
         self.register_buffer("quantized_weight_t_buffer", None, persistent=False)
 
-    def _ensure_weight_views(self) -> None:
-        """Register per-expert weight{i} views after DDP param-buffer remap."""
-        if self._weight_views_registered:
-            return
-
-        for i in range(self.num_gemms):
-            weight_i = torch.nn.Parameter(self.weights[i], requires_grad=False)
-            for attr_name, attr_val in self._saved_weight_attrs[i].items():
-                setattr(weight_i, attr_name, attr_val)
-            self.register_parameter(f"weight{i}", weight_i)
-
-        self._weight_views_registered = True
-
-    @staticmethod
-    def _forward_pre_hook_ensure_weight_views(module, _inputs):
-        module._ensure_weight_views()
-
-    def state_dict(self, *args, **kwargs):
-        self._ensure_weight_views()
-        return super().state_dict(*args, **kwargs)
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """TEColumn/RowParallelGroupedLinear define this; we subclass TEGroupedLinear."""
+        parallel_mode = self._grouped_checkpoint_parallel_mode
+        if parallel_mode == "column":
+            tp_axis_map = {}
+            for gemm_idx in range(self.num_gemms):
+                tp_axis_map.update({f"{gemm_idx}.weight": 0, f"{gemm_idx}.bias": 0})
+        elif parallel_mode == "row":
+            tp_axis_map = {f"{gemm_idx}.weight": 1 for gemm_idx in range(self.num_gemms)}
+        else:
+            raise ValueError(
+                f"PrimusTurboGroupedLinear.sharded_state_dict: unsupported parallel_mode "
+                f"{parallel_mode!r}; expected 'column' or 'row'."
+            )
+        return super()._sharded_state_dict_grouped(
+            tp_axis_map, prefix, sharded_offsets, metadata
+        )
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         _is_first_microbatch = self.is_first_microbatch
@@ -1818,7 +1813,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         is_first_microbatch: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
-        weights = self.weights
+        weights = self._weights
         # NOTE: keep x and m_splits on the same device
         if m_splits.device != x.device:
             m_splits = m_splits.to(x.device)
@@ -2093,8 +2088,11 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             A tuple of reshaped hidden states and token probabilities.
         """
         self.hidden_shape = hidden_states.shape
-        # view as [num_tokens, hidden_size]
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        # Match MoEFlexTokenDispatcher: use the tensor's trailing dim, not
+        # config.hidden_size. After fc1_latent_proj the feature dim is
+        # moe_latent_size (e.g. 3584); reshaping with hidden_size (7168) halves
+        # the token count and trips DeepEP's probs shape assert.
+        hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
         num_tokens = hidden_states.shape[0]
 
         # when force_load_balancing with type "even", we use round-robin token_indices

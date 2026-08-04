@@ -1,0 +1,294 @@
+###############################################################################
+# Kimi K3 base config: defaults shared by every K3 shape (production / debug).
+#
+# Scope: the **text backbone** only (a.k.a. Kimi-Linear). The MoonViT-3D
+# vision tower is out of scope, and this release has no MTP.
+#
+# Reference:
+#   - moonshotai/Kimi-K3 config.json  (text_config + linear_attn_config)
+#   - modeling_kimi_linear.py / configuration_kimi_k3.py
+###############################################################################
+
+extends:
+  - llama_base.yaml
+
+# Mark this model family as Kimi K3. The Primus trainer
+# (megatron_pretrain_trainer.py) and import_utils.get_model_provider use this
+# string to dispatch to the K3 builder.
+model_type: kimi_k3
+
+# norm
+norm_epsilon: 1.0e-05
+normalization: RMSNorm
+
+# ---------- attention: MLA geometry, Megatron's MLA switch OFF ----------
+# KimiK3TransformerConfig subclasses MLATransformerConfig, so the MLA
+# geometry fields below are inherited and need no re-declaration. The
+# *switch* must stay false regardless: core_transformer_config_from_args
+# replaces the caller's config_class with plain MLATransformerConfig when
+# args.multi_latent_attention is true (arguments.py:1589-1590), which would
+# silently drop every K3 field. K3 builds its attention modules from its own
+# specs, so it does not need the switch. kimi_k3_builder asserts on this.
+multi_latent_attention: false
+# The K3 attention subclass builds q_a / kv_a layernorms from its own
+# submodule spec (same arrangement as deepseek_v4_base.yaml:28), so the
+# generic MCore flag stays off.
+qk_layernorm: false
+group_query_attention: false
+
+# ---------- positional encoding: NONE, anywhere ----------
+# K3 asserts use_nope in KimiMLAAttention (modeling_kimi_linear.py:396) and
+# sets rotary_emb = None (:403); the q_rot / k_rot slices are split out but
+# never rotated. The KDA layers carry position implicitly.
+#
+# There is no NoPE *flag* in MCore: rope_type is validated against exactly
+# {"rope", "yarn"} at multi_latent_attention.py:152-155 ("none" raises), and
+# the rotary application is unconditional (:803, :812). NoPE is achieved in
+# the *module*: KimiK3MLASelfAttention hands the parent a zero-width frequency
+# table, RotaryEmbedding(0). apply_rotary_pos_emb then has rot_dim == 0, the
+# whole tensor lands in t_pass, and the closing torch.cat returns it
+# bit-for-bit (rope_utils.py:110-126). Verified on gfx950 by
+# test_k3_mla_nope.py, which asserts that bit-identity on both Q and K.
+#
+# qk_pos_emb_head_dim therefore stays at the released 64. Zeroing it *also*
+# disables rope, but it silently builds a different architecture:
+#   * it deletes the 64 MQA-shared K dims, because linear_kv_down_proj's
+#     output width is kv_lora_rank + qk_pos_emb_head_dim (:469). Those dims
+#     come straight off the raw down-projection, bypassing both the
+#     kv_lora_rank latent and kv_a_layernorm
+#     (modeling_kimi_linear.py:427-437), so no qk_head_dim rebuilds them;
+#   * it narrows linear_q_up_proj from H*192 to H*128 (:398, :443);
+#   * it changes softmax_scale from 192**-0.5 to 128**-0.5 (:115, 127-128).
+rope_type: rope
+qk_pos_emb_head_dim: 64                    # qk_rope_head_dim -- carried unrotated, not dropped
+mla_use_nope: true                         # selects the zero-width rotary table
+# position_embedding_type must stay "rope" at the *args* level. MCore has no
+# NoPE value for it, and arguments.py:1237-1238 raises
+#   '--no-position-embedding is deprecated, use --position-embedding-type'
+# for any other value once add_position_embedding is false, which it is
+# (language_model.yaml:22). KimiK3TransformerConfig.__post_init__ sets the
+# *config* field to "none" -- which is the copy that matters, since it is what
+# KimiK3Model reads to decide whether to build any positional module at all.
+# "rope" here builds nothing: LanguageModelEmbedding only adds position
+# embeddings for "learned_absolute" (language_model_embedding.py:44), and K3
+# never constructs a rotary module.
+position_embedding_type: rope
+# softmax_scale is mscale^2 / sqrt(q_head_dim) (multi_latent_attention.py:127-128)
+# where q_head_dim = qk_head_dim + qk_pos_emb_head_dim (:115), i.e. 192 at the
+# production shape. mscale_all_dim: 0.0 collapses mscale to 1.0 and keeps the
+# scale at q_head_dim ** -0.5 == 192 ** -0.5 == 0.07216878, which is what
+# modeling_kimi_linear.py:359 uses. Changing either knob changes the attention
+# scale silently; KimiK3MLASelfAttention re-derives it and raises on a mismatch.
+mscale: 1.0
+mscale_all_dim: 0.0
+rotary_base: 10000
+rotary_interleaved: false
+# Rope is a no-op here, and rotary_interleaved is rejected under MLA
+# (transformer_config.py:1678-1679); keep the fused path off.
+apply_rope_fusion: false
+
+# The sigmoid output gate is applied by the K3 attention subclass, NOT by
+# MCore's attention_output_gate: MLATransformerConfig.__post_init__ raises
+# NotImplementedError for that flag (transformer_config.py:2259-2260).
+mla_use_output_gate: true
+
+# ---------- Kimi Delta Attention (HF: linear_attn_config) ----------
+# The geometry reuses MCore's linear_* fields (transformer_config.py:297-310);
+# per-variant widths live in the shape yamls.
+#   linear_conv_kernel_dim  <- short_conv_kernel_size
+#   linear_key_head_dim     <- head_dim          (KDA has K dim == V dim)
+#   linear_num_key_heads    <- num_heads         (KDA has no GQA)
+linear_conv_kernel_dim: 4
+kda_gate_lower_bound: -5.0        # activates the bounded log-decay gate form
+kda_use_full_rank_gate: true      # output gate is a full-rank hidden -> H*D proj
+kda_chunk_size: 64
+# eager | eager_recurrent | fla | flydsl -- see kda_kernels/__init__.py.
+# `eager` is the reference and needs no optional dependency; `fla` is the
+# fused Triton path and requires flash-linear-attention (installed by the
+# megatron pretrain hook's requirements-megatron.txt, not by the base image).
+kda_backend: eager
+
+# Per-layer interleave: 1 = KDA, 0 = full attention (NoPE MLA). Provided by
+# the per-variant yaml. MUST be an explicit per-layer pattern for the
+# production shape -- the released tail is irregular (0-indexed 91 AND 92 are
+# both full attention), which the int-N ratio form cannot express.
+linear_attention_freq: null
+
+# ---------- attention residuals ----------
+# HF: attn_res_block_size. A block checkpoint is appended whenever
+# layer_idx % attn_res_block_size == 0, i.e. ceil(num_layers / block_size)
+# checkpoints over the stack (modeling_kimi_linear.py:973-1046).
+attn_res_block_size: 12
+
+# ---------- Stable Latent MoE ----------
+# HF: routed_expert_hidden_size, the latent dim the routed experts run in
+# (= hidden_size / 2 in the release). Per-variant; null keeps the experts in
+# model space, i.e. no latent bottleneck.
+routed_expert_hidden_size: null
+latent_moe_use_norm: true
+
+# ---------- MoE routing ----------
+moe_layer_freq: 1
+moe_router_topk: 16
+# K3's router is natively sigmoid (moe_router_activation_func), and
+# transformer_config.py:1769 only allows the aux-loss-free expert bias with
+# sigmoid -- so this pairing is both faithful and legal. Do NOT copy
+# DeepSeek-V4's sqrtsoftplus here: with expert bias on it raises, and every
+# V4 launcher works around it with a CLI override.
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: true        # noaux_tc / topk_method
+moe_router_bias_update_rate: 1.0e-3
+moe_router_load_balancing_type: seq_aux_loss
+# Pinned false at the family level, not just left at upstream's default
+# (transformer_config.py:714), because turning it on silently disables the
+# router: TopKRouter.forward substitutes `logits.clone().normal_()` for the
+# gating output (router.py:696-698 -> moe_utils.py:1177-1198), so routing
+# becomes uniformly random while the router weight still receives a
+# straight-through gradient. Phase 1 ran this way for its whole life
+# (validate/VALIDATION.md §7.2). Nothing in the K3 recipe -- neither
+# noaux_tc nor Quantile Balancing -- is exercised while it is on.
+moe_router_force_load_balancing: false
+
+# ---------- expert-bias update rule: sign (DSv3) vs Quantile Balancing ------
+# "sign"     -- upstream's get_updated_expert_bias (moe_utils.py:1119-1142),
+#               b <- b + moe_router_bias_update_rate * sign(offset). This is
+#               DECISIONS.md §2's known-good baseline and stays the default so
+#               that selecting the faithful rule is an explicit diff.
+# "quantile" -- Kimi K3's published rule (tech report §2.3.3 / Eq. 14):
+#               b_j = -quantile_{1-k/n}(s_{:,j} - tau_i), where tau_i is the
+#               (k+1)-th largest *biased* score of token i, estimated from an
+#               all-reduced histogram over the global batch, then mean-centred.
+#               Implementation + the argument for every default below:
+#               primus/backends/megatron/core/transformer/kimi_k3/moe/
+#               k3_quantile_balancing.py.
+# The two are A/B-able from this one key; nothing else has to change.
+moe_router_bias_update_rule: ${PRIMUS_K3_BIAS_RULE:sign}
+
+# Histogram binning. UNVERIFIED in the report -- the sentence describing it is
+# truncated in every PDF extraction we have, so these are our choice:
+# sigmoid confines the raw score to (0, 1) and the bias is mean-centred, so
+# margins live in roughly (-1, 1); 1024 bins over that is a 1.95e-3 resolution,
+# the same order as moe_router_bias_update_rate's 1e-3 step. Margins outside
+# the range are clamped into the end bins and the clamp count is tracked.
+# Cost: num_experts * num_bins * 8 bytes per MoE layer.
+quantile_balancing_num_bins: 1024
+quantile_balancing_margin_min: -1.0
+quantile_balancing_margin_max: 1.0
+# Eq. 14 line 2 -- "removes a common offset that leaves Top-k selection
+# unchanged", so this is drift control, not a correction.
+quantile_balancing_center_bias: true
+# Cadence in optimizer steps. The report reads as every step ("QB derives the
+# next bias from a single forward pass"; the quantile "spans the full global
+# batch ... across ranks and accumulation steps"). >1 widens the window.
+quantile_balancing_update_interval: 1
+# null reproduces the report: the bias is *set*, not smoothed. A value in
+# [0, 1) makes it an EMA, which is the reading the report's global-batch
+# sentence rules out but which is kept reachable for small-batch debugging.
+quantile_balancing_ema_decay: null
+moe_aux_loss_coeff: 1.0e-3
+moe_router_topk_scaling_factor: 1.0        # routed_scaling_factor
+# num_expert_group == topk_group == 1 in the release, i.e. group-limited
+# routing is inactive.
+moe_router_num_groups: null
+moe_router_group_topk: null
+moe_router_dtype: null                     # fp32 recommended at training time
+moe_token_dispatcher_type: alltoall
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+# Must stay false: `moe_layer.py:360-362` asserts `not shared_expert_overlap`
+# whenever the latent projections are live, and Kimi K3 always runs the latent
+# path (routed_expert_hidden_size is set). The assert fires at *forward* time,
+# so leaving this true builds a model fine and then crashes on step 1.
+moe_shared_expert_overlap: false
+
+# ---------- activation: situ (Moonshot's soft-clamped SwiGLU) ----------
+swiglu: true
+bias_swiglu_fusion: false                  # the fused path has no soft clamp
+activation_situ_beta: 4.0                  # gate-branch soft clamp
+activation_situ_linear_beta: 25.0          # up-branch soft clamp
+# situ is a FUSED GLU activation: the up half gets a soft clamp of its own
+# (25.0) that differs from the gate's (4.0), and the final multiply happens
+# inside the fp32 region. config.activation_func cannot express that. With
+# gated_linear_unit=True -- which swiglu: true sets, and which K3's [gate | up]
+# packing requires -- MLP.forward's glu closure (mlp.py:312-319) hands
+# config.activation_func the GATE HALF ONLY, and the sole transform available
+# for the up half is a hard clamp sharing the gate's single bound.
+#
+# The one hook that receives the fused [..., 2I] tensor is the
+# MLPSubmodules.activation_func *module* slot, read at mlp.py:226-229 /
+# :256-259 and, for the grouped routed experts, experts.py:196-199 / :272-275.
+# It is gated on this flag. SituActivation is written to that slot's builder
+# protocol (TEActivationFunctionBuilder, mlp.py:91-96).
+#
+# activation_func itself must stay one of {F.gelu, F.silu, F.relu} --
+# transformer_config.py:1638-1644 rejects anything else once this flag is set --
+# and swiglu: true supplies F.silu at the args layer (arguments.py:1610-1612).
+# It is dead code on this path: the module slot wins at mlp.py:226.
+# bias_swiglu_fusion must stay false: transformer_config.py:1631-1636 rejects
+# the combination outright.
+use_te_activation_func: true
+
+# ---------- Multi-Token Prediction ----------
+# Off by default, which reproduces the released config.json
+# (num_nextn_predict_layers: 0) rather than the trained model: tech-report
+# Table 1 lists "MTP Layers: 1 layer", so the release was stripped. Turning it
+# on is one key -- set num_nextn_predict_layers: 1 in the experiment yaml's
+# overrides block, or here for a family-wide default.
+#
+# num_nextn_predict_layers is Kimi K3's own name for the quantity Megatron
+# calls mtp_num_layers. Both layers are reconciled:
+#   args   <- patches/kimi_k3_flops_patches.py::patch_k3_args_mtp_num_layers
+#   config <- kimi_k3_transformer_config.py::_resolve_mtp_fields
+# Set only one of the two; setting both to different values raises.
+#
+# Do NOT write 0 for "off". Upstream's mtp_on_this_rank tests
+# `config.mtp_num_layers is not None` (multi_token_prediction.py:508), so a
+# literal 0 turns MTP on for the last pipeline stage and then trips
+# MultiTokenPredictionBlock's "must have at least one layer" assert. Both
+# reconcilers normalise 0 -> null; null is what to write.
+num_nextn_predict_layers: null
+mtp_num_layers: null
+
+# Which backbone layer the MTP layer mirrors. Report §4.1.4 says only that it
+# "mirrors the structure of a backbone layer" and K3's backbone is
+# heterogeneous, so this is a resolved ambiguity: "mirror_last" copies the
+# final backbone layer, which §2.1 guarantees is a Gated MLA layer. "mla" and
+# "kda" force the variant.
+mtp_layer_type: mirror_last
+
+# The report does not state the MTP loss weight anywhere. 0.1 is DeepSeek-V3's
+# and upstream Megatron's default (transformer_config.py:61-66) and is what
+# DeepSeek-V4 ships. A choice, not a reproduction.
+mtp_loss_scaling_factor: 0.1
+
+# ---------- published training recipe: NOT settable from here ----------
+# Tech report §3.3 specifies a cosine LR schedule with a 1% linear warmup and
+# weight decay 0.1. Those keys deliberately do NOT appear in this file.
+#
+# PrimusParser merges a model preset into the module config with
+# merge_namespace(module_config, model_config, allow_override=False)
+# (parser.py:320), and that helper *skips* every key already present in the
+# destination (yaml_utils.py:121-122: "continue  # Skip duplicate keys, keep
+# dst value"). trainer_base.yaml:73-96 declares lr_decay_style,
+# lr_warmup_fraction, lr_warmup_iters and weight_decay, and pre_trainer.yaml
+# :22-28 re-sets weight_decay to 0.0 and lr_warmup_iters to 40. Anything
+# written here would therefore be dead config that reads as if it were live.
+#
+# The recipe lives in the experiment yaml's `overrides:` block, which goes
+# through override_namespace -> deep_merge_namespace (parser.py:323-324) and
+# does win. See examples/megatron/configs/MI355X/kimi_k3-BF16-pretrain.yaml,
+# and test_recipe_router_live.py which pins both the values and this
+# precedence rule.
+#
+# Also report-only, deliberately not implemented here:
+#   * "K2 weight clipping" -- the report names it but does not specify it.
+#     Megatron ships megatron/core/optimizer/qk_clip.py, which is K2's QK-Clip;
+#     whether that is the same mechanism is unverified.
+#   * the 8k -> 64k context ramp -- config staging, belongs with the run
+#     harness rather than with a model preset.
+
+# ---------- parallelism defaults ----------
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: null

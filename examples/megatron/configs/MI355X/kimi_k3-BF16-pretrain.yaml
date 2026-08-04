@@ -1,0 +1,199 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:kimi_k3-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Kimi K3 (text backbone) BF16 pretraining config for MI355X.
+#
+# This is the experiment YAML for the K3 model shapes in
+# primus/configs/models/megatron/kimi_k3*.yaml. It is deliberately runnable
+# as written -- no launcher CLI overrides are required to get past Megatron's
+# argument validation. The two traps the DeepSeek-V4 configs fall into are
+# both avoided in kimi_k3_base.yaml rather than here:
+#   1. rope_type: yarn + multi_latent_attention: false trips
+#      arguments.py:1635. K3 uses rope_type: rope (and gets NoPE from a
+#      zero-width rotary table inside its attention module, keeping the
+#      released qk_pos_emb_head_dim: 64), so the assert is satisfied by the
+#      YAML.
+#   2. a non-sigmoid moe_router_score_function + moe_router_enable_expert_bias
+#      raises at transformer_config.py:1769. K3's router is natively sigmoid,
+#      so the noaux_tc bias is legal.
+#
+# Few-layer smoke shape (single GPU, synthetic data), which is what to run
+# first:
+#   PRIMUS_SKIP_PIP=1 GPUS_PER_NODE=1 NNODES=1 PRIMUS_MODEL=kimi_k3_debug \
+#   EXP=examples/megatron/configs/MI355X/kimi_k3-BF16-pretrain.yaml \
+#   bash examples/run_pretrain.sh --backend_path $PWD/third_party/Megatron-LM
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # kimi_k3 = the 93-layer production shape; kimi_k3_debug = the 8-layer
+    # single-GPU smoke shape.
+    model: ${PRIMUS_MODEL:kimi_k3}.yaml
+    overrides:
+      # ---------- log ----------
+      wandb_project: "Primus_Kimi_K3_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: ${PRIMUS_LOG_INTERVAL:1}
+
+      # ---------- hyper parameters ----------
+      train_iters: ${TRAIN_ITERS:50}
+      micro_batch_size: ${MBS:1}
+      global_batch_size: ${GBS:8}
+      seq_length: ${PRIMUS_SEQ_LENGTH:512}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:512}
+      lr: 1.0e-5
+      min_lr: 0.0
+      # Published recipe, tech report §3.3: "a cosine learning rate schedule
+      # with a 1% linear warmup. Weight decay is set to 0:1 throughout."
+      # lr_warmup_fraction is the only knob that expresses "1% of training":
+      # OptimizerParamScheduler multiplies it by the decay horizon
+      # (lr_decay_iters, which falls back to train_iters), whereas
+      # lr_warmup_iters is an absolute count. The two are mutually exclusive
+      # (arguments.py:1005-1007), so lr_warmup_iters must stay 0 here --
+      # pre_trainer.yaml:25 would otherwise supply 40.
+      #
+      # These four keys cannot live in primus/configs/models/megatron/
+      # kimi_k3*.yaml: PrimusParser merges the model preset with
+      # merge_namespace(..., allow_override=False) (parser.py:320), which skips
+      # any key the module config already declares (yaml_utils.py:121-122), and
+      # trainer_base.yaml:73-96 declares all of them. Only this overrides block
+      # wins. Pinned by test_recipe_router_live.py.
+      lr_warmup_iters: 0
+      lr_warmup_fraction: 0.01
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-5
+
+      # ---------- parallel ----------
+      # PP stays 1: the production shape is 93 layers, which is not divisible
+      # by any of the usual PP degrees, so PP > 1 needs
+      # decoder_first_pipeline_num_layers / decoder_last_pipeline_num_layers
+      # to be chosen deliberately. That is the parallelism work package's job.
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:1}
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # ---------- data: synthetic ----------
+      # mock_data: true nulls every data path AND forces
+      # tokenizer_type=NullTokenizer while preserving vocab_size
+      # (primus/backends/megatron/patches/args/mock_data_patches.py:33-45),
+      # so no dataset and no tokenizer download is needed.
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ---------- Kimi K3 specific ----------
+      # eager | eager_recurrent | fla | flydsl.
+      # `fla` is the fused Triton path and is the right default for training:
+      # the eager reference deliberately trades speed for auditable numerics
+      # (column-wise score construction, a Python-loop UT transform) and exists
+      # to be the oracle, not the training path. flash-linear-attention is not
+      # in the base image but the megatron pretrain hook installs it
+      # (runner/helpers/hooks/.../00_install_requirements.sh). Fall back with
+      # PRIMUS_KDA_BACKEND=eager if it is genuinely unavailable.
+      kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      # K3P_KDA_CONV=fla is the run_pretrain.sh default (env, not a Megatron arg):
+      # fla causal_conv1d replaces nn.Conv1d; conv/task_conv_landing.sh measured
+      # 164.6 vs 103.3 TFLOP/s. Override with K3P_KDA_CONV=default for the MIOpen path.
+      # MUST stay false. This is a *benchmark* switch, not a load balancer:
+      # TopKRouter.forward calls apply_random_logits (router.py:696-698), and
+      # RandomSTE.forward (moe_utils.py:1177-1198) DISCARDS the router's logits
+      # and returns `logits.clone().normal_()`. Routing is then uniformly random
+      # and the router weight only ever sees a straight-through gradient
+      # computed against a decision it did not make -- so "router grad is
+      # non-zero" still passes while the router learns nothing. The whole
+      # phase-1 run was routed this way; see validate/VALIDATION.md §7.2.
+      # Upstream's own default is false (transformer_config.py:714).
+      # test_recipe_router_live.py fails if this is ever flipped back on.
+      moe_router_force_load_balancing: ${PRIMUS_MOE_FORCE_LOAD_BALANCING:false}
+      moe_router_dtype: fp32
+
+      # ---------- optimizer ----------
+      optimizer: adam
+      use_distributed_optimizer: false
+      use_precision_aware_optimizer: false
+
+      # ---------- recompute: off at bring-up size ----------
+      recompute_granularity: null
+      recompute_method: null
+      recompute_num_layers: null
+
+      # ---------- ckpt ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # ---------- Turbo / fusion ----------
+      # Turned ON to match the throughput lane's measured defaults. At the scaled
+      # shape (24 layers / hidden 2048 / 32 experts / EP=8, 8 x MI355X) grouped
+      # GEMM + RMSNorm were +7.5 % and permute fusion +3.2 %, both memory-neutral
+      # and both with a 450-iteration loss curve behind them. Full report and the
+      # complete ladder: perf/FINDINGS.md. This file runs a small bring-up shape,
+      # so it will not show those numbers itself -- the flags are here so the
+      # bring-up path and the production path do not silently diverge.
+      #
+      # THE TWO SETTINGS THAT MATTER MOST ARE NOT IN THIS FILE:
+      #   1. ENABLE_NUMA_BINDING=1 -- an ENVIRONMENT variable, not a Megatron arg
+      #      (examples/run_pretrain.sh:376-379 -> runner/helpers/numa_bind.sh).
+      #      Worth **+28 %** on its own and defaulted to 0 by run_pretrain.sh:241,
+      #      although nearly every production MI355X MoE recipe Primus ships sets
+      #      it to 1. Set it. It cannot change numerics -- it only chooses which
+      #      NUMA node a rank's CPU threads and host memory live on.
+      #   2. micro_batch_size -- the single largest lever measured (25.70 ->
+      #      130.70 TFLOP/s across the ladder), because with the global batch held
+      #      fixed almost all of the win is deleting gradient-accumulation steps.
+      #      It is deliberately left at the bring-up value below, since the right
+      #      value is memory-bound and therefore shape-specific: at the scaled
+      #      shape MBS=16 needs recompute (full/block/12) to fit in 288 GB.
+      #      See examples/megatron/configs/MI355X/kimi_k3-BF16-perf.yaml.
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
+      # Fixed 2026-07-30: PrimusTurboGroupedLinear now keeps per-expert weight{i}
+      # Parameters (TE layout) + sharded_state_dict; save verified at EP=8.
+      # Was broken when a single consolidated ``weights`` Parameter was used.
+      use_turbo_grouped_gemm: ${PRIMUS_USE_TURBO_GROUPED_GEMM:false}
+      # These two are checkpoint-safe: verified saving at EP=8.
+      use_turbo_rms_norm: true
+      moe_permute_fusion: true
+      # Left off, each for a measured reason (throughput noise floor 0.22 %):
+      #   attention -- a real +1.5 %, but the configuration validated over 450
+      #     iterations is the one without it.
+      #   fused_act_with_probs -- a real -1.0 % REGRESSION at the scaled shape.
+      #   deepep -- BROKEN for K3: `probs must have shape [num_tokens=4096,
+      #     ep_size*num_local_experts=32], got (8192, 32)`. The dispatcher is
+      #     sized for half the tokens the stable-latent MoE hands it. Code fix,
+      #     not a knob, and the profile says it is worth at most 9.3 % anyway.
+      #   shared_expert_overlap -- moe_layer.py:360-362 asserts
+      #     `not shared_expert_overlap` whenever the latent projections are live,
+      #     and K3 always runs the latent path. Fires at FORWARD time, so a true
+      #     here builds fine and dies on step 1.
+      use_turbo_attention: false
+      use_turbo_fused_act_with_probs: false
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_use_fused_router_with_aux_score: false
+
+      enable_experimental: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
