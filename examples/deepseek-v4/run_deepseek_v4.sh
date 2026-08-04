@@ -259,26 +259,6 @@ if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
   PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
 fi
 
-# ---------- Memory reporting (off by default) --------------------------------
-# The per-iteration line only carries the *global* peak (one all-reduce MAX) plus
-# the printing rank's own device usage, so it cannot show how memory is spread
-# across pipeline stages. Two opt-in knobs fill that gap:
-#   PRIMUS_LOG_MEMORY_INTERVAL=N  -> Megatron's report_memory() every N steps,
-#     printed by every DP-rank-0. With TP=1/EP=8 the ranks map 8-per-node and
-#     pp_rank == node index, so this yields one sample per node.
-#   PRIMUS_USE_ROCM_MEM_INFO=True -> re-read rocm-smi every step. The default
-#     samples only at iterations 1 and 2 and reuses that string afterwards, so
-#     the reported peak is an early snapshot rather than a steady-state value.
-export PRIMUS_LOG_MEMORY_INTERVAL=${PRIMUS_LOG_MEMORY_INTERVAL:-}
-export PRIMUS_USE_ROCM_MEM_INFO=${PRIMUS_USE_ROCM_MEM_INFO:-}
-MEM_LOG_CLI_ARGS=()
-if [ -n "$PRIMUS_LOG_MEMORY_INTERVAL" ]; then
-  MEM_LOG_CLI_ARGS+=(--log_memory_interval "$PRIMUS_LOG_MEMORY_INTERVAL")
-fi
-if [ -n "$PRIMUS_USE_ROCM_MEM_INFO" ]; then
-  MEM_LOG_CLI_ARGS+=(--use_rocm_mem_info "$PRIMUS_USE_ROCM_MEM_INFO")
-fi
-
 PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
 
 export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
