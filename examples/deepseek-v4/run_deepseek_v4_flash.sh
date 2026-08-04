@@ -175,14 +175,9 @@ export PRIMUS_MOE_FFN_HIDDEN_SIZE=${PRIMUS_MOE_FFN_HIDDEN_SIZE:-2048}
 export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-512}
 export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]'}
 export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
-
 export NNODES=${NNODES:-4}
 export PRIMUS_TP=${PRIMUS_TP:-1}
-if [ "$NNODES" -ge 8 ]; then
-    export PRIMUS_PP=${PRIMUS_PP:-8}
-else
-    export PRIMUS_PP=${PRIMUS_PP:-4}
-fi
+export PRIMUS_PP=${PRIMUS_PP:-4}
 export PRIMUS_EP=${PRIMUS_EP:-8}
 
 export MBS=${MBS:-1}
@@ -324,24 +319,10 @@ fi
 # optimizations above have freed the memory for it -- dropping it first will
 # run out of memory.
 if [ "$PRIMUS_OPT_LAYOUT" = 1 ]; then
-    if [ "$NNODES" -ge 8 ]; then
-        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-            export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*4|t*5|(t*6|)*5,t*4mL}"
-        else
-            export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*4|t*5|(t*6|)*5,t*4L}"
-        fi
-    elif [ "$NNODES" -eq 4 ]; then
-        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-            export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*12|t*12|t*9mL}"
-        else
-            export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*11|t*11|t*11L}"
-        fi
-    fi
+    export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*12|t*12|t*9mL}"
     export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
 else
-    if [ "$NNODES" -eq 4 ] && [ "$MTP_NUM_LAYERS" -eq 1 ]; then
-        export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*11|t*11|t*11mL}"
-    fi
+    export PRIMUS_PP_LAYOUT="${PRIMUS_PP_LAYOUT:-Et*10|t*11|t*11|t*11mL}"
     export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-3}
 fi
 export RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-full}
