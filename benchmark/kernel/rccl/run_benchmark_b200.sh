@@ -27,8 +27,8 @@ set -euo pipefail
 
 GPUS_PER_NODE=8
 # Pre-imported sqsh avoids enroot aufs whiteout errors on ext4 /data filesystem.
-# The sqsh is pre-imported on: GPUA806, GPUA817, GPUA818, GPUA863, GPUA7DD, GPUA81E
-# If running on other nodes, root must run: enroot import --output /scratch/enroot/data/nvcr+nvidia+nemo+25.11.01.sqsh docker://nvcr.io#nvidia/nemo:25.11.01
+# It must exist on every node in the allocation; where it does not, root must run:
+#   enroot import --output /scratch/enroot/data/nvcr+nvidia+nemo+25.11.01.sqsh docker://nvcr.io#nvidia/nemo:25.11.01
 DOCKER_IMAGE="/scratch/enroot/data/nvcr+nvidia+nemo+25.11.01.sqsh"
 MASTER_PORT=29500
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}"

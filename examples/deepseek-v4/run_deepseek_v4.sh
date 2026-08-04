@@ -27,8 +27,10 @@ export TRAIN_ITERS=${TRAIN_ITERS:-20}
 # pr-927 ships the Primus-Turbo build (0.3.2.dev55) that carries the MegaMoE
 # kernels; the older pr-882 turbo cannot run USE_TURBO_MEGA_MOE=True.
 export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-927-ainic"}
-export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
-export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
+# Cluster placement is site-specific: leave both empty so the scheduler picks
+# the partition/nodes, and export them to pin a run to known-good hardware.
+export SLURM_PARTITION=${SLURM_PARTITION:-}
+export SLURM_NODELIST="${SLURM_NODELIST:-}"
 export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
