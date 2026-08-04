@@ -12,9 +12,13 @@
 
 ## ✨ Key Features
 
-- **🔄 Multi-Backend Support**: Seamlessly switch between Megatron-LM, TorchTitan, and other training frameworks
-- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters ([Docs](./docs/02-user-guide/cli-reference.md))
-- **⚡ ROCm Optimized**: Deep integration with AMD ROCm stack and optimized kernels from Primus-Turbo
+- **🔄 Multi-Backend Support**: Megatron-LM, Megatron-Bridge, TorchTitan, JAX MaxText, HummingbirdXT, and a diffusion backend (Flux.1 / Wan) behind one config system
+- **🎯 Full Training Lifecycle**: Pretraining, native SFT / LoRA post-training, and MLPerf-verified recipes (Llama2-70B LoRA, Llama3.1-8B, GPT-OSS-20B)
+- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters; also installable as a pip wheel ([Docs](./docs/02-user-guide/cli-reference.md))
+- **⚡ ROCm Optimized**: Primus-Turbo kernels, MegaMoE fused MoE, DeepEP, SDMA copy-engine all-gather, and zero-bubble pipeline scheduling
+- **🔢 Low-Precision Training**: BF16, FP8 (delayed and blockwise scaling), MXFP8, and MXFP4 / FP4
+- **📐 Plan Before You Train**: [Primus Projection](./docs/02-user-guide/projection.md) for parallelism and memory projection, plus the [Tuning Agent](./docs/02-user-guide/tuning-agent.md) for automated config search
+- **📊 Observability**: MLflow tracking, TraceLens trace analysis, and [Preflight](./primus/tools/preflight/README.md) cluster sanity checks
 - **📦 Production Ready**: Battle-tested on large-scale training with hundreds of GPUs
 - **🔌 Extensible Architecture**: Plugin-based design for easy integration of custom models and workflows
 - **🛡️ Enterprise Features**: Built-in fault tolerance, checkpoint management, and monitoring
@@ -33,15 +37,25 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
+- **[2026/07/30]** **MegaMoE** - FlyDSL-based fused MoE layer for Megatron, enabled on DeepSeek-V4 ([Docs](./docs/04-technical-guides/mega-moe.md), #927, #934)
+- **[2026/07/29]** Hybrid / linear-attention models - Gated Delta Net (GDN) and Kimi Delta Attention (KDA), FLA 0.5.1 (#676, #936)
+- **[2026/07/22]** 🎉 **Primus v26.5 released** - `rocm/primus:v26.5` and JAX/MaxText v26.5 images (#915)
+- **[2026/07/17]** **DeepSeek-V4 training support** - attention / MoE kernels, Muon optimizer, FP8 / FP4, projection toolkit (#882)
+- **[2026/07/17]** TorchTitan upgraded to v0.2.2 (torch 2.12) with GPT-OSS support (#871)
+- **[2026/07/16]** **Diffusion backend** - Flux.1 and Wan video training, FSDP2 FP8 all-gather, MXFP4 ([Docs](./docs/04-technical-guides/diffusion-models/README.md), #779, #832)
+- **[2026/07/14]** MLPerf Training 6.0 examples - Llama2-70B LoRA on MI355X, Llama3.1-8B, GPT-OSS-20B (#854, #877)
+- **[2026/06/15]** **Tuning Agent** - automated, memory-aware configuration search ([Docs](./docs/02-user-guide/tuning-agent.md), #755)
+- **[2026/06/10]** Native SFT / LoRA post-training ([Docs](./docs/04-technical-guides/native-sft-lora.md), #701)
+- **[2026/06/08]** Primus published as a **pip wheel** with bundled `primus-cli` (#750)
+- **[2026/06/02]** SDMA copy-engine all-gather for FSDP / FSDP2 (#740, #763)
+- **[2026/05/14]** TraceLens and MLflow integration for trace analysis and artifact upload (#439, #440)
+- **[2026/04/10]** MoE Package V2.0 (#648)
+- **[2026/03/25]** Zero-bubble heuristic pipeline scheduling and the **Primus Projection** performance model ([Docs](./docs/02-user-guide/projection.md), #618, #602)
+- **[2026/02/03]** HummingbirdXT backend integration (#533)
+- **[2026/01/22]** Post-training via **Megatron-Bridge** ([Docs](./docs/02-user-guide/posttraining.md), #500)
 - **[2025/12/17]** MoE Training Best Practices on AMD GPUs - [MoE Package Blog](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)
 - **[2025/11/14]** 🎉 **Primus CLI 1.0 Released** - Unified command-line interface with comprehensive documentation
 - **[2025/08/22]** Primus introduction [blog](https://rocm.blogs.amd.com/software-tools-optimization/primus/README.html)
-- **[2025/06/18]** Added TorchTitan backend support
-- **[2025/05/16]** Added benchmark suite for performance evaluation
-- **[2025/04/18]** Added [Preflight](./primus/tools/preflight/README.md) cluster sanity checker
-- **[2025/04/14]** Integrated HipBLASLt autotuning for optimized GPU kernel performance
-- **[2025/04/09]** Extended support for LLaMA2, LLaMA3, DeepSeek-V2/V3 models
-- **[2025/03/04]** Released Megatron trainer module
 
 ---
 
