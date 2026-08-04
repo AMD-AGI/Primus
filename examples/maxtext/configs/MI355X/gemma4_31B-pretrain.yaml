@@ -34,5 +34,10 @@ modules:
       ici_tensor_sequence_parallelism: -1
 
       remat_policy: "full"
-      max_target_length: 8192
-      per_device_batch_size: 2
+      # v26.6 (rocm-main) maxtext: gemma4 trains with the reference dot_product
+      # attention. The fused/flash kernels still native-crash on head_dim=256 +
+      # sliding-window on this ROCm stack, so we use dot_product here. Seq len is
+      # reduced to 4096 to keep dot_product's O(S^2) compile/step tractable.
+      attention: "dot_product"
+      max_target_length: 4096
+      per_device_batch_size: 1

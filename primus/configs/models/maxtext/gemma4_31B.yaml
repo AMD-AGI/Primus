@@ -4,15 +4,16 @@ extends:
 # Gemma 4 31B (Dense). Architecture comes from MaxText's
 # configs/models/gemma4-31b.yml (selected via model_name).
 #
-# KNOWN LIMITATION (validated on gfx950 / jax_the_rock_ci_45156b7 + jaxlib 0.10.0):
-# gemma4 does NOT currently run on this JAX-ROCm stack. The efficient attention
-# kernels crash natively during XLA compile for gemma4's head_dim=256 +
-# bidirectional sliding-window attention (model_base default attention
-# 'cudnn_flash_te', and 'flash', both abort at the first forward pass -- even at
-# per_device_batch_size=1, so it is not a memory/batch-size issue). 'dot_product'
-# avoids the crash but is O(S^2) and cannot compile in a reasonable time at
-# max_target_length=8192. This config is kept ready for when the stack adds gemma4
-# attention support; it is intentionally excluded from the active MAD sweep.
+# ATTENTION LIMITATION (validated on gfx950 / jax_the_rock_ci_45156b7 + jaxlib 0.10.0):
+# The efficient attention kernels crash natively during XLA compile for gemma4's
+# head_dim=256 + bidirectional sliding-window attention ('cudnn_flash_te' and
+# 'flash' both abort at the first forward pass -- even at per_device_batch_size=1,
+# so it is not a memory/batch-size issue). The reference 'dot_product' attention
+# works: on maxtext release/v26.6 gemma4-31b trains cleanly (validated in the MAD
+# sweep at ~395 TFLOP/s/gpu, seq 4096). gemma4 does NOT run on maxtext v26.5.
+# The MI355X pretrain example config therefore sets attention=dot_product and a
+# reduced seq length; switch back to fused attention once the ROCm stack supports
+# head_dim=256 + sliding-window.
 model_name: "gemma4-31b"
 
 # Gemma 4 is not published on HF; synthetic pretraining generates data from
