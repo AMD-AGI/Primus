@@ -133,17 +133,19 @@ if command -v spur >/dev/null 2>&1; then
     export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-}"
     export DOCKER_LOGIN_KEY="${DOCKER_LOGIN_KEY:-}"
 else
-    # Any other SLURM cluster.
+    # dccs cluster. Partition / nodelist are not pinned here; export
+    # SLURM_PARTITION / SLURM_NODELIST to target specific hardware.
     #
-    # Socket interface: runner/helpers/hooks/10_auto_nccl_net.sh auto-detects the
-    # front-end NIC, but only while GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME are
-    # unset, so they are deliberately not set here. If detection picks the wrong
-    # interface and multi-node rendezvous hangs, export both to your cluster's
-    # front-end interface name -- run_deepseek_v4.sh otherwise falls back to
-    # `lo`, which never completes a multi-node rendezvous.
-    #
-    # Optionally reuse one held allocation instead of queueing per run, so a
-    # sweep keeps landing on the same known-good nodes:
+    # Socket interface: run_deepseek_v4.sh falls back to `lo`, which leaves
+    # multi-node rendezvous hanging. The dccs front-end NIC is `fenic` (the RDMA
+    # devices are benic1p1..benic8p1 / ionic_0..7). runner/helpers/hooks/
+    # 10_auto_nccl_net.sh would auto-detect it, but only when these are unset, and
+    # the `lo` fallback sets them -- so pin them here.
+    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-fenic}"
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-fenic}"
+
+    # Optionally reuse one held allocation instead of queueing per run, so a sweep
+    # keeps landing on the same (known-good) nodes:
     #   salloc --no-shell -N 4 --exclusive --partition=<partition> --mem=0
     #   SLURM_ALLOC_JOB_ID=<granted id> bash examples/deepseek-v4/run_deepseek_v4_flash.sh
     # srun then joins that allocation rather than asking for new nodes;
@@ -156,8 +158,9 @@ else
         export SLURM_JOBID="${SLURM_JOBID:-$SLURM_ALLOC_JOB_ID}"
         # Let the step share nodes the allocation already holds.
         export SLURM_OVERLAP="${SLURM_OVERLAP:-1}"
-        # srun rejects a --nodelist that is not inside the allocation, so take
-        # the allocation's own list. Empty (allocation still pending) is fine.
+        # srun rejects a --nodelist that is not inside the allocation, so take the
+        # allocation's own list. Empty (allocation still pending) is fine; srun
+        # then just uses every node it was given.
         export SLURM_NODELIST="${SLURM_NODELIST:-$(squeue -h -j "$SLURM_ALLOC_JOB_ID" -o '%N' 2>/dev/null || true)}"
     fi
     export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-fenic}"

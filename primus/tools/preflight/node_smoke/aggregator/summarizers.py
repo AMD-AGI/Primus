@@ -335,7 +335,7 @@ def _tooling_inventory_rows(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         {
             "rows": [
-                {"node_rank": 0, "host": "tus1-p3-g25",
+                {"node_rank": 0, "host": "node001",
                  "amd-smi": True, "rocm-smi": True, "lsof": True},
                 ...
             ],
