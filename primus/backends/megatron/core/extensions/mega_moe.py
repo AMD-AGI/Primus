@@ -37,12 +37,13 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
 )
 
 try:  # older Primus-Turbo builds ship only the bf16 stage pair
+    from primus_turbo.flydsl.mega.fp8 import advance_weight_generation
     from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
         fused_mega_moe_fp8_stage1,
         fused_mega_moe_fp8_stage2,
     )
 except ImportError:
-    fused_mega_moe_fp8_stage1 = fused_mega_moe_fp8_stage2 = None
+    fused_mega_moe_fp8_stage1 = fused_mega_moe_fp8_stage2 = advance_weight_generation = None
 
 
 MEGA_MOE_PRECISIONS = ("bf16", "mxfp8")
@@ -183,7 +184,26 @@ class MegaMoEFP8Experts(MegaMoEExperts):
             config.recompute_granularity != "full"
         ), "MegaMoE fp8 does not support recompute_granularity=full"
 
+    # Count microbatches to find the step boundary, which is when the fp8 weight caches have to be
+    # dropped. Nothing they can see tells them a weight moved: `_version` never moves under the
+    # precision-aware optimizer, and the quantized / flattened / preshuffled copies keep their
+    # addresses (the allocator hands back the block it just freed), so left alone the experts
+    # contract the weights training started with for the whole run.
+    #
+    # Megatron's own signal for this, set_is_first_microbatch(), is not usable here: it returns early
+    # unless config.fp8/fp4/kitchen is set, and MegaMoE selects mxfp8 through
+    # turbo_mega_moe_precision while Megatron's own recipe stays off.
+    _microbatch_in_step = 0
+
     def forward(self, x, topk_idx, topk_weights):
+        # Only count real training forwards: eval runs no optimizer step, and counting those would
+        # slide the phase so the refresh stops landing on the step boundary.
+        if self.training and torch.is_grad_enabled():
+            from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+            if self._microbatch_in_step == 0:
+                advance_weight_generation()
+            self._microbatch_in_step = (self._microbatch_in_step + 1) % max(1, get_num_microbatches())
         w1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2 = self.fc2_weight()
