@@ -6,6 +6,8 @@ It is derived from the official training `Dockerfile` and installs the same comp
 
 > **Important**: This is a long, build-heavy process. A full from-source build (Flash Attention, TransformerEngine, aiter, Primus-Turbo, FBGEMM, rocSHMEM, etc.) can take **several hours** and needs a machine with many CPU cores, plenty of RAM, and tens of GB of free disk. The Docker image remains the recommended and best-supported path. Use this guide only when containers are not an option.
 
+> **Using the JAX MaxText backend instead?** This guide builds the PyTorch stack (Megatron-LM / TorchTitan). For the JAX / MaxText backend, follow the leaner [JAX bare-metal installation guide](bare-metal-installation-jax.md) instead.
+
 ---
 
 ## Quick path: automated install scripts
