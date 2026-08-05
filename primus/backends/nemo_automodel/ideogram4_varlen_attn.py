@@ -54,9 +54,11 @@ COMPILE:
   and under FSDP2 a mid-forward break splits the region the per-layer all-gather/reshard
   collectives are registered around and desyncs them across ranks (a silent multi-rank death).
   The fix is to not derive the packing here at all: ``Ideogram4Adapter`` builds ``cu_seqlens``
-  on the host (it already holds the text lengths as Python ints) and threads it in through
-  ``attention_kwargs``, making it a graph INPUT. That path is exact on ragged batches, needs no
-  host sync, and stops recomputing the same packing once per layer.
+  on the host (it already holds the text lengths as Python ints) and publishes it into a shared
+  non-persistent buffer on the attention modules, making it a graph INPUT (see
+  ``ideogram4_packing_buffer.py`` for why that route and not ``attention_kwargs``, which is a
+  dead parameter for this model in diffusers 0.39.0). That path is exact on ragged batches,
+  needs no host sync, and stops recomputing the same packing once per layer.
 
 Activation (env, no config schema change):
     PRIMUS_IDEOGRAM_VARLEN_ATTN=1          swap Ideogram-4 attention to the var-len flash path
@@ -78,6 +80,8 @@ from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
+
+from primus.backends.nemo_automodel.ideogram4_packing_buffer import resolve_packing
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +123,17 @@ def precompute_cu_seqlens_enabled() -> bool:
     for A/B measurement and rollback, not as a routine knob.
     """
     return os.getenv("PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS", "1") in _TRUTHY
+
+
+def precompute_cu_seqlens_active() -> bool:
+    """Whether precomputing the packing will actually be *read* by anything.
+
+    Both switches have to be on. Without ``PRIMUS_IDEOGRAM_VARLEN_ATTN`` the stock SDPA
+    processor is in place and has no ``cu_seqlens`` parameter, so precomputing would cost a
+    build plus the reserved pad column's token position every step for nothing. This is the
+    gate the adapter uses; :func:`precompute_cu_seqlens_enabled` is only the flag.
+    """
+    return is_varlen_attn_enabled() and precompute_cu_seqlens_enabled()
 
 
 # --------------------------------------------------------------------------- #
@@ -248,9 +263,10 @@ class Ideogram4VarlenAttnProcessor:
     ``_attention`` picks a path in this order:
 
       1. **provided** ``cu_seqlens`` -- the adapter precomputed the packing on the host and
-         passed it through ``attention_kwargs``. Exact on ragged batches and free of
-         data-dependent ops, so it is the only path that is simultaneously correct on
-         ragged data and safe under per-layer ``torch.compile`` + FSDP2.
+         published it into the shared buffer this processor reads off ``attn``. Exact on
+         ragged batches and free of data-dependent ops, so it is the only path that is
+         simultaneously correct on ragged data and safe under per-layer ``torch.compile``
+         + FSDP2.
       2. ``assume_dense`` **or no mask** -- dense flash. Exact only when no row has padding.
       3. **mask analysis** (legacy) -- exact, but its device->host reads graph-break.
     """
@@ -273,12 +289,15 @@ class Ideogram4VarlenAttnProcessor:
         cu_seqlens: Optional[Tensor] = None,
         max_seqlen: Optional[int] = None,
     ) -> Tensor:
-        # ``cu_seqlens`` / ``max_seqlen`` arrive from the adapter through the model's
-        # ``attention_kwargs``. They MUST be declared as named parameters here: diffusers'
-        # attention module filters the kwargs it forwards against
-        # ``inspect.signature(self.processor.__call__).parameters``, so a processor
-        # declaring only ``**kwargs`` would silently receive nothing (a logger.warning is
-        # the only trace, easily lost under torchrun).
+        # The packing normally arrives on the module: the adapter publishes it into a shared
+        # non-persistent buffer that ``resolve_packing`` reads off ``attn`` (see
+        # ``ideogram4_packing_buffer.py``). The two named parameters are kept because
+        # diffusers' attention module filters forwarded kwargs against
+        # ``inspect.signature(self.processor.__call__).parameters``, so declaring them by name
+        # is what would let a kwargs route work at all -- a ``**kwargs``-only processor would
+        # silently receive nothing. An explicit argument wins over the buffer.
+        cu_seqlens, max_seqlen = resolve_packing(attn, cu_seqlens, max_seqlen)
+
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
@@ -340,11 +359,39 @@ class Ideogram4VarlenAttnProcessor:
         # The branch tests a property of the RUN (was anything provided), not of the data,
         # so it costs one guard and no graph break.
         if cu_seqlens is not None:
+            # The packing lives on the module and outlives the step that published it, so a
+            # caller that bypasses the adapter (a sampling pass, an eval loop with a different
+            # batch size) could otherwise attend on a stale one and corrupt silently. This
+            # compares only static SHAPE metadata -- no values are read, so it costs a guard
+            # and no host sync. ``2B+1`` is the layout contract: one pad segment plus one
+            # text+image segment per row. Packing several samples per row would change that
+            # count, and this check with it.
+            expected = 2 * B + 1
+            if cu_seqlens.numel() != expected:
+                raise ValueError(
+                    f"cu_seqlens has {cu_seqlens.numel()} entries but this batch needs "
+                    f"{expected} (2*B+1 for B={B}). Either the packing was published for a "
+                    "different batch size and is stale -- call "
+                    "ideogram4_packing_buffer.clear_packing(model) before running the model "
+                    "outside the adapter -- or the sequence layout no longer has exactly two "
+                    "segments per row, in which case update this check."
+                )
+            # Hand the kernel a PRIVATE COPY, never the shared buffer. aiter's var-len op
+            # treats cu_seqlens as a mutable argument: it saves the tensor for its backward
+            # and then writes it, bumping the autograd version counter once per call. One
+            # buffer shared by 34 layers therefore has its version moved 34 times per forward
+            # while each layer's backward still expects the version it saved, and the step
+            # dies in .backward() with "a variable needed for gradient computation has been
+            # modified by an inplace operation: IntTensor[5] is at version 35; expected 34"
+            # (measured 2026-08-04, t2 stage; the legacy path never saw it because every
+            # layer derives its own tensor from the mask). The clone is 5 int32 already on
+            # device, and under compile it is a graph intermediate -- the buffer stays a
+            # read-only graph input, which is what makes sharing it safe at all.
             out = varlen_flash_attention(
                 query.reshape(B * L, H, D),
                 key.reshape(B * L, H, D),
                 value.reshape(B * L, H, D),
-                cu_seqlens,
+                cu_seqlens.clone(),
                 L if max_seqlen is None else max_seqlen,
                 deterministic=self.deterministic,
             )

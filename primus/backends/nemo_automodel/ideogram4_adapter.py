@@ -30,12 +30,13 @@ WHAT the adapter does:
     image), and the ``position_ids/segment_ids/indicator`` for the
     ``[pad][text][image]`` layout. Ideogram model time is ``t = 1 - sigma``.
     It ALSO builds the var-len ``cu_seqlens`` packing here on the host (see
-    :func:`build_cu_seqlens`) and threads it to the attention processor via
-    ``attention_kwargs``, so the processor never derives it from the mask inside the
+    :func:`build_cu_seqlens`), so the processor never derives it from the mask inside the
     compiled region -- that derivation is data-dependent, host-syncing, and under FSDP2
     its graph break desyncs the per-layer collectives. Disable with
     ``PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS=0``.
-  - ``forward`` runs the DiT, slices the image-token velocity, unpacks to
+  - ``forward`` publishes that packing into the attention modules' shared buffer
+    (``ideogram4_packing_buffer``, which documents why that route and not diffusers'
+    ``attention_kwargs``), runs the DiT, slices the image-token velocity, unpacks to
     ``[B,128,H_p,W_p]`` and NEGATES it: the DiT predicts ``x0 - eps`` (inference
     feeds ``-v`` to the scheduler) while AutoModel's target is ``eps - x0``.
 
@@ -55,9 +56,10 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
+from primus.backends.nemo_automodel.ideogram4_packing_buffer import publish_packing
 from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
     assume_dense_enabled,
-    precompute_cu_seqlens_enabled,
+    precompute_cu_seqlens_active,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,11 +72,24 @@ try:
         OUTPUT_IMAGE_INDICATOR,
         SEQUENCE_PADDING_INDICATOR,
     )
-except Exception:  # pragma: no cover - keep import-safe if diffusers is older
-    IMAGE_POSITION_OFFSET = 4096
-    LLM_TOKEN_INDICATOR = 1
+except Exception:  # pragma: no cover - keep the module importable without diffusers (tests, lint)
+    # Values as of diffusers 0.39.0, read out of the installed package rather than guessed.
+    # They are the layout contract with the model, so a stale literal here silently mislabels
+    # every token: the warning below is the only signal that the real ones were not used.
+    IMAGE_POSITION_OFFSET = 65536
+    LLM_TOKEN_INDICATOR = 3
     OUTPUT_IMAGE_INDICATOR = 2
-    SEQUENCE_PADDING_INDICATOR = 0
+    SEQUENCE_PADDING_INDICATOR = -1
+    logger.warning(
+        "[PrimusIdeogram4] Could not import the Ideogram-4 layout constants from diffusers; "
+        "falling back to the diffusers 0.39.0 values (pad=%d, llm=%d, image=%d, offset=%d). "
+        "Fine for import-only use, but if a real run reaches this the constants may have been "
+        "renamed upstream and the token layout will be wrong with no further error.",
+        SEQUENCE_PADDING_INDICATOR,
+        LLM_TOKEN_INDICATOR,
+        OUTPUT_IMAGE_INDICATOR,
+        IMAGE_POSITION_OFFSET,
+    )
 
 
 def build_cu_seqlens(
@@ -226,7 +241,7 @@ def _build_ideogram4_adapter_class():
             # count -- and thus cu_seqlens' shape -- would vary per batch and recompile the
             # graph. Costs one token position out of S; capping captions instead would mean
             # dropping a real token to satisfy the compiler.
-            precompute_cu_seqlens = precompute_cu_seqlens_enabled()
+            precompute_cu_seqlens = precompute_cu_seqlens_active()
             if precompute_cu_seqlens:
                 pad_col = torch.zeros(B, 1, llm_features.shape[-1], device=device, dtype=dtype)
                 llm_features = torch.cat([pad_col, llm_features], dim=1)
@@ -272,13 +287,15 @@ def _build_ideogram4_adapter_class():
 
             # Built once here and shared by all layers, so the packing is a graph INPUT
             # instead of something the processor recovers from the mask 34 times per step.
+            # Left on the HOST: ``forward`` publishes it into the attention modules' shared
+            # buffer, and that single copy_ is then the only host->device transfer.
             # max_seqlen is the static upper bound S, not the true per-batch maximum:
             # Dynamo guards Python ints by value, so a data-derived one would recompile
             # almost every batch.
             cu_seqlens = None
             max_seqlen = None
             if precompute_cu_seqlens:
-                cu_seqlens = build_cu_seqlens(text_lengths, max_text, num_image_tokens, device)
+                cu_seqlens = build_cu_seqlens(text_lengths, max_text, num_image_tokens)
                 max_seqlen = max_text + num_image_tokens
 
             # Ideogram model time: 0=noise, 1=data => t = 1 - sigma.
@@ -305,14 +322,26 @@ def _build_ideogram4_adapter_class():
             cu_seqlens = inputs.pop("_cu_seqlens", None)
             max_seqlen = inputs.pop("_max_seqlen", None)
 
-            # ``attention_kwargs`` is the only free-form channel diffusers gives us into the
-            # attention processor. The model pops the LoRA ``scale`` and forwards the rest
-            # down to each block, which splats it into the attention module; the module then
-            # keeps only the keys the processor declares by name. One tensor, built once in
-            # prepare_inputs, shared by every layer -- not rebuilt per layer.
-            attention_kwargs = None
+            # Publish the packing onto the attention modules, which is where the processor
+            # reads it (``ideogram4_packing_buffer``). Diffusers' ``attention_kwargs`` cannot
+            # carry it: the model never forwards it to the blocks in 0.39.0, so passing it was
+            # a silent no-op. Two ordering rules, both silent when broken: this must happen
+            # BEFORE the model call, and nothing may republish between the forward and its
+            # backward -- per-layer compile lives inside the checkpoint wrapper, so the block
+            # re-reads this buffer during the backward recompute.
             if cu_seqlens is not None:
-                attention_kwargs = {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen}
+                publish_packing(
+                    model,
+                    cu_seqlens,
+                    max_seqlen,
+                    device=inputs["hidden_states"].device,
+                    # Having built a packing, a model that cannot read it is a misconfiguration,
+                    # not a fallback: every layer would derive its own from the mask, and on a
+                    # subset of ranks that quietly averages two attention paths into one
+                    # gradient. Non-zero ranks log nothing after init, so raising is the only
+                    # way this becomes visible.
+                    required=True,
+                )
 
             out = model(
                 hidden_states=inputs["hidden_states"],
@@ -321,7 +350,6 @@ def _build_ideogram4_adapter_class():
                 position_ids=inputs["position_ids"],
                 segment_ids=inputs["segment_ids"],
                 indicator=inputs["indicator"],
-                attention_kwargs=attention_kwargs,
                 return_dict=False,
             )
             pred = self.post_process_prediction(out)  # [B, S, 128]

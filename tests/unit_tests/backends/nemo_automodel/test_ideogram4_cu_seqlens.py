@@ -27,7 +27,9 @@ WHY THIS TEST EXISTS:
 
 Only ``torch`` is required for the core parity test. The ``_prepare_ids`` cross-check needs
 ``nemo_automodel`` (the adapter class is built lazily against its ``ModelAdapter`` base) and
-skips when the submodule is not importable.
+skips when the submodule is not importable. Note that it therefore runs in TWO different
+environments -- with diffusers present (in-container) and without (lint/CI) -- which is why the
+padding-segment id is imported from the adapter instead of hardcoded.
 """
 
 import pytest
@@ -37,14 +39,19 @@ try:
 except ImportError:  # pragma: no cover - CPU-less lint environments
     pytest.skip("Ideogram-4 cu_seqlens tests require torch", allow_module_level=True)
 
-from primus.backends.nemo_automodel.ideogram4_adapter import build_cu_seqlens
+from primus.backends.nemo_automodel.ideogram4_adapter import (
+    SEQUENCE_PADDING_INDICATOR,
+    build_cu_seqlens,
+)
 from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
     blockdiag_bool_mask_to_cu_seqlens,
 )
 
-# Mirrors diffusers' transformer_ideogram4 constants; the adapter falls back to these same
-# literals when diffusers is unavailable, so hardcoding them keeps this test dependency-free.
-SEQUENCE_PADDING_INDICATOR = 0
+# Taken from the adapter rather than hardcoded, because the adapter resolves it from diffusers
+# when diffusers is importable and falls back to a literal otherwise -- and the two disagree
+# (0.39.0 pads with -1). The VALUE is irrelevant to everything here: the model's mask is
+# ``seg_i == seg_j``, so only which positions share an id matters, and the adapter writes the
+# valid region as a literal 1.
 VALID_SEGMENT = 1
 
 
