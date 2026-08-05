@@ -1,0 +1,195 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-lora-govreport-fp8}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# =============================================================================
+# Qwen3-235B-A22B LoRA SFT (FP8 hybrid) — SCROLLS GovReport (native Megatron)
+# =============================================================================
+# Hardware: 1 node × 8× MI355X — TP=1, PP=1, EP=8.
+#
+# Same dataset, packing, and LoRA targets as the BF16 yaml; ``fp8: hybrid``
+# enables TE FP8 on linear / attention / MoE compute (master + LoRA in bf16).
+#
+# Dataset: SCROLLS GovReport JSONL under /data/scrolls_govreport (see
+# examples/megatron/scripts/prepare_scrolls_govreport.sh).
+#
+# Container layout (bind-mount once; yaml defaults below — no exports required):
+#   /data/scrolls_govreport/                     — train.jsonl + validation.jsonl
+#   /data/megatron_checkpoints/Qwen3-235B-A22B/  — Megatron torch_dist base
+#   /data/huggingface/                           — HF tokenizers (HF_HOME)
+#
+# Alternative (HF hub, no local jsonl):
+#   sft_dataset_name: tau/scrolls
+#   sft_dataset_config: gov_report
+#
+# Recompute vs throughput (full + block; 94 decoder layers):
+#   recompute_num_layers = checkpoint block size, NOT "how many layers to recompute".
+#   Lower value → more activation checkpoints → LESS backward recompute → HIGHER TFLOP/s & tokens/s, MORE HBM.
+#   Higher value (e.g. 94) → almost full forward redo each step → lower GPU util / W&B throughput.
+#   Sweep for max TFLOPS (watch W&B ``throughput``): try 1 → 3 → 8; on OOM step up: 16 → 47 → 94.
+#   export PRIMUS_RECOMPUTE_LAYERS=3   # yaml default (throughput-leaning)
+#   export PRIMUS_MBS=2 PRIMUS_GBS=16  # next lever after recompute fits
+#   MoE: keep legacy grouped GEMM for torch_dist expert shards (Turbo grouped GEMM
+#   breaks load with ShardedTensor expert weights from converted checkpoints).
+#   export PRIMUS_TURBO_SYNC_FREE_MOE_STAGE=1
+#   If iter-1 OOM: export PRIMUS_MBS=1 PRIMUS_GBS=8; raise PRIMUS_RECOMPUTE_LAYERS
+#   Optional: export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+#   export WANDB_API_KEY=...   # required when disable_wandb is false
+#   export WANDB_ENTITY=...    # optional team/org
+# Metrics in W&B (requires disable_tensorboard: false — Megatron mirrors TB scalars):
+#   train lm loss, validation lm loss, LR, grad norm, iteration-time, throughput (TFLOP/s/GPU).
+#   tokens/s/GPU is appended to the console line by Primus; W&B gets throughput + iteration-time.
+#   export HF_TOKEN=...
+#   export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+#   export PRIMUS_PACK_LOCK_DIR=/tmp/primus_pack_locks
+#   export DATA_PATH=/data
+#
+# Launch:
+#   ./runner/primus-cli direct -- train posttrain \
+#     --config examples/megatron/configs/MI355X/qwen3_235B_A22B-FP8-lora-govreport.yaml
+#
+# User guide: docs/02-user-guide/mi355x-lora-posttrain.md
+# =============================================================================
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+
+    model: qwen3_235B_A22B.yaml
+
+    overrides:
+      stage: sft
+
+      hf_path: Qwen/Qwen3-235B-A22B
+      tokenizer_model: Qwen/Qwen3-235B-A22B
+
+      sft_dataset_name: ${SCROLLS_GOVREPORT_DIR:/data/scrolls_govreport}
+      sft_conversation_format: hf_chat
+
+      enable_packed_sequences: true
+      use_packed_attention: false
+
+      wandb_project: Primus_Qwen3_235B_A22B_LoRA_FP8
+      wandb_exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-lora-govreport-fp8}
+      disable_wandb: true
+      disable_tensorboard: false
+
+      log_interval: 1
+      log_throughput: true
+      tensorboard_log_interval: 1
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_validation_ppl_to_tensorboard: true
+      log_memory_to_tensorboard: true
+      log_loss_scale_to_tensorboard: true
+      log_params_norm: true
+      log_num_zeros_in_grad: true
+
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 0
+      log_avg_reset_interval: 10
+
+      train_iters: ${PRIMUS_TRAIN_ITERS:200}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:8}
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:8192}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:8192}
+
+      lr: 1.0e-4
+      min_lr: 1.0e-5
+      lr_warmup_iters: 20
+      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:550}
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      eod_mask_loss: false
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      apply_rope_fusion: true
+      enable_experimental: true
+      moe_router_force_load_balancing: false
+
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # Megatron rejects overlap_moe_expert_parallel_comm with recompute_granularity=full.
+      overlap_moe_expert_parallel_comm: false
+      gradient_accumulation_fusion: true
+
+      finetune: true
+      #pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Qwen3-235B-A22B}
+      load: null
+      save: null
+      save_interval: 50
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch_dist
+      dist_ckpt_strictness: assume_ok_unexpected
+
+      bf16: true
+      fp8: hybrid
+      # Avoid a parallel cached FP8 weight-transpose buffer (large HBM savings at 235B).
+      no_fp8_weight_transpose_cache: false
+
+      recompute_granularity: full
+      recompute_method: block
+      # Throughput: minimize this while avoiding OOM (1 fastest, 94 slowest). FP8 HBM headroom often allows 3–8 at 8192.
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_LAYERS:3}
+
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: false
+
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      # Legacy grouped GEMM matches torch_dist MoE expert ShardedTensor layout.
+      moe_use_legacy_grouped_gemm: true
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: true
+      turbo_sync_free_moe_stage: ${PRIMUS_TURBO_SYNC_FREE_MOE_STAGE:1}
+
+      cross_entropy_fusion_impl: te
+      cross_entropy_loss_fusion: true
+
+      manual_gc: true
+      manual_gc_interval: ${PRIMUS_MANUAL_GC_INTERVAL:100}
+
+      eval_iters: ${PRIMUS_EVAL_ITERS:24}
+
+      lora:
+        enabled: true
+        dim: 32
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2
