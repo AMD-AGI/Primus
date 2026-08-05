@@ -48,7 +48,10 @@ export PRIMUS_EP=1
 # -----------------------------------------------------------------------------
 # Primus Configuration
 # -----------------------------------------------------------------------------
-export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=TRITON
+export PRIMUS_TURBO_GROUPED_GEMM_BACKEND="${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-triton}"
+export PRIMUS_TURBO_GEMM_BACKEND=triton
+export PRIMUS_TURBO_FUSED_WGRAD_ACCUM="${PRIMUS_TURBO_FUSED_WGRAD_ACCUM:-1}"
+export PRIMUS_NUM_WORKERS="${PRIMUS_NUM_WORKERS:-2}"
 export PRIMUS_GRAD_REDUCE_IN_BF16=true
 export USE_TURBO_RMS_NORM=true
 
@@ -84,7 +87,14 @@ export NCCL_CHECKS_DISABLE=1
 # -----------------------------------------------------------------------------
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
-export HIPBLASLT_TUNING_OVERRIDE_FILE=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/tune_gemm_results.txt
+HIPBLASLT_TUNING_OVERRIDE_FILE="${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/tune_gemm_results-${MLPERF_RUNTIME_SERIES:-v26.3}.txt"
+if [ -f "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]; then
+    export HIPBLASLT_TUNING_OVERRIDE_FILE
+else
+    # hipBLASLt solution indices are runtime-specific. Never feed the v26.3
+    # catalog to v26.5 while its own tuning table has not been generated.
+    unset HIPBLASLT_TUNING_OVERRIDE_FILE
+fi
 
 # -----------------------------------------------------------------------------
 # NVTE — FP8 & Cast Transpose
@@ -100,19 +110,27 @@ export NVTE_FLASH_ATTN=0                  # Disable FlashAttention so FusedAtten
 export NVTE_CK_USES_FWD_V3=1              # Globally on; aiter selects v3 vs CK-tile internally
 export NVTE_CK_USES_BWD_V3=1              # Globally on; aiter selects v3 vs CK-tile internally
 export NVTE_USE_AITER_ROPE=1              # Route RoPE through aiter's fused kernel instead of TE's own CK kernel
-export NVTE_FMHA_USE_BSHD=0               # Native SBHD path (aiter c4b33df0 supports it; skips Megatron's SBHD↔BSHD shim transposes)
-export NVTE_CK_IS_V3_ATOMIC_FP32=1        # use atomic fp32 kernels for now. atomic fp16 kernels resulting in numerics issues.
-export NVTE_CK_HOW_V3_BF16_CVT=2          # 0=RTNE, 1=RTNA, 2=RTZ
+export NVTE_FMHA_USE_BSHD=0               # Use the native SBHD path provided by the v26.5 AITER stack
+export NVTE_CK_HOW_V3_BF16_CVT=2          # 0=RTNE, 1=RTNA, 2=RTZ (gfx942 selector; gfx950 is fixed)
 
-# fwd-attn-asm: route eligible (D=64 BF16 [SWA-]causal) fused_attn_fwd calls
-# to the hand-tuned gfx950 kernel staged into site-packages by the Dockerfile.
-# Set to 0 to disable. FMHA_HD64_ASM_LOG=1 prints one line per dispatch.
-export MLPERF_ENABLE_FWD_ATTN_ASM=1
-export FMHA_HD64_ASM_LOG=0
+# Route eligible D=64 BF16 causal forward calls to the hand-tuned gfx950
+# kernel. FMHA_HD64_ASM_LOG=1 prints one line per successful launch.
+export MLPERF_ENABLE_FWD_ATTN_ASM="${MLPERF_ENABLE_FWD_ATTN_ASM:-1}"
+export FMHA_HD64_ASM_LOG="${FMHA_HD64_ASM_LOG:-0}"
 
-# bwd-attn-asm is build-time only — TE's QoLA build embeds aiter's bwd `.co`
-# into te_libmha_bwd.so at pip-install. Toggle with Docker `--build-arg
-# BWD_ATTN_ASM_ENABLE=0` (default 1) at image build time.
+# The RTZ custom backward code object is registered under the RTNE-named slot
+# that v26.5 AITER actually selects on gfx950. Unlike the bundled v26.5 a16
+# kernel that overflowed at sequence length 8192, this injected kernel passed a
+# 200-step FP8 C4 convergence run. Set the flag to 0 for the a32 PSSK fallback.
+export MLPERF_ENABLE_BWD_ATTN_ASM="${MLPERF_ENABLE_BWD_ATTN_ASM:-1}"
+if [ "${MLPERF_ENABLE_BWD_ATTN_ASM}" = "1" ]; then
+    export NVTE_CK_IS_V3_ATOMIC_FP32=0
+elif [ "${MLPERF_ENABLE_BWD_ATTN_ASM}" = "0" ]; then
+    export NVTE_CK_IS_V3_ATOMIC_FP32=1
+else
+    echo "MLPERF_ENABLE_BWD_ATTN_ASM must be 0 or 1" >&2
+    return 2 2>/dev/null || exit 2
+fi
 
 # -----------------------------------------------------------------------------
 # NVTE — Debug
@@ -156,16 +174,29 @@ export SYNTH_WARMUP_STEPS=3
 # -----------------------------------------------------------------------------
 # Skip sort_chunks_by_idxs when the per-local-expert index is an identity
 # permutation (fires at EP=1/TP=1). Set to 0 to run the original path; useful
-# for A/B measurements. See patches/megatron_moe_skip_identity_sort.patch.
+# for A/B measurements. Implemented by skip_identity_sort_patches.py.
 export MOE_SKIP_IDENTITY_SORT=1
 
 # -----------------------------------------------------------------------------
 # DDP Parameter All-Gather (SDMA)
 # -----------------------------------------------------------------------------
-export ENABLE_SDMA_ALLGATHER=1
+# v26.5 turns five SDMA workspace barriers into ~5 ms waits each. A same-node
+# A/B with the latest Turbo main measured 1004 ms/step with SDMA and 988
+# ms/step with RCCL, matching the v26.3 control at 989 ms/step. Keep SDMA
+# opt-in on v26.5 until its barrier regression is fixed; retain the validated
+# v26.3 default.
+if [ "${MLPERF_RUNTIME_SERIES:-v26.5}" = "v26.3" ]; then
+    DEFAULT_ENABLE_SDMA_ALLGATHER=1
+else
+    DEFAULT_ENABLE_SDMA_ALLGATHER=0
+fi
+export ENABLE_SDMA_ALLGATHER="${ENABLE_SDMA_ALLGATHER:-${DEFAULT_ENABLE_SDMA_ALLGATHER}}"
 # Optional: cap the per-call peer-copy stream count. Default is
 # min(world_size-1, 8); lower values reduce SDMA / memory-system pressure.
 # export MEGATRON_SDMA_PEER_COPY_STREAMS=8
+# When SDMA is explicitly enabled, keep the source-patch behavior: the first
+# two parameter bucket groups use RCCL and later groups use SDMA.
+export MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS=${MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS:-2}
 
 # -----------------------------------------------------------------------------
 # Run-log verbosity
