@@ -143,6 +143,23 @@ def validate_args_on_rocm(args):
             args.fp4_recipe in support_fp4_recipe
         ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_gemm`."
 
+    # Turbo FP4 autocast check: PrimusTurboLinear quantizes only under the Turbo
+    # autocast, which the TE-native path never enters. Local specs quantize
+    # in-module rather than off that state, so they are exempt.
+    if (
+        args.fp4
+        and use_turbo_gemm
+        and getattr(args, "fp4_use_native_te_autocast", False)
+        and getattr(args, "transformer_impl", "transformer_engine") != "local"
+    ):
+        raise ValueError(
+            "fp4_use_native_te_autocast=True is incompatible with use_turbo_gemm=True. "
+            "Native TE FP4 autocast does not set the Primus-Turbo FP4 state that "
+            "PrimusTurboLinear reads, so Turbo GEMM linears would silently run BF16 "
+            "instead of FP4. Set use_turbo_gemm=false to use native TE MXFP4 linears, "
+            "or set fp4_use_native_te_autocast=false to use the Primus-Turbo FP4 path."
+        )
+
     # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
     if args.fp8_recipe == "mxfp8":
         assert (
