@@ -1141,11 +1141,18 @@ class InferencePerformanceProjector:
         comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
         return comm
 
-    def _comm_extras(self, batch: int, input_len: int, output_len: int) -> Dict[str, float]:
-        """Representative per-phase comm breakdown (ms) for reporting."""
+    def _comm_extras(
+        self, batch: int, input_len: int, output_len: int, prefill_batch: Optional[int] = None
+    ) -> Dict[str, float]:
+        """Representative per-phase comm breakdown (ms) for reporting.
+
+        ``prefill_batch`` sizes the prefill breakdown; it defaults to ``batch``
+        but is set to the per-request prefill batch (1 under continuous batching)
+        so the reported prefill comm matches the per-request TTFT basis.
+        """
         if self._comm is None:
             return {}
-        pre = self._comm_breakdown(batch, input_len, "prefill")
+        pre = self._comm_breakdown(prefill_batch if prefill_batch else batch, input_len, "prefill")
         spec_k = int(self.cfg.request_config.speculative_num_tokens or 0)
         q_len = (spec_k + 1) if spec_k > 0 else 1
         dec = self._comm_breakdown(batch, q_len, "decode")
@@ -1255,11 +1262,19 @@ class InferencePerformanceProjector:
         q_len = (spec_k + 1) if spec_k > 0 else 1
         replica_gpus = _replica_gpus(self.cfg)
 
-        ttft = self.prefill_latency_ms(batch, input_len)
+        # TTFT is a per-request quantity: a request's first token follows the
+        # prefill of its OWN prompt. Under continuous batching, pricing the whole
+        # concurrent batch here would scale every prefill collective message by
+        # the batch size (e.g. a batch-x larger EP All-to-All) and massively
+        # over-state TTFT. Price TTFT at a single request; the batched prefill
+        # still drives aggregate prefill throughput below.
+        continuous = self._use_continuous_batching(concurrency, output_len)
+        ttft = self.prefill_latency_ms(1 if continuous else batch, input_len)
+        prefill_full_ms = self.prefill_latency_ms(batch, input_len) if continuous else ttft
         extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
         extras.update(conc["extras"])
 
-        if self._use_continuous_batching(concurrency, output_len):
+        if continuous:
             # Continuous batching: TPOT is the blended pure/mixed steady state.
             m = self._continuous_decode_metrics(input_len, output_len, concurrency)
             decode_total = m["decode_total_ms"]
@@ -1287,7 +1302,7 @@ class InferencePerformanceProjector:
 
         request_latency = ttft + decode_total
         decode_tps_per_gpu = decode_tps / replica_gpus if replica_gpus else 0.0
-        prefill_tps = (batch * input_len * 1000.0 / ttft) if ttft > 0 else 0.0
+        prefill_tps = (batch * input_len * 1000.0 / prefill_full_ms) if prefill_full_ms > 0 else 0.0
 
         # Offered-load queueing (open-loop). Adjusts TTFT + e2e latency only;
         # decode throughput / TPOT are steady-state and unaffected. No-op unless
@@ -1299,7 +1314,7 @@ class InferencePerformanceProjector:
             request_latency = q["request_latency_with_queue_ms"]
             extras.update(q)
 
-        extras.update(self._comm_extras(batch, input_len, output_len))
+        extras.update(self._comm_extras(batch, input_len, output_len, prefill_batch=(1 if continuous else batch)))
         if self.is_benchmark_calibrated:
             extras["benchmark_calibrated"] = 1.0
 
@@ -1372,7 +1387,10 @@ class InferencePerformanceProjector:
         )
 
         # Prefill phase on the prefill pool (drives TTFT + prefill throughput).
-        ttft_compute = prefill_proj.prefill_latency_ms(batch, input_len)
+        # TTFT is per-request (a single prompt's prefill); the batched prefill
+        # drives aggregate prefill throughput below.
+        ttft_compute = prefill_proj.prefill_latency_ms(1, input_len)
+        prefill_full_ms = prefill_proj.prefill_latency_ms(batch, input_len)
         kv_transfer = self._kv_transfer_ms(decode_proj, batch, input_len)
         ttft = ttft_compute + kv_transfer
 
@@ -1395,11 +1413,11 @@ class InferencePerformanceProjector:
         total_decode_gpus = decode_replica_gpus * max(1, disagg.decode_replicas)
         decode_tps_per_gpu = decode_tps / total_decode_gpus if total_decode_gpus else 0.0
 
-        prefill_tps_replica = (batch * input_len * 1000.0 / ttft_compute) if ttft_compute > 0 else 0.0
+        prefill_tps_replica = (batch * input_len * 1000.0 / prefill_full_ms) if prefill_full_ms > 0 else 0.0
         prefill_tps = prefill_tps_replica * max(1, disagg.prefill_replicas)
 
         extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
-        extras.update(decode_proj._comm_extras(batch, input_len, output_len))
+        extras.update(decode_proj._comm_extras(batch, input_len, output_len, prefill_batch=1))
         if self.is_benchmark_calibrated:
             extras["benchmark_calibrated"] = 1.0
         extras["prefill_compute_ttft_ms"] = ttft_compute
