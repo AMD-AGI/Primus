@@ -37,7 +37,7 @@ click==8.4.2
     #   sphinx-external-toc
 comm==0.2.3
     # via ipykernel
-cryptography==49.0.0
+cryptography==50.0.0
     # via pyjwt
 debugpy==1.8.21
     # via ipykernel
@@ -190,7 +190,7 @@ requests==2.34.2
     #   pygithub
     #   sphinx
 rocm-docs-core[llms]==1.38.0
-    # via -r docs/sphinx/requirements.in
+    # via -r requirements.in
 roman-numerals==4.1.0
     # via sphinx
 rpds-py==2026.6.3
