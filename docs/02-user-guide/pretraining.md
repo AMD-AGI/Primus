@@ -15,6 +15,7 @@ The following table describes the four backend types supported by Primus and the
 | Megatron-LM | `framework: megatron` | Large-scale transformer pretraining with Megatron-style parallelism (TP/PP/EP). |
 | TorchTitan | `framework: torchtitan` | PyTorch-native scaled training (FSDP / tensor / pipeline / expert parallelism per config). |
 | MaxText (JAX) | `framework: maxtext` | JAX/MaxText single- and multi-node runs; parallelism via MaxText `ici_*` / `dcn_*` settings. |
+| MaxDiffusion (JAX) | `framework: maxdiffusion` | JAX/MaxDiffusion diffusion pretraining (WAN 2.1, FLUX.1-dev). Source is vendored as the `third_party/maxdiffusion` submodule; deps/patches installed by `examples/maxdiffusion/setup_maxdiffusion_env.sh`. |
 | Megatron Bridge | `framework: megatron_bridge` | Bridge-oriented workflows (configure like other backends; see parameter reference). |
 
 > Several setup steps apply to **all** backends (mock vs. real data, Hugging Face tokens, scaling to multiple nodes, and HipBLASLt autotuning). After you read the backend section that applies to you, see [Common patterns](#common-patterns) below.
@@ -224,6 +225,57 @@ pip install -r requirements-jax.txt
 | `qwen3_30B_A3B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 
 The `llama2_7B-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
+
+> **fp8 MoE (v26.6):** fp8 Mixture-of-Experts configs must set `pure_nnx_decoder: false` in their overrides; otherwise they crash at step 1 under the v26.6 pure-NNX decoder default. See [MaxText parameters → Precision and quantization](../03-configuration-reference/maxtext-parameters.md#7-precision-and-quantization). Dense fp8 and bf16 configs are unaffected.
+
+---
+
+## MaxDiffusion (JAX) pretraining
+
+The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). Unlike the other backends, MaxDiffusion needs its own JAX + PyTorch dependency stack plus a few source patches. Primus owns that whole environment definition so you can run it **directly from a Primus checkout** on the MaxText JAX base image — no separate/bespoke image required:
+
+- **Source** is vendored as the `third_party/maxdiffusion` submodule.
+- **Dependencies** live in `requirements-maxdiffusion.txt` (kept separate from `requirements-jax.txt` so the MaxDiffusion pins never affect MaxText runs).
+- **Install + patches** are applied by `examples/maxdiffusion/setup_maxdiffusion_env.sh` (idempotent): torch/torchvision (ROCm wheels), the requirements above, an editable install of the vendored submodule, and four historical patches (Flax-T5 clip rename, TensorFlow-preload-before-TransformerEngine, Shardy-on, and the TransformerEngine empty context-parallel-axis fix).
+
+### Prerequisites
+
+Initialize the vendored submodule (a plain clone will not populate it):
+
+```bash
+git submodule update --init third_party/maxdiffusion
+```
+
+Run on a JAX base image (for example `rocm/jax-training`) or a bare-metal JAX environment, and export `HF_TOKEN` for gated Hugging Face assets.
+
+### Quick start (run from a bare Primus checkout)
+
+Use `run_pretrain.sh` with `BACKEND=MaxDiffusion`. When `PRIMUS_SKIP_PIP` is unset, the launcher runs `setup_maxdiffusion_env.sh` for you (installs the stack + applies the patches), sets `NVTE_FRAMEWORK=jax` and `MAXDIFFUSION_PATH`, then launches:
+
+```bash
+BACKEND=MaxDiffusion \
+EXP=examples/maxdiffusion/configs/MI355X/wan2.1_1.3b-pretrain.yaml \
+  bash ./examples/run_pretrain.sh
+```
+
+To run the environment setup once by itself (e.g. to warm an image or a shared venv), invoke the script directly, then launch with `PRIMUS_SKIP_PIP=1`:
+
+```bash
+bash examples/maxdiffusion/setup_maxdiffusion_env.sh
+PRIMUS_SKIP_PIP=1 BACKEND=MaxDiffusion \
+EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
+  bash ./examples/run_pretrain.sh
+```
+
+> The dependency bootstrap lives in `run_pretrain.sh`, not the CLI. Invoking `primus-cli` (`train pretrain`) directly assumes the MaxDiffusion stack is **already** installed in the current environment (e.g. a pre-baked image, or after you have run `setup_maxdiffusion_env.sh` once) — it does not install anything itself.
+
+### Example configurations under `examples/maxdiffusion/configs/MI355X/`
+
+| File | Model | Status on MI355X (gfx950) |
+| --- | --- | --- |
+| `flux_dev-pretrain.yaml` | FLUX.1-dev | ✅ validated |
+| `wan2.1_1.3b-pretrain.yaml` | WAN 2.1 1.3B | ✅ validated |
+| `wan2.1_14b-pretrain.yaml` | WAN 2.1 14B | ⚠️ known cold-init RCCL rendezvous timeout on large-model compile |
 
 ---
 
