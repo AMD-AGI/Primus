@@ -117,6 +117,13 @@ source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 if _is_maxdiffusion_backend; then
     export NVTE_FRAMEWORK="${NVTE_FRAMEWORK:-jax}"
     export MAXDIFFUSION_PATH="${MAXDIFFUSION_PATH:-$PRIMUS_PATH/third_party/maxdiffusion}"
+    # Multi-node JAX coordination. MaxDiffusion's GPU init
+    # (max_utils.initialize_jax_for_gpu) only calls jax.distributed.initialize()
+    # when JAX_COORDINATOR_IP is set, using num_processes=NNODES / process_id=NODE_RANK
+    # (one process per node). Mirror the MaxText env_spec so a 2+ node run rendezvous
+    # instead of each node silently initializing as a standalone single-node job.
+    export JAX_COORDINATOR_IP="${JAX_COORDINATOR_IP:-$MASTER_ADDR}"
+    export JAX_COORDINATOR_PORT="${JAX_COORDINATOR_PORT:-$MASTER_PORT}"
 fi
 
 # PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
