@@ -43,6 +43,16 @@ _PROTOCOLS = ("simple", "ll", "ll64", "ll128")
 _QUICK_REDUCE_SPEEDUP = 0.6        # ROCm low-latency quantized AR (small msgs).
 _FUSED_RMSNORM_AR_SPEEDUP = 0.8    # RMSNorm+AR fusion hides part of the AR.
 
+# Small-message (inference-decode) latency floor.
+#
+# The base fixed collective overhead is calibrated for training's large
+# messages; decode moves only small messages per step, where a latency floor
+# dominates.  Below the crossover we use the measured intra-node floor instead;
+# larger / multi-node messages keep the existing model unchanged.
+_INFER_SMALL_MSG_BYTES = 2 << 20   # crossover below which the floor applies
+_INFER_AR_OVERHEAD_US = 15.0       # intra-node AllReduce latency floor
+_INFER_A2A_OVERHEAD_US = 18.0      # intra-node AllToAll latency floor
+
 
 def deepep_overlap_efficiency(model_config) -> float:
     """Fraction of EP All-to-All hidden behind compute under DeepEP/SyncFree.
@@ -193,6 +203,9 @@ class InferenceCollectiveModel:
                 raw = _min_over_protocols(cm.RingAllreduce, self._args, msg, self.tp, ["tp"])
             # Forced algorithms must carry the same fixed overhead as ``auto``.
             us = raw + _allreduce_overhead_us(self._args, msg, self.tp)
+        # Small decode messages: swap the training-scale fixed overhead for the
+        # measured intra-node latency floor (no-op for large / multi-node msgs).
+        us = self._floor_small_msg_overhead(us, msg, self.tp, is_a2a=False)
         # Custom-op speedups: quick-reduce (small-message quantized AR) and
         # fused RMSNorm+AllReduce both shave the exposed TP-AR time.
         eff = float(self.cc.tp_allreduce_efficiency)
@@ -225,6 +238,9 @@ class InferenceCollectiveModel:
                 raw = _min_over_protocols(cm.run_alltoall, self._args, msg, self.ep, ["ep"])
             # Forced algorithms must carry the same fixed overhead as ``auto``.
             one = raw + _alltoall_overhead_us(self._args, self.ep)
+        # Small decode messages: swap the training-scale fixed overhead for the
+        # measured intra-node latency floor (no-op for large / multi-node msgs).
+        one = self._floor_small_msg_overhead(one, msg, self.ep, is_a2a=True)
         # dispatch + combine, scaled by the custom-op efficiency and reduced by
         # the DeepEP/SyncFree compute-overlap fraction (exposed A2A only).
         return (
@@ -233,6 +249,37 @@ class InferenceCollectiveModel:
             * float(self.cc.ep_a2a_efficiency)
             * (1.0 - self._deepep_overlap)
         )
+
+    def _floor_small_msg_overhead(self, us: float, msg: int, gpus: int, *, is_a2a: bool) -> float:
+        """Use the measured small-message latency floor for tiny decode collectives.
+
+        Only applies below the latency/bandwidth crossover and for intra-node
+        collectives (the regime the microbenchmark measured).  At these sizes the
+        graph-captured floor (~15 us AR / ~18 us A2A at the 180 KB / 740 KB decode
+        sizes) *already includes* the data transfer, so it replaces the model's
+        whole ``bandwidth-transfer + fixed-overhead`` total rather than being added
+        to it (adding it on top would double-count the transfer).  The floor is
+        flat across the small-message region; ``max`` with the model's bandwidth
+        term keeps it correct as the message approaches the crossover.  No-op for
+        messages at or above the crossover, or across multiple nodes.
+        """
+        if msg >= _INFER_SMALL_MSG_BYTES or gpus > self._args.node_size:
+            return us
+        if is_a2a:
+            peers = min(gpus - 1, self._args.node_size - 1)
+            baked = (
+                getattr(self._args, "a2a_intra_sync_overhead", 50.0)
+                + getattr(self._args, "a2a_intra_node_peer_lat", 2.5) * max(0, peers)
+                + getattr(self._args, "a2a_rccl_overhead_us", 0.0)
+            )
+            floor = _INFER_A2A_OVERHEAD_US
+        else:
+            baked = getattr(self._args, "rccl_overhead_us", 0.0)
+            floor = _INFER_AR_OVERHEAD_US
+        # Bandwidth-only time (strip the training-scale fixed overhead); the floor
+        # dominates for tiny messages, the bandwidth term takes over near the knee.
+        bandwidth_us = max(0.0, us - baked)
+        return max(floor, bandwidth_us)
 
     # -- Pipeline P2P ----------------------------------------------------------
 

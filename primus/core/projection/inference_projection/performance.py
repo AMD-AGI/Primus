@@ -520,8 +520,8 @@ class InferencePerformanceProjector:
                 dec_pts = [(ref_batch, float(model_step["decode_ms"]))]
             if self._restore:
                 # Prefill processes ``ref_input`` tokens/seq; decode 1 token/step.
-                pre_pts = [(b, self._restore_whole(ms, b, ref_input)) for b, ms in pre_pts]
-                dec_pts = [(b, self._restore_whole(ms, b, 1)) for b, ms in dec_pts]
+                pre_pts = [(b, self._restore_whole(ms, b, ref_input, "prefill")) for b, ms in pre_pts]
+                dec_pts = [(b, self._restore_whole(ms, b, 1, "decode")) for b, ms in dec_pts]
             self._meas_whole = {
                 k: v for k, v in (("prefill", sorted(pre_pts)), ("decode", sorted(dec_pts))) if v
             }
@@ -604,7 +604,7 @@ class InferencePerformanceProjector:
             return 0.0
         return self._comm_tgt.pp_p2p_ms(batch, tokens) - self._comm_bench.pp_p2p_ms(batch, tokens)
 
-    def _restore_whole(self, ms_bench: float, batch: int, tokens: int) -> float:
+    def _restore_whole(self, ms_bench: float, batch: int, tokens: int, phase: str = "decode") -> float:
         """Restore a whole-model (vLLM) step latency measured at the benchmark's
         reduced parallelism to the target TP/EP/PP, training-style and in the same
         ``pp -> ep -> tp`` order as the Megatron per-layer path:
@@ -630,7 +630,12 @@ class InferencePerformanceProjector:
         comm_bench = _comm_total(self._comm_bench)
         comm_tgt = _comm_total(self._comm_tgt)
         compute = max(0.0, ms_bench - comm_bench) * (self._bench_tp / self._tgt_tp)
-        return compute + comm_tgt + self._restore_pp_ms(batch, tokens)
+        # Apply the same compute-limited comm/compute overlap used on the
+        # analytical path (``_overlap_keep``): the configured prefill/decode
+        # overlap is a ceiling, but you can hide at most ``compute`` worth of
+        # comm behind compute. No-op when the overlap knob is 0 (default).
+        keep = self._overlap_keep(phase, comm_tgt, compute)
+        return compute + comm_tgt * keep + self._restore_pp_ms(batch, tokens)
 
     # -- per-pass forward time -------------------------------------------------
 
