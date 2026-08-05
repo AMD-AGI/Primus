@@ -32,6 +32,14 @@ env:
   GPU_MAX_HW_QUEUES: "2"
   HIP_FORCE_DEV_KERNARG: "1"
   RCCL_MSCCL_ENABLE: "0"
+  # wan2.1_14b fix (v26.6): the 14B graph makes RCCL instantiate 448 collective
+  # channels, exceeding WarpSpeed's 256-channel ceiling. RCCL warns
+  # "WarpSpeed does not support more than 256 channels ... To avoid hang, run with
+  # RCCL_WARP_SPEED_AUTO=0" and the launcher then dies at comm-init. Disable
+  # WarpSpeed auto for this config only (mirrors the MaxText gfx950 default in
+  # primus/backends/maxtext/env_spec.py). The smaller wan2.1_1.3b/flux graphs stay
+  # under 256 channels, so their known-good baseline env is left untouched.
+  RCCL_WARP_SPEED_AUTO: "0"
   NCCL_MAX_NCHANNELS: "112"
   NCCL_IB_TC: "41"
   NCCL_IB_SL: "0"
