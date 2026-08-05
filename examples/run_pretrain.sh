@@ -48,6 +48,16 @@ _is_jax_backend() {
     esac
 }
 
+# MaxDiffusion needs its own (separate-from-MaxText) JAX dep stack + source
+# patches. When running from a bare Primus checkout (no MAD maxdiffusion image),
+# examples/maxdiffusion/setup_maxdiffusion_env.sh installs/patches it in-venv.
+_is_maxdiffusion_backend() {
+    case "$(printf '%s' "${BACKEND:-}" | tr '[:upper:]' '[:lower:]')" in
+        maxdiffusion) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 EXAMPLE_FAULT_TOLERANCE() {
     for arg in "$@"; do
         case "$arg" in
@@ -102,11 +112,21 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 # shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
+# MaxDiffusion backend: own the JAX/torch dep stack + source location in Primus
+# (vendored third_party/maxdiffusion submodule), independent of the MaxText image.
+if _is_maxdiffusion_backend; then
+    export NVTE_FRAMEWORK="${NVTE_FRAMEWORK:-jax}"
+    export MAXDIFFUSION_PATH="${MAXDIFFUSION_PATH:-$PRIMUS_PATH/third_party/maxdiffusion}"
+fi
+
 # PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
 # image). Use it when many ranks/nodes share one venv and concurrent pip installs
 # would race, or simply to speed up a warm container. Not keyed on the launcher.
 if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
     LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
+elif _is_maxdiffusion_backend; then
+    LOG_INFO_RANK0 "MaxDiffusion backend: setting up maxdiffusion env from Primus ..."
+    bash "$PRIMUS_PATH/examples/maxdiffusion/setup_maxdiffusion_env.sh"
 else
     LOG_INFO_RANK0 "Pip installing required packages ..."
     if ! _is_jax_backend; then
