@@ -37,7 +37,7 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
 )
 
 try:  # older Primus-Turbo builds ship only the bf16 stage pair
-    from primus_turbo.flydsl.mega.fp8 import advance_weight_generation
+    from primus_turbo.pytorch.kernels.fused_mega_moe import advance_weight_generation
     from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
         fused_mega_moe_fp8_stage1,
         fused_mega_moe_fp8_stage2,
