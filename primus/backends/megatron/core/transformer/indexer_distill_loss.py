@@ -129,6 +129,13 @@ def log_indexer_distill_loss(
     an explicit zero to keep the key present everywhere without changing the
     sum.
 
+    Writing the key here is necessary but not sufficient for it to be logged:
+    ``training_log`` passes ``track_moe_metrics`` an explicit ``track_names``
+    list built from the MoE router options, and anything outside that list is
+    reduced by nobody and zeroed at the end of the step. The
+    ``megatron.deepseek_v4.indexer_distill_loss_logging`` patch appends this
+    key to that list, gated on the model type and the coefficient.
+
     The reported value is the per-layer sum divided by the layer count (the
     denominator ``track_moe_metrics`` applies to every tracked loss), not
     divided by the number of CSA layers.
