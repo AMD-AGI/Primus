@@ -623,6 +623,9 @@ models:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `enable_primus_turbo` | `false` | Master switch for Primus-Turbo integrations. Many sub-features require this plus specific kernels. |
+| `turbo_gemm_backend` | `default` | Pin the Turbo dense GEMM backend. Anything other than `default` is written to `PRIMUS_TURBO_GEMM_BACKEND`, so it takes that variable's syntax: a single backend for every precision (`ck`) or a per-precision list (`fp8:ck,other:hipblaslt`). See `primus_turbo.yaml` for the backends currently available per precision. |
+| `turbo_grouped_gemm_backend` | `default` | Same idea for the MoE grouped GEMM, written to `PRIMUS_TURBO_GROUPED_GEMM_BACKEND`. |
+| `turbo_moe_dispatch_combine_backend` | `default` | Pin the MoE dispatch/combine backend, written to `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND`. |
 | `use_turbo_attention` | `false` | Turbo attention implementation. |
 | `use_sink_attention` | `false` | GPT-OSS-style learned sink attention. |
 | `sink_sliding_window` | `0` | Sliding-window size for sink attention (GPT-OSS uses `128`). |

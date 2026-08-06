@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
@@ -86,6 +87,7 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+from primus.core.utils.module_utils import warning_rank_0
 
 try:
     pass
@@ -334,6 +336,38 @@ def _use_split_wgrad_op():
         ), "split wgrad op is not supported when turbo fp8 or fp4 is enabled."
 
     return enable_split_wgrad_op
+
+
+def _apply_turbo_backend(option: str, env_var: str) -> None:
+    DEFAULT_BACKEND_PLACEHOLDER = "default"
+
+    backend = getattr(get_args(), option, DEFAULT_BACKEND_PLACEHOLDER)
+    if backend == DEFAULT_BACKEND_PLACEHOLDER:
+        return
+
+    previous = os.environ.get(env_var, DEFAULT_BACKEND_PLACEHOLDER)
+    # Set the environment variable to the new backend
+    os.environ[env_var] = backend
+
+    warning_rank_0(f"Primus-Turbo backend overridden: {env_var}='{previous}' -> {env_var}='{backend}'")
+
+
+def _configure_turbo_gemm_backend() -> None:
+    """Pin the Primus-Turbo GEMM backend from the ``turbo_gemm_backend`` config."""
+    TURBO_GEMM_BACKEND_ENV = "PRIMUS_TURBO_GEMM_BACKEND"
+    _apply_turbo_backend("turbo_gemm_backend", TURBO_GEMM_BACKEND_ENV)
+
+
+def _configure_turbo_grouped_gemm_backend() -> None:
+    """Pin the Primus-Turbo grouped GEMM backend from ``turbo_grouped_gemm_backend``."""
+    TURBO_GROUPED_GEMM_BACKEND_ENV = "PRIMUS_TURBO_GROUPED_GEMM_BACKEND"
+    _apply_turbo_backend("turbo_grouped_gemm_backend", TURBO_GROUPED_GEMM_BACKEND_ENV)
+
+
+def _configure_turbo_moe_dispatch_combine_backend() -> None:
+    """Pin the Primus-Turbo MOE dispatch combine backend from ``turbo_moe_dispatch_combine_backend``."""
+    TURBO_MOE_DISPATCH_COMBINE_BACKEND_ENV = "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND"
+    _apply_turbo_backend("turbo_moe_dispatch_combine_backend", TURBO_MOE_DISPATCH_COMBINE_BACKEND_ENV)
 
 
 class PrimusTurboQuantConfig:
@@ -927,6 +961,8 @@ class PrimusTurboLinear(TELinear):
         self.offload = args.offload and "parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
+        _configure_turbo_gemm_backend()
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -1116,6 +1152,8 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
+        _configure_turbo_gemm_backend()
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -1301,6 +1339,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
+
+        _configure_turbo_gemm_backend()
 
         super().__init__(
             input_size=input_size,
@@ -1491,6 +1531,8 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
+
+        _configure_turbo_gemm_backend()
 
         super().__init__(
             input_size,
@@ -1716,6 +1758,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
+
+        _configure_turbo_grouped_gemm_backend()
 
         super().__init__(
             num_gemms,
@@ -2017,6 +2061,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         assert (
             self.config.moe_pad_expert_input_to_capacity is False
         ), "DeepEP token dispatcher does not support --moe-pad-expert-input-to-capacity"
+
+        _configure_turbo_moe_dispatch_combine_backend()
 
         args = get_args()
 

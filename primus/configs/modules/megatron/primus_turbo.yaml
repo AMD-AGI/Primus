@@ -6,6 +6,27 @@ enable_primus_turbo: false
 # enable turbo auto-tuning
 use_turbo_autotune: false
 
+# ===== Backend Selection =====
+# Pin the Primus-Turbo GEMM / grouped GEMM backends. The value is written to the
+# PRIMUS_TURBO_GEMM_BACKEND / PRIMUS_TURBO_GROUPED_GEMM_BACKEND env vars, so it uses
+# their syntax:
+#   default                  -> leave Primus-Turbo's own selection alone
+#   <backend>                -> every precision uses <backend>, e.g. `ck`
+#   <precision>:<backend>,.. -> per precision, e.g. `fp8:ck,other:hipblaslt`
+
+# choice:
+#   bf16/fp16: [hipblaslt]
+#   fp8: [hipblaslt, turbo, triton, ck, flydsl]
+#   fp4: [hipblaslt, aiter, flydsl]
+turbo_gemm_backend: default
+# choice:
+#   bf16/fp16: [hipblaslt, ck, triton]
+#   fp8: [hipblaslt, ck, triton, flydsl]
+#   fp4: [triton, flydsl]
+turbo_grouped_gemm_backend: default
+# choice: [turbo, deep_ep]
+turbo_moe_dispatch_combine_backend: default
+
 # ===== MXFP4 =====
 # Use stochastic rounding when quantizing MXFP4 gradients. This is disabled by
 # default and requires a Primus-Turbo grouped GEMM implementation with matching
