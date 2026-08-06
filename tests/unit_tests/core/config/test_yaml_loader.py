@@ -49,6 +49,24 @@ class TestYamlLoader:
         assert result["child_val"] == 3
         assert "extends" not in result  # Should be removed
 
+    def test_parse_yaml_scalar_extends(self, tmp_path):
+        """A lone preset written as a scalar must not be iterated per character."""
+        base = tmp_path / "base.yaml"
+        base.write_text("base_val: 1\noverride_val: 1")
+
+        child = tmp_path / "child.yaml"
+        child.write_text(
+            """
+        extends: base.yaml
+        override_val: 2
+        """
+        )
+
+        result = parse_yaml(str(child))
+        assert result["base_val"] == 1
+        assert result["override_val"] == 2
+        assert "extends" not in result
+
     def test_parse_yaml_multi_extends(self, tmp_path):
         """Test extending multiple files."""
         base1 = tmp_path / "base1.yaml"
