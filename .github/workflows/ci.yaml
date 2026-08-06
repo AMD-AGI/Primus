@@ -391,10 +391,9 @@ jobs:
         run: |
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
-          # Keep the unit data for the final unit-vs-E2E comparison table
-          # (.coverage.unit is fed to `coverage combine` after the E2E steps).
+          # .coverage_unit (not .coverage.unit) avoids coverage combine treating it as a .coverage.* shard.
           python -m coverage json -o coverage_unit.json 2>/dev/null || true
-          cp .coverage "${GITHUB_WORKSPACE}/.coverage.unit" 2>/dev/null || true
+          cp .coverage "${GITHUB_WORKSPACE}/.coverage_unit" 2>/dev/null || true
           IN
       - name: Setup E2E training coverage
         if: always()
@@ -552,14 +551,15 @@ jobs:
         run: |
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set +e
-          # Don't instrument coverage's own helper processes here.
           unset COVERAGE_PROCESS_START
-          # Merge per-rank E2E data, then line-merge unit + E2E into one dataset.
-          # The JSON is consumed by the coverage-summary job (no per-job summary).
-          python -m coverage combine 2>/dev/null || true
+          # docker exec doesn't inherit GITHUB_ENV; set COVERAGE_FILE for E2E shards before merging with unit.
+          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_e2e" python -m coverage combine
           COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage combine --keep \
-            "${GITHUB_WORKSPACE}/.coverage.unit" "${GITHUB_WORKSPACE}/.coverage_e2e" 2>/dev/null || true
-          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage json -o coverage_combined.json 2>/dev/null || true
+            "${GITHUB_WORKSPACE}/.coverage_unit" "${GITHUB_WORKSPACE}/.coverage_e2e"
+          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage json -o coverage_combined.json
+          if [[ ! -s coverage_combined.json ]]; then
+            echo "::warning::coverage_combined.json missing; Unit+E2E summary will omit torch E2E data"
+          fi
           IN
       - name: Upload torch coverage json
         if: always()
@@ -588,7 +588,7 @@ jobs:
           set +e
           cd "${GITHUB_WORKSPACE}" || exit 0
           rm -rf logs test-reports ut_out .pytest_cache .hypothesis \
-                 .coverage .coverage.* .coverage_e2e* .coverage.unit .coverage_all \
+                 .coverage .coverage.* .coverage_e2e* .coverage_unit .coverage_all \
                  .coveragerc_e2e .e2e_scope coverage_unit.json coverage_combined.json
           # Bytecode caches written during the run (root-owned; block checkout clean).
           find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
