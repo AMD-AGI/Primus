@@ -14,6 +14,9 @@ are imported by full submodule path (no package-level re-export):
 * :mod:`hc_expand` / :mod:`hc_glue` — hierarchical-compression expand / glue
 * :mod:`sinkhorn` — fused Sinkhorn-Knopp normalize (FWD/BWD)
 * :mod:`rope_interleaved_partial` — fused interleaved partial RoPE (FWD/BWD)
+* :mod:`indexer_distill_target` / :mod:`indexer_distill_kl` — the KL target
+  and the KL tail of the indexer distillation loss. Only reached when
+  ``v4_indexer_distill_loss_coeff > 0``.
 
 The attention kernels live in :mod:`.._triton_v0_deprecated` / :mod:`.._triton_v1` /
 :mod:`.._triton_v2`.
