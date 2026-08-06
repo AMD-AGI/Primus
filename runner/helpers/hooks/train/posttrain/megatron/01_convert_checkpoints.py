@@ -318,7 +318,7 @@ def convert_checkpoint(hf_path: str, megatron_path: str):
     log_info(f"Megatron-Bridge path: {bridge_path}")
     log_info(f"Using Megatron-LM from: {bridge_megatron_path}")
 
-    log_info(f"Converting HF → Megatron checkpoint...")
+    log_info(f"Converting HF -> Megatron checkpoint...")
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
