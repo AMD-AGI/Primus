@@ -36,10 +36,11 @@ It supports both **single-node** and **multi-node** training, and includes optio
 
 Primus supports multiple backends.
 
-| Backend    | Description                                                  |
-| ---------- | ------------------------------------------------------------ |
-| Megatron   | Open-source framework for large-scale transformer training   |
-| TorchTitan | PyTorch-compatible framework developed for training at scale |
+| Backend        | Description                                                  |
+| -------------- | ------------------------------------------------------------ |
+| Megatron       | Open-source framework for large-scale transformer training   |
+| TorchTitan     | PyTorch-compatible framework developed for training at scale |
+| NeMo AutoModel | NVIDIA-NeMo AutoModel (diffusion: Wan 2.2 T2V); `third_party/Automodel` submodule, installed editable on first run |
 
 
 ## 🖥️ Single Node Training
