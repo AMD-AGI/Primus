@@ -12,6 +12,14 @@ Fuses the body of
 into a single forward kernel. No backward is needed: the target is built under
 ``torch.no_grad``.
 
+``noncompressed_lse`` makes the per-head softmax match the attention the target
+imitates. A CSA layer takes one softmax jointly over the sliding window, the
+sparse compressed entries and the sink, so the share of a head's attention that
+lands on the compressed branch is ``exp(compressed_lse - full_lse)`` -- below 1
+and different per head. Normalising each head over the compressed entries alone
+throws that away and over-weights the heads that are almost entirely local;
+passing the log mass of the non-compressed part puts it back in the denominator.
+
 Why this one is worth fusing when the P38 indexer-score fusion was not: the cost
 here is not the GEMM, it is the gather in front of it. The eager body does
 
@@ -53,6 +61,7 @@ caller always has a working path.
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 import torch
 import triton
@@ -81,6 +90,7 @@ def _distill_target_fwd_kernel(
     POOL_PTR,  # [B, P, D]      compressed KV pool (detached)
     IDX_PTR,  # [B, S, K]      selected pool rows, -1 = invalid
     OUT_PTR,  # [B, S, K]      head-summed probabilities (fp32)
+    NCLSE_PTR,  # [B, H, S]      log mass outside the compressed branch (fp32)
     q_sb,
     q_sh,
     q_ss,
@@ -94,6 +104,9 @@ def _distill_target_fwd_kernel(
     o_sb,
     o_ss,
     o_sk,
+    n_sb,
+    n_sh,
+    n_ss,
     scale,
     eps,
     H: tl.constexpr,
@@ -102,6 +115,7 @@ def _distill_target_fwd_kernel(
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NORMALIZE: tl.constexpr,
+    HAS_NCLSE: tl.constexpr,
 ):
     """One program = one query row ``(b, s)``, all heads, all K entries.
 
@@ -114,6 +128,10 @@ def _distill_target_fwd_kernel(
     stored, which saves a full read-modify-write of the ``[B, S, K]`` fp32
     target. It has to stay off when the head sum is still incomplete, i.e.
     when the heads are sharded and an all-reduce has to happen first.
+
+    With ``HAS_NCLSE`` the softmax denominator also carries the window and
+    sink mass, so each head contributes in proportion to how much of its
+    attention actually reaches the compressed entries.
     """
     b = tl.program_id(0)
     s = tl.program_id(1)
@@ -151,6 +169,15 @@ def _distill_target_fwd_kernel(
         e = tl.exp(logits - m[:, None])
         e = tl.where(valid[None, :], e, 0.0)
         denom = tl.sum(e, axis=1)
+
+        if HAS_NCLSE:
+            nclse = tl.load(NCLSE_PTR + b * n_sb + offs_h * n_sh + s * n_ss)
+            # A head whose attention is almost entirely local makes
+            # nclse - m large; the clamp keeps the exponential finite so the
+            # ratio stays a well-defined 0 instead of inf/inf. exp(80) is
+            # ~5.5e34, still 4 orders below the fp32 ceiling.
+            denom += tl.exp(tl.minimum(nclse - m, 80.0))
+
         p = e / tl.where(denom > 0.0, denom, 1.0)[:, None]
 
         acc += tl.sum(p, axis=0)
@@ -221,6 +248,7 @@ def target_distribution_triton(
     softmax_scale: float,
     normalize: bool = False,
     eps: float = 1e-10,
+    noncompressed_lse: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Head-summed attention distribution over the selected entries: ``[B, S, K]``.
 
@@ -230,6 +258,12 @@ def target_distribution_triton(
 
     ``normalize`` folds the caller's ``target /= target.sum(-1)`` into the
     kernel. Pass ``False`` when the head sum still needs an all-reduce.
+
+    ``noncompressed_lse`` is ``[B, H, S]`` fp32: the log of the attention mass
+    the layer places outside the compressed entries (sliding window + sink).
+    Supplying it makes the per-head softmax the conditional the joint CSA
+    softmax actually produces rather than one renormalised over the compressed
+    entries alone.
     """
     B, H, S, D = query.shape
     K = topk_idxs.shape[-1]
@@ -239,6 +273,21 @@ def target_distribution_triton(
     kv = pool if pool.stride(-1) == 1 else pool.contiguous()
     idx = topk_idxs if topk_idxs.stride(-1) == 1 else topk_idxs.contiguous()
 
+    has_nclse = noncompressed_lse is not None
+    if has_nclse:
+        nclse = noncompressed_lse
+        if nclse.shape != (B, H, S):
+            raise ValueError(f"noncompressed_lse must be [B, H, S] = {(B, H, S)}, got {tuple(nclse.shape)}")
+        nclse = nclse.to(torch.float32)
+        if nclse.stride(-1) != 1:
+            nclse = nclse.contiguous()
+        n_strides = (nclse.stride(0), nclse.stride(1), nclse.stride(2))
+    else:
+        # Triton still needs a real pointer and three strides for the unused
+        # argument; the query tensor is already resident, so alias it.
+        nclse = q
+        n_strides = (0, 0, 0)
+
     out = torch.empty((B, S, K), device=query.device, dtype=torch.float32)
 
     _distill_target_fwd_kernel[(B, S)](
@@ -246,6 +295,7 @@ def target_distribution_triton(
         kv,
         idx,
         out,
+        nclse,
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -259,6 +309,9 @@ def target_distribution_triton(
         out.stride(0),
         out.stride(1),
         out.stride(2),
+        n_strides[0],
+        n_strides[1],
+        n_strides[2],
         float(softmax_scale),
         float(eps),
         H=H,
@@ -267,6 +320,7 @@ def target_distribution_triton(
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         NORMALIZE=bool(normalize),
+        HAS_NCLSE=has_nclse,
         num_warps=warps,
     )
     return out

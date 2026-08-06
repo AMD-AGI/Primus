@@ -21,6 +21,13 @@ what the forward pass actually consumes, and because those entries are already
 gathered per query the computation stays in the ``[B, S, K]`` top-k space and
 never materialises the dense ``[B, H, S, P]`` score tensor.
 
+The target is the distribution the layer's **joint** softmax puts on those
+entries, not a fresh softmax over them: a CSA layer normalises the sliding
+window, the compressed entries and the sink together, so a head that spends
+most of its attention on the window should carry correspondingly little weight
+in the head sum. :func:`noncompressed_lse` supplies the window-plus-sink log
+mass that makes the denominator the real one.
+
 The gradient flows **one way**: into the indexer only. The target side (the
 attention queries and the compressed pool) is detached inside
 :func:`compute_indexer_distill_loss`, and the caller feeds the indexer from a
@@ -47,10 +54,17 @@ __all__ = [
     "V4IndexerLossAutoScaler",
     "compute_indexer_distill_loss",
     "log_indexer_distill_loss",
+    "noncompressed_lse",
 ]
 
 # Guard for log(0) / division by zero.
 _EPS = 1e-10
+
+# Lower bound for the L1 renormalisation of the target. With the joint softmax
+# accounted for, a row's mass is the share of attention that reaches the
+# compressed entries, which for an almost entirely local query is legitimately
+# far below the ``H`` a per-branch softmax would give -- ``_EPS`` would clip it.
+_NORM_FLOOR = torch.finfo(torch.float32).tiny
 
 # Query rows per chunk when building the KL target; see ``_target_chunk_size``.
 # Only used by the eager fallback -- the fused kernel needs no chunking, since
@@ -58,10 +72,20 @@ _EPS = 1e-10
 _TARGET_CHUNK_ENV = "PRIMUS_V4_DISTILL_TARGET_CHUNK"
 _TARGET_CHUNK_DEFAULT = 512
 
+# Query rows per chunk when building the window log-sum-exp.
+_WINDOW_CHUNK_ENV = "PRIMUS_V4_DISTILL_WINDOW_CHUNK"
+_WINDOW_CHUNK_DEFAULT = 256
+
+# Set to 0 to normalise each head over the compressed entries alone, i.e. to go
+# back to the behaviour from before the joint-softmax fix. Diagnostic only --
+# it makes the target a distribution the layer never produces.
+_NONCOMP_LSE_ENV = "PRIMUS_V4_DISTILL_NONCOMP_LSE"
+
 # Resolved on first use by ``_triton_target_fn`` / ``_triton_kl_fn``.
 _UNSET = object()
 _TRITON_TARGET_FN = _UNSET
 _TRITON_KL_FN = _UNSET
+_TRITON_WINDOW_FN = _UNSET
 
 # Key under which the loss is reported. Shares the framework's MoE aux-loss
 # tracker, so it lands in the training log / TensorBoard / W&B next to the MoE
@@ -97,11 +121,11 @@ def log_indexer_distill_loss(
     """Record this layer's indexer loss in the MoE aux-loss tracker.
 
     Call this from **every** V4 attention layer whenever the loss is enabled,
-    passing ``None`` on the layers that do not own an indexer. The tracker is
-    reduced across pipeline ranks over whatever keys each rank happens to hold,
-    so a key that only appears on the ranks that own a CSA layer would make the
-    collective diverge. Non-CSA layers therefore contribute an explicit zero,
-    which keeps the key present everywhere and leaves the sum unchanged.
+    passing ``None`` on the layers that do not own an indexer. The tracker's
+    per-layer slots are reduced across pipeline ranks with a collective, so
+    every rank has to agree on which keys take part; non-CSA layers contribute
+    an explicit zero to keep the key present everywhere without changing the
+    sum.
 
     The reported value is the per-layer sum divided by the layer count (the
     denominator ``track_moe_metrics`` applies to every tracked loss), not
@@ -212,6 +236,108 @@ def _triton_kl_fn():
     return _TRITON_KL_FN
 
 
+def _triton_window_fn():
+    """``(can_use, run)`` for the fused window log-sum-exp, or ``None``."""
+    global _TRITON_WINDOW_FN
+    if _TRITON_WINDOW_FN is _UNSET:
+        try:
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_window_lse import (
+                can_use_triton_window_lse,
+                window_lse_triton,
+            )
+
+            _TRITON_WINDOW_FN = (can_use_triton_window_lse, window_lse_triton)
+        except Exception:
+            _TRITON_WINDOW_FN = None
+    return _TRITON_WINDOW_FN
+
+
+def _noncompressed_lse_enabled() -> bool:
+    return os.environ.get(_NONCOMP_LSE_ENV, "1") == "1"
+
+
+def _window_chunk_size() -> int:
+    override = os.environ.get(_WINDOW_CHUNK_ENV)
+    if override is not None:
+        try:
+            return max(int(override), 1)
+        except ValueError:
+            pass
+    return _WINDOW_CHUNK_DEFAULT
+
+
+def noncompressed_lse(
+    *,
+    query: torch.Tensor,
+    k_local: torch.Tensor,
+    sink: Optional[torch.Tensor],
+    swa_window: int,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """``[B, H, S]`` log attention mass outside the compressed entries.
+
+    A CSA layer takes **one** softmax over the concatenation of the sliding
+    window keys, the sparse compressed entries and the per-head sink. The
+    fraction of a head's attention that reaches the compressed entries is
+    therefore ``exp(compressed_lse - full_lse)``, and this returns the piece of
+    ``full_lse`` that the compressed branch does not contribute:
+
+        ``logaddexp(logsumexp_j in window(q . k_j * scale), sink)``
+
+    which is exactly the sufficient statistic the reference implementation
+    threads into its teacher. It is a log mass, not a distribution, and it is
+    never differentiated -- the target is detached.
+
+    Cost is ``O(S * window)`` rather than the ``O(S^2)`` a full score matrix
+    would need, because the window is the same 128 keys the layer attends to.
+    """
+    B, H, S, _ = query.shape
+    device = query.device
+    q = query.detach()
+    kv = k_local.detach()
+
+    # Fused path: keeps the window scores in registers. The eager body below
+    # writes a [B, H, chunk, chunk + window] fp32 logit tensor whose sliding
+    # window mask discards most of it, which costs several times the target
+    # kernel it is feeding.
+    fused = _triton_window_fn()
+    if fused is not None:
+        can_use, run = fused
+        if can_use(query=q, k_local=kv, swa_window=swa_window):
+            return run(
+                query=q,
+                k_local=kv,
+                sink=sink,
+                swa_window=swa_window,
+                softmax_scale=softmax_scale,
+            )
+
+    # `_local_mask` treats a non-positive window as "full causal", so match it.
+    window = swa_window if swa_window > 0 else S
+
+    out = torch.empty((B, H, S), device=device, dtype=torch.float32)
+    chunk = _window_chunk_size()
+    for start in range(0, S, chunk):
+        stop = min(start + chunk, S)
+        # Only keys in [start - window + 1, stop) can be visible to this block.
+        first_key = max(0, start - window + 1)
+        logits = torch.matmul(q[:, :, start:stop], kv[:, :, first_key:stop].transpose(-1, -2)).float()
+        logits *= softmax_scale
+
+        i = torch.arange(start, stop, device=device).unsqueeze(1)
+        j = torch.arange(first_key, stop, device=device).unsqueeze(0)
+        dist = i - j
+        # Same predicate as ``sliding_window_causal_mask``: causal and within
+        # the window. Every row keeps at least its own key, so the log-sum-exp
+        # below is never over an all -inf row.
+        logits.masked_fill_(~((dist >= 0) & (dist < window)), float("-inf"))
+        out[:, :, start:stop] = torch.logsumexp(logits, dim=-1)
+
+    if sink is not None:
+        out = torch.logaddexp(out, sink.detach().float().view(1, H, 1))
+    return out
+
+
 def _target_chunk_size(seq_len: int) -> int:
     """Query rows per chunk when building the KL target.
 
@@ -238,6 +364,7 @@ def _target_distribution(
     row_valid: torch.Tensor,
     softmax_scale: float,
     normalize: bool = False,
+    nc_lse: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Head-summed attention distribution over the selected entries: ``[B, S, K]``.
 
@@ -274,7 +401,8 @@ def _target_distribution(
                 topk_idxs=topk_idxs,
                 softmax_scale=softmax_scale,
                 normalize=normalize,
-                eps=_EPS,
+                eps=_NORM_FLOOR if nc_lse is not None else _EPS,
+                noncompressed_lse=nc_lse,
             )
 
     batch_idx = torch.arange(B, device=pool.device).view(B, 1, 1)
@@ -286,6 +414,18 @@ def _target_distribution(
         logits = torch.einsum("bhsd,bskd->bhsk", q[:, :, sl], gathered).float()
         logits *= softmax_scale
         logits.masked_fill_(~valid[:, sl].unsqueeze(1), float("-inf"))
+
+        if nc_lse is not None:
+            # Divide by the joint denominator instead of renormalising over the
+            # compressed entries: exp(logit - logaddexp(non_compressed, own)).
+            # A row with no legal entry has compressed_lse == -inf, so the
+            # non-compressed term alone keeps the denominator finite and the
+            # numerator's exp(-inf) makes the row a clean zero.
+            compressed_lse = torch.logsumexp(logits, dim=-1)
+            full_lse = torch.logaddexp(nc_lse[:, :, sl], compressed_lse)
+            probs = torch.exp(logits - full_lse.unsqueeze(-1))
+            return probs.sum(dim=1)  # [B, chunk, K]
+
         # An all -inf row would softmax to NaN; flatten it and drop it after.
         rows = row_valid[:, sl].view(B, 1, -1, 1)
         logits.masked_fill_(~rows, 0.0)
@@ -303,7 +443,8 @@ def _target_distribution(
             out[:, start:stop] = block(slice(start, stop))
 
     if normalize:
-        out /= out.sum(dim=-1, keepdim=True).clamp(min=_EPS)
+        floor = _NORM_FLOOR if nc_lse is not None else _EPS
+        out /= out.sum(dim=-1, keepdim=True).clamp(min=floor)
     return out
 
 
@@ -316,6 +457,9 @@ def compute_indexer_distill_loss(
     softmax_scale: float,
     loss_coeff: float,
     head_reduce_group: Optional["torch.distributed.ProcessGroup"] = None,
+    k_local: Optional[torch.Tensor] = None,
+    sink: Optional[torch.Tensor] = None,
+    swa_window: int = 0,
 ) -> torch.Tensor:
     """``KL(attention || indexer)`` over the selected compressed entries.
 
@@ -340,6 +484,14 @@ def compute_indexer_distill_loss(
             or ``None`` when every rank holds all of them. Only needed if the Q
             projection stops gathering its output -- see
             :meth:`DeepseekV4Attention._indexer_loss_head_group`.
+        k_local: sliding-window keys, ``[B, H, S, head_dim]``. Detached
+            internally. Together with ``sink`` and ``swa_window`` this makes the
+            per-head target the conditional the layer's joint softmax really
+            produces; omitting them renormalises each head over the compressed
+            entries alone and head-sums as if every head weighted the compressed
+            branch equally.
+        sink: per-head softmax sink logits, ``[H]``, or ``None``.
+        swa_window: sliding-window width; ``<= 0`` means full causal.
 
     Returns:
         Scalar loss (fp32). Rows with no legal entry contribute nothing, so a
@@ -357,6 +509,16 @@ def compute_indexer_distill_loss(
     # entries. Fully detached (see the note above), so it is built under
     # ``no_grad`` and never has to materialise the dense per-head tensors.
     with torch.no_grad():
+        nc_lse = None
+        if k_local is not None and _noncompressed_lse_enabled():
+            nc_lse = noncompressed_lse(
+                query=query,
+                k_local=k_local,
+                sink=sink,
+                swa_window=swa_window,
+                softmax_scale=softmax_scale,
+            )
+
         target = _target_distribution(
             query=query,
             pool=pool,
@@ -365,13 +527,15 @@ def compute_indexer_distill_loss(
             row_valid=row_valid,
             softmax_scale=softmax_scale,
             normalize=not sharded_heads,
+            nc_lse=nc_lse,
         )
         if sharded_heads:
             target = target.contiguous()
             torch.distributed.all_reduce(target, group=head_reduce_group)
             # Renormalise to a distribution; L1 is enough since softmax outputs
             # are already non-negative.
-            target /= target.sum(dim=-1, keepdim=True).clamp(min=_EPS)
+            floor = _NORM_FLOOR if nc_lse is not None else _EPS
+            target /= target.sum(dim=-1, keepdim=True).clamp(min=floor)
 
     # The indexer side is the one that learns, so it stays attached. Rows with
     # zero legal entries are neutralised before the softmax and dropped after,
