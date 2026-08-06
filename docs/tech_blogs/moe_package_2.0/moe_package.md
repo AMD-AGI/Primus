@@ -32,14 +32,13 @@ release.
 STRUCTURE: the post runs bottom-up through the training stack —
   foundation (framework) -> kernels -> scale (TTT) -> other regimes and backends -> tooling.
 Every later result is measured on top of the framework baseline in the first
-section, so that section should stay first. The megakernel is research-stage and
-is explicitly labelled as a preview; keep that label until its numbers clear
-review, so its placeholders do not sit unmarked next to measured results.
+section, so that section should stay first. The megakernel numbers are measured
+on a reduced-depth DeepSeek-V3 proxy; keep that scope stated wherever they appear.
 --->
 
 # MoE Training Optimization with Primus
 
-_Mixture-of-Experts (MoE) is now the default architecture for frontier-scale language models, and our users increasingly train large MoE models on AMD Instinct™ GPUs. This post walks through the MoE training optimizations we built in Primus in response to those workloads, working bottom-up through the stack: the general **Primus + Primus-Turbo** framework optimizations every MoE run inherits, kernel-level work (**low-precision expert GEMMs** and a fused MoE **megakernel**), **time-to-train** optimization of DeepSeek-V3 at up to 1024 GPUs, the different bottleneck regime of **small MoE models** benchmarked against **NVIDIA B200**, our **JAX (MaxText)** training path, and the **projection** tool that sizes a run before it starts. Both the Megatron-LM and JAX backends of Primus are covered. For the foundational optimizations this work builds on, see our earlier [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) post._
+_Mixture-of-Experts (MoE) has become the default architecture for frontier-scale language models, and our users increasingly train large MoE models on AMD Instinct™ GPUs. Driven by these real workload requirements — and by where the industry has recently concentrated its MoE optimization efforts — we have built a broad set of MoE training optimizations in Primus. This blog walks through that work: kernel-level work (a fused MoE **megakernel** and **low-precision operators**), general **Primus + Primus-Turbo** training optimizations, **time-to-train** improvements on large models such as DeepSeek-V3, our **JAX (MaxText)** MoE training path, and **performance projection**. Both the Megatron-LM and JAX backends of Primus are covered. For the foundational optimizations this work builds on, see our earlier [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html) post._
 
 All feature demonstrations and benchmarking results in this guide are built on Primus. [Primus/Primus-LM](https://github.com/AMD-AGI/Primus) is a flexible, high-performance framework for large-scale foundation model training and inference on AMD GPUs. As the training-framework layer of the Primus ecosystem, Primus-LM works alongside [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) (high-performance operators) and [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) (stability and platform infrastructure) to deliver a scalable, production-ready solution for state-of-the-art large-model development.
 
@@ -74,30 +73,11 @@ Those trends mean MoE training efficiency is no longer about fast GEMMs alone. A
 | Bottleneck | What we did about it | Section |
 |---|---|---|
 | **Expert GEMM throughput** — expert FFNs dominate FLOPs | FP8/MXFP8 grouped GEMM, FlyDSL kernels, quantized-weight caching | [Low-precision expert GEMMs](#low-precision-expert-gemms) |
-| **All-to-all dispatch/combine** — grows with top-k and EP width | DeepEP dispatch, 1F1B all-to-all overlap, and tile-granularity fusion inside a single kernel | [Framework foundation](#the-foundation-primus--primus-turbo), [Megakernel](#research-preview-the-moe-megakernel) |
+| **All-to-all dispatch/combine** — grows with top-k and EP width | DeepEP dispatch, 1F1B all-to-all overlap, and tile-granularity fusion inside a single kernel | [Framework foundation](#the-foundation-primus--primus-turbo), [Megakernel](#the-moe-megakernel) |
 | **Memory ceiling** — sets micro-batch size and recompute cost | Precision-aware optimizer, pipeline layout, fine-grained recompute, ahead-of-time projection | [DeepSeek-V3 at scale](#time-to-train-deepseek-v3-at-256-1024-gpus), [Projection](#planning-before-you-train-primus-projection) |
 | **Host and launch overhead** — dominates when layers are small | Sync-free MoE, NUMA binding and launch tuning, pipeline warm-up | [Framework foundation](#the-foundation-primus--primus-turbo), [Small MoE models](#small-moe-models-a-different-bottleneck-regime) |
 
 Two sections sit outside that grid: the [JAX (MaxText) path](#beyond-megatron-lm-the-jax-maxtext-path), which brings the same grouped-GEMM and DeepEP primitives to a second backend, and [Primus Projection](#planning-before-you-train-primus-projection), which answers "will it fit, and how fast?" before any cluster time is spent.
-
-### Results at a glance
-
-<!---
-OWNER / FILL: Overview owner. Replace [X] placeholders with the real headline
-numbers once the per-model results below are finalized, and make sure this
-paragraph matches the "Overall performance uplift" chart. Keep it to one
-paragraph of end-to-end story + headline numbers. Add the asset at
-imgs/moe_perf_overview.png — a bar chart of end-to-end training throughput uplift
-across common MoE models (DeepSeek-V3, Qwen3-235B-A22B, Qwen3-30B-A3B, GPT-OSS,
-Mixtral, ...). State the baseline, hardware (MI300 / MI355), and precision in the
-caption.
---->
-
-Taken together, these optimizations deliver end-to-end training speedups across the modern MoE model family on AMD Instinct MI300/MI355-series GPUs. Against an unoptimized baseline configuration, the combined kernel, communication, precision, and scheduling improvements yield up to **[X]×** higher training throughput on representative models such as DeepSeek-V3 and Qwen3-235B-A22B, while projection keeps configuration cost low by predicting memory and performance before a run starts.
-
-![Figure 1: End-to-end MoE training throughput uplift across representative models on AMD Instinct MI355X](imgs/moe_perf_overview.png)
-
-**Figure 1: End-to-end MoE training throughput uplift across representative models on AMD Instinct MI355X** _(placeholder — asset and numbers to be finalized)_
 
 ---
 
@@ -128,9 +108,9 @@ On top of that foundation, we hardened and extended the following for the curren
 - **Pipeline warm-up (`pp_warmup`).** A parallel forward+backward warm-up on every pipeline rank exercises all lazy-init paths (CUDA/HIP, TE, FP8, NCCL) concurrently, removing first-iteration stalls without changing numerics.
 - **Faster process teardown.** An opt-in fast-exit path shaves wall-clock time from the tail of large runs.
 
-![Figure 2: Additional Primus-Turbo optimizations improve throughput by 16.2% on Qwen3-235B-A22B, 9.7% on GPT-OSS 20B, and 5.8% on Qwen3-30B-A3B](imgs/general_opt_uplift.png)
+![Figure 1: Additional Primus-Turbo optimizations improve throughput by 16.2% on Qwen3-235B-A22B, 9.7% on GPT-OSS 20B, and 5.8% on Qwen3-30B-A3B](imgs/general_opt_uplift.png)
 
-**Figure 2: Incremental throughput uplift from additional Primus-Turbo optimizations.** Compared with the listed reference configurations, the additional Turbo and FlyDSL settings improve throughput by **16.2%** on Qwen3-235B-A22B, **9.7%** on GPT-OSS 20B, and **5.8%** on Qwen3-30B-A3B.
+**Figure 1: Incremental throughput uplift from additional Primus-Turbo optimizations.** Compared with the listed reference configurations, the additional Turbo and FlyDSL settings improve throughput by **16.2%** on Qwen3-235B-A22B, **9.7%** on GPT-OSS 20B, and **5.8%** on Qwen3-30B-A3B.
 
 The specific model configurations and measured throughput are shown below.
 
@@ -168,13 +148,13 @@ Four things matter when running FP8 MoE training on AMD GPUs:
 - **Format selection.** On gfx950, using the OCP E4M3 format for expert GEMMs avoids costly up-conversions.
 - **System-level break-even.** At the kernel level, FP8 expert GEMMs are substantially faster than BF16. End-to-end, the win depends on amortizing the surrounding quantization work — amax reduction, casting, and token-count synchronization. Primus reduces this overhead through weight-quantization caching, quantization-aware padding, and keeping token counts on-GPU, so the kernel speedup translates into end-to-end gains.
 
-Figure 3 isolates that kernel-level payoff on MI355X alone, sweeping tokens-per-expert `M` over training-relevant sizes and reporting the FP8 (tensorwise) grouped-GEMM speedup over BF16 with quantization included in the FP8 timing.
+Figure 2 isolates that kernel-level payoff on MI355X alone, sweeping tokens-per-expert `M` over training-relevant sizes and reporting the FP8 (tensorwise) grouped-GEMM speedup over BF16 with quantization included in the FP8 timing.
 
 <p align="center">
   <img src="imgs/low_precision_fp8_vs_bf16_grouped.png" alt="FP8 vs BF16 grouped GEMM speedup on MI355X" width="45%">
 </p>
 
-**Figure 3: Kernel-level FP8-vs-BF16 grouped-GEMM speedup on AMD Instinct MI355X, swept over tokens-per-expert `M` and averaged over the DeepSeek-V3 / Qwen3-235B-A22B / gpt-oss expert shapes; quantization is included in the FP8 timing.**
+**Figure 2: Kernel-level FP8-vs-BF16 grouped-GEMM speedup on AMD Instinct MI355X, swept over tokens-per-expert `M` and averaged over the DeepSeek-V3 / Qwen3-235B-A22B / gpt-oss expert shapes; quantization is included in the FP8 timing.**
 
 The forward speedup grows with `M` — from ~1.2x at `M`=2048 to ~1.6x at `M`=8192, as the GEMM gets large enough to hide the cast/amax cost that Primus already minimizes — while the backward is consistently ~1.5–1.7x. At training-relevant token counts the FP8 grouped-GEMM speedup is real and sizable.
 
@@ -191,53 +171,94 @@ To place these kernels against the industry reference, we benchmark end-to-end q
   </tr>
 </table>
 
-**Figure 4: FP8 tensorwise (top) and MXFP8 (bottom) GEMM throughput on AMD Instinct MI355X vs NVIDIA B200/GB200 (TE) — dense (left) and grouped (right), forward and backward, averaged over the tested shapes.**
+**Figure 3: FP8 tensorwise (top) and MXFP8 (bottom) GEMM throughput on AMD Instinct MI355X vs NVIDIA B200/GB200 (TE) — dense (left) and grouped (right), forward and backward, averaged over the tested shapes.**
 
 The lesson is that low precision is not just a datatype switch: for MoE, layout and grouped scheduling matter as much as the quantization recipe. Removing the forward transpose tax and autotuning each grouped shape turns an apparent forward deficit into a forward lead, and MXFP8 layers finer-grained scaling on top of the same execution path while staying competitive with the B200/GB200 baseline.
 
-### Research preview: the MoE megakernel
+### The MoE megakernel
 
 <!---
-OWNER / FILL: Xiaoming Peng, Zhen Huang. This section describes research-stage
-work (RocMoE / MonolithEP super-kernel). Before publishing:
-  - Confirm which numbers are cleared for public release. The standalone GEMM
-    roofline (near-peak MFMA) is safe and compelling; end-to-end fused-kernel
-    speedups are still being finalized at training scale — keep them as
-    placeholders ([X]) or mark clearly as preliminary until validated.
+OWNER / FILL: Xiaoming Peng, Zhen Huang. Still open before publishing:
+  - Confirm the end-to-end numbers below are cleared for public release. They are
+    measured, not projected (8x MI355X, DeepSeek-V3 4 layers + MTP, EP8, gbs 512,
+    50 steps) but they are a reduced-depth proxy, not a full 61-layer run.
   - Decide how much AMD-specific implementation detail (DTOLDS/AGPR/wave
     specialization) to expose publicly.
-  - Add figures: (a) fused single-kernel dataflow diagram, (b) timeline showing
-    dispatch/GEMM/combine overlap, (c) a perf bar vs. the separate-kernel baseline.
-KEEP the "research preview" framing until the numbers clear review.
+  - Figure 4 is a schematic drawn in code (.ab/gen_megakernel_diagram.py); stage
+    widths are illustrative, not measured per-stage timings. Swap in a profiled
+    timeline if one is cleared for release.
 --->
 
-> **Research preview.** Unlike everything above, this is research-stage work rather than a shipping feature. The standalone GEMM results are measured; the fused end-to-end numbers are preliminary.
+Expert dispatch and combine are the two costs that make an MoE layer different from a dense one, and both of them are communication. This section is about removing the boundary between that communication and the expert compute it feeds.
 
-**Motivation.** Faster expert GEMMs eventually run into a structural limit. In a standard MoE layer, expert dispatch and combine are collective all-to-all operations while FC1/FC2 are grouped GEMMs. Because collective libraries are host-initiated and operate at kernel granularity, communication and expert compute execute in separate kernels and can only be overlapped coarsely across kernel boundaries. Profiling shows the MoE forward pass split roughly between all-to-all communication and expert compute, so the biggest remaining prize is to overlap the two *inside* a single kernel at fine granularity.
+#### How an MoE layer executes today
 
-**Design.** The megakernel fuses the entire MoE forward path — dispatch (all-to-all) → FC1 (gate/up grouped GEMM) → SwiGLU → FC2 (down grouped GEMM) → combine (all-to-all) — into a **single persistent kernel**:
+A single MoE layer is a chain of eight or so operators. The router scores each token and picks its top-k experts; a permutation gathers tokens into expert order; an all-to-all **dispatch** sends each token to the rank that owns its expert; two grouped GEMMs (**FC1** gate/up and **FC2** down) with a **SwiGLU** between them do the expert compute; an all-to-all **combine** returns the results; and a final unpermute-and-scale reduces the top-k contributions back onto each token.
 
-- **Role-specialized workgroups.** The persistent grid is partitioned into roles (dispatch, compute, combine), so communication workgroups can make progress while compute workgroups run MFMA GEMMs concurrently on the same device.
-- **Tile-granularity overlap via arrival scoreboards.** Instead of a global barrier between dispatch and compute, per-block arrival flags let a compute workgroup begin FC1 on a tile the moment that tile's tokens have landed — hiding communication latency inside the GEMM.
-- **Zero-permute token layout.** Received tokens are packed contiguously per expert, so the grouped GEMM indexes them directly with no separate permutation step.
-- **Epilogue fusion.** SwiGLU is fused into the FC1 epilogue and FC2 output is written directly into the combine path, eliminating intermediate activation round-trips to HBM.
+Each of those stages is its own kernel. The top half of Figure 4 shows the consequence.
 
-**AMD-specific engineering.** The design maps the pattern onto CDNA3/CDNA4 (gfx942/gfx950): direct-to-LDS asynchronous loads replace TMA, MFMA accumulators live in AGPRs, `__hip_atomic_*` release/acquire plus LDS signaling replaces mbarrier/cluster synchronization, wave specialization within a workgroup replaces warpgroup register partitioning, and XGMI/IPC peer transfers replace NVLink.
+![Figure 4: MoE layer dataflow — separate kernels today versus MegaMoE's three fused kernels](imgs/megakernel_dataflow.png)
 
-**Results.** The hand-tuned expert grouped-GEMM inner loop reaches near-peak MFMA utilization on MI355X, approaching the BF16 roofline for representative DeepSeek-V3 expert shapes. The fused single-kernel prototype overlaps dispatch/compute/combine to reduce MoE-layer forward time versus a separate-kernel baseline.
+**Figure 4: MoE layer dataflow. Top: today, one kernel per stage, with an HBM round trip at every boundary. Bottom: MegaMoE, three kernels in which each all-to-all is fused into the grouped GEMM that feeds it, overlapping at tile granularity.** _(schematic; stage widths are illustrative, not measured per-stage timings)_
 
-<!---
-OWNER / FILL: Xiaoming Peng, Zhen Huang. Replace [X] below with cleared numbers,
-or reword to a qualitative claim if numbers are not yet public.
---->
+#### The problem: communication and compute cannot overlap
 
-On representative DeepSeek-V3 expert shapes, the fused megakernel achieves up to **[X]×** speedup over the separate dispatch/GEMM/combine baseline for the MoE forward layer. _(preliminary — to be finalized)_
+Two costs follow from that structure, and neither is addressable by making any individual kernel faster.
 
-![Figure 5: Fused MoE megakernel — single persistent kernel overlapping dispatch, grouped GEMM, and combine](imgs/megakernel_dataflow.png)
+**Communication and compute are serialized.** Collective libraries are host-initiated and operate at kernel granularity: a dispatch kernel occupies the device, finishes, and only then does the FC1 kernel launch. Profiling shows the MoE forward pass split roughly evenly between all-to-all communication and expert compute, so with the two in separate kernels roughly half of the layer's time is spent with the matrix cores idle. Coarse overlap across kernel boundaries — running the next microbatch's communication behind this one's compute — recovers some of that, but it cannot overlap a tile's own dispatch with its own GEMM.
 
-**Figure 5: Fused MoE megakernel — single persistent kernel overlapping dispatch, grouped GEMM, and combine** _(placeholder — asset to be added)_
+**Every kernel boundary is an HBM round trip.** The permutation writes a reordered copy of the tokens; FC1 writes its activations out for SwiGLU to read back; FC2 writes its output for the combine to read again. At DeepSeek-V3's expert granularity — 256 experts with top-8 routing — the layer is a long chain of comparatively small operators, and the traffic *between* them is on the same order as the traffic the GEMMs need to do their work.
 
-We are working to graduate this super-kernel into a feature-flagged Primus-Turbo operator, extend it to FP8/MXFP8 expert weights, and scale it beyond a single node.
+The prize, then, is not a faster dispatch or a faster GEMM. It is to put them in the same kernel so that one can hide inside the other and the intermediates never reach HBM.
+
+#### Our approach: fuse each all-to-all into the GEMM that feeds it
+
+The critical move is not collapsing the layer into one kernel — it is putting each all-to-all *inside* the grouped GEMM that produces or consumes its data, so the communication has something to hide behind. **MegaMoE** does this in three kernels, shown in the bottom half of Figure 4:
+
+1. **dispatch + FC1.** The incoming all-to-all and the FC1 grouped GEMM share one kernel. The CU grid is split between dispatch and compute roles, so tokens keep streaming in from peer ranks while the matrix cores work on tiles that have already landed.
+2. **SwiGLU.** A small middle kernel that also quantizes its own output, so the MXFP8 cast never becomes a separate pass over the activations.
+3. **FC2 + combine.** The FC2 grouped GEMM and the outgoing all-to-all share one kernel: the GEMM epilogue pushes each finished tile to its owning rank and the reduction happens there, so results leave as they are produced instead of after the whole GEMM completes.
+
+The backward mirrors this by the dispatch/combine duality — `dispatch(dy)` fuses with the FC2 data-gradient GEMM, and the FC1 data-gradient fuses with the combine and reduction — plus two variable-K weight-gradient kernels.
+
+Two properties make the overlap work. Within each fused kernel the CU grid is split by role, so communication workgroups make progress while compute workgroups run MFMA GEMMs on the same device. And instead of a global barrier between the two, per-tile arrival flags let compute start on a tile the moment it lands, and let a finished tile leave for the combine immediately — which is what turns communication latency into something the GEMM hides rather than waits on. The kernels are authored in [FlyDSL](https://github.com/ROCm/FlyDSL) and mapped onto CDNA3/CDNA4 (gfx942/gfx950).
+
+For the user, all of this is one feature flag (`use_turbo_mega_moe`) plus a precision knob (`turbo_mega_moe_precision: bf16 | mxfp8`): MegaMoE replaces the whole Megatron MoE layer, with the router feeding the fused op directly.
+
+#### Kernel-level performance
+
+Measured on its own, on DeepSeek-V3 expert shapes (H=7168, I=2048, 256 experts, top-8, EP8, 8192 tokens per rank), the fused layer runs as follows:
+
+| Pass | BF16 | MXFP8 | Speedup |
+|---|---|---|---|
+| Forward | 6.96 ms | 5.18 ms | 1.34× |
+| Backward | 13.34 ms | 8.40 ms | 1.59× |
+| **Forward + backward** | **19.94 ms** | **13.21 ms** | **1.51×** |
+
+The backward benefits most, which matters because it is also the larger half of the layer. The ratio is unchanged under a deliberately imbalanced routing, so the speedup does not depend on experts receiving equal token counts.
+
+#### End-to-end training performance
+
+Kernel-level wins only matter if they survive a real training step. We train DeepSeek-V3 (4 layers + MTP, EP8 on one 8×MI355X node, global batch 512, 50 iterations) and swap only the MoE implementation: within each precision the two runs differ by exactly one Megatron argument, with attention, optimizer, data, and seed held fixed.
+
+| Precision | MoE layer | ms / step | TFLOP/s per GPU | Speedup |
+|---|---|---|---|---|
+| BF16 | DeepEP dispatcher + grouped GEMM | 9540 | 841 | — |
+| BF16 | **MegaMoE** | **8817** | **910** | **1.082×** |
+| MXFP8 | DeepEP dispatcher + grouped GEMM | 8432 | 951 | — |
+| MXFP8 | **MegaMoE** | **7508** | **1069** | **1.123×** |
+
+![MegaMoE end-to-end step time and throughput on MI355X](imgs/megakernel_e2e_perf.png)
+
+![MegaMoE training loss versus the DeepEP baseline](imgs/megakernel_e2e_loss.png)
+
+**Figure 5: MegaMoE end to end on DeepSeek-V3 (4 layers + MTP), 8×MI355X, EP8, global batch 512. Top: steady-state step time and throughput, median of iterations 3–50. Bottom: training loss over 50 iterations.**
+
+The step-level gain is necessarily smaller than the 1.51× measured on the kernel — the MoE layer is only part of a training step — but it survives the trip: the per-call saving, multiplied out over the layers and microbatches of a step, lands within 4% of the measured step-time delta. Notably, **fusion and low precision compound**: MegaMoE is worth more in MXFP8 (1.123×) than in BF16 (1.082×), because quantizing everything else raises the MoE's share of the step. Fusion also lowers peak memory — 142.4 GiB against 150.1 GiB in the MXFP8 pair — since the permuted token buffers are never materialized.
+
+The loss curves in Figure 5 stay together over the whole run, so the fused path trains as the dispatcher path does; longer-horizon validation is ongoing. MegaMoE is currently EP-only (TP=1) and dropless, and network-wide MXFP8 on DeepSeek-V3 needs the Turbo GEMM path (`use_turbo_gemm`, `use_turbo_grouped_gemm`).
+
+MegaMoE has graduated from a research prototype into a feature-flagged Primus-Turbo operator with MXFP8 expert weights and a full backward pass. We are now extending it beyond a single node and to the remaining MoE layer variants.
 
 ---
 
@@ -343,7 +364,14 @@ Layout and recompute together shorten the step at both scales, and the win grows
 | 128 | Default layout, 1 recompute layer per virtual stage | 23.75 | 1.00x |
 | 128 | Tuned layout + 9 recompute IDs | 21.68 | **1.095x** |
 
-Figure 7 shows why, using the pipeline visualizer on 128 nodes.
+**What did not work.** Two rejected configurations are worth recording, because they show the tuning is not simply "more freedom is better":
+
+- **VPP1** costs 14–21% in step time even with its own layout and recompute tuning, and on this stack it required disabling gradient-reduce/all-gather overlap to run at all.
+- **An aggressively non-uniform layout** (1–3 layers per virtual stage, chosen to equalize memory) is 21% slower than the VPP2 baseline. It does flatten memory, but it unbalances compute, and the pipeline then runs at the speed of its slowest stage.
+
+Balanced compute per stage dominates. Memory balance is only worth chasing once compute is already even.
+
+Figure 7 shows why the tuned configuration is faster, using the pipeline visualizer on 128 nodes.
 
 ![Figure 7: 128-node pipeline schedule, default configuration versus tuned layout and recompute IDs](imgs/dsv3_pp_schedule_128n.png)
 
@@ -480,7 +508,7 @@ Every published validation case lands within 10% of measured throughput, and the
 
 Looking ahead, we are pursuing several directions:
 
-- **Productionizing the MoE megakernel** as a feature-flagged Primus-Turbo operator, with FP8/MXFP8 expert weights and multi-node scaling.
+- **Scaling the MoE megakernel beyond a single node**, and extending it to the MoE layer variants it does not yet cover (tensor parallelism, shared experts, non-SwiGLU activations).
 - **Closing the FP8 end-to-end gap** by further reducing quantization and amax-reduction overhead so kernel-level FP8 speedups translate fully to end-to-end throughput.
 - **Deeper communication/compute overlap** across dispatch, grouped GEMM, and pipeline schedules for the largest MoE models.
 - **Broader backend parity**, bringing DeepEP/grouped-GEMM-class optimizations and more MoE models to the JAX (MaxText) path.

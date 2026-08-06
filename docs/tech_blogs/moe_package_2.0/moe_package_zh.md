@@ -30,8 +30,7 @@ SOFTWARE.
 结构：全文自底向上贯穿训练栈 ——
   基础（框架）-> kernel -> 规模（TTT）-> 其他区间与后端 -> 工具。
 后文的每一个结果都是在第一节的框架基线之上测得的，因此该节应保持在最前。
-megakernel 属于研究阶段工作，已显式标注为「研究预览」；在其数字通过评审之前请保留
-该标注，避免其占位符与已实测结果混在一起。
+megakernel 的数字是在减层的 DeepSeek-V3 代理配置上实测的；凡出现之处都应写明这一范围。
 --->
 
 # 基于 Primus 的 MoE 训练优化
@@ -71,27 +70,11 @@ _Mixture-of-Experts（MoE）已经成为前沿规模语言模型的默认架构�
 | 瓶颈 | 我们的应对 | 章节 |
 |---|---|---|
 | **专家 GEMM 吞吐** —— 专家 FFN 主导算力 | FP8/MXFP8 grouped GEMM、FlyDSL kernel、量化权重缓存 | [低精度专家 GEMM](#低精度专家-gemm) |
-| **all-to-all dispatch/combine** —— 随 top-k 与 EP 宽度增长 | DeepEP dispatch、1F1B overlap，以及单 kernel 内的 tile 级融合 | [框架基础](#基础primus--primus-turbo)、[Megakernel](#研究预览moe-megakernel) |
+| **all-to-all dispatch/combine** —— 随 top-k 与 EP 宽度增长 | DeepEP dispatch、1F1B overlap，以及单 kernel 内的 tile 级融合 | [框架基础](#基础primus--primus-turbo)、[Megakernel](#moe-megakernel) |
 | **显存上限** —— 决定 micro-batch 大小与 recompute 代价 | precision-aware optimizer、流水线布局、细粒度 recompute、事前 projection | [规模化的 DeepSeek-V3](#time-to-train256-1024-gpu-上的-deepseek-v3)、[Projection](#开跑之前先做预估primus-projection) |
 | **Host 与 launch 开销** —— 层规模小时占主导 | sync-free MoE、NUMA 绑定与 launch 调优、流水线预热 | [框架基础](#基础primus--primus-turbo)、[小 MoE 模型](#小-moe-模型另一种瓶颈区间) |
 
 有两节不在上表的框架内：[JAX（MaxText）路径](#超越-megatron-lmjaxmaxtext路径)把同样的 grouped GEMM 与 DeepEP 原语带到第二个后端；[Primus Projection](#开跑之前先做预估primus-projection) 则在花费任何集群时间之前，先回答「装得下吗、能跑多快」。
-
-### 结果速览
-
-<!---
-负责人 / 待补充：总览章节负责人。待下方各模型结果确定后，用真实的头条数字替换
-[X] 占位符，并确保本段与「整体性能提升」图表一致。控制在一段：端到端故事 + 头条数字。
-并在 imgs/moe_perf_overview.png 放置资源 —— 一张覆盖常见 MoE 模型（DeepSeek-V3、
-Qwen3-235B-A22B、Qwen3-30B-A3B、GPT-OSS、Mixtral……）端到端训练吞吐提升的柱状图。
-在图注中写明基线、硬件（MI300 / MI355）与精度。
---->
-
-综合来看，这些优化在 AMD Instinct MI300/MI355 系列 GPU 上，为现代 MoE 模型家族带来了端到端的训练加速。相比未优化的基线配置，kernel、通信、精度与调度多方面改进的叠加，在 DeepSeek-V3、Qwen3-235B-A22B 等代表模型上带来最高 **[X]×** 的训练吞吐提升；与此同时，projection 通过在开跑前预测显存与性能，把配置调优的成本降到很低。
-
-![图 1：AMD Instinct MI355X 上代表性 MoE 模型的端到端训练吞吐提升](imgs/moe_perf_overview.png)
-
-**图 1：AMD Instinct MI355X 上代表性 MoE 模型的端到端训练吞吐提升** _（占位 —— 资源与数字待定）_
 
 ---
 
@@ -121,9 +104,9 @@ Qwen3-235B-A22B、Qwen3-30B-A3B、GPT-OSS、Mixtral……）端到端训练吞�
 - **流水线预热（`pp_warmup`）。** 在每个流水线 rank 上并行执行一次 forward+backward 预热，让所有惰性初始化路径（CUDA/HIP、TE、FP8、NCCL）并发完成，从而在不改变数值的前提下消除首个迭代的停顿。
 - **更快的进程退出。** 一个可选的 fast-exit 路径，削减大规模训练收尾阶段的墙钟时间。
 
-![图 2：额外的 Primus-Turbo 优化在 Qwen3-235B-A22B 上提升 16.2%，在 GPT-OSS 20B 上提升 9.7%，在 Qwen3-30B-A3B 上提升 5.8%](imgs/general_opt_uplift.png)
+![图 1：额外的 Primus-Turbo 优化在 Qwen3-235B-A22B 上提升 16.2%，在 GPT-OSS 20B 上提升 9.7%，在 Qwen3-30B-A3B 上提升 5.8%](imgs/general_opt_uplift.png)
 
-**图 2：额外 Primus-Turbo 优化带来的增量吞吐提升。** 相较所列参考配置，额外的 Turbo 与 FlyDSL 设置在 Qwen3-235B-A22B 上提升 **16.2%**，在 GPT-OSS 20B 上提升 **9.7%**，在 Qwen3-30B-A3B 上提升 **5.8%**。
+**图 1：额外 Primus-Turbo 优化带来的增量吞吐提升。** 相较所列参考配置，额外的 Turbo 与 FlyDSL 设置在 Qwen3-235B-A22B 上提升 **16.2%**，在 GPT-OSS 20B 上提升 **9.7%**，在 Qwen3-30B-A3B 上提升 **5.8%**。
 
 各模型的具体配置与实测吞吐如下所示。
 
@@ -160,13 +143,13 @@ Qwen3-235B-A22B、Qwen3-30B-A3B、GPT-OSS、Mixtral……）端到端训练吞�
 - **格式选择。** 在 gfx950 上，专家 GEMM 使用 OCP E4M3 格式可避免代价高昂的向上转换（up-conversion）。
 - **系统级的收支平衡。** 在 kernel 层面，FP8 专家 GEMM 明显快于 BF16；但端到端的收益取决于能否摊薄周边的量化工作 —— amax 规约、cast 以及 token 数同步。Primus 通过权重量化缓存、量化感知的 padding、以及把 token 计数保留在 GPU 上，降低这部分开销，使 kernel 级的加速能够转化为端到端收益。
 
-图 3 单独展示了 MI355X 上这一 kernel 级收益：在训练相关的规模范围内扫描每专家 token 数 `M`，报告 FP8（tensorwise）grouped GEMM 相对 BF16 的加速（FP8 计时中已计入量化开销）。
+图 2 单独展示了 MI355X 上这一 kernel 级收益：在训练相关的规模范围内扫描每专家 token 数 `M`，报告 FP8（tensorwise）grouped GEMM 相对 BF16 的加速（FP8 计时中已计入量化开销）。
 
 <p align="center">
   <img src="imgs/low_precision_fp8_vs_bf16_grouped.png" alt="MI355X 上 FP8 与 BF16 grouped GEMM 的加速对比" width="45%">
 </p>
 
-**图 3：AMD Instinct MI355X 上 kernel 级 FP8-vs-BF16 grouped GEMM 加速，按每专家 token 数 `M` 扫描，并在 DeepSeek-V3 / Qwen3-235B-A22B / gpt-oss 专家 shape 上取平均；FP8 计时已计入量化开销。**
+**图 2：AMD Instinct MI355X 上 kernel 级 FP8-vs-BF16 grouped GEMM 加速，按每专家 token 数 `M` 扫描，并在 DeepSeek-V3 / Qwen3-235B-A22B / gpt-oss 专家 shape 上取平均；FP8 计时已计入量化开销。**
 
 前向加速随 `M` 增大而提升 —— 从 `M`=2048 的约 1.2× 提升到 `M`=8192 的约 1.6×，因为此时 GEMM 已经大到足以掩盖 Primus 已尽量压低的 cast/amax 开销 —— 而反向则稳定在约 1.5–1.7×。在训练相关的 token 数下，FP8 grouped GEMM 的加速真实且可观。
 
@@ -183,51 +166,91 @@ Qwen3-235B-A22B、Qwen3-30B-A3B、GPT-OSS、Mixtral……）端到端训练吞�
   </tr>
 </table>
 
-**图 4：AMD Instinct MI355X 与 NVIDIA B200/GB200（TE）的 GEMM 吞吐对比 —— FP8 tensorwise（上）与 MXFP8（下），dense（左）与 grouped（右），含前向与反向，在所测 shape 上取平均。**
+**图 3：AMD Instinct MI355X 与 NVIDIA B200/GB200（TE）的 GEMM 吞吐对比 —— FP8 tensorwise（上）与 MXFP8（下），dense（左）与 grouped（右），含前向与反向，在所测 shape 上取平均。**
 
 这里的经验是：低精度不仅仅是切换数据类型 —— 对 MoE 而言，布局（layout）与 grouped 调度和量化 recipe 同等重要。消除前向的 transpose 开销、并对每种 grouped shape 做 autotune，能把看似落后的前向变成领先；而 MXFP8 在同一执行路径之上叠加更细粒度的 scaling，同时仍与 B200/GB200 基线保持竞争力。
 
-### 研究预览：MoE megakernel
+### MoE megakernel
 
 <!---
-负责人 / 待补充：Xiaoming Peng、Zhen Huang。本节描述的是研究阶段的工作
-（RocMoE / MonolithEP super-kernel）。发布前：
-  - 确认哪些数字可公开。单算子 GEMM roofline（接近 MFMA 峰值）是安全且有说服力的；
-    融合 kernel 的端到端加速在训练规模下仍在收敛中 —— 在验证前请保留为占位（[X]）
-    或明确标注为初步（preliminary）。
+负责人 / 待补充：Xiaoming Peng、Zhen Huang。发布前仍待确认：
+  - 确认下方端到端数字可以公开。它们是实测而非推算（8×MI355X、DeepSeek-V3
+    4 层 + MTP、EP8、gbs 512、50 步），但属于减层代理配置，不是完整的 61 层训练。
   - 决定对外暴露多少 AMD 专有实现细节（DTOLDS/AGPR/wave specialization）。
-  - 补图：（a）融合单 kernel 的 dataflow 示意图；（b）展示 dispatch/GEMM/combine
-    重叠的时间线；（c）相对「分离 kernel」基线的性能柱状图。
-在数字通过评审之前，请保留「研究预览」这一定位。
+  - 图 4 是用代码画的示意图（.ab/gen_megakernel_diagram.py），各阶段的宽度只是示意，
+    并非实测的分阶段耗时。若有可公开的 profiling 时间线，请替换。
 --->
 
-> **研究预览。** 与上文所有内容不同，本节是研究阶段的工作，而非已发布的特性。其中单算子 GEMM 结果为实测，融合后的端到端数字仍是初步的。
+专家 dispatch 与 combine 是让 MoE 层区别于 dense 层的两项开销，而它们都是通信。本节要做的，就是拆掉这部分通信与它所喂给的专家计算之间的边界。
 
-**动机。** 把专家 GEMM 做得更快，最终会撞上一个结构性上限。在标准 MoE 层中，专家 dispatch 与 combine 是集合式（collective）的 all-to-all 操作，而 FC1/FC2 是 grouped GEMM。由于集合通信库由 host 发起、以 kernel 为粒度，通信与专家计算被拆到不同的 kernel 中执行，只能在 kernel 边界处进行粗粒度的重叠。Profiling 显示，MoE 前向大致被 all-to-all 通信与专家计算二分，因此剩下最大的收益点，就是在**单个 kernel 内部**以细粒度把二者重叠起来。
+#### 今天的 MoE 层是怎么执行的
 
-**设计。** megakernel 把整条 MoE 前向路径 —— dispatch（all-to-all）→ FC1（gate/up grouped GEMM）→ SwiGLU → FC2（down grouped GEMM）→ combine（all-to-all）—— 融进**单个 persistent kernel**：
+一个 MoE 层是由八个左右算子组成的链条。router 为每个 token 打分并选出 top-k 专家；一次 permutation 把 token 按专家顺序聚拢；一次 all-to-all **dispatch** 把每个 token 发往持有其专家的 rank；两个 grouped GEMM（**FC1** gate/up 与 **FC2** down）以及夹在中间的 **SwiGLU** 完成专家计算；一次 all-to-all **combine** 把结果送回；最后的 unpermute-and-scale 把 top-k 的贡献归约回每个 token。
 
-- **角色专精的 workgroup。** persistent grid 被划分成不同角色（dispatch、compute、combine），让通信 workgroup 在推进的同时，compute workgroup 在同一设备上并发运行 MFMA GEMM。
-- **基于到达记分板（arrival scoreboard）的 tile 级重叠。** 不在 dispatch 与 compute 之间设全局 barrier，而是用 per-block 的到达标志，让 compute workgroup 在某个 tile 的 token 一落地就立刻对该 tile 开始 FC1 —— 把通信延迟藏进 GEMM 内部。
-- **零 permute 的 token 布局。** 收到的 token 按专家连续打包，使 grouped GEMM 可以直接索引，无需单独的 permutation 步骤。
-- **Epilogue 融合。** SwiGLU 融进 FC1 的 epilogue，FC2 的输出直接写入 combine 路径，消除中间激活对 HBM 的往返读写。
+上述每个阶段都是独立的 kernel。图 4 的上半部分展示了由此带来的后果。
 
-**AMD 专有工程实现。** 该设计把这一模式映射到 CDNA3/CDNA4（gfx942/gfx950）：用 direct-to-LDS 异步加载替代 TMA，MFMA 累加器驻留在 AGPR，用 `__hip_atomic_*` 的 release/acquire 加 LDS 信号替代 mbarrier/cluster 同步，用 workgroup 内的 wave specialization 替代 warpgroup 的寄存器切分，并用 XGMI/IPC 的 peer 传输替代 NVLink。
+![图 4：MoE 层 dataflow —— 今天的分离 kernel vs MegaMoE 的三个融合 kernel](imgs/megakernel_dataflow.png)
 
-**结果。** 手工调优的专家 grouped-GEMM 内层循环在 MI355X 上达到接近 MFMA 峰值的利用率，在代表性的 DeepSeek-V3 专家 shape 上逼近 BF16 roofline。融合的单 kernel 原型通过重叠 dispatch/compute/combine，相较分离 kernel 基线降低了 MoE 层的前向时间。
+**图 4：MoE 层 dataflow。上：今天的做法，每个阶段一个 kernel，每个边界都要走一次 HBM 往返。下：MegaMoE，三个 kernel，每次 all-to-all 都被融进喂给它的那个 grouped GEMM 中，以 tile 粒度重叠。** _（示意图；各阶段宽度为示意，非实测分阶段耗时）_
 
-<!---
-负责人 / 待补充：Xiaoming Peng、Zhen Huang。请用已获批的数字替换下方 [X]，
-若数字尚不可公开，则改写为定性表述。
---->
+#### 问题：通信与计算无法重叠
 
-在代表性的 DeepSeek-V3 专家 shape 上，相较分离的 dispatch/GEMM/combine 基线，融合 megakernel 在 MoE 前向层上取得最高 **[X]×** 的加速。 _（初步 —— 待最终确认）_
+这一结构带来两项开销，而且都不是「把某个 kernel 做快」所能解决的。
 
-![图 5：融合式 MoE megakernel —— 单个 persistent kernel 重叠 dispatch、grouped GEMM 与 combine](imgs/megakernel_dataflow.png)
+**通信与计算被串行化。** 集合通信库由 host 发起、以 kernel 为粒度：dispatch kernel 占住设备、跑完，之后 FC1 kernel 才被 launch。Profiling 显示 MoE 前向大致被 all-to-all 通信与专家计算二分，因此当二者分处不同 kernel 时，整层大约有一半时间矩阵核心是空闲的。跨 kernel 边界的粗粒度重叠 —— 把下一个 microbatch 的通信藏到当前 microbatch 的计算后面 —— 能挽回一部分，但它无法把某个 tile 自己的 dispatch 与它自己的 GEMM 重叠起来。
 
-**图 5：融合式 MoE megakernel —— 单个 persistent kernel 重叠 dispatch、grouped GEMM 与 combine** _（占位 —— 资源待补充）_
+**每一次 kernel 边界都是一次 HBM 往返。** permutation 写出一份重排后的 token 副本；FC1 把激活写出去，再由 SwiGLU 读回来；FC2 写出结果，combine 又读一遍。在 DeepSeek-V3 的专家粒度下 —— 256 个专家、top-8 路由 —— 整层是一条由相对小算子组成的长链，算子**之间**的访存量与 GEMM 本身所需的访存量处在同一量级。
 
-我们正在把这一 super-kernel 逐步落地为一个带 feature flag 的 Primus-Turbo 算子，扩展到 FP8/MXFP8 专家权重，并扩展到单节点之外的多节点场景。
+所以真正的收益点不是更快的 dispatch 或更快的 GEMM，而是把它们放进同一个 kernel，让一方藏进另一方内部，并让中间结果根本不落 HBM。
+
+#### 我们的做法：把每次 all-to-all 融进喂给它的 GEMM
+
+关键一步并不是把整层塌缩成一个 kernel，而是把每次 all-to-all 放进生产或消费其数据的那个 grouped GEMM **内部**，让通信有东西可藏。**MegaMoE** 用三个 kernel 做到这一点，如图 4 下半部分所示：
+
+1. **dispatch + FC1。** 入向 all-to-all 与 FC1 grouped GEMM 共享一个 kernel。CU grid 在 dispatch 与 compute 两个角色之间切分，于是 token 持续从对端 rank 流入的同时，矩阵核心已经在处理先落地的 tile。
+2. **SwiGLU。** 中间的一个小 kernel，同时对自身输出做量化，使 MXFP8 的 cast 不必成为一次单独的激活遍历。
+3. **FC2 + combine。** FC2 grouped GEMM 与出向 all-to-all 共享一个 kernel：GEMM 的 epilogue 把每个算完的 tile 推给它的归属 rank，归约在那里完成，于是结果是「边产出边发走」，而不是等整个 GEMM 结束。
+
+反向依照 dispatch/combine 的对偶关系镜像这一结构 —— `dispatch(dy)` 与 FC2 的数据梯度 GEMM 融合，FC1 的数据梯度与 combine 及归约融合 —— 另加两个变长 K 的权重梯度 kernel。
+
+有两个性质让重叠真正生效。其一，在每个融合 kernel 内部，CU grid 按角色切分，通信 workgroup 推进的同时，compute workgroup 在同一设备上运行 MFMA GEMM。其二，二者之间不设全局 barrier，而是用 per-tile 的到达标志：tile 一落地 compute 就能开始，tile 一算完就能立刻发往 combine —— 正是这一点把通信延迟变成了 GEMM 可以掩盖的东西，而不是必须等待的东西。这些 kernel 使用 [FlyDSL](https://github.com/ROCm/FlyDSL) 编写，并映射到 CDNA3/CDNA4（gfx942/gfx950）。
+
+对用户而言，这一切只是一个 feature flag（`use_turbo_mega_moe`）加一个精度开关（`turbo_mega_moe_precision: bf16 | mxfp8`）：MegaMoE 整体替换 Megatron 的 MoE 层，由 router 直接喂给融合算子。
+
+#### Kernel 级性能
+
+单独测量时，在 DeepSeek-V3 专家 shape 下（H=7168、I=2048、256 专家、top-8、EP8、每 rank 8192 token），融合层的表现如下：
+
+| Pass | BF16 | MXFP8 | 加速 |
+|---|---|---|---|
+| 前向 | 6.96 ms | 5.18 ms | 1.34× |
+| 反向 | 13.34 ms | 8.40 ms | 1.59× |
+| **前向 + 反向** | **19.94 ms** | **13.21 ms** | **1.51×** |
+
+反向获益最大，而这恰恰重要，因为反向本身也是整层中更大的那一半。在刻意构造的不均衡路由下该比值保持不变，说明加速并不依赖于各专家收到相同数量的 token。
+
+#### 端到端训练性能
+
+Kernel 级的收益只有在真实训练 step 中存活下来才有意义。我们训练 DeepSeek-V3（4 层 + MTP，单节点 8×MI355X 上 EP8，global batch 512，50 次迭代），只替换 MoE 实现：在每种精度内，两次运行仅相差一个 Megatron 参数，attention、optimizer、数据与随机种子全部固定。
+
+| 精度 | MoE 层 | ms / step | 单卡 TFLOP/s | 加速 |
+|---|---|---|---|---|
+| BF16 | DeepEP dispatcher + grouped GEMM | 9540 | 841 | — |
+| BF16 | **MegaMoE** | **8817** | **910** | **1.082×** |
+| MXFP8 | DeepEP dispatcher + grouped GEMM | 8432 | 951 | — |
+| MXFP8 | **MegaMoE** | **7508** | **1069** | **1.123×** |
+
+![MegaMoE 在 MI355X 上的端到端 step 时间与吞吐](imgs/megakernel_e2e_perf.png)
+
+![MegaMoE 相对 DeepEP 基线的训练 loss](imgs/megakernel_e2e_loss.png)
+
+**图 5：MegaMoE 在 DeepSeek-V3（4 层 + MTP）上的端到端表现，8×MI355X、EP8、global batch 512。上：稳态 step 时间与吞吐，取第 3–50 次迭代的中位数。下：50 次迭代的训练 loss。**
+
+step 级的收益必然小于 kernel 上实测的 1.51× —— MoE 层只是一个训练 step 的一部分 —— 但它确实活了下来：把单次调用的节省按一个 step 中的层数与 microbatch 数乘开，与实测的 step 时间差距落在 4% 以内。值得注意的是，**融合与低精度是叠乘的**：MegaMoE 在 MXFP8 下（1.123×）比在 BF16 下（1.082×）更值钱，因为把其余部分量化之后，MoE 在整个 step 中的占比反而提高了。融合同时降低了显存峰值 —— MXFP8 这一组是 142.4 GiB vs 150.1 GiB —— 因为 permute 后的 token 缓冲区从未被真正物化。
+
+图 5 中的 loss 曲线在整个运行过程中保持贴合，说明融合路径的训练行为与 dispatcher 路径一致；更长周期的验证仍在进行中。MegaMoE 目前仅支持 EP（TP=1）且为 dropless，DeepSeek-V3 上的全网 MXFP8 需要走 Turbo GEMM 路径（`use_turbo_gemm`、`use_turbo_grouped_gemm`）。
+
+MegaMoE 已经从研究原型毕业为一个带 feature flag 的 Primus-Turbo 算子，支持 MXFP8 专家权重与完整反向。我们正在把它扩展到单节点之外，并覆盖其余的 MoE 层变体。
 
 ---
 
