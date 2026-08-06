@@ -48,7 +48,7 @@ From a clone of the Primus repository, the same entrypoint is often invoked as `
 ### Container mode
 
 ```bash
-./runner/primus-cli container --image rocm/primus:v26.4 -- \
+./runner/primus-cli container --image rocm/primus:v26.5 -- \
   train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 ```

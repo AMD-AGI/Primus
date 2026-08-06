@@ -49,7 +49,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.4` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.5` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
 
 Image is picked in the priority order of `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -94,7 +94,7 @@ For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_
 ### 1. Launch the container
 
 ```bash
-docker pull rocm/primus:v26.4
+docker pull rocm/primus:v26.5
 docker run -it \
     --device /dev/dri --device /dev/kfd --device /dev/infiniband \
     --network host --ipc host \
@@ -102,7 +102,7 @@ docker run -it \
     --security-opt seccomp=unconfined --privileged \
     -v $HOME:$HOME --shm-size 128G \
     --name primus_training_env \
-    rocm/primus:v26.4
+    rocm/primus:v26.5
 ```
 
 Access the container later with `docker start primus_training_env && docker exec -it primus_training_env bash`.
@@ -192,7 +192,7 @@ MaxText uses a different Docker image than Megatron and TorchTitan, and it is **
 ### 1. Launch the container
 
 ```bash
-docker pull rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
+docker pull rocm/jax-training:maxtext-v26.5
 docker run -it \
     --device /dev/dri --device /dev/kfd \
     --network host --ipc host \
@@ -201,7 +201,7 @@ docker run -it \
     -v $HOME:$HOME -v $HOME/.ssh:/root/.ssh \
     --shm-size 64G \
     --name training_env \
-    rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0
+    rocm/jax-training:maxtext-v26.5
 ```
 
 If you run Primus directly on the host instead of inside the prebuilt Docker image, install the JAX dependencies first by `pip install -r requirements-jax.txt`.
@@ -219,7 +219,7 @@ Direct mode (inside the container)—pretraining Llama 3 8B on **MI355X**:
 Container mode—passing the MaxText image with `--image`:
 
 ```bash
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.5 \
   -- train pretrain \
   --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
 ```
