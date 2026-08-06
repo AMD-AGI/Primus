@@ -8,15 +8,15 @@
 # Global hook: opt into the SDMA/RCCL dispatch path for FSDP
 # all-gather.
 #
-# Single trigger -- the only knob:
+# Backend selector:
 #
-#   export SDMA_ALL_GATHER=1
+#   export FSDP_ALL_GATHER_BACKEND=rccl_sdma
 #   primus-cli direct -- train pretrain --config <any existing yaml>
 #
-# When SDMA_ALL_GATHER=1, this hook:
+# When the backend is rccl_sdma, this hook:
 #   1. Exports the zero-CTA env that RCCL needs to actually take the
 #      copy-engine path (NCCL_CTA_POLICY=2, NCCL_CUMEM_ENABLE=1, ...).
-#   2. Propagates SDMA_ALL_GATHER=1 into the launched torchrun children
+#   2. Propagates FSDP_ALL_GATHER_BACKEND=rccl_sdma into torchrun children
 #      so the companion Python patch's gate fires there too. See
 #      primus/backends/torchtitan/patches/sdma_symm_mem_collectives.py.
 #   3. Rebuilds the bundled LD_PRELOAD interposer
@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-if [[ "${SDMA_ALL_GATHER:-0}" != "1" ]]; then
+if [[ "${FSDP_ALL_GATHER_BACKEND:-}" != "rccl_sdma" ]]; then
     exit 0
 fi
 
@@ -48,11 +48,11 @@ echo "env.NCCL_CUMEM_ENABLE=1"
 echo "env.NCCL_LOCAL_REGISTER=0"
 echo "env.TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=true"
 
-# 2) Make the trigger visible to torchrun children so the Python patch
+# 2) Make the selector visible to torchrun children so the Python patch
 #    fires there. primus-cli direct doesn't inherit the host env into
 #    the child unless it's either CLI-passed via --env or hook-emitted
 #    via env.*.
-echo "env.SDMA_ALL_GATHER=1"
+echo "env.FSDP_ALL_GATHER_BACKEND=rccl_sdma"
 
 # 3) Always (re)build the interposer. The source is tiny and gcc is
 #    typically <1s; we don't bother with a staleness check so the .so
