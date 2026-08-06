@@ -53,8 +53,15 @@ __all__ = [
 _EPS = 1e-10
 
 # Query rows per chunk when building the KL target; see ``_target_chunk_size``.
+# Only used by the eager fallback -- the fused kernel needs no chunking, since
+# it never materialises the gathered pool in the first place.
 _TARGET_CHUNK_ENV = "PRIMUS_V4_DISTILL_TARGET_CHUNK"
 _TARGET_CHUNK_DEFAULT = 512
+
+# Resolved on first use by ``_triton_target_fn`` / ``_triton_kl_fn``.
+_UNSET = object()
+_TRITON_TARGET_FN = _UNSET
+_TRITON_KL_FN = _UNSET
 
 # Key under which the loss is reported. Shares the framework's MoE aux-loss
 # tracker, so it lands in the training log / TensorBoard / W&B next to the MoE
@@ -168,6 +175,43 @@ class V4IndexerLossAutoScaler(torch.autograd.Function):
         V4IndexerLossAutoScaler.main_loss_backward_scale = scale
 
 
+def _triton_target_fn():
+    """``(can_use, run)`` for the fused KL target, or ``None`` if unavailable.
+
+    Imported lazily so this module keeps working without Triton (the torch-only
+    unit tests) and so a broken kernel build degrades to the eager body rather
+    than breaking training.
+    """
+    global _TRITON_TARGET_FN
+    if _TRITON_TARGET_FN is _UNSET:
+        try:
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_target import (
+                can_use_triton_target,
+                target_distribution_triton,
+            )
+
+            _TRITON_TARGET_FN = (can_use_triton_target, target_distribution_triton)
+        except Exception:
+            _TRITON_TARGET_FN = None
+    return _TRITON_TARGET_FN
+
+
+def _triton_kl_fn():
+    """``(can_use, run)`` for the fused KL tail, or ``None`` if unavailable."""
+    global _TRITON_KL_FN
+    if _TRITON_KL_FN is _UNSET:
+        try:
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_kl import (
+                can_use_triton_kl,
+                indexer_kl_per_row_triton,
+            )
+
+            _TRITON_KL_FN = (can_use_triton_kl, indexer_kl_per_row_triton)
+        except Exception:
+            _TRITON_KL_FN = None
+    return _TRITON_KL_FN
+
+
 def _target_chunk_size(seq_len: int) -> int:
     """Query rows per chunk when building the KL target.
 
@@ -193,6 +237,7 @@ def _target_distribution(
     valid: torch.Tensor,
     row_valid: torch.Tensor,
     softmax_scale: float,
+    normalize: bool = False,
 ) -> torch.Tensor:
     """Head-summed attention distribution over the selected entries: ``[B, S, K]``.
 
@@ -214,6 +259,24 @@ def _target_distribution(
     K = topk_idxs.shape[-1]
     q = query.detach()
     kv = pool.detach()
+
+    # Fused path: indexes the pool inside the kernel, so the [B, S, K, D]
+    # gather -- 2.1 GB per CSA layer per microbatch at V4-Flash widths, and the
+    # single largest kernel this loss adds -- never reaches HBM. Falls through
+    # to the eager body below on shapes it does not cover.
+    fused = _triton_target_fn()
+    if fused is not None:
+        can_use, run = fused
+        if can_use(query=q, topk_idxs=topk_idxs):
+            return run(
+                query=q,
+                pool=kv,
+                topk_idxs=topk_idxs,
+                softmax_scale=softmax_scale,
+                normalize=normalize,
+                eps=_EPS,
+            )
+
     batch_idx = torch.arange(B, device=pool.device).view(B, 1, 1)
 
     def block(sl: slice) -> torch.Tensor:
@@ -232,12 +295,15 @@ def _target_distribution(
 
     chunk = _target_chunk_size(S)
     if chunk <= 0 or chunk >= S:
-        return block(slice(0, S))
+        out = block(slice(0, S))
+    else:
+        out = torch.empty((B, S, K), device=query.device, dtype=torch.float32)
+        for start in range(0, S, chunk):
+            stop = min(start + chunk, S)
+            out[:, start:stop] = block(slice(start, stop))
 
-    out = torch.empty((B, S, K), device=query.device, dtype=torch.float32)
-    for start in range(0, S, chunk):
-        stop = min(start + chunk, S)
-        out[:, start:stop] = block(slice(start, stop))
+    if normalize:
+        out /= out.sum(dim=-1, keepdim=True).clamp(min=_EPS)
     return out
 
 
@@ -283,6 +349,10 @@ def compute_indexer_distill_loss(
     valid = topk_idxs >= 0  # [B, S, K]
     row_valid = valid.any(dim=-1)  # [B, S]
 
+    # The head sum must span all heads before the target is renormalised, so the
+    # normalisation can only be folded into the kernel when no all-reduce is due.
+    sharded_heads = head_reduce_group is not None and torch.distributed.get_world_size(head_reduce_group) > 1
+
     # The KL target: the head-summed attention distribution over the same
     # entries. Fully detached (see the note above), so it is built under
     # ``no_grad`` and never has to materialise the dense per-head tensors.
@@ -294,18 +364,28 @@ def compute_indexer_distill_loss(
             valid=valid,
             row_valid=row_valid,
             softmax_scale=softmax_scale,
+            normalize=not sharded_heads,
         )
-        # The head sum must span all heads before the renormalisation below.
-        if head_reduce_group is not None and torch.distributed.get_world_size(head_reduce_group) > 1:
+        if sharded_heads:
             target = target.contiguous()
             torch.distributed.all_reduce(target, group=head_reduce_group)
-        # Renormalise to a distribution; L1 is enough since softmax outputs are
-        # already non-negative.
-        target /= target.sum(dim=-1, keepdim=True).clamp(min=_EPS)
+            # Renormalise to a distribution; L1 is enough since softmax outputs
+            # are already non-negative.
+            target /= target.sum(dim=-1, keepdim=True).clamp(min=_EPS)
 
     # The indexer side is the one that learns, so it stays attached. Rows with
     # zero legal entries are neutralised before the softmax and dropped after,
     # so a fully-masked row yields 0 rather than NaN and no gradient.
+    fused_kl = _triton_kl_fn()
+    if fused_kl is not None and fused_kl[0](target=target):
+        kl_per_row = fused_kl[1](
+            index_topk_scores=index_topk_scores,
+            target=target,
+            row_valid=row_valid,
+            eps=_EPS,
+        )
+        return kl_per_row.mean() * loss_coeff
+
     idx_row_mask = row_valid.view(B, S, 1)
     idx_logits = index_topk_scores.float().masked_fill(~idx_row_mask, 0.0)
     idx_probs = torch.softmax(idx_logits, dim=-1, dtype=torch.float32) * idx_row_mask.to(torch.float32)

@@ -688,11 +688,29 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 # overlap_grad_reduce / param_gather OFF and crippled cross-node
                 # DP scaling. So freeze unless the loss is actually enabled.
                 # PRIMUS_V4_INDEXER_TRAINABLE=1 still forces trainable.
-                if not self.indexer_distill_enabled and (
-                    os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
+                #
+                # PRIMUS_V4_DISTILL_FREEZE_INDEXER=1 additionally freezes the
+                # indexer *while still computing the loss*. That is not a
+                # training mode -- the indexer then learns nothing -- it exists
+                # to measure how much of the loss's cost is its backward, by
+                # A/B-ing against the same run without it.
+                _diag_freeze = os.environ.get("PRIMUS_V4_DISTILL_FREEZE_INDEXER", "0") == "1"
+                if _diag_freeze or (
+                    not self.indexer_distill_enabled
+                    and os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
                 ):
                     for _indexer_param in self.indexer.parameters():
                         _indexer_param.requires_grad_(False)
+
+                # Training the indexer costs ~7.2 ms/iter on the EP=8 proxy, of
+                # which only ~2 ms is arithmetic: the rest is the autograd engine
+                # walking the ~20 nodes its forward builds, per CSA layer. Handing
+                # the module to torch.compile lets AOTAutograd emit one fused
+                # backward instead. Opt-in while it is being evaluated; `topk` is
+                # data-dependent and will graph-break, which is fine -- everything
+                # before it is what costs.
+                if self.indexer_distill_enabled and os.environ.get("PRIMUS_V4_INDEXER_COMPILE", "0") == "1":
+                    self.indexer = torch.compile(self.indexer, dynamic=False)
 
         # ---- core attention (Turbo / TE flash) — dense layers only ----
         # Plan-3 P22: when the spec emits a ``core_attention`` submodule
