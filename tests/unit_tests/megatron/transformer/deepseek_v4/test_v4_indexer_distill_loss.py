@@ -1031,6 +1031,37 @@ def test_fused_window_lse_declines_full_causal():
     assert not can_use_triton_window_lse(query=case["query"], k_local=case["k_local"], swa_window=0)
 
 
+def test_layer_number_reaches_the_attention_module():
+    """The tracker is indexed by ``layer_number``, and 0 is its "unnumbered"
+    sentinel.
+
+    ``DeepseekV4HybridLayer`` knows its 1-based layer number but used not to
+    pass it to ``build_module`` for the attention, so every attention module
+    came up as layer 0 and ``log_indexer_distill_loss`` dropped the value on the
+    floor -- the loss was trained but never reported. Nothing else in the
+    forward depends on it, so only a test keeps it wired.
+    """
+    from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
+        DeepseekV4HybridLayer,
+    )
+
+    config = _make_v4_config(coeff=1e-2)
+    rope = _make_v4_rope(config)
+
+    for layer_idx in (0, 3, 7):
+        layer = DeepseekV4HybridLayer(
+            config=config,
+            layer_idx=layer_idx,
+            compress_ratio=4,
+            rope=rope,
+        )
+        assert layer.layer_number == layer_idx + 1
+        assert layer.self_attention.layer_number == layer.layer_number, (
+            "attention did not receive the layer number; the indexer loss will "
+            "be silently dropped by the tracker"
+        )
+
+
 def test_disabled_coeff_never_reaches_the_new_code(monkeypatch):
     """With the loss off, none of this machinery may run.
 
