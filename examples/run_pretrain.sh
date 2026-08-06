@@ -252,6 +252,10 @@ LOG_INFO_RANK0 ""
 # ----------------- Performance tuning -----------------
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+# Kimi K3 KDA depthwise conv: fla causal_conv1d replaces nn.Conv1d (MIOpen ref).
+# Only read by kimi_delta_attention.py; harmless for non-K3 models. Override with
+# K3P_KDA_CONV=default to keep the PyTorch path (debug / A-B).
+export K3P_KDA_CONV=${K3P_KDA_CONV:-fla}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 if [ "${BACKEND:-}" != "MaxText" ]; then
     export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
@@ -284,6 +288,7 @@ export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 LOG_INFO_RANK0 "==========Performance tuning=========="
 LOG_INFO_RANK0 "GPU_MAX_HW_QUEUES: $GPU_MAX_HW_QUEUES"
 LOG_INFO_RANK0 "ENABLE_NUMA_BINDING: $ENABLE_NUMA_BINDING"
+LOG_INFO_RANK0 "K3P_KDA_CONV: $K3P_KDA_CONV"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
 LOG_INFO_RANK0 "TORCH_NCCL_HIGH_PRIORITY: $TORCH_NCCL_HIGH_PRIORITY"
 LOG_INFO_RANK0 "NCCL_PXN_DISABLE: $NCCL_PXN_DISABLE"

@@ -1,0 +1,95 @@
+###############################################################################
+# Kimi K3 production shape (text backbone).
+#
+# Source: moonshotai/Kimi-K3 config.json -> text_config + linear_attn_config.
+# 93 layers, hidden 7168, 896 routed + 2 shared experts, top-16.
+###############################################################################
+
+extends:
+  - kimi_k3_base.yaml
+
+# ---------- core shape ----------
+# Depth is env-overridable so one file can run a shallower official-width stack:
+#   K3_NUM_LAYERS=24 ...  (runs 24 layers at hidden 7168 / 896 experts)
+# The *scaled* shapes (kimi_k3_curve=24L/2048h/32e, kimi_k3_debug=8L/1024h/8e)
+# stay as separate presets because they shrink hidden/experts/topk together,
+# not just depth -- see kimi_k3_curve.yaml / kimi_k3_debug.yaml.
+num_layers: ${K3_NUM_LAYERS:93}
+hidden_size: 7168
+num_attention_heads: 96
+num_query_groups: null
+# MUST be set explicitly: 7168 % 96 != 0, and arguments.py:1051-1053 asserts
+# hidden_size % num_attention_heads == 0 whenever kv_channels is None.
+kv_channels: 128                            # = v_head_dim
+ffn_hidden_size: 33792                      # intermediate_size (dense MLP + shared-expert base)
+
+# ---------- full-attention layers (MLA, NoPE) ----------
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_head_dim: 128                            # qk_nope_head_dim
+v_head_dim: 128
+# qk_pos_emb_head_dim is 64 (kimi_k3_base.yaml), the released qk_rope_head_dim.
+# Those dims are never rotated, but they are real learned width: they are
+# MQA-shared, produced by the tail of linear_kv_down_proj outside the
+# kv_lora_rank latent, and they set q_head_dim = 192 and hence
+# softmax_scale = 192 ** -0.5. Dropping them is a different architecture, not a
+# NoPE encoding of this one -- see the block in kimi_k3_base.yaml.
+
+# ---------- Kimi Delta Attention ----------
+# 96 heads x 128 dims -> q/k/v projections are 7168 -> 12288. No GQA.
+linear_num_key_heads: 96
+linear_num_value_heads: 96
+linear_key_head_dim: 128
+linear_value_head_dim: 128
+linear_conv_kernel_dim: 4
+
+# Per-layer interleave, 0-indexed, 1 = KDA / 0 = full attention.
+# The release ships explicit kda_layers / full_attn_layers lists (1-indexed)
+# rather than a ratio because the tail is irregular: 69 KDA / 24 full, with
+# full attention at 0-indexed 3, 7, 11, ..., 87 and then BOTH 91 and 92 --
+# the last block is K K F F, not K K K F.
+#   ([1]*3+[0])*22  -> layers 0..87,  full at 3, 7, ..., 87   (22 full)
+#   +[1]*3          -> layers 88..90, KDA
+#   +[0]*2          -> layers 91, 92, full                    ( 2 full)
+# 88 + 3 + 2 = 93 layers; 22 + 2 = 24 full; 69 KDA. Ratio 2.875 : 1.
+linear_attention_freq: "([1]*3+[0])*22+[1]*3+[0]*2"
+
+# ---------- attention residuals ----------
+# ceil(93 / 12) = 8 block checkpoints, appended at layers 0, 12, ..., 84.
+attn_res_block_size: 12
+
+# ---------- MoE ----------
+num_experts: 896
+moe_router_topk: 16
+moe_ffn_hidden_size: 3072                   # moe_intermediate_size
+# num_shared_experts: 2 -- MCore expresses shared experts as a width, so this
+# is num_shared_experts * moe_intermediate_size. Note the release derives the
+# shared-expert width from moe_intermediate_size, NOT from intermediate_size
+# (modeling_kimi_linear.py:798).
+moe_shared_expert_intermediate_size: 6144
+# Stable Latent MoE: routed experts run in a 3584-dim latent
+# (= hidden_size / 2), with an RMSNorm inside the bottleneck.
+routed_expert_hidden_size: 3584
+latent_moe_use_norm: true
+# first_k_dense_replace: 1 -- layer 0 is a dense MLP, every layer >= 1 is MoE.
+moe_layer_freq: "([0]*1+[1]*92)"
+
+# ---------- context ----------
+seq_length: 4096                            # training seq; overridden per experiment
+max_position_embeddings: 1048576            # 1M context
+
+# ---------- vocab ----------
+vocab_size: 163840
+make_vocab_size_divisible_by: 64
+# tie_word_embeddings: false in the release, i.e. a separate lm_head.
+untie_embeddings_and_output_weights: true
+
+# ---------- tokenizer ----------
+# HF checkpoint / tokenizer support is deliberately out of scope, so there is
+# no KimiK3Tokenizer to name. NullTokenizer keeps this yaml self-sufficient
+# (it only needs vocab_size); mock_data: true forces the same thing anyway
+# (mock_data_patches.py:33-45).
+tokenizer_type: NullTokenizer
+
+# ---------- init ----------
+init_method_std: 0.02

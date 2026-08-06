@@ -429,3 +429,90 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         )
 
         return ModuleSpec(module=(DeepseekV4LearnedRouter if learned else DeepseekV4HashRouter))
+
+
+class KimiK3SpecProvider(PrimusTurboSpecProvider):
+    """Kimi K3 provider rooted on PrimusTurboSpecProvider.
+
+    Same arrangement as :class:`DeepSeekV4SpecProvider`: the K3 spec
+    helpers take a provider instance rather than reaching for module-level
+    backend classes, so a single audit point decides whether TE or
+    PrimusTurbo wires the K3 modules. Resolve it through
+    ``primus.backends.megatron.core.models.kimi_k3.build_context.resolve_k3_provider``,
+    which caches one instance per config.
+
+    Unlike V4, Kimi K3 needs **no bespoke router**: its gate is
+    DeepSeek-V3's ``noaux_tc``, which upstream ``TopKRouter`` already
+    implements exactly (see the router notes in
+    ``kimi_k3/moe/k3_stable_latent_moe.py``). There is correspondingly no
+    ``k3_router_spec``.
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config
+
+    def k3_norm_module(self) -> type:
+        """Norm module used by K3 specs (block / layer / final / latent MoE).
+
+        Kimi K3 is RMSNorm throughout (``KimiRMSNorm``,
+        ``modeling_kimi_linear.py:226-236``).
+        """
+        return self.layer_norm(rms_norm=True)
+
+    def k3_mlp_activation_func(self) -> Optional[type]:
+        """Activation-func selection for K3 MLP / shared-expert specs.
+
+        Same gating contract as
+        :meth:`DeepSeekV4SpecProvider.v4_mlp_activation_func`:
+        ``MLP.__init__`` only reads ``submodules.activation_func`` when
+        ``config.use_te_activation_func`` is set (``mlp.py:226-229``), and
+        otherwise takes the callable from ``config.activation_func``.
+        Returning a class unconditionally would put a silently-ignored one in
+        the spec.
+
+        What it returns is **not** TE's activation op. Kimi K3's activation is
+        ``situ`` (``modeling_kimi_linear.py:64-82``), a fused GLU activation
+        with two different tanh soft-clamp bounds; TE has no equivalent. The
+        module slot is the only hook that sees the fused ``[..., 2I]`` tensor,
+        which is exactly why the K3 yamls set ``use_te_activation_func: true``
+        — the flag names TE only for historical reasons, and upstream reads it
+        as "use the module slot".
+        """
+        cfg = getattr(self, "config", None)
+        if cfg is None or not bool(getattr(cfg, "use_te_activation_func", False)):
+            return None
+        from primus.backends.megatron.core.transformer.kimi_k3.situ_activation import (
+            SituActivation,
+        )
+
+        return SituActivation
+
+    def k3_grouped_mlp_modules(
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
+    ):
+        """Grouped-MLP module selection for the K3 routed-expert path.
+
+        The routed experts run at ``routed_expert_hidden_size``; upstream
+        derives that width from ``config.moe_latent_size`` inside the
+        grouped module itself (``experts.py:185,203-208``), so no
+        width-carrying config clone is needed here.
+
+        The ``activation_func`` slot does have to be filled, though.
+        ``TEGroupedMLP`` reads it under the same
+        ``config.use_te_activation_func`` gate as plain ``MLP``
+        (``experts.py:196-199``) and applies it to the fused post-``fc1``
+        tensor (``:272-275``). Leaving it ``None`` with the flag set would fall
+        back to ``config.activation_func`` — ``F.silu`` — applied to the whole
+        ``[..., 2I]`` tensor, which is both the wrong activation and the wrong
+        width for ``linear_fc2``. The base provider does not fill it, so K3
+        does.
+        """
+        module, submodules = self.grouped_mlp_modules(
+            moe_use_grouped_gemm=moe_use_grouped_gemm,
+            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        )
+        activation_func = self.k3_mlp_activation_func()
+        if activation_func is not None and submodules is not None:
+            submodules.activation_func = activation_func
+        return module, submodules
