@@ -1496,6 +1496,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # kernel the layer dispatches to, without threading a second return
         # value through all of them.
         if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            # k_local / sink / swa_window let the target use the same joint
+            # denominator the attention below does: this layer runs one softmax
+            # over [window, sparse, sink], so the target for the sparse part is
+            # a conditional of that, not a softmax over the sparse part alone.
             indexer_loss = compute_indexer_distill_loss(
                 index_topk_scores=topk_scores,
                 topk_idxs=topk_idxs,
@@ -1504,6 +1508,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 softmax_scale=self._attention_scale(),
                 loss_coeff=self.indexer_distill_coeff,
                 head_reduce_group=self._indexer_loss_head_group(),
+                k_local=k_local_bh,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
             )
             self.last_indexer_distill_loss = indexer_loss.detach()
             pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)
