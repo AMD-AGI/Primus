@@ -706,9 +706,19 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 # which only ~2 ms is arithmetic: the rest is the autograd engine
                 # walking the ~20 nodes its forward builds, per CSA layer. Handing
                 # the module to torch.compile lets AOTAutograd emit one fused
-                # backward instead. Opt-in while it is being evaluated; `topk` is
-                # data-dependent and will graph-break, which is fine -- everything
-                # before it is what costs.
+                # backward instead. `topk` is data-dependent and will graph-break,
+                # which is fine -- everything before it is what costs.
+                #
+                # Off by default, and not merely because it is unproven: on 4
+                # nodes it deadlocks when the fused distillation kernels are also
+                # on. The run never reaches iteration 1 and one rank sits in
+                # MegaMoE's dispatch prologue reporting
+                # `xgmi_barrier stuck: signal=5 != target=8`, with no traceback.
+                # Either half alone is fine -- fusion alone measured 9056 ms/iter
+                # and compile alone 10285 ms against a 10555 ms unoptimised
+                # baseline -- so the fusion is where the speedup is and this is
+                # worth only the remaining 2.6%. Do not enable it without
+                # re-testing the combination on the target node set.
                 if self.indexer_distill_enabled and os.environ.get("PRIMUS_V4_INDEXER_COMPILE", "0") == "1":
                     self.indexer = torch.compile(self.indexer, dynamic=False)
 
@@ -1498,6 +1508,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # kernel the layer dispatches to, without threading a second return
         # value through all of them.
         if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            # k_local / sink / swa_window let the target use the same joint
+            # denominator the attention below does: this layer runs one softmax
+            # over [window, sparse, sink], so the target for the sparse part is
+            # a conditional of that, not a softmax over the sparse part alone.
             indexer_loss = compute_indexer_distill_loss(
                 index_topk_scores=topk_scores,
                 topk_idxs=topk_idxs,
@@ -1506,6 +1520,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 softmax_scale=self._attention_scale(),
                 loss_coeff=self.indexer_distill_coeff,
                 head_reduce_group=self._indexer_loss_head_group(),
+                k_local=k_local_bh,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
             )
             self.last_indexer_distill_loss = indexer_loss.detach()
             pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)

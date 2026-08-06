@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 
 import pytest
 
@@ -641,3 +642,529 @@ def test_no_indexer_loss_in_eval(monkeypatch):
         attn(hidden, position_ids)
 
     assert attn.last_indexer_distill_loss is None
+
+
+# ---------------------------------------------------------------------------
+# The target is a conditional of the layer's joint softmax
+# ---------------------------------------------------------------------------
+#
+# A CSA layer takes one softmax over [sliding window, sparse compressed, sink].
+# The distribution it places on the compressed entries is therefore a
+# conditional of that joint softmax, and the share of a head's mass that gets
+# there is below one and differs per head. These tests pin the target to the
+# joint softmax the reference op (``eager_v4_csa_attention``) actually computes,
+# rather than to a softmax taken over the compressed entries on their own.
+
+
+def _joint_softmax_target(*, query, k_local, pool, topk_idxs, sink, swa_window, scale):
+    """Reference target: one joint softmax, keep the sparse block, sum heads.
+
+    Deliberately written the long way -- materialise the whole
+    ``[B, H, S, S + K + 1]`` logit tensor and softmax it once -- so it mirrors
+    ``eager_v4_csa_attention`` step for step and shares no code with the
+    implementation under test.
+    """
+    B, H, S, _ = query.shape
+    K = topk_idxs.shape[-1]
+    window = swa_window if swa_window > 0 else S
+
+    local_logits = torch.matmul(query, k_local.transpose(-1, -2)).float() * scale
+    i = torch.arange(S).view(-1, 1)
+    j = torch.arange(S).view(1, -1)
+    dist = i - j
+    local_logits = local_logits.masked_fill(~((dist >= 0) & (dist < window)), float("-inf"))
+
+    gathered = pool[torch.arange(B).view(B, 1, 1), topk_idxs.clamp_min(0)]
+    sparse_logits = torch.einsum("bhsd,bskd->bhsk", query, gathered).float() * scale
+    sparse_logits = sparse_logits.masked_fill(~(topk_idxs >= 0).unsqueeze(1), float("-inf"))
+
+    parts = [local_logits, sparse_logits]
+    if sink is not None:
+        parts.append(sink.float().view(1, H, 1, 1).expand(B, H, S, 1))
+    probs = torch.softmax(torch.cat(parts, dim=-1), dim=-1)
+
+    target = probs[..., S : S + K].sum(dim=1)  # head-sum -> [B, S, K]
+    return target / target.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+
+
+def _distill_target(*, query, pool, topk_idxs, scale, nc_lse):
+    """``_target_distribution`` with the masks the loss entry point derives."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        _target_distribution,
+    )
+
+    valid = topk_idxs >= 0
+    return _target_distribution(
+        query=query,
+        pool=pool,
+        topk_idxs=topk_idxs,
+        valid=valid,
+        row_valid=valid.any(dim=-1),
+        softmax_scale=scale,
+        normalize=True,
+        nc_lse=nc_lse,
+    )
+
+
+def _target_case(*, S=12, K=4, H=4, P=6, window=5, with_sink=True, seed=0):
+    torch.manual_seed(seed)
+    B, Dh = 1, 8
+    query = torch.randn(B, H, S, Dh, dtype=_DTYPE)
+    k_local = torch.randn(B, H, S, Dh, dtype=_DTYPE)
+    pool = torch.randn(B, P, Dh, dtype=_DTYPE)
+    topk_idxs = torch.randint(0, P, (B, S, K), dtype=torch.long)
+    sink = torch.randn(H, dtype=_DTYPE) if with_sink else None
+    return {
+        "query": query,
+        "k_local": k_local,
+        "pool": pool,
+        "topk_idxs": topk_idxs,
+        "sink": sink,
+        "swa_window": window,
+        "scale": 1.0 / math.sqrt(Dh),
+    }
+
+
+@pytest.mark.parametrize("with_sink", [True, False])
+@pytest.mark.parametrize("window", [3, 5, 12])
+def test_target_matches_the_joint_softmax(with_sink, window):
+    """The target must equal the joint softmax's conditional on the sparse block."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _target_case(window=window, with_sink=with_sink)
+    expected = _joint_softmax_target(**case)
+
+    nc_lse = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=case["sink"],
+        swa_window=case["swa_window"],
+        softmax_scale=case["scale"],
+    )
+    got = _distill_target(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=case["topk_idxs"],
+        scale=case["scale"],
+        nc_lse=nc_lse,
+    )
+
+    torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_per_branch_softmax_disagrees_with_the_joint_one():
+    """Guard against the fix being a no-op.
+
+    Renormalising each head over the compressed entries alone gives every head
+    the same weight in the head sum; the joint softmax weights them by how much
+    of their attention actually reaches those entries. The two must differ, or
+    the ``nc_lse`` argument is not doing anything.
+    """
+    case = _target_case()
+    joint = _joint_softmax_target(**case)
+    per_branch = _distill_target(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=case["topk_idxs"],
+        scale=case["scale"],
+        nc_lse=None,
+    )
+
+    assert not torch.allclose(per_branch, joint, rtol=1e-2, atol=1e-3)
+
+
+def test_noncompressed_lse_matches_an_explicit_mask():
+    """``noncompressed_lse`` is chunked; check it against the unchunked form."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _target_case(S=20, window=7)
+    query, k_local, sink = case["query"], case["k_local"], case["sink"]
+    scale, window = case["scale"], case["swa_window"]
+    S = query.shape[2]
+
+    logits = torch.matmul(query, k_local.transpose(-1, -2)).float() * scale
+    i = torch.arange(S).view(-1, 1)
+    j = torch.arange(S).view(1, -1)
+    dist = i - j
+    logits = logits.masked_fill(~((dist >= 0) & (dist < window)), float("-inf"))
+    expected = torch.logsumexp(logits, dim=-1)
+    expected = torch.logaddexp(expected, sink.float().view(1, -1, 1))
+
+    for chunk in ("3", "7", "64"):
+        os.environ["PRIMUS_V4_DISTILL_WINDOW_CHUNK"] = chunk
+        try:
+            got = noncompressed_lse(
+                query=query,
+                k_local=k_local,
+                sink=sink,
+                swa_window=window,
+                softmax_scale=scale,
+            )
+        finally:
+            del os.environ["PRIMUS_V4_DISTILL_WINDOW_CHUNK"]
+        torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_joint_target_survives_fully_masked_rows():
+    """Rows with no legal compressed entry stay zero instead of going NaN.
+
+    With the joint denominator such a row's compressed log-sum-exp is ``-inf``,
+    and only the window and sink keep the denominator finite -- the arithmetic
+    that has to not divide ``-inf`` by ``-inf``.
+    """
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _target_case(S=8, K=3)
+    topk_idxs = case["topk_idxs"].clone()
+    topk_idxs[:, :2] = -1  # first two queries select nothing
+
+    nc_lse = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=case["sink"],
+        swa_window=case["swa_window"],
+        softmax_scale=case["scale"],
+    )
+    got = _distill_target(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=topk_idxs,
+        scale=case["scale"],
+        nc_lse=nc_lse,
+    )
+
+    assert torch.isfinite(got).all()
+    assert (got[:, :2] == 0).all()
+    torch.testing.assert_close(got[:, 2:].sum(dim=-1), torch.ones_like(got[:, 2:, 0]), rtol=1e-5, atol=1e-6)
+
+
+def test_loss_entry_point_uses_the_joint_denominator(monkeypatch):
+    """Passing ``k_local`` changes the loss; ``PRIMUS_V4_DISTILL_NONCOMP_LSE=0`` reverts it."""
+    case = _target_case()
+    B, _, S, _ = case["query"].shape
+    K = case["topk_idxs"].shape[-1]
+    torch.manual_seed(1)
+    index_scores = torch.randn(B, S, K, dtype=_DTYPE)
+
+    common = dict(
+        index_topk_scores=index_scores,
+        topk_idxs=case["topk_idxs"],
+        query=case["query"],
+        pool=case["pool"],
+        softmax_scale=case["scale"],
+        loss_coeff=1.0,
+    )
+    joint_kwargs = dict(k_local=case["k_local"], sink=case["sink"], swa_window=case["swa_window"])
+
+    monkeypatch.delenv("PRIMUS_V4_DISTILL_NONCOMP_LSE", raising=False)
+    per_branch = compute_indexer_distill_loss(**common)
+    joint = compute_indexer_distill_loss(**common, **joint_kwargs)
+    assert joint.item() != pytest.approx(per_branch.item(), rel=1e-3)
+
+    monkeypatch.setenv("PRIMUS_V4_DISTILL_NONCOMP_LSE", "0")
+    reverted = compute_indexer_distill_loss(**common, **joint_kwargs)
+    assert reverted.item() == pytest.approx(per_branch.item(), rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# The fused kernel takes the same joint denominator
+# ---------------------------------------------------------------------------
+#
+# The tests above run on CPU tensors, which `can_use_triton_target` declines, so
+# they only exercise the eager body. These pin the kernel to it.
+
+
+def _gpu_target_case(*, S=64, K=16, H=16, P=32, Dh=64, window=8, with_sink=True, seed=0):
+    """Shapes both fused kernels accept: ``K`` a power of two >= 16, ``H``
+    divisible by a legal head block, and ``Dh`` divisible by the target
+    kernel's 32-wide and the window kernel's 64-wide feature tiles."""
+    torch.manual_seed(seed)
+    dev = torch.device("cuda")
+    B = 1
+    query = torch.randn(B, H, S, Dh, device=dev, dtype=torch.bfloat16)
+    k_local = torch.randn(B, H, S, Dh, device=dev, dtype=torch.bfloat16)
+    pool = torch.randn(B, P, Dh, device=dev, dtype=torch.bfloat16)
+    topk_idxs = torch.randint(0, P, (B, S, K), device=dev, dtype=torch.long)
+    sink = torch.randn(H, device=dev, dtype=torch.float32) if with_sink else None
+    return {
+        "query": query,
+        "k_local": k_local,
+        "pool": pool,
+        "topk_idxs": topk_idxs,
+        "sink": sink,
+        "swa_window": window,
+        "scale": 1.0 / math.sqrt(Dh),
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+@pytest.mark.parametrize("with_sink", [True, False])
+def test_fused_target_matches_eager_with_joint_denominator(monkeypatch, with_sink):
+    """Kernel and eager body must agree once the joint denominator is in play."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _gpu_target_case(with_sink=with_sink)
+    nc_lse = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=case["sink"],
+        swa_window=case["swa_window"],
+        softmax_scale=case["scale"],
+    )
+    shared = dict(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=case["topk_idxs"],
+        scale=case["scale"],
+        nc_lse=nc_lse,
+    )
+
+    monkeypatch.setenv("PRIMUS_V4_DISTILL_TARGET_TRITON", "0")
+    eager = _distill_target(**shared)
+    monkeypatch.setenv("PRIMUS_V4_DISTILL_TARGET_TRITON", "1")
+    fused = _distill_target(**shared)
+
+    assert torch.isfinite(fused).all()
+    # bf16 inputs, so the tolerance is set by the inputs rather than the kernel;
+    # tl.dot accumulates in fp32 and is if anything the more accurate of the two.
+    torch.testing.assert_close(fused, eager, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+def test_fused_target_survives_fully_masked_rows():
+    """``exp(nclse - m)`` must not turn an empty row into NaN in the kernel."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _gpu_target_case()
+    topk_idxs = case["topk_idxs"].clone()
+    topk_idxs[:, :4] = -1
+
+    nc_lse = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=case["sink"],
+        swa_window=case["swa_window"],
+        softmax_scale=case["scale"],
+    )
+    fused = _distill_target(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=topk_idxs,
+        scale=case["scale"],
+        nc_lse=nc_lse,
+    )
+
+    assert torch.isfinite(fused).all()
+    assert (fused[:, :4] == 0).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+@pytest.mark.parametrize("with_sink", [True, False])
+@pytest.mark.parametrize("window", [8, 16, 64])
+def test_fused_window_lse_matches_eager(monkeypatch, with_sink, window):
+    """The window log-sum-exp kernel must agree with the chunked eager body.
+
+    This is the piece the whole fix costs, so it gets its own comparison rather
+    than only being checked through the target it feeds.
+    """
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_window_lse import (
+        can_use_triton_window_lse,
+    )
+
+    case = _gpu_target_case(window=window, with_sink=with_sink)
+    args = dict(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=case["sink"],
+        swa_window=window,
+        softmax_scale=case["scale"],
+    )
+    assert can_use_triton_window_lse(
+        query=case["query"], k_local=case["k_local"], swa_window=window
+    ), "the kernel should cover this shape, otherwise the test proves nothing"
+
+    monkeypatch.setenv("PRIMUS_V4_DISTILL_WINDOW_TRITON", "0")
+    eager = noncompressed_lse(**args)
+    monkeypatch.setenv("PRIMUS_V4_DISTILL_WINDOW_TRITON", "1")
+    fused = noncompressed_lse(**args)
+
+    assert torch.isfinite(fused).all()
+    torch.testing.assert_close(fused, eager, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+def test_fused_window_lse_declines_full_causal():
+    """A non-positive window means full causal, which the band cannot cover."""
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_window_lse import (
+        can_use_triton_window_lse,
+    )
+
+    case = _gpu_target_case()
+    assert not can_use_triton_window_lse(query=case["query"], k_local=case["k_local"], swa_window=0)
+
+
+def test_disabled_coeff_never_reaches_the_new_code(monkeypatch):
+    """With the loss off, none of this machinery may run.
+
+    ``v4_indexer_distill_loss_coeff`` defaults to 0, which is what every model
+    other than a deliberately-configured V4-Flash run uses. Poison the two
+    entry points the fix added so that touching them fails loudly, then drive a
+    full CSA forward.
+    """
+    monkeypatch.delenv("PRIMUS_V4_INDEXER_TRAINABLE", raising=False)
+    import primus.backends.megatron.core.transformer.indexer_distill_loss as idl
+
+    def _poisoned(*_a, **_kw):
+        raise AssertionError("the distillation path ran with the loss disabled")
+
+    monkeypatch.setattr(idl, "noncompressed_lse", _poisoned)
+    monkeypatch.setattr(idl, "compute_indexer_distill_loss", _poisoned)
+
+    torch.manual_seed(0)
+    attn = _make_csa_attention(coeff=0.0).to(_DTYPE)
+    attn.train()
+
+    B, S = 1, 8
+    hidden = torch.randn(B, S, attn.config.hidden_size, dtype=_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+    attn(hidden, position_ids)  # must not raise
+
+    assert attn.last_indexer_distill_loss is None
+
+
+def test_noncompressed_lse_full_causal_window():
+    """``swa_window <= 0`` means full causal, matching ``_local_mask``."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _target_case(S=10, window=0, with_sink=True)
+    query, k_local, sink, scale = (
+        case["query"],
+        case["k_local"],
+        case["sink"],
+        case["scale"],
+    )
+    S = query.shape[2]
+
+    logits = torch.matmul(query, k_local.transpose(-1, -2)).float() * scale
+    i = torch.arange(S).view(-1, 1)
+    j = torch.arange(S).view(1, -1)
+    logits = logits.masked_fill(i < j, float("-inf"))  # plain causal
+    expected = torch.logaddexp(torch.logsumexp(logits, dim=-1), sink.float().view(1, -1, 1))
+
+    got = noncompressed_lse(query=query, k_local=k_local, sink=sink, swa_window=0, softmax_scale=scale)
+    torch.testing.assert_close(got, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_window_wider_than_the_sequence_is_still_causal():
+    """A window past the end of the sequence must not reach beyond the diagonal."""
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _target_case(S=6, window=100, with_sink=False)
+    wide = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=None,
+        swa_window=100,
+        softmax_scale=case["scale"],
+    )
+    causal = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"],
+        sink=None,
+        swa_window=0,
+        softmax_scale=case["scale"],
+    )
+    torch.testing.assert_close(wide, causal, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+def test_fused_kernels_reject_mismatched_inputs():
+    """Bad shapes must raise rather than read out of bounds."""
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_target import (
+        target_distribution_triton,
+    )
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_window_lse import (
+        window_lse_triton,
+    )
+
+    case = _gpu_target_case()
+    B, H, S, _ = case["query"].shape
+
+    with pytest.raises(ValueError, match="noncompressed_lse must be"):
+        target_distribution_triton(
+            query=case["query"],
+            pool=case["pool"],
+            topk_idxs=case["topk_idxs"],
+            softmax_scale=case["scale"],
+            noncompressed_lse=torch.zeros(B, H, S + 1, device="cuda"),
+        )
+
+    with pytest.raises(ValueError, match="sink must hold"):
+        window_lse_triton(
+            query=case["query"],
+            k_local=case["k_local"],
+            sink=torch.zeros(H + 1, device="cuda"),
+            swa_window=case["swa_window"],
+            softmax_scale=case["scale"],
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+def test_fused_window_lse_declines_shapes_it_cannot_tile():
+    """A head_dim the feature tile does not divide falls back to eager."""
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_distill_window_lse import (
+        can_use_triton_window_lse,
+    )
+
+    odd = _gpu_target_case(Dh=48)  # 48 % 64 != 0
+    assert not can_use_triton_window_lse(
+        query=odd["query"], k_local=odd["k_local"], swa_window=odd["swa_window"]
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused kernel needs a GPU")
+def test_fused_target_handles_a_dominant_local_branch():
+    """A head that barely looks at the compressed entries must not produce NaN.
+
+    Scaling the window keys up drives ``nclse`` far above the compressed
+    logits, which is exactly the case the kernel's clamp exists for: the head's
+    compressed share underflows to zero, and zero is the right answer.
+    """
+    from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+        noncompressed_lse,
+    )
+
+    case = _gpu_target_case()
+    nc_lse = noncompressed_lse(
+        query=case["query"],
+        k_local=case["k_local"] * 100.0,
+        sink=case["sink"],
+        swa_window=case["swa_window"],
+        softmax_scale=case["scale"],
+    )
+    fused = _distill_target(
+        query=case["query"],
+        pool=case["pool"],
+        topk_idxs=case["topk_idxs"],
+        scale=case["scale"],
+        nc_lse=nc_lse,
+    )
+
+    assert torch.isfinite(fused).all()
