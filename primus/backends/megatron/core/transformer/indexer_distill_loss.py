@@ -127,6 +127,10 @@ def log_indexer_distill_loss(
     an explicit zero to keep the key present everywhere without changing the
     sum.
 
+    Writing the key here is necessary but not sufficient: ``training_log`` only
+    reduces and reports the keys in its own ``track_names`` list, which the
+    ``megatron.deepseek_v4.indexer_distill_loss_logging`` patch extends.
+
     The reported value is the per-layer sum divided by the layer count (the
     denominator ``track_moe_metrics`` applies to every tracked loss), not
     divided by the number of CSA layers.

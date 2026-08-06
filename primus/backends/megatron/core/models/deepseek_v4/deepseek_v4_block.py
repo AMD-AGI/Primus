@@ -439,6 +439,7 @@ def _build_attention(
     compress_ratio: int,
     rope: DualRoPE,
     config: Optional[DeepSeekV4TransformerConfig] = None,
+    layer_number: Optional[int] = None,
 ):
     """No-spec fallback used when the layer is built without an
     ``attention`` :class:`ModuleSpec`.
@@ -455,6 +456,7 @@ def _build_attention(
         config=config,
         rope=rope,
         compress_ratio=int(compress_ratio),
+        layer_number=layer_number,
     )
 
 
@@ -574,17 +576,23 @@ class DeepseekV4HybridLayer(TransformerLayer):
         else:
             self.input_layernorm = LocalRMSNorm(hidden_size, eps=norm_eps)
 
+        # ``layer_number`` has to reach the attention module: it indexes the
+        # aux-loss tracker, and the 0 it defaults to is the sentinel
+        # ``log_indexer_distill_loss`` rejects -- so without it the indexer
+        # distillation loss is computed every step and never reported.
         if use_spec_submodules and submodules.self_attention is not None:
             self.self_attention = build_module(
                 submodules.self_attention,
                 config=config,
                 rope=rope,
+                layer_number=self.layer_number,
             )
         else:
             self.self_attention = _build_attention(
                 compress_ratio=self.compress_ratio,
                 rope=rope,
                 config=config,
+                layer_number=self.layer_number,
             )
 
         if use_spec_submodules and submodules.pre_mlp_layernorm is not None:
