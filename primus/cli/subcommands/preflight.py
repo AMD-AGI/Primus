@@ -13,6 +13,7 @@ Usage:
     primus-cli preflight --gpu                        # GPU info only
     primus-cli preflight --network                    # Network info only
     primus-cli preflight --perf-test                  # Perf tests only (skip info)
+    primus-cli preflight --mori                       # MORI runtime build + smoke
 """
 
 from __future__ import annotations
@@ -24,6 +25,11 @@ def run(args: Any, extra_args: List[str]) -> None:
     """
     Entry point for the 'preflight' subcommand.
     """
+    if getattr(args, "mori", False):
+        from primus.tools.preflight.mori_preflight import run_mori_preflight
+
+        raise SystemExit(run_mori_preflight(args, extra_args))
+
     from primus.tools.preflight.preflight_perf_test import run_preflight
 
     if extra_args:
@@ -43,6 +49,7 @@ def register_subcommand(subparsers):
         primus-cli preflight --gpu                        # GPU info only
         primus-cli preflight --network                    # Network info only
         primus-cli preflight --perf-test                  # Perf only
+        primus-cli preflight --mori                       # MORI runtime build + smoke
     """
     from primus.tools.preflight.preflight_args import add_preflight_parser
 

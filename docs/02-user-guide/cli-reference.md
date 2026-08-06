@@ -165,6 +165,7 @@ These run under `primus/cli/main.py` unless you change `--script` in direct mode
 | `train posttrain --config <yaml>` | Post-training (SFT or LoRA-style workflows; same top-level flags as pretrain in the parser). |
 | `benchmark <suite> [args]` | Performance microbenchmarks (see table below). |
 | `preflight [--host] [--gpu] [--network] [--perf-test]` | Cluster and node diagnostics. |
+| `preflight --mori [MORI options]` | Run NIC configuration checking, build MORI and do MORI single/cross node test. Recommended if you plan to enable MORI for training. |
 | `projection memory --config <yaml>` | Memory estimation from a merged config. |
 | `projection performance --config <yaml>` | Performance projection from a merged config. |
 | `projection both --config <yaml>` | Single benchmark → both performance and memory projections (cluster sizing). |
@@ -208,6 +209,7 @@ Within a chosen file, nested keys follow normal YAML structure. Slurm and contai
 | Container pretrain | `./runner/primus-cli container --volume /data:/data -- train pretrain --config /data/exp.yaml` |
 | Slurm training | `./runner/primus-cli slurm srun -N 4 -- train pretrain --config exp.yaml` |
 | Preflight (fast) | `./runner/primus-cli slurm srun -N 4 -- preflight --host --gpu --network` |
+| MORI preflight | `./runner/primus-cli direct -- preflight --mori` |
 | Inspect launch command | `./runner/primus-cli --dry-run direct -- train pretrain --config exp.yaml` |
 | Dry-run Slurm | `./runner/primus-cli --dry-run slurm srun -N 2 -- train pretrain --config exp.yaml` |
 

@@ -49,6 +49,7 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         primus-cli preflight --gpu                    # GPU info only
         primus-cli preflight --network                # Network info only
         primus-cli preflight --gpu --network          # GPU + Network info
+        primus-cli preflight --mori                   # MORI runtime build + smoke
         primus-cli preflight --perf-test              # Perf only, all tests
         primus-cli preflight --quick                  # Perf only, fast preset
         primus-cli preflight --tests gemm             # Perf only, GEMM only
@@ -228,5 +229,82 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         dest="save_pdf",
         action="store_false",
         help="Disable PDF report generation.",
+    )
+
+    # MORI preflight is an exclusive orchestration mode. It runs once per node
+    # (not once per GPU), builds MORI inside a privileged runtime container,
+    # and executes local plus optional cross-node all-gather correctness tests.
+    mori = parser.add_argument_group("MORI runtime preflight")
+    mori.add_argument(
+        "--mori",
+        action="store_true",
+        help="Run MORI NIC diagnostics, runtime source build, and all-gather smoke. "
+        "Cannot be combined with standard info/perf selectors.",
+    )
+    mori.add_argument(
+        "--mori-base-image",
+        default=("unifiedtrainingdockers.azurecr.io/utd/nightly:" "primus_the_rock_rocm7.15_20260728"),
+        help="Base image pulled by MORI preflight.",
+    )
+    mori.add_argument(
+        "--mori-repo",
+        default="https://github.com/ROCm/mori.git",
+        help="MORI git repository.",
+    )
+    mori.add_argument(
+        "--mori-ref",
+        default="12d1bc32d0c93dcd5062e74f4e0f772e36e1aac4",
+        help="Pinned MORI git revision to build.",
+    )
+    mori.add_argument(
+        "--mori-max-jobs",
+        type=int,
+        default=32,
+        help="Maximum parallel MORI build jobs.",
+    )
+    mori.add_argument(
+        "--mori-smoke-numel",
+        type=int,
+        default=67108864,
+        help="BF16 elements per rank in MORI all-gather smokes " "(default: 67108864 = 128 MiB).",
+    )
+    mori.add_argument(
+        "--mori-keep-container",
+        action="store_true",
+        help="Keep the temporary build container after preflight.",
+    )
+    mori.add_argument(
+        "--mori-log-dir",
+        default=None,
+        help="MORI phase-log directory. Defaults under --dump-path.",
+    )
+    mori.add_argument(
+        "--mori-nodes",
+        default=None,
+        help="General multi-node target: comma-separated hosts, Slurm hostlist, "
+        "or @file. Each node runs full diagnostics/build/local smoke before "
+        "the N-node all-gather.",
+    )
+    mori.add_argument(
+        "--mori-master-addr",
+        default=None,
+        help="Master IP for the N-node smoke (auto-detected when unset).",
+    )
+    mori.add_argument(
+        "--mori-master-port",
+        type=int,
+        default=29610,
+        help="torchrun rendezvous port for the N-node MORI smoke.",
+    )
+    mori.add_argument(
+        "--mori-socket-ifname",
+        default=None,
+        help="Bootstrap interface for the N-node smoke.",
+    )
+    mori.add_argument(
+        "--mori-gid-index",
+        type=int,
+        default=None,
+        help="RCCL RoCEv2 GID index for the N-node smoke.",
     )
     return parser
