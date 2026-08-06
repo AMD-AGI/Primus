@@ -33,7 +33,8 @@ def _resolve_legacy_ckpt_file(ckpt_dir: str, core_mpu) -> str:
     tracker = os.path.join(base, "latest_checkpointed_iteration.txt")
     if os.path.isfile(tracker):
         try:
-            content = open(tracker).read().strip()
+            with open(tracker) as f:
+                content = f.read().strip()
         except Exception:
             content = ""
         if content == "release":

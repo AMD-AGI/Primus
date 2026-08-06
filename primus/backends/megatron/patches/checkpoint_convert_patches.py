@@ -83,9 +83,15 @@ def patch_fused_kernels_noop_on_rocm(ctx: PatchContext):
                     "[Patch:megatron.checkpoint_convert.fused_kernels_rocm_noop]   "
                     "ROCm/HIP detected -> skipping legacy fused_kernels build"
                 )
-                return
-        except Exception:
-            pass
+                return None
+        except Exception as e:
+            # Tolerate a failed ROCm/CUDA probe (e.g. an unexpected torch layout):
+            # fall back to the original loader rather than masking a real build.
+            log_rank_0(
+                "[Patch:megatron.checkpoint_convert.fused_kernels_rocm_noop]   "
+                f"ROCm probe failed ({type(e).__name__}: {e}); using original loader"
+            )
+            return _orig_load(args)
         return _orig_load(args)
 
     _rocm_safe_load._primus_rocm_wrapped = True
