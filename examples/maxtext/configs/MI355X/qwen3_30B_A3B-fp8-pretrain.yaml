@@ -1,0 +1,51 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-fp8-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: qwen3_30B_A3B.yaml
+    overrides:
+      run_name: "qwen3_30b_a3b_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: -1
+
+      # training
+      max_target_length: 8192
+      per_device_batch_size: 4
+      remat_policy: "minimal"
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1
+
+      # quantization (fp8)
+      quantization: "fp8"
+
+      # v26.6 fp8-MoE fix: the legacy per-module linen Fp8Einsum requires an active
+      # Linen binding scope. v26.6 flipped base.yml pure_nnx_decoder false->true, which
+      # runs the decoder in pure-NNX and invokes Fp8Einsum unbound -> crash. Pinning the
+      # decoder back to the bridged path restores the v26.5 fp8-MoE behavior.
+      pure_nnx_decoder: false

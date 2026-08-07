@@ -1,0 +1,22 @@
+extends:
+  - model_base.yaml
+
+# Gemma 4 26B (MoE, 128 experts / 8 active). Architecture comes from MaxText's
+# configs/models/gemma4-26b.yml (selected via model_name).
+#
+# ATTENTION LIMITATION (validated on gfx950 / jax_the_rock_ci_45156b7 + jaxlib 0.10.0):
+# The efficient attention kernels crash natively during XLA compile for gemma4's
+# head_dim=256 + bidirectional sliding-window attention (fails even at
+# per_device_batch_size=1; not a memory issue). The reference 'dot_product'
+# attention works: on maxtext release/v26.6 gemma4-26b (MoE) trains cleanly
+# (validated in the MAD sweep at ~117 TFLOP/s/gpu, seq 4096). gemma4 does NOT run
+# on maxtext v26.5. The MI355X pretrain example config sets attention=dot_product
+# and a reduced seq length. See gemma4_31B.yaml for details. NOTE: fp8 MoE is
+# additionally blocked on v26.6 by an nnx/AQT einsum bug (CallCompactUnboundModuleError).
+model_name: "gemma4-26b"
+
+# Gemma 4 is not published on HF; synthetic pretraining generates data from
+# vocab_size (262144) and does not load a tokenizer. Point at the bundled
+# Gemma 3 SentencePiece tokenizer (same vocab) for any non-data code paths.
+tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.gemma3"
+tokenizer_type: "sentencepiece"

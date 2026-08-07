@@ -1,0 +1,89 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2.1_14b-pretrain}
+workspace: ./output
+
+# Per-config environment (ported from base_wan_14B_env.sh). See the 1.3B config
+# for the rationale; TrainRuntime applies this before JAX/XLA init.
+env:
+  KERAS_BACKEND: "jax"
+  JAX_SPMD_MODE: "allow_all"
+  JAX_TRACEBACK_FILTERING: "off"
+  JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
+  # Persist the XLA compilation cache on the bind-mounted workspace (NFS) instead
+  # of the ephemeral in-container /app/.cache/jax. The WAN fused-attention graph
+  # (long video sequence + autotune_level=5) can take 30-50 min to compile on a
+  # cold cache; without persistence every run recompiles from scratch and can
+  # exceed the launcher timeout before a single step runs. /myworkspace is the
+  # container bind-mount of the repo root.
+  JAX_COMPILATION_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_14b"
+  MIOPEN_CUSTOM_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_14b/miopen"
+  TOKENIZERS_PARALLELISM: "1"
+  SKIP_GCS: "1"
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
+  TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
+  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  # ROCm/HIP + RCCL/NCCL knobs. These MUST match the verified-good
+  # base_wan_14B_env.sh: dropping NCCL_PROTO=Simple / HSA_NO_SCRATCH_RECLAIM=1 /
+  # GPU_MAX_HW_QUEUES / HIP_FORCE_DEV_KERNARG / RCCL_MSCCL_ENABLE caused an RCCL
+  # init hang (GPUs 0%, CPU busy-wait) during model construction.
+  HSA_FORCE_FINE_GRAIN_PCIE: "1"
+  HSA_NO_SCRATCH_RECLAIM: "1"
+  GPU_MAX_HW_QUEUES: "2"
+  HIP_FORCE_DEV_KERNARG: "1"
+  RCCL_MSCCL_ENABLE: "0"
+  # wan2.1_14b fix (v26.6): the 14B graph makes RCCL instantiate 448 collective
+  # channels, exceeding WarpSpeed's 256-channel ceiling. RCCL warns
+  # "WarpSpeed does not support more than 256 channels ... To avoid hang, run with
+  # RCCL_WARP_SPEED_AUTO=0" and the launcher then dies at comm-init. Disable
+  # WarpSpeed auto for this config only (mirrors the MaxText gfx950 default in
+  # primus/backends/maxtext/env_spec.py). The smaller wan2.1_1.3b/flux graphs stay
+  # under 256 channels, so their known-good baseline env is left untouched.
+  RCCL_WARP_SPEED_AUTO: "0"
+  NCCL_MAX_NCHANNELS: "112"
+  NCCL_IB_TC: "41"
+  NCCL_IB_SL: "0"
+  NCCL_DEBUG: "WARN"
+  NCCL_PROTO: "Simple"
+  LIBTPU_INIT_ARGS: ""
+  NVTE_FUSED_ATTN: "1"
+  NVTE_FUSED_ATTN_CK: "1"
+  NVTE_FUSED_ATTN_AOTRITON: "0"
+  NVTE_CK_USES_BWD_V3: "1"
+  NVTE_CK_USES_FWD_V3: "1"
+  NVTE_CK_IS_V3_ATOMIC_FP32: "0"
+  NVTE_CK_HOW_V3_BF16_CVT: "2"
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: "1"
+
+modules:
+  pre_trainer:
+    framework: maxdiffusion
+    config: pre_trainer.yaml
+
+    model: wan2.1_14b.yaml
+    maxdiffusion_entrypoint: wan
+
+    overrides:
+      run_name: "wan2.1_14b_pretrain"
+      output_dir: "./output/wan2.1_14b-pretrain"
+      base_output_directory: "./output/wan2.1_14b-pretrain"
+      max_train_steps: ${MAX_STEPS:20}
+      # Log throughput every step: the perf extractor parses the per-step
+      # "completed step: N, seconds: X, TFLOP/s/device: Y" line. The image
+      # default log_period=100 emits nothing at 20 steps, so perf came back empty
+      # and madengine silently reused a stale CSV.
+      log_period: 1
+      # Bound to run.sh's PERF_METRICS_FILE: the trainer writes per-step JSON
+      # metrics here (max_utils.write_metrics_locally). This is the reliable perf
+      # source; the per-step stdout "completed step:" line is dropped under the
+      # Primus launcher. Empty when unset -> no-op (upstream default).
+      metrics_file: "${PERF_METRICS_FILE:}"
+      dataset_type: "synthetic"
+      hardware: "gpu"
+      checkpoint_every: -1
+      enable_profiler: false
+      per_device_batch_size: 1
+      ici_fsdp_parallelism: 8
+      ici_data_parallelism: 1
+      ici_context_parallelism: 1
+      ici_tensor_parallelism: 1

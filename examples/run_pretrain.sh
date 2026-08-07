@@ -38,6 +38,26 @@ LOG_INFO_RANK0() {
 }
 LOG_ERROR() { echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*"; }
 
+# JAX backends (MaxText, MaxDiffusion) are launched WITHOUT torchrun, install
+# requirements-jax.txt, and skip the torch/NCCL-only env. Returns 0 (true) for
+# any JAX backend, matched case-insensitively against $BACKEND.
+_is_jax_backend() {
+    case "$(printf '%s' "${BACKEND:-}" | tr '[:upper:]' '[:lower:]')" in
+        maxtext|maxdiffusion) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# MaxDiffusion needs its own (separate-from-MaxText) JAX dep stack + source
+# patches. When running from a bare Primus checkout (no MAD maxdiffusion image),
+# examples/maxdiffusion/setup_maxdiffusion_env.sh installs/patches it in-venv.
+_is_maxdiffusion_backend() {
+    case "$(printf '%s' "${BACKEND:-}" | tr '[:upper:]' '[:lower:]')" in
+        maxdiffusion) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 EXAMPLE_FAULT_TOLERANCE() {
     for arg in "$@"; do
         case "$arg" in
@@ -92,14 +112,31 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 # shellcheck source=/dev/null
 source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
 
+# MaxDiffusion backend: own the JAX/torch dep stack + source location in Primus
+# (vendored third_party/maxdiffusion submodule), independent of the MaxText image.
+if _is_maxdiffusion_backend; then
+    export NVTE_FRAMEWORK="${NVTE_FRAMEWORK:-jax}"
+    export MAXDIFFUSION_PATH="${MAXDIFFUSION_PATH:-$PRIMUS_PATH/third_party/maxdiffusion}"
+    # Multi-node JAX coordination. MaxDiffusion's GPU init
+    # (max_utils.initialize_jax_for_gpu) only calls jax.distributed.initialize()
+    # when JAX_COORDINATOR_IP is set, using num_processes=NNODES / process_id=NODE_RANK
+    # (one process per node). Mirror the MaxText env_spec so a 2+ node run rendezvous
+    # instead of each node silently initializing as a standalone single-node job.
+    export JAX_COORDINATOR_IP="${JAX_COORDINATOR_IP:-$MASTER_ADDR}"
+    export JAX_COORDINATOR_PORT="${JAX_COORDINATOR_PORT:-$MASTER_PORT}"
+fi
+
 # PRIMUS_SKIP_PIP=1 skips the per-run pip install (deps already ship in the base
 # image). Use it when many ranks/nodes share one venv and concurrent pip installs
 # would race, or simply to speed up a warm container. Not keyed on the launcher.
 if [ "${PRIMUS_SKIP_PIP:-0}" == "1" ]; then
     LOG_INFO_RANK0 "PRIMUS_SKIP_PIP=1: skipping pip install (deps from image)"
+elif _is_maxdiffusion_backend; then
+    LOG_INFO_RANK0 "MaxDiffusion backend: setting up maxdiffusion env from Primus ..."
+    bash "$PRIMUS_PATH/examples/maxdiffusion/setup_maxdiffusion_env.sh"
 else
     LOG_INFO_RANK0 "Pip installing required packages ..."
-    if [ "${BACKEND:-}" != "MaxText" ]; then
+    if ! _is_jax_backend; then
         pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
     else
         pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
@@ -232,14 +269,18 @@ export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 
 # Prevent scratch memory from being reclaimed to stabilize large memory usage patterns (e.g., KV cache, MoE experts)
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
-# Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+# Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models.
+# MaxText intentionally skipped here: its adapter owns HSA_NO_SCRATCH_RECLAIM
+# (gfx942 => 1; unset on gfx950) via env_spec.py, so we must not pre-set it.
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+fi
 export RCCL_MSCCL_ENABLE=0
 export RCCL_MSCCLPP_ENABLE=0
 export RCCL_MSCCLPP_FORCE_ENABLE=0
 export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024))
 export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-if [ "${BACKEND:-}" != "MaxText" ]; then
+if ! _is_jax_backend; then
     export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
 fi
 
@@ -253,7 +294,7 @@ LOG_INFO_RANK0 ""
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-if [ "${BACKEND:-}" != "MaxText" ]; then
+if ! _is_jax_backend; then
     export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 fi
 
@@ -264,9 +305,16 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-0}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
-export NVTE_ROCM_ENABLE_MXFP8=1
+export NVTE_ROCM_ENABLE_MXFP8=${NVTE_ROCM_ENABLE_MXFP8:-1}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
+
+# NOTE (MaxText): all MaxText/JAX perf + arch env (XLA_FLAGS incl. the fp8 MoE
+# --xla_gpu_autotune_level fix, NVTE/HIP/HSA tunables, and the arch-gated
+# RCCL_WARP_SPEED_AUTO/HSA_NO_SCRATCH_RECLAIM) is owned by the Primus MaxText
+# backend adapter (primus/backends/maxtext/env_spec.py), applied in-process before
+# JAX init. This launcher intentionally sets NO MaxText perf/arch env so there is a
+# single source of truth. See primus/core/backend/env_registry.py.
 
 if [ "${PRIMUS_DETERMINISTIC:-}" == "1" ]; then
     export NCCL_ALGO="Ring"
@@ -376,7 +424,9 @@ fi
 
 
 # -------------------- Launch Training --------------------
-if [ "${BACKEND:-}" == "MaxText" ]; then
+if _is_jax_backend; then
+    # JAX backends (MaxText, MaxDiffusion) manage devices themselves; launch a
+    # single plain-python process (no torchrun).
     CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 else
     DISTRIBUTED_ARGS=(

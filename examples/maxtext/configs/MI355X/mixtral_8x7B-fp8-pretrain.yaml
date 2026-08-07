@@ -1,13 +1,12 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-fp8-pretrain}
 workspace: ./output
 
 # Per-config environment (single source of truth in Primus). TrainRuntime applies
 # this top-level `env:` before JAX/XLA init, overriding the base image's baked value.
-# mixtral_8x7B bs11 peaks ~270-274 GB / 288 GB HBM and needs a larger XLA client pool
-# than the image default (0.9); combined with moe_dispatch_no_expert_sharding it fits
-# on one GPU.
+# mixtral_8x7B bs11 peaks ~270-274 GB / 288 GB HBM and needs a larger XLA client pool than
+# the image default (0.9); combined with moe_dispatch_no_expert_sharding it fits on one GPU.
 env:
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
 
@@ -52,4 +51,12 @@ modules:
       max_target_length: 4096
       per_device_batch_size: 11
       remat_policy: "minimal"
-      moe_dispatch_no_expert_sharding: true
+
+      # quantization (fp8)
+      quantization: "fp8"
+
+      # v26.6 fp8-MoE fix: the legacy per-module linen Fp8Einsum requires an active
+      # Linen binding scope. v26.6 flipped base.yml pure_nnx_decoder false->true, which
+      # runs the decoder in pure-NNX and invokes Fp8Einsum unbound -> crash. Pinning the
+      # decoder back to the bridged path restores the v26.5 fp8-MoE behavior.
+      pure_nnx_decoder: false
