@@ -11,7 +11,7 @@ Core workflows and day-to-day usage.
 - [Node-smoke test instruction](node-smoke-test-instruction.md): screen a cluster fast and exclude bad nodes before launching a real training job
 - [Preflight](preflight.md): cluster diagnostics and environment validation
 - [Run preflight without a container](preflight-without-container.md): run cluster-diagnostic tool directly on the host
-- [Benchmarking](benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
+- [Micro-benchmarking](micro-benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Projection](projection.md): memory and performance projection tools
 - [Tuning agent](tuning-agent.md): LLM-driven search for an optimal training configuration (uses projection as an oracle)
 

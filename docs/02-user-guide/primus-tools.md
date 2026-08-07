@@ -8,7 +8,7 @@ point; follow a tool's link for the full reference.
 | Tool | Type | What it does | How to use |
 |------|------|--------------|------------|
 | [`train`](./pretraining.md) | CLI | Launch pretraining or post-training on any backend from a YAML configuration. | `primus-cli <mode> -- train pretrain --config <yaml>` |
-| [`benchmark`](./benchmarking.md) | CLI | GEMM, RCCL, and attention microbenchmarks for hardware and stack validation. | `primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096` |
+| [`benchmark`](./micro-benchmarking.md) | CLI | GEMM, RCCL, and attention microbenchmarks for hardware and stack validation. | `primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096` |
 | [`preflight`](./preflight.md) | CLI | Host, GPU, and network health checks before long jobs. | `primus-cli slurm srun -N 4 -- preflight --host --gpu --network` |
 | [`projection`](./projection.md) | CLI | Estimate per-GPU memory and throughput without occupying a full cluster. | `primus-cli direct -- projection both --config <yaml>` |
 | [Tuning agent](./tuning-agent.md) | Agent | LLM-driven search for a near-optimal training configuration, scored by projection. | `python -m primus.agents.tuning_agent --workload <yaml> --target-cluster <yaml>` |

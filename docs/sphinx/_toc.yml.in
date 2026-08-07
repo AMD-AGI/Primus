@@ -38,8 +38,8 @@ subtrees:
         title: Preflight diagnostics
       - file: 02-user-guide/preflight-without-container.md
         title: Run preflight without a container
-      - file: 02-user-guide/benchmarking.md
-        title: Benchmark suite
+      - file: 02-user-guide/micro-benchmarking.md
+        title: Micro-benchmarking suite
       - file: 02-user-guide/projection.md
         title: Memory and performance projection
       - file: 02-user-guide/tuning-agent.md

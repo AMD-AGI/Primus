@@ -2,7 +2,7 @@
 
 Post-training (supervised fine-tuning) adapts a pre-trained foundation model to new tasks or domains. In Primus, post-training runs through the **Megatron Bridge** backend using the `train posttrain` subcommand. Example YAML configurations live under `examples/megatron_bridge/configs/` in the [Primus repository](https://github.com/AMD-AGI/Primus).
 
-For YAML field details, see [Megatron Bridge parameters](../03-configuration-reference/megatron-bridge-parameters.md). For related tooling, see [Benchmark suite](./benchmarking.md), [Preflight diagnostics](./preflight.md), [Memory and performance projection](./projection.md).
+For YAML field details, see [Megatron Bridge parameters](../03-configuration-reference/megatron-bridge-parameters.md). For related tooling, see [Micro-benchmarking suite](./micro-benchmarking.md), [Preflight diagnostics](./preflight.md), [Memory and performance projection](./projection.md).
 
 ---
 
@@ -197,7 +197,7 @@ Sample command for running the post-training:
 
 1. Increase effective batch size where memory allows (`global_batch_size` / `micro_batch_size` tuning).
 2. Revisit TP/PP/CP for your cluster topology.
-3. Run [benchmarks](./benchmarking.md) or [preflight](./preflight.md) to isolate network or GPU issues.
+3. Run [benchmarks](./micro-benchmarking.md) or [preflight](./preflight.md) to isolate network or GPU issues.
 
 ### Configuration errors
 
@@ -211,6 +211,6 @@ Sample command for running the post-training:
 
 - [Megatron Bridge parameters](../03-configuration-reference/megatron-bridge-parameters.md)
 - [Native SFT / LoRA quick start](../04-technical-guides/native-sft-lora.md)
-- [Benchmark suite](./benchmarking.md)
+- [Micro-benchmarking suite](./micro-benchmarking.md)
 - [Preflight diagnostics](./preflight.md)
 - [Memory and performance projection](./projection.md)
