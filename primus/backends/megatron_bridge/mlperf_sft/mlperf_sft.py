@@ -53,12 +53,8 @@ class MLPerfSFTLogger:
         self._logger = MLPerfLogger()
         self._gbs = global_batch_size
         self._mbs = micro_batch_size
-        self._target_eval_loss = target_eval_loss or float(
-            os.getenv("MLLOG_TARGET_EVAL_LOSS", "0.925")
-        )
-        self._train_loss_log_freq = train_loss_log_freq or int(
-            os.getenv("MLLOG_TRAIN_LOSS_LOG_FREQ", "10")
-        )
+        self._target_eval_loss = target_eval_loss or float(os.getenv("MLLOG_TARGET_EVAL_LOSS", "0.925"))
+        self._train_loss_log_freq = train_loss_log_freq or int(os.getenv("MLLOG_TRAIN_LOSS_LOG_FREQ", "10"))
         self._block_start_time: Optional[float] = None
         self._block_start_samples: int = 0
         self._is_target_reached = False
@@ -83,7 +79,9 @@ class MLPerfSFTLogger:
         from mlperf_logging import mllog
 
         save_to_file = os.getenv("MLLOG_SAVE_TO_FILE", "1").lower() not in (
-            "0", "false", "no",
+            "0",
+            "false",
+            "no",
         )
         if save_to_file:
             out_dir = os.path.dirname(output_file)
@@ -111,12 +109,8 @@ class MLPerfSFTLogger:
             key=constants.SUBMISSION_PLATFORM,
             value=os.getenv("MLLOG_SUBMISSION_PLATFORM", "MI355X"),
         )
-        self._logger.log_event(
-            key=constants.SUBMISSION_STATUS, value="onprem"
-        )
-        self._logger.log_event(
-            key="target_accuracy", value=self._target_eval_loss
-        )
+        self._logger.log_event(key=constants.SUBMISSION_STATUS, value="onprem")
+        self._logger.log_event(key="target_accuracy", value=self._target_eval_loss)
 
         _KEY_MAP = {
             "global_batch_size": constants.GLOBAL_BATCH_SIZE,
@@ -156,12 +150,8 @@ class MLPerfSFTLogger:
         self._logger.log_end(key=constants.INIT_STOP)
         self._logger.log_start(key=constants.RUN_START)
         self._run_start_time = time.time()
-        self._logger.log_start(
-            key=constants.EPOCH_START, metadata={constants.SAMPLES_COUNT: 0}
-        )
-        self._logger.log_start(
-            key=constants.BLOCK_START, metadata={constants.SAMPLES_COUNT: 0}
-        )
+        self._logger.log_start(key=constants.EPOCH_START, metadata={constants.SAMPLES_COUNT: 0})
+        self._logger.log_start(key=constants.BLOCK_START, metadata={constants.SAMPLES_COUNT: 0})
         self._block_start_time = time.time()
         self._block_start_samples = 0
 
@@ -299,12 +289,8 @@ class MLPerfSFTLogger:
         config_filename: str = "",
         lowest_numerical_precision_linear: str = "",
     ) -> Dict[str, Any]:
-        train_samples = int(
-            np.load(os.path.join(data_root, "train.npy"), allow_pickle=True).shape[0]
-        )
-        eval_samples = int(
-            np.load(os.path.join(data_root, "validation.npy"), allow_pickle=True).shape[0]
-        )
+        train_samples = int(np.load(os.path.join(data_root, "train.npy"), allow_pickle=True).shape[0])
+        eval_samples = int(np.load(os.path.join(data_root, "validation.npy"), allow_pickle=True).shape[0])
 
         if data_parallel_size is not None and data_parallel_size > 0:
             dp_size = data_parallel_size
@@ -312,8 +298,10 @@ class MLPerfSFTLogger:
             dp_size = 1
             try:
                 import torch
+
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
                     from megatron.core import parallel_state
+
                     dp_size = parallel_state.get_data_parallel_world_size()
             except Exception:
                 pass

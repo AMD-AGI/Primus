@@ -31,7 +31,7 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 Use this only if you are **not** using **`run_with_docker.sh`** and want an interactive shell inside the image.
 
 ```bash
-docker pull rocm/primus:v26.4
+docker pull rocm/primus:v26.5
 
 docker run -it \
   --device=/dev/kfd \
@@ -50,7 +50,7 @@ docker run -it \
   --ulimit nofile=65535:65535 \
   -v /path/to/Primus:/workspace/Primus \
   -v /path/on/host/data:/data \
-  rocm/primus:v26.4
+  rocm/primus:v26.5
 ```
 
 Repo is at **`/workspace/Primus`** inside the container. Then follow [§4](#4-run-training-inside-an-existing-container).
@@ -94,7 +94,7 @@ cd /path/to/Primus
 export HF_TOKEN=hf_...                      # required: Llama-2-70b + GovReport hooks
 export DATADIR=/data/mlperf_llama2          # writable: dataset + checkpoint (host)
 export LOGDIR=/data/mlperf_llama2/results   # writable: trial logs + MLLOG (host)
-export CONT=rocm/primus:v26.4               # Primus ROCm image
+export CONT=rocm/primus:v26.5               # Primus ROCm image
 export DGXSYSTEM=MI355X_1x8x1               # selects config_${DGXSYSTEM}.sh
 export NEXP=1                               # use 10 for MLPerf submission runs
 
@@ -171,7 +171,7 @@ Variables you set most often:
 | **`HF_TOKEN`** | *(none)* | **Required.** Hugging Face token for Llama-2-70b + dataset hooks |
 | **`DATADIR`** | `$HOME/data/mlperf_llama2` | Host data + checkpoint tree (mounted at `/data`) |
 | **`LOGDIR`** | `${DATADIR}/results` | Host results (mounted at `/results`) |
-| **`CONT`** | `rocm/primus:v26.4` | Docker image |
+| **`CONT`** | `rocm/primus:v26.5` | Docker image |
 | **`DGXSYSTEM`** | `MI355X_1x8x1` | Suffix for `config_${DGXSYSTEM}.sh` |
 | **`NEXP`** | `1` | Number of timed trials (submission often uses **10**) |
 | **`SUBMISSION_QUIET`** | `0` | `1` → sets `PRIMUS_LOG_SUPPRESSION=1`, `MLPERF_VERBOSE_LOGS=0`, `PRIMUS_LOG_GPU_MEM=0`, `VERBOSE_TRAINING_LOG=0` |
