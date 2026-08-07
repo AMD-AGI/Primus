@@ -28,8 +28,8 @@ subtrees:
         title: Configuration system
       - file: 02-user-guide/pretraining.md
         title: Pretraining workflows
-      - file: 02-user-guide/training-recipes.md
-        title: Backend training recipes
+      - file: 02-user-guide/end-to-end-training-recipes.md
+        title: End-to-end training recipes
       - file: 02-user-guide/posttraining.md
         title: Post-training workflows
       - file: 02-user-guide/node-smoke-test-instruction.md

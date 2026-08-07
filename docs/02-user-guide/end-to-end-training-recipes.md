@@ -1,4 +1,4 @@
-# Backend training recipes
+# End-to-end training recipes
 
 Task-oriented, copy-paste commands for launching pretraining runs with each Primus backend on AMD Instinct™ GPUs.
 

@@ -35,7 +35,7 @@ Core workflows and day-to-day usage.
 - [CLI reference](./02-user-guide/cli-reference.md): `primus-cli` modes, flags, and subcommands
 - [Configuration system](./02-user-guide/configuration-system.md): YAML configuration model, presets, overrides, inheritance
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
-- [Backend training recipes](./02-user-guide/training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
 - [Post-training](./02-user-guide/posttraining.md): SFT and LoRA fine-tuning via Megatron Bridge
 - [Micro-benchmarking](./02-user-guide/micro-benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
@@ -108,7 +108,7 @@ For contributors and maintainers.
 | Browse all Primus tools | [Primus tools](./02-user-guide/primus-tools.md) |
 | Install Primus | [Installation](./01-getting-started/installation.md) |
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
-| Get an exact run command for my model/GPU | [Backend training recipes](./02-user-guide/training-recipes.md) |
+| Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |
