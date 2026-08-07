@@ -267,7 +267,18 @@ EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
   bash ./examples/run_pretrain.sh
 ```
 
-> The dependency bootstrap lives in `run_pretrain.sh`, not the CLI. Invoking `primus-cli` (`train pretrain`) directly assumes the MaxDiffusion stack is **already** installed in the current environment (e.g. a pre-baked image, or after you have run `setup_maxdiffusion_env.sh` once) — it does not install anything itself.
+### Quick start (container mode)
+
+`primus-cli` bootstraps the same environment: the `train/pretrain/maxdiffusion` prepare hooks run `setup_maxdiffusion_env.sh` before training and select the plain-python launcher (JAX drives every GPU from one process, so `torchrun` is never used).
+
+```bash
+./primus-cli container -- train pretrain \
+  --config examples/maxdiffusion/configs/MI300X/wan2.1_1.3b-pretrain.yaml --max_train_steps 10
+```
+
+> Container launches start from a clean image each time, so the setup runs on every launch. Wheels are cached under `$DATA_PATH/pip_cache` inside the mounted checkout, so only the first run pays for downloads. Set `PRIMUS_SKIP_PIP=1` to skip the step entirely on images that already ship the stack.
+
+> Step counts use `--max_train_steps` (the MaxDiffusion field name). `--steps` belongs to MaxText and is silently ignored here.
 
 ### Example configurations under `examples/maxdiffusion/configs/MI355X/`
 
