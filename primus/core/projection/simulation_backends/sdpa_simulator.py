@@ -158,6 +158,83 @@ _HW_PROFILES: Dict[str, GPUHardwareSpec] = {
     ),
 }
 
+# Default per-profile compute clocks (MHz) used to derive the scale factor when
+# ``--gpu-clock-mhz`` / ``PRIMUS_GPU_CLOCK_MHZ`` overrides the clock.
+_PROFILE_CLOCK_MHZ: Dict[str, int] = {
+    "mi300x": 2100,
+    "gfx942": 2100,
+    "mi325x": 2100,  # same gfx942 compute die as MI300X
+    "mi355x": 2100,
+    "gfx950": 2100,
+    "mi300a": 2100,
+}
+
+
+def _load_external_hw_profiles() -> None:
+    """Merge additional GPU compute profiles from external YAML files.
+
+    Profiles for architectures not shipped in-tree can be supplied via YAML files
+    whose directories are listed in the ``PRIMUS_HW_PROFILE_DIR`` env var
+    (comma/semicolon separated).  Each file has the form::
+
+        gpu_hardware_profiles:
+          <arch>:
+            peak_tflops_bf16: ...
+            peak_tflops_fp16: ...
+            peak_tflops_fp8: ...
+            hbm_bandwidth_gbps: ...
+            n_cu: ...
+            n_xcd: ...
+            base_clock_mhz: ...        # optional (for clock scaling)
+            aliases: [<name>, ...]     # optional
+
+    This function never raises: a missing dir / bad file is skipped so the
+    built-in default profiles always remain usable.
+    """
+    raw = os.getenv("PRIMUS_HW_PROFILE_DIR", "")
+    dirs = [d.strip() for d in raw.replace(";", ",").split(",") if d.strip()]
+    if not dirs:
+        return
+    try:
+        import glob
+
+        import yaml  # type: ignore[import-untyped]
+    except Exception:
+        return
+
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.yaml")) + glob.glob(os.path.join(d, "*.yml"))):
+            try:
+                with open(path, "r") as fh:
+                    doc = yaml.safe_load(fh) or {}
+                profiles = doc.get("gpu_hardware_profiles") or {}
+                for arch, fields in profiles.items():
+                    if not isinstance(fields, dict):
+                        continue
+                    arch_l = str(arch).lower().strip()
+                    spec = GPUHardwareSpec(
+                        peak_tflops_bf16=float(fields.get("peak_tflops_bf16", 0.0)),
+                        peak_tflops_fp16=float(fields.get("peak_tflops_fp16", 0.0)),
+                        peak_tflops_fp8=float(fields.get("peak_tflops_fp8", 0.0)),
+                        hbm_bandwidth_gbps=float(fields.get("hbm_bandwidth_gbps", 0.0)),
+                        n_cu=int(fields.get("n_cu", 304)),
+                        n_xcd=int(fields.get("n_xcd", 8)),
+                    )
+                    _HW_PROFILES[arch_l] = spec
+                    base_clock = fields.get("base_clock_mhz")
+                    if base_clock is not None:
+                        _PROFILE_CLOCK_MHZ[arch_l] = int(base_clock)
+                    for alias in fields.get("aliases", []) or []:
+                        alias_l = str(alias).lower().strip()
+                        _HW_PROFILES[alias_l] = spec
+                        if base_clock is not None:
+                            _PROFILE_CLOCK_MHZ[alias_l] = int(base_clock)
+            except Exception:
+                continue
+
+
+_load_external_hw_profiles()
+
 
 def _get_hardware_spec(
     gpu_arch: Optional[str] = None,
@@ -175,15 +252,8 @@ def _get_hardware_spec(
     # Apply clock override — scale TFLOPS linearly
     clock_override = gpu_clock_mhz or (int(v) if (v := os.getenv("PRIMUS_GPU_CLOCK_MHZ")) else None)
     if clock_override is not None:
-        # Derive the profile's implicit clock from a known reference.
-        _PROFILE_CLOCK_MHZ = {
-            "mi300x": 2100,
-            "gfx942": 2100,
-            "mi325x": 2100,  # same gfx942 compute die as MI300X
-            "mi355x": 2100,
-            "gfx950": 2100,
-            "mi300a": 2100,
-        }
+        # Derive the profile's implicit clock from a known reference (module-level
+        # table, extended by any external overlay profiles).
         base_clock = _PROFILE_CLOCK_MHZ.get(arch, 2100)
         scale = clock_override / base_clock
         spec = GPUHardwareSpec(
@@ -225,6 +295,7 @@ class SDPASimulator(SDPASimulationBackend):
         gpu_arch: Optional[str] = None,
         hardware_spec: Optional[GPUHardwareSpec] = None,
         gpu_clock_mhz: Optional[int] = None,
+        gemm_backend: Optional[str] = None,
     ):
         """
         Args:
@@ -233,25 +304,38 @@ class SDPASimulator(SDPASimulationBackend):
             hardware_spec: Override hardware spec directly.
             gpu_clock_mhz: Override the GPU compute clock frequency in MHz.
                 If provided, the profile's TFLOPS are scaled proportionally.
+            gemm_backend: Which registered GEMM engine prices the per-tile
+                FAv3 sub-GEMMs.  If *None*, falls back to ``PRIMUS_GEMM_BACKEND``
+                and finally "origami".
 
         Raises:
-            RuntimeError: If the Origami backend is not available.
+            RuntimeError: If the selected GEMM backend is not available.
         """
+        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
+        from primus.core.projection.simulation_backends.factory import _ensure_backends_discovered
+
         self._hw = hardware_spec or _get_hardware_spec(gpu_arch, gpu_clock_mhz)
 
-        # Create the Origami 1-CU backend for tile-level simulation.
+        _ensure_backends_discovered()
+        name = (gemm_backend or os.getenv("PRIMUS_GEMM_BACKEND") or "origami").lower().strip()
+        # Fall back to the built-in origami engine if the requested backend is
+        # not registered in this environment.
+        if get_gemm_backend_factory(name) is None:
+            name = "origami"
+        self._mode = name
+
+        # Create the 1-CU GEMM backend used to price the per-tile sub-GEMMs.
         # This is required — SDPA simulation cannot proceed without it.
-        self._tile_gemm = self._create_tile_gemm_backend(gpu_arch, gpu_clock_mhz)
+        self._tile_gemm = self._create_tile_gemm_backend(name, gpu_arch, gpu_clock_mhz)
         if self._tile_gemm is None:
             raise RuntimeError(
-                "SDPASimulator requires the Origami backend but it is not "
-                "available.  Please install the 'origami' package or ensure "
-                "primus.core.projection.simulation_backends.origami_backend "
-                "is importable."
+                f"SDPASimulator requires the '{name}' GEMM backend but it is not "
+                "available.  Install / provide it, or select an available backend "
+                "via PRIMUS_GEMM_BACKEND (registered backends self-register on import)."
             )
 
     def name(self) -> str:
-        return "sdpa_simulator (FAv3)"
+        return f"sdpa_simulator (FAv3, {self._mode} 1-CU)"
 
     def is_available(self) -> bool:
         return self._tile_gemm is not None and self._tile_gemm.is_available()
@@ -322,34 +406,38 @@ class SDPASimulator(SDPASimulationBackend):
 
     def _create_tile_gemm_backend(
         self,
+        backend_name: str,
         gpu_arch: Optional[str],
         gpu_clock_mhz: Optional[int],
     ):
-        """Try to create an Origami backend with 1 CU for per-tile simulation.
+        """Create the selected GEMM backend with 1 CU for per-tile simulation.
 
-        Returns the backend on success, or ``None`` if Origami is not available.
+        Uses the shared registry so any registered backend (default origami) can
+        price the FAv3 tiles.  Returns the backend on success, or ``None`` if it
+        is not available.
         """
-        try:
-            from primus.core.projection.simulation_backends.origami_backend import (
-                OrigamiGEMMBackend,
-            )
+        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
 
-            backend = OrigamiGEMMBackend(
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        try:
+            factory = get_gemm_backend_factory(backend_name)
+            if factory is None:
+                return None
+            backend = factory(
                 gpu_arch=gpu_arch,
                 gpu_clock_mhz=gpu_clock_mhz,
                 n_cu_override=1,
             )
             if backend.is_available():
-                is_rank_0 = int(os.getenv("RANK", "0")) == 0
                 if is_rank_0:
-                    print("[Primus:SDPA] Using Origami 1-CU tile-level simulation " "for Flash Attention")
+                    print(
+                        f"[Primus:SDPA] Using {backend_name} 1-CU tile-level "
+                        "simulation for Flash Attention"
+                    )
                 return backend
         except Exception as exc:
-            # If Origami is not available or fails to initialize, fall back to
-            # the analytic SDPA model by returning None here.
-            is_rank_0 = int(os.getenv("RANK", "0")) == 0
             if is_rank_0:
-                print("[Primus:SDPA] Origami 1-CU tile-level simulation disabled " f"due to error: {exc}")
+                print("[Primus:SDPA] 1-CU tile-level simulation disabled " f"due to error: {exc}")
         return None
 
     def _simulate_tile_level(

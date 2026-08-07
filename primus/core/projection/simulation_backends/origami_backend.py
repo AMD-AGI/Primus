@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from primus.core.projection.simulation_backends.base import (
     GEMMSimulationBackend,
     SimulationResult,
+    register_gemm_backend,
 )
 
 # ---------------------------------------------------------------------------
@@ -468,3 +469,23 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 f"clock={clock_khz / 1e6:.1f} GHz{override_tag}{cu_tag}"
             )
         return hw
+
+
+# ---------------------------------------------------------------------------
+# Self-registration.  Importing this module registers the built-in ``origami``
+# GEMM backend with the shared registry (see ``base.register_gemm_backend``).
+# ---------------------------------------------------------------------------
+def _make_origami_backend(
+    gpu_arch=None,
+    gpu_clock_mhz=None,
+    n_cu_override=None,
+    **_kwargs,
+) -> OrigamiGEMMBackend:
+    return OrigamiGEMMBackend(
+        gpu_arch=gpu_arch,
+        gpu_clock_mhz=gpu_clock_mhz,
+        n_cu_override=n_cu_override,
+    )
+
+
+register_gemm_backend("origami", _make_origami_backend)
