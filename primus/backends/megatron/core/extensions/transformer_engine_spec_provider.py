@@ -43,6 +43,7 @@ try:
         PrimusTurboLinear,
         PrimusTurboRowParallelGroupedLinear,
         PrimusTurboRowParallelLinear,
+        _make_primus_turbo_norm_te_column_parallel_linear,
     )
 except (ImportError, ModuleNotFoundError):
     PrimusTurboAttention = None
@@ -52,6 +53,7 @@ except (ImportError, ModuleNotFoundError):
     PrimusTurboLinear = None
     PrimusTurboRowParallelGroupedLinear = None
     PrimusTurboRowParallelLinear = None
+    _make_primus_turbo_norm_te_column_parallel_linear = None
 
 _LEGACY_GROUPED_MLP_CLS = None
 
@@ -108,6 +110,7 @@ def _build_default_primus_args() -> SimpleNamespace:
     return SimpleNamespace(
         enable_primus_turbo=False,
         use_turbo_gemm=False,
+        use_turbo_norm_te_linear=False,
         use_turbo_attention=False,
         use_turbo_grouped_gemm=False,
         moe_use_legacy_grouped_gemm=False,
@@ -190,14 +193,23 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         return True
 
     def column_parallel_layer_norm_linear(self) -> Optional[type]:
-        """Which module for sequential layernorm and linear"""
-        return (
-            _require_primus_turbo(
+        """Which module for sequential layernorm and linear.
+
+        Three choices, because the norm and the GEMM want different backends on
+        these shapes: Turbo's rmsnorm beats TE's, while TE's hipBLASLt GEMM beats
+        Turbo's. ``use_turbo_norm_te_linear`` takes only the norm.
+        """
+        if self.cfg.use_turbo_gemm:
+            return _require_primus_turbo(
                 PrimusTurboLayerNormColumnParallelLinear, "layernorm column parallel linear"
             )
-            if self.cfg.use_turbo_gemm
-            else TELayerNormColumnParallelLinear
-        )
+        if getattr(self.cfg, "use_turbo_norm_te_linear", False):
+            factory = _require_primus_turbo(
+                _make_primus_turbo_norm_te_column_parallel_linear,
+                "turbo-norm layernorm column parallel linear",
+            )
+            return factory()
+        return TELayerNormColumnParallelLinear
 
     def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
         """Which module to use for layer norm"""

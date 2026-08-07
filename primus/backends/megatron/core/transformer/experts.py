@@ -46,6 +46,36 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
+        self.use_turbo_ragged_grouped_gemm = getattr(args, "use_turbo_ragged_grouped_gemm", False)
+        # PrimusTurbo's tensorwise FP8 grouped GEMM consumes the original GPU
+        # tokens_per_expert tensor, including non-aligned (ragged) group sizes.
+        # Keep TE's explicit zero-padding fallback for other recipes/backends.
+
+    def _use_explicit_quantization_padding(self) -> bool:
+        """Whether this forward must pad expert groups before quantization."""
+        if not (self.config.fp8 or self.config.fp4):
+            return False
+        if self.moe_router_padding_for_quantization:
+            return False
+        if not self.use_turbo_ragged_grouped_gemm:
+            return True
+
+        # Check the active autocast state at forward time. The CLI recipe alone
+        # does not prove that this grouped linear is actually using Turbo FP8.
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager,
+        )
+
+        if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            raise RuntimeError(
+                "use_turbo_ragged_grouped_gemm=True requires an active PrimusTurbo FP8 autocast context."
+            )
+        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+        if not quant_config.current_scaling():
+            raise RuntimeError(
+                "use_turbo_ragged_grouped_gemm=True currently requires tensorwise dynamic FP8 scaling."
+            )
+        return False
 
     def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
         """
@@ -170,7 +200,8 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+        use_explicit_quantization_padding = self._use_explicit_quantization_padding()
+        if use_explicit_quantization_padding:
             # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
             actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
@@ -218,7 +249,14 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 )
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
+                # Honor use_turbo_fused_act_with_probs independently of activation
+                # recomputation. The helper falls back to bias_act_func when disabled.
+                bias_act_output = self.bias_act_func_with_mask(
+                    fc1_output,
+                    bias_parallel,
+                    permuted_probs,
+                    tokens_per_expert,
+                )
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
@@ -230,7 +268,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+        if use_explicit_quantization_padding:
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None
