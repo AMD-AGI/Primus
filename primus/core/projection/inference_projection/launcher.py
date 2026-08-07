@@ -244,6 +244,17 @@ def _print_performance(inference_config, perf) -> None:
     print("=" * 100)
 
 
+def _scaling_bench_paths(args) -> list:
+    """Extra benchmark artifacts for the TP-scaling fit (repeatable or comma-sep)."""
+    raw = getattr(args, "load_benchmark_scaling", None) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    out = []
+    for item in raw:
+        out.extend(p for p in str(item).split(",") if p)
+    return out
+
+
 def _print_des(des: Dict[str, object]) -> None:
     point = des["point"]
     print("\n" + "=" * 100)
@@ -365,6 +376,7 @@ def launch_projection_from_cli(args, overrides):
     # Benchmark mode: spawn a torchrun worker to measure forward-only layer
     # times on real GPUs, then calibrate the analytical projection to them.
     benchmark_layer_times = None
+    scaling_benchmarks: list = []
     load_bench = getattr(args, "load_benchmark", None)
     if load_bench and mode in ("performance", "both"):
         # Reuse a previously-saved GPU layer benchmark (skips the spawn). Lets a
@@ -374,6 +386,10 @@ def launch_projection_from_cli(args, overrides):
         with open(load_bench) as _f:
             benchmark_layer_times = _json.load(_f)
         print(f"[Primus:Inference] loaded GPU benchmark from {load_bench}")
+        for _p in _scaling_bench_paths(args):
+            with open(_p) as _f:
+                scaling_benchmarks.append(_json.load(_f))
+            print(f"[Primus:Inference] loaded TP-scaling benchmark from {_p}")
     elif profiling_mode == "benchmark" and mode in ("performance", "both"):
         from .benchmark import spawn_inference_benchmark
 
@@ -391,7 +407,8 @@ def launch_projection_from_cli(args, overrides):
         )
     if mode in ("performance", "both"):
         projector = InferencePerformanceProjector(
-            inference_config, args=args, benchmark_layer_times=benchmark_layer_times
+            inference_config, args=args, benchmark_layer_times=benchmark_layer_times,
+            scaling_benchmarks=scaling_benchmarks,
         )
         perf = projector.project()
         _print_performance(inference_config, perf)

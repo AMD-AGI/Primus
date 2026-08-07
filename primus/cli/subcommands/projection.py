@@ -226,6 +226,20 @@ def _add_load_benchmark_arg(parser, *, include_compute_baseline_alias: bool):
             "loaded measurements."
         ),
     )
+    parser.add_argument(
+        "--load-benchmark-scaling",
+        type=str,
+        action="append",
+        required=False,
+        default=None,
+        metavar="PATH[,PATH...]",
+        help=(
+            "Extra bench artifacts for the same model captured at other "
+            "--benchmark-gpus values, used to fit how the step scales with TP "
+            "instead of assuming TP^-1. Repeatable or comma-separated; only "
+            "matters when the benchmark parallelism differs from the target."
+        ),
+    )
     if include_compute_baseline_alias:
         parser.add_argument(
             "--compute-baseline",

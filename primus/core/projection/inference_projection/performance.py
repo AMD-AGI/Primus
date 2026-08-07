@@ -126,7 +126,8 @@ class InferencePerfResult:
 class InferencePerformanceProjector:
     """Builds the profiler once and answers prefill / decode timing queries."""
 
-    def __init__(self, inference_config: InferenceConfig, args=None, benchmark_layer_times=None):
+    def __init__(self, inference_config: InferenceConfig, args=None, benchmark_layer_times=None,
+                 scaling_benchmarks=None):
         self.cfg = inference_config
         self._args_ref = args
         gpu_arch = getattr(args, "gpu_arch", None) if args else None
@@ -246,6 +247,11 @@ class InferencePerformanceProjector:
         self._bench_tp = 1
         self._bench_ep = 1
         self._bench_pp = 1
+        # phase -> batch -> tp -> (ms, ep, pp), and the split fitted from it.
+        self._bench_scaling_raw: dict = {}
+        self._bench_scaling_fit: dict = {}
+        for _blob in (scaling_benchmarks or []):
+            self.add_scaling_benchmark(_blob)
         if benchmark_layer_times:
             self.set_benchmark_calibration(benchmark_layer_times)
 
@@ -503,6 +509,12 @@ class InferencePerformanceProjector:
             # per-layer path. Builds the bench/target collective models; a no-op
             # when the benchmark already ran at the target parallelism.
             self._setup_restoration()
+            # The primary artifact is itself a point on the scaling curve.
+            self.add_scaling_benchmark(benchmark_layer_times)
+            if self._restore:
+                for _phase in ("decode", "prefill"):
+                    self._fit_tp_scaling(_phase)
+                self._report_tp_scaling()
             sweep = benchmark_layer_times.get("sweep") or []
             pre_pts, dec_pts = [], []
             for e in sweep:
@@ -580,6 +592,104 @@ class InferencePerformanceProjector:
         self._comm_bench = InferenceCollectiveModel(mc, bench_mp, self._cc)
         self._comm_tgt = InferenceCollectiveModel(mc, mp, self._cc)
 
+    def _comm_model_at_tp(self, tp: int, ep: int, pp: int) -> "InferenceCollectiveModel":
+        """Collective model at an arbitrary parallelism, for the scaling fit."""
+        mp = self.cfg.model_parallel_config
+        return InferenceCollectiveModel(
+            self.cfg.model_config,
+            replace(
+                mp,
+                tensor_model_parallel_size=max(1, tp),
+                expert_model_parallel_size=max(1, ep),
+                pipeline_model_parallel_size=max(1, pp),
+            ),
+            self._cc,
+        )
+
+    def _fit_tp_scaling(self, phase: str) -> None:
+        """Fit ``compute(tp) = shardable / tp + invariant`` per batch size.
+
+        Least squares in ``1/tp`` over the points registered by
+        ``add_scaling_benchmark``; needs at least two parallelisms.
+        """
+        pts = self._bench_scaling_raw.get(phase) or {}
+        fits = {}
+        for batch, per_tp in pts.items():
+            if len(per_tp) < 2:
+                continue
+            xs, ys = [], []
+            for tp, (ms, ep, pp) in sorted(per_tp.items()):
+                tokens = 1 if phase == "decode" else self._meas_ref_input
+                cm = self._comm_model_at_tp(tp, ep, pp)
+                dense = (cm.layer_comm_ms(batch, tokens, is_moe=False).total_ms
+                         if self._n_dense else 0.0)
+                moe = (cm.layer_comm_ms(batch, tokens, is_moe=True).total_ms
+                       if self._n_moe else 0.0)
+                comm = self._n_dense * dense + self._n_moe * moe
+                xs.append(1.0 / tp)
+                ys.append(max(0.0, ms - comm))
+            n = len(xs)
+            sx, sy = sum(xs), sum(ys)
+            sxx = sum(x * x for x in xs)
+            sxy = sum(x * y for x, y in zip(xs, ys))
+            det = n * sxx - sx * sx
+            if abs(det) < 1e-12:
+                continue
+            shardable = (n * sxy - sx * sy) / det
+            invariant = (sy - shardable * sx) / n
+            # Better-than-linear scaling means a contaminated point, not a fit.
+            if shardable <= 0.0 or invariant < 0.0:
+                continue
+            fits[batch] = (shardable, invariant)
+        if fits:
+            self._bench_scaling_fit[phase] = fits
+
+    def _report_tp_scaling(self) -> None:
+        """Print the TP-scaling law the restore will use."""
+        fits = self._bench_scaling_fit.get("decode") or {}
+        if fits:
+            # Largest batch: the concurrency the step is usually judged at.
+            batch = max(fits)
+            shardable, invariant = fits[batch]
+            tps = sorted((self._bench_scaling_raw.get("decode") or {}).get(batch, {}))
+            total = shardable + invariant
+            print(
+                f"[Primus:Inference] TP scaling fitted from benchmark TP="
+                f"{','.join(str(t) for t in tps)} at batch {batch}: "
+                f"{shardable:.2f} ms shardable + {invariant:.2f} ms TP-invariant"
+                f" ({invariant / total * 100:.0f}% does not shrink with TP)"
+            )
+            return
+        if self._bench_tp != self._tgt_tp:
+            print(
+                f"[Primus:Inference] WARNING: restoring benchmark TP="
+                f"{self._bench_tp} to TP={self._tgt_tp} assuming the whole step is"
+                " TP-shardable and scales as TP^-1. Real decode steps keep a"
+                " TP-invariant remainder, so this under-predicts step latency."
+                " Pass --load-benchmark-scaling with a run at another"
+                " --benchmark-gpus to fit the split instead."
+            )
+
+    def add_scaling_benchmark(self, blob: dict) -> None:
+        """Register a benchmark artifact taken at a different TP, for the fit only."""
+        measured = blob.get("measured", blob)
+        meta = blob.get("meta", {})
+        tp = int(meta.get("benchmark_tp") or meta.get("tp") or 1)
+        ep = int(meta.get("benchmark_ep") or meta.get("ep") or 1)
+        pp = int(meta.get("benchmark_pp") or meta.get("pp") or 1)
+        sweep = blob.get("sweep") or []
+        model_step = measured.get("model") or {}
+        ref_batch = int(meta.get("batch") or self.cfg.request_config.batch_size or 1)
+        for phase, key in (("decode", "decode_ms"), ("prefill", "prefill_ms")):
+            rows = [(int(e["batch"]), float(e[key])) for e in sweep
+                    if e.get("batch") is not None and e.get(key)]
+            if not rows and model_step.get(key):
+                rows = [(ref_batch, float(model_step[key]))]
+            for batch, ms in rows:
+                self._bench_scaling_raw.setdefault(phase, {}).setdefault(
+                    batch, {}
+                )[tp] = (ms, ep, pp)
+
     def _restore_per_layer(self, ltype: str, ms_bench: float, batch: int, tokens: int) -> float:
         """Restore a per-layer time measured at the benchmark's (reduced) TP/EP to
         the target parallelism, training-style: the shardable compute scales by
@@ -629,7 +739,14 @@ class InferencePerformanceProjector:
 
         comm_bench = _comm_total(self._comm_bench)
         comm_tgt = _comm_total(self._comm_tgt)
-        compute = max(0.0, ms_bench - comm_bench) * (self._bench_tp / self._tgt_tp)
+        compute = max(0.0, ms_bench - comm_bench)
+        fit = (self._bench_scaling_fit.get(phase) or {}).get(batch)
+        if fit:
+            # Measured scaling: only the shardable part shrinks with TP.
+            shardable, invariant = fit
+            compute = shardable / self._tgt_tp + invariant
+        else:
+            compute *= self._bench_tp / self._tgt_tp
         # Apply the same compute-limited comm/compute overlap used on the
         # analytical path (``_overlap_keep``): the configured prefill/decode
         # overlap is a ceiling, but you can hide at most ``compute`` worth of
