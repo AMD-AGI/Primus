@@ -62,9 +62,9 @@ def derive_megatron_fields(cfg):
 
 
 def build_margs(cfg_fields, args):
-    from megatron.training.arguments import add_megatron_arguments, validate_args
-
     import argparse
+
+    from megatron.training.arguments import add_megatron_arguments, validate_args
 
     p = argparse.ArgumentParser(allow_abbrev=False)
     p = add_megatron_arguments(p)
@@ -134,9 +134,7 @@ def build_margs(cfg_fields, args):
     m.expert_tensor_parallel_size = args.tensor_parallel_size
     m.context_parallel_size = 1
     m.sequence_parallel = False
-    m.world_size = (
-        args.tensor_parallel_size * args.pipeline_parallel_size * args.expert_parallel_size
-    )
+    m.world_size = args.tensor_parallel_size * args.pipeline_parallel_size * args.expert_parallel_size
     m.rank = 0
     if args.dtype == "bf16":
         m.bf16 = True
@@ -231,9 +229,7 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
         ).reshape(-1, hidden)
 
     # ---- non-layer ----
-    sd["embedding.word_embeddings.weight"] = common.pad_vocab(
-        get("model.embed_tokens.weight"), padded_vocab
-    )
+    sd["embedding.word_embeddings.weight"] = common.pad_vocab(get("model.embed_tokens.weight"), padded_vocab)
     sd["decoder.final_layernorm.weight"] = get("model.norm.weight")
     if margs.untie_embeddings_and_output_weights:
         sd["output_layer.weight"] = common.pad_vocab(get("lm_head.weight"), padded_vocab)
@@ -310,6 +306,7 @@ def convert(
     already been applied in this process (the conversion hook does so).
     """
     if log is None:
+
         def log(*a):
             print("[qwen3-convert]", *a, flush=True)
 

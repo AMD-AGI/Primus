@@ -400,9 +400,7 @@ def _native_main(hf_path: str, native_opts: dict):
     """
     family = _detect_native_family(hf_path)
     if family is None:
-        log_error(
-            f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}"
-        )
+        log_error(f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}")
         sys.exit(1)
     native_opts["family"] = family
 

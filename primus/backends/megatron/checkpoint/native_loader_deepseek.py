@@ -78,9 +78,7 @@ def derive_megatron_fields(cfg):
         rotary_scaling_factor=float(rope_scaling.get("factor", 1.0)),
         mscale=float(rope_scaling.get("mscale", 1.0)),
         mscale_all_dim=float(rope_scaling.get("mscale_all_dim", 0.0)),
-        original_max_position_embeddings=int(
-            rope_scaling.get("original_max_position_embeddings", 4096)
-        ),
+        original_max_position_embeddings=int(rope_scaling.get("original_max_position_embeddings", 4096)),
         # ---- MoE ----
         num_experts=cfg["n_routed_experts"],
         moe_ffn_hidden_size=moe_inter,
@@ -109,15 +107,35 @@ def build_margs(cfg_fields, args):
 
     # architecture / shapes
     for k in (
-        "num_layers", "hidden_size", "ffn_hidden_size", "num_attention_heads",
-        "kv_channels", "norm_epsilon", "untie_embeddings_and_output_weights",
-        "multi_latent_attention", "q_lora_rank", "kv_lora_rank", "qk_head_dim",
-        "qk_pos_emb_head_dim", "v_head_dim", "qk_layernorm", "rope_type",
-        "rotary_base", "rotary_scaling_factor", "mscale", "mscale_all_dim",
-        "original_max_position_embeddings", "num_experts", "moe_ffn_hidden_size",
-        "moe_shared_expert_intermediate_size", "moe_router_topk", "moe_layer_freq",
-        "moe_router_score_function", "moe_router_enable_expert_bias",
-        "moe_router_topk_scaling_factor", "moe_router_num_groups",
+        "num_layers",
+        "hidden_size",
+        "ffn_hidden_size",
+        "num_attention_heads",
+        "kv_channels",
+        "norm_epsilon",
+        "untie_embeddings_and_output_weights",
+        "multi_latent_attention",
+        "q_lora_rank",
+        "kv_lora_rank",
+        "qk_head_dim",
+        "qk_pos_emb_head_dim",
+        "v_head_dim",
+        "qk_layernorm",
+        "rope_type",
+        "rotary_base",
+        "rotary_scaling_factor",
+        "mscale",
+        "mscale_all_dim",
+        "original_max_position_embeddings",
+        "num_experts",
+        "moe_ffn_hidden_size",
+        "moe_shared_expert_intermediate_size",
+        "moe_router_topk",
+        "moe_layer_freq",
+        "moe_router_score_function",
+        "moe_router_enable_expert_bias",
+        "moe_router_topk_scaling_factor",
+        "moe_router_num_groups",
         "moe_router_group_topk",
     ):
         setattr(m, k, cfg_fields[k])
@@ -161,9 +179,7 @@ def build_margs(cfg_fields, args):
     m.expert_tensor_parallel_size = args.tensor_parallel_size
     m.context_parallel_size = 1
     m.sequence_parallel = False
-    m.world_size = (
-        args.tensor_parallel_size * args.pipeline_parallel_size * args.expert_parallel_size
-    )
+    m.world_size = args.tensor_parallel_size * args.pipeline_parallel_size * args.expert_parallel_size
     m.rank = 0
     if args.dtype == "bf16":
         m.bf16 = True
@@ -224,9 +240,7 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
         return store.get(name, dtype)
 
     # ---- non-layer ----
-    sd["embedding.word_embeddings.weight"] = common.pad_vocab(
-        get("model.embed_tokens.weight"), padded_vocab
-    )
+    sd["embedding.word_embeddings.weight"] = common.pad_vocab(get("model.embed_tokens.weight"), padded_vocab)
     sd["decoder.final_layernorm.weight"] = get("model.norm.weight")
     if margs.untie_embeddings_and_output_weights:
         sd["output_layer.weight"] = common.pad_vocab(get("lm_head.weight"), padded_vocab)
@@ -247,9 +261,7 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
             sd[p + "self_attention.linear_q_up_proj.layer_norm_weight"] = get(
                 h + "self_attn.q_a_layernorm.weight"
             )
-        sd[p + "self_attention.linear_kv_down_proj.weight"] = get(
-            h + "self_attn.kv_a_proj_with_mqa.weight"
-        )
+        sd[p + "self_attention.linear_kv_down_proj.weight"] = get(h + "self_attn.kv_a_proj_with_mqa.weight")
         sd[p + "self_attention.linear_kv_up_proj.weight"] = get(h + "self_attn.kv_b_proj.weight")
         sd[p + "self_attention.linear_kv_up_proj.layer_norm_weight"] = get(
             h + "self_attn.kv_a_layernorm.weight"
@@ -274,9 +286,7 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
                     get(h + f"mlp.experts.{e}.gate_proj.weight"),
                     get(h + f"mlp.experts.{e}.up_proj.weight"),
                 )
-                sd[p + f"mlp.experts.linear_fc2.weight{e}"] = get(
-                    h + f"mlp.experts.{e}.down_proj.weight"
-                )
+                sd[p + f"mlp.experts.linear_fc2.weight{e}"] = get(h + f"mlp.experts.{e}.down_proj.weight")
             if n_shared:
                 sd[p + "mlp.shared_experts.linear_fc1.weight"] = cat_gate_up(
                     get(h + "mlp.shared_experts.gate_proj.weight"),
@@ -313,6 +323,7 @@ def convert(
     have already been applied in this process (the conversion hook does so).
     """
     if log is None:
+
         def log(*a):
             print("[ds-convert]", *a, flush=True)
 

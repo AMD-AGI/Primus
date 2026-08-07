@@ -63,8 +63,7 @@ def patch_fused_kernels_noop_on_rocm(ctx: PatchContext):
 
     if getattr(fk.load, "_primus_rocm_wrapped", False):
         log_rank_0(
-            "[Patch:megatron.checkpoint_convert.fused_kernels_rocm_noop]   "
-            "already wrapped; skipping"
+            "[Patch:megatron.checkpoint_convert.fused_kernels_rocm_noop]   " "already wrapped; skipping"
         )
         return
 
@@ -73,7 +72,6 @@ def patch_fused_kernels_noop_on_rocm(ctx: PatchContext):
     def _rocm_safe_load(args):
         try:
             import torch
-
             from torch.utils import cpp_extension
 
             if getattr(torch.version, "hip", None) or cpp_extension.CUDA_HOME is None:

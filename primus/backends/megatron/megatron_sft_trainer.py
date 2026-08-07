@@ -406,12 +406,8 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                     # only non-weight entries and round-trip harmlessly.
                     # ------------------------------------------------------
                     legacy_file = _resolve_legacy_ckpt_file(ckpt_dir, core_mpu)
-                    log_rank_0(
-                        f"[PEFT pre-wrap] Loading torch(legacy) base weights from: {legacy_file}"
-                    )
-                    legacy_sd = torch.load(
-                        legacy_file, map_location="cpu", mmap=True, weights_only=False
-                    )
+                    log_rank_0(f"[PEFT pre-wrap] Loading torch(legacy) base weights from: {legacy_file}")
+                    legacy_sd = torch.load(legacy_file, map_location="cpu", mmap=True, weights_only=False)
                     if isinstance(legacy_sd, dict) and "model" in legacy_sd:
                         model_sd = legacy_sd["model"]
                     else:
