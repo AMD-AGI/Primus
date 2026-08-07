@@ -193,10 +193,12 @@ def _reduce_parallelism(target_tp, target_pp, target_ep, benchmark_gpus):
 
 
 _ZIPF_MARKER = "PRIMUS_ZIPF_ROUTING"
+# Bump when the injected strategy changes; the installer replaces older blocks.
+_ZIPF_VERSION = "v2-pooled"
 
 _ZIPF_PATCH = '''
 
-# === {marker} (appended by Primus benchmark; idempotent) ===
+# === BEGIN {marker} {version} (appended by Primus benchmark; idempotent) ===
 import os as _primus_os
 import torch as _primus_torch
 
@@ -216,6 +218,7 @@ class _PrimusZipfRouting(RoutingStrategy):
         self.s = float(s)
         self.seed = int(seed)
         self._cache = {{}}
+        self._pools = {{}}
 
     def _probs(self, num_experts, device):
         key = (num_experts, str(device))
@@ -230,26 +233,60 @@ class _PrimusZipfRouting(RoutingStrategy):
             self._cache[key] = p
         return p
 
+    def _pool(self, num_experts, top_k, device):
+        """Routing assignments drawn once per (experts, top_k), so the timed
+        decode step pays only a gather and not the sampling."""
+        key = (num_experts, top_k, str(device))
+        got = self._pools.get(key)
+        if got is None:
+            rows = int(_primus_os.environ.get("PRIMUS_ROUTING_POOL", "65536"))
+            rows = max(rows, 8192)
+            probs = self._probs(num_experts, device)
+            ids = _primus_torch.multinomial(
+                probs.unsqueeze(0).expand(rows, -1).contiguous(),
+                top_k, replacement=False,
+            ).to(_primus_torch.int32)
+            weights = _primus_torch.full(
+                (rows, top_k), 1.0 / top_k, device=device, dtype=_primus_torch.float32
+            )
+            # Device-side: a host counter would be frozen into the CUDA graph at
+            # capture, making every replay reuse the same slice of the pool.
+            cursor = _primus_torch.zeros((), device=device, dtype=_primus_torch.int64)
+            arange = _primus_torch.arange(rows, device=device, dtype=_primus_torch.int64)
+            got = (ids, weights, cursor, arange, rows)
+            self._pools[key] = got
+        return got
+
     def route_tokens(self, hidden_states, router_logits, top_k, indices_type=None):
         num_tokens = hidden_states.shape[0]
         num_experts = router_logits.shape[-1]
         if indices_type is None:
             indices_type = _primus_torch.long
-        probs = self._probs(num_experts, hidden_states.device)
-        p = probs.unsqueeze(0).expand(num_tokens, -1).contiguous()
-        topk_ids = _primus_torch.multinomial(p, top_k, replacement=False).to(indices_type)
-        topk_weights = _primus_torch.full(
-            (num_tokens, top_k), 1.0 / top_k,
-            device=hidden_states.device, dtype=_primus_torch.float32,
+        ids, weights, cursor, arange, rows = self._pool(
+            num_experts, top_k, hidden_states.device
         )
-        return topk_weights, topk_ids
+        if num_tokens > rows:      # larger than the pool: sample directly
+            probs = self._probs(num_experts, hidden_states.device)
+            p = probs.unsqueeze(0).expand(num_tokens, -1).contiguous()
+            topk_ids = _primus_torch.multinomial(p, top_k, replacement=False)
+            return (
+                _primus_torch.full(
+                    (num_tokens, top_k), 1.0 / top_k,
+                    device=hidden_states.device, dtype=_primus_torch.float32,
+                ),
+                topk_ids.to(indices_type),
+            )
+        idx = (cursor + arange[:num_tokens]) % rows
+        topk_ids = ids.index_select(0, idx).to(indices_type)
+        cursor.add_(num_tokens)
+        return weights[:num_tokens], topk_ids
 
 
 RoutingSimulator.register_strategy(
     "zipf", _PrimusZipfRouting(s=float(_primus_os.environ.get("PRIMUS_ZIPF_S", "1.0")))
 )
 # === END {marker} ===
-'''.format(marker=_ZIPF_MARKER)
+'''.format(marker=_ZIPF_MARKER, version=_ZIPF_VERSION)
 
 
 def _install_zipf_routing(zipf_s: float) -> bool:
@@ -272,7 +309,18 @@ def _install_zipf_routing(zipf_s: float) -> bool:
     path = spec.origin
     with open(path, "r") as f:
         src = f.read()
-    if _ZIPF_MARKER not in src:
+    want = f"BEGIN {_ZIPF_MARKER} {_ZIPF_VERSION}"
+    if want not in src:
+        # Drop an older block before appending.
+        start = src.find(f"# === BEGIN {_ZIPF_MARKER}")
+        if start == -1:
+            start = src.find(f"# === {_ZIPF_MARKER}")
+        if start != -1:
+            end = src.find(f"# === END {_ZIPF_MARKER} ===", start)
+            end = len(src) if end == -1 else end + len(f"# === END {_ZIPF_MARKER} ===")
+            src = src[:start] + src[end:]
+            with open(path, "w") as f:
+                f.write(src)
         with open(path, "a") as f:
             f.write(_ZIPF_PATCH)
     os.environ["VLLM_MOE_ROUTING_SIMULATION_STRATEGY"] = "zipf"
