@@ -444,8 +444,12 @@ def _measure_batch(llm, input_len: int, batch: int, decode_steps: int,
                    random_tokens: bool = False, vocab: int = 30000, seed: int = 0) -> dict:
     """Measure whole-model prefill + steady-state decode step latency at ``batch``.
 
-    Subtracting a 1-token run from a K-token run cancels prefill and fixed
-    overheads, isolating one decode step for the full batch.
+    The decode step differences two long runs, K and K/2 tokens, which share the
+    prefill-admission transient and so cancel it. A 1-token run cannot serve as
+    the baseline: its sequences retire as they emit that token, so it admits
+    differently whenever ``batch * input_len`` exceeds ``max_num_batched_tokens``
+    and the residual prefill lands in the decode estimate. ``prefill_ms`` still
+    comes from the 1-token run, which is what that run measures.
 
     With ``random_tokens`` each sequence gets independent uniform-random token
     ids. This matters for **real-weight** runs: the trained router maps token
@@ -468,9 +472,16 @@ def _measure_batch(llm, input_len: int, batch: int, decode_steps: int,
 
     _measure(llm, prompts, out_len=4, reps=1)  # warmup + CUDA-graph capture
     lat1 = _measure(llm, prompts, out_len=1, reps=3)
+    mid = max(2, decode_steps // 2)
+    steps = decode_steps - mid
+    latMid = _measure(llm, prompts, out_len=mid, reps=2)
     latK = _measure(llm, prompts, out_len=decode_steps, reps=2)
 
-    decode_ms = max(1e-6, (latK - lat1) / max(1, decode_steps - 1) * 1000.0)
+    if steps >= 1 and latK > latMid:
+        decode_ms = (latK - latMid) / steps * 1000.0
+    else:  # degenerate step count: fall back to the 1-token baseline
+        decode_ms = (latK - lat1) / max(1, decode_steps - 1) * 1000.0
+    decode_ms = max(1e-6, decode_ms)
     prefill_ms = max(1e-3, lat1 * 1000.0 - decode_ms)
     return {"batch": batch, "prefill_ms": prefill_ms, "decode_ms": decode_ms}
 
