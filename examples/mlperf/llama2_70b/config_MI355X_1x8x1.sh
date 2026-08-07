@@ -1,6 +1,7 @@
 #!/bin/bash
 # MLPerf 6.0 environment for Llama2-70B LoRA on MI355X (8 GPUs, 1 node).
-# Source before run_and_time.sh or primus-cli direct train posttrain.
+# Source before run_and_time.sh, then from ${PRIMUS_PATH}:
+#   ./primus-cli direct --log_file /results/logs/log_*.txt -- train posttrain --config "${EXP}"
 
 export DGXSYSTEM=MI355X_1x8x1
 export GPUS_PER_NODE=8
@@ -88,6 +89,7 @@ export ENABLE_MLLOG=1
 export MLLOG_OUTPUT_FILE=/results/mlperf_logging.out
 export MLLOG_TRAIN_LOSS_LOG_FREQ=0
 export MLLOG_TARGET_EVAL_LOSS=0.925
+export TARGET_EVAL_LOSS=0.925
 export MLLOG_SUBMISSION_BENCHMARK=llama2_70b_lora
 export MLLOG_SUBMISSION_DIVISION=closed
 export MLLOG_SUBMISSION_ORG=AMD
@@ -148,6 +150,8 @@ export FP4=True
 export FP4_RECIPE=mxfp4
 export MAX_STEPS=550
 export NEXP=1
+
+export MLPERF_VERBOSE_LOGS=${MLPERF_VERBOSE_LOGS:-0}
 
 export LOAD_CKPT=True
 export MCORE_CUDA_GRAPH=False

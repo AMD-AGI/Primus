@@ -6,12 +6,11 @@
 
 """Primus MLPerf logging integration for the Megatron pretrain backend.
 
-This package integrates the (formerly external) ``primus_mllog`` thin wrapper
-directly into Primus, mapping it onto the new ``BaseTrainer`` lifecycle.
+Pretrain uses :class:`MLPerfMegatronPretrainTrainer`.  Megatron-Bridge SFT /
+post-train workloads use ``primus.backends.megatron_bridge.mlperf_sft``.
 
-``mlperf_logging`` and other MLPerf-only dependencies are imported lazily
-inside methods so that importing this package (which happens whenever the
-Megatron backend is loaded) never breaks non-MLPerf runs.
+``mlperf_logging`` is imported lazily inside methods so non-MLPerf runs are
+unaffected.
 """
 
 from primus.backends.megatron.mlperf.mlperf_logger import MLPerfLogger, ThroughputTimer
@@ -23,4 +22,15 @@ __all__ = [
     "MLPerfLogger",
     "ThroughputTimer",
     "MLPerfMegatronPretrainTrainer",
+    "run_synthetic_warmup",
+    "reset_fp8_state",
+    "seed_fp8_amax",
 ]
+
+
+def __getattr__(name: str):
+    if name in ("run_synthetic_warmup", "reset_fp8_state", "seed_fp8_amax"):
+        from primus.backends.megatron.mlperf import warmup
+
+        return getattr(warmup, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -81,18 +81,48 @@ Hooks create these under `/data` on first run if missing. Point `PACKED_DATA_DIR
 ## 3. Run training
 
 ```bash
+export HF_TOKEN=hf_...
+source examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh
 bash examples/mlperf/llama2_70b/run_and_time.sh
 ```
 
-Hooks run automatically: pip deps → dataset → HF→Megatron checkpoint.
+Timed run writes under **`/results`**:
 
-Equivalent:
+- `train.mlperfposttrain.exp.log` — full stdout from the timed wrapper
+- `logs/log_*.txt` — primus-cli direct log
+- `mlperf_logging.out` — `:::MLLOG` submission log (`ENABLE_MLLOG=1`)
+- `RESULT,LLAMA2_70B_LORA,,<seconds>,AMD,<start time>` — wall-clock line for MLPerf timing
+
+One-shot without sourcing config first (env + hooks still run):
 
 ```bash
-source examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh
-./runner/primus-cli direct train posttrain \
-  --config examples/mlperf/llama2_70b/configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml
+export HF_TOKEN=hf_...
+bash examples/mlperf/llama2_70b/run_and_time.sh
 ```
+
+Equivalent manual launch (same as `run_and_time.sh` without timing/`tee`):
+
+```bash
+cd /workspace/Primus   # or: cd "${PRIMUS_PATH}"
+
+export HF_TOKEN=hf_...
+source examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh
+
+mkdir -p /results/logs
+cd "${PRIMUS_PATH}"
+
+./primus-cli direct \
+  --log_file "/results/logs/log_$(date +%Y%m%d_%H%M%S).txt" \
+  -- \
+  train posttrain \
+  --config "${EXP}"
+```
+
+Notes:
+
+- The **`--`** separates launcher flags from the Primus Python CLI (`train posttrain ...`).
+- Run from **`${PRIMUS_PATH}`** with **`--log_file` under `/results/logs`** so a read-only Primus bind mount does not fail on `logs/`.
+- `EXP` is set by `config_MI355X_1x8x1.sh`; override with `export EXP=...` if needed.
 
 ---
 
