@@ -413,9 +413,7 @@ def _install_fused_attn_override():
     import torch
 
     original_fused_attn_fwd = fused_attn_module.fused_attn_fwd
-    original_parameter_names = frozenset(
-        inspect.signature(original_fused_attn_fwd).parameters
-    )
+    original_parameter_names = frozenset(inspect.signature(original_fused_attn_fwd).parameters)
 
     def patched_fused_attn_fwd(
         is_training,
@@ -492,9 +490,7 @@ def _install_fused_attn_override():
         # does not accept it. Keep one superset wrapper, but only forward
         # parameters supported by the installed TE revision.
         original_kwargs = {
-            name: value
-            for name, value in all_kwargs.items()
-            if name in original_parameter_names
+            name: value for name, value in all_kwargs.items() if name in original_parameter_names
         }
 
         if not _eligible(
@@ -583,10 +579,7 @@ def _install_fused_attn_override():
                     lse,
                     torch.zeros(2, dtype=torch.int64, device=q.device),
                 ]
-                logger.info(
-                    "CK aux template unavailable; synthesized LSE/RNG aux "
-                    "for dropout=0"
-                )
+                logger.info("CK aux template unavailable; synthesized LSE/RNG aux " "for dropout=0")
             _AUX_CTX_TEMPLATES[cache_key] = template
             template_lse = template[0] if template else None
             if (
@@ -637,10 +630,7 @@ def _install_fused_attn_override():
                 args[1] if len(args) > 1 else None,
                 getattr(args[4], "shape", None) if len(args) > 4 else None,
                 args[12] if len(args) > 12 else None,
-                [
-                    (tuple(t.shape), str(t.dtype))
-                    for t in (aux or [])
-                ],
+                [(tuple(t.shape), str(t.dtype)) for t in (aux or [])],
                 args[21] if len(args) > 21 else None,
                 args[23] if len(args) > 23 else None,
                 args[25] if len(args) > 25 else None,

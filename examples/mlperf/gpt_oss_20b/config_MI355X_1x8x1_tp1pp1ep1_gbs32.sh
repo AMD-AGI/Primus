@@ -161,7 +161,10 @@ elif [ "${MLPERF_ENABLE_BWD_ATTN_ASM}" = "0" ]; then
     export NVTE_CK_IS_V3_ATOMIC_FP32=1
 else
     echo "MLPERF_ENABLE_BWD_ATTN_ASM must be 0 or 1" >&2
-    return 2 2>/dev/null || exit 2
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+        return 2
+    fi
+    exit 2
 fi
 
 # -----------------------------------------------------------------------------

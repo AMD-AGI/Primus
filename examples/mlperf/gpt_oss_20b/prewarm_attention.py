@@ -3,10 +3,9 @@
 
 import argparse
 
+import aiter_hd64_asm_override
 import torch
 from transformer_engine.pytorch.attention import DotProductAttention
-
-import aiter_hd64_asm_override
 
 
 def prewarm(sequence_length: int, micro_batch_size: int, window_left: int) -> None:
@@ -25,8 +24,7 @@ def prewarm(sequence_length: int, micro_batch_size: int, window_left: int) -> No
         (sequence_length, micro_batch_size, 8, 64),
     )
     query, key, value = (
-        torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        for shape in shapes
+        torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True) for shape in shapes
     )
     output = attention(query, key, value)
     if isinstance(output, tuple):
