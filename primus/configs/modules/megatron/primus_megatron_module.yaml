@@ -82,14 +82,6 @@ no_fp8_weight_transpose_cache: false
 # parallelism
 decoder_pipeline_manual_split_list: null # int list
 
-# distributed init
-# Pass an explicit device_id to torch.distributed.init_process_group (FSDP2 only).
-# Opt-in: it forces eager RCCL communicator creation for the world PG and every
-# Megatron sub-group, which costs ~16 GiB/GPU of peak VRAM and ~10s of startup
-# with no throughput gain on llama3-70B FSDP2 (1 node x 8 MI355X, ROCm 26.5).
-# Enable it only where the RCCL device-mapping deadlock actually reproduces.
-enable_init_process_group_device_id: false
-
 # MoE comm & comp Overlap
 patch_moe_overlap: false
 
