@@ -87,13 +87,45 @@ export NCCL_CHECKS_DISABLE=1
 # -----------------------------------------------------------------------------
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
-HIPBLASLT_TUNING_OVERRIDE_FILE="${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/tune_gemm_results-${MLPERF_RUNTIME_SERIES:-v26.3}.txt"
-if [ -f "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]; then
-    export HIPBLASLT_TUNING_OVERRIDE_FILE
-else
-    # hipBLASLt solution indices are runtime-specific. Never feed the v26.3
-    # catalog to v26.5 while its own tuning table has not been generated.
+
+# Solution indices are runtime-specific. For normal v26.3 runs, replay the
+# Stage 0 cache validated with this runtime instead of the legacy override table.
+# Setting TE_HIPBLASLT_ALGO_SAVE selects online tuning and suppresses the default
+# replay cache. HIPBLASLT_TUNING_OVERRIDE_FILE remains available as an explicit
+# diagnostic override.
+if [ -n "${TE_HIPBLASLT_ALGO_SAVE:-}" ]; then
+    export TE_HIPBLASLT_ALGO_SAVE
+    unset TE_HIPBLASLT_ALGO_LOAD
     unset HIPBLASLT_TUNING_OVERRIDE_FILE
+elif [ -n "${TE_HIPBLASLT_ALGO_LOAD:-}" ]; then
+    if [ -f "${TE_HIPBLASLT_ALGO_LOAD}" ]; then
+        export TE_HIPBLASLT_ALGO_LOAD
+        unset HIPBLASLT_TUNING_OVERRIDE_FILE
+    else
+        unset TE_HIPBLASLT_ALGO_LOAD
+    fi
+elif [ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE:-}" ]; then
+    if [ -f "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]; then
+        export HIPBLASLT_TUNING_OVERRIDE_FILE
+    else
+        unset HIPBLASLT_TUNING_OVERRIDE_FILE
+    fi
+else
+    if [ "${MLPERF_RUNTIME_SERIES:-v26.3}" = "v26.3" ]; then
+        TE_HIPBLASLT_ALGO_LOAD="${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/te_hipblaslt_algo-v26.3.csv"
+        if [ -f "${TE_HIPBLASLT_ALGO_LOAD}" ]; then
+            export TE_HIPBLASLT_ALGO_LOAD
+        else
+            unset TE_HIPBLASLT_ALGO_LOAD
+        fi
+    else
+        HIPBLASLT_TUNING_OVERRIDE_FILE="${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/tune_gemm_results-${MLPERF_RUNTIME_SERIES}.txt"
+        if [ -f "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]; then
+            export HIPBLASLT_TUNING_OVERRIDE_FILE
+        else
+            unset HIPBLASLT_TUNING_OVERRIDE_FILE
+        fi
+    fi
 fi
 
 # -----------------------------------------------------------------------------
