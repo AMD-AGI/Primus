@@ -6,14 +6,21 @@ set -e
 mkdir -p /results
 
 cd "${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b"
+TRAIN_LOG_FILE="${TRAIN_LOG_FILE:-train.mlperfpretrain.exp.log}"
 
-# Under multi-node SLURM (run_with_docker_slurm.sh), inherit rendezvous + node
-# sizing from SLURM env so we can scale to N nodes without editing the config
-# file. Single-node SLURM jobs (NNODES=1) fall through to the config defaults
-# so torchrun doesn't try to do c10d rdzv against MASTER_ADDR=localhost.
+# Under a multi-node scheduler wrapper, inherit rendezvous + node sizing from
+# SLURM so the same benchmark config scales without edits. Single-node jobs
+# fall through to the config defaults.
 if [[ -n "${SLURM_NNODES:-}" && "${SLURM_NNODES}" -gt 1 ]]; then
     NNODES="${SLURM_NNODES}"
     NODE_RANK="${SLURM_NODEID:-0}"
+fi
+
+# TE 2.15 lazily compiles CK attention blobs. Populate both GPT-OSS windows
+# once before torchrun so eight ranks do not race while writing the cache.
+if [ "${MLPERF_RUNTIME_SERIES:-v26.3}" = "v26.5" ] \
+    && [ "${MLPERF_SKIP_ATTENTION_PREWARM:-0}" != "1" ]; then
+    python3 /opt/mlperf-gpt-oss-20b/prewarm_attention.py
 fi
 
 echo "============================================"
@@ -38,7 +45,7 @@ set +e
 "${PRIMUS_PATH}/primus-cli" direct -- \
     train pretrain \
     --config "${EXP}" \
-    2>&1 | tee train.mlperfpretrain.exp.log
+    2>&1 | tee "${TRAIN_LOG_FILE}"
 ret_code=${PIPESTATUS[0]}
 set -e
 
