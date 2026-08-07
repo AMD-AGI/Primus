@@ -2,7 +2,7 @@
 # MLPerf Llama2-70B LoRA (Megatron-Bridge posttrain) — timed run with :::MLLOG output.
 #
 # Hooks run automatically before training:
-#   00_install_requirements.sh — pip deps (+ mlperf-logging when ENABLE_MLLOG=1)
+#   00_install_requirements.sh — Megatron-Bridge pip deps (mlperf-logging from image / requirements.txt)
 #   01_convert_checkpoints.sh    — HF → Megatron checkpoint (needs HF_TOKEN)
 #   02_prepare_mlperf_dataset.sh — SCROLLS gov-report .npy + metadata (needs HF_TOKEN)
 #

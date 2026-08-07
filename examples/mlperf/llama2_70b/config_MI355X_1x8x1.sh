@@ -4,6 +4,8 @@
 #   ./primus-cli direct --log_file /results/logs/log_*.txt -- train posttrain --config "${EXP}"
 
 export DGXSYSTEM=MI355X_1x8x1
+# Used by runner/helpers/envs/primus-env.sh when rocm-smi is not in PATH (e.g. minimal Docker exec).
+export PRIMUS_GPU_MODEL="${PRIMUS_GPU_MODEL:-MI355X}"
 export GPUS_PER_NODE=8
 export NNODES=1
 export NODE_RANK=0
