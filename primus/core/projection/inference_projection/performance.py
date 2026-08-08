@@ -1388,6 +1388,11 @@ class InferencePerformanceProjector:
         continuous = self._use_continuous_batching(concurrency, output_len)
         ttft = self.prefill_latency_ms(1 if continuous else batch, input_len)
         prefill_full_ms = self.prefill_latency_ms(batch, input_len) if continuous else ttft
+        # Host prompt-tokenization cost (client sends text; server tokenizes it
+        # after the TTFT clock starts). Latency-only, TTFT side -- symmetric with
+        # the decode-side detokenization term below. Applied after prefill_full_ms
+        # so it never leaks into prefill throughput.
+        ttft += max(0.0, self.cfg.request_config.tokenize_overhead_us) / 1000.0 * max(0, input_len)
         extras = {"speculative_tokens_per_step": self._spec_tokens_per_step()}
         extras.update(conc["extras"])
 
@@ -1417,18 +1422,29 @@ class InferencePerformanceProjector:
             per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
             decode_tps = (batch * 1000.0 / step_latency) if step_latency > 0 else 0.0
 
+        # Per-token detokenization + streaming (client-side host cost). Serving
+        # harnesses measure ITL client-side, so it carries this; the GPU decode
+        # step does not. Latency-only: it overlaps the next server step, so
+        # aggregate decode throughput is unchanged.
+        detok_ms = max(0.0, self.cfg.request_config.detokenize_overhead_us) / 1000.0
+        if detok_ms:
+            itl += detok_ms
+            decode_total += detok_ms * max(0, output_len)
+            per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
+
         request_latency = ttft + decode_total
         decode_tps_per_gpu = decode_tps / replica_gpus if replica_gpus else 0.0
         prefill_tps = (batch * input_len * 1000.0 / prefill_full_ms) if prefill_full_ms > 0 else 0.0
 
-        # Offered-load queueing (open-loop). Adjusts TTFT + e2e latency only;
-        # decode throughput / TPOT are steady-state and unaffected. No-op unless
-        # a request rate is set. Computed from compute-TTFT (prefill_tps above
-        # uses the pre-queue TTFT, which is correct).
+        # Offered-load queueing (open-loop). The offered-load queue wait is the
+        # client-side wait for a serving slot; like the vLLM / InferenceX harness
+        # (whose TTFT clock starts after the request is admitted), we keep it OUT
+        # of the primary TTFT and end-to-end latency and expose it separately
+        # (queue_wait_ms, ttft_with_queue_ms, request_latency_with_queue_ms).
+        # No-op unless a request rate is set. TPOT / throughput are steady-state
+        # and unaffected either way.
         q = self._request_rate_queueing(decode_tps, output_len, ttft, request_latency)
         if q:
-            ttft = q["ttft_with_queue_ms"]
-            request_latency = q["request_latency_with_queue_ms"]
             extras.update(q)
 
         extras.update(self._comm_extras(batch, input_len, output_len, prefill_batch=(1 if continuous else batch)))
@@ -1509,7 +1525,9 @@ class InferencePerformanceProjector:
         ttft_compute = prefill_proj.prefill_latency_ms(1, input_len)
         prefill_full_ms = prefill_proj.prefill_latency_ms(batch, input_len)
         kv_transfer = self._kv_transfer_ms(decode_proj, batch, input_len)
-        ttft = ttft_compute + kv_transfer
+        # Host prompt-tokenization cost (latency-only, TTFT side).
+        tok_ms = max(0.0, req.tokenize_overhead_us) / 1000.0 * max(0, input_len)
+        ttft = ttft_compute + kv_transfer + tok_ms
 
         # Decode phase on the decode pool (drives ITL + decode throughput).
         decode_total = decode_proj.decode_total_ms(batch, input_len, output_len)
@@ -1519,6 +1537,12 @@ class InferencePerformanceProjector:
         step_latency = decode_proj._decode_step_latency_ms(batch, mid_ctx, q_len=q_len)
 
         itl = (decode_total / output_len) if output_len > 0 else step_latency
+        # Per-token detokenization + streaming (latency-only; see the co-located
+        # projection path for the rationale).
+        detok_ms = max(0.0, req.detokenize_overhead_us) / 1000.0
+        if detok_ms:
+            itl += detok_ms
+            decode_total += detok_ms * max(0, output_len)
         request_latency = ttft + decode_total
         per_req_decode_tps = (1000.0 / itl) if itl > 0 else 0.0
 

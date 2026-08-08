@@ -100,6 +100,7 @@ class _Req:
     generated: int = 0           # output tokens emitted so far
     prefill_done: bool = False
     status: str = "WAITING"      # WAITING | RUNNING | FINISHED
+    admit_ms: float = -1.0       # when it left the waiting queue (server admit)
     first_token_ms: float = -1.0
     finish_ms: float = -1.0
     itls: List[float] = field(default_factory=list)
@@ -130,7 +131,9 @@ class DESResult:
     system_throughput_tps: float   # output tokens/s
     saturated: bool
     # latency distributions (ms)
-    ttft: Dict[str, float] = field(default_factory=dict)
+    ttft: Dict[str, float] = field(default_factory=dict)          # from admission (queue-excluded)
+    ttft_arrival: Dict[str, float] = field(default_factory=dict)  # from arrival (incl. queue wait)
+    queue_wait: Dict[str, float] = field(default_factory=dict)    # arrival -> admission
     tpot: Dict[str, float] = field(default_factory=dict)
     itl: Dict[str, float] = field(default_factory=dict)
     e2e: Dict[str, float] = field(default_factory=dict)
@@ -406,6 +409,7 @@ def simulate_once(
                 break
             waiting.pop(0)
             cand.status = "RUNNING"
+            cand.admit_ms = now
             running.append(cand)
             kv_used += cand.reserved_kv
             scheduled.append((cand, q, True, cand.kv_len))
@@ -509,16 +513,49 @@ def simulate_once(
     drop = int(len(done) * max(0.0, min(0.9, warmup_frac)))
     sample = done[drop:] if len(done) - drop >= 8 else done
 
-    ttft = [r.first_token_ms - r.arrival_ms for r in sample if r.first_token_ms >= 0]
-    e2e = [r.finish_ms - r.arrival_ms for r in sample if r.finish_ms >= 0]
+    # TTFT is measured from *admission* (server start), not arrival, so the
+    # client-side wait for a concurrency slot is excluded -- matching the vLLM /
+    # InferenceX serving harness, whose TTFT clock (``st``) starts after the
+    # request acquires its semaphore. The queue wait and the arrival-relative
+    # TTFT are reported separately (queue_wait, ttft_arrival) so the deployment
+    # view is not lost.
+    # Host prompt-tokenization cost (per prompt token). The prompt is sent as
+    # text and tokenized server-side after the TTFT clock starts, so it lands in
+    # TTFT. Latency-only -- the server scheduler/makespan above are unchanged.
+    tok_ms_pt = max(0.0, req.tokenize_overhead_us) / 1000.0
+
+    def _admit(r):
+        return r.admit_ms if r.admit_ms >= 0 else r.arrival_ms
+
+    ttft = [
+        (r.first_token_ms - _admit(r)) + tok_ms_pt * r.prompt_len
+        for r in sample if r.first_token_ms >= 0
+    ]
+    ttft_arrival = [
+        (r.first_token_ms - r.arrival_ms) + tok_ms_pt * r.prompt_len
+        for r in sample if r.first_token_ms >= 0
+    ]
+    queue_wait = [
+        _admit(r) - r.arrival_ms
+        for r in sample if r.first_token_ms >= 0
+    ]
+    # Per-output-token detokenization + streaming (client-side host cost).
+    # Latency-only: added to ITL/TPOT/e2e but not to the server step, so the
+    # scheduler, makespan and throughput above are unchanged. Matches the
+    # serving harness, which measures ITL client-side.
+    detok_ms = max(0.0, req.detokenize_overhead_us) / 1000.0
+    e2e = [
+        (r.finish_ms - r.arrival_ms) + tok_ms_pt * r.prompt_len + detok_ms * r.generated
+        for r in sample if r.finish_ms >= 0
+    ]
     tpot = [
-        (r.finish_ms - r.first_token_ms) / max(1, r.generated - 1)
+        (r.finish_ms - r.first_token_ms) / max(1, r.generated - 1) + detok_ms
         for r in sample
         if r.finish_ms >= 0 and r.generated > 1
     ]
     itl_all: List[float] = []
     for r in sample:
-        itl_all.extend(r.itls)
+        itl_all.extend(x + detok_ms for x in r.itls)
 
     makespan = max((r.finish_ms for r in done), default=0.0)
     total_out = sum(r.generated for r in done)
@@ -576,6 +613,8 @@ def simulate_once(
         system_throughput_tps=sys_tps,
         saturated=saturated,
         ttft=dist(ttft),
+        ttft_arrival=dist(ttft_arrival),
+        queue_wait=dist(queue_wait),
         tpot=dist(tpot),
         itl=dist(itl_all),
         e2e=dist(e2e),

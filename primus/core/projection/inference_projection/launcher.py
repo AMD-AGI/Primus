@@ -32,6 +32,8 @@ _ARG_TO_FIELD = {
     "speculative_acceptance_rate": "speculative_acceptance_rate",
     "serving_model": "serving_model",
     "decode_step_overhead_us": "decode_step_overhead_us",
+    "detokenize_overhead_us": "detokenize_overhead_us",
+    "tokenize_overhead_us": "tokenize_overhead_us",
     "mixed_batch_penalty": "mixed_batch_penalty",
     "cudagraph_mode": "cudagraph_mode",
     "kv_cache_memory_fraction": "kv_cache_memory_fraction",
@@ -203,7 +205,10 @@ def _print_performance(inference_config, perf) -> None:
             f"(max sustainable {perf.extras.get('max_sustainable_request_rate', 0.0):.2f} req/s, "
             f"utilization {perf.extras.get('utilization', 0.0) * 100:.0f}%){sat}"
         )
-        print(f"  Queue wait (in TTFT):            {perf.extras.get('queue_wait_ms', 0.0):.2f} ms")
+        print(
+            f"  Queue wait (excl. from TTFT):    {perf.extras.get('queue_wait_ms', 0.0):.2f} ms"
+            f"   (TTFT+queue {perf.extras.get('ttft_with_queue_ms', 0.0):.2f} ms)"
+        )
     print("-" * 100)
     print(f"  Per-request decode throughput:   {perf.per_request_decode_tps:.1f} tok/s")
     print(f"  Aggregate decode throughput:     {perf.decode_throughput_tps:.1f} tok/s")
@@ -282,7 +287,10 @@ def _print_des(des: Dict[str, object]) -> None:
             f"{d.get('p99', 0.0):>10.2f} {unit:<1}"
         )
 
-    _row("TTFT", point.ttft)
+    _row("TTFT (from admit)", point.ttft)
+    if getattr(point, "queue_wait", None):
+        _row("  queue wait", point.queue_wait)
+        _row("  TTFT (from arrival)", point.ttft_arrival)
     _row("TPOT (per token)", point.tpot)
     _row("ITL (inter-token)", point.itl)
     _row("End-to-end latency", point.e2e)

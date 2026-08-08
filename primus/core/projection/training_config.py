@@ -189,6 +189,19 @@ class InferenceRequestConfig:
     # batch the step is launch-bound; CUDA-graph capture shrinks this. Added to
     # every decode/mixed step. 0 = ignore (pure kernel-compute model).
     decode_step_overhead_us: float = 0.0
+    # Per-output-token host cost for detokenization + response streaming
+    # (microseconds/token). The serving harness (vLLM / InferenceX) measures ITL
+    # client-side, so its per-token latency carries detok+stream that the GPU
+    # decode step does not. Added to ITL/TPOT and end-to-end latency only -- it
+    # overlaps the next server step, so aggregate throughput is unchanged.
+    # 0 = ignore (pure GPU-step model).
+    detokenize_overhead_us: float = 0.0
+    # Per-prompt-token host cost for tokenizing the request text (microseconds/
+    # token). The serving harness (vLLM / InferenceX) sends the prompt as text
+    # and the server tokenizes it after the TTFT clock starts, so it lands in
+    # TTFT. Added to TTFT + end-to-end latency only. 0 = ignore (GPU-prefill
+    # model). Symmetric with ``detokenize_overhead_us`` on the decode side.
+    tokenize_overhead_us: float = 0.0
     # Extra cost fraction applied to a *mixed* (prefill+decode) step to model
     # vLLM's less-efficient PIECEWISE CUDA-graph path vs the FULL graph used for
     # uniform pure-decode steps. 0 = no penalty.

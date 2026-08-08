@@ -650,6 +650,22 @@ def _add_inference_args(parser):
         help="Fixed per-decode-step host/launch overhead (us). CUDA graphs reduce this. Default 0.",
     )
     serv.add_argument(
+        "--detokenize-overhead-us",
+        type=float,
+        default=None,
+        help="Per-output-token host detokenization + streaming cost (us/token). Added to "
+             "ITL/TPOT and end-to-end latency only (not throughput), matching client-side "
+             "serving-harness ITL. Default 0.",
+    )
+    serv.add_argument(
+        "--tokenize-overhead-us",
+        type=float,
+        default=None,
+        help="Per-prompt-token host tokenization cost (us/token). The prompt is sent as text "
+             "and tokenized server-side after the TTFT clock starts, so it is added to TTFT "
+             "and end-to-end latency only (not throughput). Default 0.",
+    )
+    serv.add_argument(
         "--mixed-batch-penalty",
         type=float,
         default=None,
