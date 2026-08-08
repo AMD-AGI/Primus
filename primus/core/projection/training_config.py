@@ -81,6 +81,9 @@ class ModelConfig:
     # Primus Turbo flags — used to select the grouped-GEMM performance model
     enable_primus_turbo: bool = False
     use_turbo_grouped_mlp: bool = False
+    # MoE simulate-kernel model: None -> auto (turbo/legacy); "vllm_fused" models
+    # the vLLM fused-MoE decode kernel; "legacy"/"turbo" force the Megatron paths.
+    moe_sim_kernel: str = None
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
 
@@ -574,12 +577,16 @@ def megatron_derive_default_args(args):
         # If GQA not set, treat as per-head queries
         args.num_query_groups = args.num_attention_heads
 
+    if not hasattr(args, "context_parallel_size") or args.context_parallel_size is None:
+        args.context_parallel_size = 1
     if not hasattr(args, "data_parallel_size") or args.data_parallel_size is None:
         args.data_parallel_size = world_size // (
             args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
         )
     if not hasattr(args, "virtual_pipeline_model_parallel_size"):
         args.virtual_pipeline_model_parallel_size = None
+    if not hasattr(args, "num_layers_per_virtual_pipeline_stage"):
+        args.num_layers_per_virtual_pipeline_stage = None
     if (
         args.num_layers_per_virtual_pipeline_stage is None
         and args.virtual_pipeline_model_parallel_size is None

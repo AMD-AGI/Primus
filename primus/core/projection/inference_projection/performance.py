@@ -22,6 +22,7 @@ Serving features modelled here: chunked prefill, KV-cache quantization
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, replace
 from typing import Dict, Optional
 
@@ -133,6 +134,16 @@ class InferencePerformanceProjector:
         gpu_arch = getattr(args, "gpu_arch", None) if args else None
         gpu_clock = getattr(args, "gpu_clock_mhz", None) if args else None
         gemm_name = getattr(args, "gemm_backend", None) if args else None
+        # Kept for the origami-ratio restore, which builds its own guaranteed-
+        # simulating profilers at the bench/target views (see _setup_restoration).
+        self._gpu_arch, self._gpu_clock, self._gemm_name = gpu_arch, gpu_clock, gemm_name
+        # TP/EP-restore scaling: how a measured anchor is extrapolated to another
+        # TP. "origami" (default) scales the measured step by the simulator's
+        # (vLLM-fused MoE) TP-scaling ratio — validated to beat a 2-point measured
+        # fit at high TP; "fit" forces the measured shardable/invariant fit;
+        # "blind" the naive TP^-1. Env override for A/B testing.
+        self._scaling_mode = (os.getenv("PRIMUS_RESTORE_SCALING") or "origami").strip().lower()
+        self._lm_ratio_bench = None
 
         # In benchmark mode the projection is driven *entirely* by measured
         # layer times, so the analytical GEMM/SDPA simulators (origami) are not
@@ -282,28 +293,7 @@ class InferencePerformanceProjector:
                 return v0 + w * (v1 - v0)
         return pts[-1][1]
 
-    # -- batch transport (measured anchor x analytical shape) ------------------
-
-    def _sim_decode_step_ms(self, batch: int) -> float:
-        """Pure analytical decode step latency at ``batch`` — used ONLY as a
-        *shape* to carry a measured anchor across batch. Context is held fixed so
-        the ratio isolates the batch response; absolute simulator bias cancels in
-        the ratio. Returns 0 if the simulator is unavailable (→ caller falls
-        back to interpolation)."""
-        try:
-            ctx = int(self._meas_ref_input or self.cfg.request_config.input_seq_len or 1)
-            return self._forward_times(max(1, batch), 1, "decode", ctx).total_ms
-        except Exception:  # noqa: BLE001
-            return 0.0
-
-    def _sim_prefill_ms(self, batch: int) -> float:
-        """Pure analytical prefill latency at ``batch`` (fixed prompt length), as
-        a shape for batch transport; see :meth:`_sim_decode_step_ms`."""
-        try:
-            tok = int(self._meas_ref_input or self.cfg.request_config.input_seq_len or 1)
-            return self._forward_times(max(1, batch), tok, "prefill", tok).total_ms
-        except Exception:  # noqa: BLE001
-            return 0.0
+    # -- batch transport (measured curve only) --------------------------------
 
     @staticmethod
     def _nearest_anchor(batch: int, pts: list):
@@ -378,20 +368,17 @@ class InferencePerformanceProjector:
         slope = (y1 - y0) / (x1 - x0) if x1 != x0 else 0.0
         return math.exp(y0 + slope * (lb - x0))
 
-    def _transport_batch(self, batch: int, pts: list, sim_fn) -> float:
+    def _transport_batch(self, batch: int, pts: list) -> float:
         """Transport a measured ``(batch -> ms)`` curve to an arbitrary
-        ``batch``.
+        ``batch`` — MEASUREMENT-ONLY.
 
-        * **>= 2 measured points** (a benchmark sweep): interpolate/extrapolate
-          the measured curve directly in log-log space (:meth:`_loglog_transport`).
-          Interpolating real measurements between adjacent anchors is more
-          accurate than scaling by the analytical simulate ratio, whose shape
-          can carry a spurious knee the silicon does not have.
-        * **single anchor** (e.g. an anchor-store reconstruction): there is no
-          curve to interpolate, so carry the lone point across batch by the
-          analytical simulate ratio ``sim(batch) / sim(anchor)`` — the physical,
-          non-linear batch shape. Falls back to holding the anchor value when
-          the simulator is unavailable.
+        The benchmark protocol always sweeps batch within a single run, so
+        ``pts`` carries >= 2 measured points and we interpolate/extrapolate the
+        real curve in log-log space (:meth:`_loglog_transport`) — the analytical
+        (origami) simulator is never consulted for the batch shape. A lone
+        anchor (a degenerate, non-swept artifact) holds its measured value
+        rather than falling back to the simulator, so a benchmark-calibrated
+        projection stays free of simulator bias by construction.
 
         Returns the exact measured value when ``batch`` is itself measured."""
         if not pts:
@@ -402,11 +389,7 @@ class InferencePerformanceProjector:
                 return v0
         if len(P) >= 2:
             return self._loglog_transport(batch, P)
-        b0, v0 = P[0]
-        s_t, s_0 = sim_fn(batch), sim_fn(b0)
-        if s_t > 0.0 and s_0 > 0.0:
-            return v0 * (s_t / s_0)
-        return v0
+        return P[0][1]
 
     # -- measured-time accessors (benchmark-based projection) ------------------
 
@@ -421,7 +404,7 @@ class InferencePerformanceProjector:
             if self._decode_pad_to_capture:
                 base = self._bucket_up(batch, pts)
             else:
-                base = self._transport_batch(batch, pts, self._sim_decode_step_ms)
+                base = self._transport_batch(batch, pts)
             if context is not None and self._decode_kv_slope_ms > 0.0 and self._decode_ctx_ref > 0.0:
                 base += self._decode_kv_slope_ms * max(0.0, float(context) - self._decode_ctx_ref)
             return base
@@ -434,7 +417,7 @@ class InferencePerformanceProjector:
     def _measured_full_prefill_ms(self, batch: int) -> float:
         """Measured whole-model / composed prefill latency for the full prompt."""
         if self._meas_whole.get("prefill"):
-            return self._transport_batch(batch, self._meas_whole["prefill"], self._sim_prefill_ms)
+            return self._transport_batch(batch, self._meas_whole["prefill"])
         tok = self._meas_ref_input or 1
         d = self._restore_per_layer("dense", self._meas_layer.get(("prefill", "dense"), 0.0), batch, tok)
         m = self._restore_per_layer("moe", self._meas_layer.get(("prefill", "moe"), 0.0), batch, tok)
@@ -537,6 +520,17 @@ class InferencePerformanceProjector:
             self._meas_whole = {
                 k: v for k, v in (("prefill", sorted(pre_pts)), ("decode", sorted(dec_pts))) if v
             }
+            # Batch transport interpolates the MEASURED curve and never falls
+            # back to the simulator. That requires a batch sweep (>= 2 points);
+            # a single-batch artifact would force a flat hold. Warn so the
+            # benchmark is (re)run with a sweep rather than silently degrading.
+            for _ph in ("prefill", "decode"):
+                if len(self._meas_whole.get(_ph, [])) < 2:
+                    print(
+                        f"[Primus:Inference] WARNING: {_ph} benchmark has a single "
+                        f"batch point — batch transport will hold it flat. Re-run the "
+                        f"benchmark with a batch sweep for an accurate {_ph} batch curve."
+                    )
             # Per-token prefill rate (for sub-prompt chunk pieces): full-prompt
             # prefill of ``b`` seqs processes ``b * ref_input`` tokens.
             if pre_pts and ref_input > 0:
@@ -592,6 +586,42 @@ class InferencePerformanceProjector:
         self._comm_bench = InferenceCollectiveModel(mc, bench_mp, self._cc)
         self._comm_tgt = InferenceCollectiveModel(mc, mp, self._cc)
 
+        # Origami-ratio setup: build guaranteed-simulating profiler trees at the
+        # bench and target views so ``_restore_whole`` can scale the measured
+        # anchor by the simulator's TP-scaling ratio (the absolute origami bias
+        # cancels in the ratio). Benchmark mode may hold a metadata-only GEMM
+        # backend, so build dedicated simulating backends here. On any failure
+        # (e.g. no SDPA simulator for the arch) origami is disabled and the
+        # restore falls back to the measured fit / blind TP^-1.
+        self._view_tgt = self._view
+        self._lm_ratio_bench = None
+        if self._scaling_mode == "origami":
+            try:
+                self._gemm_sim = get_gemm_simulation_backend(
+                    backend_name=self._gemm_name, gpu_arch=self._gpu_arch,
+                    gpu_clock_mhz=self._gpu_clock, require_simulation=True,
+                )
+                self._sdpa_sim = get_sdpa_simulation_backend(
+                    gpu_arch=self._gpu_arch, gpu_clock_mhz=self._gpu_clock,
+                )
+                rc = self.cfg.request_config
+                saved_mp = self.cfg.model_parallel_config
+                self.cfg.model_parallel_config = bench_mp
+                self._view_bench = self.cfg.as_training_config(
+                    batch_size=rc.batch_size, seq_len=rc.input_seq_len,
+                )
+                self.cfg.model_parallel_config = saved_mp
+                self._lm_ratio_tgt = build_profiler(
+                    get_language_model_profiler_spec(self._view_tgt))
+                self._lm_ratio_tgt.set_simulation_backends(self._gemm_sim, self._sdpa_sim)
+                self._lm_ratio_bench = build_profiler(
+                    get_language_model_profiler_spec(self._view_bench))
+                self._lm_ratio_bench.set_simulation_backends(self._gemm_sim, self._sdpa_sim)
+            except Exception as e:  # pragma: no cover - arch-dependent
+                self._lm_ratio_bench = None
+                print(f"[Primus:Inference] origami-ratio unavailable ({e}); "
+                      "falling back to measured fit / blind TP^-1.")
+
     def _comm_model_at_tp(self, tp: int, ep: int, pp: int) -> "InferenceCollectiveModel":
         """Collective model at an arbitrary parallelism, for the scaling fit."""
         mp = self.cfg.model_parallel_config
@@ -637,15 +667,34 @@ class InferencePerformanceProjector:
                 continue
             shardable = (n * sxy - sx * sy) / det
             invariant = (sy - shardable * sx) / n
-            # Better-than-linear scaling means a contaminated point, not a fit.
-            if shardable <= 0.0 or invariant < 0.0:
+            if shardable <= 0.0:
+                # No positive TP-shardable component — not a usable fit.
                 continue
+            if invariant < 0.0:
+                # Near-/super-linear scaling. This is expected for a close pair
+                # such as TP=1 + TP=2, where the TP-invariant remainder is still
+                # masked by compute at low TP and the fit's intercept dips
+                # slightly negative. Rather than discard the two measured anchors
+                # (and fall back to a blind TP^-1), clamp the invariant to 0 and
+                # refit ``shardable`` as least-squares through the origin. The law
+                # then reproduces both measured anchors and scales as ~TP^-1 —
+                # exact where measured, optimistic for TP well above the range.
+                invariant = 0.0
+                shardable = sxy / sxx if sxx > 0.0 else shardable
             fits[batch] = (shardable, invariant)
         if fits:
             self._bench_scaling_fit[phase] = fits
 
     def _report_tp_scaling(self) -> None:
         """Print the TP-scaling law the restore will use."""
+        if (self._scaling_mode == "origami" and self._restore
+                and getattr(self, "_lm_ratio_bench", None) is not None):
+            print(
+                f"[Primus:Inference] TP scaling: origami-ratio (simulate vLLM-fused "
+                f"MoE) — scaling measured TP={self._bench_tp} anchor to TP="
+                f"{self._tgt_tp} by sim(target)/sim(bench)."
+            )
+            return
         fits = self._bench_scaling_fit.get("decode") or {}
         if fits:
             # Largest batch: the concurrency the step is usually judged at.
@@ -659,6 +708,19 @@ class InferencePerformanceProjector:
                 f"{shardable:.2f} ms shardable + {invariant:.2f} ms TP-invariant"
                 f" ({invariant / total * 100:.0f}% does not shrink with TP)"
             )
+            # Interpolation between measured anchors is exact; extrapolation
+            # ABOVE the measured range is only as good as the fitted invariant,
+            # which two low-TP anchors cannot fully resolve (the non-shrinking
+            # floor is still masked at low TP). Flag it so an out-of-range TP is
+            # treated as lower-confidence rather than trusted like a measurement.
+            max_tp = max(tps) if tps else self._bench_tp
+            if self._tgt_tp > max_tp:
+                print(
+                    f"[Primus:Inference] WARNING: target TP={self._tgt_tp} is ABOVE the "
+                    f"measured range (TP<={max_tp}); this decode step is EXTRAPOLATED and "
+                    f"tends to under-predict latency / over-predict throughput. Add a "
+                    f"benchmark at TP>={self._tgt_tp} to make it exact."
+                )
             return
         if self._bench_tp != self._tgt_tp:
             print(
@@ -714,6 +776,44 @@ class InferencePerformanceProjector:
             return 0.0
         return self._comm_tgt.pp_p2p_ms(batch, tokens) - self._comm_bench.pp_p2p_ms(batch, tokens)
 
+    def _origami_ratio(self, batch: int, tokens: int, phase: str) -> Optional[float]:
+        """Simulator TP-scaling ratio sim(target)/sim(bench) for the whole step.
+
+        Reuses the analytical ``_forward_times`` at the bench and target views by
+        temporarily swapping the profiler tree / comm model / view / sim backends
+        (the analytical path is otherwise unused in benchmark mode). Returns
+        ``None`` when origami is unavailable so the caller falls back to the fit.
+        """
+        if getattr(self, "_lm_ratio_bench", None) is None:
+            return None
+        if phase == "prefill":
+            q_len, kv = max(1, tokens), max(1, tokens)
+        else:
+            q_len = 1
+            kv = max(1, self._meas_ref_input or self.cfg.request_config.input_seq_len or 1024)
+        # Explicit comm model per view when active; else builtin (comm=None) so
+        # ``_forward_times`` derives it from the (swapped) view.
+        comm_tgt = self._comm if self._comm is not None else None
+        comm_bench = self._comm_bench if self._comm is not None else None
+
+        def _step(lm, comm, view) -> float:
+            saved = (self._lm, self._comm, self._view, self._gemm, self._sdpa)
+            self._lm, self._comm, self._view = lm, comm, view
+            self._gemm, self._sdpa = self._gemm_sim, self._sdpa_sim
+            try:
+                return self._forward_times(batch, q_len, phase, kv).total_ms
+            finally:
+                (self._lm, self._comm, self._view, self._gemm, self._sdpa) = saved
+
+        try:
+            s_tgt = _step(self._lm_ratio_tgt, comm_tgt, self._view_tgt)
+            s_bench = _step(self._lm_ratio_bench, comm_bench, self._view_bench)
+        except Exception:
+            return None
+        if s_bench <= 0.0 or s_tgt <= 0.0:
+            return None
+        return s_tgt / s_bench
+
     def _restore_whole(self, ms_bench: float, batch: int, tokens: int, phase: str = "decode") -> float:
         """Restore a whole-model (vLLM) step latency measured at the benchmark's
         reduced parallelism to the target TP/EP/PP, training-style and in the same
@@ -731,6 +831,16 @@ class InferencePerformanceProjector:
         vLLM step is not separable per layer, so comm is composed by layer count)."""
         if not self._restore or ms_bench <= 0.0:
             return ms_bench
+
+        # Origami-ratio (default): scale the measured anchor by the simulator's
+        # whole-step TP-scaling ratio sim(target)/sim(bench). The vLLM-fused MoE
+        # cost model captures the saturating decode curve (compute sharding +
+        # comm growth) better than a 2-point linear fit; the ~5x absolute origami
+        # bias cancels in the ratio. Falls through to fit/blind if unavailable.
+        if self._scaling_mode == "origami":
+            r = self._origami_ratio(batch, tokens, phase)
+            if r is not None and r > 0.0:
+                return ms_bench * r
 
         def _comm_total(cm) -> float:
             dense = cm.layer_comm_ms(batch, tokens, is_moe=False).total_ms if self._n_dense else 0.0

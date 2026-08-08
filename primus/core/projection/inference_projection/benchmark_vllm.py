@@ -637,6 +637,12 @@ def run_vllm_benchmark(args) -> dict:
         )
         if bench_pp > 1:
             kwargs["pipeline_parallel_size"] = bench_pp
+        # Custom all-reduce allocates an IPC shared buffer that can fail on some
+        # ROCm GPU-subset topologies (``allocate_shared_buffer_and_handle`` ->
+        # HIP invalid argument), e.g. a 4-GPU subset while another tenant holds a
+        # GPU. Opt-in fallback to NCCL all-reduce via env, no-op otherwise.
+        if os.environ.get("PRIMUS_BENCH_DISABLE_CAR"):
+            kwargs["disable_custom_all_reduce"] = True
         # Expert parallelism: shard MoE experts across the TP ranks (EP = TP)
         # instead of tensor-slicing each expert. Required to expose the
         # imbalance-sensitive effects — the MoE step is then gated by the BUSIEST

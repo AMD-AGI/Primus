@@ -156,6 +156,15 @@ class MoEMLPProfiler(BaseModuleProfiler):
         num_experts = self.config.model_config.num_experts or 1
         num_local_experts = num_experts // ep_size
 
+        # Expert tensor-parallel degree: within a TP×EP domain, EP distributes
+        # whole experts across ranks and the remaining ``tp_size // ep_size`` ranks
+        # tensor-shard each expert's FFN intermediate (gate/up column-parallel,
+        # down row-parallel — all shard the ``moe_ffn`` dimension). Without this,
+        # the weight-bandwidth-bound decode GEMM reads the *full* expert weights on
+        # every rank and shows no TP speedup (e.g. EP=1: experts never shard).
+        #   EP=1, TP=8 -> etp=8 (full TP sharding)   EP=8, TP=8 -> etp=1 (EP-only)
+        expert_tp = max(1, tp_size // max(1, ep_size))
+
         # Expected number of *distinct* experts whose weights are actually read
         # this step. MoE decode is weight-bandwidth-bound, so its cost tracks the
         # number of experts touched, not the full local set: at small batch only
@@ -185,9 +194,13 @@ class MoEMLPProfiler(BaseModuleProfiler):
         bytes_per_el = 1 if gemm_dtype == "fp8" else 2
 
         # ── 1. Routed expert GEMMs ──
+        # ``F`` is the per-rank FFN intermediate after expert tensor-sharding, so
+        # the weight-bound decode step scales ~1/etp (and total per-rank expert
+        # weight ∝ num_experts·H·F/tp, independent of the EP/TP split — physically
+        # correct: total expert params spread over all GPUs).
         M = tokens_per_expert
         H = hidden_size
-        F = moe_ffn
+        F = max(1, moe_ffn // expert_tp)
 
         # Determine grouped-GEMM performance model.
         # Primus Turbo's grouped-GEMM kernel achieves near-ideal batched
@@ -198,17 +211,33 @@ class MoEMLPProfiler(BaseModuleProfiler):
             self.config.model_config, "use_turbo_grouped_gemm", False
         )
 
+        # Kernel selection. ``vllm_fused`` models the vLLM fused-MoE decode kernel:
+        # a single batched op over the *active* experts (no per-expert launch
+        # overhead like the Megatron ``legacy`` grouped_gemm) that is weight-
+        # bandwidth-bound at decode — the backend roofline over ``batch=active``
+        # captures reading each touched expert's (sharded) weights once. Resolution
+        # order: explicit env / model_config override, else turbo flag, else legacy.
+        # vLLM serving should use ``vllm_fused``; Megatron training keeps turbo/legacy.
+        kernel = (
+            os.getenv("PRIMUS_MOE_SIM_KERNEL")
+            or getattr(self.config.model_config, "moe_sim_kernel", None)
+            or ("turbo" if use_turbo else "legacy")
+        ).lower()
+        batched = kernel in ("turbo", "vllm_fused")
+
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0 and num_local_experts > 1:
-            mode = "Turbo (batched)" if use_turbo else "Legacy (sequential)"
+            label = {"vllm_fused": "vLLM fused (batched)", "turbo": "Turbo (batched)"}.get(
+                kernel, "Legacy (sequential)"
+            )
             print(
-                f"  [MoE MLP] Grouped-GEMM model: {mode}"
+                f"  [MoE MLP] Grouped-GEMM model: {label}"
                 f"  ({active_local_experts}/{num_local_experts} active local experts, "
                 f"M={M}, H={H}, F={F})"
             )
 
-        if use_turbo:
-            # ── Turbo model: batched GEMM (active experts in parallel) ──
+        if batched:
+            # ── Batched model (turbo / vLLM-fused): active experts in parallel ──
             B = active_local_experts
             if self.config.model_config.swiglu:
                 gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
@@ -332,10 +361,11 @@ class MoEMLPProfiler(BaseModuleProfiler):
         bwd_time += permute_bwd_ms
 
         # ── 4. Activation function overhead (SwiGLU / GELU) ──
+        # Uses the per-rank (tensor-sharded) intermediate ``F``, not full moe_ffn.
         if self.config.model_config.swiglu:
-            act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
+            act_bytes = 3 * topk_tokens * F * bytes_per_el  # gate+up read, result write
         else:
-            act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
+            act_bytes = 2 * topk_tokens * F * bytes_per_el  # read + write
         activation_ms = act_bytes / (activation_bw_gbps * 1e6)
 
         fwd_time += activation_ms

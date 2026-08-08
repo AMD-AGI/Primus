@@ -368,6 +368,33 @@ def launch_projection_from_cli(args, overrides):
         elif wdt in ("bf16", "bfloat16", "fp16", "float16", "fp32", "float32"):
             inference_config.model_config.fp8 = None
 
+    # Origami (simulate) calibration defaults. The analytical GEMM/attention
+    # model over-predicts small-batch MoE decode by several x when it is left at
+    # its bf16 + Triton defaults, because real serving runs low-precision expert
+    # kernels (mxfp4/fp8) on the AITER backend. Reflect the serving stack so the
+    # simulate ratio lands closer to measured, WITHOUT overriding an explicit
+    # user choice (both remain no-ops when already set).
+    _rc = inference_config.request_config
+    if getattr(_rc, "moe_expert_dtype", None) is None:
+        # The expert grouped-GEMM runs at the weight precision. mxfp4-weighted
+        # models (e.g. gpt-oss) are served as mxfp4; fp8 weights → fp8 experts.
+        _wdt = str(explicit_wdt or "").lower()
+        if _wdt in ("mxfp4", "fp4"):
+            _rc.moe_expert_dtype = "mxfp4"
+        elif _wdt.startswith("fp8") or _wdt in ("e4m3", "e5m2"):
+            _rc.moe_expert_dtype = "fp8"
+    if getattr(_rc, "attention_backend", None) is None:
+        _arch = str(getattr(args, "gpu_arch", "") or "").lower()
+        if _arch.startswith("mi") or _arch.startswith("gfx") or "rocm" in _arch:
+            _rc.attention_backend = "aiter"
+
+    # MoE simulate kernel: vLLM serving uses a fused-MoE decode kernel (single
+    # batched, weight-bandwidth-bound op), NOT the Megatron per-expert grouped
+    # GEMM. Default the inference simulate path to ``vllm_fused`` so the origami
+    # MoE cost model matches the serving stack (no-op if explicitly set).
+    if getattr(inference_config.model_config, "moe_sim_kernel", None) is None:
+        inference_config.model_config.moe_sim_kernel = "vllm_fused"
+
     # DeepEP / SyncFree (shared perf flags) — enable async EP All-to-All overlap
     # for the serving projection, mirroring the training projection override.
     if getattr(args, "enable_deepep", False):
@@ -407,6 +434,30 @@ def launch_projection_from_cli(args, overrides):
                 "[Primus:Inference] benchmark unavailable — falling back to "
                 "simulation for the performance projection."
             )
+
+    # Default multi-anchor policy ("TP=1 + TP=2 scaling"): when several
+    # whole-model benchmarks are loaded, use the one measured AT the target TP
+    # as the primary (its step latency is then reproduced exactly) and keep the
+    # others only to fit the TP-scaling law for *unmeasured* target TPs. Without
+    # this, projecting to a TP we actually measured would needlessly restore it
+    # from a different TP through the analytical comm model and lose accuracy.
+    if benchmark_layer_times and scaling_benchmarks and mode in ("performance", "both"):
+        tgt_tp = int(inference_config.model_parallel_config.tensor_model_parallel_size)
+
+        def _btp(blob):
+            m = blob.get("meta", {}) if isinstance(blob, dict) else {}
+            return int(m.get("benchmark_tp") or m.get("tp") or 1)
+
+        if _btp(benchmark_layer_times) != tgt_tp:
+            for _i, _sb in enumerate(scaling_benchmarks):
+                if _btp(_sb) == tgt_tp:
+                    scaling_benchmarks[_i] = benchmark_layer_times
+                    benchmark_layer_times = _sb
+                    print(
+                        f"[Primus:Inference] using the TP={tgt_tp} benchmark as the "
+                        f"primary anchor (exact); other anchors fit the TP-scaling law."
+                    )
+                    break
 
     results = {}
     if mode in ("memory", "both"):
