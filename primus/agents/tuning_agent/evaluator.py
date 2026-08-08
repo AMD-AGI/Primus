@@ -521,7 +521,15 @@ def _build_inference_cmd(
     cfg,
     agent_cfg: AgentConfig,
     primus_root: Path,
+    load_benchmark: Path | None = None,
+    profiling_mode: str | None = None,
+    bench_gpus: int | None = None,
 ) -> list[str]:
+    # The inference projector runs single-process and (in --profiling-mode
+    # benchmark) spawns its OWN torchrun worker via spawn_inference_benchmark,
+    # so the parent must NOT be wrapped in torchrun. A cached --load-benchmark
+    # artifact (one measurement per parallelism, reused across all serving-knob
+    # trials) skips the spawn and just calibrates.
     cmd: list[str] = [
         *_python_invoker(primus_root),
         "projection", "inference",
@@ -597,6 +605,10 @@ def _build_inference_cmd(
             cmd += ["--transfer-backend", str(cfg.transfer_backend)]
     if agent_cfg.target_cluster.gpu_clock_mhz:
         cmd += ["--gpu-clock-mhz", str(agent_cfg.target_cluster.gpu_clock_mhz)]
+    if load_benchmark is not None:
+        cmd += ["--load-benchmark", str(load_benchmark)]
+    elif profiling_mode == "benchmark" and bench_gpus:
+        cmd += ["--profiling-mode", "benchmark"]
     return cmd
 
 
@@ -726,6 +738,25 @@ class Evaluator:
             )
         return self._evaluate(cfg, tag, mode="benchmark")
 
+    def _resolve_inference_bench_artifact(self, cfg) -> Path | None:
+        """Locate a cached vLLM benchmark artifact matching this trial's
+        parallelism, for benchmark-calibrated serving projection.
+
+        A single artifact per (TP, PP, EP) serves every serving-knob trial at
+        that parallelism. Looks in ``$PRIMUS_INFER_BENCH_CACHE`` for a file
+        named ``<model>_tp{tp}_pp{pp}_ep{ep}.json`` (EP forced to 1 for dense
+        models); otherwise honours a single forced ``$PRIMUS_INFER_BENCH_ARTIFACT``.
+        Returns ``None`` when no artifact is available."""
+        forced = os.environ.get("PRIMUS_INFER_BENCH_ARTIFACT")
+        if forced and Path(forced).exists():
+            return Path(forced)
+        cache = os.environ.get("PRIMUS_INFER_BENCH_CACHE")
+        if not cache:
+            return None
+        ep = cfg.ep if getattr(self.arch, "is_moe", False) else 1
+        cand = Path(cache) / f"{self.arch.model_name}_tp{cfg.tp}_pp{cfg.pp}_ep{ep}.json"
+        return cand if cand.exists() else None
+
     def evaluate_inference(self, cfg, tag: str) -> EvalResult:
         """Score a serving config via ``projection inference`` (memory + perf).
 
@@ -761,10 +792,48 @@ class Evaluator:
             return result
 
         yaml_path = write_inference_trial_yaml(self.arch, cfg, self.trials_dir, tag)
-        cmd = _build_inference_cmd(yaml_path, cfg, self.cfg, self.primus_root)
-        rc, out, dur = _run(cmd, cwd=self.primus_root,
-                            env=_build_env(self.cfg, self.primus_root), timeout=600)
-        self.n_simulate_calls += 1
+
+        # Benchmark mode: calibrate the serving projection against a real GPU
+        # measurement instead of the analytical (origami) cost model. One
+        # benchmark per parallelism (TP/PP/EP) is enough — every serving-knob
+        # trial (batch, concurrency, kv-dtype, chunked-prefill, spec-decode) at
+        # that parallelism reuses it via ``--load-benchmark``, since those knobs
+        # are resolved by the DES on top of the measured step. Resolution order:
+        #   1. cached artifact for this parallelism ($PRIMUS_INFER_BENCH_CACHE),
+        #   2. a single forced artifact ($PRIMUS_INFER_BENCH_ARTIFACT), or
+        #   3. spawn a live benchmark (--profiling-mode benchmark) on the host.
+        load_bench = None
+        profiling_mode = None
+        bench_gpus = None
+        is_bench = self.mode == "benchmark" or self.cfg.benchmark_host.has_gpu
+        if is_bench:
+            load_bench = self._resolve_inference_bench_artifact(cfg)
+            if load_bench is None:
+                if os.environ.get("PRIMUS_INFER_BENCH_CACHE_ONLY"):
+                    result.legal = False
+                    result.reason = (
+                        f"benchmark mode: no cached benchmark artifact for "
+                        f"TP={cfg.tp} PP={cfg.pp} EP={cfg.ep} "
+                        f"(set PRIMUS_INFER_BENCH_CACHE or pre-benchmark this parallelism)"
+                    )
+                    return result
+                profiling_mode = "benchmark"
+                bench_gpus = self.cfg.benchmark_host.benchmark_gpus or None
+
+        cmd = _build_inference_cmd(
+            yaml_path, cfg, self.cfg, self.primus_root,
+            load_benchmark=load_bench, profiling_mode=profiling_mode, bench_gpus=bench_gpus,
+        )
+        rc, out, dur = _run(
+            cmd, cwd=self.primus_root,
+            env=_build_env(self.cfg, self.primus_root,
+                           profiling_mode=("benchmark" if profiling_mode else None)),
+            timeout=(3600 if profiling_mode == "benchmark" else 600),
+        )
+        if load_bench is not None or profiling_mode == "benchmark":
+            self.n_benchmark_calls += 1
+        else:
+            self.n_simulate_calls += 1
         result.cmd = cmd
         result.returncode = rc
         result.duration_s = dur
