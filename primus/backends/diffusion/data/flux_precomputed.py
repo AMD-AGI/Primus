@@ -284,6 +284,12 @@ class FluxPrecomputedProcessor:
     ) -> dict[str, torch.Tensor]:
         tensors = self._collate_raw(batch)
         for key, value in tensors.items():
+            if (
+                key == "t5_encodings"
+                and device.type == "cuda"
+                and os.getenv("PIN_FLUX_T5_STACK", "1") == "1"
+            ):
+                value = value.pin_memory()
             if key == "timestep":
                 tensors[key] = value.to(device=device, dtype=torch.int64, non_blocking=True)
             else:

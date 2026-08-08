@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import torch
@@ -232,6 +234,28 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
 
     assert compiled_inputs == [(block, "reduce-overhead") for block in original_blocks]
     assert [*root.double_blocks, *root.single_blocks] == original_blocks
+
+
+def test_flux_precomputed_processor_pins_t5_by_default(monkeypatch):
+    t5 = Mock()
+    t5.pin_memory.return_value = t5
+    clip = Mock()
+    processor = FluxPrecomputedProcessor({})
+    monkeypatch.delenv("PIN_FLUX_T5_STACK", raising=False)
+    monkeypatch.setattr(
+        processor,
+        "_collate_raw",
+        lambda batch: {"t5_encodings": t5, "clip_encodings": clip},
+    )
+
+    processor.prepare_batch(batch=[], device=torch.device("cuda"), dtype=torch.float32)
+
+    t5.pin_memory.assert_called_once_with()
+    clip.pin_memory.assert_not_called()
+
+    monkeypatch.setenv("PIN_FLUX_T5_STACK", "0")
+    processor.prepare_batch(batch=[], device=torch.device("cuda"), dtype=torch.float32)
+    t5.pin_memory.assert_called_once_with()
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
