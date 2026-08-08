@@ -48,7 +48,13 @@ def test_flux_argument_builder_selects_flux_defaults():
                 "lr_scheduler_type": "constant_with_warmup",
                 "warmup_steps": 11,
             },
-            "runtime": {"gradient_checkpointing_ratio": 0.25},
+            "runtime": {
+                "gradient_checkpointing_ratio": 0.25,
+                "compile_strategy": "per_block",
+                "compile_backend": "inductor",
+                "compile_fullgraph": "false",
+                "compile_dynamic": "true",
+            },
         }
     )
 
@@ -65,6 +71,11 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"
     assert args.trainer["args"]["compile_transformer_blocks"] is True
+    assert args.trainer["args"]["compile_strategy"] == "per_block"
+    assert args.trainer["args"]["compile_backend"] == "inductor"
+    assert args.trainer["args"]["compile_fullgraph"] is False
+    assert args.trainer["args"]["compile_dynamic"] is True
+    assert args.trainer["args"]["compile_output_head"] is False
 
 
 def test_flux_argument_builder_maps_raw_dataset_type():
@@ -219,19 +230,55 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
     original_blocks = [*root.double_blocks, *root.single_blocks]
     compiled_inputs = []
 
-    def fake_compile(module, *, fullgraph, mode):
+    def fake_compile(module, *, backend, fullgraph, dynamic, mode):
+        assert backend == "inductor"
         assert fullgraph is True
+        assert dynamic is False
         compiled_inputs.append((module, mode))
 
     monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
     monkeypatch.setenv("TORCH_COMPILE_MODE", "reduce-overhead")
     trainer = FSDP2Trainer.__new__(FSDP2Trainer)
     trainer.rank = 1
+    trainer.args = {
+        "compile_strategy": "per_block",
+        "compile_backend": "inductor",
+        "compile_fullgraph": True,
+        "compile_dynamic": False,
+    }
 
     trainer._compile_transformer_blocks(root)
 
     assert compiled_inputs == [(block, "reduce-overhead") for block in original_blocks]
     assert [*root.double_blocks, *root.single_blocks] == original_blocks
+    trainer.args["compile_strategy"] = "stack"
+    with pytest.raises(ValueError, match="Unsupported compile_strategy='stack'"):
+        trainer._compile_transformer_blocks(root)
+
+
+def test_fsdp2_compile_output_head_in_place(monkeypatch):
+    root = torch.nn.Module()
+    root.final_layer = torch.nn.Linear(2, 2)
+    compiled_inputs = []
+
+    def fake_compile(module, *, backend, fullgraph, dynamic, mode):
+        assert backend == "inductor"
+        assert fullgraph is True
+        assert dynamic is False
+        compiled_inputs.append((module, mode))
+
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.args = {
+        "compile_backend": "inductor",
+        "compile_fullgraph": True,
+        "compile_dynamic": False,
+    }
+
+    trainer._compile_output_head(root)
+
+    assert compiled_inputs == [(root.final_layer, None)]
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
@@ -455,9 +502,7 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
     def fake_load_weights(dit, *args, **kwargs):
         events.append("load")
         original_param_ids.update({name: id(param) for name, param in dit.named_parameters()})
-        original_param_values.update(
-            {name: param.detach().clone() for name, param in dit.named_parameters()}
-        )
+        original_param_values.update({name: param.detach().clone() for name, param in dit.named_parameters()})
         original_state_keys.update(dit.state_dict())
 
     monkeypatch.setattr(
@@ -486,9 +531,7 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
     )
 
     converted_fqns = {
-        fqn
-        for fqn, module in model.dit.named_modules()
-        if type(module) is float8_linear.Float8Linear
+        fqn for fqn, module in model.dit.named_modules() if type(module) is float8_linear.Float8Linear
     }
     assert events == ["load", "convert", "convert"]
     assert len(converted_fqns) == 10
@@ -517,7 +560,9 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
         == "disabled"
     )
     assert (
-        model.dit.double_blocks[0].img_attn.qkv.config.cast_config_grad_output_for_grad_weight.scaling_type.value
+        model.dit.double_blocks[
+            0
+        ].img_attn.qkv.config.cast_config_grad_output_for_grad_weight.scaling_type.value
         == "disabled"
     )
     assert (

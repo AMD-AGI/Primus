@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:local}
 user_name: ${PRIMUS_USER:local}
-exp_name: ${PRIMUS_EXP_NAME:flux.1_schnell_t2i-raw-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:flux.1_dev_t2i-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 platform:
@@ -11,42 +11,34 @@ modules:
     framework: diffusion
     config: pre_trainer.yaml
 
-    model: flux.1_schnell_t2i.yaml
+    model: flux.1_dev_t2i.yaml
     overrides:
       sink_level: null
       file_sink_level: INFO
       stderr_sink_level: INFO
 
-      model:
-        config:
-          encoder:
-            t5_encoder: ${T5_ENCODER:google/t5-v1_1-xxl}
-            clip_encoder: ${CLIP_ENCODER:openai/clip-vit-large-patch14}
-            autoencoder: ${VAE_CHECKPOINT:black-forest-labs/FLUX.1-dev/ae.safetensors}
-            max_t5_length: ${MAX_T5_LENGTH:256}
-
       metrics:
-        log_freq: 1
-        enable_wandb: false
+        log_freq: ${LOG_FREQ:1}
+        enable_wandb: ${ENABLE_WANDB_LOGGER:false}
 
       training:
         local_batch_size: ${LOCAL_BATCH_SIZE:1}
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
         gradient_accumulation_steps: 1
-        output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-raw-pretrain}
-        save_steps: 0
-        save_strategy: ${SAVE_STRATEGY:dit_only}
-        run_name: flux.1_schnell_t2i-raw-pretrain
+        output_dir: ${OUTPUT_DIR:./output/flux.1_dev_t2i-pretrain}
+        save_steps: ${SAVE_STEPS:100}
+        save_strategy: ${SAVE_STRATEGY:dtcp_full}
+        save_total_limit: ${CHECKPOINT_KEEP_LATEST:3}
+        resume_from_checkpoint: ${RESUME_FROM_CHECKPOINT:latest}
+        run_name: flux.1_dev_t2i-pretrain
 
       data:
-        dataset_type: raw
-        dataset: ${DATASET:cc12m-test}
-        dataset_format: ${DATASET_FORMAT:webdataset}
         dataset_path: ${DATASET_PATH:}
+        eval_dataset_path: ${EVAL_DATASET_PATH:}
+        empty_encodings_path: ${EMPTY_ENCODINGS_PATH:}
         prompt_dropout_prob: ${PROMPT_DROPOUT_PROB:0.1}
         img_size: ${IMG_SIZE:256}
-        skip_low_resolution: false
 
       parallelism:
         sp_size: 1
@@ -62,8 +54,10 @@ modules:
         warmup_steps: ${WARMUP_STEPS:1600}
 
       runtime:
-        attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
-        gradient_checkpointing: ${GRADIENT_CHECKPOINTING:false}
+        seed: ${SEED:10007}
+        attention_backend: ${ATTENTION_BACKEND:sdpa}
+        gradient_checkpointing: ${GRADIENT_CHECKPOINTING:true}
+        gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO:1.0}
         compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
         compile_strategy: ${COMPILE_STRATEGY:per_block}
         compile_backend: ${COMPILE_BACKEND:inductor}
@@ -71,4 +65,16 @@ modules:
         compile_dynamic: ${COMPILE_DYNAMIC:false}
         compile_output_head: ${COMPILE_OUTPUT_HEAD:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
-        report_to: none
+        profile: ${PROFILE:false}
+        profile_rank: ${PROFILE_RANK:0}
+        profile_wait_steps: ${PROFILE_WAIT_STEPS:10}
+        profile_warmup_steps: ${PROFILE_WARMUP_STEPS:2}
+        profile_active_steps: ${PROFILE_ACTIVE_STEPS:10}
+        profile_output_dir: ${PROFILE_OUTPUT_DIR:}
+        profile_with_stack: ${PROFILE_WITH_STACK:false}
+
+      mlperf:
+        enable: ${MLPERF_ENABLE:false}
+        target_eval_loss: ${TARGET_ACCURACY:0.586}
+        eval_samples: ${VAL_CHECK_INTERVAL:262144}
+        output_file: ${MLLOG_OUTPUT_FILE:}

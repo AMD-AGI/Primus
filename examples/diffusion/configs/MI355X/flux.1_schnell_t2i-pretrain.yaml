@@ -58,8 +58,20 @@ modules:
         attention_backend: ${ATTENTION_BACKEND:sdpa}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:true}
         gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO:1.0}
-        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:false}
+        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
+        compile_strategy: ${COMPILE_STRATEGY:per_block}
+        compile_backend: ${COMPILE_BACKEND:inductor}
+        compile_fullgraph: ${COMPILE_FULLGRAPH:true}
+        compile_dynamic: ${COMPILE_DYNAMIC:false}
+        compile_output_head: ${COMPILE_OUTPUT_HEAD:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
+        profile: ${PROFILE:false}
+        profile_rank: ${PROFILE_RANK:0}
+        profile_wait_steps: ${PROFILE_WAIT_STEPS:10}
+        profile_warmup_steps: ${PROFILE_WARMUP_STEPS:2}
+        profile_active_steps: ${PROFILE_ACTIVE_STEPS:10}
+        profile_output_dir: ${PROFILE_OUTPUT_DIR:}
+        profile_with_stack: ${PROFILE_WITH_STACK:false}
 
       mlperf:
         enable: ${MLPERF_ENABLE:false}

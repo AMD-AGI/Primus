@@ -424,6 +424,49 @@ class BaseWanTrainer:
     def _save_checkpoint(self):
         """Save checkpoint at save_steps intervals. Override for custom strategies."""
 
+    def _start_profiler(self) -> None:
+        self._profiler = None
+        if not self.args.get("profile", False):
+            return
+        profile_rank = int(self.args.get("profile_rank", 0))
+        if self.rank != profile_rank:
+            return
+
+        output_dir = str(
+            self.args.get("profile_output_dir") or os.path.join(self.output_dir, "torch_profile")
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        self._profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=int(self.args.get("profile_wait_steps", 10)),
+                warmup=int(self.args.get("profile_warmup_steps", 2)),
+                active=int(self.args.get("profile_active_steps", 10)),
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                output_dir,
+                worker_name=f"rank{self.rank}",
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=bool(self.args.get("profile_with_stack", False)),
+        )
+        self._profiler.start()
+        logger.info("Torch profiler enabled on rank %d: %s", self.rank, output_dir)
+
+    def _step_profiler(self) -> None:
+        if self._profiler is not None:
+            self._profiler.step()
+
+    def _stop_profiler(self) -> None:
+        if self._profiler is not None:
+            self._profiler.stop()
+            self._profiler = None
+
     # ------------------------------------------------------------------ #
     #                       Common methods                                 #
     # ------------------------------------------------------------------ #
@@ -923,6 +966,7 @@ class BaseWanTrainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         torch.cuda.reset_peak_memory_stats()
+        self._start_profiler()
 
         start_time = time.time()
         last_log_time = start_time
@@ -994,6 +1038,7 @@ class BaseWanTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    self._step_profiler()
                     self._mlperf_log_block_stop(self.global_step)
                     update_steps_since_log += 1
                     local_samples_since_log += local_samples_in_update
@@ -1075,11 +1120,13 @@ class BaseWanTrainer:
                                         value=time_to_converge,
                                     )
                             self._mlperf_log_run_stop()
+                            self._stop_profiler()
                             return
 
                     # Early termination
                     if self.max_steps > 0 and self.global_step >= self.max_steps:
                         self._mlperf_log_run_stop()
+                        self._stop_profiler()
                         return
 
             if self.max_steps > 0 and self.global_step >= self.max_steps:
@@ -1089,6 +1136,7 @@ class BaseWanTrainer:
             elapsed = time.time() - start_time
             logger.info(f"Training finished in {elapsed / 60:.2f} min")
         self._mlperf_log_run_stop()
+        self._stop_profiler()
 
     def save_model(self):
         """Save final model. Override in subclass."""

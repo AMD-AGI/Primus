@@ -42,9 +42,21 @@ export WARMUP_STEPS=${WARMUP_STEPS:-1600}
 export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
 export GRADIENT_CHECKPOINTING_RATIO=${GRADIENT_CHECKPOINTING_RATIO:-0.25}
 export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-true}
+export COMPILE_STRATEGY=${COMPILE_STRATEGY:-per_block}
+export COMPILE_BACKEND=${COMPILE_BACKEND:-inductor}
+export COMPILE_FULLGRAPH=${COMPILE_FULLGRAPH:-true}
+export COMPILE_DYNAMIC=${COMPILE_DYNAMIC:-false}
+export COMPILE_OUTPUT_HEAD=${COMPILE_OUTPUT_HEAD:-false}
 export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-false}
 export TORCH_COMPILE_MODE=${TORCH_COMPILE_MODE:-}
 export FSDP2_REDUCE_DTYPE=${FSDP2_REDUCE_DTYPE:-fp32}
+export PROFILE=${PROFILE:-false}
+export PROFILE_RANK=${PROFILE_RANK:-0}
+export PROFILE_WAIT_STEPS=${PROFILE_WAIT_STEPS:-10}
+export PROFILE_WARMUP_STEPS=${PROFILE_WARMUP_STEPS:-2}
+export PROFILE_ACTIVE_STEPS=${PROFILE_ACTIVE_STEPS:-10}
+export PROFILE_OUTPUT_DIR=${PROFILE_OUTPUT_DIR:-}
+export PROFILE_WITH_STACK=${PROFILE_WITH_STACK:-false}
 export SAVE_STEPS=${SAVE_STEPS:-100}
 export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
 export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
@@ -199,9 +211,16 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"float8_recipe: {os.environ.get('FLUX_FLOAT8_RECIPE', '')}\n")
     handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
     handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
+    handle.write(f"compile_strategy: {os.environ.get('COMPILE_STRATEGY', '')}\n")
+    handle.write(f"compile_backend: {os.environ.get('COMPILE_BACKEND', '')}\n")
+    handle.write(f"compile_fullgraph: {os.environ.get('COMPILE_FULLGRAPH', '')}\n")
+    handle.write(f"compile_dynamic: {os.environ.get('COMPILE_DYNAMIC', '')}\n")
+    handle.write(f"compile_output_head: {os.environ.get('COMPILE_OUTPUT_HEAD', '')}\n")
     handle.write(f"fsdp2_reshard_after_forward: {os.environ.get('FSDP2_RESHARD_AFTER_FORWARD', '')}\n")
     handle.write(f"torch_compile_mode: {os.environ.get('TORCH_COMPILE_MODE', '')}\n")
     handle.write(f"fsdp2_reduce_dtype: {os.environ.get('FSDP2_REDUCE_DTYPE', '')}\n")
+    handle.write(f"profile: {os.environ.get('PROFILE', '')}\n")
+    handle.write(f"profile_output_dir: {os.environ.get('PROFILE_OUTPUT_DIR', '')}\n")
     handle.write(f"mlperf_enable: {os.environ.get('MLPERF_ENABLE', '')}\n")
     handle.write(f"target_accuracy: {os.environ.get('TARGET_ACCURACY', '')}\n")
     handle.write(f"val_check_interval: {os.environ.get('VAL_CHECK_INTERVAL', '')}\n")
@@ -251,8 +270,8 @@ echo "[run_flux_mlperf] steps=$MAX_STEPS local_batch_size=$LOCAL_BATCH_SIZE lr=$
 echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATEST resume=$RESUME_FROM_CHECKPOINT"
 echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
-echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
-echo "[run_flux_mlperf] compile_mode=$TORCH_COMPILE_MODE fsdp2_reduce_dtype=$FSDP2_REDUCE_DTYPE"
+echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS strategy=$COMPILE_STRATEGY compile_output_head=$COMPILE_OUTPUT_HEAD reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
+echo "[run_flux_mlperf] compile_backend=$COMPILE_BACKEND fullgraph=$COMPILE_FULLGRAPH dynamic=$COMPILE_DYNAMIC mode=$TORCH_COMPILE_MODE fsdp2_reduce_dtype=$FSDP2_REDUCE_DTYPE"
 echo "[run_flux_mlperf] float8_recipe=${FLUX_FLOAT8_RECIPE:-bf16}"
 
 trap terminate_training INT TERM

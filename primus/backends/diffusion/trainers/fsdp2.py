@@ -76,7 +76,9 @@ class FSDP2Trainer(BaseWanTrainer):
         # Checkpoint loading (after optimizer & scheduler are fully initialized)
         resume_from = self.args.get("resume_from_checkpoint")
         if resume_from:
-            path = self._latest_checkpoint() if str(resume_from).lower() in {"auto", "latest"} else resume_from
+            path = (
+                self._latest_checkpoint() if str(resume_from).lower() in {"auto", "latest"} else resume_from
+            )
             if path:
                 self._load_checkpoint(path)
             elif str(resume_from).lower() not in {"auto", "latest"}:
@@ -139,20 +141,24 @@ class FSDP2Trainer(BaseWanTrainer):
             else self.model
         )
 
-        non_fp32_params = [name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32]
+        non_fp32_params = [
+            name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32
+        ]
         if non_fp32_params:
             raise ValueError(
                 "TorchTitan-aligned FSDP2 requires FP32 parameter storage before wrapping; "
                 f"found non-FP32 parameters including {non_fp32_params[:3]}."
             )
 
+        if bool(self.args.get("compile_transformer_blocks", False)):
+            self._compile_transformer_blocks(wrap_root)
+        if bool(self.args.get("compile_output_head", False)):
+            self._compile_output_head(wrap_root)
+
         if self.world_size == 1:
             if self.rank == 0:
                 logger.info("FSDP2: world_size=1; skipping composable FSDP wrapping.")
             return
-
-        if bool(self.args.get("compile_transformer_blocks", False)):
-            self._compile_transformer_blocks(wrap_root)
 
         reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
         no_reshard_paths = {
@@ -234,19 +240,51 @@ class FSDP2Trainer(BaseWanTrainer):
             )
 
     def _compile_transformer_blocks(self, root: torch.nn.Module) -> None:
+        strategy = str(self.args.get("compile_strategy", "per_block")).strip().lower()
+        if strategy != "per_block":
+            raise ValueError(f"Unsupported compile_strategy={strategy!r}; currently supported: 'per_block'")
         compiled = 0
+        backend = str(self.args.get("compile_backend", "inductor")).strip() or "inductor"
+        fullgraph = bool(self.args.get("compile_fullgraph", True))
+        dynamic = bool(self.args.get("compile_dynamic", False))
         compile_mode = os.getenv("TORCH_COMPILE_MODE", "").strip() or None
         for attr in ("double_blocks", "single_blocks"):
             blocks = getattr(root, attr, None)
             if blocks is None:
                 continue
             for block in blocks:
-                block.compile(fullgraph=True, mode=compile_mode)
+                block.compile(
+                    backend=backend,
+                    fullgraph=fullgraph,
+                    dynamic=dynamic,
+                    mode=compile_mode,
+                )
                 compiled += 1
         if self.rank == 0:
             logger.info(
-                f"FSDP2: compiled {compiled} FLUX transformer blocks "
-                f"with torch.compile mode={compile_mode or 'default'}"
+                f"FSDP2: compiled {compiled} FLUX transformer blocks with strategy={strategy}, "
+                f"backend={backend}, fullgraph={fullgraph}, dynamic={dynamic}, "
+                f"mode={compile_mode or 'default'}"
+            )
+
+    def _compile_output_head(self, root: torch.nn.Module) -> None:
+        final_layer = getattr(root, "final_layer", None)
+        if final_layer is None:
+            raise ValueError("compile_output_head requires a FLUX model with final_layer")
+        backend = str(self.args.get("compile_backend", "inductor")).strip() or "inductor"
+        fullgraph = bool(self.args.get("compile_fullgraph", True))
+        dynamic = bool(self.args.get("compile_dynamic", False))
+        compile_mode = os.getenv("TORCH_COMPILE_MODE", "").strip() or None
+        final_layer.compile(
+            backend=backend,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            mode=compile_mode,
+        )
+        if self.rank == 0:
+            logger.info(
+                f"FSDP2: compiled FLUX output head with backend={backend}, "
+                f"fullgraph={fullgraph}, dynamic={dynamic}, mode={compile_mode or 'default'}"
             )
 
     @staticmethod
@@ -510,7 +548,9 @@ class FSDP2Trainer(BaseWanTrainer):
         self._save_dtcp(path)
 
 
-def build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None):
+def build_fsdp2_trainer(
+    *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
+):
     rank, world_size, local_rank = setup_distributed()
     return FSDP2Trainer(
         model=model,

@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
+export CONFIG=${CONFIG:-examples/diffusion/configs/MI355X/flux.1_schnell_t2i-pretrain.yaml}
 export DATASET_PATH=${DATASET_PATH:-/data/cc12m_preprocessed}
 export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
 export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
@@ -15,6 +16,11 @@ export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export GRADIENT_CHECKPOINTING_RATIO=${GRADIENT_CHECKPOINTING_RATIO:-0.25}
 export COMPILE_TRANSFORMER_BLOCKS=${COMPILE_TRANSFORMER_BLOCKS:-true}
+export COMPILE_STRATEGY=${COMPILE_STRATEGY:-per_block}
+export COMPILE_BACKEND=${COMPILE_BACKEND:-inductor}
+export COMPILE_FULLGRAPH=${COMPILE_FULLGRAPH:-true}
+export COMPILE_DYNAMIC=${COMPILE_DYNAMIC:-false}
+export COMPILE_OUTPUT_HEAD=${COMPILE_OUTPUT_HEAD:-false}
 export FSDP2_RESHARD_AFTER_FORWARD=${FSDP2_RESHARD_AFTER_FORWARD:-false}
 export FSDP2_REDUCE_DTYPE=${FSDP2_REDUCE_DTYPE:-fp32}
 export MLPERF_ENABLE=${MLPERF_ENABLE:-true}
@@ -30,4 +36,4 @@ fi
 
 torchrun --standalone --nproc_per_node="${GPUS_PER_NODE:-8}" \
   -m primus.cli.main train pretrain \
-  --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-pretrain.yaml
+  --config "$CONFIG"
