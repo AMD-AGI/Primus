@@ -508,6 +508,11 @@ def write_inference_trial_yaml(arch: ArchitectureRecord, cfg, out_dir: Path, tag
     overrides["pipeline_model_parallel_size"] = cfg.pp
     overrides["expert_model_parallel_size"] = cfg.ep
     overrides["context_parallel_size"] = cfg.cp
+    # Inference sweeps its own PP; a fixed *training* pipeline layout (stage
+    # string / VPP) conflicts with the serving parallelism and is meaningless
+    # for a forward-only projection, so drop both.
+    overrides["virtual_pipeline_model_parallel_size"] = None
+    overrides["pipeline_model_parallel_layout"] = None
     pre_trainer["overrides"] = overrides
     raw.setdefault("modules", {})["pre_trainer"] = pre_trainer
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -755,7 +760,32 @@ class Evaluator:
             return None
         ep = cfg.ep if getattr(self.arch, "is_moe", False) else 1
         cand = Path(cache) / f"{self.arch.model_name}_tp{cfg.tp}_pp{cfg.pp}_ep{ep}.json"
-        return cand if cand.exists() else None
+        if cand.exists():
+            return cand
+        # No exact-parallelism artifact: fall back to a regime-appropriate base
+        # anchor and let the projector restore. For a sharded target, escalate to
+        # a 2-GPU in-regime anchor when the model shows super-linear sharding
+        # relief (heavy single-GPU overhead a 1-GPU restore can't extrapolate);
+        # otherwise the 1-GPU anchor suffices. See inference_projection.regime.
+        return self._select_regime_base_anchor(cfg, Path(cache), ep)
+
+    def _select_regime_base_anchor(self, cfg, cache: Path, ep: int) -> Path | None:
+        from primus.core.projection.inference_projection.regime import select_anchor
+
+        m = self.arch.model_name
+        a1 = cache / f"{m}_tp1_pp1_ep1.json"
+        if not a1.exists():
+            return None
+        a2 = next(
+            (cache / n for n in (f"{m}_tp2_pp1_ep2.json", f"{m}_tp2_pp1_ep1.json")
+             if (cache / n).exists()),
+            None,
+        )
+        target_gpus = cfg.tp * cfg.pp * (ep if getattr(self.arch, "is_moe", False) else 1)
+        chosen, _in_regime, _reason = select_anchor(
+            target_gpus, str(a1), str(a2) if a2 else None
+        )
+        return Path(chosen)
 
     def evaluate_inference(self, cfg, tag: str) -> EvalResult:
         """Score a serving config via ``projection inference`` (memory + perf).
