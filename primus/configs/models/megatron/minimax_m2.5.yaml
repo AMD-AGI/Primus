@@ -11,7 +11,8 @@ tokenizer_model: MiniMaxAI/MiniMax-M2.5
 # model architecture
 num_layers: 62
 hidden_size: 3072
-ffn_hidden_size: 1536
+ffn_hidden_size: 1536       # dense FFN (unused: all layers are MoE)
+moe_ffn_hidden_size: 1536   # expert intermediate (HF config: intermediate_size)
 num_attention_heads: 48
 
 # GQA (48 Q heads, 8 KV heads)
