@@ -15,6 +15,8 @@ subtrees:
         title: Quickstart
       - file: 01-getting-started/installation.md
         title: Installation and setup
+      - file: 01-getting-started/release-notes.md
+        title: Release notes
       - file: 01-getting-started/glossary.md
         title: Glossary
 
@@ -30,6 +32,12 @@ subtrees:
         title: Pretraining workflows
       - file: 02-user-guide/end-to-end-training-recipes.md
         title: End-to-end training recipes
+      - file: 02-user-guide/megatron-lm-training.md
+        title: Megatron-LM training performance validation
+      - file: 02-user-guide/torchtitan-training.md
+        title: TorchTitan training performance validation
+      - file: 02-user-guide/jax-maxtext-training.md
+        title: JAX MaxText training performance validation
       - file: 02-user-guide/posttraining.md
         title: Post-training workflows
       - file: 02-user-guide/node-smoke-test-instruction.md

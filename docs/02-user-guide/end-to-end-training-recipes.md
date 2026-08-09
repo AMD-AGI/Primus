@@ -2,13 +2,20 @@
 
 Task-oriented, copy-paste commands for launching pretraining runs with each Primus backend on AMD Instinct™ GPUs.
 
-This section is for users who already know what they want to run and need the specific command for a given model, precision, and GPU. To understand concepts related to the Primus workflow (how backends work, YAML structure and inheritance, parallelism vocabulary, the full per-backend configuration inventory, etc.), see **[Pretraining](pretraining.md)**.
+This page covers what is common to every backend — image, architecture folders, environment, shared setup — and gives one worked example each. For the **complete per-model command set**, follow the backend recipe page in the table below. For the concepts behind the workflow (how backends work, YAML structure and inheritance, parallelism vocabulary, the full configuration inventory), see [Pretraining](pretraining.md).
 
-> **Authoritative full matrices.** AMD publishes per-model reproduction pages with verified images, commits, and tuned batch sizes for every supported model at the following locations—treat them as the source of truth for achieving the expected performance; this page only gives the canonical *pattern* plus a representative example per backend and links to other reference materials.
->
-> - [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html)
-> - [Training with Primus + PyTorch (TorchTitan)](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-pytorch.html)
-> - [Training with Primus + JAX MaxText](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/jax-maxtext.html)
+## Choose your recipe
+
+| Backend | Image family | Configurations | Full recipe |
+| ------- | ------------ | -------------- | ----------- |
+| Megatron-LM | `rocm/primus` | `examples/megatron/configs/<ARCH>/` | [Megatron-LM training](megatron-lm-training.md) |
+| TorchTitan (PyTorch) | `rocm/primus` | `examples/torchtitan/configs/<ARCH>/` | [TorchTitan training](torchtitan-training.md) |
+| JAX MaxText | `rocm/jax-training:maxtext-…` | `examples/maxtext/configs/<ARCH>/` | [JAX MaxText training](jax-maxtext-training.md) |
+| Megatron Bridge (post-training) | `rocm/primus` | `examples/megatron_bridge/configs/<ARCH>/` | [Post-training](posttraining.md) |
+
+Each backend recipe page opens with an **Important notes** section listing the settings that release requires, the architecture-specific tuning, and any known issues. Read it before your first run on a new image tag.
+
+> **Image contents.** The exact ROCm, PyTorch/JAX, Transformer Engine, and RCCL versions in every published tag are in [Release notes](../01-getting-started/release-notes.md), which is the single source of truth for image contents.
 
 ---
 
@@ -16,15 +23,26 @@ This section is for users who already know what they want to run and need the sp
 
 Every recipe follows the same four-step pattern:
 
-1. **Pull and launch the AMD Docker image** (for a reproducible environment).
+1. **Clone the Primus branch** matching your image, on the host.
 2. **Set the GPU-architecture environment** (performance environment variable settings differ by GPU).
 3. **Pick the configuration YAML** for your GPU architecture under `examples/<backend>/configs/<ARCH>/` in the [Primus repository](https://github.com/AMD-AGI/Primus).
-4. **Launch** with `runner/primus-cli` in `direct`, `container`, or `slurm` mode.
+4. **Launch** with `runner/primus-cli` — in `container` mode from the host, which starts the container for you.
+
+### Choosing a launch mode
+
+| Mode | Run it from | What it does |
+| ---- | ----------- | ------------ |
+| **`container`** (recommended) | The host, in your Primus checkout | Starts the container, mounts your checkout into it at the same path, and runs the training inside. Nothing to set up by hand. |
+| `direct` | **Inside** a container, or a bare-metal install | Runs training in the current environment. Use it when you already have a shell inside the container, or when Primus is installed directly on the host. |
+| `slurm` | The host, in your Primus checkout | Allocates nodes and runs `container` mode on each of them. |
+
+Container mode mounts your checkout at the same absolute path inside the container and runs from there, so **the branch you cloned is the code that executes** — the `/workspace/Primus` copy baked into the image is not used. It also forwards a list of environment variables from the host (including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables), so exports you make on the host take effect inside. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
+
+> Only the Primus tree is mounted automatically. Mount datasets, checkpoints, and output directories with `--volume /host/path` (or `--volume /host/path:/container/path`).
 
 ### GPU-architecture config folders
 
 Configuration YAMLs are organized by GPU architecture. Always pick the folder that matches your hardware:
-
 
 | Backend                             | `MI300X` | `MI325X` | `MI355X` / `MI350X` |
 | ----------------------------------- | -------- | -------- | ------------------- |
@@ -33,12 +51,11 @@ Configuration YAMLs are organized by GPU architecture. Always pick the folder th
 | `examples/maxtext/configs/`         | yes      | —        | yes                 |
 | `examples/megatron_bridge/configs/` | yes      | —        | yes                 |
 
-
 > MI350X uses the same configurations as MI355X because both are based on the gfx950 architecture. If a configuration for your model is not available in the architecture-specific folder, use the closest match from the same generation as a starting point.
 
 ### GPU-architecture environment variables
 
-MI300X and MI325X benefit from the following performance settings; MI355X/MI350X do **not** need them:
+**Megatron-LM and TorchTitan** on MI300X/MI325X (gfx942) benefit from the following settings. They are not needed on MI355X/MI350X (gfx950):
 
 ```bash
 # MI300X / MI325X only -- improves performance
@@ -47,17 +64,63 @@ export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=1
 export NVTE_CK_IS_V3_ATOMIC_FP32=1
 ```
 
+**JAX MaxText does not use these.** Its backend adapter applies the correct architecture environment automatically, and the one variable you may need to export yourself is `RCCL_WARP_SPEED_AUTO=0` on MI355X. See [JAX MaxText → Architecture-specific settings](jax-maxtext-training.md#architecture-specific-settings).
+
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.5` (`runner/.primus.yaml`). For reproducing published benchmarks, use the AMD-published tag for your release (the AMD pages under **Authoritative full matrices** above list the most current tag). JAX MaxText has its own separate image family of `rocm/jax-training:maxtext-...`.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.5`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default — pass it explicitly in container and Slurm modes.
 
-Image is picked in the priority order of `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
+The image is picked in priority order: `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
 ---
 
 ## Shared setup for all backends
 
 These apply across all backends. Set them up before running the recipes below.
+
+### Get the Primus source
+
+Clone the branch matching your image, on the host. Every command on this page runs from this directory:
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
+cd Primus
+git checkout release/v26.5
+git submodule update --init --recursive
+```
+
+Container mode mounts this checkout into the container, so this is the code that runs — you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.5](../01-getting-started/release-notes.md#primus-source-for-v265).
+
+### Pull the image (optional)
+
+`primus-cli container` pulls the image on first use, so this is only needed if you want to warm the cache:
+
+```bash
+docker pull rocm/primus:v26.5                  # Megatron-LM, TorchTitan, Megatron Bridge
+docker pull rocm/jax-training:maxtext-v26.5    # JAX MaxText
+```
+
+<details>
+<summary>Starting a container by hand instead</summary>
+
+If you want an interactive shell in the container — for debugging, or to run `primus-cli direct` yourself — start one manually and bind your Primus checkout:
+
+```bash
+docker run -it \
+    --device /dev/dri --device /dev/kfd --device /dev/infiniband \
+    --network host --ipc host \
+    --group-add video --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined --privileged \
+    -v $PWD:$PWD -w $PWD --shm-size 128G \
+    --name primus_training_env \
+    rocm/primus:v26.5
+```
+
+Re-enter it later with `docker start primus_training_env && docker exec -it primus_training_env bash`. Inside, use `primus-cli direct`. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
+
+Bind only the directories you need rather than your whole home directory.
+
+</details>
 
 ### Hugging Face token (for gated models or real data)
 
@@ -74,71 +137,52 @@ export HF_TOKEN=<your_hf_token>
 
 ### Multi-node networking checklist
 
-The `primus-cli` launcher sets sensible `NCCL_`* defaults, but auto-detection can pick the wrong device on multi-NIC nodes. Before multi-node, confirm and export if needed:
+The `primus-cli` launcher sets sensible `NCCL_*` defaults, but auto-detection can pick the wrong device on multi-NIC nodes. Before multi-node, confirm and export if needed:
 
 ```bash
 export NCCL_IB_HCA=<your_rdma_interfaces>      # from `ibv_devices`
 export NCCL_SOCKET_IFNAME=<your_net_interface> # from `ip a`
 export GLOO_SOCKET_IFNAME=<same_as_NCCL_SOCKET_IFNAME>
-export NCCL_IB_GID_INDEX=3                      # 3 for RoCE (1 for AMD AINIC)
+export NCCL_IB_GID_INDEX=3                     # 3 for RoCE (1 for AMD AINIC)
 ```
 
-For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_GID_INDEX=1`. See [Multi-Node Networking](../04-technical-guides/multi-node-networking.md) for the full reference.
+For AMD AINIC clusters also set `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, `NCCL_IB_GID_INDEX=1`. See [Multi-node networking](../04-technical-guides/multi-node-networking.md) for the full reference.
 
 ---
 
 ## Megatron-LM
 
-**Image:** `rocm/primus`  |  **Configurations:** `examples/megatron/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
+**Configurations:** `examples/megatron/configs/<ARCH>/`  |  **Precisions:** BF16, FP8 (all architectures); MXFP8 and MXFP4 for Llama 3.1 8B on MI355X
 
-### 1. Launch the container
+**➜ Full recipe with every model and precision: [Megatron-LM training](megatron-lm-training.md)**
 
-```bash
-docker pull rocm/primus:v26.5
-docker run -it \
-    --device /dev/dri --device /dev/kfd --device /dev/infiniband \
-    --network host --ipc host \
-    --group-add video --cap-add SYS_PTRACE \
-    --security-opt seccomp=unconfined --privileged \
-    -v $HOME:$HOME --shm-size 128G \
-    --name primus_training_env \
-    rocm/primus:v26.5
-```
-
-Access the container later with `docker start primus_training_env && docker exec -it primus_training_env bash`.
-
-### 2. Run pretraining (direct mode, inside the container)
-
-Pretrain Llama 3.1 8B BF16 on **MI355X / MI350X**:
+Pretrain Llama 3.1 8B BF16 on **MI355X / MI350X**, from your Primus checkout on the host:
 
 ```bash
-./runner/primus-cli direct \
+./runner/primus-cli container \
   --log_file /tmp/primus_llama3.1_8B.log \
   -- train pretrain \
   --config examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-Pretrain the same model on **MI300X / MI325X** (add the performance environment variables):
+The same model on **MI300X / MI325X** — export the gfx942 performance variables first, and container mode forwards them into the container:
 
 ```bash
 export HSA_NO_SCRATCH_RECLAIM=1
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=1
 export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
-./runner/primus-cli direct \
+./runner/primus-cli container \
   --log_file /tmp/primus_llama3.1_8B.log \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-Switch model or precision by changing the config filename (e.g. `llama3.1_70B-FP8-pretrain.yaml`, `mixtral_8x7B_v0.1-BF16-pretrain.yaml`). The full configuration inventory is the repository's `examples/megatron/configs/<ARCH>/` directory. See the parallelism table in [Pretraining](pretraining.md#example-configurations-under-examplesmegatronconfigsmi300x).
+If you already have a shell inside the container, swap `container` for `direct` in any of these commands.
 
-**Model-specific notes:**
+Switch model or precision by changing the config filename (for example `llama3.1_70B-FP8-pretrain.yaml`, `mixtral_8x7B_v0.1-BF16-pretrain.yaml`). See the parallelism table in [Pretraining](pretraining.md#example-configurations-under-examplesmegatronconfigsmi300x).
 
-- **Zebra-Llama** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/zebra_llama_{1B,3B,8B}-pretrain.yaml` and run via the standard core runtime; Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
-- **MoE models** (DeepSeek-V2-Lite, Mixtral) might need extra grouped-GEMM or router flags; [Training with Primus + Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) lists the exact flags per model.
-
-### 3. Multi-node (Slurm mode)
+Multi-node with Slurm:
 
 ```bash
 ./runner/primus-cli slurm srun -N 8 -p <partition> -- train pretrain \
@@ -146,30 +190,35 @@ Switch model or precision by changing the config filename (e.g. `llama3.1_70B-FP
   --micro_batch_size 4 --global_batch_size 1024
 ```
 
-Scale batch size with node count and align `tensor_model_parallel_size`, `pipeline_model_parallel_size`, and `expert_model_parallel_size` to your topology. See the [multi-node networking checklist](#multi-node-networking-checklist) above.
+Scale batch size with node count and align `tensor_model_parallel_size`, `pipeline_model_parallel_size`, and `expert_model_parallel_size` to your topology. The [Megatron-LM recipe](megatron-lm-training.md#32-multi-node-training) lists per-model, per-node-count batch sizes.
+
+**Model-specific notes:**
+
+- **Zebra-Llama** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/zebra_llama_1B-pretrain.yaml` (and `_3B`, `_8B`), and run via the legacy runtime — prefix the command with `PRIMUS_TRAIN_RUNTIME=legacy`. Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
+- **MoE models** (DeepSeek-V2-Lite, Mixtral, Qwen3-A3B, GPT-OSS) may need extra grouped-GEMM or router flags; the [Megatron-LM recipe](megatron-lm-training.md#31-single-node-training) gives the exact command per model.
 
 ---
 
 ## TorchTitan (PyTorch)
 
-**Image:** `rocm/primus`  |  **Configurations:** `examples/torchtitan/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
+**Configurations:** `examples/torchtitan/configs/<ARCH>/`  |  **Precisions:** BF16, FP8
 
-Use the same `rocm/primus` container as Megatron (step 1 above). TorchTitan parameters use a dotted namespace (e.g. `--training.local_batch_size`).
+**➜ Full recipe with every model and precision: [TorchTitan training](torchtitan-training.md)**
 
-### Run pretraining (direct mode)
+Uses the same `rocm/primus` container as Megatron-LM. TorchTitan parameters use a dotted namespace (for example `--training.local_batch_size`).
 
-Pretrain Llama 3.1 8B BF16 on **MI355X / MI350X**:
+Pretrain Llama 3.1 8B BF16 on **MI355X / MI350X**, from your Primus checkout on the host:
 
 ```bash
-./runner/primus-cli direct \
+./runner/primus-cli container \
   --log_file /tmp/primus_llama3.1_8B.log \
   -- train pretrain \
   --config examples/torchtitan/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-On **MI300X / MI325X**, export the performance environment variables first (see above) and use the `MI300X` config path.
+On **MI300X / MI325X**, export the gfx942 performance variables first and use the `MI300X` config path.
 
-### Multi-node (Slurm mode)
+Multi-node with Slurm:
 
 ```bash
 ./runner/primus-cli slurm srun -N 4 -- train pretrain \
@@ -179,52 +228,39 @@ On **MI300X / MI325X**, export the performance environment variables first (see 
   --training.mock_data True
 ```
 
-Available models include Llama 3.1 (8B/70B/405B), Llama 4, DeepSeek V3, and Qwen 3. See the `examples/torchtitan/configs/<ARCH>/` directory in the repository.
+Available models include Llama 3.1 (8B/70B/405B), Llama 4 (17Bx16E/17Bx128E), DeepSeek V3 (16B/236B/671B), Qwen 3 (0.6B–32B), and GPT-OSS (20B/120B). See `examples/torchtitan/configs/<ARCH>/`.
 
 ---
 
 ## JAX MaxText
 
-**Image:** `rocm/jax-training:maxtext-...` (separate family from the other backends)  |  **Configurations:** `examples/maxtext/configs/<ARCH>/`
+**Configurations:** `examples/maxtext/configs/<ARCH>/`  |  **Precisions:** BF16
 
-MaxText uses a different Docker image than Megatron and TorchTitan, and it is **not** the default image pointed to in `runner/.primus.yaml`. In container or Slurm mode, you must point Primus at your MaxText image explicitly.
+**➜ Full recipe with every model and precision: [JAX MaxText training](jax-maxtext-training.md)**
 
-### 1. Launch the container
+MaxText uses a different Docker image than the PyTorch backends and it is **not** the default in `runner/.primus.yaml`, so pass it explicitly with `--image` in container and Slurm modes.
 
-```bash
-docker pull rocm/jax-training:maxtext-v26.5
-docker run -it \
-    --device /dev/dri --device /dev/kfd \
-    --network host --ipc host \
-    --group-add video --cap-add SYS_PTRACE \
-    --security-opt seccomp=unconfined --privileged \
-    -v $HOME:$HOME -v $HOME/.ssh:/root/.ssh \
-    --shm-size 64G \
-    --name training_env \
-    rocm/jax-training:maxtext-v26.5
-```
+> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v265).
 
-If you run Primus directly on the host instead of inside the prebuilt Docker image, install the JAX dependencies first by `pip install -r requirements-jax.txt`.
-
-### 2. Run pretraining
-
-Direct mode (inside the container)—pretraining Llama 3 8B on **MI355X**:
+Pretrain Llama 3 8B on **MI355X**, from your Primus checkout on the host:
 
 ```bash
-./runner/primus-cli direct \
-  -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
-```
-
-Container mode—passing the MaxText image with `--image`:
-
-```bash
+export RCCL_WARP_SPEED_AUTO=0
 ./runner/primus-cli container --image rocm/jax-training:maxtext-v26.5 \
   -- train pretrain \
   --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
 ```
 
-Slurm mode—supplying the image (and any environment variables) via a config file:
+If you already have a shell inside the MaxText container, use `direct` instead — no `--image` needed:
+
+```bash
+export RCCL_WARP_SPEED_AUTO=0
+./runner/primus-cli direct \
+  -- train pretrain \
+  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+```
+
+Slurm mode — supply the image (and any environment variables) via a config file:
 
 ```bash
 ./runner/primus-cli --config my_maxtext_config.yaml slurm srun -N 8 \
@@ -232,16 +268,18 @@ Slurm mode—supplying the image (and any environment variables) via a config fi
   --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
 ```
 
-MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields—see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).
+MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields — see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).
+
+> **Quantized MaxText runs.** The `examples/maxtext/configs/` YAMLs are BF16 only, so there is no FP8 config to select by path. The image does support FP8 (gfx950) and NANOO FP8 (gfx942) — reach them through the `-q fp8` / `-q nanoo_fp8` flags of the standalone benchmark scripts, described in [JAX MaxText → Standalone benchmarking](jax-maxtext-training.md#standalone-benchmarking).
 
 ---
 
 ## Megatron Bridge (post-training)
 
-Megatron Bridge configurations are under `examples/megatron_bridge/configs/<ARCH>/` in the repository and are primarily **SFT and LoRA post-training** recipes (e.g. `qwen3_32b_sft_posttrain.yaml`, `llama31_70b_lora_posttrain.yaml`). Launch with `train posttrain`:
+Megatron Bridge configurations are under `examples/megatron_bridge/configs/<ARCH>/` and are primarily **SFT and LoRA post-training** recipes (for example `qwen3_32b_sft_posttrain.yaml`, `llama31_70b_lora_posttrain.yaml`). Launch with `train posttrain`:
 
 ```bash
-./runner/primus-cli direct \
+./runner/primus-cli container \
   --log_file /tmp/primus_qwen3_32b_sft.log \
   -- train posttrain \
   --config examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
@@ -253,6 +291,8 @@ See [Post-training](posttraining.md) for the full SFT/LoRA workflow.
 
 ## Related documentation
 
+- [Megatron-LM training](megatron-lm-training.md), [TorchTitan training](torchtitan-training.md), [JAX MaxText training](jax-maxtext-training.md): full per-model recipes.
+- [Release notes](../01-getting-started/release-notes.md): what is inside each published image tag.
 - [Pretraining](pretraining.md): backend concepts, configuration walkthroughs, parallelism vocabulary, full configuration inventories.
 - [Post-training](posttraining.md): SFT and LoRA via Megatron Bridge.
 - [CLI reference](cli-reference.md): `direct` / `container` / `slurm` modes and flags.
