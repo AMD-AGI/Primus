@@ -155,7 +155,7 @@ python preprocess.py \
 
 This writes Arrow shard files to `legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train/data-*.arrow`.
 
-**Step B.2 — Convert the Arrow shards to Megatron binary** using the script at `[tools/hybrid/convert_fla_to_megatron.py](../../tools/hybrid/convert_fla_to_megatron.py)`:
+**Step B.2 — Convert the Arrow shards to Megatron binary** using the script at `[tools/hybrid/convert_fla_to_megatron.py](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/convert_fla_to_megatron.py)`:
 
 ```bash
 cd /home/<user>/Primus
@@ -185,7 +185,7 @@ GDN parity training needs six behavioral patches on top of the vendored
 never modifies the third-party source: these patches are implemented as
 runtime monkey-patches using Primus's own patch system
 (`primus/core/patches`) and live under
-`[primus/backends/megatron/patches/](../../primus/backends/megatron/patches/)`.
+`[primus/backends/megatron/patches/](https://github.com/AMD-AGI/Primus/tree/main/primus/backends/megatron/patches)`.
 They register unconditionally but each carries a `condition=` gate on the
 relevant config flag, so they're a no-op unless you actually enable that
 flag — nothing to run by hand.
@@ -226,7 +226,7 @@ The Primus repo includes `tools/hybrid/convert_fla_gdn_init_to_megatron.py` (the
 
 ### 5.1 Inspect the config
 
-The training config lives at `[examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml](../../examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)`. Key parameters (matched to FLA):
+The training config lives at `[examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)`. Key parameters (matched to FLA):
 
 ```yaml
 train_iters: 4768                 # ≈ 10B tokens at global_batch=1024, seq=2048
@@ -250,7 +250,7 @@ spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs
 use_distributed_optimizer: false  # 300M fits — ZeRO-1 adds allreduce overhead
 ```
 
-The architecture-only YAML it extends from is `[primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml](../../primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml)`.
+The architecture-only YAML it extends from is `[primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/zebra_llama_300M_gdn_pure.yaml)`.
 
 ### 5.2 Launch
 
@@ -352,7 +352,7 @@ Final wall time on a healthy MI300X box: **6832 s vs FLA 6840 s** = Primus 8 s f
 
 ## Step 7: Convert checkpoint to HuggingFace format
 
-Use `[tools/hybrid/convert_gdn_to_fla_hf.py](../../tools/hybrid/convert_gdn_to_fla_hf.py)` to translate the Megatron checkpoint into FLA's native `GatedDeltaNetForCausalLM` HF format:
+Use `[tools/hybrid/convert_gdn_to_fla_hf.py](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/convert_gdn_to_fla_hf.py)` to translate the Megatron checkpoint into FLA's native `GatedDeltaNetForCausalLM` HF format:
 
 ```bash
 python tools/hybrid/convert_gdn_to_fla_hf.py \
@@ -390,7 +390,7 @@ For the 1B pure-GDN model, same command but use the 1B checkpoint path — the c
 
 ## Step 8: Verify conversion
 
-Run the sanity check at `[tools/hybrid/verify_gdn_conversion.py](../../tools/hybrid/verify_gdn_conversion.py)`:
+Run the sanity check at `[tools/hybrid/verify_gdn_conversion.py](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/verify_gdn_conversion.py)`:
 
 ```bash
 python tools/hybrid/verify_gdn_conversion.py \
@@ -452,7 +452,7 @@ If cosine < 0.5 → permutation bug. If 0.5–0.95 → likely missing-key issue 
 
 ## Step 9: Run lm-eval-harness benchmarks
 
-Use `[tools/hybrid/eval_gdn_lm_eval.py](../../tools/hybrid/eval_gdn_lm_eval.py)`, which imports `fla` first (so `AutoConfig` recognizes the `gated_deltanet` model type) and patches the FLA model `__init__` to accept the `dtype` kwarg that `transformers ≥ 4.55` passes internally.
+Use `[tools/hybrid/eval_gdn_lm_eval.py](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/eval_gdn_lm_eval.py)`, which imports `fla` first (so `AutoConfig` recognizes the `gated_deltanet` model type) and patches the FLA model `__init__` to accept the `dtype` kwarg that `transformers ≥ 4.55` passes internally.
 
 **Do not** invoke `lm_eval --model hf ...` directly — `AutoConfig.from_pretrained` will fail with `model type gated_deltanet not recognized`.
 
@@ -547,7 +547,7 @@ LR warmup misconfigured. Confirm `lr_warmup_iters: 200` matches your `train_iter
 
 ### Iter 1 loss ~12.1 instead of ~11.97
 
-The `layernorm_epsilon: 1.0e-6` override is being silently overwritten by the TransformerConfig default of `1e-5`. Confirm it's in the *training* YAML's `overrides:` block (not just the model YAML) — see `[zebra_llama_300M_gdn_pure-pretrain.yaml](../../examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)` for the canonical placement.
+The `layernorm_epsilon: 1.0e-6` override is being silently overwritten by the TransformerConfig default of `1e-5`. Confirm it's in the *training* YAML's `overrides:` block (not just the model YAML) — see `[zebra_llama_300M_gdn_pure-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml)` for the canonical placement.
 
 ### Iter 1 loss not bit-matching FLA but converges fine
 

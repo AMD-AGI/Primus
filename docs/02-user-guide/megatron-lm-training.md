@@ -176,13 +176,13 @@ Bind only the directories you need rather than your whole home directory.
 
 ## 2. Configurations in YAML files (`examples/megatron/configs/`)
 
-Primus defines a training YAML for each model inside [`examples/megatron/configs/`](../../examples/megatron/configs). For example, use `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` to update Llama 3.1 8B training parameters. Other YAML files for the supported models follow the `examples/megatron/configs/<ARCH>/${MODEL_NAME}-<PRECISION>-pretrain.yaml` naming convention, where `<ARCH>` is `MI300X`, `MI325X`, or `MI355X`.
+Primus defines a training YAML for each model inside [`examples/megatron/configs/`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/configs). For example, use `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` to update Llama 3.1 8B training parameters. Other YAML files for the supported models follow the `examples/megatron/configs/<ARCH>/${MODEL_NAME}-<PRECISION>-pretrain.yaml` naming convention, where `<ARCH>` is `MI300X`, `MI325X`, or `MI355X`.
 
 You can toggle various training parameters such as `micro_batch_size`, `global_batch_size`, `train_iters`, and others inside the pretraining YAML files.
 
 > **Note:**
 >
-> - Supported model definitions can be found inside [`primus/configs/models/megatron/`](../../primus/configs/models/megatron).
+> - Supported model definitions can be found inside [`primus/configs/models/megatron/`](https://github.com/AMD-AGI/Primus/tree/main/primus/configs/models/megatron).
 > - To migrate an existing workload from ROCm/Megatron-LM to Primus, or to add a new workload, follow the [Migration Guide](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/Migration_Guide.md).
 
 ### 2.1 Dataset
@@ -194,7 +194,7 @@ You can use either mock data or real data for training.
 
 ### 2.2 Tokenizer
 
-In Primus, each model uses a tokenizer from Hugging Face. For example, the Llama 3.1 8B model uses `tokenizer_model: meta-llama/Llama-3.1-8B` and `tokenizer_type: Llama3Tokenizer`, defined in the [Llama 3.1 8B model configuration](../../examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml). Use an `HF_TOKEN` with the right permissions to access the tokenizer for each model.
+In Primus, each model uses a tokenizer from Hugging Face. For example, the Llama 3.1 8B model uses `tokenizer_model: meta-llama/Llama-3.1-8B` and `tokenizer_type: Llama3Tokenizer`, defined in the [Llama 3.1 8B model configuration](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml). Use an `HF_TOKEN` with the right permissions to access the tokenizer for each model.
 
 ```bash
 # Export your HF_TOKEN in the workspace
@@ -583,7 +583,7 @@ PRIMUS_TRAIN_RUNTIME=legacy ./runner/primus-cli container \
 
 ### 3.2 Multi-node training
 
-To run training on multiple nodes, you can use `primus-cli` (recommended) or the [`run_slurm_pretrain.sh`](../../examples/run_slurm_pretrain.sh) script to launch multi-node workloads. Below are the multi-node setup and examples to run multi-node tests.
+To run training on multiple nodes, you can use `primus-cli` (recommended) or the [`run_slurm_pretrain.sh`](https://github.com/AMD-AGI/Primus/blob/main/examples/run_slurm_pretrain.sh) script to launch multi-node workloads. Below are the multi-node setup and examples to run multi-node tests.
 
 **Multi-node setup**
 

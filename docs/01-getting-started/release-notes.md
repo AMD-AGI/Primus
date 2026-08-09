@@ -11,7 +11,7 @@ The two families share a version number but are **not** built in lockstep — th
 
 **This page is the single source of truth for image contents.** Other pages link here instead of repeating version tables, so there is exactly one place to update per release. If you add a page that names an image tag, link to the relevant section below rather than restating the stack.
 
-Every version below was read out of the published image itself. For v26.4 and v26.5 the values were additionally cross-checked against the release Dockerfiles in [`.github/workflows/docker-release/`](../../.github/workflows/docker-release); earlier releases predate those files and are image-derived only. See [Verifying the stack in an image](#verifying-the-stack-in-an-image) to reproduce any table.
+Every version below was read out of the published image itself. For v26.4 and v26.5 the values were additionally cross-checked against the release Dockerfiles in [`.github/workflows/docker-release/`](https://github.com/AMD-AGI/Primus/tree/main/.github/workflows/docker-release); earlier releases predate those files and are image-derived only. See [Verifying the stack in an image](#verifying-the-stack-in-an-image) to reproduce any table.
 
 ---
 
@@ -27,7 +27,7 @@ Megatron-LM, TorchTitan, and Megatron Bridge backends.
 | Built | 2026-07-22 |
 | Size | 54.7 GB |
 | Manifest | `8e124a76fbe33cbcc26062f05da3ca5e6419b163` |
-| Dockerfile | [`Dockerfile.primus-v26.5`](../../.github/workflows/docker-release/Dockerfile.primus-v26.5) |
+| Dockerfile | [`Dockerfile.primus-v26.5`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.5) |
 
 | Software component | Version |
 | ------------------ | ------- |
@@ -60,7 +60,7 @@ MaxText (JAX) backend.
 | Built | 2026-07-17 |
 | Size | 45.7 GB |
 | Manifest | `5ffe026e7bb969c42ce9f3c9f5c4a3c3164c8a8c` |
-| Dockerfile | [`Dockerfile.jax-v26.5`](../../.github/workflows/docker-release/Dockerfile.jax-v26.5) |
+| Dockerfile | [`Dockerfile.jax-v26.5`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.5) |
 
 | Software component | Version |
 | ------------------ | ------- |
@@ -156,7 +156,7 @@ git submodule update --init --recursive
 | Size | 75.9 GB |
 | Manifest | `a2d4c7239d874501f864080baf2a8131236b0221` |
 | Also published as | `rocm/primus:pytorch-2.12.0-rocm7.14.0a20260608_te-2.14.0.dev0-e6ede467_v26.4` (same image) |
-| Dockerfile | [`Dockerfile.primus-v26.4`](../../.github/workflows/docker-release/Dockerfile.primus-v26.4) |
+| Dockerfile | [`Dockerfile.primus-v26.4`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.4) |
 
 | Software component | Version |
 | ------------------ | ------- |
@@ -188,7 +188,7 @@ git submodule update --init --recursive
 | Size | 63.6 GB |
 | Manifest | `b0b705ce0533ead5490070daa402ca625f1489b5` |
 | Also published as | `rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0` (same image) |
-| Dockerfile | [`Dockerfile.jax-v26.4`](../../.github/workflows/docker-release/Dockerfile.jax-v26.4) |
+| Dockerfile | [`Dockerfile.jax-v26.4`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.4) |
 
 | Software component | Version |
 | ------------------ | ------- |

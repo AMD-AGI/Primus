@@ -15,10 +15,10 @@ point; follow a tool's link for the full reference.
 | [Primus-LM](../01-getting-started/quickstart.md) | Ecosystem | The training framework in this repository (multi-backend, unified CLI). | See the [Quickstart](../01-getting-started/quickstart.md) |
 | [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) | Ecosystem | High-performance ROCm operators (attention, GEMM, grouped GEMM, DeepEP, FP8/FP4). | Bundled in the `rocm/primus` image; enabled via configuration flags |
 | [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) | Ecosystem | Kubernetes-native stability, scheduling, and fault-tolerance platform. | Deployed separately on Kubernetes (Helm) |
-| [IRLens](../../tools/IRLens/README.md) | Auxiliary | Parse XLA HLO dumps into a communication-vs-compute execution skeleton. | See the [README](../../tools/IRLens/README.md) |
-| [model_stats](../../tools/model_stats/README.md) | Auxiliary | Chart model dimensions from the config registry. | See the [README](../../tools/model_stats/README.md) |
-| [Pipeline visualization](../../tools/visualization/pp_vis/README.md) | Auxiliary | Render pipeline-parallel schedules in a local web UI. | See the [README](../../tools/visualization/pp_vis/README.md) |
-| [Auto benchmark](../../tools/auto_benchmark/Primus_Auto_Benchmark_README.md) | Auxiliary | Interactive Megatron/TorchTitan benchmark menu with metrics collection. | See the [README](../../tools/auto_benchmark/Primus_Auto_Benchmark_README.md) |
+| [IRLens](https://github.com/AMD-AGI/Primus/blob/main/tools/IRLens/README.md) | Auxiliary | Parse XLA HLO dumps into a communication-vs-compute execution skeleton. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/IRLens/README.md) |
+| [model_stats](https://github.com/AMD-AGI/Primus/blob/main/tools/model_stats/README.md) | Auxiliary | Chart model dimensions from the config registry. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/model_stats/README.md) |
+| [Pipeline visualization](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md) | Auxiliary | Render pipeline-parallel schedules in a local web UI. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md) |
+| [Auto benchmark](https://github.com/AMD-AGI/Primus/blob/main/tools/auto_benchmark/Primus_Auto_Benchmark_README.md) | Auxiliary | Interactive Megatron/TorchTitan benchmark menu with metrics collection. | See the [README](https://github.com/AMD-AGI/Primus/blob/main/tools/auto_benchmark/Primus_Auto_Benchmark_README.md) |
 
 ---
 
