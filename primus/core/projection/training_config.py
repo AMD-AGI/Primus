@@ -86,6 +86,13 @@ class ModelConfig:
     moe_sim_kernel: str = None
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
+    # MoE routing imbalance (hottest EP-rank / mean token load, >= 1.0) and its
+    # redundant-experts mitigation, mirrored from the inference request config so
+    # the expert-GEMM simulator can apply it *inside* the roofline (scales the
+    # busiest rank's token count M, a near no-op at weight-bound decode and full
+    # at compute-bound prefill). EP-gated: only meaningful when EP > 1.
+    ep_load_balance: float = 1.0
+    redundant_experts: int = 0
 
     # Loss fusion – fuses cross-entropy with output layer avoiding full logits materialisation
     cross_entropy_loss_fusion: bool = False

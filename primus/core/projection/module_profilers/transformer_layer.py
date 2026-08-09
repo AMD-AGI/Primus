@@ -87,6 +87,24 @@ def _estimate_layernorm_residual_time_ms(
     return fwd_ms, bwd_ms
 
 
+def _moe_tp_allreduce_count(config) -> int:
+    """Number of TP all-reduces on a MoE layer's forward (1 or 2).
+
+    A dense/MoE layer has two row-parallel reductions: after attention and
+    after the MLP/expert down-projection. The expert down-projection is only
+    TP-sharded (and thus TP-all-reduced) while ``expert_tp = tp // ep > 1``
+    (e.g. EP=1: experts sharded across the whole TP group). Once experts are
+    fully expert-parallel (``expert_tp == 1``, EP == TP) their outputs are
+    combined by the EP all-to-all *instead of* a TP all-reduce, so only the
+    attention all-reduce remains. Charging 2 TP-AR + A2A at EP>1 double-counts
+    the expert reduction and makes EP look slower than silicon.
+    """
+    mp = config.model_parallel_config
+    tp = max(1, mp.tensor_model_parallel_size)
+    ep = max(1, getattr(mp, "expert_model_parallel_size", 1) or 1)
+    return 2 if (tp // ep) > 1 else 1
+
+
 def _estimate_tp_allreduce_time_ms(config, batch_size: int, seq_len: int) -> float:
     """
     Estimate TP AllReduce time for a single AllReduce operation (in ms).
@@ -460,8 +478,11 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_bwd_ms
+        # 2 TP all-reduces only while experts stay TP-sharded (EP=1); at EP==TP
+        # the expert output is combined by the A2A, leaving just attention's AR.
+        n_moe_ar = _moe_tp_allreduce_count(self.config)
+        fwd_time = attn_fwd + mlp_fwd + n_moe_ar * tp_ar_ms + moe_a2a_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + n_moe_ar * tp_ar_ms + moe_a2a_ms + ln_res_bwd_ms
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 

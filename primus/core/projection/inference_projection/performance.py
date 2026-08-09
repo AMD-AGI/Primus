@@ -33,6 +33,7 @@ from primus.core.projection.module_profilers.language_model import (
 from primus.core.projection.module_profilers.transformer_layer import (
     _estimate_moe_a2a_time_ms,
     _estimate_tp_allreduce_time_ms,
+    _moe_tp_allreduce_count,
 )
 from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
@@ -201,6 +202,22 @@ class InferencePerformanceProjector:
         # the perfectly-balanced average.  Only meaningful for an EP-sharded MoE
         # model; a no-op (1.0) otherwise.
         self._moe_imbalance = self._moe_imbalance_factor()
+        # Per-view imbalance for the origami ratio (populated in
+        # _setup_restoration when a bench<->target restore is active).
+        self._imb_tgt = self._moe_imbalance
+        self._imb_bench = self._moe_imbalance
+        # Mirror the routing-imbalance knobs onto the (shared) model_config so the
+        # expert-GEMM simulator can apply imbalance *inside* the roofline, per
+        # view (EP lives on each view's parallel config). Default ("roofline")
+        # mode; PRIMUS_MOE_IMB_ROOFLINE=0 falls back to the outer multiplier.
+        self._imb_roofline = os.getenv(
+            "PRIMUS_MOE_IMB_ROOFLINE", "1"
+        ).strip().lower() not in ("0", "false", "no")
+        try:
+            mc.ep_load_balance = float(self.cfg.request_config.ep_load_balance or 1.0)
+            mc.redundant_experts = int(self.cfg.request_config.redundant_experts or 0)
+        except Exception:
+            pass
 
         # Kernel-backend (AITER/Triton/CK/HIP) attention multiplier, native
         # sparse-attention selection, and MoE expert-dtype (mxfp4/fp8/bf16)
@@ -440,7 +457,9 @@ class InferencePerformanceProjector:
         """Implicit comm baked into the layer profiler's forward time."""
         tp_ar_one = _estimate_tp_allreduce_time_ms(self._view, batch, q_len)
         if ltype == "moe":
-            return 2.0 * tp_ar_one + _estimate_moe_a2a_time_ms(self._view, batch, q_len, self._gemm)
+            # EP>1 (expert_tp==1) drops the post-expert TP-AR (combined by A2A).
+            n_ar = _moe_tp_allreduce_count(self._view)
+            return n_ar * tp_ar_one + _estimate_moe_a2a_time_ms(self._view, batch, q_len, self._gemm)
         return 2.0 * tp_ar_one
 
     def set_benchmark_calibration(self, benchmark_layer_times: dict) -> None:
@@ -585,6 +604,20 @@ class InferencePerformanceProjector:
         )
         self._comm_bench = InferenceCollectiveModel(mc, bench_mp, self._cc)
         self._comm_tgt = InferenceCollectiveModel(mc, mp, self._cc)
+
+        # Per-view MoE routing imbalance for the origami ratio.  The target view
+        # already uses ``self._moe_imbalance`` (constructor).  The bench view is
+        # evaluated at the *bench* EP so that, e.g., an EP=1 bench (experts
+        # TP-sharded, balanced -> 1.0) restored to an EP=8 target (all-to-all,
+        # busiest-rank gated -> ep_load_balance) keeps the EP sharding penalty
+        # in ``sim(target)/sim(bench)`` instead of cancelling it.
+        self._imb_tgt = self._moe_imbalance
+        self._imb_bench = self._moe_imbalance_for_ep(self._bench_ep)
+        # Diagnostic escape hatch: PRIMUS_ORIGAMI_IMB_PERVIEW=0 restores the old
+        # behaviour (single target imbalance on both views, which cancels in the
+        # ratio) for before/after validation of the per-view fix.
+        if os.getenv("PRIMUS_ORIGAMI_IMB_PERVIEW", "1").strip().lower() in ("0", "false", "no"):
+            self._imb_bench = self._moe_imbalance
 
         # Origami-ratio setup: build guaranteed-simulating profiler trees at the
         # bench and target views so ``_restore_whole`` can scale the measured
@@ -796,18 +829,22 @@ class InferencePerformanceProjector:
         comm_tgt = self._comm if self._comm is not None else None
         comm_bench = self._comm_bench if self._comm is not None else None
 
-        def _step(lm, comm, view) -> float:
-            saved = (self._lm, self._comm, self._view, self._gemm, self._sdpa)
+        def _step(lm, comm, view, imb) -> float:
+            saved = (self._lm, self._comm, self._view, self._gemm, self._sdpa,
+                     self._moe_imbalance)
             self._lm, self._comm, self._view = lm, comm, view
             self._gemm, self._sdpa = self._gemm_sim, self._sdpa_sim
+            # Per-view imbalance: bench-EP vs target-EP (see _setup_restoration).
+            self._moe_imbalance = imb
             try:
                 return self._forward_times(batch, q_len, phase, kv).total_ms
             finally:
-                (self._lm, self._comm, self._view, self._gemm, self._sdpa) = saved
+                (self._lm, self._comm, self._view, self._gemm, self._sdpa,
+                 self._moe_imbalance) = saved
 
         try:
-            s_tgt = _step(self._lm_ratio_tgt, comm_tgt, self._view_tgt)
-            s_bench = _step(self._lm_ratio_bench, comm_bench, self._view_bench)
+            s_tgt = _step(self._lm_ratio_tgt, comm_tgt, self._view_tgt, self._imb_tgt)
+            s_bench = _step(self._lm_ratio_bench, comm_bench, self._view_bench, self._imb_bench)
         except Exception:
             return None
         if s_bench <= 0.0 or s_tgt <= 0.0:
@@ -867,17 +904,25 @@ class InferencePerformanceProjector:
     # -- per-pass forward time -------------------------------------------------
 
     def _moe_imbalance_factor(self) -> float:
-        """MoE expert-compute imbalance multiplier (>= 1.0).
+        """MoE expert-compute imbalance multiplier (>= 1.0) at the target EP."""
+        return self._moe_imbalance_for_ep(
+            max(1, self.cfg.model_parallel_config.expert_model_parallel_size)
+        )
+
+    def _moe_imbalance_for_ep(self, ep: int) -> float:
+        """MoE expert-compute imbalance multiplier (>= 1.0) at an arbitrary EP.
 
         Only EP-sharded MoE models (``num_experts > 0`` and ``EP > 1``) see
         routing imbalance; for everything else this is a no-op (1.0).  The
         magnitude (and the ``redundant_experts`` mitigation) is resolved on the
-        request config, given the model's expert count.
+        request config, given the model's expert count.  Evaluating this per-EP
+        is what lets the origami ratio keep the EP sharding penalty instead of
+        cancelling a single (target) imbalance value on both bench and target
+        sides.
         """
         mc = self.cfg.model_config
         num_experts = int(getattr(mc, "num_experts", 0) or 0)
-        ep = max(1, self.cfg.model_parallel_config.expert_model_parallel_size)
-        if num_experts <= 0 or ep <= 1:
+        if num_experts <= 0 or max(1, ep) <= 1:
             return 1.0
         return self.cfg.request_config.resolved_ep_imbalance(num_experts)
 
@@ -911,15 +956,20 @@ class InferencePerformanceProjector:
         #   * expert dtype speedup (<= 1.0): low-precision expert kernels
         #     (mxfp4 / fp8) run the grouped-GEMM faster.
         # These compose multiplicatively. No-op when balanced + bf16 / non-MoE.
+        # In roofline mode the imbalance is applied inside the expert GEMM (M
+        # scaling in moe_mlp), so the outer multiplier only carries the dtype
+        # speedup here to avoid double-counting. When roofline mode is disabled
+        # the outer multiplier applies the imbalance (legacy behaviour).
+        outer_imb = 1.0 if self._imb_roofline else self._moe_imbalance
         if (
             has_moe
-            and (self._moe_imbalance > 1.0 or self._moe_expert_speedup != 1.0)
+            and (outer_imb > 1.0 or self._moe_expert_speedup != 1.0)
             and hasattr(moe_p, "get_sub_profiler")
         ):
             mlp_p = moe_p.get_sub_profiler("mlp")
             if mlp_p is not None:
                 expert_mlp_ms = mlp_p.measured_forward_time(batch, q_len)
-                new_expert = expert_mlp_ms * self._moe_imbalance * self._moe_expert_speedup
+                new_expert = expert_mlp_ms * outer_imb * self._moe_expert_speedup
                 moe_compute += new_expert - expert_mlp_ms
 
         # Kernel-backend (attention library) + native-sparse-attention: adjust
@@ -949,21 +999,44 @@ class InferencePerformanceProjector:
             # and the residual at high batch is captured analytically.
             new_tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
             new_ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
+            # Dense: 2 TP-AR (attention + MLP). MoE: the post-expert TP-AR is
+            # only present while experts stay TP-sharded (EP=1); at EP==TP the
+            # expert output is combined by the A2A, so MoE carries just the
+            # attention AR (half of the dense 2-AR) plus the A2A. Charging the
+            # full dense 2-AR + A2A on MoE at EP>1 double-counts (see
+            # _moe_tp_allreduce_count).
+            moe_tp_ar = new_tp_ar * (_moe_tp_allreduce_count(self._view) / 2.0)
+
+            # EP A2A (dispatch/combine) is overlapped with expert compute by the
+            # fused MoE kernel (aiter/DeepEP), so its exposed cost is limited by
+            # available compute, NOT the configured comm-overlap ceiling (which
+            # defaults to 0). A direct fused-MoE microbench + the EP validation
+            # sweep show the exposed decode A2A is near-zero, not the ~30us
+            # isolated collective latency; charging it fully makes EP>1 look
+            # slower than silicon. The attention TP-AR stays on the configured
+            # ceiling (serial reduction). Toggle: PRIMUS_MOE_A2A_OVERLAP=0.
+            a2a_overlap = os.getenv("PRIMUS_MOE_A2A_OVERLAP", "1") != "0"
+            if a2a_overlap and has_moe and moe_compute > 0.0 and new_ep_a2a > 0.0:
+                keep_a2a = 1.0 - min(1.0, moe_compute / new_ep_a2a)
+            else:
+                keep_a2a = self._overlap_keep(phase, new_ep_a2a, moe_compute) if has_moe else 1.0
+            ep_a2a_exposed = new_ep_a2a * keep_a2a
 
             dense_comm = new_tp_ar
-            moe_comm = new_tp_ar + new_ep_a2a
             keep_dense = self._overlap_keep(phase, dense_comm, dense_compute) if has_dense else 1.0
-            keep_moe = self._overlap_keep(phase, moe_comm, moe_compute) if has_moe else 1.0
+            keep_moe_ar = self._overlap_keep(phase, moe_tp_ar, moe_compute) if has_moe else 1.0
 
             dense_fwd = dense_compute + (dense_comm * keep_dense if has_dense else 0.0)
-            moe_fwd = moe_compute + (moe_comm * keep_moe if has_moe else 0.0)
+            moe_fwd = moe_compute + (
+                moe_tp_ar * keep_moe_ar + ep_a2a_exposed if has_moe else 0.0
+            )
 
             # TP-AR appears in both layer types; charge each at its own exposure.
             comm.tp_allreduce_ms = (
-                self._n_dense * new_tp_ar * keep_dense + self._n_moe * new_tp_ar * keep_moe
+                self._n_dense * new_tp_ar * keep_dense + self._n_moe * moe_tp_ar * keep_moe_ar
             )
-            comm.ep_a2a_ms = self._n_moe * new_ep_a2a * keep_moe
-            pp_keep = keep_moe if has_moe else keep_dense
+            comm.ep_a2a_ms = self._n_moe * ep_a2a_exposed
+            pp_keep = keep_moe_ar if has_moe else keep_dense
             comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * pp_keep
         else:
             # Implicit comm: add the built-in cost back onto (calibrated)
@@ -1363,7 +1436,10 @@ class InferencePerformanceProjector:
         keep = self._overlap_keep(phase, 1.0, None)
         tp_ar = self._comm.tp_allreduce_ms(batch, q_len)
         ep_a2a = self._comm.ep_a2a_ms(batch, q_len)
-        comm.tp_allreduce_ms = (self._n_dense + self._n_moe) * tp_ar * keep
+        # MoE keeps only the attention AR when experts are fully EP-distributed
+        # (see _moe_tp_allreduce_count); avoids double-counting with the A2A.
+        moe_tp_ar = tp_ar * (_moe_tp_allreduce_count(self._view) / 2.0)
+        comm.tp_allreduce_ms = (self._n_dense * tp_ar + self._n_moe * moe_tp_ar) * keep
         comm.ep_a2a_ms = self._n_moe * ep_a2a * keep
         comm.pp_p2p_ms = self._comm.pp_p2p_ms(batch, q_len) * keep
         return comm

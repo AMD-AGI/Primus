@@ -50,8 +50,12 @@ _FUSED_RMSNORM_AR_SPEEDUP = 0.8    # RMSNorm+AR fusion hides part of the AR.
 # dominates.  Below the crossover we use the measured intra-node floor instead;
 # larger / multi-node messages keep the existing model unchanged.
 _INFER_SMALL_MSG_BYTES = 2 << 20   # crossover below which the floor applies
-_INFER_AR_OVERHEAD_US = 15.0       # intra-node AllReduce latency floor
-_INFER_A2A_OVERHEAD_US = 18.0      # intra-node AllToAll latency floor
+# Measured intra-node decode collective latencies (MI355X, 8-GPU RCCL, tmp_bench
+# comm_microbench.py): AllReduce ~26 us, AllToAll ~30 us, both latency-bound and
+# flat across the 6-184 KB / 23-737 KB decode message range. These replace the
+# earlier hand-set 15/18 us guesses. Override via env for other fabrics.
+_INFER_AR_OVERHEAD_US = float(os.getenv("PRIMUS_INFER_AR_FLOOR_US", "26.0") or 26.0)
+_INFER_A2A_OVERHEAD_US = float(os.getenv("PRIMUS_INFER_A2A_FLOOR_US", "30.0") or 30.0)
 
 
 def deepep_overlap_efficiency(model_config) -> float:
@@ -310,9 +314,19 @@ class InferenceCollectiveModel:
     # -- combined per-layer ----------------------------------------------------
 
     def layer_comm_ms(self, batch: int, tokens: int, *, is_moe: bool) -> CommBreakdown:
-        """Per-*layer* comm (TP AllReduce always; EP A2A only on MoE layers)."""
+        """Per-*layer* comm (TP AllReduce always; EP A2A only on MoE layers).
+
+        A MoE layer keeps the post-expert TP all-reduce only while experts stay
+        TP-sharded (``expert_tp = tp // ep > 1``, e.g. EP=1). Once experts are
+        fully expert-parallel (``expert_tp == 1``, EP == TP) the expert output
+        is combined by the EP all-to-all instead, leaving just the attention
+        all-reduce — so charging the full 2-AR + A2A there double-counts.
+        """
+        tp_ar = self.tp_allreduce_ms(batch, tokens)
+        if is_moe and self.ep > 1 and (self.tp // self.ep) <= 1:
+            tp_ar *= 0.5  # drop the post-expert AR (combined by the A2A)
         return CommBreakdown(
-            tp_allreduce_ms=self.tp_allreduce_ms(batch, tokens),
+            tp_allreduce_ms=tp_ar,
             ep_a2a_ms=self.ep_a2a_ms(batch, tokens) if is_moe else 0.0,
             pp_p2p_ms=0.0,
         )

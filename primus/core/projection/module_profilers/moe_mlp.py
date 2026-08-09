@@ -189,6 +189,28 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # GEMM and divide-by-zero in the simulator.
         tokens_per_expert = max(1, topk_tokens // max(active_local_experts, 1))
 
+        # MoE routing imbalance (busiest EP rank), applied *inside* the roofline:
+        # the hottest rank sees ``imbalance``x the mean token load, so scale its
+        # per-expert row count ``M``. Because the expert GEMM is
+        # ``max(compute, weight_read)``, this is a near no-op at weight-bandwidth-
+        # bound decode (small M) and grows to the full factor at compute-bound
+        # prefill / high batch — matching measured EP=8 decode (~flat vs EP=1).
+        # EP-gated (no cross-rank imbalance when EP<=1) and per-view (each view's
+        # own ``ep_size``). Toggle: PRIMUS_MOE_IMB_ROOFLINE=0 disables (imbalance
+        # then handled by the legacy outer multiplier in performance.py).
+        imbalance = 1.0
+        if (
+            os.getenv("PRIMUS_MOE_IMB_ROOFLINE", "1").strip().lower() not in ("0", "false", "no")
+            and ep_size > 1
+            and num_experts > 1
+        ):
+            elb = float(getattr(self.config.model_config, "ep_load_balance", 1.0) or 1.0)
+            if elb > 1.0:
+                red = max(0, int(getattr(self.config.model_config, "redundant_experts", 0) or 0))
+                imbalance = 1.0 + (elb - 1.0) * num_experts / (num_experts + red) if red else elb
+                imbalance = max(1.0, imbalance)
+        tokens_per_expert = max(1, int(round(tokens_per_expert * imbalance)))
+
         # FP8-hybrid: MoE expert MLP projections run in FP8
         gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
         bytes_per_el = 1 if gemm_dtype == "fp8" else 2
