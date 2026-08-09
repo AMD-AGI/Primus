@@ -347,12 +347,32 @@ class MoEMLPProfiler(BaseModuleProfiler):
         fwd_time = expert_fwd
         bwd_time = expert_bwd
 
+        # Effective HBM bandwidths for the memory-bound (non-GEMM) MoE terms.
+        # Derived from the target GPU's peak HBM bandwidth so the model adapts
+        # automatically across architectures (MI300X/MI325X/MI355X).
+        peak_hbm = (
+            self._gemm_backend.hbm_bandwidth_gbps
+            if self._gemm_backend is not None and self._gemm_backend.hbm_bandwidth_gbps is not None
+            else _FALLBACK_HBM_BW_GBPS
+        )
+        permute_eff_bw_gbps = peak_hbm * _PERMUTE_BW_FRACTION
+        activation_bw_gbps = peak_hbm * _ACTIVATION_BW_FRACTION
+
         # ── 2. Router overhead ──
         # Gate linear: [batch_tokens, num_experts, hidden_size]
         router_gemm = self._gemm_backend.simulate_gemm(batch_tokens, num_experts, hidden_size, gemm_dtype)
         router_fwd_ms = router_gemm.forward_time_ms
-        # Softmax + top-K selection + auxiliary loss overhead (empirical)
-        topk_overhead_ms = 0.1 + 0.002 * num_experts
+        # Softmax + top-K selection over the router logits [batch_tokens,
+        # num_experts]. Modelled as a memory-bound streaming op (read logits,
+        # write gates/indices) rather than a fixed per-layer constant. This
+        # scales with the tokens actually routed on this rank — so it shards
+        # with TP (via ``batch_tokens``) and collapses to ~0 at decode (few
+        # tokens). A batch-independent constant instead stays equal across the
+        # bench/target views and pulls the EP/TP restore ratio toward 1
+        # (under-relief). Softmax streams contiguous buffers, so it uses the
+        # same sequential-streaming BW fraction as the activation term.
+        router_logits_bytes = 2 * batch_tokens * num_experts * 4  # fp32 logits read + write
+        topk_overhead_ms = router_logits_bytes / (activation_bw_gbps * 1e6)
         router_fwd_ms += topk_overhead_ms
         # Backward: dgrad + wgrad for gate linear
         router_bwd_ms = 2.0 * router_gemm.forward_time_ms + topk_overhead_ms
@@ -363,16 +383,6 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # ── 3. Token permutation overhead (dispatch + combine) ──
         # Dispatch: gather tokens by expert assignment → irregular memory access
         # Combine: scatter expert outputs back → weighted reduce
-        #
-        # Derive effective BW from the target GPU's peak HBM bandwidth so the
-        # model adapts automatically to different architectures.
-        peak_hbm = (
-            self._gemm_backend.hbm_bandwidth_gbps
-            if self._gemm_backend is not None and self._gemm_backend.hbm_bandwidth_gbps is not None
-            else _FALLBACK_HBM_BW_GBPS
-        )
-        permute_eff_bw_gbps = peak_hbm * _PERMUTE_BW_FRACTION
-        activation_bw_gbps = peak_hbm * _ACTIVATION_BW_FRACTION
 
         dispatch_bytes = (batch_tokens + topk_tokens) * hidden_size * bytes_per_el
         combine_bytes = (topk_tokens + batch_tokens) * hidden_size * bytes_per_el

@@ -240,6 +240,22 @@ def _add_load_benchmark_arg(parser, *, include_compute_baseline_alias: bool):
             "matters when the benchmark parallelism differs from the target."
         ),
     )
+    parser.add_argument(
+        "--decode-floor-benchmark",
+        type=str,
+        required=False,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a sharded (e.g. 2-GPU EP-sharded) bench artifact whose "
+            "measured decode step defines the hardware latency floor. The "
+            "restored decode step is capped from below at this floor per batch "
+            "(decode = max(restored, floor)). Above the roofline knee, decode "
+            "latency is fixed by per-step launch/dispatch overhead and is "
+            "parallelism-invariant, so a single sharded probe supplies the "
+            "floor for all more-sharded targets. No-op below the floor."
+        ),
+    )
     if include_compute_baseline_alias:
         parser.add_argument(
             "--compute-baseline",

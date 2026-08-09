@@ -425,6 +425,32 @@ def launch_projection_from_cli(args, overrides):
             with open(_p) as _f:
                 scaling_benchmarks.append(_json.load(_f))
             print(f"[Primus:Inference] loaded TP-scaling benchmark from {_p}")
+
+    # Decode latency floor: a sharded probe's measured decode curve caps the
+    # restored decode step from below (decode = max(restored, floor)). Above the
+    # roofline knee the step is fixed by per-step launch/dispatch overhead and is
+    # ~parallelism-invariant, so one probe supplies the floor for all more-
+    # sharded targets. Parsed into {batch: decode_ms}.
+    decode_floor = None
+    floor_bench = getattr(args, "decode_floor_benchmark", None)
+    if floor_bench and mode in ("performance", "both"):
+        import json as _json
+
+        with open(floor_bench) as _f:
+            _blob = _json.load(_f)
+        decode_floor = {
+            int(e["batch"]): float(e["decode_ms"])
+            for e in _blob.get("sweep", [])
+            if e.get("decode_ms")
+        }
+        if decode_floor:
+            print(
+                f"[Primus:Inference] loaded decode latency floor from {floor_bench} "
+                f"({len(decode_floor)} batch points, "
+                f"min {min(decode_floor.values()):.2f} ms)"
+            )
+        else:
+            decode_floor = None
     elif profiling_mode == "benchmark" and mode in ("performance", "both"):
         from .benchmark import spawn_inference_benchmark
 
@@ -467,7 +493,7 @@ def launch_projection_from_cli(args, overrides):
     if mode in ("performance", "both"):
         projector = InferencePerformanceProjector(
             inference_config, args=args, benchmark_layer_times=benchmark_layer_times,
-            scaling_benchmarks=scaling_benchmarks,
+            scaling_benchmarks=scaling_benchmarks, decode_floor=decode_floor,
         )
         perf = projector.project()
         _print_performance(inference_config, perf)

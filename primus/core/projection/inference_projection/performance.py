@@ -129,9 +129,13 @@ class InferencePerformanceProjector:
     """Builds the profiler once and answers prefill / decode timing queries."""
 
     def __init__(self, inference_config: InferenceConfig, args=None, benchmark_layer_times=None,
-                 scaling_benchmarks=None):
+                 scaling_benchmarks=None, decode_floor=None):
         self.cfg = inference_config
         self._args_ref = args
+        # Optional measured decode latency floor {batch: ms} from a sharded
+        # probe. Applied as decode = max(restored, floor(batch)) — see
+        # ``_decode_floor_ms``.
+        self._decode_floor = {int(b): float(v) for b, v in (decode_floor or {}).items() if v}
         gpu_arch = getattr(args, "gpu_arch", None) if args else None
         gpu_clock = getattr(args, "gpu_clock_mhz", None) if args else None
         gemm_name = getattr(args, "gemm_backend", None) if args else None
@@ -829,6 +833,18 @@ class InferencePerformanceProjector:
         comm_tgt = self._comm if self._comm is not None else None
         comm_bench = self._comm_bench if self._comm is not None else None
 
+        # For decode, exclude communication from the scaling ratio: decode
+        # collectives (TP all-reduce, EP all-to-all) are small-message,
+        # latency-bound, and either overlapped with compute at high batch or
+        # pipelined into the fixed per-step overhead at low batch — they are NOT
+        # additive on top of a comm-free anchor. Charging them in the ratio
+        # double-counts and, when restoring from a comm-free 1-GPU anchor,
+        # explodes the ratio at low batch (the target grows a full A2A+AR the
+        # anchor never had). The resident decode comm is instead captured by the
+        # measured latency floor (``_decode_floor_ms``). Prefill comm is large-
+        # message and genuinely exposed, so it stays in the ratio.
+        comm_free = phase == "decode"
+
         def _step(lm, comm, view, imb) -> float:
             saved = (self._lm, self._comm, self._view, self._gemm, self._sdpa,
                      self._moe_imbalance)
@@ -837,7 +853,11 @@ class InferencePerformanceProjector:
             # Per-view imbalance: bench-EP vs target-EP (see _setup_restoration).
             self._moe_imbalance = imb
             try:
-                return self._forward_times(batch, q_len, phase, kv).total_ms
+                ft = self._forward_times(batch, q_len, phase, kv)
+                if comm_free:
+                    return max(0.0, ft.total_ms - ft.comm.tp_allreduce_ms
+                               - ft.comm.ep_a2a_ms - ft.comm.pp_p2p_ms)
+                return ft.total_ms
             finally:
                 (self._lm, self._comm, self._view, self._gemm, self._sdpa,
                  self._moe_imbalance) = saved
@@ -1107,6 +1127,32 @@ class InferencePerformanceProjector:
         """Fixed per-step host/launch overhead (CUDA-graph-reducible)."""
         return max(0.0, self.cfg.request_config.resolved_decode_step_overhead_us()) / 1000.0
 
+    def _decode_floor_ms(self, batch: int) -> float:
+        """Hardware decode latency floor at ``batch`` from a sharded probe.
+
+        Above the roofline knee the decode step is set by fixed per-step
+        launch/dispatch overhead (parallelism-invariant), so a sharded probe's
+        measured decode curve is the floor for any more-sharded target. Clamps
+        to the probe's batch range and linearly interpolates between measured
+        points. Returns 0.0 (no floor) when no probe was provided.
+        """
+        floor = self._decode_floor
+        if not floor:
+            return 0.0
+        if batch in floor:
+            return floor[batch]
+        bs = sorted(floor)
+        if batch <= bs[0]:
+            return floor[bs[0]]
+        if batch >= bs[-1]:
+            return floor[bs[-1]]
+        lo = max(b for b in bs if b <= batch)
+        hi = min(b for b in bs if b >= batch)
+        if hi == lo:
+            return floor[lo]
+        w = (batch - lo) / (hi - lo)
+        return floor[lo] * (1.0 - w) + floor[hi] * w
+
     def _draft_overhead_ms(self, per_token_step_ms: float) -> float:
         """Speculative draft-model forward cost added to a verify step.
 
@@ -1128,10 +1174,12 @@ class InferencePerformanceProjector:
         if self._measured_mode:
             per_token = self._measured_decode_step_ms(batch, kv_len)
             step = per_token * q_len if q_len > 1 else per_token  # verify q_len tokens/step
-            return step + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
+            step = step + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
+            return max(step, self._decode_floor_ms(batch))
         ft = self._forward_times(batch, q_len, "decode", kv_len)
         per_token = ft.total_ms / max(1, q_len)
-        return ft.total_ms + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
+        step = ft.total_ms + self._draft_overhead_ms(per_token) + self._decode_step_overhead_ms()
+        return max(step, self._decode_floor_ms(batch))
 
     # -- DES event-duration kernel --------------------------------------------
     # Public wrappers used by the discrete-event simulator (``des.py``) so that
@@ -1299,6 +1347,15 @@ class InferencePerformanceProjector:
                 mixed.append(t_mixed)
             t_pure = sum(pure) / len(pure)
             t_mixed = sum(mixed) / len(mixed)
+
+        # Hardware decode latency floor (from a sharded probe): above the
+        # roofline knee the pure-decode step can't drop below the fixed
+        # per-step launch/dispatch overhead. A mixed step carries this decode
+        # work plus a prefill chunk, so the same floor is a valid lower bound.
+        floor = self._decode_floor_ms(C)
+        if floor > 0.0:
+            t_pure = max(t_pure, floor)
+            t_mixed = max(t_mixed, floor)
 
         # Pure steps per request needed to make up the decode tokens the mixed
         # steps did not cover.

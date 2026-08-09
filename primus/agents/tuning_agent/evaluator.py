@@ -529,6 +529,7 @@ def _build_inference_cmd(
     load_benchmark: Path | None = None,
     profiling_mode: str | None = None,
     bench_gpus: int | None = None,
+    decode_floor: Path | None = None,
 ) -> list[str]:
     # The inference projector runs single-process and (in --profiling-mode
     # benchmark) spawns its OWN torchrun worker via spawn_inference_benchmark,
@@ -614,6 +615,8 @@ def _build_inference_cmd(
         cmd += ["--load-benchmark", str(load_benchmark)]
     elif profiling_mode == "benchmark" and bench_gpus:
         cmd += ["--profiling-mode", "benchmark"]
+    if decode_floor is not None:
+        cmd += ["--decode-floor-benchmark", str(decode_floor)]
     return cmd
 
 
@@ -787,6 +790,26 @@ class Evaluator:
         )
         return Path(chosen)
 
+    def _resolve_decode_floor(self, cfg) -> Path | None:
+        """Decode latency floor probe for an EP-sharded MoE target.
+
+        Above the roofline knee the decode step is set by fixed per-step
+        launch/dispatch overhead (incl. resident comm) and is ~parallelism-
+        invariant, so the 2-GPU EP-sharded probe's measured decode curve is the
+        floor for any more-sharded EP=TP target. Applied as
+        ``decode = max(restored, floor)`` (see performance.py). Only for
+        EP-sharded MoE targets (``EP > 1``): pure-TP (``EP == 1``) MoE decode
+        stays weight-bound and grows with batch — a different regime the
+        EP-sharded floor does not describe — so it gets no floor. Returns the
+        cached ``<model>_tp2_pp1_ep2.json`` probe, else ``None``."""
+        if not getattr(self.arch, "is_moe", False) or int(getattr(cfg, "ep", 1)) <= 1:
+            return None
+        cache = os.environ.get("PRIMUS_INFER_BENCH_CACHE")
+        if not cache:
+            return None
+        probe = Path(cache) / f"{self.arch.model_name}_tp2_pp1_ep2.json"
+        return probe if probe.exists() else None
+
     def evaluate_inference(self, cfg, tag: str) -> EvalResult:
         """Score a serving config via ``projection inference`` (memory + perf).
 
@@ -850,9 +873,15 @@ class Evaluator:
                 profiling_mode = "benchmark"
                 bench_gpus = self.cfg.benchmark_host.benchmark_gpus or None
 
+        # Decode latency floor for EP-sharded MoE targets restored from a
+        # smaller anchor: cap the restored decode step at the 2-GPU EP-sharded
+        # probe's measured curve (no-op below the floor / for pure-TP).
+        decode_floor = self._resolve_decode_floor(cfg) if is_bench else None
+
         cmd = _build_inference_cmd(
             yaml_path, cfg, self.cfg, self.primus_root,
             load_benchmark=load_bench, profiling_mode=profiling_mode, bench_gpus=bench_gpus,
+            decode_floor=decode_floor,
         )
         rc, out, dur = _run(
             cmd, cwd=self.primus_root,
