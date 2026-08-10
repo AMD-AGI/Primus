@@ -72,6 +72,24 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Check version/commit pin consistency
         run: python tools/ci/check_version_consistency.py
+      # The three submodules the drift check reads a schema from; `submodules:
+      # recursive` on the checkout would also clone Megatron-Bridge & friends
+      # for nothing. A fetch failure is deliberately left to the check step,
+      # which names the backend it could not check instead of dropping a bare
+      # git error; drift stays warn-only, but a backend it could not check
+      # fails the job, since a check that did not run must not read as a pass.
+      - name: Fetch backend schema sources
+        continue-on-error: true
+        run: >-
+          git submodule update --init --depth 1
+          third_party/torchtitan third_party/maxtext third_party/Megatron-LM
+      - name: Check backend config schema drift
+        # `pipefail` is not on by default, and without it `tee` would report
+        # success for a check that failed -- the same silent pass this step
+        # exists to stop.
+        run: |
+          set -o pipefail
+          python tools/ci/check_config_schema.py --warn-only | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
   # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
