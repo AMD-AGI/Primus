@@ -74,6 +74,14 @@ For a **manual** container (§1), export the same paths inside the shell before 
 export HF_TOKEN=hf_...
 export PACKED_DATA_DIR=/data
 export PRETRAINED_CHECKPOINT=/data/megatron_checkpoints/Llama-2-70b-hf
+source /workspace/Primus/examples/mlperf/llama2_70b/config_MI355X_1x8x1.sh
+export SUBMISSION_QUIET=1          # or manually:
+export PRIMUS_LOG_SUPPRESSION=1
+export MLPERF_VERBOSE_LOGS=0
+export VERBOSE_TRAINING_LOG=0
+export PRIMUS_LOG_GPU_MEM=0
+export MLLOG_SAVE_TO_FILE=0        # :::MLLOG on stdout; omit to keep file-only
+bash /workspace/Primus/examples/mlperf/llama2_70b/run_and_time.sh
 ```
 
 Checkpoint root must contain **`latest_train_state.pt`**, not only **`iter_0000000/`**.
