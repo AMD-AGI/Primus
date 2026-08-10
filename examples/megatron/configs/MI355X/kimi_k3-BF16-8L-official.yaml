@@ -95,6 +95,10 @@ modules:
       # PRIMUS_KDA_BACKEND=fla and K3P_KDA_CONV=fla). Fall back with
       # PRIMUS_KDA_BACKEND=eager if fla is unavailable.
       kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV); the
+      # launcher exports PRIMUS_ATTN_BACKEND=fla so chunk kernel + causal_conv1d
+      # both use fla. This matches the validated 190 TFLOP/s reference run.
+      use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
       moe_router_dtype: fp32
       optimizer: adam
 

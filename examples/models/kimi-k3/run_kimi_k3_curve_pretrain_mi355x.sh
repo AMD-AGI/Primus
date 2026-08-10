@@ -46,13 +46,19 @@
 #     MLA (6 layers) + router + norms                         ~= 0.06 B
 #     -------------------------------------------------------------------
 #     TOTAL                                                   ~= 3.85 B
-#   At EP=8 this fits comfortably on 8 x 288 GB (the debug bring-up peaked at
-#   ~14.6 GB), so NO distributed optimizer / recompute is needed.
+#   The model + optimizer fit comfortably on 8 x 288 GB (no distributed optimizer
+#   needed). Activation recompute IS used for the MBS=16 perf recipe below
+#   (full/block/12 -> 224.71 GB peak); without it MBS=16 OOMs (~276 GB).
 #
-# PERFORMANCE
-#   In PERF mode (mbs 16, seq 2048, fla + Turbo, bf16) curve reaches ~190
-#   TFLOP/s/GPU single-node -- close to the official 8-layer 4-node number, which
-#   is what makes it a useful throughput proxy without a multi-node reservation.
+# PERFORMANCE (measured winner; see the perf-config header in the repo history)
+#   MBS=16 / seq 2048 / recompute full/block/12 / Turbo grouped_gemm + rms_norm +
+#   permute / ENABLE_NUMA_BINDING=1 (fla, bf16) reaches ~130.7 TFLOP/s/GPU
+#   single-node -- 2361 ms/iter, 224.71 GB peak of 288, measured over a FULL 450
+#   iterations (0 NaN, 0 skipped). ENABLE_NUMA_BINDING alone is worth +28.2%.
+#   NOTE: this shape needs ~150 iterations to reach steady state (2789 ms @ iter20
+#   -> 2353 @ iter200), so a short run (<= 50 iters) legitimately reads BELOW 130.7
+#   (~9% low at 20 iters) -- that is warmup, not a regression. (There is no
+#   ~190 TFLOP/s single-node number; ~191 is the 8L official 4-node figure.)
 #
 # DATA (portable by default)
 #   Defaults to MOCK data so the perf reproduction has no external dependency.
@@ -86,7 +92,9 @@ export SKIP_TRAIN=${SKIP_TRAIN:-0}
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+# HSA_NO_SCRATCH_RECLAIM=0 is the fla fix (matches run_pretrain.sh's own default,
+# which its comment calls the fla fix); =1 regressed fla throughput, so keep 0.
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Kimi K3 KDA backend selection (self-contained; run_pretrain.sh no longer sets it):
@@ -131,6 +139,8 @@ export OPTIMIZER=${OPTIMIZER:-adam}
 export FP8=${FP8:-False}                           # False = bf16
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export MOCK_DATA=${MOCK_DATA:-True}                # True = portable perf; False = real-data convergence
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # winner: full/block/12 (224.71GB); 8=271GB(riskier); 0=off(mbs16 OOMs)
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # winner: full/block/12 (224.71GB); 8=271GB(riskier); 0=off(mbs16 OOMs)
 
 # MoE_Features legend (K3-applicable, contiguous ids):
 #   0 baseline | 1 turbo grouped GEMM | 2 cross-entropy loss fusion |
@@ -194,13 +204,36 @@ K3_TURBO_ARGS+=("--use_turbo_deepep" "False")
 K3_TURBO_ARGS+=("--moe_shared_expert_overlap" "False")
 K3_TURBO_ARGS+=("--turbo_sync_free_moe_stage" "0")
 
+# Activation recompute so MBS=16 fits (measured winner: full/block/12 -> 224.71 GB
+# peak). Kept in the SCRIPT, not the convergence-control yaml. RECOMPUTE_LAYERS=0
+# disables it (mbs16 then OOMs at ~276 GB).
+RECOMPUTE_ARGS=()
+if [ "${RECOMPUTE_LAYERS}" -gt 0 ]; then
+    RECOMPUTE_ARGS+=("--recompute_granularity" "full")
+    RECOMPUTE_ARGS+=("--recompute_method" "block")
+    RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
+fi
+
+# Activation recompute so MBS=16 fits (measured winner: full/block/12 -> 224.71 GB
+# peak). Kept in the SCRIPT, not the convergence-control yaml. RECOMPUTE_LAYERS=0
+# disables it (mbs16 then OOMs at ~276 GB).
+RECOMPUTE_ARGS=()
+if [ "${RECOMPUTE_LAYERS}" -gt 0 ]; then
+    RECOMPUTE_ARGS+=("--recompute_granularity" "full")
+    RECOMPUTE_ARGS+=("--recompute_method" "block")
+    RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
+fi
+
 FP8_ARGS=()
 if [ "$FP8" = "True" ]; then
     FP8_ARGS+=("--fp8" "hybrid")
 fi
 
 # NOTE: no MLA/MTP CLI args (K3 builds MLA from its own specs; multi_latent_attention
-# stays false), no distributed-optimizer / recompute args (3.85 B fits on one node).
+# stays false) and no distributed optimizer (3.85 B fits on one node). Activation
+# recompute (RECOMPUTE_ARGS) IS passed via CLI so MBS=16 fits (~224.71 GB peak);
+# it is kept OUT of kimi_k3-BF16-curve.yaml because that file is the convergence
+# CONTROL, where recompute would distort the ms/iter and FLOPs figures.
 
 ######################### Training Experiments #########################
 PRIMUS_TEAM="date-$(date +%Y%m%d)-KimiK3-Curve"
@@ -209,7 +242,11 @@ PRIMUS_USER=${PRIMUS_USER:-user-kimi-k3}
 export PRIMUS_USER
 export PRIMUS_EXP_NAME="KimiK3_Curve_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_TP${TP}_ETP${ETP}_PP${PP}_EP${EP}_CP${CP}_Mock${MOCK_DATA}_Features${FEATURE_TAG}"
 
-LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
+# Writable workspace: the checkout may sit on a read-only mount, so default output
+# to a writable HOME path (env-overridable). primus reads PRIMUS_WORKSPACE for the
+# yaml `workspace`, forwarded into the container as a PRIMUS_-prefixed var.
+export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/home/$USER/primus_output}
+LOG_DIR=$PRIMUS_WORKSPACE/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export LOG_FILE=$LOG_DIR/training.log
 mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
@@ -226,6 +263,7 @@ echo "NNODES=${NNODES}  TP=${TP} PP=${PP} EP=${EP}  MBS=${MBS} GBS=${GBS} SEQ=${
 echo "LOG_DIR=${LOG_DIR}" | tee -a "$LOG_FILE"
 echo "FEATURE_ARGS=${FEATURE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "K3_TURBO_ARGS=${K3_TURBO_ARGS[*]}" | tee -a "$LOG_FILE"
+echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
@@ -233,7 +271,7 @@ echo "--------------------------------" | tee -a "$LOG_FILE"
 # Mirrors examples/moe_package/run_glm5_4layers_proxy.sh -- drive primus-cli
 # directly on ONE node instead of the multi-node run_slurm_pretrain.sh wrapper.
 # Same args, same $EXP; only the launch entrypoint differs.
-mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+mkdir -p "$LOG_DIR"
 ./primus-cli direct \
     -- train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
@@ -249,5 +287,6 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
     --mock_data "$MOCK_DATA" \
     "${FEATURE_ARGS[@]}" \
     "${K3_TURBO_ARGS[@]}" \
+    "${RECOMPUTE_ARGS[@]}" \
     "${FP8_ARGS[@]}" \
     --train_iters "$TRAIN_ITERS" 2>&1 | tee -a "$LOG_FILE"

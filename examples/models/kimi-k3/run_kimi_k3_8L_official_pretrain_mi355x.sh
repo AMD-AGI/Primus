@@ -55,9 +55,15 @@
 #   grads/moments, recompute full/block/8); this launcher also re-asserts it via
 #   MEM_ARGS below so the knobs are visible at the call site.
 #
-# LAUNCH PATH (this IS the primus-cli path)
-#   run_slurm_pretrain.sh --(srun)--> run_local_pretrain.sh --(docker)-->
-#   run_pretrain.sh --> python primus/cli/main.py train pretrain --config $EXP <overrides>
+# LAUNCH PATH (the PR's own primus-cli slurm entry -- NOT run_slurm_pretrain.sh)
+#   ./primus-cli slurm srun -N N -p amd-spur --reservation=... -- container --
+#     train pretrain --config $EXP
+#   --(srun)--> runner/primus-cli-slurm-entry.sh (Spur-safe pure-bash nodelist
+#     fallback, no `srun --export`, no `scontrol show hostnames`) -->
+#     primus-cli-container.sh --(docker)--> primus-cli-direct.sh --> torchrun
+#     python primus/cli/main.py train pretrain --config $EXP <overrides>
+#   run_slurm_pretrain.sh is avoided on purpose: this cluster's SLURM rejects its
+#   `srun --export ALL` and lacks `scontrol show hostnames`.
 #
 # USAGE
 #   NNODES=4 bash examples/models/kimi-k3/run_kimi_k3_8L_official_pretrain_mi355x.sh
@@ -75,8 +81,11 @@ export SKIP_TRAIN=${SKIP_TRAIN:-0}
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+# HSA_NO_SCRATCH_RECLAIM=0 is the fla fix (matches run_pretrain.sh's own default,
+# whose comment calls it the fla fix); =1 regressed fla throughput, so keep 0.
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
+export PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF:-expandable_segments:True}
 
 # Kimi K3 KDA backend selection (self-contained; run_pretrain.sh no longer sets it):
 #   PRIMUS_KDA_BACKEND=fla -> kda_backend=fla, the fused fla Triton chunk kernel
@@ -88,18 +97,30 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 #     ...; if your site launcher does not forward K3P_*, export it there too).
 export PRIMUS_KDA_BACKEND=${PRIMUS_KDA_BACKEND:-fla}
 export K3P_KDA_CONV=${K3P_KDA_CONV:-fla}
+# Unified KDA backend selector (supersedes the two above): fla = fused chunk kernel
+# + fla causal_conv1d. kimi_k3-BF16-8L-official.yaml reads it as PRIMUS_ATTN_BACKEND.
+export PRIMUS_ATTN_BACKEND=${PRIMUS_ATTN_BACKEND:-fla}
 
-# Multi-node cluster wiring -- ADJUST per cluster (these are ionic/Vultr examples).
 export NNODES=${NNODES:-4}
-export USING_AINIC=${USING_AINIC:-0}
-# export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7"
-# export NCCL_SOCKET_IFNAME="enp193s0f1np1"
-# export GLOO_SOCKET_IFNAME="enp193s0f1np1"
-# export SLURM_PARTITION=${SLURM_PARTITION:-}
-# export SLURM_NODELIST=${SLURM_NODELIST:-}
 
-# Per-rank LOCAL Triton cache: the fla causal_conv1d 'hsaco' KeyError only shows
-# up under a shared-NFS Triton cache, so keep it node-local.
+# Multi-node cluster networking -- PROVEN ionic RoCE values for this MI355X cluster
+# (env VALUES copied from the validated 8L perf run). Forwarded into the training
+# container both by the .primus.yaml env whitelist AND explicitly as --env in the
+# launch below (belt-and-suspenders, in case srun does not propagate the env).
+export USING_AINIC=${USING_AINIC:-1}
+export NCCL_IB_HCA=${NCCL_IB_HCA:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens3}
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-ens3}
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-20}
+export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-300}
+
+# SLURM allocation targets for the `primus-cli slurm` launch below.
+export SLURM_PARTITION=${SLURM_PARTITION:-amd-spur}
+export SBATCH_RESERVATION=${SBATCH_RESERVATION:-primus-deepseek-v4-reserved}
+export SLURM_TIME=${SLURM_TIME:-04:00:00}
+
+# Node-local Triton cache (avoids the shared-NFS fla causal_conv1d 'hsaco' KeyError).
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_8L}
 
 # Select the 8-layer official-width preset (extends kimi_k3.yaml, num_layers=8).
@@ -229,7 +250,12 @@ PRIMUS_USER=${PRIMUS_USER:-user-kimi-k3}
 export PRIMUS_USER
 export PRIMUS_EXP_NAME="KimiK3_8L_Official_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_L${NUM_LAYERS}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_EP${EP}_CP${CP}_NN${NNODES}_Features${FEATURE_TAG}"
 
-LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
+# Writable workspace: the checkout may sit on a read-only mount (e.g. /shared_nfs
+# from the submit node), so default output to a writable HOME path (env-overridable).
+# primus reads PRIMUS_WORKSPACE for the yaml `workspace` (PRIMUS_-prefixed -> also
+# forwarded into the container).
+export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/home/$USER/primus_output}
+LOG_DIR=$PRIMUS_WORKSPACE/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export LOG_FILE=$LOG_DIR/training.log
 mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
@@ -251,8 +277,52 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-######################### Training Job #########################
-bash ./examples/run_slurm_pretrain.sh \
+######################### Training Job (primus-cli slurm -> container) #########################
+# Extra container mounts. --volume is a cumulative passthrough option accepted by
+# runner/primus-cli-container.sh, so the K3 script can inject mounts WITHOUT editing
+# any shared script:
+#   * whole /shared_nfs so the checkout (and any data) is visible on every node;
+#   * the writable HOME workspace;
+#   * host libionic (ionic RoCE ABI-4 provider) over the container's own provider
+#     lib so NCCL IB init sees the ABI the ionic NICs need. NOTE: if the container's
+#     path is a symlink to a versioned .so, a plain mount-over-name may not fully
+#     swap it; the proven fallback is an in-container `cp` over `readlink -f` of the
+#     provider, which needs a pre-run hook (primus-cli-direct `--patch`). See report.
+CONTAINER_VOL_ARGS=("--volume" "/shared_nfs:/shared_nfs" "--volume" "/home/$USER:/home/$USER")
+LIBIONIC_HOST=${LIBIONIC_HOST:-/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so}
+if [ -e "$LIBIONIC_HOST" ]; then
+    CONTAINER_VOL_ARGS+=("--volume" "${LIBIONIC_HOST}:${LIBIONIC_HOST}:ro")
+fi
+
+# Env forwarded explicitly into the container (robust even if srun does not
+# propagate the submit environment; PRIMUS_*/NCCL_* also auto-forward).
+CONTAINER_ENV_ARGS=(
+    "--env" "USING_AINIC=${USING_AINIC}"
+    "--env" "NCCL_IB_HCA=${NCCL_IB_HCA}"
+    "--env" "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
+    "--env" "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
+    "--env" "NCCL_IB_DISABLE=${NCCL_IB_DISABLE}"
+    "--env" "NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT}"
+    "--env" "NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT}"
+    "--env" "HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM}"
+    "--env" "PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF}"
+    "--env" "ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}"
+    "--env" "HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}"
+    "--env" "GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES}"
+    "--env" "NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3}"
+    "--env" "PRIMUS_KDA_BACKEND=${PRIMUS_KDA_BACKEND}"
+    "--env" "PRIMUS_ATTN_BACKEND=${PRIMUS_ATTN_BACKEND}"
+    "--env" "K3P_KDA_CONV=${K3P_KDA_CONV}"
+    "--env" "TRITON_CACHE_DIR=${TRITON_CACHE_DIR}"
+    "--env" "PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE}"
+)
+
+SLURM_FLAGS=("-N" "$NNODES" "-p" "$SLURM_PARTITION" "--exclusive" "-t" "$SLURM_TIME")
+[ -n "${SBATCH_RESERVATION:-}" ] && SLURM_FLAGS+=("--reservation=${SBATCH_RESERVATION}")
+
+./primus-cli slurm srun "${SLURM_FLAGS[@]}" \
+    -- container --shm-size 64g "${CONTAINER_VOL_ARGS[@]}" "${CONTAINER_ENV_ARGS[@]}" \
+    -- train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \
