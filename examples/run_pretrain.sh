@@ -167,6 +167,9 @@ export NCCL_CHECKS_DISABLE=1
 
 if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
+    # ROCm 7.2.1+ builds ANP into RCCL; RCCL_AINIC_ROCE=1 enables the built-in ANP
+    # path. An explicitly-set NCCL_NET_PLUGIN below still takes precedence.
+    export RCCL_AINIC_ROCE="${RCCL_AINIC_ROCE:-1}"
     export NCCL_IB_GID_INDEX=1
     export NCCL_IB_TC=${NCCL_IB_TC:-104}
     export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}

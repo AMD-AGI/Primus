@@ -30,6 +30,12 @@ ANP_HOME_DIR="${ANP_HOME_DIR:-/workspace/amd-anp}"
 RCCL_HOME_DIR="${RCCL_HOME_DIR:-/workspace/rccl}"
 MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
 
+# AINIC RoCE mode. ROCm 7.2.1+ builds ANP INTO RCCL (no separate librccl-anp.so);
+# RCCL_AINIC_ROCE=1 enables that built-in ANP path. On older ROCm the external
+# plugin is selected below instead. An explicitly-set NCCL_NET_PLUGIN always takes
+# precedence (force-loads the named plugin) irrespective of RCCL_AINIC_ROCE.
+RCCL_AINIC_ROCE="${RCCL_AINIC_ROCE:-1}"
+
 # NCCL_NET_PLUGIN: ANP libraray has different names in different containers: librccl-anp.so or librccl-net.so.
 if [ -z "${NCCL_NET_PLUGIN:-}" ]; then
     if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
@@ -71,6 +77,7 @@ echo "env.ANP_HOME_DIR=${ANP_HOME_DIR}"
 echo "env.RCCL_HOME_DIR=${RCCL_HOME_DIR}"
 echo "env.MPI_HOME_DIR=${MPI_HOME_DIR}"
 echo "env.NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
+echo "env.RCCL_AINIC_ROCE=${RCCL_AINIC_ROCE}"
 echo "env.NCCL_IB_TC=${NCCL_IB_TC}"
 echo "env.NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC}"
 echo "env.NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"
