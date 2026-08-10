@@ -64,6 +64,35 @@ def _rms_norm_per_head(x: torch.Tensor, eps: float) -> torch.Tensor:
     return (x32 * rms).to(in_dtype)
 
 
+def _inverse_rope_reference(
+    out: torch.Tensor,
+    *,
+    position_ids: torch.Tensor,
+    rope: DualRoPE,
+    rotary_dim: int,
+    compress_ratio: int = 0,
+) -> torch.Tensor:
+    """Reference de-rotation of the attention output (RoPE at ``-t``).
+
+    Mirrors ``apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)`` from
+    the released ``inference/model.py``: the conjugate rotation, expressed
+    here by negating the sine.
+    """
+    from primus.backends.megatron.core.transformer.dual_rope import (
+        apply_interleaved_partial_rope,
+    )
+
+    cache = rope.get_rope(compress_ratio=compress_ratio)
+    cos, sin = cache(position_ids)
+    cos = cos[..., : rotary_dim // 2]
+    sin = sin[..., : rotary_dim // 2]
+    lead = out.shape[:-2]
+    if tuple(cos.shape[:-1]) != tuple(lead):
+        cos = cos.expand(*lead, -1)
+        sin = sin.expand(*lead, -1)
+    return apply_interleaved_partial_rope(out, cos, -sin, rotary_dim=rotary_dim)
+
+
 def _reference_v4_attention_forward(
     *,
     hidden: torch.Tensor,  # [B, S, D]
@@ -141,6 +170,10 @@ def _reference_v4_attention_forward(
         probs = probs[..., :-1].to(v_bh.dtype)
     out = torch.matmul(probs, v_bh.float()).to(hidden.dtype)
     out = out.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
+
+    # Inverse RoPE (position = -t) on the output tail: K == V, so the output
+    # carries absolute positions until it is de-rotated.
+    out = _inverse_rope_reference(out, position_ids=position_ids, rope=rope, rotary_dim=rotary_dim)
 
     # Grouped low-rank O.
     out_g = out.reshape(B, S, o_groups, (n_heads * head_dim) // o_groups)
@@ -631,7 +664,9 @@ def _reference_hca_forward(
     # Compressed pool from the attention's own Compressor + compress-base RoPE.
     pool = attn.compressor(hidden)  # [B, P, Dh]
     P = pool.shape[1]
-    comp_pos = torch.arange(P, device=hidden.device)
+    # Compressed entry s stands for the window starting at original token
+    # s * ratio, so it is rotated at that position (not at the block index).
+    comp_pos = torch.arange(P, device=hidden.device) * ratio
     cos, sin = attn.rope.compress_rope(comp_pos)
     cos = cos[..., : rotary_dim // 2]
     sin = sin[..., : rotary_dim // 2]
@@ -658,7 +693,9 @@ def _reference_hca_forward(
     k_bh = k_full.transpose(1, 2)
     v_bh = v_full.transpose(1, 2)
 
-    scale = 1.0 / math.sqrt(Dh) * attn.rope.attn_scale(compress_ratio=ratio)
+    # Plain 1/sqrt(head_dim): the YaRN magnitude factor is not part of the
+    # softmax temperature (``inference/model.py`` uses ``head_dim ** -0.5``).
+    scale = 1.0 / math.sqrt(Dh)
     logits = torch.matmul(q_bh.float(), k_bh.float().transpose(-2, -1)) * scale
     logits = logits + full_mask
 
@@ -673,6 +710,15 @@ def _reference_hca_forward(
 
     out = torch.matmul(probs, v_bh.float()).to(hidden.dtype)
     out = out.transpose(1, 2).contiguous()  # [B, S, H, Dh]
+
+    # Inverse RoPE (position = -t) using this layer's compress-base RoPE.
+    out = _inverse_rope_reference(
+        out,
+        position_ids=position_ids,
+        rope=attn.rope,
+        rotary_dim=rotary_dim,
+        compress_ratio=ratio,
+    )
 
     # Grouped low-rank O.
     G, r = attn.o_groups, attn.o_lora_rank
@@ -721,6 +767,264 @@ def test_hca_forward_matches_inline_reference():
 
     diff = (ours - ref).abs().max().item()
     assert diff < 1e-3, f"HCA forward mismatch: max abs diff = {diff:.3e}"
+
+
+def test_inverse_rope_round_trips():
+    """``R(-t)`` exactly undoes ``R(t)`` on the rotated tail.
+
+    Pure math property of the helper, independent of any attention branch.
+    """
+    torch.manual_seed(0)
+    # H must be a power of two: the Triton RoPE kernel tiles the head axis with
+    # BLOCK_H = _pick_block_h(H) and feeds it to tl.arange, which rejects
+    # non-power-of-2 ranges. Production runs H=64 (Q) / H=1 (KV), so this only
+    # ever bites contrived test shapes.
+    B, S, H, Dh, rotary_dim = 2, 6, 4, 16, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=H,
+        head_dim=Dh,
+        rotary_dim=rotary_dim,
+        q_lora_rank=32,
+        o_groups=1,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    x = torch.randn(B, S, H, Dh, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+
+    rotated = attn.rope.apply_rope(x, position_ids=position_ids, compress_ratio=0)
+    restored = attn._apply_inverse_rope(rotated, position_ids)
+
+    torch.testing.assert_close(restored, x, rtol=1e-5, atol=1e-5)
+    # The rotation must be non-trivial, otherwise the round-trip is vacuous.
+    assert not torch.allclose(rotated, x, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+def test_output_is_derotated_before_o_projection(compress_ratio):
+    """Every branch de-rotates the attention output before ``wo_a``.
+
+    Guards the wiring rather than the math: ``_project_output`` must apply the
+    inverse rotation, so feeding it a tensor and comparing against an explicit
+    de-rotate + O projection has to agree, and skipping the de-rotation must
+    not.
+    """
+    torch.manual_seed(0)
+    B, S = 2, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    if compress_ratio:
+        attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio)
+    else:
+        attn = _make_attention(config)
+    attn = attn.to(_TEST_DTYPE)
+
+    core_out = torch.randn(B, S, attn.num_heads, attn.head_dim, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+
+    with torch.no_grad():
+        ours = attn._project_output(core_out, position_ids)
+
+        derotated = _inverse_rope_reference(
+            core_out,
+            position_ids=position_ids,
+            rope=attn.rope,
+            rotary_dim=attn.rotary_dim,
+            compress_ratio=compress_ratio,
+        )
+        expected = attn._grouped_o_projection(derotated)
+        without_fix = attn._grouped_o_projection(core_out)
+
+    torch.testing.assert_close(ours, expected, rtol=1e-4, atol=1e-4)
+    assert not torch.allclose(ours, without_fix, rtol=1e-3, atol=1e-3)
+
+
+def test_inverse_rope_matches_the_negated_sine_formulation():
+    """The fused de-rotation equals the explicit ``-sin`` rotation.
+
+    ``_apply_inverse_rope`` negates the *angle* inside the fused kernel rather
+    than building cos / sin eagerly and negating the sine, which saves three
+    launches and a materialised cos / sin tensor per layer. ``cos`` is even and
+    ``sin`` odd, so the two are the same rotation -- pinned here because the
+    optimisation is only safe as long as that stays true.
+    """
+    torch.manual_seed(0)
+    B, S, H, Dh, rotary_dim = 2, 6, 4, 16, 8
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=H,
+        head_dim=Dh,
+        rotary_dim=rotary_dim,
+        q_lora_rank=32,
+        o_groups=1,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    x = torch.randn(B, S, H, Dh, dtype=_TEST_DTYPE)
+    # Offset positions so position 0 (where the rotation is the identity) does
+    # not dominate the comparison.
+    position_ids = torch.arange(1, S + 1).unsqueeze(0).expand(B, S)
+
+    with torch.no_grad():
+        ours = attn._apply_inverse_rope(x, position_ids)
+        ref = _inverse_rope_reference(x, position_ids=position_ids, rope=attn.rope, rotary_dim=rotary_dim)
+
+    torch.testing.assert_close(ours, ref, rtol=1e-5, atol=1e-5)
+    assert not torch.allclose(ours, x, rtol=1e-3, atol=1e-3)
+
+
+def test_inverse_rope_does_not_mutate_core_attention_output():
+    """De-rotation is out-of-place.
+
+    The attention backward keeps a reference to the core output, so mutating
+    it in place would corrupt the gradient.
+    """
+    torch.manual_seed(0)
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=False,
+    )
+    attn = _make_attention(config).to(_TEST_DTYPE)
+
+    core_out = torch.randn(2, 5, attn.num_heads, attn.head_dim, dtype=_TEST_DTYPE)
+    before = core_out.clone()
+    position_ids = torch.arange(5).unsqueeze(0).expand(2, 5)
+
+    with torch.no_grad():
+        rotated = attn._apply_inverse_rope(core_out, position_ids)
+
+    assert rotated is not core_out
+    torch.testing.assert_close(core_out, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(("compress_ratio", "num_pool_entries"), [(4, 4), (128, 2)])
+def test_compressed_pool_rope_uses_original_sequence_positions(compress_ratio, num_pool_entries):
+    """Compressed entry ``s`` is rotated at original token ``s * ratio``.
+
+    The queries are rotated at their own original positions, so rotating the
+    compressed KV at bare block indices would put the two sides on different
+    coordinate systems. ``inference/model.py`` slices ``freqs_cis[:cutoff:ratio]``
+    for prefill and indexes ``start_pos + 1 - ratio`` for decode; both land on
+    ``s * ratio``.
+    """
+    from primus.backends.megatron.core.transformer.dual_rope import (
+        apply_interleaved_partial_rope,
+    )
+
+    torch.manual_seed(0)
+    S = compress_ratio * num_pool_entries
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio).to(_TEST_DTYPE)
+    hidden = torch.randn(1, S, config.hidden_size, dtype=_TEST_DTYPE)
+
+    with torch.no_grad():
+        pooled_raw = attn.compressor(hidden)  # [B, P, Dh], pre-RoPE
+        ours = attn._build_compressed_pool(hidden)
+
+    P = pooled_raw.shape[1]
+    assert P == num_pool_entries, f"expected P={num_pool_entries}, got {P}"
+    rotary_dim = attn.rotary_dim
+
+    def _rope_at(positions: torch.Tensor) -> torch.Tensor:
+        cos, sin = attn.rope.compress_rope(positions)
+        cos = cos[..., : rotary_dim // 2].unsqueeze(0)
+        sin = sin[..., : rotary_dim // 2].unsqueeze(0)
+        rotated = apply_interleaved_partial_rope(pooled_raw.unsqueeze(2), cos, sin, rotary_dim=rotary_dim)
+        return rotated.squeeze(2)
+
+    block_idx = torch.arange(P, device=hidden.device)
+    expected = _rope_at(block_idx * compress_ratio)
+    torch.testing.assert_close(ours, expected, rtol=1e-4, atol=1e-4)
+
+    # The two conventions must actually differ, or the assertion above is
+    # vacuous (they coincide only at P == 1, which is why P > 1 here).
+    wrong = _rope_at(block_idx)
+    assert not torch.allclose(expected, wrong, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+def test_attention_scale_is_pure_inv_sqrt_head_dim(compress_ratio):
+    """Softmax temperature is ``1/sqrt(head_dim)`` on every branch.
+
+    The released ``inference/model.py`` sets ``softmax_scale = head_dim ** -0.5``
+    unconditionally; the YaRN magnitude factor (``m_scale``) must not be folded
+    into the attention temperature even on the compressed layers, which run
+    with a YaRN-scaled RoPE. A non-unit ``yarn_factor`` is used here on purpose
+    so the assertion fails if ``m_scale`` ever leaks back in.
+    """
+    head_dim = 16
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=head_dim,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    yarn_factor = 16.0
+    rope = DualRoPE(
+        rotary_dim=config.qk_pos_emb_head_dim,
+        rope_theta=config.rotary_base,
+        compress_rope_theta=config.compress_rope_theta,
+        yarn_factor=yarn_factor,
+        original_max_position_embeddings=config.original_max_position_embeddings,
+    )
+    attn = DeepseekV4Attention(
+        config,
+        rope=rope,
+        compress_ratio=compress_ratio,
+        submodules=None,
+    )
+
+    expected = 1.0 / math.sqrt(head_dim)
+    assert attn._attention_scale() == pytest.approx(expected, rel=1e-12)
+
+    if compress_ratio:
+        # Guard the regression directly: the compressed RoPE really does carry
+        # a non-unit m_scale, so the assertion above is not vacuous.
+        assert rope.attn_scale(compress_ratio=compress_ratio) > 1.0
 
 
 # ---------------------------------------------------------------------------
