@@ -62,11 +62,16 @@
 #     PRIMUS_TOKENIZER_MODEL=<hf_snapshot_dir>  MoE_Features="3 6 7"  MBS=2
 #   (dropping feature 2 and the Turbo args restores the control's ms/iter).
 #
-# LAUNCH PATH (this IS the primus-cli path)
-#   run_slurm_pretrain.sh --(srun -N1)--> run_local_pretrain.sh --(docker)-->
-#   run_pretrain.sh --> python primus/cli/main.py train pretrain --config $EXP <overrides>
+# LAUNCH PATH (single-node: primus-cli direct)
+#   ./primus-cli direct -- train pretrain --config $EXP <overrides>
+#   Mirrors examples/moe_package/run_glm5_4layers_proxy.sh: for ONE node we drive
+#   primus-cli directly rather than the multi-node examples/run_slurm_pretrain.sh
+#   wrapper. primus-cli (repo root) -> runner/primus-cli; `direct` runs the
+#   pretrain entrypoint (primus/cli/main.py train pretrain --config $EXP) in the
+#   container it brings up from DOCKER_IMAGE on this node. The 8-layer official
+#   sibling stays on run_slurm_pretrain.sh because it is multi-node (>= 4 nodes).
 #
-# USAGE
+# USAGE (run from the Primus repo root)
 #   bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh
 ###############################################################################
 
@@ -92,9 +97,13 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 export PRIMUS_KDA_BACKEND=${PRIMUS_KDA_BACKEND:-fla}
 export K3P_KDA_CONV=${K3P_KDA_CONV:-fla}
 
-# Single node.
+# Single node. primus-cli `direct` allocates via SLURM using these; on a reserved
+# cluster also export SBATCH_RESERVATION=<name> SLURM_EXCLUSIVE=0 (and optionally
+# SLURM_NODELIST=<node>) before running.
 export NNODES=${NNODES:-1}
 export USING_AINIC=${USING_AINIC:-0}
+export SLURM_TIME=${SLURM_TIME:-01:00:00}
+export SLURM_PARTITION=${SLURM_PARTITION:-amd-aig}
 
 # Node-local Triton cache (avoids the shared-NFS fla causal_conv1d 'hsaco' KeyError).
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_curve}
@@ -220,8 +229,13 @@ echo "K3_TURBO_ARGS=${K3_TURBO_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-######################### Training Job #########################
-bash ./examples/run_slurm_pretrain.sh \
+######################### Training Job (single-node: primus-cli direct) #########################
+# Mirrors examples/moe_package/run_glm5_4layers_proxy.sh -- drive primus-cli
+# directly on ONE node instead of the multi-node run_slurm_pretrain.sh wrapper.
+# Same args, same $EXP; only the launch entrypoint differs.
+mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+./primus-cli direct \
+    -- train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \

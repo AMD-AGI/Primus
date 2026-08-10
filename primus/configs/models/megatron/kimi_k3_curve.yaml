@@ -2,6 +2,14 @@
 # Kimi K3 "curve" shape — the smallest shape worth drawing a real convergence
 # curve with, on ONE node of 8 x MI355X.
 #
+# Parameter count (derived from this config, not measured; mirrors the
+# deepseek_v2.yaml "# 236B total / 21B active" convention):
+#   ~3.85 B total params  -- 32 routed experts x 23 MoE layers x ~3.15 M/expert
+#     (3 x 1024 latent x 1024 moe_ffn) ~= 2.32 B dominates; + untied 151680 x
+#     2048 embed + lm_head (~0.62 B), KDA/MLA, shared experts, latent projections.
+#     Full breakdown: examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh.
+#   ~1.5 B active params/token  -- top-4 of 32 routed + 2 shared + attention + embed.
+#
 # The 8-layer kimi_k3_debug.yaml is a correctness vehicle, not a science
 # instrument: 0.34 B of its 0.45 B parameters are the untied embedding and
 # output head (VALIDATION.md §7.7), so 75 % of the model is vocabulary and
