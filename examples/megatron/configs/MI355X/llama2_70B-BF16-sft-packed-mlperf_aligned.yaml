@@ -257,7 +257,7 @@ modules:
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
 
-      check_for_nan_in_loss: false
+      check_for_nan_in_loss_and_grad: false
 
       manual_gc: false
 
