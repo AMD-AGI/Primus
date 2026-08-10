@@ -331,6 +331,19 @@ fi
 export RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-full}
 export RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-block}
 
+# PRIMUS_RECOMPUTE_LAYERS recomputes the first n layers of *every* PP stage,
+# which is a blunt instrument once the layout is uneven: with the tuned layout
+# above, stage 3 is the one that also carries MTP and the loss, so it is the
+# stage that actually needs the memory back. Naming the layers instead spends
+# the recompute exactly where it is needed:
+#
+#   PRIMUS_RECOMPUTE_LAYER_IDS="[34,35,43]" bash examples/deepseek-v4/run_deepseek_v4_flash.sh
+#
+# Ids are global and run 0..PRIMUS_TOTAL_LAYERS-1 for the decoder, then continue
+# into the MTP depths -- with the defaults (43 layers, 1 MTP) id 43 is the MTP
+# module. Set it and PRIMUS_RECOMPUTE_LAYERS is ignored.
+export PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
+
 # =============================================================================
 # Experiment config: derived yaml
 # =============================================================================
@@ -394,7 +407,12 @@ export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_flash_nodes${NNODES}_pp${P
 echo "[flash] (1) fusion=$PRIMUS_OPT_FUSION  (2) attention=$PRIMUS_OPT_ATTENTION  (3) deepep=$PRIMUS_OPT_DEEPEP  (4) sync_free=$PRIMUS_OPT_SYNC_FREE  (5) mega_moe=$PRIMUS_OPT_MEGA_MOE  (6) layout=$PRIMUS_OPT_LAYOUT"
 echo "[flash] attention=$USE_V4_ATTENTION_BACKEND/$USE_V4_CSA_ATTENTION_BACKEND turbo_gate=$ENABLE_PRIMUS_TURBO"
 echo "[flash] deepep=$USE_TURBO_DEEPEP grouped_gemm=$TURBO_USE_GROUPED_MLP mega_moe=$USE_TURBO_MEGA_MOE sync_free_stage=$YAML_SYNC_FREE_STAGE"
-echo "[flash] layout=${PRIMUS_PP_LAYOUT:-<even split>} recompute=$PRIMUS_RECOMPUTE_LAYERS"
+if [ -n "$PRIMUS_RECOMPUTE_LAYER_IDS" ]; then
+    _RECOMPUTE_DESC="layer_ids=$PRIMUS_RECOMPUTE_LAYER_IDS"
+else
+    _RECOMPUTE_DESC="$PRIMUS_RECOMPUTE_LAYERS"
+fi
+echo "[flash] layout=${PRIMUS_PP_LAYOUT:-<even split>} recompute=$_RECOMPUTE_DESC"
 echo "[flash] nodes=$NNODES tp=$PRIMUS_TP pp=$PRIMUS_PP ep=$PRIMUS_EP gbs=$GBS seq=$PRIMUS_SEQ_LENGTH iters=$TRAIN_ITERS"
 echo "[flash] exp=$EXP"
 
