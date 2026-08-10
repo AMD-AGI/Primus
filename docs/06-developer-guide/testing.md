@@ -87,6 +87,57 @@ python ./tests/run_unit_tests.py --jax
 - **Unit tests:** Cover configuration parsing, preset loading, CLI behavior, patch registration, adapters, and other library logic under `tests/unit_tests/`.
 - **Trainer tests:** End-to-end training against real backends; require AMD GPUs and appropriate data paths (and sometimes tokens). See `.github/workflows/ci.yaml` for CI values such as `DATA_PATH`, `MASTER_PORT`, and `HSA_NO_SCRATCH_RECLAIM`.
 
+### Test tiers (slim on PRs, full on weekends)
+
+Each trainer E2E case is a full training launch, so the suites hold one model per
+architecture and per feature path. A model that only scales the dims of an
+existing test is **deleted**, not kept in a slower tier — its recipe stays
+schema-checked by the example-config smoke test below. What remains is split by
+the **`@pytest.mark.weekly`** marker (registered in `tests/conftest.py`):
+
+| Tier | Trigger | Model E2E | Unit tests |
+| --- | --- | --- | --- |
+| slim | pull request, push to `main`/tags | `-m "not weekly"` | default (slow gates skipped) |
+| full | `schedule` cron (Sat 18:00 UTC), or `workflow_dispatch` with `full_tests=true` | no filter | `--run-slow` |
+
+The workflow derives every test step's arguments from a single `PRIMUS_CI_FULL`
+workflow-level env var, so there is one switch to flip.
+
+Two kinds of case belong in the weekly tier: extended coverage that is not worth
+a PR's wall clock — secondary architectures, extra precisions, variants of a
+feature whose primary path stays per-PR — and new E2E cases during burn-in,
+promoted to the per-PR tier by deleting the marker once a weekend run has shown
+them green. Each marked case carries a comment saying what still covers its path
+on PRs.
+
+Reproduce either tier locally:
+
+```bash
+pytest tests/trainer/test_megatron_trainer.py -m "not weekly" -s   # what PR CI runs
+pytest tests/trainer/test_megatron_trainer.py -s                   # full matrix
+```
+
+Two things are deliberately outside this mechanism and stay hidden in **both**
+tiers: the cases `--deselect`ed in `ci.yaml` because they are broken on the
+current toolchain, and the MaxText models hidden by `JAX_SKIP_UT=1`.
+
+Do not delete the last remaining test of an architecture or of a feature path.
+Two cases with identical `extra_args` are not necessarily isomorphic: the flag
+that makes one unique often lives in its recipe yaml, so compare those too.
+
+### Example-config smoke test
+
+`tests/unit_tests/configs/test_example_configs.py` loads **every** yaml under
+`examples/**/configs/` through the real config stack — env interpolation,
+`extends:` merge, module/model preset merge, experiment overrides — and asserts
+each resolves to a well-formed experiment whose declared `framework` matches its
+backend directory. It is CPU-only (`load_primus_config` does not import
+megatron/torchtitan/jax) and runs in seconds.
+
+This is what makes deleting an isomorphic E2E safe: the recipe stops being
+*trained*, but a renamed model preset, a broken `extends:` chain or a `${VAR}`
+without a default still fails CI, naming the exact yaml.
+
 ## 4. Writing new tests
 
 - **Pytest:** Add files named `test_*.py` under `tests/unit_tests/`, following existing patterns and reusing fixtures from `conftest.py` where present.
@@ -101,6 +152,8 @@ From `.github/workflows/ci.yaml`:
 - **`dependency-review`:** Runs `actions/dependency-review-action` on pull requests to flag dependency changes.
 - **`run-unittest-torch`:** Self-hosted GPU runner. Installs `requirements.txt`, runs `bash ./tests/runner/run_all_tests.sh`, then `pytest tests/unit_tests/` under coverage (`--cov=primus --cov-report=term-missing`) with specific tests `--deselect`ed (currently some `megatron/cco` TP-overlap and `megatron/transformer/moe` dispatcher cases—see the workflow file). Trainer steps set `MASTER_PORT`, `DATA_PATH`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` for Megatron and TorchTitan trainer tests. A follow-up **coverage** step combines unit and E2E coverage.
 - **`run-unittest-jax`:** JAX runner. Installs `requirements-jax.txt`, runs the same shell test script, then `python ./tests/run_unit_tests.py --jax` with CI environment variables (for example `JAX_SKIP_UT=1` and `DATA_PATH` as defined in the workflow).
+
+The torch job picks its tier from `PRIMUS_CI_FULL` and prints the resolved tier in the job summary. See [Test tiers](#test-tiers-slim-on-prs-full-on-weekends).
 
 The **`build-docker`** job builds images after lint passes; unit test jobs depend on **`code-lint`**, not on **`build-docker`**.
 
