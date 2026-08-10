@@ -11,6 +11,13 @@ env:
   JAX_SPMD_MODE: "allow_all"
   JAX_TRACEBACK_FILTERING: "off"
   JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
+  # Persist the compile caches across runs; see the 1.3B MI300X config for why
+  # (without a directory the XLA cache is never initialized and every run
+  # recompiles). Paths are relative to the Primus root, which is bind-mounted in
+  # container mode. Deliberately no CK_JIT_CACHE_DIR -- see the 1.3B config for
+  # why a relative path breaks TransformerEngine's CK kernel build.
+  JAX_COMPILATION_CACHE_DIR: "./.jax_cache/wan2.1_14b"
+  MIOPEN_CUSTOM_CACHE_DIR: "./.jax_cache/wan2.1_14b/miopen"
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"

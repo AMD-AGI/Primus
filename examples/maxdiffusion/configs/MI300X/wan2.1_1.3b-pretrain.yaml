@@ -12,6 +12,25 @@ env:
   JAX_SPMD_MODE: "allow_all"
   JAX_TRACEBACK_FILTERING: "off"
   JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: "all"
+  # JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES only selects *which* caches take part;
+  # without a directory the cache is never initialized ("Not writing persistent
+  # cache entry ... since cache is disabled/not initialized") and the WAN graph is
+  # recompiled from scratch on every run. Measured on MI300X: ~41 min of a 46 min
+  # 10-step run was compilation. Paths are relative to the Primus root, which is
+  # the working directory for every launch path and is bind-mounted in container
+  # mode, so the cache survives the container. (The MI355X configs use absolute
+  # /myworkspace paths, which only exist in the MAD image.)
+  JAX_COMPILATION_CACHE_DIR: "./.jax_cache/wan2.1_1.3b"
+  MIOPEN_CUSTOM_CACHE_DIR: "./.jax_cache/wan2.1_1.3b/miopen"
+  # NOTE: do not add a relative CK_JIT_CACHE_DIR here. TransformerEngine's CK
+  # fused-attention kernels are built by ck_jit_compile.sh, which is spawned with
+  # a working directory that is NOT the Primus root, so a "./..." path resolves
+  # somewhere else and the build dies with
+  #   mktemp: failed to create file via template './.jax_cache/ck_jit/...': No such file or directory
+  # taking the whole run down with it. JAX and MIOpen are unaffected because they
+  # resolve their dirs in-process. TE's CK cache therefore stays at its default
+  # ($HOME/.cache/te_ck_jit, ephemeral); it is a small cost next to the XLA
+  # compile. If you want to persist it, use an ABSOLUTE path.
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
