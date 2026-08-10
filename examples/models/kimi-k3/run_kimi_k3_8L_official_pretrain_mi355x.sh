@@ -115,6 +115,12 @@ export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-ens3}
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
 export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-20}
 export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-300}
+# RoCE needs an explicit GID index; without it the ionic QPs fail the INIT->RTR
+# transition ("ibv_modify_qp failed with 61 No data available, on dev ionic_0")
+# and the job dies at the first collective. These are the AINIC values from
+# runner/use_ainic.yaml, which this launcher does not otherwise pull in.
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-1}
+export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-0}
 
 # SLURM allocation targets for the `primus-cli slurm` launch below.
 # IMPORTANT: this cluster's scheduler (Spur) does NOT honor srun's --reservation
@@ -336,6 +342,8 @@ CONTAINER_ENV_ARGS=(
     "--env" "NCCL_IB_DISABLE=${NCCL_IB_DISABLE}"
     "--env" "NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT}"
     "--env" "NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT}"
+    "--env" "NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"
+    "--env" "NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE}"
     "--env" "HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM}"
     "--env" "PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF}"
     "--env" "ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}"
