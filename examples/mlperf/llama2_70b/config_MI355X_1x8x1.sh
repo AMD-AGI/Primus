@@ -78,17 +78,20 @@ export MEGATRON_BRIDGE_LOGGING_LEVEL=50
 export PYTHONWARNINGS=ignore
 export PRIMUS_LOG_LEVEL=ERROR
 
-# Print rank-0 GPU memory (allocated/reserved/peak + torch memory_stats) every log_interval.
-export PRIMUS_LOG_GPU_MEM=${PRIMUS_LOG_GPU_MEM:-1}
-# Megatron iteration / TFLOP / loss lines use print_rank_0 (always on). Primus log_rank_0
-# helpers need this for recipe-internal banners during bring-up.
-export VERBOSE_TRAINING_LOG=${VERBOSE_TRAINING_LOG:-1}
+# Submission-style logging: suppress framework noise; emit :::MLLOG on stdout.
+# Override for bring-up/debug: VERBOSE_TRAINING_LOG=1 PRIMUS_LOG_GPU_MEM=1 MLPERF_VERBOSE_LOGS=1
+export SUBMISSION_QUIET=1
+export PRIMUS_LOG_SUPPRESSION=1
+export MLPERF_VERBOSE_LOGS=0
+export VERBOSE_TRAINING_LOG=0
+export PRIMUS_LOG_GPU_MEM=0
 
 export SYNTH_WARMUP_STEPS=5
 export SYNTH_WARMUP_VALID_STEPS=5
 
 export ENABLE_MLLOG=1
 export MLLOG_OUTPUT_FILE=/results/mlperf_logging.out
+export MLLOG_SAVE_TO_FILE=0
 export MLLOG_TRAIN_LOSS_LOG_FREQ=0
 export MLLOG_TARGET_EVAL_LOSS=0.925
 export TARGET_EVAL_LOSS=0.925
@@ -152,8 +155,6 @@ export FP4=True
 export FP4_RECIPE=mxfp4
 export MAX_STEPS=550
 export NEXP=1
-
-export MLPERF_VERBOSE_LOGS=${MLPERF_VERBOSE_LOGS:-0}
 
 export LOAD_CKPT=True
 export MCORE_CUDA_GRAPH=False
