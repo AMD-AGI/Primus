@@ -1,0 +1,140 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:kimi_k3-8L-official}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Kimi K3 official-width 8-layer (~215B) BF16 pretraining experiment for MI355X.
+#
+# Runs the released Kimi K3 text backbone at EVERY per-tensor width, with only the
+# depth compressed to 8 layers (1 dense + 7 MoE) via the kimi_k3_8L_official preset.
+# Sized for MULTI-NODE (>= 4 x 8 MI355X): the 896-expert optimizer state only shards
+# across expert-DP = DP/EP, so the memory recipe below (distributed + precision-aware
+# optimizer, bf16 grads/moments, recompute full/block/8) is folded in so the file
+# runs at 4-node scale as written. Synthetic data (mock_data: true).
+#
+# Launched by examples/models/kimi-k3/run_kimi_k3_8L_official_pretrain_mi355x.sh.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Official-width shape, depth compressed to 8 layers. num_layers and the
+    # attention / MoE interleave patterns come from the preset, NOT from CLI slicing.
+    model: ${PRIMUS_MODEL:kimi_k3_8L_official}.yaml
+    overrides:
+      # ---------- log ----------
+      wandb_project: "Primus_Kimi_K3_8L_Official"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: ${PRIMUS_LOG_INTERVAL:1}
+
+      # ---------- token budget ----------
+      train_iters: ${TRAIN_ITERS:50}
+      micro_batch_size: ${MBS:2}
+      # GBS must be divisible by MBS * data_parallel_size. With EP=8/TP=1/PP=1,
+      # DP = world_size, so DP=32 at 4 nodes; 128 = 2 * 32 * 2 (grad-accum 2).
+      # Override GBS to a multiple of MBS*DP for other node counts.
+      global_batch_size: ${GBS:128}
+      seq_length: ${PRIMUS_SEQ_LENGTH:7168}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:7168}
+
+      # ---------- hyper parameters ----------
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: ${LR_WARMUP_ITERS:5}
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-5
+
+      # ---------- parallel ----------
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+
+      # ---------- 896-expert memory recipe (REQUIRED at >= 4-node scale) ----------
+      # At EP=8 the 896 experts' optimizer state shards only across expert-DP =
+      # DP/EP, so >= 2 nodes are needed for any sharding and 4 for the measured
+      # headroom. Distributed + precision-aware optimizer with bf16 grad/Adam
+      # moments halves the grad buffer and moments; fp32 master weights are kept.
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # ---------- recompute: full over all 8 layers (block method) ----------
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 8
+
+      # ---------- data: MOCK (NullTokenizer, no external deps) ----------
+      mock_data: true
+      tokenizer_type: NullTokenizer
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      split: null
+
+      # ---------- validation: off for a smoke ----------
+      eval_iters: 0
+      eval_interval: 100000
+
+      # ---------- Kimi K3 specific ----------
+      # fla chunk kernel + fla causal_conv1d (the launcher exports
+      # PRIMUS_KDA_BACKEND=fla and K3P_KDA_CONV=fla). Fall back with
+      # PRIMUS_KDA_BACKEND=eager if fla is unavailable.
+      kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      moe_router_dtype: fp32
+      optimizer: adam
+
+      # ---------- ckpt ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # ---------- Turbo / fusion: the measured-winner set ----------
+      # grouped GEMM + RMSNorm + permute fusion are memory-neutral and on. The
+      # launcher re-asserts these plus manual GC / NUMA via MoE_Features.
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      moe_permute_fusion: true
+      # Left OFF, each for a measured / asserted reason:
+      #   attention              -- the validated configuration is without it.
+      #   deepep                 -- breaks K3 numerics (first backward non-finite).
+      #   shared_expert_overlap  -- moe_layer.py asserts NOT-overlap on the live K3
+      #                             latent path; dies at forward.
+      #   sync-free              -- stage >= 2 force-enables DeepEP.
+      use_turbo_attention: false
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_use_fused_router_with_aux_score: false
+      turbo_sync_free_moe_stage: 0
+
+      # ---------- host-side overhead / MoE stability ----------
+      manual_gc: true
+      manual_gc_interval: 1
+
+      # FP8 off (bf16 sweep; prior FP8 hybrid showed no gain over bf16). Re-enable
+      # per-run via CLI `--fp8 hybrid`.
+      fp8: null
+      enable_experimental: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

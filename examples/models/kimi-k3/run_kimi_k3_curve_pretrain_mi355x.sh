@@ -132,13 +132,15 @@ export FP8=${FP8:-False}                           # False = bf16
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export MOCK_DATA=${MOCK_DATA:-True}                # True = portable perf; False = real-data convergence
 
-# MoE_Features legend (K3-applicable subset of examples/moe_package/*):
-#   0 baseline | 2 turbo grouped GEMM | 3 loss fusion | 6 NUMA binding | 7 manual GC
-# Upstream options 1 (turbo attention), 4 (DeepEP), 5 (sync-free MoE) and 8
-# (UCCL-EP) are intentionally NOT offered here -- they are NO-OP or unsafe for K3
-# (see the K3_TURBO_ARGS note below), so they were dropped from both this legend
-# and the case handler and cannot be enabled.
-MoE_Features=(2 3 6 7)
+# MoE_Features legend (K3-applicable, contiguous ids):
+#   0 baseline | 1 turbo grouped GEMM | 2 cross-entropy loss fusion |
+#   3 NUMA binding | 4 manual GC
+# Default = 1 2 3 4, the K3 "measured winner": grouped GEMM (+ RMSNorm/permute in
+# K3_TURBO_ARGS) + CE loss fusion + NUMA + manual GC. Upstream turbo attention /
+# DeepEP / sync-free MoE / UCCL-EP are intentionally NOT offered -- they are NO-OP
+# or unsafe for K3 (see the K3_TURBO_ARGS note below), so they are absent from this
+# legend and the case handler and cannot be enabled.
+MoE_Features=(1 2 3 4)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -152,19 +154,19 @@ ensure_primus_turbo() {
 for feature in "${MoE_Features[@]}"; do
     case "$feature" in
     0) ;;
-    2)
+    1)
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_grouped_gemm" "True")
         ;;
-    3)
+    2)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
         FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
         ;;
-    6)
+    3)
         export ENABLE_NUMA_BINDING=1
         export HSA_KERNARG_POOL_SIZE=12582912
         ;;
-    7)
+    4)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;

@@ -15,19 +15,17 @@
 #   (1 dense + 7 MoE). This is the shape our 4-node throughput tuning measured at
 #   ~191 TFLOP/s/GPU, 0-NaN, ~96% of 288 GB HBM on 4 x 8 MI355X (bf16).
 #
-#   The PR ships a single official-width preset, primus/configs/models/megatron/
-#   kimi_k3.yaml, which defaults to the full 93-layer production stack. That stack
-#   is ~2.8 T parameters and does not fit on a small reservation, so this launcher
-#   slices it to 8 layers via CLI overrides:
-#       --num_layers 8
-#       --linear_attention_freq "([1]*3+[0])*2"   # = [1,1,1,0,1,1,1,0]  (6 KDA / 2 full)
-#       --moe_layer_freq        "([0]*1+[1]*7)"   # = [0,1,1,1,1,1,1,1]  (layer 0 dense)
+#   The 8-layer depth is encoded by the kimi_k3_8L_official preset
+#   (primus/configs/models/megatron/kimi_k3_8L_official.yaml), which extends the
+#   full 93-layer kimi_k3.yaml (~2.8 T params) and overrides only the three
+#   depth-dependent keys:
+#       num_layers 8
+#       linear_attention_freq "([1]*3+[0])*2"   # = [1,1,1,0,1,1,1,0]  (6 KDA / 2 full)
+#       moe_layer_freq        "([0]*1+[1]*7)"   # = [0,1,1,1,1,1,1,1]  (layer 0 dense)
 #   Both patterns are the first-8 truncation of the production patterns
 #   ("([1]*3+[0])*22+[1]*3+[0]*2" and "([0]*1+[1]*92)"), so the interleave under
-#   test is faithful. They MUST be overridden together with num_layers: K3's
-#   normalize_linear_attention_freq / moe_layer_freq hard-error unless the
-#   pattern length equals num_layers (kimi_k3_transformer_config.py:115,
-#   kimi_k3_layer_specs.py:123).
+#   test is faithful. They live in the preset (not CLI overrides) so num_layers and
+#   the two length-checked patterns can never desync.
 #
 # PARAMETER COUNT (derived from kimi_k3.yaml + kimi_k3_base.yaml, not measured)
 #   Each routed expert is a SwiGLU MLP living in the 3584-dim Stable-Latent-MoE
@@ -45,16 +43,17 @@
 #   replicated -> 207 B / 8 (~26 B) + ~7 B replicated ~= 33 B params/GPU.
 #   Activated / token (top-16): routed 16 * 33.0 M * 7 ~= 3.7 B, plus the
 #   always-on attention (KDA is FULL width, no GQA -> heavy), shared experts,
-#   dense layer and LM head ~= 5 B  ->  ~8-9 B activated/token.
+#   dense layer and LM head ~= 6 B  ->  ~10 B activated/token.
 #
 # WHY >= 4 NODES
 #   The 896-expert optimizer state only shards across expert-DP = DP / EP, so you
 #   need DP/EP >= 2 (i.e. >= 2 nodes at EP=8) for ANY optimizer sharding, and the
 #   measured 191 TFLOP/s headroom needs 4: even with the distributed +
 #   precision-aware optimizer, bf16 grad/moments and recompute full/block/8, the
-#   footprint sits at ~96% of 288 GB on 4 nodes. kimi_k3-BF16-pretrain.yaml ships
-#   the optimizer knobs OFF (it must also run as a 1-GPU smoke), so this launcher
-#   turns them on -- see MEM_ARGS below.
+#   footprint sits at ~96% of 288 GB on 4 nodes. The memory recipe is folded into
+#   kimi_k3-BF16-8L-official.yaml (distributed + precision-aware optimizer, bf16
+#   grads/moments, recompute full/block/8); this launcher also re-asserts it via
+#   MEM_ARGS below so the knobs are visible at the call site.
 #
 # LAUNCH PATH (this IS the primus-cli path)
 #   run_slurm_pretrain.sh --(srun)--> run_local_pretrain.sh --(docker)-->
@@ -103,11 +102,11 @@ export USING_AINIC=${USING_AINIC:-0}
 # up under a shared-NFS Triton cache, so keep it node-local.
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_8L}
 
-# Select the official-width preset (93-layer file, sliced to 8 layers below).
-export PRIMUS_MODEL=${PRIMUS_MODEL:-kimi_k3}
+# Select the 8-layer official-width preset (extends kimi_k3.yaml, num_layers=8).
+export PRIMUS_MODEL=${PRIMUS_MODEL:-kimi_k3_8L_official}
 
 ######################### Training Config (measured 4-node best) #########################
-export NUM_LAYERS=${NUM_LAYERS:-8}                 # 1 dense + 7 MoE, official width
+export NUM_LAYERS=${NUM_LAYERS:-8}                 # display label; depth is fixed at 8 by the preset
 export MBS=${MBS:-2}
 export GBS=${GBS:-128}                             # must be a multiple of MBS * DP (DP=32 at 4 nodes)
 export SEQ_LENGTH=${SEQ_LENGTH:-7168}
@@ -121,19 +120,18 @@ export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-8}     # full/block over all 8 layer
 export FP8=${FP8:-False}                           # False = bf16 (bf16 matched fp8 here)
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 
-# 8-layer interleave patterns (first-8 slice of the production patterns). Length
-# MUST equal NUM_LAYERS or K3 raises at config build.
-export LINEAR_ATTENTION_FREQ=${LINEAR_ATTENTION_FREQ:-"([1]*3+[0])*2"}
-export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-"([0]*1+[1]*7)"}
+# Depth (num_layers 8 + the attention/MoE interleave patterns) is encoded by the
+# kimi_k3_8L_official preset, so no --num_layers / --*_freq CLI slicing is needed.
 
-# MoE_Features legend (K3-applicable subset of examples/moe_package/*):
-#   0 baseline | 2 turbo grouped GEMM | 3 loss fusion | 6 NUMA binding | 7 manual GC
-# K3 measured winner: grouped GEMM (+RMSNorm/permute below) + loss fusion + NUMA +
-# manual GC. The upstream options 1 (turbo attention), 4 (DeepEP), 5 (sync-free
-# MoE) and 8 (UCCL-EP) are intentionally NOT offered here -- they are NO-OP or
-# unsafe for K3 (see the K3_TURBO_ARGS note below), so they were dropped from both
-# this legend and the case handler and cannot be enabled.
-MoE_Features=(2 3 6 7)
+# MoE_Features legend (K3-applicable, contiguous ids):
+#   0 baseline | 1 turbo grouped GEMM | 2 cross-entropy loss fusion |
+#   3 NUMA binding | 4 manual GC
+# Default = 1 2 3 4, the K3 "measured winner": grouped GEMM (+ RMSNorm/permute in
+# K3_TURBO_ARGS) + CE loss fusion + NUMA + manual GC. Upstream turbo attention /
+# DeepEP / sync-free MoE / UCCL-EP are intentionally NOT offered -- they are NO-OP
+# or unsafe for K3 (see the K3_TURBO_ARGS note below), so they are absent from this
+# legend and the case handler and cannot be enabled.
+MoE_Features=(1 2 3 4)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -147,20 +145,20 @@ ensure_primus_turbo() {
 for feature in "${MoE_Features[@]}"; do
     case "$feature" in
     0) ;;
-    2)
+    1)
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_grouped_gemm" "True")
         ;;
-    3)
+    2)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
         FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
         ;;
-    6)
+    3)
         # NUMA binding: worth ~+28% on K3, only chooses NUMA node for CPU/host mem.
         export ENABLE_NUMA_BINDING=1
         export HSA_KERNARG_POOL_SIZE=12582912
         ;;
-    7)
+    4)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
@@ -195,9 +193,9 @@ K3_TURBO_ARGS+=("--use_turbo_deepep" "False")
 K3_TURBO_ARGS+=("--moe_shared_expert_overlap" "False")
 K3_TURBO_ARGS+=("--turbo_sync_free_moe_stage" "0")
 
-# 896-expert MEMORY recipe (REQUIRED at scale; kimi_k3-BF16-pretrain.yaml ships
-# these OFF so it can also run as a 1-GPU smoke). Distributed + precision-aware
-# optimizer with bf16 grads/moments; fp32 master weights are still kept.
+# 896-expert MEMORY recipe (REQUIRED at scale). kimi_k3-BF16-8L-official.yaml
+# already sets these; this block re-asserts them at the call site. Distributed +
+# precision-aware optimizer with bf16 grads/moments; fp32 master weights are kept.
 MEM_ARGS=(
     "--use_distributed_optimizer" "True"
     "--overlap_grad_reduce" "True"
@@ -206,13 +204,6 @@ MEM_ARGS=(
     "--main_grads_dtype" "bf16"
     "--exp_avg_dtype" "bf16"
     "--exp_avg_sq_dtype" "bf16"
-)
-
-# Depth override: 8-layer official-width slice of the 93-layer kimi_k3 preset.
-DEPTH_ARGS=(
-    "--num_layers" "$NUM_LAYERS"
-    "--linear_attention_freq" "$LINEAR_ATTENTION_FREQ"
-    "--moe_layer_freq" "$MOE_LAYER_FREQ"
 )
 
 RECOMPUTE_ARGS=()
@@ -243,9 +234,10 @@ export LOG_FILE=$LOG_DIR/training.log
 mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
-# The official-width experiment YAML (selects PRIMUS_MODEL=kimi_k3, mock data,
-# NullTokenizer, sigmoid+noaux_tc router, situ, MLA/KDA specs).
-export EXP="examples/megatron/configs/MI355X/kimi_k3-BF16-pretrain.yaml"
+# The official 8-layer experiment YAML (selects PRIMUS_MODEL=kimi_k3_8L_official,
+# mock data + NullTokenizer, the 896-expert memory recipe, sigmoid+noaux_tc
+# router, situ, MLA/KDA specs).
+export EXP="examples/megatron/configs/MI355X/kimi_k3-BF16-8L-official.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
 echo "Begin Training... $(date +%Y%m%d_%H%M%S)" | tee -a "$LOG_FILE"
@@ -255,7 +247,6 @@ echo "LOG_DIR=${LOG_DIR}" | tee -a "$LOG_FILE"
 echo "FEATURE_ARGS=${FEATURE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "K3_TURBO_ARGS=${K3_TURBO_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "MEM_ARGS=${MEM_ARGS[*]}" | tee -a "$LOG_FILE"
-echo "DEPTH_ARGS=${DEPTH_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
@@ -273,7 +264,6 @@ bash ./examples/run_slurm_pretrain.sh \
     --context_parallel_size "$CP" \
     --optimizer "$OPTIMIZER" \
     --mock_data True \
-    "${DEPTH_ARGS[@]}" \
     "${FEATURE_ARGS[@]}" \
     "${K3_TURBO_ARGS[@]}" \
     "${MEM_ARGS[@]}" \

@@ -298,7 +298,7 @@ mtp_loss_scaling_factor: 0.1
 #
 # The recipe lives in the experiment yaml's `overrides:` block, which goes
 # through override_namespace -> deep_merge_namespace (parser.py:323-324) and
-# does win. See examples/megatron/configs/MI355X/kimi_k3-BF16-pretrain.yaml,
+# does win. See examples/megatron/configs/MI355X/kimi_k3-BF16-8L-official.yaml,
 # and test_recipe_router_live.py which pins both the values and this
 # precedence rule.
 #

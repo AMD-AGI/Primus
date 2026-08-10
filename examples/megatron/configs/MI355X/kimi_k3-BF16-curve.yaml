@@ -37,7 +37,7 @@ modules:
 
       # ---------- hyper parameters ----------
       # Restated (not inherited) because this file does not extend
-      # kimi_k3-BF16-pretrain.yaml. lr_warmup_iters is nonzero here (~1% linear
+      # kimi_k3-BF16-8L-official.yaml. lr_warmup_iters is nonzero here (~1% linear
       # warmup, per the Kimi K3 tech report) so the first/largest gradient does not
       # land on a random init.
       lr: 1.0e-5
