@@ -15,7 +15,7 @@ What the report asks for
     slightly reduces optimizer overhead, as Newton-Schulz iterations on tall
     per-head blocks are cheaper than on the full projection matrix."
 
-    -- report §2.5, extracted text at ``research/raw/extras.txt:2``
+    -- report §2.5
 
 Why this is a patch and not a new optimizer
 -------------------------------------------

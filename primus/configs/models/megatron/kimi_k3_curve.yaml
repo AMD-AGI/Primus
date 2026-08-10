@@ -12,7 +12,7 @@
 #
 # The 8-layer kimi_k3_debug.yaml is a correctness vehicle, not a science
 # instrument: 0.34 B of its 0.45 B parameters are the untied embedding and
-# output head (VALIDATION.md §7.7), so 75 % of the model is vocabulary and
+# output head, so 75 % of the model is vocabulary and
 # 78 % of the FLOPs are the LM head. Any measured throughput or convergence
 # rate at that shape is a statement about a vocabulary projection.
 #
@@ -46,7 +46,7 @@
 #
 # The release uses vocab_size 163840 with Moonshot's own tokenizer, which is
 # not distributed with anything reachable here (HF checkpoint / tokenizer
-# support is out of scope per DECISIONS.md §3). The real-data runs tokenise
+# support is out of scope). The real-data runs tokenise
 # with the locally cached Qwen2.5 tokenizer instead, whose true size is
 # len(tokenizer) == 151665 (151643 base + 22 added tokens, ids 0..151664 with
 # no gaps).
@@ -56,8 +56,7 @@
 # build_tokenizer.py:114-117 sets
 #   args.padded_vocab_size = vocab_size_with_padding(tokenizer.vocab_size, args)
 # and huggingface_tokenizer.py:291-293 returns len(tokenizer) there — so the
-# model is built at ceil(151665 / 64) * 64 = 151680 (measured, not derived:
-# phase2_infra/results/dataset_readback.json) regardless of what vocab_size
+# model is built at ceil(151665 / 64) * 64 = 151680 regardless of what vocab_size
 # says. Leaving vocab_size at 163840 would produce a config whose stated
 # vocabulary is 12 160 rows larger than the tensor actually allocated, with no
 # error anywhere: KimiK3TransformerConfig.__post_init__:345 only back-fills

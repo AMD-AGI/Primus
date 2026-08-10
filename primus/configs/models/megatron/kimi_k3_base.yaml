@@ -166,15 +166,14 @@ moe_router_load_balancing_type: seq_aux_loss
 # router: TopKRouter.forward substitutes `logits.clone().normal_()` for the
 # gating output (router.py:696-698 -> moe_utils.py:1177-1198), so routing
 # becomes uniformly random while the router weight still receives a
-# straight-through gradient. Phase 1 ran this way for its whole life
-# (validate/VALIDATION.md §7.2). Nothing in the K3 recipe -- neither
+# straight-through gradient. Nothing in the K3 recipe -- neither
 # noaux_tc nor Quantile Balancing -- is exercised while it is on.
 moe_router_force_load_balancing: false
 
 # ---------- expert-bias update rule: sign (DSv3) vs Quantile Balancing ------
 # "sign"     -- upstream's get_updated_expert_bias (moe_utils.py:1119-1142),
 #               b <- b + moe_router_bias_update_rate * sign(offset). This is
-#               DECISIONS.md §2's known-good baseline and stays the default so
+#               the known-good baseline and stays the default so
 #               that selecting the faithful rule is an explicit diff.
 # "quantile" -- Kimi K3's published rule (tech report §2.3.3 / Eq. 14):
 #               b_j = -quantile_{1-k/n}(s_{:,j} - tau_i), where tau_i is the

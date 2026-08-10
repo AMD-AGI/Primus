@@ -687,8 +687,7 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
     ``[Primus:Kimi-K3] latent MoE width`` line shows
     ``config.moe_latent_size=512, args.moe_latent_size=None`` with
     ``built.fc1_latent_proj=(…, (512, 1024))`` — i.e. the weights are the
-    configured width even while the args copy is ``None``. See
-    ``latent/FINDINGS.md``.
+    configured width even while the args copy is ``None``.
 
     **Read the source key off ``module_config.params``, not off
     ``backend_args``.** This is the phase-ordering trap that made the original
@@ -790,7 +789,7 @@ def patch_k3_args_mtp_num_layers(ctx: PatchContext):
     "Primus-specific parameters" dump 350 lines later lists
     ``num_nextn_predict_layers ... 1``. The sibling
     ``patch_k3_args_moe_latent_size`` above reads ``backend_args`` and is a
-    no-op for exactly this reason -- see ``mtp/FINDINGS.md``.)
+    no-op for exactly this reason.)
 
     Writing to ``backend_args`` *is* correct: ``merge_namespace(backend_args,
     module_config.params, allow_override=False)`` keeps the destination's value
