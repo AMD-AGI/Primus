@@ -12,6 +12,8 @@ import subprocess
 import sys
 import unittest
 
+import pytest
+
 from tests.utils import PrimusUT, run_training_script
 
 
@@ -128,6 +130,21 @@ def run_posttrain_script(
 
 
 class TestMegatronTrainer(PrimusUT):
+    """One model per architecture, plus one case per feature path.
+
+    Every case is a full training launch, so a model that only scales the dims
+    of a sibling earns no coverage and does not belong here: qwen3_235B_A22B
+    (same template as qwen3_30B_A3B) and mixtral_8x22B (same template as
+    mixtral_8x7B, whose recipe additionally covers DeepEP / sync-free MoE) were
+    removed for that reason. Their example yamls are still schema-checked by
+    tests/unit_tests/configs/test_example_configs.py.
+
+    Before adding a model, check it is not isomorphic to one already here, and
+    before removing one, check it is not the last user of a feature path --
+    llama3_70B for instance is the only recipe that enables use_torch_fsdp2.
+    See tests/README.md.
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -142,6 +159,26 @@ class TestMegatronTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3_8B",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_8B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+            ],
+        )
+
+    # The only dense FP8 case; every other FP8 case here is MoE.
+    @pytest.mark.weekly
+    def test_llama3_8B_fp8(self):
+        run_script(
+            self.__class__.__name__,
+            "llama3_8B_fp8",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_8B-FP8-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -227,46 +264,9 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def test_qwen3_235B_A22B(self):
-        run_script(
-            self.__class__.__name__,
-            "qwen3_235B_A22B",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/qwen3_235B_A22B-BF16-pretrain.yaml",
-            env_override={},
-            extra_args=[
-                "--num_layers",
-                "4",
-                "--moe_layer_freq",
-                "[0]*1+[1]*3",
-                "--train_iters",
-                "3",
-                "--micro_batch_size",
-                "1",
-                "--global_batch_size",
-                "8",
-                "--expert_model_parallel_size",
-                "8",
-                "--pipeline_model_parallel_size",
-                "1",
-                # Unset the config's interleaved pipeline_model_parallel_layout (it
-                # requires PP>1, but this test runs with PP=1). "None" is coerced to
-                # Python None by parse_cli_overrides, which clears the layout; an empty
-                # string instead builds an empty layout that fails validation.
-                "--pipeline_model_parallel_layout",
-                "None",
-                "--recompute_granularity",
-                "full",
-                "--recompute_method",
-                "block",
-                "--recompute_num_layers",
-                "0",
-                "--enable_primus_turbo",
-                "1",
-                "--use_turbo_attention",
-                "1",
-            ],
-        )
-
+    # Its gated_delta_net attention is an experimental variant and needs
+    # flash-linear-attention; qwen3 MoE stays covered per-PR by qwen3_30B_A3B.
+    @pytest.mark.weekly
     def test_qwen3_5_35B_A3B(self):
         run_script(
             self.__class__.__name__,
@@ -351,6 +351,9 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    # Secondary architecture; MoE with expert parallelism stays covered per-PR by
+    # deepseek_v2_lite and qwen3_30B_A3B.
+    @pytest.mark.weekly
     def test_mixtral_8x7B(self):
         run_script(
             self.__class__.__name__,
@@ -377,11 +380,14 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def test_mixtral_8x22B(self):
+    # Its own architecture: rope scaling, qk_layernorm and shared-expert overlap
+    # on every layer.
+    @pytest.mark.weekly
+    def test_llama4_17B16E(self):
         run_script(
             self.__class__.__name__,
-            "mixtral_8x22B_v0.1",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mixtral_8x22B_v0.1-BF16-pretrain.yaml",
+            "llama4_17B16E",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama4_17B16E-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -392,19 +398,14 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--global_batch_size",
                 "8",
-                "--moe_layer_freq",
-                "1",
                 "--expert_model_parallel_size",
                 "8",
-                "--pipeline_model_parallel_size",
-                "1",
-                "--enable_primus_turbo",
-                "1",
-                "--use_turbo_attention",
-                "1",
             ],
         )
 
+    # Secondary architecture; PP+VPP stay covered per-PR by deepseek_v3 and
+    # test_interleaved_pipeline_parallelism.
+    @pytest.mark.weekly
     def test_grok2(self):
         run_script(
             self.__class__.__name__,
@@ -619,6 +620,8 @@ class TestMegatronTrainer(PrimusUT):
             Dataloader_mp_context_patch_log in stdout
         ), "Expected dataloader_mp_context patch log not found in stdout"
 
+    # A fused-op combination on top of llama3_8B, which stays covered per-PR.
+    @pytest.mark.weekly
     def test_sdma_allgather_fused_residual_norm(self):
         # Neither patch runs in any other case here: SDMA param all-gather
         # only activates with ENABLE_SDMA_ALLGATHER=1 (env var, not a --arg) +
@@ -730,6 +733,8 @@ class TestMegatronTrainer(PrimusUT):
             extra_args=["--attention_backend", "unfused"],
         )
 
+    # UEP variant; the deepep path stays covered per-PR by test_turbo_deepep.
+    @pytest.mark.weekly
     def test_deepseekv2_lite_uep(self):
         run_script(
             self.__class__.__name__,
@@ -812,6 +817,10 @@ class TestMegatronTrainer(PrimusUT):
         self.assertIn("Training completed.", stdout)
         return stdout
 
+    # The three zbv cases below differ only in wgrad-split backend (TE / turbo /
+    # legacy grouped GEMM), and at 8 layers with PP=4 VPP=2 each costs more than
+    # the 4-layer cases above.
+    @pytest.mark.weekly
     def test_deepseek_v2_lite_te_fp8_zbv_formatted(self):
         stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
             "deepseek_v2_lite_te_fp8_zbv_formatted",
@@ -823,6 +832,7 @@ class TestMegatronTrainer(PrimusUT):
         self.assertIn("[Patch:megatron.pp.te_wgrad_split]", stdout)
         self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
 
+    @pytest.mark.weekly
     def test_deepseek_v2_lite_turbo_bf16_zbv_formatted(self):
         stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
             "deepseek_v2_lite_turbo_fp8_zbv_formatted",
@@ -839,6 +849,7 @@ class TestMegatronTrainer(PrimusUT):
         )
         self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
 
+    @pytest.mark.weekly
     def test_deepseek_v2_lite_bf16_lagacy_gg_zbv_formatted(self):
         stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
             "deepseek_v2_lite_bf16_lagacy_gg_zbv_formatted",
@@ -854,7 +865,16 @@ class TestMegatronTrainer(PrimusUT):
         self.assertIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
 
 
+@pytest.mark.weekly
 class TestMegatronTrainerDeterministic(PrimusUT):
+    """Bitwise reproducibility, weekend-only.
+
+    Every case here runs the same config twice and compares the losses as
+    strings, so each one costs two full training launches. Determinism breaks
+    from the kernel/collective stack rather than from a typical PR, so the pair
+    is not worth ~4 launches on the per-PR path.
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
