@@ -77,6 +77,13 @@ class BaseDiffusionConfig(TransformerConfig):
     # Stochastic rounding on MXFP4 gradients (paper Section 4.4)
     mxfp4_gradient_stochastic_rounding: bool = False
 
+    # Extend the deterministic H16 rotation from the Wgrad operand pair (the
+    # shipped default) to the Fprop and Dgrad pairs as well, so all six
+    # quantized operands are rotated (arXiv 2605.09825). Requires
+    # mxfp4_backward_precision="mxfp4"; the MXFP4 linears reject the
+    # combination with the hybrid FP8 backward.
+    mxfp4_full_pipeline_hadamard: bool = False
+
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
     sensitive_layers_start: int = 0

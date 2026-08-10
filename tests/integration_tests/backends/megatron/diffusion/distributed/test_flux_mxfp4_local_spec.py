@@ -177,6 +177,46 @@ class TestFluxMXFP4LocalSpec(PrimusUT):
         assert has_mxfp4_grad, "No MXFP4 linear has a weight gradient -- gradient did not flow"
 
     @requires_mxfp4
+    def test_full_pipeline_hadamard_reaches_every_mxfp4_linear(self):
+        """The gate is read with a getattr default, so a name that never lands
+        on the config produces a clean run that silently never rotates.
+
+        Checks both directions on a real model: off by default, and on for
+        every MXFP4 linear once requested.
+        """
+        default_model = Flux(self._make_mxfp4_config())
+        gated_model = Flux(self._make_mxfp4_config(mxfp4_full_pipeline_hadamard=True))
+
+        def flags(model):
+            return [
+                module._full_pipeline_rht
+                for module in model.modules()
+                if isinstance(module, (MXFP4ColumnParallelLinear, MXFP4RowParallelLinear))
+            ]
+
+        default_flags, gated_flags = flags(default_model), flags(gated_model)
+
+        assert default_flags, "No MXFP4 linears found in model"
+        assert not any(default_flags), "Full-pipeline Hadamard must default off"
+        assert all(gated_flags), (
+            f"Only {sum(gated_flags)}/{len(gated_flags)} MXFP4 linears picked up "
+            f"mxfp4_full_pipeline_hadamard."
+        )
+
+    @requires_mxfp4
+    def test_full_pipeline_hadamard_rejects_hybrid_backward(self):
+        """Under the FP8 backward, Dgrad and Wgrad never reach the MXFP4
+        quantizer, so two of the three rotated pairs do not exist. Fail at
+        construction rather than running an ablation that measures nothing."""
+        with pytest.raises(ValueError, match="mxfp4_backward_precision"):
+            Flux(
+                self._make_mxfp4_config(
+                    mxfp4_full_pipeline_hadamard=True,
+                    mxfp4_backward_precision="fp8",
+                )
+            )
+
+    @requires_mxfp4
     def test_flux_535m_mxfp4_hybrid_forward_backward(self):
         """Hybrid backward (FP4 fwd / FP8 bwd) works through the full model."""
         config = self._make_mxfp4_config(mxfp4_backward_precision="fp8")

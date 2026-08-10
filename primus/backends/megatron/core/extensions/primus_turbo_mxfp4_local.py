@@ -231,7 +231,25 @@ _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 _DEFAULT_BACKEND = BackendType.HIPBLASLT.value
 
 
-def _quantize_input_dual(input_2d, preshuffle):
+# Deterministic H16 rotation coverage.
+#
+# Each linear quantizes six operands (three tensors, rowwise + colwise each)
+# feeding three GEMMs, and the rotation only cancels -- H H^T = I inside the
+# dot product -- when BOTH operands of a GEMM carry it along the shared
+# contraction dimension. The pairs are:
+#
+#   Fprop  input rowwise  x weight rowwise   (contracts over input features)
+#   Dgrad  grad  rowwise  x weight colwise   (contracts over output features)
+#   Wgrad  grad  colwise  x input  colwise   (contracts over tokens)
+#
+# Wgrad is rotated unconditionally, which is the shipped default. The
+# full_pipeline_rht flag extends the rotation to the Fprop and Dgrad pairs,
+# following arXiv 2605.09825, whose ladder found Wgrad-only insufficient.
+# Rotating one side of a pair computes a silently different quantity, so the
+# flag must move all four of its operands together.
+
+
+def _quantize_input_dual(input_2d, preshuffle, full_pipeline_rht=False):
     """Quantize input (activation) with dual rowwise + colwise."""
     return _quantize_mxfp4_dual_op(
         input_2d,
@@ -239,10 +257,10 @@ def _quantize_input_dual(input_2d, preshuffle):
         MXFP4_PADDING_ALIGN_SIZE,
         False,
         False,
-        False,  # rowwise: no 2d_block, no sr, no rht
+        full_pipeline_rht,  # rowwise: no 2d_block, no sr, rht gated (Fprop)
         False,
         False,
-        True,  # colwise: no 2d_block, no sr, yes rht
+        True,  # colwise: no 2d_block, no sr, yes rht (Wgrad)
         preshuffle,
         False,  # shuffle_rowwise_scale, shuffle_rowwise
         preshuffle,
@@ -250,7 +268,7 @@ def _quantize_input_dual(input_2d, preshuffle):
     )
 
 
-def _quantize_weight_dual(weight, preshuffle):
+def _quantize_weight_dual(weight, preshuffle, full_pipeline_rht=False):
     """Quantize weight with dual rowwise + colwise."""
     return _quantize_mxfp4_dual_op(
         weight,
@@ -258,10 +276,10 @@ def _quantize_weight_dual(weight, preshuffle):
         MXFP4_PADDING_ALIGN_SIZE,
         True,
         False,
-        False,  # rowwise: 2d_block, no sr, no rht
+        full_pipeline_rht,  # rowwise: 2d_block, no sr, rht gated (Fprop)
         True,
         False,
-        False,  # colwise: 2d_block, no sr, no rht
+        full_pipeline_rht,  # colwise: 2d_block, no sr, rht gated (Dgrad)
         preshuffle,
         preshuffle,  # shuffle_rowwise_scale, shuffle_rowwise
         preshuffle,
@@ -269,7 +287,7 @@ def _quantize_weight_dual(weight, preshuffle):
     )
 
 
-def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
+def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True, full_pipeline_rht=False):
     """Quantize gradient (activation recipe) with dual rowwise + colwise."""
     return _quantize_mxfp4_dual_op(
         grad_2d,
@@ -277,10 +295,10 @@ def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
         MXFP4_PADDING_ALIGN_SIZE,
         False,
         use_sr,
-        False,  # rowwise: no 2d_block, SR configurable, no rht
+        full_pipeline_rht,  # rowwise: no 2d_block, SR configurable, rht gated (Dgrad)
         False,
         use_sr,
-        True,  # colwise: no 2d_block, SR configurable, yes rht
+        True,  # colwise: no 2d_block, SR configurable, yes rht (Wgrad)
         preshuffle,
         False,  # shuffle_rowwise_scale, shuffle_rowwise
         preshuffle,
@@ -308,13 +326,14 @@ class MXFP4LinearFunction(torch.autograd.Function):
         fp8_gran_value,
         fp8_backend_value,
         use_gradient_sr,
+        full_pipeline_rht,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
         input_2d = input.reshape(-1, input.shape[-1])
 
-        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle)
-        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(weight, preshuffle)
+        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle, full_pipeline_rht)
+        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(weight, preshuffle, full_pipeline_rht)
 
         output = gemm_fp4_impl(
             a_fp4,
@@ -357,11 +376,13 @@ class MXFP4LinearFunction(torch.autograd.Function):
             fp8_gran_value,
             fp8_backend_value,
             use_gradient_sr,
+            full_pipeline_rht,
         ) = inputs
 
         ctx.preshuffle = preshuffle
         ctx.backward_is_fp8 = backward_is_fp8
         ctx.use_gradient_sr = use_gradient_sr
+        ctx.full_pipeline_rht = full_pipeline_rht
         ctx.out_dtype = inputs[0].dtype
         ctx.orig_shape = inputs[0].shape
 
@@ -426,7 +447,10 @@ class MXFP4LinearFunction(torch.autograd.Function):
             preshuffle = ctx.preshuffle
 
             g_fp4, g_scale, g_t_fp4, g_t_scale = _quantize_grad_dual(
-                grad_2d, preshuffle, use_sr=ctx.use_gradient_sr
+                grad_2d,
+                preshuffle,
+                use_sr=ctx.use_gradient_sr,
+                full_pipeline_rht=ctx.full_pipeline_rht,
             )
 
             grad_input = gemm_fp4_impl(
@@ -458,7 +482,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 preshuffled=preshuffle,
             )
 
-        return grad_input, grad_weight, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +518,17 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._full_pipeline_rht = getattr(self.config, "mxfp4_full_pipeline_hadamard", False)
+
+        if self._full_pipeline_rht and self._backward_is_fp8:
+            raise ValueError(
+                "mxfp4_full_pipeline_hadamard=True requires "
+                "mxfp4_backward_precision='mxfp4', got 'fp8'. The hybrid "
+                "backward re-quantizes the saved BF16 tensors to FP8 "
+                "tensorwise, so Dgrad and Wgrad never reach the MXFP4 "
+                "quantizer and two of the three rotated GEMM pairs do not "
+                "exist."
+            )
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -518,6 +553,7 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._full_pipeline_rht,
         )
         output = result[0]
 
@@ -554,6 +590,17 @@ class MXFP4RowParallelLinear(RowParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._full_pipeline_rht = getattr(self.config, "mxfp4_full_pipeline_hadamard", False)
+
+        if self._full_pipeline_rht and self._backward_is_fp8:
+            raise ValueError(
+                "mxfp4_full_pipeline_hadamard=True requires "
+                "mxfp4_backward_precision='mxfp4', got 'fp8'. The hybrid "
+                "backward re-quantizes the saved BF16 tensors to FP8 "
+                "tensorwise, so Dgrad and Wgrad never reach the MXFP4 "
+                "quantizer and two of the three rotated GEMM pairs do not "
+                "exist."
+            )
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -578,6 +625,7 @@ class MXFP4RowParallelLinear(RowParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._full_pipeline_rht,
         )
         output = result[0]
 

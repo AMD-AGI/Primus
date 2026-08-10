@@ -505,6 +505,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4": fp4_enabled,
                 "fp4_recipe": fp4_recipe,
                 "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
+                "mxfp4_full_pipeline_hadamard": getattr(params, "mxfp4_full_pipeline_hadamard", False),
             }
         )
 
