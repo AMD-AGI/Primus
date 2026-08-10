@@ -682,6 +682,57 @@ def _run(cmd: list[str], cwd: Path, env: dict, timeout: int) -> tuple[int, str, 
         )
 
 
+def _ladder_anchor_from_cache(
+    model_name: str, is_moe: bool, tp: int, pp: int, ep: int, cache: Path
+) -> Path | None:
+    """Pick the cheapest in-regime cached anchor for a target via the ladder.
+
+    Scans *all* cached benchmark artifacts for ``model_name`` (not just tp1/tp2),
+    keeps those in the target's sharding family and at/below the target GPU count
+    (``tp*pp``; EP overlaps the TP GPU set), and asks
+    :func:`inference_projection.regime.confidence_ladder` for the anchor to
+    restore from. Returns that anchor's path, or ``None`` if none are cached.
+
+    Family rule: the single-GPU ``tp1_pp1_ep1`` base is always eligible; above it
+    an EP-sharded target (``ep>1``) draws only EP-sharded rungs and a pure-TP
+    target (``ep==1``) draws only pure-TP rungs, so the per-GPU relief the ladder
+    measures compares like with like.
+    """
+    try:
+        from primus.core.projection.inference_projection.regime import confidence_ladder
+    except Exception:
+        return None
+    import json as _json
+
+    target_gpus = tp * pp
+    want_ep_sharded = bool(is_moe) and ep > 1
+    rungs: dict[int, Path] = {}
+    for path in sorted(cache.glob(f"{model_name}_tp*_pp*_ep*.json")):
+        try:
+            meta = (_json.load(open(path)) or {}).get("meta", {}) or {}
+        except Exception:
+            continue
+        a_tp = int(meta.get("tp", 1) or 1)
+        a_pp = int(meta.get("pp", 1) or 1)
+        a_ep = int(meta.get("ep", 1) or 1)
+        g = a_tp * a_pp
+        if g > target_gpus:
+            continue
+        if g == 1:
+            eligible = True
+        elif want_ep_sharded:
+            eligible = a_ep > 1
+        else:
+            eligible = a_ep == 1
+        if eligible:
+            rungs.setdefault(g, path)
+    if not rungs:
+        return None
+    verdict = confidence_ladder(target_gpus, {g: str(p) for g, p in rungs.items()})
+    chosen = verdict.get("anchor")
+    return Path(chosen) if chosen else None
+
+
 # ---------------------------------------------------------------------------
 # Public evaluator class
 # ---------------------------------------------------------------------------
@@ -773,6 +824,15 @@ class Evaluator:
         return self._select_regime_base_anchor(cfg, Path(cache), ep)
 
     def _select_regime_base_anchor(self, cfg, cache: Path, ep: int) -> Path | None:
+        is_moe = bool(getattr(self.arch, "is_moe", False))
+        # Full confidence ladder over EVERY cached rung (tp1..tpN): climb to the
+        # closest in-regime anchor rather than stopping at the tp1/tp2 pair.
+        chosen = _ladder_anchor_from_cache(
+            self.arch.model_name, is_moe, cfg.tp, cfg.pp, cfg.ep, cache
+        )
+        if chosen is not None:
+            return chosen
+        # Backward-compatible fallback: original tp1 (+ optional tp2) 2-rung pick.
         from primus.core.projection.inference_projection.regime import select_anchor
 
         m = self.arch.model_name
@@ -784,7 +844,7 @@ class Evaluator:
              if (cache / n).exists()),
             None,
         )
-        target_gpus = cfg.tp * cfg.pp * (ep if getattr(self.arch, "is_moe", False) else 1)
+        target_gpus = cfg.tp * cfg.pp * (ep if is_moe else 1)
         chosen, _in_regime, _reason = select_anchor(
             target_gpus, str(a1), str(a2) if a2 else None
         )

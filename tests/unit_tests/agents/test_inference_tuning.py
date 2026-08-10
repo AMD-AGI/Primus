@@ -1197,3 +1197,60 @@ def test_benchmark_pp_restoration_adds_per_forward_p2p():
     # P2P is added on top of the summed layers.
     expected = cfg.model_config.num_layers * D + pp_p2p
     assert proj._measured_decode_step_ms(B) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Confidence-ladder anchor selection over the benchmark cache
+# ---------------------------------------------------------------------------
+
+pytest.importorskip("primus.agents.tuning_agent.evaluator")
+
+from primus.agents.tuning_agent.evaluator import _ladder_anchor_from_cache  # noqa: E402
+
+
+def _write_anchor(cache, model, tp, pp, ep, per_gpu_tput_at_32):
+    import json
+
+    decode_ms = 32 * 1000.0 / per_gpu_tput_at_32 / tp
+    p = cache / f"{model}_tp{tp}_pp{pp}_ep{ep}.json"
+    p.write_text(json.dumps({
+        "meta": {"tp": tp, "pp": pp, "ep": ep},
+        "sweep": [{"batch": 32, "decode_ms": decode_ms}],
+    }))
+    return p
+
+
+def test_ladder_cache_climbs_to_highest_puretp(tmp_path):
+    M = "m"
+    _write_anchor(tmp_path, M, 1, 1, 1, 3200.0)
+    _write_anchor(tmp_path, M, 2, 1, 1, 1300.0)
+    _write_anchor(tmp_path, M, 4, 1, 1, 400.0)
+    # target TP8/EP1 with no tp8 cached -> climb to the 4-GPU pure-TP anchor
+    res = _ladder_anchor_from_cache(M, True, 8, 1, 1, tmp_path)
+    assert res is not None and res.name == f"{M}_tp4_pp1_ep1.json"
+
+
+def test_ladder_cache_exact_rung(tmp_path):
+    M = "m"
+    _write_anchor(tmp_path, M, 1, 1, 1, 3200.0)
+    _write_anchor(tmp_path, M, 4, 1, 1, 400.0)
+    res = _ladder_anchor_from_cache(M, True, 4, 1, 1, tmp_path)
+    assert res is not None and res.name == f"{M}_tp4_pp1_ep1.json"
+
+
+def test_ladder_cache_family_separation(tmp_path):
+    M = "m"
+    _write_anchor(tmp_path, M, 1, 1, 1, 3200.0)
+    _write_anchor(tmp_path, M, 2, 1, 2, 1300.0)  # EP-sharded 2-GPU
+    _write_anchor(tmp_path, M, 2, 1, 1, 1300.0)  # pure-TP 2-GPU
+    _write_anchor(tmp_path, M, 4, 1, 1, 400.0)   # pure-TP 4-GPU
+    # EP target draws only EP-sharded rungs -> highest EP rung (tp2/ep2)
+    ep_res = _ladder_anchor_from_cache(M, True, 8, 1, 8, tmp_path)
+    assert ep_res is not None and ep_res.name == f"{M}_tp2_pp1_ep2.json"
+    # pure-TP target draws only pure-TP rungs -> highest pure-TP rung (tp4/ep1)
+    tp_res = _ladder_anchor_from_cache(M, True, 8, 1, 1, tmp_path)
+    assert tp_res is not None and tp_res.name == f"{M}_tp4_pp1_ep1.json"
+
+
+def test_ladder_cache_empty_returns_none(tmp_path):
+    assert _ladder_anchor_from_cache("m", True, 8, 1, 1, tmp_path) is None
