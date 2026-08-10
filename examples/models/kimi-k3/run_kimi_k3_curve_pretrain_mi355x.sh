@@ -68,8 +68,9 @@
 #   reach steady state and its whole-run average under-reports the sustained
 #   number by ~20%. Always quote which segment a figure came from.
 #
-#   MBS=16 (the default below) does NOT train on this stack -- it NaNs on
-#   iteration 1, reproduced four times with different knobs:
+#   MBS=16 does NOT train on this stack -- it NaNs on iteration 1, reproduced
+#   four times with different knobs (so the default below is MBS=8, the largest
+#   micro-batch that trains clean here):
 #       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN fwd loss (rank 7)
 #       full/block/24, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN grad norm(rank 3)
 #       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=1 -> NaN fwd loss (rank 7)
@@ -77,9 +78,10 @@
 #   and with recompute off it OOMs instead. That rules out recompute depth,
 #   scratch reclaim and the single-micro-batch (no grad-accum) path: what is left
 #   is the 16 x 2048 micro-batch itself. MBS=4 and MBS=8 are clean with the same
-#   recompute settings, so the model and the recompute path are both fine. Until
-#   MBS=16 is fixed, run this script as
-#   `MBS=8 bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh`.
+#   recompute settings, so the model and the recompute path are both fine. The
+#   default below is therefore MBS=8; request MBS=16 explicitly
+#   (`MBS=16 bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh`)
+#   only after the 16 x 2048 kernel NaN is fixed.
 #
 #   No ~130.7 and no ~190 TFLOP/s single-node figure has been reproduced here;
 #   ~191 TFLOP/s is the 8L official 4-NODE number and belongs to
@@ -152,8 +154,8 @@ export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_curve}
 export PRIMUS_MODEL=${PRIMUS_MODEL:-kimi_k3_curve}
 
 ######################### Training Config (single-node perf) #########################
-export MBS=${MBS:-16}
-export GBS=${GBS:-128}                             # 128 = MBS(16) * DP(8) -> 1 micro-batch, no grad accum
+export MBS=${MBS:-8}                               # 8 = largest micro-batch that trains clean here (MBS=16 NaNs, see header)
+export GBS=${GBS:-128}                             # 128 = MBS(8) * DP(8) * 2 -> 2 micro-batches (grad accum 2)
 export SEQ_LENGTH=${SEQ_LENGTH:-2048}
 export TP=${TP:-1}
 export ETP=${ETP:-1}
@@ -245,8 +247,8 @@ fi
 
 # NOTE: no MLA/MTP CLI args (K3 builds MLA from its own specs; multi_latent_attention
 # stays false) and no distributed optimizer (3.85 B fits on one node). Activation
-# recompute (RECOMPUTE_ARGS) IS passed via CLI so MBS=16 fits (~224.71 GB peak);
-# it is kept OUT of kimi_k3-BF16-curve.yaml because that file is the convergence
+# recompute (RECOMPUTE_ARGS) IS passed via CLI so the micro-batch fits (measured:
+# MBS=8 -> 139.6 GB peak); it is kept OUT of kimi_k3-BF16-curve.yaml because that file is the convergence
 # CONTROL, where recompute would distort the ms/iter and FLOPs figures.
 
 ######################### Training Experiments #########################
