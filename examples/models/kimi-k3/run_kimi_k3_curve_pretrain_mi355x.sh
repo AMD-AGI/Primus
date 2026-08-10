@@ -47,18 +47,43 @@
 #     -------------------------------------------------------------------
 #     TOTAL                                                   ~= 3.85 B
 #   The model + optimizer fit comfortably on 8 x 288 GB (no distributed optimizer
-#   needed). Activation recompute IS used for the MBS=16 perf recipe below
-#   (full/block/12 -> 224.71 GB peak); without it MBS=16 OOMs (~276 GB).
+#   needed). Activation recompute is what keeps the larger micro-batches in
+#   memory: MBS=8 with full/block/12 peaks at 139.6 GB of 288 (measured), while
+#   MBS=16 without recompute OOMs at 276.2 GB allocated (measured).
 #
-# PERFORMANCE (measured winner; see the perf-config header in the repo history)
-#   MBS=16 / seq 2048 / recompute full/block/12 / Turbo grouped_gemm + rms_norm +
-#   permute / ENABLE_NUMA_BINDING=1 (fla, bf16) reaches ~130.7 TFLOP/s/GPU
-#   single-node -- 2361 ms/iter, 224.71 GB peak of 288, measured over a FULL 450
-#   iterations (0 NaN, 0 skipped). ENABLE_NUMA_BINDING alone is worth +28.2%.
-#   NOTE: this shape needs ~150 iterations to reach steady state (2789 ms @ iter20
-#   -> 2353 @ iter200), so a short run (<= 50 iters) legitimately reads BELOW 130.7
-#   (~9% low at 20 iters) -- that is warmup, not a regression. (There is no
-#   ~190 TFLOP/s single-node number; ~191 is the 8L official 4-node figure.)
+# PERFORMANCE -- MEASURED, 1 node x 8 MI355X, bf16, mock data
+#   Measured 2026-08-10 on the MI355X reservation with
+#   docker.io/tasimage/primus:pr-927, kda_backend=fla, attn_res_backend=eager
+#   (eager is that knob's DEFAULT, not a fallback -- see attn_res_backend in
+#   kimi_k3_transformer_config.py), HSA_NO_SCRATCH_RECLAIM=0,
+#   ENABLE_NUMA_BINDING=1, Turbo grouped_gemm + rms_norm + permute.
+#
+#   Best CLEAN configuration: MBS=8 / GBS=128 / seq 2048 / recompute full/block/12.
+#   50/50 iterations, 0 NaN, 0 skipped, 139.6 GB peak of 288, lm loss 12.33 -> 3.26:
+#       all 50 iters (incl. the 2 compile iters)  64.1 TFLOP/s/GPU
+#       iters 3-50  (compile excluded)            66.6 TFLOP/s/GPU
+#       iters 41-50                               76.6 TFLOP/s/GPU (4045 ms/iter)
+#       iters 45-50                               80.2 TFLOP/s/GPU (3849 ms/iter)
+#   Throughput was still RISING at iteration 50, so a 50-iteration run does not
+#   reach steady state and its whole-run average under-reports the sustained
+#   number by ~20%. Always quote which segment a figure came from.
+#
+#   MBS=16 (the default below) does NOT train on this stack -- it NaNs on
+#   iteration 1, reproduced four times with different knobs:
+#       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN fwd loss (rank 7)
+#       full/block/24, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN grad norm(rank 3)
+#       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=1 -> NaN fwd loss (rank 7)
+#       full/block/12, GBS=256 (2 micro-batches)         -> NaN fwd loss (rank 0)
+#   and with recompute off it OOMs instead. That rules out recompute depth,
+#   scratch reclaim and the single-micro-batch (no grad-accum) path: what is left
+#   is the 16 x 2048 micro-batch itself. MBS=4 and MBS=8 are clean with the same
+#   recompute settings, so the model and the recompute path are both fine. Until
+#   MBS=16 is fixed, run this script as
+#   `MBS=8 bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh`.
+#
+#   No ~130.7 and no ~190 TFLOP/s single-node figure has been reproduced here;
+#   ~191 TFLOP/s is the 8L official 4-NODE number and belongs to
+#   run_kimi_k3_8L_official_pretrain_mi355x.sh, not to curve.
 #
 # DATA (portable by default)
 #   Defaults to MOCK data so the perf reproduction has no external dependency.
@@ -139,8 +164,7 @@ export OPTIMIZER=${OPTIMIZER:-adam}
 export FP8=${FP8:-False}                           # False = bf16
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export MOCK_DATA=${MOCK_DATA:-True}                # True = portable perf; False = real-data convergence
-export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # winner: full/block/12 (224.71GB); 8=271GB(riskier); 0=off(mbs16 OOMs)
-export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # winner: full/block/12 (224.71GB); 8=271GB(riskier); 0=off(mbs16 OOMs)
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # full/block/12: MBS=8 -> 139.6GB peak; 0=off -> MBS=16 OOMs at 276GB
 
 # MoE_Features legend (K3-applicable, contiguous ids):
 #   0 baseline | 1 turbo grouped GEMM | 2 cross-entropy loss fusion |
@@ -204,19 +228,9 @@ K3_TURBO_ARGS+=("--use_turbo_deepep" "False")
 K3_TURBO_ARGS+=("--moe_shared_expert_overlap" "False")
 K3_TURBO_ARGS+=("--turbo_sync_free_moe_stage" "0")
 
-# Activation recompute so MBS=16 fits (measured winner: full/block/12 -> 224.71 GB
-# peak). Kept in the SCRIPT, not the convergence-control yaml. RECOMPUTE_LAYERS=0
-# disables it (mbs16 then OOMs at ~276 GB).
-RECOMPUTE_ARGS=()
-if [ "${RECOMPUTE_LAYERS}" -gt 0 ]; then
-    RECOMPUTE_ARGS+=("--recompute_granularity" "full")
-    RECOMPUTE_ARGS+=("--recompute_method" "block")
-    RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
-fi
-
-# Activation recompute so MBS=16 fits (measured winner: full/block/12 -> 224.71 GB
-# peak). Kept in the SCRIPT, not the convergence-control yaml. RECOMPUTE_LAYERS=0
-# disables it (mbs16 then OOMs at ~276 GB).
+# Activation recompute, so the larger micro-batches fit (measured: MBS=8 with
+# full/block/12 -> 139.6 GB peak). Kept in the SCRIPT, not the convergence-control
+# yaml. RECOMPUTE_LAYERS=0 disables it (MBS=16 then OOMs at 276 GB).
 RECOMPUTE_ARGS=()
 if [ "${RECOMPUTE_LAYERS}" -gt 0 ]; then
     RECOMPUTE_ARGS+=("--recompute_granularity" "full")
