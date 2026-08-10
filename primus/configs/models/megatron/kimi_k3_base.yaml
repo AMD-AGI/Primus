@@ -17,6 +17,21 @@ extends:
 # string to dispatch to the K3 builder.
 model_type: kimi_k3
 
+# ---------- tokenizer ----------
+# Official Kimi K3 tokenizer, declared on the family base so every K3 shape
+# inherits it (mirrors how deepseek_v2.yaml carries DeepSeekV2Tokenizer +
+# tokenizer_model). moonshotai/Kimi-K3 is this family's source of truth -- the
+# shapes in this repo were read from its config.json -- and its tokenizer is
+# tiktoken-based. `HuggingFaceTokenizer` routes through AutoTokenizer.from_pretrained
+# (the Primus build_tokenizer patch), so tokenizer_model accepts this Hub id or a
+# local snapshot directory. Real-data runs tokenize with the official K3 vocab;
+# mock-data runs never build it -- mock_data_patches.py forces
+# tokenizer_type=NullTokenizer at build_args and preserves vocab_size -- so this
+# declaration adds no import-time download. (The main repo's custom tiktoken class
+# may need trust_remote_code=True / a tokenizer.json mirror; see the PR notes.)
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: moonshotai/Kimi-K3
+
 # norm
 norm_epsilon: 1.0e-05
 normalization: RMSNorm

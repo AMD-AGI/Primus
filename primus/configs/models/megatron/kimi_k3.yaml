@@ -85,11 +85,12 @@ make_vocab_size_divisible_by: 64
 untie_embeddings_and_output_weights: true
 
 # ---------- tokenizer ----------
-# HF checkpoint / tokenizer support is deliberately out of scope, so there is
-# no KimiK3Tokenizer to name. NullTokenizer keeps this yaml self-sufficient
-# (it only needs vocab_size); mock_data: true forces the same thing anyway
-# (mock_data_patches.py:33-45).
-tokenizer_type: NullTokenizer
+# Inherits the official Kimi K3 tokenizer from kimi_k3_base.yaml
+# (tokenizer_type: HuggingFaceTokenizer, tokenizer_model: moonshotai/Kimi-K3), so
+# real-data runs tokenize with the official K3 vocab (vocab_size 163840 above).
+# Mock-data smokes are unaffected: mock_data: true forces
+# tokenizer_type=NullTokenizer while preserving vocab_size (mock_data_patches.py:33-45),
+# so this yaml stays self-sufficient for the single-GPU smoke and downloads nothing.
 
 # ---------- init ----------
 init_method_std: 0.02
