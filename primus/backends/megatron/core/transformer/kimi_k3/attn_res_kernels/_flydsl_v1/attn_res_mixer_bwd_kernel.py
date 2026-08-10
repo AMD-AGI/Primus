@@ -150,9 +150,7 @@ def build_attn_res_mixer_bwd(
     if elem_dtype not in ("f32", "bf16"):
         raise ValueError(f"elem_dtype must be 'f32' or 'bf16'; got {elem_dtype!r}")
     if inject and inject not in BWD_INJECTIONS:
-        raise ValueError(
-            f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}"
-        )
+        raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}")
 
     BLOCK = block_size_for(H)
     EPT = H // BLOCK
@@ -160,9 +158,7 @@ def build_attn_res_mixer_bwd(
     # One reduction row per candidate: dp[c] only. r and dot are read back from
     # the forward's saved tensors.
     RED_ROWS = C
-    allocator = SmemAllocator(
-        None, arch=arch, global_sym_name=f"attnres_bwd_smem_H{H}_C{C}_{elem_dtype}"
-    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"attnres_bwd_smem_H{H}_C{C}_{elem_dtype}")
     lds_red_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_red_off + RED_ROWS * BLOCK * 4
 
@@ -261,8 +257,7 @@ def build_attn_res_mixer_bwd(
         # candidate. The last candidate is the running stream; the choice of
         # pointer is made here at trace time, never by an `if` in the body.
         cand = [
-            (br_ptr, row_br + arith.index(c * H), dbr_ptr, row_br + arith.index(c * H))
-            for c in range(NB)
+            (br_ptr, row_br + arith.index(c * H), dbr_ptr, row_br + arith.index(c * H)) for c in range(NB)
         ]
         cand = cand + [(ps_ptr, row_ps, dps_ptr, row_ps)]
 
@@ -345,12 +340,8 @@ def build_attn_res_mixer_bwd(
         # The three terms of `dv`, each independently switchable off. `dw_acc`
         # keeps the true `d_dot` regardless, so a dropped term shows up in the
         # input gradients rather than being masked by a matching change in dW.
-        rms_w = {False: two_d_ss, True: [c_fzero for _ in range(C)]}[
-            inject == "drop_rms_term"
-        ]
-        score_w = {False: d_dot, True: [c_fzero for _ in range(C)]}[
-            inject == "drop_score_term"
-        ]
+        rms_w = {False: two_d_ss, True: [c_fzero for _ in range(C)]}[inject == "drop_rms_term"]
+        score_w = {False: d_dot, True: [c_fzero for _ in range(C)]}[inject == "drop_score_term"]
 
         # Same branch-free duplicate-store trick as the forward's RSAV/DSAV.
         save_c = tid % I_C
@@ -395,9 +386,7 @@ def build_attn_res_mixer_bwd(
             allocator.finalize()
 
         grid_x = arith.index_cast(T.index, num_tokens)
-        launcher = attn_res_mixer_bwd_kernel(
-            BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT
-        )
+        launcher = attn_res_mixer_bwd_kernel(BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT)
 
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":

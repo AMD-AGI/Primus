@@ -179,9 +179,7 @@ def validate_moonvit_fields(config: "KimiK3TransformerConfig") -> None:
         return
 
     if int(config.vt_num_hidden_layers) < 1:
-        raise ValueError(
-            f"vt_num_hidden_layers must be >= 1 when set, got {config.vt_num_hidden_layers}"
-        )
+        raise ValueError(f"vt_num_hidden_layers must be >= 1 when set, got {config.vt_num_hidden_layers}")
     for name in ("vt_hidden_size", "vt_intermediate_size", "vt_num_attention_heads", "vt_patch_size"):
         value = int(getattr(config, name))
         if value < 1:
@@ -249,9 +247,7 @@ def validate_moonvit_fields(config: "KimiK3TransformerConfig") -> None:
     if config.vt_media_placeholder_token_id is not None:
         token = int(config.vt_media_placeholder_token_id)
         if token < 0:
-            raise ValueError(
-                f"vt_media_placeholder_token_id must be >= 0 when set, got {token}"
-            )
+            raise ValueError(f"vt_media_placeholder_token_id must be >= 0 when set, got {token}")
 
 
 #: Environment fields the vision configs inherit verbatim from the text

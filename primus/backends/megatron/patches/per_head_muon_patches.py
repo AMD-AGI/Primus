@@ -85,9 +85,7 @@ def _per_head_requested(args) -> bool:
     # models, while a future non-K3 model that wants per-head blocking can still
     # opt in. (Contrast the model-type gate on the K3 flops/pp/probe/QB patches,
     # which wrap functions shared by ALL models and key off generic args.)
-    condition=lambda ctx: (
-        _muon_selected(get_args(ctx)) and _per_head_requested(get_args(ctx))
-    ),
+    condition=lambda ctx: (_muon_selected(get_args(ctx)) and _per_head_requested(get_args(ctx))),
 )
 def patch_per_head_muon(ctx: PatchContext):
     """Install the per-head branch. Idempotent."""
@@ -158,9 +156,7 @@ def patch_per_head_muon(ctx: PatchContext):
         rules: dict = {}
         skipped: list = []
         for model_chunk in model_chunks:
-            summary = tag_per_head_params(
-                model_chunk.named_parameters(), model_chunk.config, per_head_config
-            )
+            summary = tag_per_head_params(model_chunk.named_parameters(), model_chunk.config, per_head_config)
             total_selected += summary.num_selected
             for rule, count in summary.by_rule().items():
                 rules[rule] = rules.get(rule, 0) + count
@@ -193,10 +189,7 @@ def patch_per_head_muon(ctx: PatchContext):
         tagged_masters = 0
         for model_chunk in model_chunks:
             tagged_masters += propagate_specs_to_master_weights(model_chunk.named_parameters())
-        log_rank_0(
-            f"{_LOG_PREFIX} propagated the per-head spec to {tagged_masters} fp32 master "
-            "weight(s)"
-        )
+        log_rank_0(f"{_LOG_PREFIX} propagated the per-head spec to {tagged_masters} fp32 master " "weight(s)")
         if total_selected > 0 and tagged_masters == 0 and getattr(config, "bf16", False):
             # bf16 means Float16OptimizerWithFloat16Params, whose fp32 clone is what
             # orthogonalize() actually sees (optimizer.py:675-684).

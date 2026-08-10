@@ -121,9 +121,7 @@ def resolve_qb_backend(name: str, max_tokens: Optional[int] = None):
         if max_tokens is None:
             return entry
         return functools.partial(entry, max_tokens=int(max_tokens))
-    raise ValueError(
-        f"Unknown Quantile Balancing backend {name!r}; expected one of {list(QB_BACKENDS)}."
-    )
+    raise ValueError(f"Unknown Quantile Balancing backend {name!r}; expected one of {list(QB_BACKENDS)}.")
 
 
 __all__ = [

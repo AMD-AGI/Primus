@@ -127,9 +127,7 @@ class AttentionResidualMixer(MegatronModule):
             device = torch.cuda.current_device()
 
         self.norm_weight = nn.Parameter(torch.ones(self.hidden_size, dtype=params_dtype, device=device))
-        self.proj_weight = nn.Parameter(
-            torch.empty(1, self.hidden_size, dtype=params_dtype, device=device)
-        )
+        self.proj_weight = nn.Parameter(torch.empty(1, self.hidden_size, dtype=params_dtype, device=device))
 
         sequence_parallel = bool(getattr(config, "sequence_parallel", False))
         for param in (self.norm_weight, self.proj_weight):
@@ -143,8 +141,7 @@ class AttentionResidualMixer(MegatronModule):
         self.backend_name = str(getattr(config, "attn_res_backend", "eager") or "eager")
         if self.backend_name not in ATTN_RES_BACKENDS:
             raise ValueError(
-                f"attn_res_backend must be one of {list(ATTN_RES_BACKENDS)}; "
-                f"got {self.backend_name!r}."
+                f"attn_res_backend must be one of {list(ATTN_RES_BACKENDS)}; " f"got {self.backend_name!r}."
             )
         self.attn_res_backend = resolve_attn_res_backend(self.backend_name)
 
@@ -220,9 +217,7 @@ class AttentionResidualMixer(MegatronModule):
                 f"block_residual hidden {block_residual.shape[-1]} != "
                 f"prefix_sum hidden {prefix_sum.shape[-1]}"
             )
-        return self.attn_res_backend(
-            prefix_sum, block_residual, self.norm_weight, self.proj_weight, self.eps
-        )
+        return self.attn_res_backend(prefix_sum, block_residual, self.norm_weight, self.proj_weight, self.eps)
 
 
 class AttentionResidualHead(AttentionResidualMixer):

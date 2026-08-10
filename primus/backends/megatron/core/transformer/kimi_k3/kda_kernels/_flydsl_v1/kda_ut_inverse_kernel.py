@@ -167,9 +167,7 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
         # `preg[j]` is lane `c`'s own P[j, c]; nothing crosses lanes.
         preg = []
         for i in range_constexpr(C):
-            acc = arith.select(
-                arith.cmpi(arith.CmpIPredicate.eq, tid, arith.index(i)), c_one, c_zero
-            )
+            acc = arith.select(arith.cmpi(arith.CmpIPredicate.eq, tid, arith.index(i)), c_one, c_zero)
             for j in range_constexpr(i):
                 acc = math_dialect.fma(lds_get(arith.index(i * C + j)), preg[j], acc)
             preg.append(acc)
@@ -192,9 +190,7 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK},{BLOCK}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK},{BLOCK}")
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK, 1, 1), stream=stream)
 
     _hints = {

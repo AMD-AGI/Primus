@@ -135,9 +135,7 @@ def _mfma(acc_t, a_frag, b_frag, acc):
     return rocdl.mfma_f32_16x16x32_bf16(acc_t, [a_frag, b_frag, acc])
 
 
-def supports_sweep_geometry(
-    chunk_size: int, k_dim: int, v_dim: int, block_v: int = 64
-) -> Optional[str]:
+def supports_sweep_geometry(chunk_size: int, k_dim: int, v_dim: int, block_v: int = 64) -> Optional[str]:
     """``None`` when the kernel can run this geometry, else why it cannot."""
     for name, val in (("chunk_size", chunk_size), ("head_dim", k_dim), ("v_head_dim", v_dim)):
         if val % MI_TILE != 0:
@@ -240,9 +238,7 @@ def build_kda_state_sweep(
 
     # LDS: the state and T, both with V contiguous so a 16-lane group covers one
     # whole [*, BV] row without a bank conflict.
-    allocator = SmemAllocator(
-        None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}"
-    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}")
     lds_s_off = allocator._align(allocator.ptr, 16)
     lds_t_off = allocator._align(lds_s_off + KD * BV * 4, 16)
     allocator.ptr = lds_t_off + C * BV * 4
@@ -391,9 +387,7 @@ def build_kda_state_sweep(
                         b_frag = vector.from_elements(
                             frag_t,
                             [
-                                arith.trunc_f(
-                                    op_t, lds_get(lds_src, (k0 + arith.index(j)) * I_BV + v_lds)
-                                )
+                                arith.trunc_f(op_t, lds_get(lds_src, (k0 + arith.index(j)) * I_BV + v_lds))
                                 for j in range_constexpr(LANE_K)
                             ],
                         )
@@ -419,20 +413,13 @@ def build_kda_state_sweep(
             a_base = {}
             for bi, ri in keys:
                 row_of[(bi, ri)] = lg + arith.index(ri * NG)
-                a_base[(bi, ri)] = (
-                    nb * a_rows + arith.index(blocks[bi][0]) + row_of[(bi, ri)]
-                ) * a_inner
+                a_base[(bi, ri)] = (nb * a_rows + arith.index(blocks[bi][0]) + row_of[(bi, ri)]) * a_inner
             acc = {key: [arith.constant(0.0, type=f32) for _ in range(VPT)] for key in keys}
             for k4 in range_constexpr(klen // VPT):
                 a4 = {key: load_vec4(ap, a_base[key] + arith.index(k4 * VPT)) for key in keys}
                 for jj in range_constexpr(VPT):
-                    s4 = vector.load_op(
-                        vecv_f32, lds_src, [arith.index((k4 * VPT + jj) * BV) + v_lo]
-                    )
-                    sv = [
-                        vector.extract(s4, static_position=[j], dynamic_position=[])
-                        for j in range(VPT)
-                    ]
+                    s4 = vector.load_op(vecv_f32, lds_src, [arith.index((k4 * VPT + jj) * BV) + v_lo])
+                    sv = [vector.extract(s4, static_position=[j], dynamic_position=[]) for j in range(VPT)]
                     for key in keys:
                         a_v = vector.extract(a4[key], static_position=[jj], dynamic_position=[])
                         for j in range(VPT):
@@ -505,9 +492,7 @@ def build_kda_state_sweep(
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK_SIZE},{BLOCK_SIZE}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK_SIZE},{BLOCK_SIZE}")
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
 
     _hints = {

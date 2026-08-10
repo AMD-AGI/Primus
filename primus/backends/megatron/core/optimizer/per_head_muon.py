@@ -245,9 +245,7 @@ class PerHeadMuonConfig:
 
     def __post_init__(self) -> None:
         if self.impl not in self._VALID_IMPLS:
-            raise ValueError(
-                f"muon_per_head_impl must be one of {self._VALID_IMPLS}, got {self.impl!r}"
-            )
+            raise ValueError(f"muon_per_head_impl must be one of {self._VALID_IMPLS}, got {self.impl!r}")
 
     @classmethod
     def from_args(cls, args: Any) -> "PerHeadMuonConfig":
@@ -255,9 +253,7 @@ class PerHeadMuonConfig:
         return cls(
             enabled=_as_bool(getattr(args, "muon_per_head", False), False),
             split_kv=_as_bool(getattr(args, "muon_per_head_split_kv", True), True),
-            include_output_proj=_as_bool(
-                getattr(args, "muon_per_head_include_output_proj", False), False
-            ),
+            include_output_proj=_as_bool(getattr(args, "muon_per_head_include_output_proj", False), False),
             include_gates=_as_bool(getattr(args, "muon_per_head_include_gates", False), False),
             impl=str(getattr(args, "muon_per_head_impl", "loop") or "loop"),
             strict=_as_bool(getattr(args, "muon_per_head_strict", True), True),
@@ -344,7 +340,9 @@ def batched_newton_schulz(
     Returns:
         ``[H, D, N]``, same dtype and layout convention as the input.
     """
-    from emerging_optimizers.orthogonalized_optimizers.muon_utils import _COEFFICIENT_SETS
+    from emerging_optimizers.orthogonalized_optimizers.muon_utils import (
+        _COEFFICIENT_SETS,
+    )
 
     if x.ndim != 3:
         raise ValueError(f"batched_newton_schulz expects a 3-D stack, got shape {tuple(x.shape)}")
@@ -357,8 +355,7 @@ def batched_newton_schulz(
         raise ValueError(f"Invalid coefficient type: {coefficient_type}") from exc
     if steps % len(coefficient_sets) != 0:
         raise ValueError(
-            f"steps ({steps}) must be multiple of len(coefficient_sets) "
-            f"({len(coefficient_sets)})."
+            f"steps ({steps}) must be multiple of len(coefficient_sets) " f"({len(coefficient_sets)})."
         )
 
     # Same rule as upstream (muon_utils.py:115-118): whiten on the smaller dim. All
@@ -391,9 +388,7 @@ def batched_newton_schulz(
 # ---------------------------------------------------------------------------
 
 
-def _split_into_components(
-    grad: torch.Tensor, spec: HeadBlockSpec
-) -> Tuple[int, List[torch.Tensor]]:
+def _split_into_components(grad: torch.Tensor, spec: HeadBlockSpec) -> Tuple[int, List[torch.Tensor]]:
     """``grad`` -> ``(num_heads, [stack_per_component])``, each stack ``[H, r_i, N]``.
 
     For ``head_axis == 1`` the component stacks are ``[H, M, r_i]`` instead; the
@@ -475,8 +470,7 @@ def orthogonalize_per_head(
             )
         else:
             blocks = [
-                scaled_orthogonalize_fn(component[h], tp_group, partition_dim)
-                for h in range(num_heads)
+                scaled_orthogonalize_fn(component[h], tp_group, partition_dim) for h in range(num_heads)
             ]
             out_components.append(torch.stack(blocks, dim=0))
 
@@ -494,13 +488,9 @@ def _orthogonalize_component_batched(
     scale_mode = str(kwargs.get("scale_mode", "spectral"))
     extra_scale_factor = float(kwargs.get("extra_scale_factor", 1.0))
 
-    orth = batched_newton_schulz(
-        component.contiguous(), steps=steps, coefficient_type=coefficient_type
-    )
+    orth = batched_newton_schulz(component.contiguous(), steps=steps, coefficient_type=coefficient_type)
     # Identical shape bookkeeping to muon.py:78, 89 -- the scale factor sees the block.
-    scale_factor = get_muon_scale_factor(
-        component.shape[-2], component.shape[-1], mode=scale_mode
-    )
+    scale_factor = get_muon_scale_factor(component.shape[-2], component.shape[-1], mode=scale_mode)
     return orth * scale_factor * extra_scale_factor
 
 
@@ -558,17 +548,13 @@ def head_block_spec_for(
     return spec
 
 
-def _candidate_spec(
-    leaf: str, model_config: Any, config: PerHeadMuonConfig
-) -> Optional[HeadBlockSpec]:
+def _candidate_spec(leaf: str, model_config: Any, config: PerHeadMuonConfig) -> Optional[HeadBlockSpec]:
     """Shape-independent part of the rule: leaf module name -> row structure."""
     # --- MLA (multi_latent_attention.py) ---------------------------------
     qk_head_dim = _int_or_none(model_config, "qk_head_dim")
     v_head_dim = _int_or_none(model_config, "v_head_dim")
     qk_pos_emb_head_dim = getattr(model_config, "qk_pos_emb_head_dim", 0) or 0
-    q_head_dim = (
-        qk_head_dim + int(qk_pos_emb_head_dim) if qk_head_dim is not None else None
-    )
+    q_head_dim = qk_head_dim + int(qk_pos_emb_head_dim) if qk_head_dim is not None else None
 
     if leaf in ("linear_q_up_proj", "linear_q_proj") and q_head_dim:
         return HeadBlockSpec(rows=(q_head_dim,), head_axis=0, rule=f"mla.{leaf}")
@@ -721,9 +707,7 @@ def make_per_head_orthogonalize(
         # Same tp_group selection as muon.py:123-130.
         pg_collection = getattr(self, "pg_collection", None)
         if pg_collection is not None:
-            tp_group = (
-                pg_collection.expt_tp if getattr(p, "expert_tp", False) else pg_collection.tp
-            )
+            tp_group = pg_collection.expt_tp if getattr(p, "expert_tp", False) else pg_collection.tp
         else:
             tp_group = None
 

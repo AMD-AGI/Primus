@@ -128,13 +128,11 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._s
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.kda_decay_scores_kernel import (
     _LLVM_GEP_DYNAMIC,
     _LOG2E,
-    _llvm_ptr_ty,
-    _nat_exp,
-)
-from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.kda_decay_scores_kernel import (
     BLOCK_SIZE,
     SUB_BLOCK,
     SUPPORTED_K,
+    _llvm_ptr_ty,
+    _nat_exp,
 )
 
 # `d` threads per row group. 32 is the largest that keeps `MR = SB/TR = 2`, i.e.
@@ -219,9 +217,7 @@ def build_kda_decay_scores_bwd(
     J_ORDER = {b: list(range(b)) for b in range(NSB)}
 
     tag = f"C{C}_K{KD}_" + "".join(str(b) for b in OWNED)
-    allocator = SmemAllocator(
-        None, arch=arch, global_sym_name=f"kda_scores_bwd_smem_{tag}"
-    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_scores_bwd_smem_{tag}")
     off_r = allocator._align(allocator.ptr, 16)  # k * rf  (contracted over c)
     off_q = allocator._align(off_r + SB * STRIDE * 4, 16)  # q * lf  (contracted over r)
     off_k = allocator._align(off_q + SB * STRIDE * 4, 16)  # k * lf  (contracted over r)
@@ -371,14 +367,10 @@ def build_kda_decay_scores_bwd(
             return val
 
         def _keep_le(val):
-            return arith.select(
-                arith.cmpi(arith.CmpIPredicate.sle, grad_c, grad_r), val, zero_f
-            )
+            return arith.select(arith.cmpi(arith.CmpIPredicate.sle, grad_c, grad_r), val, zero_f)
 
         def _keep_lt(val):
-            return arith.select(
-                arith.cmpi(arith.CmpIPredicate.slt, grad_c, grad_r), val, zero_f
-            )
+            return arith.select(arith.cmpi(arith.CmpIPredicate.slt, grad_c, grad_r), val, zero_f)
 
         # The forward writes exact zeros above its two diagonals, so the upstream
         # gradient there is the gradient of a constant and must be dropped. Off
@@ -560,9 +552,7 @@ def build_kda_decay_scores_bwd(
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK_SIZE},{BLOCK_SIZE}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK_SIZE},{BLOCK_SIZE}")
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
 
     _hints = {

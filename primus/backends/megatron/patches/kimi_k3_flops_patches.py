@@ -638,9 +638,7 @@ def compute_kimi_k3_flops(args: Any, batch_size: int) -> Tuple[int, KimiK3FlopsB
                 dense_pt=dense_pt,
                 moe_pt=moe_pt,
             )
-            + mtp_eh_proj_fmac_per_token(
-                hidden_size=hidden_size, mtp_num_layers=mtp_num_layers
-            )
+            + mtp_eh_proj_fmac_per_token(hidden_size=hidden_size, mtp_num_layers=mtp_num_layers)
         ),
         num_kda_layers=num_kda,
         num_full_attn_layers=num_full,
@@ -993,8 +991,7 @@ def patch_k3_flops_reporting(ctx: PatchContext):
     original_fn = training_module.num_floating_point_operations
     if getattr(original_fn, "_k3_flops_patched", False):
         log_rank_0(
-            "[Patch:megatron.kimi_k3.flops_reporting] "
-            "num_floating_point_operations already patched, skip"
+            "[Patch:megatron.kimi_k3.flops_reporting] " "num_floating_point_operations already patched, skip"
         )
         return
 
@@ -1008,9 +1005,7 @@ def patch_k3_flops_reporting(ctx: PatchContext):
         "K3-aware closed form"
     )
     if rebound:
-        log_rank_0(
-            f"[Patch:megatron.kimi_k3.flops_reporting] rebound trainer import bindings: {rebound}"
-        )
+        log_rank_0(f"[Patch:megatron.kimi_k3.flops_reporting] rebound trainer import bindings: {rebound}")
     else:
         log_rank_0(
             "[Patch:megatron.kimi_k3.flops_reporting] no trainer modules needed "

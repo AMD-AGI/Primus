@@ -255,9 +255,7 @@ def get_kimi_k3_mtp_block_spec(
                 enorm=norm_module,
                 hnorm=norm_module,
                 eh_proj=column_parallel,
-                mtp_model_layer=build_kimi_k3_mtp_inner_layer_spec(
-                    config, provider=provider, depth=depth
-                ),
+                mtp_model_layer=build_kimi_k3_mtp_inner_layer_spec(config, provider=provider, depth=depth),
                 layer_norm=norm_module,
             ),
         )

@@ -278,9 +278,7 @@ class QuantileBalancingMixin:
         # KimiDeltaAttention and AttentionResidualMixer resolve theirs: a missing
         # optional dependency then surfaces while the model is being built rather
         # than on the first forward.
-        self.qb_backend_name = str(
-            getattr(config, "quantile_balancing_backend", "eager") or "eager"
-        )
+        self.qb_backend_name = str(getattr(config, "quantile_balancing_backend", "eager") or "eager")
         if self.qb_backend_name not in QB_BACKENDS:
             raise ValueError(
                 f"quantile_balancing_backend must be one of {list(QB_BACKENDS)}; "

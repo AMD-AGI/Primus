@@ -116,9 +116,7 @@ class KimiK3Model(LanguageModule):
             # ``self.mtp_block_spec``, so the wiring stays inspectable —
             # ``deepseek_v4_model.py:110-120`` does the same.
             try:
-                self.mtp_process = mtp_on_this_rank(
-                    self.config, ignore_virtual=False, vp_stage=vp_stage
-                )
+                self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
             except (AssertionError, RuntimeError, AttributeError):
                 self.mtp_process = False
 
@@ -289,9 +287,7 @@ class KimiK3Model(LanguageModule):
                 config=self.config,
                 cp_group=getattr(self.pg_collection, "cp", None),
                 packed_seq_params=packed_seq_params,
-                scale_logits_fn=(
-                    self._scale_logits if getattr(self.config, "use_mup", False) else None
-                ),
+                scale_logits_fn=(self._scale_logits if getattr(self.config, "use_mup", False) else None),
             )
 
         logits, _ = self.output_layer(

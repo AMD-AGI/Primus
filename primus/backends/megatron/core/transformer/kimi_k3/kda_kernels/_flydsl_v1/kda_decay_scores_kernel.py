@@ -168,9 +168,7 @@ def build_kda_decay_scores(chunk_size: int, k_dim: int, waves_per_eu: int = 2):
     PAIRS = [(i, j) for i in range(NSB) for j in range(i + 1)]
     ZERO_PAIRS = [(i, j) for i in range(NSB) for j in range(i + 1, NSB)]
 
-    allocator = SmemAllocator(
-        None, arch=arch, global_sym_name=f"kda_scores_smem_C{C}_K{KD}"
-    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_scores_smem_C{C}_K{KD}")
     lds_lq_off = allocator._align(allocator.ptr, 16)
     lds_lk_off = allocator._align(lds_lq_off + SB * STRIDE * 4, 16)
     lds_rg_off = allocator._align(lds_lk_off + SB * STRIDE * 4, 16)
@@ -342,9 +340,7 @@ def build_kda_decay_scores(chunk_size: int, k_dim: int, waves_per_eu: int = 2):
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK_SIZE},{BLOCK_SIZE}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK_SIZE},{BLOCK_SIZE}")
 
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
 

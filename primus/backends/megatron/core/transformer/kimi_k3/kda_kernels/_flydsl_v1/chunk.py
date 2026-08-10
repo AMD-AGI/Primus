@@ -115,9 +115,7 @@ def _lay_out_beta(beta: torch.Tensor, chunk_size: int, pad: int) -> torch.Tensor
     return out.view(batch * num_heads * (padded_len // chunk_size), chunk_size)
 
 
-def _lay_back(
-    o: torch.Tensor, batch: int, num_heads: int, seq_len: int, dtype: torch.dtype
-) -> torch.Tensor:
+def _lay_back(o: torch.Tensor, batch: int, num_heads: int, seq_len: int, dtype: torch.dtype) -> torch.Tensor:
     """``[NB, C, V]`` fp32 -> ``[B, T, H, V]`` at ``dtype``, in **one** pass.
 
     Mirror of :func:`_lay_out`: the transpose back and the cast to the caller's
@@ -256,9 +254,7 @@ def flydsl_chunk_kda_fwd(
     return o, (final_state if output_final_state else None), saved
 
 
-def flydsl_chunk_kda_bwd(
-    saved: Tuple[Any, ...], do: torch.Tensor, dht: Optional[torch.Tensor]
-):
+def flydsl_chunk_kda_bwd(saved: Tuple[Any, ...], do: torch.Tensor, dht: Optional[torch.Tensor]):
     """Backward half: recompute the assembly and differentiate it."""
     q, k, v, g, beta, initial_state, meta = saved
     with torch.enable_grad():
@@ -269,19 +265,22 @@ def flydsl_chunk_kda_bwd(
             h0 = initial_state.detach().requires_grad_(True)
             leaves.append(h0)
         o, final_state = _assemble(
-            leaves[0], leaves[1], leaves[2], leaves[3], leaves[4], h0,
-            meta["scale"], meta["chunk_size"], v.dtype,
+            leaves[0],
+            leaves[1],
+            leaves[2],
+            leaves[3],
+            leaves[4],
+            h0,
+            meta["scale"],
+            meta["chunk_size"],
+            v.dtype,
         )
     outputs, grad_outputs = [o], [do.to(o.dtype)]
     if dht is not None:
         outputs.append(final_state)
         grad_outputs.append(dht.to(final_state.dtype))
-    grads = torch.autograd.grad(
-        outputs, leaves, grad_outputs=grad_outputs, allow_unused=True
-    )
-    dq, dk, dv, dg, dbeta = (
-        gr.to(t.dtype) if gr is not None else None for gr, t in zip(grads[:5], inputs)
-    )
+    grads = torch.autograd.grad(outputs, leaves, grad_outputs=grad_outputs, allow_unused=True)
+    dq, dk, dv, dg, dbeta = (gr.to(t.dtype) if gr is not None else None for gr, t in zip(grads[:5], inputs))
     dh0 = None
     if h0 is not None and grads[5] is not None:
         dh0 = grads[5].to(initial_state.dtype)

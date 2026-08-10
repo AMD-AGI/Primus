@@ -207,14 +207,10 @@ def _build_full_attention_spec(
         get_kimi_k3_mla_attention_spec,
     )
 
-    return get_kimi_k3_mla_attention_spec(
-        config=config, backend=provider, attn_mask_type=AttnMaskType.causal
-    )
+    return get_kimi_k3_mla_attention_spec(config=config, backend=provider, attn_mask_type=AttnMaskType.causal)
 
 
-def _build_dense_mlp_spec(
-    *, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider"
-) -> ModuleSpec:
+def _build_dense_mlp_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider") -> ModuleSpec:
     """The dense ``situ`` SwiGLU FFN used by the first ``first_k_dense_replace`` layers.
 
     Upstream :class:`MLP`, not a bespoke class: with ``gated_linear_unit``
@@ -291,9 +287,7 @@ def build_kimi_k3_layer_spec(
     # Layer 0 enters with no checkpoints, so its pre-attention mix is skipped
     # (``modeling_kimi_linear.py:987``) and the mixer would be dead weight.
     # See the matching comment in ``KimiK3Layer.__init__``.
-    runs_pre_attn_mix = (
-        use_res and attn_res_num_blocks_before(layer_idx, config.attn_res_block_size) > 0
-    )
+    runs_pre_attn_mix = use_res and attn_res_num_blocks_before(layer_idx, config.attn_res_block_size) > 0
     submodules = KimiK3LayerSubmodules(
         input_layernorm=_build_norm_spec(config=config, provider=provider),
         self_attention=attention,
@@ -368,9 +362,7 @@ def get_kimi_k3_runtime_decoder_spec(
     """
     provider = resolve_k3_provider(config)
 
-    layer_specs = _build_stage_layer_specs(
-        config, provider=provider, vp_stage=vp_stage, pp_rank=pp_rank
-    )
+    layer_specs = _build_stage_layer_specs(config, provider=provider, vp_stage=vp_stage, pp_rank=pp_rank)
     assert layer_specs, "Kimi K3 requires non-empty stage layer specs."
 
     pattern = "".join("K" if s.params["is_kda_layer"] else "F" for s in layer_specs)
@@ -384,9 +376,7 @@ def get_kimi_k3_runtime_decoder_spec(
     block_submodules = KimiK3TransformerBlockSubmodules(
         layer_specs=layer_specs,
         # Built on the post_process stage only; see KimiK3TransformerBlock.
-        attn_res_head=(
-            ModuleSpec(module=AttentionResidualHead) if config.attn_res_block_size else None
-        ),
+        attn_res_head=(ModuleSpec(module=AttentionResidualHead) if config.attn_res_block_size else None),
         final_layernorm=_build_norm_spec(config=config, provider=provider),
     )
     return ModuleSpec(module=KimiK3TransformerBlock, submodules=block_submodules)

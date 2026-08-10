@@ -108,9 +108,7 @@ def _llvm_ptr_ty():
     return ir.Type.parse("!llvm.ptr")
 
 
-def build_kda_chunk_prep(
-    chunk_size: int, k_dim: int, op_bf16: bool = True, waves_per_eu: int = 2
-):
+def build_kda_chunk_prep(chunk_size: int, k_dim: int, op_bf16: bool = True, waves_per_eu: int = 2):
     """Build the launcher for one ``(chunk_size, head_dim, operand dtype)``.
 
     Returns ``launch(Qf, Kf, CG, QW, KGam, KG, Dec, nb)`` over flat tensors:
@@ -233,9 +231,7 @@ def build_kda_chunk_prep(
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK_SIZE},{BLOCK_SIZE}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK_SIZE},{BLOCK_SIZE}")
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
 
     _hints = {

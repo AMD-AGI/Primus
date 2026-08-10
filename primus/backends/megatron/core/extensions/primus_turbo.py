@@ -1791,9 +1791,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 f"PrimusTurboGroupedLinear.sharded_state_dict: unsupported parallel_mode "
                 f"{parallel_mode!r}; expected 'column' or 'row'."
             )
-        return super()._sharded_state_dict_grouped(
-            tp_axis_map, prefix, sharded_offsets, metadata
-        )
+        return super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         _is_first_microbatch = self.is_first_microbatch

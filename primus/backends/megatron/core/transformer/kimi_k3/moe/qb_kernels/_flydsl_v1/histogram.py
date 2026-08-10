@@ -150,9 +150,7 @@ def _get_kernel(num_experts: int, num_bins: int, lo: float, hi: float):
         return launch
 
 
-def kernel_beats_eager(
-    num_tokens: int, num_experts: int, max_tokens: int = KERNEL_MAX_TOKENS
-) -> bool:
+def kernel_beats_eager(num_tokens: int, num_experts: int, max_tokens: int = KERNEL_MAX_TOKENS) -> bool:
     """Whether the kernel is expected to be faster than eager at this shape.
 
     Args:
@@ -274,9 +272,7 @@ def flydsl_compute_margin_histogram(
     tau = margin_cutoff(scores, expert_bias, topk)
 
     # [E, B+2]: the bins, then the below-range and above-range counters.
-    buf = torch.zeros(
-        num_experts, int(num_bins) + 2, dtype=torch.int32, device=scores.device
-    )
+    buf = torch.zeros(num_experts, int(num_bins) + 2, dtype=torch.int32, device=scores.device)
     _get_kernel(num_experts, num_bins, margin_min, margin_max)(
         scores.contiguous().reshape(-1),
         tau.contiguous().reshape(-1),

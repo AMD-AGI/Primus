@@ -68,9 +68,7 @@ class _KDAChunkFn(torch.autograd.Function):
         fwd_fn: Callable[..., Any],
         bwd_fn: Callable[..., Any],
     ):
-        o, final_state, saved = fwd_fn(
-            q, k, v, g, beta, scale, initial_state, output_final_state, chunk_size
-        )
+        o, final_state, saved = fwd_fn(q, k, v, g, beta, scale, initial_state, output_final_state, chunk_size)
         meta: Dict[str, Any] = {}
         if saved and isinstance(saved[-1], dict):
             *saved_tensors, meta = saved
@@ -82,9 +80,7 @@ class _KDAChunkFn(torch.autograd.Function):
         return o, final_state
 
     @staticmethod
-    def backward(  # type: ignore[override]
-        ctx, do: torch.Tensor, dht: Optional[torch.Tensor]
-    ):
+    def backward(ctx, do: torch.Tensor, dht: Optional[torch.Tensor]):  # type: ignore[override]
         saved: Tuple[Any, ...] = tuple(ctx.saved_tensors)
         if ctx.meta:
             saved = saved + (ctx.meta,)

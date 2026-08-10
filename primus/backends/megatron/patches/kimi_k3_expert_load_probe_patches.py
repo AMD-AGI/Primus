@@ -101,7 +101,6 @@ def patch_expert_load_probe(ctx: PatchContext):
     import importlib
 
     import torch
-
     from megatron.core import parallel_state
     from megatron.core.utils import get_attr_wrapped_model
 
@@ -215,7 +214,4 @@ def patch_expert_load_probe(ctx: PatchContext):
         return original(config, model)
 
     finalize_model_grads.reset_model_temporary_tensors = _instrumented_reset
-    log_rank_0(
-        f"{_LOG_PREFIX}   Wrapped reset_model_temporary_tensors; "
-        f"expert-load histogram -> {path}"
-    )
+    log_rank_0(f"{_LOG_PREFIX}   Wrapped reset_model_temporary_tensors; " f"expert-load histogram -> {path}")

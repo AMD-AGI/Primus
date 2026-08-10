@@ -208,9 +208,7 @@ def patch_kimi_k3_pp_tensor_shape(ctx: PatchContext):
     if getattr(original_get_tensor_shapes, "_k3_pp_shape_patched", False):
         log_rank_0("[Patch:megatron.kimi_k3.pp_tensor_shape] get_tensor_shapes already patched, skip")
     else:
-        schedules_module.get_tensor_shapes = _make_k3_get_tensor_shapes(
-            original_get_tensor_shapes, seq_mult
-        )
+        schedules_module.get_tensor_shapes = _make_k3_get_tensor_shapes(original_get_tensor_shapes, seq_mult)
         log_rank_0(
             f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped get_tensor_shapes; "
             f"PP wire seq_len * (1 + attn_res_num_blocks_max) = {seq_mult} "
@@ -221,12 +219,10 @@ def patch_kimi_k3_pp_tensor_shape(ctx: PatchContext):
     # Wrapper 2: forward_backward_pipelining_with_interleaving (VPP).
     original_interleaved = schedules_module.forward_backward_pipelining_with_interleaving
     if getattr(original_interleaved, "_k3_pp_interleaved_patched", False):
-        log_rank_0(
-            "[Patch:megatron.kimi_k3.pp_tensor_shape] interleaved schedule already patched, skip"
-        )
+        log_rank_0("[Patch:megatron.kimi_k3.pp_tensor_shape] interleaved schedule already patched, skip")
     else:
-        schedules_module.forward_backward_pipelining_with_interleaving = (
-            _make_k3_interleaved_schedule(original_interleaved, seq_mult)
+        schedules_module.forward_backward_pipelining_with_interleaving = _make_k3_interleaved_schedule(
+            original_interleaved, seq_mult
         )
         log_rank_0(
             f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped "

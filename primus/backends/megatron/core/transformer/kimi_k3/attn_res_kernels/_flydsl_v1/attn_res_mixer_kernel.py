@@ -264,9 +264,7 @@ def build_attn_res_mixer_fwd(
     if elem_dtype not in ("f32", "bf16"):
         raise ValueError(f"elem_dtype must be 'f32' or 'bf16'; got {elem_dtype!r}")
     if inject and inject not in _ALL_FWD_VARIANTS:
-        raise ValueError(
-            f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}"
-        )
+        raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}")
 
     BLOCK = block_size_for(H)
     EPT = H // BLOCK  # hidden elements per thread
@@ -274,9 +272,7 @@ def build_attn_res_mixer_fwd(
 
     # 2C reduction rows (ss and dot per candidate), one f32 slot per thread.
     RED_ROWS = 2 * C
-    allocator = SmemAllocator(
-        None, arch=arch, global_sym_name=f"attnres_fwd_smem_H{H}_C{C}_{elem_dtype}"
-    )
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"attnres_fwd_smem_H{H}_C{C}_{elem_dtype}")
     lds_red_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_red_off + RED_ROWS * BLOCK * 4
 

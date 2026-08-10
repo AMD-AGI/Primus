@@ -88,6 +88,7 @@ def _pick_block_v(v_dim: int) -> int:
             return bv
     return v_dim
 
+
 # bf16 is the only input dtype routed onto the MFMA path: v_mfma_f32_16x16x32_bf16
 # rounds its operands to bf16, which is exactly what `fla` does and is lossless
 # for bf16 inputs, but would cost fp16 four mantissa bits and fp32 sixteen.
@@ -252,11 +253,7 @@ def _sweep_kernel(
     def _dummy(dtype):
         return torch.empty(1, dtype=dtype, device=dev)
 
-    rq = (
-        torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
-        if emit_rq
-        else _dummy(torch.float32)
-    )
+    rq = torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev) if emit_rq else _dummy(torch.float32)
     t_all = torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
     states = (
         torch.empty(nb, k_dim, v_dim, dtype=torch.float32, device=dev)
@@ -460,6 +457,15 @@ def fused_chunk_sweep(
     """
     mode, _ = sweep_operand_mode(op_dtype)
     return _FusedSweep.apply(
-        qw, u, aqk, kg, dec, s0, int(num_chunks), bool(use_kernel), mode, op_dtype,
+        qw,
+        u,
+        aqk,
+        kg,
+        dec,
+        s0,
+        int(num_chunks),
+        bool(use_kernel),
+        mode,
+        op_dtype,
         float(scale),
     )

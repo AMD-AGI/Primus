@@ -204,9 +204,7 @@ def _lift_res_in(
 
     if pre_process:
         if num_blocks != 0:
-            raise ValueError(
-                f"the first pipeline stage must start with zero checkpoints, got {num_blocks}"
-            )
+            raise ValueError(f"the first pipeline stage must start with zero checkpoints, got {num_blocks}")
         # modeling_kimi_linear.py:1190-1192 -- genuinely zero-width, so
         # layer 0's pre-attention mix is skipped rather than mixing a zero.
         seq, batch, hidden = hidden_states.shape
@@ -359,9 +357,7 @@ class KimiK3Layer(TransformerLayer):
                 f"layer {self.layer_idx} was built with use_attn_residuals=True but "
                 "config.attn_res_block_size is unset; the append schedule is undefined."
             )
-        self.appends_checkpoint = (
-            self.use_attn_residuals and self.layer_idx % self.attn_res_block_size == 0
-        )
+        self.appends_checkpoint = self.use_attn_residuals and self.layer_idx % self.attn_res_block_size == 0
         self.num_blocks_in = (
             attn_res_num_blocks_before(self.layer_idx, self.attn_res_block_size)
             if self.use_attn_residuals

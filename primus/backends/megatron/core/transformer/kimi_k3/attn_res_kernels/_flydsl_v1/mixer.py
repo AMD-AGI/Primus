@@ -109,9 +109,7 @@ def _get_bwd(hidden: int, num_blocks: int, elem: str):
         return launch
 
 
-def supports_mixer_inputs(
-    prefix_sum: Tensor, block_residual: Tensor
-) -> Optional[str]:
+def supports_mixer_inputs(prefix_sum: Tensor, block_residual: Tensor) -> Optional[str]:
     """``None`` when the kernel can run these inputs, else why it cannot."""
     if not prefix_sum.is_cuda:
         return "the kernel is a GPU kernel and the inputs are on CPU"
@@ -196,9 +194,7 @@ class _FlydslMix(torch.autograd.Function):
         return d_ps, d_br, d_sw, None
 
 
-def flydsl_mix_kernel(
-    prefix_sum: Tensor, block_residual: Tensor, score_weight: Tensor, eps: float
-) -> Tensor:
+def flydsl_mix_kernel(prefix_sum: Tensor, block_residual: Tensor, score_weight: Tensor, eps: float) -> Tensor:
     """The kernel pair on already-flattened, already-fused inputs.
 
     Args:

@@ -585,8 +585,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
         layer_type = str(self.mtp_layer_type)
         if layer_type not in ("mirror_last", "mla", "kda"):
             raise ValueError(
-                "mtp_layer_type must be 'mirror_last', 'mla' or 'kda', got "
-                f"{self.mtp_layer_type!r}"
+                "mtp_layer_type must be 'mirror_last', 'mla' or 'kda', got " f"{self.mtp_layer_type!r}"
             )
         self.mtp_layer_type = layer_type
 

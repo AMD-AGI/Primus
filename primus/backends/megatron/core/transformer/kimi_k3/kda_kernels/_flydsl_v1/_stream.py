@@ -33,9 +33,8 @@ null-stream launch's 352 µs, i.e. not slower.
 
 from __future__ import annotations
 
-import torch
-
 import flydsl.expr as fx
+import torch
 
 __all__ = ["with_current_stream"]
 

@@ -169,17 +169,13 @@ def build_qb_margin_histogram(
     if B < 2:
         raise ValueError(f"num_bins must be >= 2, got {B}")
     if inject and inject not in _ALL_VARIANTS:
-        raise ValueError(
-            f"unknown injection {inject!r}; expected '' or one of {list(_ALL_VARIANTS)}"
-        )
+        raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_VARIANTS)}")
     LO = float(margin_min)
     WIDTH = (float(margin_max) - LO) / B
     HIST_STRIDE = B + 2  # ... + below-range column + above-range column
     _tag = f"_inj_{inject}" if inject else ""
 
-    @flyc.kernel(
-        known_block_size=[BLOCK_SIZE, 1, 1], name=f"qb_margin_hist_E{E}_B{B}{_tag}"
-    )
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1], name=f"qb_margin_hist_E{E}_B{B}{_tag}")
     def qb_margin_histogram_kernel(
         SCORES: fx.Tensor,  # [N, E] f32 flat
         TAU: fx.Tensor,  # [N]    f32 flat
@@ -234,9 +230,7 @@ def build_qb_margin_histogram(
             False: lambda x: arith.MulFOp(x, c_inv_width).result,
             True: lambda x: arith.DivFOp(x, c_width).result,
         }[inject == "true_division"]
-        round_of = {False: math_dialect.floor, True: math_dialect.trunc}[
-            inject == "trunc_not_floor"
-        ]
+        round_of = {False: math_dialect.floor, True: math_dialect.trunc}[inject == "trunc_not_floor"]
         BIN_SHIFT = 1 if inject == "off_by_one_bin" else 0
 
         # Branch-free tail guard: an out-of-range lane reads element 0 (always
@@ -290,9 +284,7 @@ def build_qb_margin_histogram(
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))
-                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(
-                    f"{BLOCK_SIZE},{BLOCK_SIZE}"
-                )
+                op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{BLOCK_SIZE},{BLOCK_SIZE}")
 
         launcher.launch(grid=(grid_x, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
 
