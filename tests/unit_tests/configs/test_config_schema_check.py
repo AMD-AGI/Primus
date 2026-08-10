@@ -1258,8 +1258,8 @@ def test_cli_warn_only_suppresses_the_failure(fake_repo: Path, monkeypatch, caps
     assert cli.main() == 0
 
 
-def test_cli_reports_a_misplaced_key_apart_from_drift(megatron_repo: Path, monkeypatch, capsys):
-    """The two need different fixes, so they must not share a table."""
+def test_cli_reports_a_misplaced_key_without_gating(megatron_repo: Path, monkeypatch, capsys):
+    """Model-scoped findings need owner validation, so report but do not gate."""
     _write(
         megatron_repo / "examples/megatron/configs/stray.yaml",
         """
@@ -1277,7 +1277,7 @@ def test_cli_reports_a_misplaced_key_apart_from_drift(megatron_repo: Path, monke
     monkeypatch.setattr(cli, "ROOT", megatron_repo)
     monkeypatch.setattr("sys.argv", ["check_config_schema.py", "--backend", "megatron"])
 
-    assert cli.main() == 1
+    assert cli.main() == 0
     out = capsys.readouterr().out
     assert "No drift: every key in" in out  # the key exists; it is only misplaced
     assert "Keys set on a model that cannot read them" in out
