@@ -297,10 +297,34 @@ echo "--------------------------------" | tee -a "$LOG_FILE"
 #     swap it; the proven fallback is an in-container `cp` over `readlink -f` of the
 #     provider, which needs a pre-run hook (primus-cli-direct `--patch`). See report.
 CONTAINER_VOL_ARGS=("--volume" "/shared_nfs:/shared_nfs" "--volume" "/home/$USER:/home/$USER")
+# Destination path inside the container (where libibverbs looks for the provider).
 LIBIONIC_HOST=${LIBIONIC_HOST:-/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so}
-if [ -e "$LIBIONIC_HOST" ]; then
-    CONTAINER_VOL_ARGS+=("--volume" "${LIBIONIC_HOST}:${LIBIONIC_HOST}:ro")
+# Source file to bind over it. Two traps, both of which fail SILENTLY and cost ~12x
+# throughput (measured ~16 TFLOP/s/GPU instead of ~190 on 4 nodes) with *identical*
+# numerics, so they read like a compute regression rather than a networking one:
+#   1. This script runs on the SUBMIT node, but the mount is consumed on the COMPUTE
+#      node. On a CPU-only submit host the provider does not exist, so a plain
+#      `[ -e ]` guard here skips the mount for every node in the job.
+#   2. The provider path is a SYMLINK to a versioned .so that lives outside the
+#      mounted name, so bind-mounting the link itself lands a dangling link.
+# Either way libibverbs loads no provider, `ibv_devices` is empty, NCCL_IB_HCA
+# matches nothing and NCCL falls back to TCP over the socket interface.
+# So: dereference, and when the submit host has no copy, point LIBIONIC_SRC at one
+# staged on a shared mount (cp -L from any compute node).
+LIBIONIC_SRC=${LIBIONIC_SRC:-$(readlink -f "$LIBIONIC_HOST" 2>/dev/null || echo "$LIBIONIC_HOST")}
+if [ -f "$LIBIONIC_SRC" ]; then
+    CONTAINER_VOL_ARGS+=("--volume" "${LIBIONIC_SRC}:${LIBIONIC_HOST}:ro")
+else
+    echo "WARNING: ionic RoCE provider not found at ${LIBIONIC_SRC}; NCCL will fall" \
+         "back to TCP and throughput will collapse. Stage it with 'cp -L" \
+         "${LIBIONIC_HOST} <shared path>' on a compute node and re-run with" \
+         "LIBIONIC_SRC=<shared path>." | tee -a "$LOG_FILE"
 fi
+
+# The verbs char devices themselves; without them the provider above still
+# enumerates nothing.
+CONTAINER_DEV_ARGS=()
+[ -e /dev/infiniband ] && CONTAINER_DEV_ARGS+=("--device" "/dev/infiniband")
 
 # Env forwarded explicitly into the container (robust even if srun does not
 # propagate the submit environment; PRIMUS_*/NCCL_* also auto-forward).
@@ -342,7 +366,7 @@ SLURM_FLAGS=("-N" "$NNODES" "-t" "$SLURM_TIME" "--output=${PRIMUS_WORKSPACE}/8L_
 [ -n "${SLURM_NODELIST:-}" ] && SLURM_FLAGS+=("-w" "$SLURM_NODELIST")
 
 ./primus-cli slurm srun "${SLURM_FLAGS[@]}" \
-    -- container --shm-size 64g "${CONTAINER_VOL_ARGS[@]}" "${CONTAINER_ENV_ARGS[@]}" \
+    -- container --shm-size 64g "${CONTAINER_VOL_ARGS[@]}" "${CONTAINER_DEV_ARGS[@]}" "${CONTAINER_ENV_ARGS[@]}" \
     -- train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
