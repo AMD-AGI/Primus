@@ -897,6 +897,9 @@ class InferencePerformanceProjector:
         if self._scaling_mode == "origami":
             r = self._origami_ratio(batch, tokens, phase)
             if r is not None and r > 0.0:
+                if os.getenv("PRIMUS_DEBUG_RESTORE"):
+                    print(f"[dbg-restore] phase={phase} b={batch} ratio={r:.4f} "
+                          f"ms_bench={ms_bench:.3f} restored={ms_bench * r:.3f}")
                 return ms_bench * r
 
         def _comm_total(cm) -> float:

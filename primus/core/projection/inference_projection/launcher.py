@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict
 
@@ -260,6 +261,60 @@ def _scaling_bench_paths(args) -> list:
     return out
 
 
+def _emit_restore_confidence(anchor_paths, target_gpus: int) -> None:
+    """Advisory: is the target being restored from an in-regime anchor?
+
+    Runs the confidence ladder over the GPU counts of the loaded anchors and
+    prints whether the restore is trustworthy or the run should benchmark at a
+    higher GPU count first. Best-effort — never raises into the projection.
+    """
+    try:
+        import json as _json
+
+        from .regime import confidence_ladder
+
+        anchors_by_gpu = {}
+        for p in anchor_paths:
+            if not p:
+                continue
+            try:
+                meta = (_json.load(open(p)) or {}).get("meta", {})
+            except Exception:
+                continue
+            gpus = int(meta.get("tp", 1) or 1) * int(meta.get("pp", 1) or 1)
+            anchors_by_gpu.setdefault(gpus, p)  # keep first path per GPU count
+        if not anchors_by_gpu or target_gpus <= 1:
+            return
+        v = confidence_ladder(target_gpus, anchors_by_gpu)
+        rungs = ",".join(str(g) for g in sorted(anchors_by_gpu))
+        cap_on = os.getenv("PRIMUS_DECODE_ETP_CAP", "1").strip().lower() not in ("0", "false", "no")
+        if v["confidence"] == "high":
+            # In-regime anchor: the raw origami restore is trustworthy. The ETP
+            # cap is unnecessary here and would over-correct a near-target anchor.
+            note = " (ETP cap is ON — consider PRIMUS_DECODE_ETP_CAP=0; it can over-correct an in-regime anchor)" if cap_on else ""
+            print(
+                f"[Primus:Inference] restore confidence: HIGH — target {target_gpus} GPUs "
+                f"from in-regime {v['gpus']}-GPU anchor (rungs measured: {rungs}). {v['reason']}.{note}"
+            )
+        else:
+            # Out-of-regime: with the cap OFF this restore is NOT trustworthy. The
+            # honest fix is to climb, not to mask it with the cap.
+            stopgap = (
+                " The ETP cap is currently masking this (a blunt, model-dependent "
+                "correction); prefer climbing over relying on it."
+                if cap_on else
+                " (ETP cap OFF: expect the raw decode over-projection until you climb.)"
+            )
+            print(
+                f"[Primus:Inference] restore confidence: LOW — {v['reason']} "
+                f"(rungs measured: {rungs}). Benchmark at {v['next_gpus']} GPUs "
+                f"(--benchmark-gpus {v['next_gpus']}) and pass it via "
+                f"--load-benchmark-scaling to converge.{stopgap}"
+            )
+    except Exception:
+        pass
+
+
 def _print_des(des: Dict[str, object]) -> None:
     point = des["point"]
     print("\n" + "=" * 100)
@@ -484,6 +539,17 @@ def launch_projection_from_cli(args, overrides):
                         f"primary anchor (exact); other anchors fit the TP-scaling law."
                     )
                     break
+
+    # Advisory: flag when the target is being restored from an out-of-regime
+    # anchor (per-GPU decode throughput not yet flat within one doubling of the
+    # target) and recommend the GPU count to benchmark next.
+    if mode in ("performance", "both"):
+        _tgt_pp = int(getattr(inference_config.model_parallel_config, "pipeline_model_parallel_size", 1) or 1)
+        _tgt_tp = int(inference_config.model_parallel_config.tensor_model_parallel_size)
+        _anchor_paths = ([load_bench] if load_bench else []) + _scaling_bench_paths(args)
+        if getattr(args, "decode_floor_benchmark", None):
+            _anchor_paths.append(args.decode_floor_benchmark)
+        _emit_restore_confidence(_anchor_paths, _tgt_tp * _tgt_pp)
 
     results = {}
     if mode in ("memory", "both"):

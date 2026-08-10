@@ -165,6 +165,28 @@ class MoEMLPProfiler(BaseModuleProfiler):
         #   EP=1, TP=8 -> etp=8 (full TP sharding)   EP=8, TP=8 -> etp=1 (EP-only)
         expert_tp = max(1, tp_size // max(1, ep_size))
 
+        # Decode weight-bandwidth relief cap for TP-sharded experts (``etp>1``,
+        # i.e. TP>EP): measured pure-TP MoE decode barely beats the single-GPU
+        # step (~0.87x at TP2, non-monotonic at higher TP), NOT the ~1/etp the
+        # weight roofline predicts. At decode (M~1) the expert grouped-GEMM is
+        # latency/launch-bound rather than weight-streaming-bound, and any
+        # compute relief from TP-sharding the FFN is offset by the post-expert
+        # all-reduce that reassembles the row-parallel output — a cost the
+        # comm-free decode ratio drops. So the FFN TP-shard yields ~no net decode
+        # relief: read each active expert's weights as if replicated across the
+        # ``etp`` ranks (attention/token/EP sharding still apply). Prefill (large
+        # M, compute-bound, seq_len>1) keeps the full ``etp`` speedup. Only the
+        # extra TP-over-EP factor is capped; EP-only sharding (etp==1) is a no-op.
+        # Toggle: PRIMUS_DECODE_ETP_CAP=0 restores the uncapped weight relief.
+        weight_expert_tp = expert_tp
+        if (
+            int(seq_len) <= 1
+            and expert_tp > 1
+            and os.getenv("PRIMUS_DECODE_ETP_CAP", "1").strip().lower()
+            not in ("0", "false", "no")
+        ):
+            weight_expert_tp = 1
+
         # Expected number of *distinct* experts whose weights are actually read
         # this step. MoE decode is weight-bandwidth-bound, so its cost tracks the
         # number of experts touched, not the full local set: at small batch only
@@ -222,7 +244,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # correct: total expert params spread over all GPUs).
         M = tokens_per_expert
         H = hidden_size
-        F = max(1, moe_ffn // expert_tp)
+        F = max(1, moe_ffn // weight_expert_tp)
 
         # Determine grouped-GEMM performance model.
         # Primus Turbo's grouped-GEMM kernel achieves near-ideal batched
