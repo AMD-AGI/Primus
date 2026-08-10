@@ -311,8 +311,12 @@ class SDPASimulator(SDPASimulationBackend):
         Raises:
             RuntimeError: If the selected GEMM backend is not available.
         """
-        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
-        from primus.core.projection.simulation_backends.factory import _ensure_backends_discovered
+        from primus.core.projection.simulation_backends.base import (
+            get_gemm_backend_factory,
+        )
+        from primus.core.projection.simulation_backends.factory import (
+            _ensure_backends_discovered,
+        )
 
         self._hw = hardware_spec or _get_hardware_spec(gpu_arch, gpu_clock_mhz)
 
@@ -416,7 +420,9 @@ class SDPASimulator(SDPASimulationBackend):
         price the FAv3 tiles.  Returns the backend on success, or ``None`` if it
         is not available.
         """
-        from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
+        from primus.core.projection.simulation_backends.base import (
+            get_gemm_backend_factory,
+        )
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         try:
@@ -563,12 +569,16 @@ class SDPASimulator(SDPASimulationBackend):
         )
 
         bwd_compute_ms = (
-            r_bwd_qk.forward_time_ms
-            + r_bwd_dp.forward_time_ms
-            + r_bwd_dv.forward_time_ms
-            + r_bwd_dq.forward_time_ms
-            + r_bwd_dk.forward_time_ms
-        ) * bwd_waves * causal_factor
+            (
+                r_bwd_qk.forward_time_ms
+                + r_bwd_dp.forward_time_ms
+                + r_bwd_dv.forward_time_ms
+                + r_bwd_dq.forward_time_ms
+                + r_bwd_dk.forward_time_ms
+            )
+            * bwd_waves
+            * causal_factor
+        )
 
         # ── Backward dQ atomics (latency-based model) ──
         # Each KV-workgroup atomically accumulates dQ via buffer_atomic_add_f32.

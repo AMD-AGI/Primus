@@ -55,6 +55,8 @@ def _ensure_backends_discovered() -> None:
         try:
             importlib.import_module(mod)
         except Exception:
+            # Best-effort discovery: a backend that fails to import simply stays
+            # unregistered; selecting it later raises a clear error.
             pass
 
     # 2. External backends declared as ``primus.gemm_backends`` entry points.
@@ -73,8 +75,10 @@ def _ensure_backends_discovered() -> None:
                 if callable(loaded):
                     loaded()
             except Exception:
+                # One misbehaving plugin must not block the others; skip it.
                 pass
     except Exception:
+        # Entry-point enumeration is optional/best-effort; never abort setup.
         pass
 
     # 3. External backends declared via env var (module paths to import).
@@ -84,6 +88,7 @@ def _ensure_backends_discovered() -> None:
             try:
                 importlib.import_module(mod)
             except Exception:
+                # Ignore a misconfigured plugin path so it can't break selection.
                 pass
 
     _DISCOVERY_DONE = True
