@@ -34,7 +34,7 @@ modules:
       ici_expert_parallelism: -1
 
       # training
-      max_target_length: 8192
+      max_target_length: 4096
       per_device_batch_size: 2
       remat_policy: "minimal"
       sparse_matmul: false
