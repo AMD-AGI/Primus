@@ -9,12 +9,11 @@
 Mirrors ``_build_ffn_spec`` (``deepseek_v4_layer_specs.py:527-584``): pick
 the grouped-expert backend and the shared-expert linears from the spec
 provider, assemble the submodule dataclass, return a ``ModuleSpec``. The
-layer-spec tree that consumes this lives in ``kimi_k3_layer_specs.py``
-(WP6); this file is deliberately importable on its own so the MoE block
+layer-spec tree that consumes this lives in ``kimi_k3_layer_specs.py``;
+this file is deliberately importable on its own so the MoE block
 can be built and tested without the rest of the stack.
 
-Two upstream contracts shape the result and are worth stating because
-``DESIGN.md`` §5.4 sketched them differently:
+Two upstream contracts shape the result and are worth stating:
 
 * the **token dispatcher is not a submodule**. ``MoELayer.__init__``
   selects it from ``config.moe_token_dispatcher_type``
@@ -112,7 +111,7 @@ def build_stable_latent_moe_spec(
     if resolve_latent_size(config) is not None and bool(config.latent_moe_use_norm):
         submodules.latent_norm = ModuleSpec(module=provider.k3_norm_module())
 
-    # Quantile Balancing (WP10) needs routing *scores*, which upstream never
+    # Quantile Balancing needs routing *scores*, which upstream never
     # keeps, so the router has to stash a per-expert margin histogram beside
     # local_tokens_per_expert. Filling the slot here rather than leaving the
     # dataclass default is also what stops the Primus router patch from

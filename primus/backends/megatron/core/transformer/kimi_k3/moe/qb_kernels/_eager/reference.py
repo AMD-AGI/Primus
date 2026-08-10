@@ -29,8 +29,7 @@ an IEEE division, i.e. a **discontinuous** function of the margin. A last-bit
 difference in the division moves a count into the neighbouring bin, so any
 reimplementation has to reproduce ``((margin - margin_min) / width).floor()``
 exactly — a reciprocal multiply is not good enough. Measured: the FlyDSL kernel
-does reproduce it bit-for-bit, including on values placed exactly on bin edges
-(``flydsl_modules/results/probe_atomics.log``).
+does reproduce it bit-for-bit, including on values placed exactly on bin edges.
 """
 
 from __future__ import annotations

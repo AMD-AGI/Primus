@@ -24,7 +24,7 @@ the inter-chunk state sweep, ``NC``           one FlyDSL kernel launch, state
 serialised steps of small torch GEMMs         resident in LDS (:mod:`.sweep`)
 ===========================================  ==========================================
 
-The third row is the second optimisation pass. WP9 measured the sweep at 95 % of
+The third row is the second optimisation pass. Profiling measured the sweep at 95 % of
 the forward (7902 µs against a 340 µs score kernel) purely because it was 64
 serialised launches of GEMMs far too small to fill an MI355X, with the state
 round-tripping through HBM every step. :func:`.sweep.fused_chunk_sweep` keeps

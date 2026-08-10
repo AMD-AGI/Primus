@@ -37,7 +37,7 @@ __all__ = [
     "StableLatentMoESubmodules",
     "build_stable_latent_moe_spec",
     "resolve_latent_size",
-    # Quantile Balancing (WP10)
+    # Quantile Balancing
     "QuantileBalancingMixin",
     "compute_quantile_bias",
     "make_quantile_balancing_router",

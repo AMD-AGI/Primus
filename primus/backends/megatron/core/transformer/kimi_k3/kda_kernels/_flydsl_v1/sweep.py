@@ -6,8 +6,8 @@
 
 """The inter-chunk state sweep, as one fused kernel launch plus batched GEMMs.
 
-WP9's forward spent 95 % of its time in this stage while it was a 64-step Python
-loop over torch GEMMs (``wp9/RESULTS.md`` §3). The fix has two halves:
+Profiling showed the forward spending 95 % of its time in this stage while it
+was a 64-step Python loop over torch GEMMs. The fix has two halves:
 
 * :mod:`.kda_state_sweep_kernel` runs the part that is **genuinely sequential**
   — the ``[K, V]`` state recurrence — in a single launch, one workgroup per
@@ -60,7 +60,7 @@ __all__ = [
 # Narrowest first. Pass 2 reasoned that 64 was the sweet spot because narrower
 # blocks re-read the state-independent operands once per block; pass 4 measured
 # the grid instead and the reasoning was wrong. On the production sweep
-# (`wp9_p4/results/probe_sweep_tune.json`, identical operands, output bit-equal
+# (identical operands, output bit-equal
 # at every setting):
 #
 #     block_v   128     64      32      16

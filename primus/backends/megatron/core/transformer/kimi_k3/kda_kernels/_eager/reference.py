@@ -7,7 +7,7 @@
 """Eager-PyTorch references for Kimi Delta Attention (KDA).
 
 These functions are the **numerical ground truth** for every other KDA
-backend (``fla``'s ``chunk_kda`` today, a FlyDSL kernel in WP9). They are
+backend (``fla``'s ``chunk_kda`` today, or a FlyDSL kernel). They are
 written for readability and for auditability against the published math,
 not for speed.
 
@@ -61,7 +61,7 @@ matrices one column at a time. Each column materialises a
 ``[B, H, NC, C, K]`` decay tensor, so a *backward* pass keeps ``C`` of
 them alive — i.e. the ``[B, H, NC, C, C, K]`` intermediate the real
 kernel exists to avoid. That is acceptable for an oracle at unit-test
-shapes and is precisely the cost WP9's FlyDSL kernel removes. The
+shapes and is precisely the cost the FlyDSL kernel removes. The
 column-wise form is used (rather than the algebraically equivalent
 two-matmul ``(K ⊙ Γ)(K / Γ)ᵀ``) because every exponent it evaluates is
 ``≤ 0``: with ``g ≥ -5`` and ``C = 64`` the ``1 / Γ`` factor of the

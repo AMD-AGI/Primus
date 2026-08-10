@@ -6,8 +6,8 @@
 
 """Native FlyDSL kernel for the **adjoint** of KDA's two score matrices.
 
-WP9 pass 2 measured :meth:`..ops._DecayScores.backward` at **12871 µs of a
-23164 µs backward — 56 %** (``wp9_opt/RESULTS.md`` §3), because it recomputed
+Profiling measured :meth:`..ops._DecayScores.backward` at **12871 µs of a
+23164 µs backward — 56 %**, because it recomputed
 :func:`..ops.decay_scores_torch` under ``enable_grad`` and differentiated it:
 ~40 elementwise ops and batched GEMMs on 100 MB tensors, doubled by autograd,
 for ~8 GFLOP of real arithmetic. This kernel replaces all of it with one launch.
@@ -87,15 +87,15 @@ a pair: nothing has to be re-read or atomically combined.
 * ``DAqk``, ``DAkk``: ``[NB, C, C]`` fp32
 
 fp32 VALU throughout, like the forward kernel and for the same two reasons:
-``v_mfma_f32_16x16x4f32`` SIGABRTs in this ``flydsl`` build (``DECISIONS.md``,
-WP9 pass 2), and a bf16 MFMA path would round ``dA`` and ``k`` at the point they
+``v_mfma_f32_16x16x4f32`` SIGABRTs in this ``flydsl`` build, and a bf16 MFMA path
+would round ``dA`` and ``k`` at the point they
 are consumed, which the gradients' 11× tolerance margin could absorb but which
 has to be *measured* before it is shipped.
 
 Two tracing rules shape the code below.
 
 * Every build-time choice is made by indexing a dict of closures rather than by
-  an ``if`` statement, per ``DECISIONS.md``: the AST rewriter routes every
+  an ``if`` statement: the AST rewriter routes every
   ``if`` through ``scf_if_dispatch``.
 * **Every** ``for`` in the body iterates ``range_constexpr``, including the
   two-deep ``MR``/``NR`` register loops. ``range_constexpr`` *is* ``range``
@@ -181,7 +181,7 @@ def build_kda_decay_scores_bwd(
     because a launch that does a quarter of the arithmetic still reads the whole
     chunk. The parameter is kept only because that is the measurement that
     established this kernel is bound by its global traffic and not by its
-    instruction count (``wp9_p3/RESULTS.md`` §5).
+    instruction count.
     """
     ensure_usable_lld()
     arch = get_rocm_arch()

@@ -57,9 +57,8 @@ duplicated, following the MLA low-rank down-projection idiom at
 ``multi_latent_attention.py:409-419``.
 
 The arithmetic is therefore TP-correct for ``tp_size > 1``, but only
-``tp_size == 1`` is exercised by the unit tests in this work package —
-multi-rank numerical validation belongs with the layer/block assembly
-work package.
+``tp_size == 1`` is exercised by this module's unit tests; multi-rank
+numerical validation belongs with the layer/block assembly.
 """
 
 from __future__ import annotations
@@ -210,7 +209,7 @@ class KimiDeltaAttention(MegatronModule):
             (``kda_gate_lower_bound``, ``kda_use_full_rank_gate``,
             ``kda_backend``, ``kda_chunk_size``) are read with ``getattr``
             defaults so this module works against a plain
-            ``TransformerConfig`` until the config work package declares
+            ``TransformerConfig`` until the K3 config declares
             them. ``kda_backend`` is a string selector validated against
             :data:`KDA_BACKENDS` here, mirroring how
             ``DeepseekV4Attention`` validates ``use_v4_attention_backend``
@@ -466,7 +465,7 @@ class KimiDeltaAttention(MegatronModule):
         in fp32, rank 0's gradient deviates from the TP=1 gradient by
         ``rel_rms`` 0.78 at TP=2 and 0.91 at TP=4 -- close to the
         ``sqrt(1 - 1/tp)`` a dropped-terms sum predicts -- while the TP sum
-        matches to 1e-7 (``wp7/RESULTS.md``). Left alone, each rank's
+        matches to 1e-7. Left alone, each rank's
         optimizer would apply a different partial gradient to a parameter
         that is supposed to be replicated, and the "same" weight would drift
         apart across TP ranks.
@@ -650,7 +649,7 @@ class KimiDeltaAttention(MegatronModule):
         Args:
             hidden_states: ``[s, b, h]``.
             attention_mask: unused — KDA is intrinsically causal and this
-                work package does not support padded or packed batches.
+                module does not support padded or packed batches.
 
         Returns:
             ``(output, bias)`` with ``output`` of shape ``[s, b, h]``.

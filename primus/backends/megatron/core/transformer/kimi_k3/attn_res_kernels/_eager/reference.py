@@ -58,7 +58,7 @@ def fused_score_weight(
     FlyDSL backend forms it with plain autograd-visible torch ops *outside* the
     kernel — one auditable copy of the factorisation, and the kernel then takes
     a single ``[hidden]`` vector. Same division of labour as KDA's
-    ``use_qk_l2norm_in_kernel`` (``DECISIONS.md``, WP9).
+    ``use_qk_l2norm_in_kernel``.
     """
     if dtype is None:
         dtype = accum_dtype(proj_weight.dtype)

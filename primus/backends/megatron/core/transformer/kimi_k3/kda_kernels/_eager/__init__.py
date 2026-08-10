@@ -7,7 +7,7 @@
 """Eager-PyTorch reference ops for Kimi Delta Attention.
 
 The single source of "eager truth" shared by ``KimiDeltaAttention``, every
-KDA kernel backend (``fla`` today, FlyDSL in WP9) and the unit tests:
+KDA kernel backend (``fla`` today, or the FlyDSL kernel) and the unit tests:
 
 * :func:`eager_chunk_kda`     — chunkwise-parallel form (the training path)
 * :func:`eager_recurrent_kda` — ``O(T)`` sequential recurrence (the oracle)

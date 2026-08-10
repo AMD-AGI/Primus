@@ -10,7 +10,7 @@
 #     (3 x 3584 latent x 3072 moe_ffn) ~= 2.72 T dominates; the remainder is the
 #     2 shared experts, KDA/MLA attention, the hidden<->3584 latent projections,
 #     dense layer 0, and the untied 163840 x 7168 embed + lm_head (~2.35 B).
-#   ~100 B active params/token  -- top-16 of 896 routed + 2 shared experts +
+#   ~104 B active params/token  -- top-16 of 896 routed + 2 shared experts +
 #     attention + embeddings (the dense-equivalent compute per token).
 ###############################################################################
 

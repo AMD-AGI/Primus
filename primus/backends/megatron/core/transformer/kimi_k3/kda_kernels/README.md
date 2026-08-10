@@ -41,7 +41,7 @@ which asserts agreement with Megatron's own
 | `eager` | `_eager/` | `eager_chunk_kda` | **The reference.** Pure-PyTorch chunkwise-parallel form; always importable, differentiable, device-agnostic. What every other backend is validated against. |
 | `eager_recurrent` | `_eager/` | `eager_recurrent_kda` | Literal `O(T)` transcription of the recurrence. Correct by inspection; the oracle for the chunked form. Far too slow for training. |
 | `fla` | `_fla/` | `fla_chunk_kda` | `flash-linear-attention`'s fused Triton `chunk_kda`. Lazily imported — `fla` is an optional dependency. **The production backend today**, and the speed baseline. |
-| `flydsl` | `_flydsl_v1/` | `flydsl_chunk_kda` | Native FlyDSL kernel (WP9), **gfx950 / CDNA4 only**. Forward and backward both work; a `@flyc.kernel` computes the intra-chunk score matrices, the rest is batched torch GEMMs. Currently **slower than `fla`** — see "What the FlyDSL backend does and does not accelerate". |
+| `flydsl` | `_flydsl_v1/` | `flydsl_chunk_kda` | Native FlyDSL kernel, **gfx950 / CDNA4 only**. Forward and backward both work; a `@flyc.kernel` computes the intra-chunk score matrices, the rest is batched torch GEMMs. Currently **slower than `fla`** — see "What the FlyDSL backend does and does not accelerate". |
 
 `fla` and `flydsl` are loaded on demand (`load_fla_kda_backend`,
 `load_flydsl_kda_backend`) so that `import ...kda_kernels` never fails
@@ -132,7 +132,7 @@ The kernel itself is *not* the bottleneck; the serial state sweep is. It is
 `NC = 64` iterations of GEMMs far too small to fill an MI355X, so its cost is
 launch latency, not arithmetic. `fla` avoids this by running the whole sweep
 inside one Triton kernel, and a fused FlyDSL sweep kernel is the next thing to
-write. Numbers, ratios and the full breakdown are in `wp9/RESULTS.md`.
+write.
 
 ### How the `1/Γ` overflow is avoided in the tiled form
 

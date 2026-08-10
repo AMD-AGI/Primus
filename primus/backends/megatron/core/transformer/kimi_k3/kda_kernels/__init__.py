@@ -177,7 +177,7 @@ __all__ = [
     "kda_l2norm",
     # fla fused Triton chunk kernel — lazily loaded
     "load_fla_kda_backend",
-    # native FlyDSL kernel (WP9) — lazily loaded
+    # native FlyDSL kernel — lazily loaded
     "load_flydsl_kda_backend",
     # dispatch
     "KDA_BACKENDS",

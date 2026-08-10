@@ -55,7 +55,7 @@ Shape contract
 At PP=1 ``pre_process`` and ``post_process`` are both true, so only the
 first and third bullets are exercised. PP > 1 additionally needs the
 pipeline scheduler to expect the folded wire shape, which is installed by
-``primus/backends/megatron/patches/kimi_k3_pp_shape_patches.py`` (WP7);
+``primus/backends/megatron/patches/kimi_k3_pp_shape_patches.py``;
 without it the receiving stage's :func:`_lift_res_in` raises on the first
 microbatch, because PyTorch P2P validates ``numel`` rather than shape.
 """
@@ -333,7 +333,7 @@ class KimiK3Layer(TransformerLayer):
             # forwarding pg_collection (multi_token_prediction.py:835-841), so
             # the MTP path always lands here. use_mpu_process_groups() reads
             # parallel_state, i.e. the real groups -- not the same thing as the
-            # get_default_pg_collection() fallback DECISIONS.md warns about for
+            # get_default_pg_collection() fallback used for
             # the MoE.
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
@@ -808,7 +808,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         if inference_context is not None:
             raise NotImplementedError(
                 "Kimi K3 has no inference cache yet: KimiDeltaAttention needs a recurrent "
-                "state cache (KimiDynamicCache in the reference) that this work package "
+                "state cache (KimiDynamicCache in the reference) that Primus "
                 "does not build."
             )
 

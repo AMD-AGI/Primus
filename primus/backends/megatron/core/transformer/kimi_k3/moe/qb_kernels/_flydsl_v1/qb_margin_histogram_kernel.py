@@ -65,8 +65,7 @@ atomics are also a single instruction where a 64-bit add is not.
 
 The grid is flat over ``N·E`` with a **branch-free** tail guard: an
 out-of-range lane clamps its index to 0 and atomically adds 0, which is a no-op.
-That avoids an ``scf.if`` in the body, which the AST rewriter is fragile around
-(``DECISIONS.md``, WP9 pass 2).
+That avoids an ``scf.if`` in the body, which the AST rewriter is fragile around.
 """
 
 import flydsl.compiler as flyc

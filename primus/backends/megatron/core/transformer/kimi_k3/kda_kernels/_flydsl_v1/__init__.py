@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Native FlyDSL KDA backend (work package 9), gfx950 / CDNA4 only.
+"""Native FlyDSL KDA backend, gfx950 / CDNA4 only.
 
 Importing this package pulls in ``flydsl``, so it must only ever be reached
 through :func:`...kda_kernels.load_flydsl_kda_backend`, never from module

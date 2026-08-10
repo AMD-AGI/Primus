@@ -6,10 +6,10 @@
 
 """Native FlyDSL kernel for ``(I − L)^{-1}``, ``L`` strictly lower triangular.
 
-Pass 4 profiled the production forward and found this stage — spelled as
+Profiling of the production forward found this stage — spelled as
 Neumann doubling over batched torch GEMMs in :func:`..ops._ut_inverse_doubling`
 — at **576 µs of a 4227 µs on-device forward, the largest single item outside
-the two existing kernels** (``wp9_p4/PROGRESS.md`` §1). It is not arithmetic
+the two existing kernels**. It is not arithmetic
 bound and never was:
 
 * ``L`` is nilpotent, so ``Σ_{k<2n} L^k = (Σ_{k<n} L^k)(I + L^n)`` inverts it in
@@ -96,8 +96,8 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
     Returns ``launch(Low, P, nb)`` over flat fp32 tensors, both ``[nb, C, C]``
     row-major. ``Low`` is read as strictly lower triangular: the kernel does not
     mask it, it relies on ``L[i, j] = 0`` for ``j ≥ i``, which is what
-    ``Akk``'s own mask guarantees (``wp9_opt/RESULTS.md`` §2 checks it is
-    exactly ``0.0``). The diagonal and upper triangle of the result are ``I``
+    ``Akk``'s own mask guarantees (verified to be exactly ``0.0``). The
+    diagonal and upper triangle of the result are ``I``
     and ``0`` respectively, both written.
     """
     ensure_usable_lld()

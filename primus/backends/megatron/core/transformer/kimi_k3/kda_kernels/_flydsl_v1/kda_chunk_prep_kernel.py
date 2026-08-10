@@ -6,9 +6,9 @@
 
 """Native FlyDSL kernel for the chunk's decay-weighted operand preparation.
 
-Pass 4 profiled the production forward down to 2749 µs on device and found that
+Profiling took the production forward down to 2749 µs on device and found that
 **~1350 µs of it — half — was torch elementwise glue that `fla` never performs**
-(``wp9_p4/FINDINGS.md`` §6). The largest connected piece of that glue is the
+The largest connected piece of that glue is the
 decay chain: six ops that between them read and write ~3.3 GB of HBM to produce
 three tensors from three, with one ``exp`` of real arithmetic per element.
 

@@ -4,19 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Kimi K3 FLOPs reporting patch (WP8).
+"""Kimi K3 FLOPs reporting patch.
 
 Megatron's :func:`megatron.training.training.num_floating_point_operations`
 gets Kimi K3 wrong on **five** independent axes. All five were read off the
-smoke run's own argument dump (``wp6/smoke_kimi_k3_debug_fla.log``) rather
-than assumed:
+smoke run's own argument dump rather than assumed:
 
 * **Dispatch.** ``is_hybrid_model(args)`` is ``args.hybrid_layer_pattern is
   not None`` (``training/utils.py:434-436``) and K3 leaves that ``None``
   (log ``:1576``), so K3 lands in ``transformer_flops()``.
 * **Attention branch.** ``args.multi_latent_attention`` must stay ``False``
   for K3 (``arguments.py:1589-1590`` would otherwise replace the config
-  class — see ``DECISIONS.md`` "Settled during WP1"), so
+  class), so
   ``transformer_flops`` takes the **MHA/GQA** branch (``training.py:429``)
   and models every layer as a dense ``h -> 3h`` QKV projection.
 * **KDA is charged as quadratic attention.** ``args.experimental_attention_variant``
@@ -34,8 +33,8 @@ than assumed:
   args layer; the closed form below does not depend on it.
 * **Two K3 modules are not modelled at all**: the MLA sigmoid output gate
   (upstream's ``args.attention_output_gate`` stays ``False`` because
-  ``MLATransformerConfig.__post_init__`` raises on it — ``DECISIONS.md``
-  "Constraints discovered by execution") and the attention-residual mixers.
+  ``MLATransformerConfig.__post_init__`` raises on it) and the
+  attention-residual mixers.
 
 Honest calibration note. At the 8-layer debug shape the five errors very
 nearly cancel: the untied 163 968-row vocabulary head is ~78 % of all FLOPs
@@ -290,7 +289,7 @@ def mla_fmac_per_token(
     * ``linear_q_up_proj``     ``q_lora_rank -> n * (qk_head_dim + qk_pos_emb_head_dim)``
     * ``linear_kv_down_proj``  ``H -> kv_lora_rank + qk_pos_emb_head_dim``
       (the trailing ``qk_pos_emb_head_dim`` dims are MQA-shared and bypass
-      the latent — ``DECISIONS.md`` "config reconciliation pass")
+      the latent)
     * ``linear_kv_up_proj``    ``kv_lora_rank -> n * (qk_head_dim + v_head_dim)``
     * ``linear_o_gate``        ``H -> n * v_head_dim``   (``:306-318``, new)
     * ``linear_proj``          ``n * v_head_dim -> H``
@@ -358,8 +357,8 @@ def latent_moe_fmac_per_token(
     original ``hidden_states``, not the latent-projected copy.
 
     ``StableLatentMoE``'s only addition over the stock latent ``MoELayer`` is
-    an RMSNorm on the combined routed output (``DECISIONS.md`` "Settled
-    during WP5"), which is elementwise and carries no matmul.
+    an RMSNorm on the combined routed output, which is elementwise and carries
+    no matmul.
     """
     expansion = _SWIGLU_FFN_EXPANSION_FACTOR if swiglu else 2
     router = hidden_size * num_experts

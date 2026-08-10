@@ -75,7 +75,7 @@ overrides it, and ``0`` disables the guard entirely.
 
 The threshold is a stopgap, not the answer. The fix is an LDS-privatised
 histogram, which needs the grid re-mapped from ``(token, expert)`` pairs to
-``(expert, token-slice)``; see ``flydsl_modules/FINDINGS.md`` §6.2.
+``(expert, token-slice)``.
 """
 
 from __future__ import annotations

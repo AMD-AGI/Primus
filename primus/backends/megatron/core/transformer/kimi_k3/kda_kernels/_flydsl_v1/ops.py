@@ -14,9 +14,9 @@ Two stages live here.
     :mod:`.kda_decay_scores_bwd_kernel` — the *same* blocked decay-weighted
     contraction with the contraction axis swapped.
 
-    Pass 2 took the adjoint by recomputing :func:`decay_scores_torch` under
-    ``enable_grad``, which was correct by construction but measured **12871 µs
-    of a 23164 µs backward, 56 %** (``wp9_opt/RESULTS.md`` §3): ~40 elementwise
+    An earlier version took the adjoint by recomputing :func:`decay_scores_torch`
+    under ``enable_grad``, which was correct by construction but measured
+    **12871 µs of a 23164 µs backward, 56 %**: ~40 elementwise
     ops and batched GEMMs on 100 MB tensors, doubled by autograd, for ~8 GFLOP
     of real arithmetic. :func:`decay_scores_bwd_torch` is the blocked torch twin
     of the new kernel and remains both the unit-test oracle and the fallback for

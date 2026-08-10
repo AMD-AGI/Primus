@@ -6,11 +6,11 @@
 
 """Native FlyDSL kernel for KDA's inter-chunk state sweep.
 
-WP9 measured this stage at **7902 µs of a 6199 µs forward** at production
+Profiling measured this stage at **7902 µs of a 6199 µs forward** at production
 geometry — 95 %, against 340 µs for the score kernel — because it was 64
 serialised iterations of a Python ``for`` loop over batched torch GEMMs far too
 small to fill an MI355X, with the ``[K, V]`` state round-tripping through HBM on
-every one of them (``wp9/RESULTS.md`` §3). This kernel runs the whole sweep in
+every one of them. This kernel runs the whole sweep in
 **one launch** with the state resident on-chip.
 
 The recurrence
@@ -75,8 +75,7 @@ Two arithmetic modes, chosen by the caller's dtype
     ``llvm::cast<VectorType>`` however its ``cbsz/abid/blgp`` flags are spelled
     (i32 Values or Python ints), so no fp32 MFMA is usable here.
 
-Two FlyDSL tracing rules shape the code below, both recorded in ``DECISIONS.md``
-and both re-confirmed here:
+Two FlyDSL tracing rules shape the code below, both re-confirmed here:
 
 * ``rocdl`` is not resolvable from a helper defined *inside* a traced body, so
   :func:`_mfma` sits at module scope and is merely called from the body.
@@ -117,7 +116,7 @@ BLOCK_SIZE = 256
 WAVE = 64
 NWAVES = BLOCK_SIZE // WAVE
 
-# v_mfma_f32_16x16x32_bf16, lane layout ground-truthed in wp9/probe/RESULTS.md
+# v_mfma_f32_16x16x32_bf16, lane layout ground-truthed empirically
 MI_TILE = 16
 MI_K = 32
 LANE_K = 8  # operand elements per lane per instruction

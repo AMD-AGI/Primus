@@ -6,8 +6,8 @@
 
 """The chunk's decay-weighted operand preparation, as one kernel plus its adjoint.
 
-Pass 4's profile left the production forward at 2749 µs on device with **half of
-it torch elementwise glue** (``wp9_p4/FINDINGS.md`` §6). The largest connected
+Profiling left the production forward at 2749 µs on device with **half of
+it torch elementwise glue**. The largest connected
 piece was six ops producing the sweep's state-independent operands:
 
     Γ = exp(cg);  QΓ = q ⊙ Γ;  KΓ = k ⊙ Γ;  KG = k ⊙ exp(ct − cg);  dec = exp(ct)

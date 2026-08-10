@@ -9,7 +9,7 @@
 :func:`flydsl_attn_res_mix` has the same signature as
 :func:`..._eager.reference.eager_attn_res_mix` and is interchangeable with it.
 
-Division of labour, following the KDA precedent (``DECISIONS.md``, WP9):
+Division of labour, following the KDA precedent:
 
 * the **rank-1 scorer is folded outside the kernel**, with plain
   autograd-visible torch ops, so the kernel takes one ``[hidden]`` vector and

@@ -1744,7 +1744,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         # does) so distributed checkpoint + optimizer sharding stay compatible.
         # Consolidating into a single ``weights`` Parameter broke save because
         # the optimizer tracked ``weights`` while sharded_state_dict emitted
-        # ``weight{i}`` slice views (integration/FINDINGS.md §1).
+        # ``weight{i}`` slice views.
         w0 = self.weight0
         buffer = torch.empty(
             self.num_gemms,

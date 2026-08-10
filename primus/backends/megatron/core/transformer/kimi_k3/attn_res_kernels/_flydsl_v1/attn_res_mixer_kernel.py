@@ -61,8 +61,7 @@ reduction of one vector against another, i.e. rank-1, so an MFMA would be fed a
 single row and waste 15/16 of the tile. The arithmetic is VALU FMA and the
 kernel is bound by HBM, which is the thing being optimised.
 
-Three FlyDSL tracing rules are load-bearing here and all three are recorded in
-``DECISIONS.md`` (WP9):
+Three FlyDSL tracing rules are load-bearing here:
 
 * ``rocdl`` is unreachable from a helper defined *inside* a traced body, so
   :func:`_nat_exp` and :func:`_rsqrt_refined` sit at module scope and are
@@ -336,7 +335,7 @@ def build_attn_res_mixer_fwd(
 
         # Build-time dtype choice by dict indexing, never by an `if` statement:
         # a Python `if` inside a traced body does not propagate its
-        # branch-local rebindings out (DECISIONS.md, WP9).
+        # branch-local rebindings out.
         load_elem = {"f32": load_f32, "bf16": _load_elem_f32}[elem_dtype]
         store_elem = {"f32": store_f32, "bf16": _store_elem_f32}[elem_dtype]
 

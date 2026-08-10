@@ -70,10 +70,9 @@ up-projection. So ``StableLatentMoE`` subclasses :class:`MoELayer`, maps
 untouched, so it is *identical by construction* to a stock
 :class:`MoELayer` rather than merely numerically close.
 
-This diverges from ``DESIGN.md`` §5.4, which sketched hand-rolled
-``linear_latent_down`` / ``linear_latent_up`` / ``token_dispatcher``
-submodule slots. Those are all redundant against the upstream this tree
-actually vendors; see the report in that section's place.
+An earlier design sketched hand-rolled ``linear_latent_down`` /
+``linear_latent_up`` / ``token_dispatcher`` submodule slots; those turned out
+redundant against the upstream this tree actually vendors, so they are not used.
 
 The router
 ----------
@@ -93,9 +92,10 @@ Configure it with ``moe_router_score_function="sigmoid"`` +
 Load balancing
 --------------
 Phase 1 uses ``seq_aux_loss`` at ``1e-3`` plus the ``noaux_tc`` expert
-bias, i.e. DeepSeek-V4's configuration — see ``DECISIONS.md`` §2. Kimi
+bias, i.e. DeepSeek-V4's configuration. Kimi
 K3's published rule is "Quantile Balancing" (tech report §2.3.3, Eq. 14),
-which has no reference implementation and is deferred to WP10. It is a
+which has no public reference implementation; Primus implements it in
+``k3_quantile_balancing.py``. It is a
 *bias-update rule*, not a loss, so it does not belong in this module: it
 replaces ``get_updated_expert_bias`` at
 ``megatron/core/distributed/finalize_model_grads.py:314-319``, which is
@@ -185,7 +185,7 @@ def resolve_latent_size(config: TransformerConfig) -> Optional[int]:
     return latent
 
 
-# Where WP10's Quantile Balancing replaces the phase-1 rule, recorded so the
+# Where Quantile Balancing replaces the phase-1 rule, recorded so the
 # location does not have to be re-derived.
 #
 # Kimi K3 does not update ``e_score_correction_bias`` with DeepSeek-V3's
@@ -208,7 +208,7 @@ QUANTILE_BALANCING_HOOK_SITE = "megatron/core/distributed/finalize_model_grads.p
 class StableLatentMoE(MoELayer):
     """Kimi K3 MoE FFN: an :class:`MoELayer` with a norm inside the bottleneck.
 
-    Layer-assembly note for the K3 layer class (WP6). Upstream
+    Layer-assembly note for the K3 layer class. Upstream
     ``TransformerLayer`` decides whether to forward ``pg_collection`` and
     ``is_mtp_layer`` to the mlp with an **identity** check against
     ``(MoELayer, TEGroupedMLP, SequentialMLP)`` (``transformer_layer.py:374``),
@@ -231,7 +231,7 @@ class StableLatentMoE(MoELayer):
         pg_collection: Megatron process groups. ``None`` falls back to
             ``get_default_pg_collection()`` (``moe_layer.py:170-171``).
         is_mtp_layer: forwarded to the parent. Always ``False`` for K3 —
-            the release has no MTP (``DECISIONS.md`` §5).
+            the release has no MTP.
     """
 
     def __init__(

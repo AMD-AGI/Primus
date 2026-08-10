@@ -97,8 +97,8 @@ subclass can dodge it. It is dodged at the config layer instead:
 :class:`KimiK3TransformerConfig` carries its own ``mla_use_output_gate``
 and leaves upstream's ``attention_output_gate`` at ``False``
 (``kimi_k3_transformer_config.py:171-174``), and this class builds and
-applies the gate itself. That is option (a) of ``DESIGN.md`` §10.2.1,
-and it keeps the whole diff inside Primus rather than patching out an
+applies the gate itself, and it keeps the whole diff inside Primus rather
+than patching out an
 upstream ``NotImplementedError`` that exists precisely because the MLA
 gate path is untested.
 
@@ -121,7 +121,7 @@ Tensor parallelism
 ``gather_output=False``, so its local width
 ``num_heads_local * v_head_dim`` matches ``core_attn_out``'s and the
 gate multiply stays entirely local. Only ``tp_size == 1`` is exercised
-by this work package's unit tests.
+by this module's unit tests.
 """
 
 from __future__ import annotations
@@ -346,8 +346,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         Kimi-Linear-48B layer-3 weights, and the disagreement is confined to
         the K/V path -- ``query`` (no norm, Kimi-Linear has ``q_lora_rank:
         null``) and the core attention on identical q/k/v are both
-        bit-identical. At 1e-6 the whole module agrees to 4.69e-07. See
-        ``hf_validate/FINDINGS.md`` §5.2.
+        bit-identical. At 1e-6 the whole module agrees to 4.69e-07.
 
         Set ``mla_latent_layernorm_epsilon=None`` to keep upstream's behaviour.
         """
@@ -627,7 +626,7 @@ def get_kimi_k3_mla_attention_spec(
     """``ModuleSpec`` for one Kimi K3 full-attention layer.
 
     The layer / block assembly that consumes this — and the KDA spec it
-    is interleaved with — belongs to the layer-spec work package; this
+    is interleaved with — belongs to the layer-spec modules; this
     only covers the attention module itself.
 
     Args:

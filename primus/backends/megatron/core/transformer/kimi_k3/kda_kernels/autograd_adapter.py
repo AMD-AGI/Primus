@@ -33,8 +33,7 @@ ahead of the Function using plain autograd-visible torch ops. The
 normalisation is a cheap elementwise reduction, doing it outside keeps
 one auditable implementation of it (the flag exists only so a backend is
 signature-compatible with ``fla``'s ``chunk_kda``), and it means a kernel
-never has to carry the ``rstd`` bookkeeping ``fla`` does
-(``wp9/fla_src/chunk.py:56-58``, ``:166-168``).
+never has to carry the ``rstd`` bookkeeping ``fla`` does.
 """
 
 from __future__ import annotations

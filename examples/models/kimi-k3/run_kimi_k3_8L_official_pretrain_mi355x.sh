@@ -17,7 +17,7 @@
 #
 #   The PR ships a single official-width preset, primus/configs/models/megatron/
 #   kimi_k3.yaml, which defaults to the full 93-layer production stack. That stack
-#   is ~2.7 T parameters and does not fit on a small reservation, so this launcher
+#   is ~2.8 T parameters and does not fit on a small reservation, so this launcher
 #   slices it to 8 layers via CLI overrides:
 #       --num_layers 8
 #       --linear_attention_freq "([1]*3+[0])*2"   # = [1,1,1,0,1,1,1,0]  (6 KDA / 2 full)
@@ -126,11 +126,13 @@ export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export LINEAR_ATTENTION_FREQ=${LINEAR_ATTENTION_FREQ:-"([1]*3+[0])*2"}
 export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-"([0]*1+[1]*7)"}
 
-# MoE_Features legend (shared with examples/moe_package/*):
-#   0 baseline | 1 turbo attention | 2 turbo grouped GEMM | 3 loss fusion |
-#   4 DeepEP | 5 sync-free MoE | 6 NUMA binding | 7 manual GC | 8 UCCL-EP
-# K3 measured winner: grouped GEMM (+RMSNorm/permute below) + loss fusion +
-# NUMA + manual GC. Attention/DeepEP/sync-free are OFF for K3 (see K3_TURBO_ARGS).
+# MoE_Features legend (K3-applicable subset of examples/moe_package/*):
+#   0 baseline | 2 turbo grouped GEMM | 3 loss fusion | 6 NUMA binding | 7 manual GC
+# K3 measured winner: grouped GEMM (+RMSNorm/permute below) + loss fusion + NUMA +
+# manual GC. The upstream options 1 (turbo attention), 4 (DeepEP), 5 (sync-free
+# MoE) and 8 (UCCL-EP) are intentionally NOT offered here -- they are NO-OP or
+# unsafe for K3 (see the K3_TURBO_ARGS note below), so they were dropped from both
+# this legend and the case handler and cannot be enabled.
 MoE_Features=(2 3 6 7)
 
 FEATURE_ARGS=()
@@ -145,10 +147,6 @@ ensure_primus_turbo() {
 for feature in "${MoE_Features[@]}"; do
     case "$feature" in
     0) ;;
-    1)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--use_turbo_attention" "True")
-        ;;
     2)
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_grouped_gemm" "True")
@@ -156,14 +154,6 @@ for feature in "${MoE_Features[@]}"; do
     3)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
         FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
-        ;;
-    4)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--use_turbo_deepep" "True")
-        ;;
-    5)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
         ;;
     6)
         # NUMA binding: worth ~+28% on K3, only chooses NUMA node for CPU/host mem.
@@ -174,9 +164,6 @@ for feature in "${MoE_Features[@]}"; do
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
-    8)
-        export USING_UEP=1
-        ;;
     *) ;;
     esac
 done
@@ -184,13 +171,21 @@ done
 FEATURE_LIST="${MoE_Features[*]}"
 FEATURE_TAG=$(printf "%s" "${FEATURE_LIST}" | tr ' ' '-')
 
-# K3-specific Turbo settings that are NOT in the shared feature legend.
+# K3-specific Turbo settings that are NOT in the feature legend above.
 #   ON : the other two of the three "measured winner" kernels (grouped GEMM is
 #        feature 2). Both are checkpoint-safe at EP=8.
-#   OFF: attention (validated curve is without it); DeepEP (first backward went
-#        non-finite on K3 -- shape bug is fixed but a combine-numerics issue
-#        remains); shared_expert_overlap (moe_layer.py asserts NOT-overlap on the
-#        live K3 latent path -> dies at forward); sync-free stage 0.
+#   OFF (explicit guard): the flags below were dropped from the MoE_Features
+#        legend/case above because they are inapplicable or unsafe for K3; they are
+#        pinned off here so they can never be turned on --
+#          use_turbo_attention        NO-OP: K3 attention is KDA (fla kernels) plus
+#                                      its own KimiK3MLASelfAttention, neither of
+#                                      which the Turbo flash-attn path touches.
+#          use_turbo_deepep           breaks K3 numerics (first backward went
+#                                      non-finite) even after the shape fix.
+#          moe_shared_expert_overlap  moe_layer.py asserts NOT-overlap on the live
+#                                      K3 latent path -> dies at forward.
+#          turbo_sync_free_moe_stage  stage>=2 force-enables DeepEP; stage 1 is
+#                                      unvalidated for K3's Stable-Latent-MoE.
 K3_TURBO_ARGS=()
 ensure_primus_turbo
 K3_TURBO_ARGS+=("--use_turbo_rms_norm" "True")

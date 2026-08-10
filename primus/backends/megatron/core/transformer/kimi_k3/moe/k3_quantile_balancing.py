@@ -4,12 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Quantile Balancing (WP10) — Kimi K3's MoE load-balancing rule.
+"""Quantile Balancing — Kimi K3's MoE load-balancing rule.
 
 Kimi K3 does **not** use DeepSeek-V3's ``b <- b + u * sign(violation)`` bias
 update. Tech report §2.3.3 replaces it wholesale: the expert bias is *set*
 from a per-expert quantile of the routing margin. The report's own framing of
-why (verbatim from the extracted text, ``research/raw/moe_section.txt:321-334``):
+why (verbatim from the extracted text):
 
     The original method updates b with the fixed-step rule
     ``b_j^(t+1) = b_j^(t) + u * sign(...)`` for which u trades off slow

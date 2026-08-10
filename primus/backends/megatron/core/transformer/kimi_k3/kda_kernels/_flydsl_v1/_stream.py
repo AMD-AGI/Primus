@@ -18,9 +18,8 @@ stop coinciding in exactly the two situations that matter:
 * **CUDA graph capture.** ``torch.cuda.graph`` captures on a side stream. The
   FlyDSL kernels keep going to stream 0, are therefore not recorded, and the
   replay silently reproduces a stale output — measured max relative error
-  **1.0** at every shape before this fix, **0.0** after
-  (``wp9_p5/results/probe_stream.json``). Pass 4's whole "dispatch-free
-  ceiling" section was built on that unverified replay.
+  **1.0** at every shape before this fix, **0.0** after. An earlier
+  "dispatch-free ceiling" analysis was built on that unverified replay.
 * **Any caller inside ``with torch.cuda.stream(s)``.** ``torch.cuda.Stream()``
   creates *non-blocking* streams, which do **not** serialise against the legacy
   default stream, so the kernels would race their own inputs.

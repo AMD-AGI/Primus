@@ -88,7 +88,7 @@ Opt-in only (see :class:`PerHeadMuonConfig`):
 Fused ``linear_qkv.weight`` (DeepSeek-V4 / GPT / GQA) is **never** touched by this
 module: it keeps going down upstream's unchanged ``split_qkv`` branch. Per-head
 blocking of a fused GQA QKV is left as future work rather than silently changing a
-path this work package cannot A/B.
+path we cannot A/B.
 
 Tensor parallelism
 ------------------
@@ -107,7 +107,7 @@ fallback (``muon_utils.py:199-201``) and makes ``get_muon_scale_factor`` see the
 logical block shape (``muon.py:78-80`` would otherwise multiply the partitioned dim by
 the TP size). For an opt-in ``head_axis=1`` parameter the blocks are *not* locally
 complete, so the original ``partition_dim`` is passed straight through and upstream's
-TP machinery handles it — supported in principle, **untested**: this work package's
+TP machinery handles it — supported in principle, **untested**: this module's
 runs are all TP=1.
 
 Update scale
@@ -192,7 +192,7 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 @dataclass
 class PerHeadMuonConfig:
-    """Per-Head Muon options, with the defaults this work package settled on.
+    """Per-Head Muon options, with the defaults this module settled on.
 
     Every field is read off Megatron's ``args`` namespace with ``getattr(...,
     default)``, so setting any of them in *any* Primus YAML works and omitting all of

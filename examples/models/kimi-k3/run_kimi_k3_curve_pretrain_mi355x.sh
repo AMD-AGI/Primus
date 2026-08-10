@@ -97,13 +97,20 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 export PRIMUS_KDA_BACKEND=${PRIMUS_KDA_BACKEND:-fla}
 export K3P_KDA_CONV=${K3P_KDA_CONV:-fla}
 
-# Single node. primus-cli `direct` allocates via SLURM using these; on a reserved
-# cluster also export SBATCH_RESERVATION=<name> SLURM_EXCLUSIVE=0 (and optionally
-# SLURM_NODELIST=<node>) before running.
+# Single node. primus-cli `direct` does NOT allocate via SLURM -- it runs torchrun
+# on the CURRENT host (only `primus-cli slurm` submits via srun/sbatch). So on a
+# reserved cluster you must already BE on a GPU node before running this, e.g.
+#   srun --reservation=<name> -w <node> -N1 --exclusive --pty \
+#        bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh
+# (or switch the launch below to `primus-cli slurm`). The reservation here is on
+# the `amd-spur` partition; export SBATCH_RESERVATION=<name> and SLURM_EXCLUSIVE=0
+# for that srun. The repo must also live on a WRITABLE path -- a read-only checkout
+# makes the `mkdir output/...` below fail. The SLURM_* vars below are only consulted
+# if you switch this launcher to `primus-cli slurm`; the `direct` path ignores them.
 export NNODES=${NNODES:-1}
 export USING_AINIC=${USING_AINIC:-0}
 export SLURM_TIME=${SLURM_TIME:-01:00:00}
-export SLURM_PARTITION=${SLURM_PARTITION:-amd-aig}
+export SLURM_PARTITION=${SLURM_PARTITION:-amd-spur}
 
 # Node-local Triton cache (avoids the shared-NFS fla causal_conv1d 'hsaco' KeyError).
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_curve}
@@ -125,9 +132,12 @@ export FP8=${FP8:-False}                           # False = bf16
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export MOCK_DATA=${MOCK_DATA:-True}                # True = portable perf; False = real-data convergence
 
-# MoE_Features legend (shared with examples/moe_package/*):
-#   0 baseline | 1 turbo attention | 2 turbo grouped GEMM | 3 loss fusion |
-#   4 DeepEP | 5 sync-free MoE | 6 NUMA binding | 7 manual GC | 8 UCCL-EP
+# MoE_Features legend (K3-applicable subset of examples/moe_package/*):
+#   0 baseline | 2 turbo grouped GEMM | 3 loss fusion | 6 NUMA binding | 7 manual GC
+# Upstream options 1 (turbo attention), 4 (DeepEP), 5 (sync-free MoE) and 8
+# (UCCL-EP) are intentionally NOT offered here -- they are NO-OP or unsafe for K3
+# (see the K3_TURBO_ARGS note below), so they were dropped from both this legend
+# and the case handler and cannot be enabled.
 MoE_Features=(2 3 6 7)
 
 FEATURE_ARGS=()
@@ -142,10 +152,6 @@ ensure_primus_turbo() {
 for feature in "${MoE_Features[@]}"; do
     case "$feature" in
     0) ;;
-    1)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--use_turbo_attention" "True")
-        ;;
     2)
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_grouped_gemm" "True")
@@ -153,14 +159,6 @@ for feature in "${MoE_Features[@]}"; do
     3)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
         FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
-        ;;
-    4)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--use_turbo_deepep" "True")
-        ;;
-    5)
-        ensure_primus_turbo
-        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
         ;;
     6)
         export ENABLE_NUMA_BINDING=1
@@ -170,9 +168,6 @@ for feature in "${MoE_Features[@]}"; do
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
-    8)
-        export USING_UEP=1
-        ;;
     *) ;;
     esac
 done
@@ -180,11 +175,14 @@ done
 FEATURE_LIST="${MoE_Features[*]}"
 FEATURE_TAG=$(printf "%s" "${FEATURE_LIST}" | tr ' ' '-')
 
-# K3-specific Turbo settings not covered by the shared feature legend.
+# K3-specific Turbo settings not covered by the feature legend above.
 # kimi_k3-BF16-curve.yaml ships Turbo OFF (it is the convergence CONTROL), so
 # turn on the "measured winner" kernels here for the perf run. rms_norm +
-# grouped GEMM (feature 2) + permute are checkpoint-safe at EP=8; the rest stay
-# off for the same reasons as the official recipe.
+# grouped GEMM (feature 2) + permute are checkpoint-safe at EP=8. The four flags
+# pinned OFF below (attention / deepep / shared_expert_overlap / sync-free) were
+# dropped from the MoE_Features legend/case above because they are inapplicable or
+# unsafe for K3 (same reasons as the official recipe); they are held off here so
+# they can never be enabled.
 K3_TURBO_ARGS=()
 ensure_primus_turbo
 K3_TURBO_ARGS+=("--use_turbo_rms_norm" "True")

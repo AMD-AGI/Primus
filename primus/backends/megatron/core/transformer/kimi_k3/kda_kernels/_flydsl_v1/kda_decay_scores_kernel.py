@@ -49,8 +49,7 @@ which is exact for any ``n``, so ``n`` is free to be chosen for numerics:
   (``fla/ops/kda/chunk_intra.py``, the ``SAFE_GATE`` branches).
 
 ``SB = 16`` is the largest sub-block with a *provable* margin: ``SB = 32``
-would permit ``exp(155)`` and only survives by luck of the data. Measured
-evidence for all of the above is in ``wp9/results/safe_form_probe.json``.
+would permit ``exp(155)`` and only survives by luck of the data.
 
 Layout and geometry
 -------------------
@@ -72,7 +71,7 @@ an MFMA one: it removes the ``C``-launch column loop and the quadratic
 backward intermediate, which are the documented costs, while keeping the
 data layout simple enough to be auditable against the eager reference.
 Moving the ``[16, K] × [K, 16]`` contraction onto ``mfma_f32_16x16x32_bf16``
-is the obvious next step and is recorded as such in ``wp9/RESULTS.md``.
+is the obvious next step.
 """
 
 import math
@@ -124,8 +123,7 @@ def _nat_exp(x, log2e_const, fastmath):
     And it uses ``rocdl.exp2`` rather than ``arith.ArithValue(x).exp2()``,
     because the latter lowers to an external ``__ocml_exp2_f32`` call and so
     drags the ROCm device-bitcode link into every compile. Both were measured
-    bit-identical to ``torch.exp2`` on this hardware
-    (``wp9/results/diag_exp.json``).
+    bit-identical to ``torch.exp2`` on this hardware.
     """
     scaled = arith.MulFOp(x, log2e_const, fastmath=fastmath).result
     return rocdl.exp2(T.f32, scaled)

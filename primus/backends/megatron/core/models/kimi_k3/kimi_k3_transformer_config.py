@@ -223,8 +223,8 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # Megatron's ``MLASelfAttention`` passes ``config.layernorm_epsilon`` to
     # both, so without this field we run them at 1e-5.
     #
-    # Measured on real Kimi-Linear-48B weights (``hf_validate/FINDINGS.md``
-    # §5.2): at 1e-5 our MLA output differs from the reference by rel_rms
+    # Measured on real Kimi-Linear-48B weights: at 1e-5 our MLA output
+    # differs from the reference by rel_rms
     # 1.95e-03; at 1e-6 by 4.69e-07. The effect scales as
     # ``(eps_ours - eps_theirs) / (2 * mean(kv_compressed^2))``, so it grows as
     # the latent activations get smaller.
@@ -254,11 +254,11 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     routed_expert_hidden_size: Optional[int] = None
     latent_moe_use_norm: bool = False
 
-    # ---- MoE load balancing: which bias-update rule (WP10) ----------------
+    # ---- MoE load balancing: which bias-update rule ----------------------
     # "sign"     -- DeepSeek-V3's b <- b + rate * sign(violation), i.e. exactly
     #               what upstream's get_updated_expert_bias does
-    #               (moe_utils.py:1119-1142). This is what phase 1 ran and
-    #               what DECISIONS.md §2 chose as the known-good baseline.
+    #               (moe_utils.py:1119-1142). This is what phase 1 ran, the
+    #               known-good baseline.
     # "quantile" -- Kimi K3's published rule, tech report §2.3.3 / Eq. 14:
     #               b_j = -quantile_{1-k/n}(s_{:,j} - tau), tau being the
     #               (k+1)-th largest *biased* score of each token. See
@@ -560,7 +560,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
         ``training.py`` reads ``args.mtp_num_layers`` (``:347``, ``:594``,
         ``:2062``) and never the config, so a config-only mapping would leave
         the FLOPs report and the per-depth MTP loss logging blind -- exactly
-        the split ``DECISIONS.md`` records for ``moe_latent_size``.
+        the same split we make for ``moe_latent_size``.
         """
         nextn = self.num_nextn_predict_layers
         mtp = self.mtp_num_layers

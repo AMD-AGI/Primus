@@ -37,7 +37,7 @@ for it would duplicate upstream work and could not win.
 Quantile Balancing is the opposite case: it is entirely ours, upstream has no
 equivalent, and it is **2.7 % of the step** in nine launches over a 0.5 MB
 tensor — i.e. almost pure launch and pass overhead, which is exactly what
-fusion removes. Full numbers in ``flydsl_modules/FINDINGS.md``.
+fusion removes.
 
 Both backends share one signature::
 
@@ -108,7 +108,7 @@ def resolve_qb_backend(name: str, max_tokens: Optional[int] = None):
     measured at **0.61x of eager at 32 768 tokens** (2.58x at 4096), so selecting
     it at a large micro-batch would slow training down while looking like an
     optimisation. Above the threshold the flydsl entry runs the eager path and
-    warns once. Details and the ladder: ``flydsl_modules/FINDINGS.md`` §6.2.
+    warns once.
 
     Raises:
         ValueError: on an unknown name.

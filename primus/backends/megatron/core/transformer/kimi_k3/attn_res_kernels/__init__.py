@@ -31,8 +31,7 @@ head are **16.8 % of a forward+backward step** — 17.6 ms forward and 33.1 ms
 backward out of 302.9 ms. The reason is materialisation, not arithmetic: the
 eager path writes six full-size ``[tokens, num_blocks+1, hidden]``
 intermediates, five of them fp32, so at ``num_blocks = 3`` it moves ~1.07 GB
-for a 67 MB bf16 input. Numbers and the per-op breakdown are in
-``flydsl_modules/FINDINGS.md``.
+for a 67 MB bf16 input.
 
 All backends share one signature, so the eager reference and the fused kernel
 are interchangeable at the call site::
