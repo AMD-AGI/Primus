@@ -1,6 +1,12 @@
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
+# Portions of this file are adapted from NVIDIA Megatron-LM
+# (https://github.com/NVIDIA/Megatron-LM),
+# megatron/core/transformer/multi_latent_attention.py; and from Moonshot AI
+# Kimi-Linear (https://huggingface.co/moonshotai/Kimi-K3),
+# modeling_kimi_linear.py.
+#
 # See LICENSE for license information.
 ###############################################################################
 
