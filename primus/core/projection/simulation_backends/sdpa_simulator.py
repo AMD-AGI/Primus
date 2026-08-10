@@ -487,7 +487,8 @@ class SDPASimulator(SDPASimulationBackend):
           Workgroups = ⌈S_K / 256⌉ × B × H_Q
         """
         assert self._tile_gemm is not None
-        N_CU = self._hw.n_cu
+        # Parallel-unit count for wave quantisation = physical CU count.
+        N_CU = getattr(self, "_tile_units", None) or self._hw.n_cu
         causal_factor = 0.5 if causal else 1.0
 
         # ==============================================================
@@ -512,7 +513,10 @@ class SDPASimulator(SDPASimulationBackend):
             dtype=dtype,
         )
 
-        fwd_time_ms = (r_fwd_qk.forward_time_ms + r_fwd_pv.forward_time_ms) * fwd_waves
+        # Causal masking halves the realised QKᵀ/PV work (FAv3 skips
+        # fully-masked KV tiles).  Applied to the *timing* here, not just the
+        # FLOP metadata below — otherwise a full-causal layer is ~2x overcounted.
+        fwd_time_ms = (r_fwd_qk.forward_time_ms + r_fwd_pv.forward_time_ms) * fwd_waves * causal_factor
 
         # ==============================================================
         # BACKWARD
@@ -564,7 +568,7 @@ class SDPASimulator(SDPASimulationBackend):
             + r_bwd_dv.forward_time_ms
             + r_bwd_dq.forward_time_ms
             + r_bwd_dk.forward_time_ms
-        ) * bwd_waves
+        ) * bwd_waves * causal_factor
 
         # ── Backward dQ atomics (latency-based model) ──
         # Each KV-workgroup atomically accumulates dQ via buffer_atomic_add_f32.
@@ -586,37 +590,8 @@ class SDPASimulator(SDPASimulationBackend):
         # ==============================================================
         # METADATA (FLOPs, bytes — for achieved-TFLOPS reporting)
         # ==============================================================
-        fwd_flops = (
-            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ
-            + 2.0 * B * H_Q * S_Q * S_K * D_v  # PV
-            + 5.0 * B * H_Q * S_Q * S_K  # softmax
-        ) * causal_factor
-
-        bwd_flops = (
-            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ recomp
-            + 2.0 * B * H_Q * S_Q * S_K * D_v  # dP
-            + 2.0 * B * H_Q * S_K * S_Q * D_v  # dV
-            + 2.0 * B * H_Q * S_Q * S_K * D_qk  # dQ
-            + 2.0 * B * H_Q * S_K * S_Q * D_qk  # dK
-            + 5.0 * B * H_Q * S_Q * S_K  # softmax bwd
-        ) * causal_factor
-
-        fwd_bytes = (
-            B * H_Q * S_Q * D_qk * bpe  # Q
-            + B * H_K * S_K * D_qk * bpe  # K
-            + B * H_K * S_K * D_v * bpe  # V
-            + B * H_Q * S_Q * D_v * bpe  # O
-            + B * H_Q * S_Q * 4  # logsumexp (fp32)
-        )
-        bwd_bytes = (
-            B * H_Q * S_Q * D_qk * bpe  # Q
-            + B * H_K * S_K * D_qk * bpe  # K
-            + B * H_K * S_K * D_v * bpe  # V
-            + B * H_Q * S_Q * D_v * bpe  # O
-            + B * H_Q * S_Q * D_v * bpe  # dO
-            + B * H_Q * S_Q * 4  # logsumexp (fp32)
-            + B * H_K * S_K * D_qk * bpe  # dK
-            + B * H_K * S_K * D_v * bpe  # dV
+        fwd_flops, bwd_flops, fwd_bytes, bwd_bytes = self._flops_bytes(
+            B, H_Q, S_Q, S_K, H_K, D_qk, D_v, causal_factor, bpe
         )
 
         fwd_achieved_tflops = (fwd_flops / (fwd_time_ms * 1e-3)) / 1e12 if fwd_time_ms > 0 else 0
@@ -669,6 +644,56 @@ class SDPASimulator(SDPASimulationBackend):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _flops_bytes(
+        self,
+        B: int,
+        H_Q: int,
+        S_Q: int,
+        S_K: int,
+        H_K: int,
+        D_qk: int,
+        D_v: int,
+        causal_factor: float,
+        bpe: int,
+    ):
+        """FLOPs and HBM bytes for the fwd/bwd SDPA (achieved-TFLOPS reporting).
+
+        Factored out so every pricing path reports identical FLOP/byte metadata.
+        """
+        fwd_flops = (
+            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ
+            + 2.0 * B * H_Q * S_Q * S_K * D_v  # PV
+            + 5.0 * B * H_Q * S_Q * S_K  # softmax
+        ) * causal_factor
+
+        bwd_flops = (
+            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ recomp
+            + 2.0 * B * H_Q * S_Q * S_K * D_v  # dP
+            + 2.0 * B * H_Q * S_K * S_Q * D_v  # dV
+            + 2.0 * B * H_Q * S_Q * S_K * D_qk  # dQ
+            + 2.0 * B * H_Q * S_K * S_Q * D_qk  # dK
+            + 5.0 * B * H_Q * S_Q * S_K  # softmax bwd
+        ) * causal_factor
+
+        fwd_bytes = (
+            B * H_Q * S_Q * D_qk * bpe  # Q
+            + B * H_K * S_K * D_qk * bpe  # K
+            + B * H_K * S_K * D_v * bpe  # V
+            + B * H_Q * S_Q * D_v * bpe  # O
+            + B * H_Q * S_Q * 4  # logsumexp (fp32)
+        )
+        bwd_bytes = (
+            B * H_Q * S_Q * D_qk * bpe  # Q
+            + B * H_K * S_K * D_qk * bpe  # K
+            + B * H_K * S_K * D_v * bpe  # V
+            + B * H_Q * S_Q * D_v * bpe  # O
+            + B * H_Q * S_Q * D_v * bpe  # dO
+            + B * H_Q * S_Q * 4  # logsumexp (fp32)
+            + B * H_K * S_K * D_qk * bpe  # dK
+            + B * H_K * S_K * D_v * bpe  # dV
+        )
+        return fwd_flops, bwd_flops, fwd_bytes, bwd_bytes
 
     def _bytes_per_element(self, dtype: str) -> int:
         return {"bf16": 2, "fp16": 2, "fp32": 4, "fp8": 1}.get(dtype, 2)

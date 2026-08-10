@@ -74,6 +74,7 @@ class _HardwareProfile:
     l2_capacity: int  # bytes (per XCD)
     compute_clock_khz: int
     hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
+    rf_capacity: int = 512 * 1024  # Register File (VGPR) capacity per CU in bytes
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
@@ -98,6 +99,13 @@ _DTYPE_MAP: Dict[str, str] = {
     "fp16": "f16",
     "fp32": "f32",
     "fp8": "bf8_fnuz",
+    # Origami has no microscaled / sub-8-bit path; model them as fp8-class
+    # (bf8_fnuz) rather than silently falling back to bf16.
+    "mx8": "bf8_fnuz",
+    "mx6": "bf8_fnuz",
+    "mx4": "bf8_fnuz",
+    "fp6": "bf8_fnuz",
+    "fp4": "bf8_fnuz",
 }
 
 # ---------------------------------------------------------------------------
@@ -271,7 +279,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
 
         # ----- Select best config & predict latency (in clock cycles) -----
         try:
-            result = _origami.select_config(problem, self._hardware, self._configs)
+            result = _origami.select_config(problem, self._hardware, self._configs, _origami.model_t.gemm)
         except Exception as e:
             raise RuntimeError(
                 f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
@@ -400,6 +408,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 arch_enum,
                 n_cu,
                 profile.lds_capacity,
+                profile.rf_capacity,
                 profile.l2_capacity,
                 clock_khz,
             )
@@ -455,6 +464,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             arch_enum,
             n_cu,
             profile.lds_capacity,
+            profile.rf_capacity,
             profile.l2_capacity,
             clock_khz,
         )
