@@ -78,6 +78,13 @@ def _per_head_requested(args) -> bool:
         "dimension and run Newton-Schulz per head block."
     ),
     priority=45,
+    # Deliberately gated on the OPT-IN ARGS, not on model_type. Per-Head Muon is
+    # a Muon-optimizer feature (any head-structured model can request it); it only
+    # installs when a run explicitly selects optimizer=muon AND muon_per_head=true.
+    # No non-K3 recipe sets those, so shared Muon code stays untouched for other
+    # models, while a future non-K3 model that wants per-head blocking can still
+    # opt in. (Contrast the model-type gate on the K3 flops/pp/probe/QB patches,
+    # which wrap functions shared by ALL models and key off generic args.)
     condition=lambda ctx: (
         _muon_selected(get_args(ctx)) and _per_head_requested(get_args(ctx))
     ),

@@ -36,6 +36,13 @@ from primus.core.utils.module_utils import log_rank_0
 
 def _wants_quantile_balancing(ctx: PatchContext) -> bool:
     args = get_args(ctx)
+    # Kimi K3 only. This rebinds finalize_model_grads._update_router_expert_bias --
+    # a function SHARED by every model that uses the aux-loss-free expert bias
+    # (DeepSeek-V3/V4 included) -- so gate on model_type, not just on the generic
+    # moe_router_enable_expert_bias / moe_router_bias_update_rule args. Mirrors
+    # kimi_k3_flops_patches.py so all K3 patches key off the same predicate.
+    if getattr(args, "model_type", None) != "kimi_k3":
+        return False
     if not getattr(args, "moe_router_enable_expert_bias", False):
         return False
     return str(getattr(args, "moe_router_bias_update_rule", "sign")) == "quantile"

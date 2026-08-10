@@ -74,6 +74,13 @@ def _wants_expert_load_probe(ctx: PatchContext) -> bool:
     if not _probe_path():
         return False
     args = get_args(ctx)
+    # Kimi K3 only. This probe wraps finalize_model_grads.reset_model_temporary_tensors
+    # -- a function SHARED by every MoE model -- so it must be gated on model_type,
+    # not just on moe_router_enable_expert_bias (DeepSeek-V3/V4 also set that flag).
+    # Without this a non-K3 run that happened to export K3_EXPERT_LOAD_PROBE would
+    # have its grad finalization wrapped. Mirrors kimi_k3_flops_patches.py.
+    if getattr(args, "model_type", None) != "kimi_k3":
+        return False
     # The buffer this probe reads only exists when the expert bias is enabled.
     return bool(getattr(args, "moe_router_enable_expert_bias", False))
 
