@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple, Union
@@ -94,6 +95,8 @@ __all__ = [
     "KimiDeltaAttentionSubmodules",
     "KimiDeltaAttention",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def _param_device() -> Optional[torch.device]:
@@ -309,6 +312,44 @@ class KimiDeltaAttention(MegatronModule):
         # surfaces while the model is being built rather than on the first
         # forward, and the per-step dispatch disappears from the hot path.
         self.kda_backend = resolve_kda_backend(self.backend_name)
+
+        # Depthwise-conv1d impl, coordinated with the unified backend selector.
+        # ``config.use_kimi_k3_attention_backend`` (when set) supersedes the
+        # ``K3P_KDA_CONV`` env: the "fla" family uses fla ``causal_conv1d``, any
+        # other family uses torch ``nn.Conv1d``. When it is None the conv defers
+        # to ``K3P_KDA_CONV`` in :meth:`_short_conv` (default "default" = torch;
+        # run_pretrain.sh sets it to "fla"), so the legacy behaviour is unchanged.
+        # NOTE: the chunk kernel needs no handling here -- __post_init__ already
+        # rewrote ``config.kda_backend`` to the unified selector, so
+        # ``self.backend_name`` above reflects it.
+        _attn_backend = getattr(config, "use_kimi_k3_attention_backend", None)
+        self._kda_conv_use_fla = None if _attn_backend is None else (str(_attn_backend) == "fla")
+
+        # One rank-0 line on the first KDA layer, so a run's log states plainly
+        # which KDA path is live and what selected it (the B2 unified knob vs the
+        # legacy kda_backend field + K3P_KDA_CONV env). Cheap and audit-friendly.
+        if self.layer_number in (None, 1):
+            import os as _os
+
+            if self._kda_conv_use_fla is None:
+                _conv = "fla" if _os.environ.get("K3P_KDA_CONV", "default") == "fla" else "torch"
+                _src = "kda_backend + K3P_KDA_CONV (legacy)"
+            else:
+                _conv = "fla" if self._kda_conv_use_fla else "torch"
+                _src = f"use_kimi_k3_attention_backend={_attn_backend!r}"
+            try:
+                import torch.distributed as _dist
+
+                _rank0 = (not _dist.is_initialized()) or _dist.get_rank() == 0
+            except Exception:
+                _rank0 = True
+            if _rank0:
+                logger.info(
+                    "[Primus:Kimi-K3] KDA backend resolved: chunk_kernel=%s conv=%s (via %s)",
+                    self.backend_name,
+                    _conv,
+                    _src,
+                )
 
         self.num_heads_local_tp = self.num_heads // self.tp_size
         self.qk_dim = self.key_head_dim * self.num_heads
@@ -560,7 +601,14 @@ class KimiDeltaAttention(MegatronModule):
         """Causal depthwise conv + SiLU on a ``[b, s, d]`` tensor."""
         import os
 
-        if os.environ.get("K3P_KDA_CONV", "default") == "fla":
+        # Priority: the yaml-level use_kimi_k3_attention_backend (resolved to
+        # self._kda_conv_use_fla in __init__) wins; when it is None the legacy
+        # K3P_KDA_CONV env decides (default "default" = torch nn.Conv1d).
+        use_fla_conv = self._kda_conv_use_fla
+        if use_fla_conv is None:
+            use_fla_conv = os.environ.get("K3P_KDA_CONV", "default") == "fla"
+
+        if use_fla_conv:
             import fla.modules.convolution as fc  # type: ignore
 
             fn = getattr(fc, "causal_conv1d", None) or getattr(fc, "causal_conv1d_fn", None)

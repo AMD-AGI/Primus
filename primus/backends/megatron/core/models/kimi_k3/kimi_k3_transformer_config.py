@@ -161,6 +161,35 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     kda_backend: str = "eager"
     kda_chunk_size: int = 64
 
+    # ---- unified KDA backend selector (the yaml-facing knob) --------------
+    # ``use_kimi_k3_attention_backend`` is the SINGLE yaml key for choosing the
+    # KDA implementation family, named after DeepSeek-V4's
+    # ``use_v4_attention_backend`` (``deepseek_v4_attention.py``). When set it
+    # supersedes BOTH lower-level knobs, so one key selects a coherent family:
+    #   * ``kda_backend``            -- the chunk-kernel selector read by
+    #                                   ``KimiDeltaAttention`` (eager |
+    #                                   eager_recurrent | fla | flydsl), and
+    #   * the ``K3P_KDA_CONV`` env   -- the depthwise-conv1d impl (fla
+    #                                   ``causal_conv1d`` vs torch ``nn.Conv1d``).
+    # "fla" -> fla chunk kernel + fla conv; any other value -> that chunk kernel
+    # + the torch conv.
+    #
+    # Priority (highest first), resolved in ``__post_init__`` (chunk kernel) and
+    # in ``KimiDeltaAttention`` (conv):
+    #   1. ``use_kimi_k3_attention_backend`` (this field), when not None
+    #   2. ``kda_backend`` (chunk kernel) + ``K3P_KDA_CONV`` env (conv) -- legacy
+    #
+    # Default is ``None``, NOT "fla", on purpose. ``kda_backend`` is pinned to
+    # "eager" in ``kimi_k3_base.yaml`` and overridden to fla per-experiment via
+    # ``${PRIMUS_KDA_BACKEND:fla}``. A non-None default here would either flip
+    # every eager preset/test (base, debug, smoke, ``test_kimi_k3_yaml.py:1119``)
+    # to fla, or clobber the experiment-level ``kda_backend`` override -- i.e. it
+    # would break "unset => behaviour unchanged". ``None`` means "defer to
+    # ``kda_backend`` + ``K3P_KDA_CONV``", so adding this field changes nothing
+    # until a yaml sets it. The production recommendation is "fla"; the
+    # experiment yamls set it explicitly.
+    use_kimi_k3_attention_backend: Optional[str] = None
+
     # ---- full-attention (MLA) extras --------------------------------------
     # NoPE, and it is real mechanism rather than a readable alias:
     # KimiK3MLASelfAttention reads this flag and, when set, replaces the
@@ -386,6 +415,30 @@ class KimiK3TransformerConfig(MLATransformerConfig):
             num_layers=int(self.num_layers),
             field_name="linear_attention_freq",
         )
+
+        # Resolve the unified KDA backend selector (see the field's docstring).
+        # When set, it wins over the legacy ``kda_backend`` field for the chunk
+        # kernel; the conv1d half is resolved in ``KimiDeltaAttention``, which
+        # reads this same field. Leaving it None reproduces the legacy behaviour
+        # exactly, so this block is a no-op for every config that does not set it.
+        if self.use_kimi_k3_attention_backend is not None:
+            # Lazy import: kda_kernels pulls in torch via ._eager, so only reach
+            # for it when the knob is actually in use (keeps a plain
+            # KimiK3TransformerConfig() free of the dependency).
+            from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (
+                KDA_BACKENDS,
+            )
+
+            selector = str(self.use_kimi_k3_attention_backend)
+            if selector not in KDA_BACKENDS:
+                raise ValueError(
+                    "use_kimi_k3_attention_backend must be one of "
+                    f"{list(KDA_BACKENDS)} (or null to defer to kda_backend); "
+                    f"got {selector!r}."
+                )
+            self.use_kimi_k3_attention_backend = selector
+            # The unified knob is authoritative for the chunk kernel.
+            self.kda_backend = selector
 
         # Keep the DeepSeek-style ``norm_epsilon`` alias and MCore's
         # ``layernorm_epsilon`` in step before parent validation runs

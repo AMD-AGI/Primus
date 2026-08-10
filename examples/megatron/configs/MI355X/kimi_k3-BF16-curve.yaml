@@ -3,84 +3,43 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:kimi_k3-curve}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Kimi K3 real-data convergence-curve experiment (BF16, 8 x MI355X, one node).
-#
-# This is the phase-2 BASELINE / CONTROL run: the current (DeepSeek-V4)
-# training recipe from DECISIONS.md §2 -- seq_aux_loss @ 1e-3 with the
-# noaux_tc sigmoid expert bias -- on a real corpus. The sibling work package's
-# faithful Kimi K3 recipe (Quantile Balancing + Per-Head Muon) is measured
-# against this curve, so nothing here may be "improved" without invalidating
-# the comparison.
-#
-# Differences from kimi_k3-BF16-pretrain.yaml, and why:
-#
-#  1. REAL DATA. `mock_data: false` plus a tokenized wikitext-103-raw-v1
-#     index. Megatron's mock data is the deterministic ramp
-#     `1, 2, 3, ..., <eod>` (gpt_dataset.py:814-819) whose conditional entropy
-#     is 0.0018 nats, i.e. the successor function -- see VALIDATION.md §1.1.
-#     Nothing about convergence on real text can be inferred from it.
-#
-#  2. `moe_router_force_load_balancing` is deliberately ABSENT from this file.
-#     The flag belongs to the sibling work package, and its Megatron default
-#     is already the value a real run needs -- `transformer_config.py:714`
-#     declares `moe_router_force_load_balancing: bool = False`. The phase-1
-#     smoke run only had it on because kimi_k3-BF16-pretrain.yaml sets
-#     `${PRIMUS_MOE_FORCE_LOAD_BALANCING:true}` (line 96 of that file), which
-#     replaced every router logit with a `normal_()` draw for the whole run
-#     (VALIDATION.md §7.2). This experiment does not extend that file, so
-#     omitting the key is what turns it off, with no contested line to merge.
-#
-#  3. A real held-out split. `valid_data_path` points at wikitext's OWN
-#     validation split, preprocessed separately, so it is document-disjoint
-#     from train by construction rather than by a `split:` ratio over one
-#     index. 523 documents / ~261 k tokens.
-#
-#  4. `eval_interval` / `eval_iters` are non-zero. The pretrain YAML has
-#     `eval_iters: 0`, i.e. it reports train loss only.
-#
-# Launch: phase2_infra/run_curve.sh (do not hand-run; it sets the 8-GPU
-# networking and the EP=8 arrangement).
+# Kimi K3 "curve" (24L / hidden 2048 / 32 experts) single-node BF16 real-data
+# convergence experiment for MI355X (8 GPUs, EP=8). Point the data/tokenizer
+# env-var defaults below at a tokenized corpus + tokenizer dir, or set
+# mock_data: true for a synthetic smoke.
 
 modules:
   pre_trainer:
     framework: megatron
     config: pre_trainer.yaml
 
-    # kimi_k3_curve = the 24-layer, hidden-2048 shape designed for this run.
+    # kimi_k3_curve = the 24-layer, hidden-2048 shape for this experiment.
     model: ${PRIMUS_MODEL:kimi_k3_curve}.yaml
     overrides:
       # ---------- log ----------
       wandb_project: "Primus_Kimi_K3_Curve"
       disable_wandb: true
       stderr_sink_level: DEBUG
-      # The first two iterations include the Triton autotune of chunk_kda and
-      # the allocator warm-up, so they are excluded from the running averages
-      # (they read 13.5 s and 7.1 s against a 0.6 s steady state in the phase-1
-      # smoke log).
+      # The first two iterations include the Triton autotune of chunk_kda and the
+      # allocator warm-up, so they are excluded from the running averages.
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
       log_interval: ${PRIMUS_LOG_INTERVAL:1}
 
       # ---------- token budget ----------
-      # gbs 128 x seq 2048 = 262 144 tokens per iteration.
-      # The train index holds 122.9 M tokens (measured:
-      # data/corpus_stats.json), so 469 iterations is exactly one epoch.
-      # TRAIN_ITERS defaults to 450 -> 118 M tokens, 0.96 epoch, which keeps
-      # the held-out number honest: no training document is seen twice.
+      # gbs 128 x seq 2048 = 262144 tokens per iteration. Size TRAIN_ITERS to your
+      # corpus so no training document is seen twice (keeps the held-out eval honest).
       train_iters: ${TRAIN_ITERS:450}
       micro_batch_size: ${MBS:2}
       global_batch_size: ${GBS:128}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:2048}
 
-      # ---------- hyper parameters: UNCHANGED from the pretrain YAML ----------
-      # These are the sibling work package's lane (LR schedule, weight decay).
-      # They are restated rather than inherited only because this file does not
-      # extend kimi_k3-BF16-pretrain.yaml, and they are byte-identical to it
-      # except for lr_warmup_iters -- 0 warmup steps over 450 total iterations
-      # would put the largest gradient of the run on a random init, so 1 % of
-      # the schedule is warmed up, which is also what the tech report specifies
-      # (DESIGN.md §3.8, "1 % linear warmup").
+      # ---------- hyper parameters ----------
+      # Restated (not inherited) because this file does not extend
+      # kimi_k3-BF16-pretrain.yaml. lr_warmup_iters is nonzero here (~1% linear
+      # warmup, per the Kimi K3 tech report) so the first/largest gradient does not
+      # land on a random init.
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: ${LR_WARMUP_ITERS:5}
@@ -93,12 +52,11 @@ modules:
       init_method_std: 0.02
       norm_epsilon: 1.0e-5
 
-      # ---------- parallel: the DeepSeek-V4 8-GPU arrangement ----------
-      # EP=8 over the 8 GPUs of one node, TP=1, PP=1. num_experts is 32, so
-      # each GPU holds exactly 4 local experts. PP must stay 1:
-      # KimiK3TransformerBlock.__init__ refuses PP>1 while attention residuals
-      # are live, because the second tensor has to cross the pipeline seam and
-      # that is WP7's job.
+      # ---------- parallel ----------
+      # EP=8 over the 8 GPUs of one node, TP=1, PP=1. num_experts is 32, so each
+      # GPU holds exactly 4 local experts. PP must stay 1: KimiK3TransformerBlock
+      # refuses PP>1 while attention residuals are live (the block residual would
+      # have to cross the pipeline seam).
       tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: ${PRIMUS_PP:1}
       expert_model_parallel_size: ${PRIMUS_EP:8}
@@ -109,35 +67,31 @@ modules:
       # ---------- data: REAL ----------
       mock_data: false
       tokenizer_type: HuggingFaceTokenizer
-      # A local snapshot directory, not a Hub id: the compute node has egress
-      # but a run should not depend on it, and HuggingFaceTokenizer passes this
-      # straight to AutoTokenizer.from_pretrained
-      # (huggingface_tokenizer.py:70-74), which accepts a directory containing
-      # tokenizer_config.json + tokenizer.json.
-      tokenizer_model: ${PRIMUS_TOKENIZER_MODEL:/shared_nfs/botao/hf_cache/hub/models--Qwen--Qwen2.5-72B/snapshots/efba10c8e54e91e0d9570ab5f7b51a958474d4cb}
+      # A local snapshot directory or a Hub id: HuggingFaceTokenizer passes this
+      # straight to AutoTokenizer.from_pretrained (huggingface_tokenizer.py:70-74),
+      # which accepts a directory containing tokenizer_config.json + tokenizer.json.
+      tokenizer_model: ${PRIMUS_TOKENIZER_MODEL:/path/to/qwen2.5-tokenizer-dir}
       # Weightless single-prefix form. The `.bin`/`.idx` suffix is NOT part of
       # the path.
-      train_data_path: ["${PRIMUS_TRAIN_DATA:/shared_nfs/botao/kimi_k3/data/wikitext103_train_qwen25_text_document}"]
-      valid_data_path: ["${PRIMUS_VALID_DATA:/shared_nfs/botao/kimi_k3/data/wikitext103_valid_qwen25_text_document}"]
+      train_data_path: ["${PRIMUS_TRAIN_DATA:/path/to/train_text_document}"]
+      valid_data_path: ["${PRIMUS_VALID_DATA:/path/to/valid_text_document}"]
       # Pointed at the same index as valid, not left null: Megatron builds all
       # three splits from `blend_per_split` and asks each for
       # `train_valid_test_num_samples`, so a None test entry with a non-zero
       # `eval_iters` is a needless failure surface. The final test evaluation
       # is therefore a duplicate of the validation number and is ignored.
-      test_data_path: ["${PRIMUS_VALID_DATA:/shared_nfs/botao/kimi_k3/data/wikitext103_valid_qwen25_text_document}"]
+      test_data_path: ["${PRIMUS_VALID_DATA:/path/to/valid_text_document}"]
       # MUST be null with per-split paths. `trainer_base.yaml:264` defaults it
       # to "99,1,0", and `arguments.py:510-514` only auto-fills it for the
       # `data_path` form; leaving a ratio set alongside explicit per-split
       # indexes would ask Megatron to slice an already-split corpus again.
       split: null
-      data_cache_path: ${PRIMUS_DATA_CACHE:/shared_nfs/botao/kimi_k3/data/cache}
+      data_cache_path: ${PRIMUS_DATA_CACHE:/path/to/data_cache}
 
       # ---------- validation loss ----------
-      # 20 eval iterations at gbs 128 = 5.24 M tokens per evaluation, which is
-      # 20x the entire held-out split, so the sampler wraps. That is fine and
-      # is what the phase-1 validation did too (VALIDATION.md §3.2 used 20 eval
-      # iterations); it makes the number a low-variance estimate over the whole
-      # held-out set rather than a sample of it.
+      # 20 eval iterations at gbs 128 = 5.24 M tokens per evaluation, a
+      # low-variance estimate over the held-out set (the sampler wraps if the
+      # held-out split is smaller than that).
       eval_iters: ${EVAL_ITERS:20}
       eval_interval: ${EVAL_INTERVAL:50}
 
@@ -151,10 +105,8 @@ modules:
       use_precision_aware_optimizer: false
 
       # ---------- recompute ----------
-      # Off. 8 x 288 GB is far more memory than this shape needs (the debug
-      # shape peaked at 14.6 GB), and recompute would double-count the forward
-      # in any FLOPs-per-second figure, which is the one number WP8 just spent
-      # its effort making trustworthy.
+      # Off. This shape fits comfortably on 8 x 288 GB, and recompute would
+      # double-count the forward in any FLOPs-per-second figure.
       recompute_granularity: null
       recompute_method: null
       recompute_num_layers: null
@@ -169,10 +121,9 @@ modules:
       ckpt_format: torch
 
       # ---------- Turbo / DeepEP: OFF ----------
-      # EP=8 makes DeepEP available, but each Turbo path is an independent
-      # failure surface and this run is the control for a recipe comparison,
-      # not a perf run. Turning any of these on would also change the measured
-      # ms/iter, which the sibling's run has to be comparable against.
+      # This is the convergence control run, not a perf run: each Turbo path is an
+      # independent failure surface and would change the measured ms/iter. (The
+      # perf launcher enables grouped_gemm / rms_norm / permute via CLI overrides.)
       enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
       use_turbo_attention: false
       use_turbo_grouped_gemm: false

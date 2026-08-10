@@ -118,10 +118,16 @@ kda_gate_lower_bound: -5.0        # activates the bounded log-decay gate form
 kda_use_full_rank_gate: true      # output gate is a full-rank hidden -> H*D proj
 kda_chunk_size: 64
 # eager | eager_recurrent | fla | flydsl -- see kda_kernels/__init__.py.
-# `eager` is the reference and needs no optional dependency; `fla` is the
-# fused Triton path and requires flash-linear-attention (installed by the
-# megatron pretrain hook's requirements-megatron.txt, not by the base image).
-kda_backend: eager
+# Family default is `fla`: the fused Triton path from flash-linear-attention
+# (installed by the megatron pretrain hook's requirements-megatron.txt). `eager`
+# stays the zero-dependency, differentiable reference -- select it explicitly
+# (kda_backend: eager) on a base image without fla, or as the numerical oracle.
+# NOTE: the KimiK3TransformerConfig dataclass default stays "eager" (see
+# kimi_k3_transformer_config.py) so a config built WITHOUT this yaml -- e.g. a
+# unit test constructing the dataclass directly -- keeps the no-dependency
+# fallback and the module getattr default. This yaml is what every real training
+# run loads, so pinning fla here is what actually takes effect in training.
+kda_backend: fla
 
 # Per-layer interleave: 1 = KDA, 0 = full attention (NoPE MLA). Provided by
 # the per-variant yaml. MUST be an explicit per-layer pattern for the
