@@ -37,6 +37,10 @@ data:
     cache_dir: /mnt/m2m_nobackup/datasets/pcam_ideogram4_256
     shuffle: true
     drop_last: true
+    # Pad the text region to a constant width so the packed sequence length S does not
+    # change between steps (per-batch padding recompiles the graph). 0 derives it from the
+    # cache's longest caption, so nothing is truncated; -1 restores per-batch padding.
+    max_text_tokens: 0
     num_workers: 2
     pin_memory: true
 

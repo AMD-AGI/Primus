@@ -29,7 +29,14 @@ WHAT the adapter does:
     ``encoder_hidden_states [B,S,53248]`` (Qwen3-VL features over text, zeros over
     image), and the ``position_ids/segment_ids/indicator`` for the
     ``[pad][text][image]`` layout. Ideogram model time is ``t = 1 - sigma``.
-  - ``forward`` runs the DiT, slices the image-token velocity, unpacks to
+    It ALSO builds the var-len ``cu_seqlens`` packing here on the host (see
+    :func:`build_cu_seqlens`), so the processor never derives it from the mask inside the
+    compiled region -- that derivation is data-dependent, host-syncing, and under FSDP2
+    its graph break desyncs the per-layer collectives. Disable with
+    ``PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS=0``.
+  - ``forward`` publishes that packing into the attention modules' shared buffer
+    (``ideogram4_packing_buffer``, which documents why that route and not diffusers'
+    ``attention_kwargs``), runs the DiT, slices the image-token velocity, unpacks to
     ``[B,128,H_p,W_p]`` and NEGATES it: the DiT predicts ``x0 - eps`` (inference
     feeds ``-v`` to the scheduler) while AutoModel's target is ``eps - x0``.
 
@@ -49,6 +56,12 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
+from primus.backends.nemo_automodel.ideogram4_packing_buffer import publish_packing
+from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
+    assume_dense_enabled,
+    precompute_cu_seqlens_active,
+)
+
 logger = logging.getLogger(__name__)
 
 # Per-token role / layout constants live with the diffusers transformer definition.
@@ -59,11 +72,80 @@ try:
         OUTPUT_IMAGE_INDICATOR,
         SEQUENCE_PADDING_INDICATOR,
     )
-except Exception:  # pragma: no cover - keep import-safe if diffusers is older
-    IMAGE_POSITION_OFFSET = 4096
-    LLM_TOKEN_INDICATOR = 1
+except Exception:  # pragma: no cover - keep the module importable without diffusers (tests, lint)
+    # Values as of diffusers 0.39.0, read out of the installed package rather than guessed.
+    # They are the layout contract with the model, so a stale literal here silently mislabels
+    # every token: the warning below is the only signal that the real ones were not used.
+    IMAGE_POSITION_OFFSET = 65536
+    LLM_TOKEN_INDICATOR = 3
     OUTPUT_IMAGE_INDICATOR = 2
-    SEQUENCE_PADDING_INDICATOR = 0
+    SEQUENCE_PADDING_INDICATOR = -1
+    logger.warning(
+        "[PrimusIdeogram4] Could not import the Ideogram-4 layout constants from diffusers; "
+        "falling back to the diffusers 0.39.0 values (pad=%d, llm=%d, image=%d, offset=%d). "
+        "Fine for import-only use, but if a real run reaches this the constants may have been "
+        "renamed upstream and the token layout will be wrong with no further error.",
+        SEQUENCE_PADDING_INDICATOR,
+        LLM_TOKEN_INDICATOR,
+        OUTPUT_IMAGE_INDICATOR,
+        IMAGE_POSITION_OFFSET,
+    )
+
+
+def build_cu_seqlens(
+    text_lengths: List[int],
+    max_text_tokens: int,
+    num_image_tokens: int,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Var-len packing for the ``[left-pad][text][image]`` layout, built on the HOST.
+
+    Each row ``b`` of the flattened ``(B*S)`` sequence (``S = max_text_tokens +
+    num_image_tokens``) contributes exactly TWO segments, matching what the model's
+    ``(seg_i == seg_j)`` mask encodes:
+
+      * ``[b*S, b*S+offset)``      the left-pad block (attends only to itself; discarded)
+      * ``[b*S+offset, (b+1)*S)``  the text+image block (Ideogram attends these jointly)
+
+    with ``offset = max_text_tokens - text_lengths[b]``.
+
+    Because the count is always ``2*B``, the returned tensor's length is always ``2*B+1``
+    -- independent of the captions in the batch. That is what keeps the compiled graph
+    reusable: a segment count that varied with the data would change this tensor's shape
+    and force a recompile per distinct length pattern.
+
+    Args:
+        text_lengths: per-sample real (non-pad) text token counts, as Python ints.
+        max_text_tokens: padded width of the text region, INCLUDING the reserved pad
+            column, so that ``offset >= 1`` on every row.
+        num_image_tokens: ``grid_h * grid_w``.
+        device: destination device. Building here costs one host->device copy; the thing
+            being avoided is device->host reads inside the compiled region.
+
+    Returns:
+        ``int32`` ``(2*len(text_lengths)+1,)`` cumulative segment starts, beginning at 0
+        and ending at ``B*S`` -- the ``flash_attn_varlen_func`` contract.
+
+    Raises:
+        ValueError: if any row would produce an empty pad segment (``offset == 0``).
+            Zero-length segments are not representable for var-len flash, and the
+            reserved pad column exists precisely to make this unreachable.
+    """
+    seq_len = max_text_tokens + num_image_tokens
+    starts: List[int] = []
+    for b, num_text in enumerate(text_lengths):
+        offset = max_text_tokens - int(num_text)
+        if offset < 1:
+            raise ValueError(
+                f"row {b} has text_length={int(num_text)} with max_text_tokens={max_text_tokens}, "
+                "leaving no padding. Every row needs >=1 pad token so the segment count (and "
+                "therefore cu_seqlens' shape) is the same for every batch."
+            )
+        base = b * seq_len
+        starts.append(base)
+        starts.append(base + offset)
+    starts.append(len(text_lengths) * seq_len)
+    return torch.tensor(starts, dtype=torch.int32, device=device)
 
 
 def _base_adapter_cls():
@@ -151,6 +233,18 @@ def _build_ideogram4_adapter_class():
             llm_features = batch["llm_features"].to(device, dtype=dtype, non_blocking=True)
             if llm_features.ndim == 2:
                 llm_features = llm_features.unsqueeze(0)
+            # Text capacity as produced by the dataloader, before the reserved pad column.
+            text_capacity = llm_features.shape[1]
+
+            # Reserve one always-pad column so offset >= 1 on every row. Without it a
+            # caption filling the full width yields a single-segment row, so the segment
+            # count -- and thus cu_seqlens' shape -- would vary per batch and recompile the
+            # graph. Costs one token position out of S; capping captions instead would mean
+            # dropping a real token to satisfy the compiler.
+            precompute_cu_seqlens = precompute_cu_seqlens_active()
+            if precompute_cu_seqlens:
+                pad_col = torch.zeros(B, 1, llm_features.shape[-1], device=device, dtype=dtype)
+                llm_features = torch.cat([pad_col, llm_features], dim=1)
             max_text = llm_features.shape[1]
 
             if context.cfg_dropout_prob > 0.0:
@@ -159,9 +253,29 @@ def _build_ideogram4_adapter_class():
 
             text_lengths = batch.get("text_lengths")
             if text_lengths is None:
-                text_lengths = [max_text] * B
+                text_lengths = [text_capacity] * B
             elif torch.is_tensor(text_lengths):
                 text_lengths = text_lengths.tolist()
+            text_lengths = [int(t) for t in text_lengths]
+            if max(text_lengths) > text_capacity:
+                raise ValueError(
+                    f"text_lengths max {max(text_lengths)} exceeds the llm_features text width "
+                    f"{text_capacity}; the dataloader must left-pad to at least the longest caption."
+                )
+
+            # ASSUME_DENSE tells the attention processor to skip the block-diagonal
+            # analysis and run dense flash over the whole row. That is exact only when no
+            # row has padding; on a ragged batch it lets pad tokens attend and leaks
+            # attention across segments, corrupting training with no error. The lengths are
+            # already on the host here, so refusing costs nothing.
+            distinct = sorted(set(text_lengths))
+            if assume_dense_enabled() and len(distinct) > 1:
+                raise ValueError(
+                    "PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1 requires every sample in the batch to have "
+                    f"the same text length, but this batch has lengths {distinct}. Dense flash would "
+                    "let padding tokens attend and silently corrupt training. Unset the flag to use "
+                    "the exact var-len path, or pin min_text_tokens == max_text_tokens."
+                )
 
             text_z = torch.zeros(B, max_text, C, device=device, dtype=dtype)
             hidden_states = torch.cat([text_z, img_tokens], dim=1)  # [B, S, 128]
@@ -170,6 +284,19 @@ def _build_ideogram4_adapter_class():
             encoder_hidden_states = torch.cat([llm_features, img_feat_pad], dim=1)  # [B, S, 53248]
 
             position_ids, segment_ids, indicator = self._prepare_ids(text_lengths, H_p, W_p, max_text, device)
+
+            # Built once here and shared by all layers, so the packing is a graph INPUT
+            # instead of something the processor recovers from the mask 34 times per step.
+            # Left on the HOST: ``forward`` publishes it into the attention modules' shared
+            # buffer, and that single copy_ is then the only host->device transfer.
+            # max_seqlen is the static upper bound S, not the true per-batch maximum:
+            # Dynamo guards Python ints by value, so a data-derived one would recompile
+            # almost every batch.
+            cu_seqlens = None
+            max_seqlen = None
+            if precompute_cu_seqlens:
+                cu_seqlens = build_cu_seqlens(text_lengths, max_text, num_image_tokens)
+                max_seqlen = max_text + num_image_tokens
 
             # Ideogram model time: 0=noise, 1=data => t = 1 - sigma.
             timestep = (1.0 - context.sigma).to(dtype)
@@ -184,12 +311,37 @@ def _build_ideogram4_adapter_class():
                 "_max_text": max_text,
                 "_h_p": H_p,
                 "_w_p": W_p,
+                "_cu_seqlens": cu_seqlens,
+                "_max_seqlen": max_seqlen,
             }
 
         def forward(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
             max_text = inputs.pop("_max_text")
             h_p = inputs.pop("_h_p")
             w_p = inputs.pop("_w_p")
+            cu_seqlens = inputs.pop("_cu_seqlens", None)
+            max_seqlen = inputs.pop("_max_seqlen", None)
+
+            # Publish the packing onto the attention modules, which is where the processor
+            # reads it (``ideogram4_packing_buffer``). Diffusers' ``attention_kwargs`` cannot
+            # carry it: the model never forwards it to the blocks in 0.39.0, so passing it was
+            # a silent no-op. Two ordering rules, both silent when broken: this must happen
+            # BEFORE the model call, and nothing may republish between the forward and its
+            # backward -- per-layer compile lives inside the checkpoint wrapper, so the block
+            # re-reads this buffer during the backward recompute.
+            if cu_seqlens is not None:
+                publish_packing(
+                    model,
+                    cu_seqlens,
+                    max_seqlen,
+                    device=inputs["hidden_states"].device,
+                    # Having built a packing, a model that cannot read it is a misconfiguration,
+                    # not a fallback: every layer would derive its own from the mask, and on a
+                    # subset of ranks that quietly averages two attention paths into one
+                    # gradient. Non-zero ranks log nothing after init, so raising is the only
+                    # way this becomes visible.
+                    required=True,
+                )
 
             out = model(
                 hidden_states=inputs["hidden_states"],
@@ -198,7 +350,6 @@ def _build_ideogram4_adapter_class():
                 position_ids=inputs["position_ids"],
                 segment_ids=inputs["segment_ids"],
                 indicator=inputs["indicator"],
-                attention_kwargs=None,
                 return_dict=False,
             )
             pred = self.post_process_prediction(out)  # [B, S, 128]

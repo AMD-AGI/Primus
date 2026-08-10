@@ -48,11 +48,29 @@ CORRECTNESS:
   warns once — it never silently relays the unoptimized path for the case it exists to
   serve (Ideogram always passes a boolean block-diagonal mask).
 
+COMPILE:
+  The mask->``cu_seqlens`` transform is data-dependent (``.any()``, ``nonzero``, ``.item()``),
+  so it forces device->host reads that ``torch.compile`` cannot trace -- each is a graph break,
+  and under FSDP2 a mid-forward break splits the region the per-layer all-gather/reshard
+  collectives are registered around and desyncs them across ranks (a silent multi-rank death).
+  The fix is to not derive the packing here at all: ``Ideogram4Adapter`` builds ``cu_seqlens``
+  on the host (it already holds the text lengths as Python ints) and publishes it into a shared
+  non-persistent buffer on the attention modules, making it a graph INPUT (see
+  ``ideogram4_packing_buffer.py`` for why that route and not ``attention_kwargs``, which is a
+  dead parameter for this model in diffusers 0.39.0). That path is exact on ragged batches,
+  needs no host sync, and stops recomputing the same packing once per layer.
+
 Activation (env, no config schema change):
-    PRIMUS_IDEOGRAM_VARLEN_ATTN=1        swap Ideogram-4 attention to the var-len flash path
-    PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1  skip the mask->cu_seqlens host-sync and use dense flash
-                                         directly (torch.compile-safe; EXACT only for
-                                         equal-length / unpadded batches, e.g. fixed-text)
+    PRIMUS_IDEOGRAM_VARLEN_ATTN=1          swap Ideogram-4 attention to the var-len flash path
+    PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS  default 1; set 0 to stop the adapter precomputing
+                                           the packing and fall back to the mask-derived
+                                           (host-syncing) path. Escape hatch for A/B and
+                                           rollback.
+    PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1    skip the mask->cu_seqlens host-sync and use dense
+                                           flash directly (torch.compile-safe; EXACT only for
+                                           equal-length / unpadded batches, e.g. fixed-text).
+                                           Never fires while a precomputed cu_seqlens is
+                                           provided, which now takes precedence.
 """
 from __future__ import annotations
 
@@ -62,6 +80,8 @@ from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
+
+from primus.backends.nemo_automodel.ideogram4_packing_buffer import resolve_packing
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +103,37 @@ def assume_dense_enabled() -> bool:
     ``PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE=1`` to skip the analysis and go straight to dense
     flash, keeping the compiled per-layer graph break-free. EXACT only for equal-length /
     no-pad batches (e.g. fixed-text); do NOT set it for ragged/padded batches.
+
+    Superseded in practice by :func:`precompute_cu_seqlens_enabled` -- when the adapter
+    hands the packing in, the processor prefers it and this flag never fires.
     """
     return os.getenv("PRIMUS_IDEOGRAM_ATTN_ASSUME_DENSE", "0") in _TRUTHY
+
+
+def precompute_cu_seqlens_enabled() -> bool:
+    """Whether the adapter precomputes ``cu_seqlens`` on the host. Default ON.
+
+    The adapter already holds the per-sample text lengths as Python ints, so it can build
+    the var-len packing itself and pass it into the processor as a plain tensor -- a graph
+    INPUT rather than something derived from the mask mid-graph. That removes the
+    device->host syncs, so the exact var-len path compiles on ragged batches.
+
+    Set ``PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS=0`` to restore the previous behaviour
+    (mask-derived packing, or dense flash under ``ASSUME_DENSE``). Kept as an escape hatch
+    for A/B measurement and rollback, not as a routine knob.
+    """
+    return os.getenv("PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS", "1") in _TRUTHY
+
+
+def precompute_cu_seqlens_active() -> bool:
+    """Whether precomputing the packing will actually be *read* by anything.
+
+    Both switches have to be on. Without ``PRIMUS_IDEOGRAM_VARLEN_ATTN`` the stock SDPA
+    processor is in place and has no ``cu_seqlens`` parameter, so precomputing would cost a
+    build plus the reserved pad column's token position every step for nothing. This is the
+    gate the adapter uses; :func:`precompute_cu_seqlens_enabled` is only the flag.
+    """
+    return is_varlen_attn_enabled() and precompute_cu_seqlens_enabled()
 
 
 # --------------------------------------------------------------------------- #
@@ -210,6 +259,16 @@ class Ideogram4VarlenAttnProcessor:
     Mirrors diffusers ``Ideogram4AttnProcessor`` (q/k/v proj, q/k RMSNorm, MRoPE, output
     proj) and swaps only the attention call for a ``cu_seqlens`` flash path. Non-det
     backward (``deterministic=False``).
+
+    ``_attention`` picks a path in this order:
+
+      1. **provided** ``cu_seqlens`` -- the adapter precomputed the packing on the host and
+         published it into the shared buffer this processor reads off ``attn``. Exact on
+         ragged batches and free of data-dependent ops, so it is the only path that is
+         simultaneously correct on ragged data and safe under per-layer ``torch.compile``
+         + FSDP2.
+      2. ``assume_dense`` **or no mask** -- dense flash. Exact only when no row has padding.
+      3. **mask analysis** (legacy) -- exact, but its device->host reads graph-break.
     """
 
     # kept for API-compatibility with diffusers' processor discovery / set_attention_backend
@@ -227,7 +286,18 @@ class Ideogram4VarlenAttnProcessor:
         hidden_states: Tensor,
         attention_mask: Optional[Tensor],
         image_rotary_emb: Tuple[Tensor, Tensor],
+        cu_seqlens: Optional[Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> Tensor:
+        # The packing normally arrives on the module: the adapter publishes it into a shared
+        # non-persistent buffer that ``resolve_packing`` reads off ``attn`` (see
+        # ``ideogram4_packing_buffer.py``). The two named parameters are kept because
+        # diffusers' attention module filters forwarded kwargs against
+        # ``inspect.signature(self.processor.__call__).parameters``, so declaring them by name
+        # is what would let a kwargs route work at all -- a ``**kwargs``-only processor would
+        # silently receive nothing. An explicit argument wins over the buffer.
+        cu_seqlens, max_seqlen = resolve_packing(attn, cu_seqlens, max_seqlen)
+
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
@@ -241,11 +311,19 @@ class Ideogram4VarlenAttnProcessor:
         query = (query * cos) + (_rotate_half(query) * sin)
         key = (key * cos) + (_rotate_half(key) * sin)
 
-        out = self._attention(query, key, value, attention_mask)
+        out = self._attention(query, key, value, attention_mask, cu_seqlens, max_seqlen)
         out = out.flatten(2, 3)
         return attn.to_out[0](out)
 
-    def _attention(self, query: Tensor, key: Tensor, value: Tensor, attention_mask: Optional[Tensor]) -> Tensor:
+    def _attention(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attention_mask: Optional[Tensor],
+        cu_seqlens: Optional[Tensor] = None,
+        max_seqlen: Optional[int] = None,
+    ) -> Tensor:
         B, L, H, D = query.shape
 
         # No mask, or a mask type we cannot represent as contiguous segments: for a
@@ -272,6 +350,53 @@ class Ideogram4VarlenAttnProcessor:
         query = query.to(compute_dtype)
         key = key.to(compute_dtype)
 
+        # PREFERRED PATH: the packing was precomputed on the host and handed in, so nothing
+        # here inspects tensor values. Exact on ragged batches AND compile-safe -- this is
+        # the only combination of those two properties available (aiter.flash_attn_varlen_func
+        # is itself traceable, so the whole processor stays in one graph and the FSDP2
+        # per-layer collectives keep their ordering). ``attention_mask`` is deliberately not
+        # read on this path; the model still materializes it, which is now dead weight.
+        # The branch tests a property of the RUN (was anything provided), not of the data,
+        # so it costs one guard and no graph break.
+        if cu_seqlens is not None:
+            # The packing lives on the module and outlives the step that published it, so a
+            # caller that bypasses the adapter (a sampling pass, an eval loop with a different
+            # batch size) could otherwise attend on a stale one and corrupt silently. This
+            # compares only static SHAPE metadata -- no values are read, so it costs a guard
+            # and no host sync. ``2B+1`` is the layout contract: one pad segment plus one
+            # text+image segment per row. Packing several samples per row would change that
+            # count, and this check with it.
+            expected = 2 * B + 1
+            if cu_seqlens.numel() != expected:
+                raise ValueError(
+                    f"cu_seqlens has {cu_seqlens.numel()} entries but this batch needs "
+                    f"{expected} (2*B+1 for B={B}). Either the packing was published for a "
+                    "different batch size and is stale -- call "
+                    "ideogram4_packing_buffer.clear_packing(model) before running the model "
+                    "outside the adapter -- or the sequence layout no longer has exactly two "
+                    "segments per row, in which case update this check."
+                )
+            # Hand the kernel a PRIVATE COPY, never the shared buffer. aiter's var-len op
+            # treats cu_seqlens as a mutable argument: it saves the tensor for its backward
+            # and then writes it, bumping the autograd version counter once per call. One
+            # buffer shared by 34 layers therefore has its version moved 34 times per forward
+            # while each layer's backward still expects the version it saved, and the step
+            # dies in .backward() with "a variable needed for gradient computation has been
+            # modified by an inplace operation: IntTensor[5] is at version 35; expected 34"
+            # (measured 2026-08-04, t2 stage; the legacy path never saw it because every
+            # layer derives its own tensor from the mask). The clone is 5 int32 already on
+            # device, and under compile it is a graph intermediate -- the buffer stays a
+            # read-only graph input, which is what makes sharing it safe at all.
+            out = varlen_flash_attention(
+                query.reshape(B * L, H, D),
+                key.reshape(B * L, H, D),
+                value.reshape(B * L, H, D),
+                cu_seqlens.clone(),
+                L if max_seqlen is None else max_seqlen,
+                deterministic=self.deterministic,
+            )
+            return out.reshape(B, L, H, D)
+
         # Dense fast path. ``attention_mask is None`` OR the equal-length assertion
         # (``assume_dense``) skips the data-dependent mask->cu_seqlens host-sync, so under
         # torch.compile the whole processor stays in one graph (aiter.flash_attn_func is
@@ -281,14 +406,18 @@ class Ideogram4VarlenAttnProcessor:
         if attention_mask is None or self.assume_dense:
             return dense_flash_attention(query, key, value, deterministic=self.deterministic)
 
-        cu_seqlens, max_seqlen, is_trivial = blockdiag_bool_mask_to_cu_seqlens(attention_mask)
+        # LEGACY PATH: derive the packing from the mask. Exact, but the derivation does
+        # device->host reads, so it graph-breaks and is unsafe under multi-rank compile.
+        # Reached only when nothing was precomputed (kill switch, or a non-adapter caller).
+        # Retained as the reference implementation the unit test checks against.
+        cu_from_mask, max_from_mask, is_trivial = blockdiag_bool_mask_to_cu_seqlens(attention_mask)
         if is_trivial:
             return dense_flash_attention(query, key, value, deterministic=self.deterministic)
 
         q = query.reshape(B * L, H, D)
         k = key.reshape(B * L, H, D)
         v = value.reshape(B * L, H, D)
-        out = varlen_flash_attention(q, k, v, cu_seqlens, max_seqlen, deterministic=self.deterministic)
+        out = varlen_flash_attention(q, k, v, cu_from_mask, max_from_mask, deterministic=self.deterministic)
         return out.reshape(B, L, H, D)
 
 
