@@ -10,7 +10,9 @@ from pathlib import Path
 
 def _get_version():
     init = Path(__file__).parent.parent / "primus" / "__init__.py"
-    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init.read_text(), re.MULTILINE)
+    match = re.search(
+        r'^__version__\s*=\s*["\']([^"\']+)["\']', init.read_text(), re.MULTILINE
+    )
     if not match:
         raise ValueError("Could not find __version__ in primus/__init__.py")
     return match.group(1)
@@ -36,9 +38,13 @@ html_theme_options = {
 html_title = project
 
 # Sphinx extension-related configs
-extensions = ["rocm_docs"]
+extensions = [
+    "rocm_docs",
+    "sphinxcontrib.mermaid",
+]
 external_toc_path = "./sphinx/_toc.yml"
 external_projects_current_project = "primus"
+myst_fence_as_directive = ["mermaid"]
 
 # Publish the llms.txt index at the docs site root and let
 # rocm-docs-core generate llms-full.txt after each build (the llms.txt standard,
