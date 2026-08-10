@@ -116,8 +116,15 @@ export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-20}
 export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-300}
 
 # SLURM allocation targets for the `primus-cli slurm` launch below.
+# IMPORTANT: this cluster's scheduler (Spur) does NOT honor srun's --reservation
+# FLAG -- it reads the reservation from the ENVIRONMENT. So export BOTH names and
+# request shared (non-exclusive) access; the reserved nodes are shared with other
+# users, so --exclusive would never get an allocation. These are the exact env
+# vars every working submission on this cluster used.
 export SLURM_PARTITION=${SLURM_PARTITION:-amd-spur}
 export SBATCH_RESERVATION=${SBATCH_RESERVATION:-primus-deepseek-v4-reserved}
+export SLURM_RESERVATION=${SLURM_RESERVATION:-$SBATCH_RESERVATION}
+export SLURM_EXCLUSIVE=${SLURM_EXCLUSIVE:-0}
 export SLURM_TIME=${SLURM_TIME:-04:00:00}
 
 # Node-local Triton cache (avoids the shared-NFS fla causal_conv1d 'hsaco' KeyError).
@@ -317,7 +324,14 @@ CONTAINER_ENV_ARGS=(
     "--env" "PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE}"
 )
 
-SLURM_FLAGS=("-N" "$NNODES" "-p" "$SLURM_PARTITION" "--exclusive" "-t" "$SLURM_TIME")
+# NOTE: NO --exclusive (reserved nodes are shared with other users; exclusive
+# never allocates) and NO -p (the reservation determines the partition; SLURM_*
+# env above carries it). The reservation is applied via the SBATCH_RESERVATION /
+# SLURM_RESERVATION env exported above; --reservation is kept only as a hint.
+# stdout goes to per-node files under the writable HOME workspace, because the
+# submit CWD may be a read-only /shared_nfs checkout (Spur writes spur-<jobid>.out
+# into CWD otherwise). %j = job id, %t = task/node rank -> last node is ..._r3.out.
+SLURM_FLAGS=("-N" "$NNODES" "-t" "$SLURM_TIME" "--output=${PRIMUS_WORKSPACE}/8L_%j_r%t.out")
 [ -n "${SBATCH_RESERVATION:-}" ] && SLURM_FLAGS+=("--reservation=${SBATCH_RESERVATION}")
 
 ./primus-cli slurm srun "${SLURM_FLAGS[@]}" \
