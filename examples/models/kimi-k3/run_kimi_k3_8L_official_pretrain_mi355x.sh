@@ -68,6 +68,7 @@
 # USAGE
 #   NNODES=4 bash examples/models/kimi-k3/run_kimi_k3_8L_official_pretrain_mi355x.sh
 #   Override any knob from the environment, e.g. MBS=1 SEQ_LENGTH=4096 TRAIN_ITERS=20 ...
+#   Pin the allocation with SLURM_NODELIST="nodeA,nodeB,..." (forwarded to srun -w).
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
@@ -333,6 +334,12 @@ CONTAINER_ENV_ARGS=(
 # into CWD otherwise). %j = job id, %t = task/node rank -> last node is ..._r3.out.
 SLURM_FLAGS=("-N" "$NNODES" "-t" "$SLURM_TIME" "--output=${PRIMUS_WORKSPACE}/8L_%j_r%t.out")
 [ -n "${SBATCH_RESERVATION:-}" ] && SLURM_FLAGS+=("--reservation=${SBATCH_RESERVATION}")
+# Node pinning. The reservation is env-driven on Spur, but SLURM_NODELIST is NOT:
+# exporting it is silently ignored and the job lands on an arbitrary subset of the
+# reservation. srun's -w/--nodelist flag IS honored, so forward the env var as a
+# flag. Give the scheduler's full node names (e.g. "nodeA,nodeB"), not bare
+# suffixes, and keep NNODES consistent with the list length.
+[ -n "${SLURM_NODELIST:-}" ] && SLURM_FLAGS+=("-w" "$SLURM_NODELIST")
 
 ./primus-cli slurm srun "${SLURM_FLAGS[@]}" \
     -- container --shm-size 64g "${CONTAINER_VOL_ARGS[@]}" "${CONTAINER_ENV_ARGS[@]}" \
