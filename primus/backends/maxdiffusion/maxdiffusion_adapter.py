@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
+import primus.backends.maxdiffusion.patches  # noqa: F401  # Register patches
 from primus.backends.maxdiffusion.argument_builder import MaxDiffusionConfigBuilder
 from primus.backends.maxdiffusion.env_spec import maxdiffusion_env_defaults
 from primus.core.backend.backend_adapter import BackendAdapter
