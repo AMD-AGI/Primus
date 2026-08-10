@@ -31,6 +31,19 @@ def test_turbo_ragged_grouped_gemm_accepts_tensorwise_fp8():
     validate_turbo_ragged_grouped_gemm(_ragged_args())
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"fp8_recipe": "blockwise"},
+        {"fp8_recipe": "mxfp8"},
+        {"fp8": None, "fp8_recipe": None, "fp4": "e2m1", "fp4_recipe": "mxfp4"},
+        {"fp8": None, "fp8_recipe": None, "fp4": False},
+    ],
+)
+def test_turbo_ragged_grouped_gemm_accepts_all_supported_precision_modes(overrides):
+    validate_turbo_ragged_grouped_gemm(_ragged_args(**overrides))
+
+
 def test_turbo_ragged_grouped_gemm_disabled_is_noop():
     validate_turbo_ragged_grouped_gemm(SimpleNamespace())
 
@@ -40,9 +53,6 @@ def test_turbo_ragged_grouped_gemm_disabled_is_noop():
     [
         ({"enable_primus_turbo": False}, "requires enable_primus_turbo"),
         ({"use_turbo_grouped_gemm": False}, "requires enable_primus_turbo"),
-        ({"fp8": None}, "supports only tensorwise FP8"),
-        ({"fp8_recipe": "blockwise"}, "supports only tensorwise FP8"),
-        ({"fp4": True}, "supports only tensorwise FP8"),
         (
             {"moe_router_padding_for_quantization": True},
             "requires moe_router_padding_for_quantization=False",

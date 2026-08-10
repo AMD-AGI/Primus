@@ -47,9 +47,9 @@ class PrimusGroupedMLP(TEGroupedMLP):
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
         self.use_turbo_ragged_grouped_gemm = getattr(args, "use_turbo_ragged_grouped_gemm", False)
-        # PrimusTurbo's tensorwise FP8 grouped GEMM consumes the original GPU
-        # tokens_per_expert tensor, including non-aligned (ragged) group sizes.
-        # Keep TE's explicit zero-padding fallback for other recipes/backends.
+        # PrimusTurbo grouped GEMMs consume the original GPU tokens_per_expert
+        # tensor for every supported quantization recipe. Keep TE's explicit
+        # zero-padding fallback only when the ragged path is not enabled.
 
     def _use_explicit_quantization_padding(self) -> bool:
         """Whether this forward must pad expert groups before quantization."""
@@ -57,25 +57,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
             return False
         if self.moe_router_padding_for_quantization:
             return False
-        if not self.use_turbo_ragged_grouped_gemm:
-            return True
-
-        # Check the active autocast state at forward time. The CLI recipe alone
-        # does not prove that this grouped linear is actually using Turbo FP8.
-        from primus.backends.megatron.core.extensions.primus_turbo import (
-            PrimusTurboLowPrecisionGlobalStateManager,
-        )
-
-        if not PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-            raise RuntimeError(
-                "use_turbo_ragged_grouped_gemm=True requires an active PrimusTurbo FP8 autocast context."
-            )
-        quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-        if not quant_config.current_scaling():
-            raise RuntimeError(
-                "use_turbo_ragged_grouped_gemm=True currently requires tensorwise dynamic FP8 scaling."
-            )
-        return False
+        return not self.use_turbo_ragged_grouped_gemm
 
     def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
         """

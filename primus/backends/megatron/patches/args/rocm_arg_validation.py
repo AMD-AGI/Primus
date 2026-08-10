@@ -104,12 +104,6 @@ def validate_turbo_ragged_grouped_gemm(args) -> None:
         return
     if not getattr(args, "enable_primus_turbo", False) or not getattr(args, "use_turbo_grouped_gemm", False):
         raise ValueError(f"{option}=True requires enable_primus_turbo=True and use_turbo_grouped_gemm=True.")
-    if (
-        not getattr(args, "fp8", None)
-        or getattr(args, "fp8_recipe", None) != "tensorwise"
-        or getattr(args, "fp4", False)
-    ):
-        raise ValueError(f"{option}=True currently supports only tensorwise FP8.")
     if getattr(args, "moe_router_padding_for_quantization", False):
         raise ValueError(
             "use_turbo_ragged_grouped_gemm=True requires moe_router_padding_for_quantization=False."
