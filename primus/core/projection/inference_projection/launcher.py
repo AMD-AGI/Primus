@@ -287,7 +287,7 @@ def _emit_restore_confidence(anchor_paths, target_gpus: int) -> None:
             return
         v = confidence_ladder(target_gpus, anchors_by_gpu)
         rungs = ",".join(str(g) for g in sorted(anchors_by_gpu))
-        cap_on = os.getenv("PRIMUS_DECODE_ETP_CAP", "1").strip().lower() not in ("0", "false", "no")
+        cap_on = os.getenv("PRIMUS_DECODE_ETP_CAP", "0").strip().lower() in ("1", "true", "yes")
         if v["confidence"] == "high":
             # In-regime anchor: the raw origami restore is trustworthy. The ETP
             # cap is unnecessary here and would over-correct a near-target anchor.

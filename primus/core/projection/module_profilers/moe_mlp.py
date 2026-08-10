@@ -177,13 +177,16 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # ``etp`` ranks (attention/token/EP sharding still apply). Prefill (large
         # M, compute-bound, seq_len>1) keeps the full ``etp`` speedup. Only the
         # extra TP-over-EP factor is capped; EP-only sharding (etp==1) is a no-op.
-        # Toggle: PRIMUS_DECODE_ETP_CAP=0 restores the uncapped weight relief.
+        # Toggle: opt-in via PRIMUS_DECODE_ETP_CAP=1 to apply the cap; the default
+        # (unset/0) leaves the uncapped weight relief because the confidence ladder
+        # self-anchors pure-TP configs at the target instead of relying on this
+        # analytical correction, which can over-correct an in-regime anchor.
         weight_expert_tp = expert_tp
         if (
             int(seq_len) <= 1
             and expert_tp > 1
-            and os.getenv("PRIMUS_DECODE_ETP_CAP", "1").strip().lower()
-            not in ("0", "false", "no")
+            and os.getenv("PRIMUS_DECODE_ETP_CAP", "0").strip().lower()
+            in ("1", "true", "yes")
         ):
             weight_expert_tp = 1
 
