@@ -34,6 +34,14 @@ modules:
       ici_tensor_sequence_parallelism: -1
 
       remat_policy: "full"
-      max_target_length: 8192
+      # v26.6 (rocm-main) maxtext: use reference dot_product attention. The
+      # efficient attention kernels do not support gemma4's bidirectional
+      # sliding-window layers with synthetic (unpacked) data and abort with
+      # "Sliding window attention requires context parallelism with load-balanced
+      # ring strategy and packing enabled". max_target_length is reduced to 4096
+      # because dot_product compilation is very heavy at 8192.
+      # Mirrors the MI355X configs validated in the v26.6 MAD sweep (fc4dc19b).
+      attention: "dot_product"
+      max_target_length: 4096
       # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
       per_device_batch_size: 1
