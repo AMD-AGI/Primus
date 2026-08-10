@@ -6,6 +6,8 @@
 
 import os
 
+import pytest
+
 from tests.utils import PrimusUT, run_training_script
 
 
@@ -45,6 +47,26 @@ def run_script(
 
 
 class TestTorchTitanTrainer(PrimusUT):
+    """One config per distinct code path; isomorphic flavors are not tested here.
+
+    Every case is a full training launch, so a model whose code path a sibling
+    already covers earns no coverage. What is kept and why:
+
+    - llama3.1_8B BF16 + FP8: the dense llama path, both precisions.
+    - qwen3_0.6B: the qwen3 dense path (activation_checkpoint off).
+    - qwen3_32B: the dense config with activation_checkpoint.mode=full.
+    - deepseek_v3_16b: MLA + MoE on classic attention, no float8.
+    - deepseek_v3_16b_fp8: the only use_moe_fp8 path; also swaps classic
+      attention for the turbo one.
+    - deepseek_v3_671b: MLA + MoE under full recompute and
+      use_turbo_float8_linear.
+    - gpt_oss_20B BF16 + FP8: MoE + sink attention, selective checkpointing.
+
+    llama3.1_70B / llama3.1_405B (both precisions) and qwen3_1.7B used to be
+    here; they only scaled the dims of the above. Their recipes are still
+    schema-checked by tests/unit_tests/configs/test_example_configs.py.
+    """
+
     def test_llama3_1_8B_BF16(self):
         run_script(
             self.__class__.__name__,
@@ -75,86 +97,11 @@ class TestTorchTitanTrainer(PrimusUT):
             ],
         )
 
-    def test_llama3_1_405B_bf16(self):
-        run_script(
-            self.__class__.__name__,
-            "llama3.1_405B_bf16",
-            "examples/torchtitan/configs/MI300X/llama3.1_405B-BF16-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--training.mock_data",
-                "True",
-            ],
-        )
-
-    def test_llama3_1_405B_fp8(self):
-        run_script(
-            self.__class__.__name__,
-            "llama3.1_405B_fp8",
-            "examples/torchtitan/configs/MI300X/llama3.1_405B-FP8-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--training.mock_data",
-                "True",
-            ],
-        )
-
-    def test_llama3_1_70B_bf16(self):
-        run_script(
-            self.__class__.__name__,
-            "llama3.1_70B_bf16",
-            "examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--training.mock_data",
-                "True",
-            ],
-        )
-
-    def test_llama3_1_70B_fp8(self):
-        run_script(
-            self.__class__.__name__,
-            "llama3.1_70B_fp8",
-            "examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--training.mock_data",
-                "True",
-            ],
-        )
-
     def test_qwen3_0_6B(self):
         run_script(
             self.__class__.__name__,
             "qwen3_0.6B",
             "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--training.mock_data",
-                "True",
-            ],
-        )
-
-    def test_qwen3_1_7B(self):
-        run_script(
-            self.__class__.__name__,
-            "qwen3_1.7B",
-            "examples/torchtitan/configs/MI300X/qwen3_1.7B-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -252,6 +199,24 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "gpt_oss_20B_fp8",
             "examples/torchtitan/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml",
+            extra_args=[
+                "--model.n_layers",
+                "4",
+                "--training.steps",
+                "3",
+                "--training.mock_data",
+                "True",
+            ],
+        )
+
+    # Llama 4 had no E2E in either backend. Distinct from the llama3 flavor above:
+    # MoE with a shared expert, and the recipe's use_turbo_grouped_mm path.
+    @pytest.mark.weekly
+    def test_llama4_17Bx16E(self):
+        run_script(
+            self.__class__.__name__,
+            "llama4_17Bx16E",
+            "examples/torchtitan/configs/MI300X/llama4_17Bx16E-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
