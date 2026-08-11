@@ -95,7 +95,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import torch  # noqa: F401  # must precede any transformer_engine import
 from megatron.core.transformer.multi_token_prediction import (
     MultiTokenPredictionBlock,
     MultiTokenPredictionBlockSubmodules,

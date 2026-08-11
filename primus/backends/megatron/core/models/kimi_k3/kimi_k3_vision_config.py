@@ -61,7 +61,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Tuple
 
-import torch  # noqa: F401  # must precede any transformer_engine import
+import torch
 import torch.nn.functional as F
 from megatron.core.transformer.transformer_config import TransformerConfig
 

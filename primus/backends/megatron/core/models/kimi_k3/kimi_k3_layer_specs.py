@@ -36,7 +36,6 @@ import logging
 import re
 from typing import TYPE_CHECKING, List, Optional
 
-import torch  # noqa: F401  # must precede any transformer_engine import
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec

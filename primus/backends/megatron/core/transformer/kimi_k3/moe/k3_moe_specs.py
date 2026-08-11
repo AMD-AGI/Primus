@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-import torch  # noqa: F401  # must precede any transformer_engine import
 from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec

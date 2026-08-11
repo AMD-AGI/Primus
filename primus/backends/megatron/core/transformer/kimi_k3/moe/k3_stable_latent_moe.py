@@ -109,7 +109,7 @@ from copy import copy
 from dataclasses import dataclass
 from typing import Optional, Union
 
-import torch  # noqa: F401  # must precede any transformer_engine import
+import torch
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules

@@ -108,7 +108,7 @@ from __future__ import annotations
 import logging
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-import torch  # noqa: F401  # must precede any transformer_engine import
+import torch
 
 from primus.backends.megatron.core.transformer.kimi_k3.moe.qb_kernels import (
     QB_BACKENDS,
