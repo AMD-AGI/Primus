@@ -139,7 +139,17 @@ def install() -> bool:
 
         # Drive prof.step() from the recipe's per-step optimizer.step (called once
         # per optimization step) without editing the submodule loop body.
-        orig_opt_step = self.optimizer.step
+        #
+        # ``self.optimizer`` is a LIST: OptimizerConfig.build returns one optimizer per
+        # model part, and the recipe steps each in turn. Hook only the LAST one, so the
+        # profiler schedule advances exactly once per optimization step -- hooking all of
+        # them would advance it once per model part and capture the wrong steps.
+        optimizers = self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        if not optimizers:
+            logger.error("[PrimusIdeogramProfile] recipe has no optimizer to hook; not profiling.")
+            return orig_loop(self)
+        target_optimizer = optimizers[-1]
+        orig_opt_step = target_optimizer.step
 
         def opt_step_and_prof(*args, **kwargs):
             ret = orig_opt_step(*args, **kwargs)
@@ -151,7 +161,7 @@ def install() -> bool:
             "with_stack=%s record_shapes=%s) -> %s",
             rank, tag, wait, warmup, active, with_stack, record_shapes, point_dir,
         )
-        self.optimizer.step = opt_step_and_prof
+        target_optimizer.step = opt_step_and_prof
         prof.start()
         try:
             orig_loop(self)
@@ -160,7 +170,7 @@ def install() -> bool:
                 prof.stop()
             except Exception:
                 pass
-            self.optimizer.step = orig_opt_step
+            target_optimizer.step = orig_opt_step
 
     patched_loop._primus_profile_wrapped = True
     TrainDiffusionRecipe.run_train_validation_loop = patched_loop
