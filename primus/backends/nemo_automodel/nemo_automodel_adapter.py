@@ -23,7 +23,7 @@ from typing import Any
 
 from primus.backends.nemo_automodel.argument_builder import NemoAutomodelConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 class NemoAutomodelAdapter(BackendAdapter):
