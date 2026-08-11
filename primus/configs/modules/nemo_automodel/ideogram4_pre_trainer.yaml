@@ -102,6 +102,15 @@ fsdp:
   # dp_size intentionally unset: AutoModel derives it from world size and the
   # parallel dims. Pin `dp_size: <n>` via overrides only to force a value.
   defer_fsdp_grad_sync: true
+  # ZeRO-2: transformer blocks keep their gathered params through backward, so there is
+  # one all-gather per block per step instead of two. Costs roughly one parameter copy
+  # of memory, which is a good trade here given available HBM. Set to `true` for ZeRO-3
+  # (lowest memory, highest traffic), or remove the key entirely to fall back to
+  # AutoModel's per-layer heuristic.
+  reshard_after_forward: false
+  # NOTE: the three prefetch knobs below are INERT while reshard_after_forward is false
+  # -- there is no backward all-gather left to prefetch. They apply again if you set it
+  # back to true.
   enable_fsdp2_prefetch: true
   fsdp2_backward_prefetch_depth: 3
   fsdp2_forward_prefetch_depth: 2

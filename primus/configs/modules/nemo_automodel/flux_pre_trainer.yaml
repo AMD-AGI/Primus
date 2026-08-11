@@ -91,6 +91,13 @@ fsdp:
   # dp_size intentionally unset: AutoModel derives it from world size and the
   # parallel dims. Pin `dp_size: <n>` via overrides only to force a value.
   defer_fsdp_grad_sync: true
+  # ZeRO-2: blocks keep their gathered params through backward (one all-gather per block
+  # per step instead of two) at the cost of roughly one parameter copy of memory. Set
+  # `true` for ZeRO-3, or remove the key to use AutoModel's per-layer heuristic.
+  # Unlike the Ideogram presets this one has enable_compile on, so A/B any throughput
+  # change here with compile held constant.
+  reshard_after_forward: false
+  # NOTE: inert while reshard_after_forward is false (no backward all-gather to prefetch).
   enable_fsdp2_prefetch: true
   fsdp2_backward_prefetch_depth: 3
   fsdp2_forward_prefetch_depth: 2

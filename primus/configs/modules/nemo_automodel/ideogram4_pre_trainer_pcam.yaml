@@ -88,6 +88,10 @@ fsdp:
   pp_size: 1
   dp_replicate_size: 1
   defer_fsdp_grad_sync: true
+  # ZeRO-2: see ideogram4_pre_trainer.yaml for the trade-off. `true` gives ZeRO-3;
+  # removing the key falls back to AutoModel's per-layer heuristic.
+  reshard_after_forward: false
+  # NOTE: inert while reshard_after_forward is false (no backward all-gather to prefetch).
   enable_fsdp2_prefetch: true
   fsdp2_backward_prefetch_depth: 3
   fsdp2_forward_prefetch_depth: 2

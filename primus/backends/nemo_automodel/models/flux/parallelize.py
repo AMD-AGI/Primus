@@ -87,9 +87,30 @@ def install() -> bool:
             dp_replicate_mesh_name: str = "dp_replicate",
             dp_shard_cp_mesh_name: str = "dp_shard_cp",
             tp_mesh_name: str = "tp",
+            reshard_after_forward: bool | None = None,
             **kwargs,
         ):
             dp_mesh = P.get_fsdp_dp_mesh(device_mesh, dp_replicate_mesh_name, dp_shard_cp_mesh_name)
+
+            # Read the hook's state through the module, never a from-import: a
+            # from-import binds False at import time and the guard then fires on
+            # every healthy run.
+            from primus.backends.nemo_automodel.distributed import fsdp2_reshard
+
+            logger.info(
+                "[PrimusFluxAC] reshard_after_forward: received=%s applied_by_hook=%s",
+                reshard_after_forward,
+                fsdp2_reshard.applied_reshard_after_forward,
+            )
+            if not fsdp2_reshard.patch_installed:
+                # The trainer swallows hook exceptions, so a failed install shows up
+                # only as one log line and then a full run at ~3P traffic. This is the
+                # one unambiguous in-process signal that it happened.
+                logger.error(
+                    "[PrimusFluxAC] the FSDP2 reshard repair hook is NOT installed, so "
+                    "fsdp.reshard_after_forward from YAML was dropped upstream and this run "
+                    "will use ZeRO-3-style per-block resharding regardless of config."
+                )
 
             if tp_mesh_name in getattr(device_mesh, "mesh_dim_names", ()) and device_mesh[tp_mesh_name].size() > 1:
                 logger.warning(
@@ -122,14 +143,19 @@ def install() -> bool:
                     output_dtype=torch.float32,
                 )
 
+            # Keyword form throughout: this call previously passed seven positional
+            # arguments and stopped one short of reshard_after_forward, silently
+            # discarding it. Keywords make that class of bug impossible to repeat.
             P.apply_fsdp2_sharding_recursively(
                 model,
                 dp_mesh,
                 mp_policy,
                 offload_policy,
-                kwargs.get("enable_fsdp2_prefetch", True),
-                kwargs.get("fsdp2_backward_prefetch_depth", 2),
-                kwargs.get("fsdp2_forward_prefetch_depth", 1),
+                enable_fsdp2_prefetch=kwargs.get("enable_fsdp2_prefetch", True),
+                fsdp2_backward_prefetch_depth=kwargs.get("fsdp2_backward_prefetch_depth", 2),
+                fsdp2_forward_prefetch_depth=kwargs.get("fsdp2_forward_prefetch_depth", 1),
+                # Forwarded faithfully, including None: YAML decides, not this code.
+                reshard_after_forward=reshard_after_forward,
             )
 
             return P.fully_shard(
