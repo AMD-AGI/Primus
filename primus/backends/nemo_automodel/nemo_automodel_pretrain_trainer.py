@@ -64,16 +64,22 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
         modified.
         """
         # (module, description) pairs; each exposes an env-gated install().
+        # Grouped by owner (shared, then one group per model) so a model's hooks
+        # can be added or removed without touching another's.
+        _PKG = "primus.backends.nemo_automodel"
         hooks = (
-            ("primus.backends.nemo_automodel.primus_turbo_fp8", "GEMM low-precision"),
-            ("primus.backends.nemo_automodel.primus_turbo_fp8_attn", "FP8 attention"),
-            ("primus.backends.nemo_automodel.aiter_bf16_attn", "non-deterministic attention"),
-            ("primus.backends.nemo_automodel.ideogram4_varlen_attn", "Ideogram-4 var-len flash attention"),
-            ("primus.backends.nemo_automodel.flux_ac", "FLUX real activation checkpointing"),
-            ("primus.backends.nemo_automodel.ideogram4_adapter", "Ideogram-4 flow-matching adapter"),
-            ("primus.backends.nemo_automodel.ideogram_ac", "Ideogram-4 real activation checkpointing"),
-            ("primus.backends.nemo_automodel.ideogram_zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
-            ("primus.backends.nemo_automodel.ideogram_profile", "Ideogram-4 torch.profiler train-loop wrapper"),
+            # shared, model-agnostic low precision
+            (f"{_PKG}.quantization.primus_turbo_fp8", "GEMM low-precision"),
+            (f"{_PKG}.quantization.primus_turbo_fp8_attn", "FP8 attention"),
+            (f"{_PKG}.quantization.aiter_bf16_attn", "non-deterministic attention"),
+            # FLUX
+            (f"{_PKG}.models.flux.parallelize", "FLUX real activation checkpointing"),
+            # Ideogram-4
+            (f"{_PKG}.models.ideogram4.attention", "Ideogram-4 var-len flash attention"),
+            (f"{_PKG}.models.ideogram4.adapter", "Ideogram-4 flow-matching adapter"),
+            (f"{_PKG}.models.ideogram4.parallelize", "Ideogram-4 real activation checkpointing"),
+            (f"{_PKG}.models.ideogram4.zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
+            (f"{_PKG}.models.ideogram4.profile", "Ideogram-4 torch.profiler train-loop wrapper"),
         )
         import importlib
 

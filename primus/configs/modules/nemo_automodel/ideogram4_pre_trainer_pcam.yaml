@@ -4,7 +4,7 @@
 # Real-data sibling of `ideogram4_pre_trainer.yaml` (the synthetic-cache smoke):
 # identical recipe/optimizer/FSDP wiring, but `data.dataloader` points at the real
 # Flux-2 VAE + Qwen3-VL preprocessor cache produced by `Ideogram4Processor`
-# (`ideogram_processor.py`) and read by `Ideogram4CacheDataloaderConfig`
+# (`processor.py`) and read by `Ideogram4CacheDataloaderConfig`
 # (emits image_latents [B,128,gh,gw] + LEFT-padded llm_features [B,·,53248] +
 # text_lengths). A dedicated preset (not an override of the synthetic one) so no
 # synthetic-only dataloader keys leak through the deep-merge into the cache dataclass.
@@ -32,7 +32,7 @@ step_scheduler:
 
 data:
   dataloader:
-    _target_: primus.backends.nemo_automodel.ideogram_cache_data.Ideogram4CacheDataloaderConfig
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.cache.Ideogram4CacheDataloaderConfig
     # Pre-encoded Ideogram-4 cache dir (override per run in the EXP).
     cache_dir: /dataset/pcam_ideogram4_256
     shuffle: true

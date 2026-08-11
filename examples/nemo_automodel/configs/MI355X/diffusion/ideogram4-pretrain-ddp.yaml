@@ -4,7 +4,7 @@
 # (ideogram4_ddp_pre_trainer.yaml -> `ddp:` block) so the recipe replicates
 # params+grads and skips per-layer all-gather; pair with PRIMUS_IDEOGRAM_ZERO1=1
 # to shard the optimizer state (ZeRO-1) + whole-block-checkpoint the Ideogram
-# layers on the DDP path (no-fork ideogram_zero1.py hook).
+# layers on the DDP path (no-fork zero1.py hook).
 #
 # CAVEAT: torch.compile is FSDP2-only and single-node comm is ~hidden, so this
 # path trails FSDP2+compile on one node. It is the multi-node lever / reference;

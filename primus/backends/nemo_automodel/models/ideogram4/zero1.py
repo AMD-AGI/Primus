@@ -32,7 +32,7 @@ WHAT (NO diffusers / Automodel fork) — two env-gated monkeypatches:
      apply_submodule_checkpointing, which wraps by attribute name
      (mlp/self_attn/norm1...) -- attributes an Ideogram4TransformerBlock does NOT
      have -- so DDP-mode AC is a SILENT NO-OP for Ideogram (same failure mode the
-     FSDP strategy has, fixed there by ideogram_ac.py). Without real AC the 9.3B
+     FSDP strategy has, fixed there by parallelize.py). Without real AC the 9.3B
      DiT OOMs at any real mbs. We patch DDPManager.parallelize to whole-block
      checkpoint-wrap model.layers for Ideogram before DDP wrap.
 

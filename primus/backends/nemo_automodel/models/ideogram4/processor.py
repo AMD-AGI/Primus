@@ -10,7 +10,7 @@ WHY (no Automodel/diffusers fork):
   AutoModel's processors live in the submodule (``tools/diffusion/processors``) and
   register into a closed ``ProcessorRegistry``. Rather than edit the submodule, this
   is a standalone Primus-side processor that produces a flat per-sample cache read
-  by :class:`Ideogram4CacheDataloaderConfig` (``ideogram_cache_data.py``).
+  by :class:`Ideogram4CacheDataloaderConfig` (``data/cache.py``).
 
 WHAT it reproduces (ported verbatim from the diffusers Ideogram-4 pipeline so the
 cached conditioning matches training==inference):

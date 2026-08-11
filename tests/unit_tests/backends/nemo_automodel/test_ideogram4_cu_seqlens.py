@@ -39,11 +39,11 @@ try:
 except ImportError:  # pragma: no cover - CPU-less lint environments
     pytest.skip("Ideogram-4 cu_seqlens tests require torch", allow_module_level=True)
 
-from primus.backends.nemo_automodel.ideogram4_adapter import (
+from primus.backends.nemo_automodel.models.ideogram4.adapter import (
     SEQUENCE_PADDING_INDICATOR,
     build_cu_seqlens,
 )
-from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
+from primus.backends.nemo_automodel.models.ideogram4.attention import (
     blockdiag_bool_mask_to_cu_seqlens,
 )
 
@@ -190,7 +190,7 @@ class TestPrepareIdsAgreement:
             "nemo_automodel",
             reason="Ideogram-4 adapter class is built against nemo_automodel's ModelAdapter base",
         )
-        from primus.backends.nemo_automodel.ideogram4_adapter import (
+        from primus.backends.nemo_automodel.models.ideogram4.adapter import (
             get_ideogram4_adapter_class,
         )
 

@@ -4,11 +4,11 @@
 # nemo_automodel path as Wan2.2 / FLUX. The Ideogram-specific pieces are all
 # no-fork Primus hooks (installed by NemoAutomodelPretrainTrainer):
 #   - flow_matching.adapter_type: ideogram4  -> Ideogram4Adapter
-#     (primus/backends/nemo_automodel/ideogram4_adapter.py)
+#     (primus/backends/nemo_automodel/models/ideogram4/adapter.py)
 #   - data.dataloader -> SyntheticIdeogram4DataloaderConfig
-#     (primus/backends/nemo_automodel/ideogram_synthetic_data.py)
+#     (primus/backends/nemo_automodel/models/ideogram4/data/synthetic.py)
 #   - fsdp.activation_checkpointing + PRIMUS_IDEOGRAM_REAL_AC=1 -> real AC
-#     (primus/backends/nemo_automodel/ideogram_ac.py)
+#     (primus/backends/nemo_automodel/models/ideogram4/parallelize.py)
 # The model builds from a weightless local config dir (no gated weights).
 #
 # One-time setup: `model.pretrained_model_name_or_path` below must point at a local

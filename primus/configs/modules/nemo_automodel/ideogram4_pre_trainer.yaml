@@ -37,7 +37,7 @@ step_scheduler:
 
 data:
   dataloader:
-    _target_: primus.backends.nemo_automodel.ideogram_synthetic_data.SyntheticIdeogram4DataloaderConfig
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
     # Fixed (deterministic) synthetic cache for the from-config overfit smoke.
     num_samples: 64
     in_channels: 128

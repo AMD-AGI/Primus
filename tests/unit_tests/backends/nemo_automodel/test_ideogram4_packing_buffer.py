@@ -33,9 +33,11 @@ try:
 except ImportError:  # pragma: no cover - CPU-less lint environments
     pytest.skip("Ideogram-4 packing buffer tests require torch", allow_module_level=True)
 
-from primus.backends.nemo_automodel import ideogram4_packing_buffer as transport
-from primus.backends.nemo_automodel import ideogram4_varlen_attn as varlen_mod
-from primus.backends.nemo_automodel.ideogram4_packing_buffer import (
+from primus.backends.nemo_automodel.models.ideogram4 import attention as varlen_mod
+from primus.backends.nemo_automodel.models.ideogram4 import (
+    packing_buffer as transport,
+)
+from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import (
     BOUND_ATTR,
     PACKING_ATTR,
     attention_modules,
@@ -43,7 +45,7 @@ from primus.backends.nemo_automodel.ideogram4_packing_buffer import (
     publish_packing,
     resolve_packing,
 )
-from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
+from primus.backends.nemo_automodel.models.ideogram4.attention import (
     Ideogram4VarlenAttnProcessor,
 )
 

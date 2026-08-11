@@ -3,9 +3,9 @@
 # Same no-fork Primus path as `ideogram4-pretrain.yaml`, but trains on a REAL
 # pre-encoded cache instead of the synthetic one:
 #   - data.dataloader -> Ideogram4CacheDataloaderConfig
-#     (primus/backends/nemo_automodel/ideogram_cache_data.py), reading a
+#     (primus/backends/nemo_automodel/models/ideogram4/data/cache.py), reading a
 #     Flux-2 VAE + Qwen3-VL 13-layer cache produced by Ideogram4Processor
-#     (primus/backends/nemo_automodel/ideogram_processor.py).
+#     (primus/backends/nemo_automodel/models/ideogram4/processor.py).
 #   - flow_matching.adapter_type: ideogram4 -> Ideogram4Adapter
 #   - fsdp.activation_checkpointing + PRIMUS_IDEOGRAM_REAL_AC=1 -> real AC
 # The DiT still builds from a weightless local config dir (random init, no gated

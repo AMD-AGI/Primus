@@ -56,7 +56,7 @@ COMPILE:
   The fix is to not derive the packing here at all: ``Ideogram4Adapter`` builds ``cu_seqlens``
   on the host (it already holds the text lengths as Python ints) and publishes it into a shared
   non-persistent buffer on the attention modules, making it a graph INPUT (see
-  ``ideogram4_packing_buffer.py`` for why that route and not ``attention_kwargs``, which is a
+  ``packing_buffer.py`` for why that route and not ``attention_kwargs``, which is a
   dead parameter for this model in diffusers 0.39.0). That path is exact on ragged batches,
   needs no host sync, and stops recomputing the same packing once per layer.
 
@@ -81,7 +81,7 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from primus.backends.nemo_automodel.ideogram4_packing_buffer import resolve_packing
+from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import resolve_packing
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +291,7 @@ class Ideogram4VarlenAttnProcessor:
     ) -> Tensor:
         # The packing normally arrives on the module: the adapter publishes it into a shared
         # non-persistent buffer that ``resolve_packing`` reads off ``attn`` (see
-        # ``ideogram4_packing_buffer.py``). The two named parameters are kept because
+        # ``packing_buffer.py``). The two named parameters are kept because
         # diffusers' attention module filters forwarded kwargs against
         # ``inspect.signature(self.processor.__call__).parameters``, so declaring them by name
         # is what would let a kwargs route work at all -- a ``**kwargs``-only processor would

@@ -56,8 +56,8 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
-from primus.backends.nemo_automodel.ideogram4_packing_buffer import publish_packing
-from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
+from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import publish_packing
+from primus.backends.nemo_automodel.models.ideogram4.attention import (
     assume_dense_enabled,
     precompute_cu_seqlens_active,
 )

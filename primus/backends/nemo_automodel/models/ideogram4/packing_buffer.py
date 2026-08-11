@@ -107,7 +107,7 @@ def attention_modules(model: nn.Module) -> List[nn.Module]:
     if cached is not None:
         return cached
 
-    from primus.backends.nemo_automodel.ideogram4_varlen_attn import (
+    from primus.backends.nemo_automodel.models.ideogram4.attention import (
         Ideogram4VarlenAttnProcessor,
     )
 

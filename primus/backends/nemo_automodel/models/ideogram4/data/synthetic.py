@@ -137,7 +137,7 @@ class SyntheticIdeogram4DataloaderConfig:
 
         data:
           dataloader:
-            _target_: primus.backends.nemo_automodel.ideogram_synthetic_data.SyntheticIdeogram4DataloaderConfig
+            _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
             num_samples: 64
             grid_h: 16
             grid_w: 16

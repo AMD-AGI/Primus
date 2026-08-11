@@ -4,7 +4,7 @@
 # Identical to ideogram4_pre_trainer.yaml EXCEPT the `fsdp:` block is replaced by
 # a `ddp:` block, so the diffusion recipe takes the DistributedDataParallel path
 # (params + grads REPLICATED, no per-layer all-gather). Pair it with
-# PRIMUS_IDEOGRAM_ZERO1=1 (no-fork hook, ideogram_zero1.py) to:
+# PRIMUS_IDEOGRAM_ZERO1=1 (no-fork hook, zero1.py) to:
 #   - shard the AdamW optimizer state across DP ranks (ZeRO-1), recovering the
 #     memory pure DDP would waste on a replicated optimizer, and
 #   - whole-block checkpoint-wrap the Ideogram layers on the DDP path (the generic
@@ -44,7 +44,7 @@ step_scheduler:
 
 data:
   dataloader:
-    _target_: primus.backends.nemo_automodel.ideogram_synthetic_data.SyntheticIdeogram4DataloaderConfig
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
     num_samples: 64
     in_channels: 128
     grid_h: 16
