@@ -14,7 +14,9 @@ import torch
 
 from primus.backends.megatron.data import energon_dataset_provider as provider_module
 from primus.backends.megatron.data.dataloader import (
+    DATALOADER_STATE_FORMAT_VERSION,
     DATALOADER_STATE_KEY,
+    DATALOADER_STATE_PAYLOAD_KEY,
     MegatronDataloaderWrapper,
     restore_dataloader_state_from_checkpoint,
 )
@@ -125,6 +127,53 @@ def test_restore_dataloader_state_fails_when_payload_key_is_missing(tmp_path):
         )
 
 
+def test_restore_dataloader_state_rejects_empty_state(tmp_path):
+    checkpoint_path = tmp_path / "state.pt"
+    checkpoint_path.touch()
+    wrapper = MegatronDataloaderWrapper(_StatefulLoader())
+
+    with pytest.raises(RuntimeError, match="empty state"):
+        restore_dataloader_state_from_checkpoint(
+            wrapper,
+            str(tmp_path),
+            iteration=8,
+            data_parallel_rank=0,
+            checkpoint_name_fn=lambda *args, **kwargs: str(checkpoint_path),
+            load_fn=lambda path: {DATALOADER_STATE_KEY: None},
+        )
+
+
+def test_restore_dataloader_state_rejects_changed_data_parallel_topology():
+    source = MegatronDataloaderWrapper(
+        _SequentialStatefulLoader(),
+        data_parallel_rank=3,
+        data_parallel_world_size=8,
+    )
+    state = source.save_state()
+
+    assert state == {
+        "format_version": DATALOADER_STATE_FORMAT_VERSION,
+        "data_parallel_rank": 3,
+        "data_parallel_world_size": 8,
+        DATALOADER_STATE_PAYLOAD_KEY: {"position": 0},
+    }
+
+    matching = MegatronDataloaderWrapper(
+        _SequentialStatefulLoader(),
+        data_parallel_rank=3,
+        data_parallel_world_size=8,
+    )
+    assert matching.restore_state(state, strict=True)
+
+    changed_world_size = MegatronDataloaderWrapper(
+        _SequentialStatefulLoader(),
+        data_parallel_rank=3,
+        data_parallel_world_size=4,
+    )
+    with pytest.raises(RuntimeError, match="topology does not match"):
+        changed_world_size.restore_state(state, strict=True)
+
+
 def test_restore_dataloader_state_requires_restore_capability(tmp_path):
     checkpoint_path = tmp_path / "state.pt"
     checkpoint_path.touch()
@@ -206,6 +255,32 @@ def test_provider_restores_before_first_resumed_batch(monkeypatch, tmp_path):
     assert restored_path == str(tmp_path / "train_dataloader_dprank003.pt")
     assert calls == [("/dataloader-state", 5, 3)]
     assert next(loader) == 5
+
+
+def test_provider_skips_restore_when_exact_continuation_is_not_required(
+    monkeypatch,
+):
+    provider = EnergonDatasetProvider(lambda: None)
+    loader = MegatronDataloaderWrapper(_SequentialStatefulLoader())
+    args = SimpleNamespace(
+        load="/checkpoints",
+        dataloader_save="/dataloader-state",
+        iteration=5,
+        finetune=False,
+        require_dataloader_restore=False,
+    )
+
+    def unexpected_restore(*args, **kwargs):
+        raise AssertionError("optional resume must not partially restore rank state")
+
+    monkeypatch.setattr(
+        provider_module,
+        "restore_dataloader_state_from_checkpoint",
+        unexpected_restore,
+    )
+
+    assert provider._restore_train_dataloader_state(args, loader) is None
+    assert next(loader) == 0
 
 
 @pytest.mark.parametrize(

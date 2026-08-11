@@ -11,6 +11,7 @@ from primus.backends.megatron.flux_pretrain_trainer import (
     FluxPretrainTrainer,
     _precision_linear_class_census,
 )
+from primus.backends.megatron.patches.mlperf_warmup_patches import _is_resumed_training
 from primus.backends.megatron.training.diffusion.forward_step import (
     _emit_batch_fingerprint,
 )
@@ -59,6 +60,27 @@ def test_emit_batch_fingerprint_skips_synthetic_warmup(monkeypatch, capsys):
     _emit_batch_fingerprint({}, step_count=1)
 
     assert capsys.readouterr().out == ""
+
+
+def test_emit_batch_fingerprint_skips_validation(monkeypatch, capsys):
+    monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
+
+    _emit_batch_fingerprint({}, step_count=5, is_training=False)
+
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("iteration", "expected"),
+    [
+        (0, False),
+        (5, True),
+        (None, False),
+        (True, False),
+    ],
+)
+def test_warmup_resume_detection(iteration, expected):
+    assert _is_resumed_training(SimpleNamespace(iteration=iteration)) is expected
 
 
 def test_diffusion_forward_step_exposes_counter_reset(monkeypatch):

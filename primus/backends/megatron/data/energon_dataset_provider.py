@@ -121,7 +121,11 @@ class EnergonDatasetProvider(DatasetProvider):
         train_dataloader = get_savable_loader(
             train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
         )
-        train_dataloader = MegatronDataloaderWrapper(train_dataloader)
+        train_dataloader = MegatronDataloaderWrapper(
+            train_dataloader,
+            data_parallel_rank=parallel_state.get_data_parallel_rank(),
+            data_parallel_world_size=parallel_state.get_data_parallel_world_size(),
+        )
         self._restore_train_dataloader_state(args, train_dataloader)
         log_rank_0("Created training dataloader")
 
@@ -216,6 +220,13 @@ class EnergonDatasetProvider(DatasetProvider):
                     "WARNING: Checkpoint load did not resume a positive iteration; "
                     "the Energon dataloader position will not be restored"
                 )
+            return None
+
+        if not require_restore:
+            log_rank_0(
+                "WARNING: Resuming without require_dataloader_restore=True; "
+                "the Energon dataloader position will not be restored"
+            )
             return None
 
         dataloader_save = getattr(args, "dataloader_save", None)

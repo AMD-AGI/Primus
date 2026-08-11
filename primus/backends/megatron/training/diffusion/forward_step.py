@@ -40,9 +40,11 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
 logger = logging.getLogger(__name__)
 
 
-def _emit_batch_fingerprint(batch: dict, step_count: int) -> None:
+def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool = True) -> None:
     """Emit a rank-local sample-key digest for explicit continuity audits."""
     if os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") != "1":
+        return
+    if not is_training:
         return
     if os.getenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE") == "1":
         return
@@ -426,9 +428,6 @@ def flux_forward_step_func(
         if not pooled_prompt_embeds.is_cuda:
             pooled_prompt_embeds = pooled_prompt_embeds.cuda(non_blocking=True)
 
-    if batch is not None:
-        _emit_batch_fingerprint(batch, step_count)
-
     # Obtain latents based on vae_latent_mode
     if vae_latent_mode == "resample":
         # Resample mode: reconstruct latents from posterior parameters each step
@@ -499,6 +498,13 @@ def flux_forward_step_func(
         batch["timestep"] = val_idx
         val_timesteps = val_idx.to(dtype=compute_dtype) / 8.0
         batch["timesteps"] = val_timesteps
+
+    if batch is not None:
+        _emit_batch_fingerprint(
+            batch,
+            step_count,
+            is_training=not is_validation,
+        )
 
     # Matches NeMo's forward_step which wraps prepare_image_latent_like_reference
     # in torch.no_grad() — no gradients needed for position IDs, noise sampling,

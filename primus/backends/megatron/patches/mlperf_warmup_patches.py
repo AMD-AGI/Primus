@@ -40,6 +40,12 @@ def _warmup_enabled(ctx: PatchContext) -> bool:
     return args is not None and getattr(args, "warmup_train_steps", 0) > 0
 
 
+def _is_resumed_training(args) -> bool:
+    """Return whether Megatron has restored a positive training iteration."""
+    iteration = getattr(args, "iteration", 0)
+    return isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0
+
+
 def _reset_fp8_te_spec(models):
     """Reset FP8 state for TransformerEngine spec modules.
 
@@ -284,11 +290,26 @@ def patch_mlperf_warmup(ctx: PatchContext):
                 iteration=iteration,
             )
 
-        _lazy_init()
-
         from megatron.training import get_args as megatron_get_args
 
         megatron_args = megatron_get_args()
+        if _is_resumed_training(megatron_args):
+            _warmup_done[0] = True
+            mt.train_step = _wrapped_chain
+            _log("Skipping synthetic warmup for resumed training at " f"iteration={megatron_args.iteration}")
+            return _wrapped_chain(
+                forward_step_func,
+                data_iterator,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                config,
+                forward_backward_func,
+                iteration=iteration,
+            )
+
+        _lazy_init()
+
         models = model if isinstance(model, (list, tuple)) else [model]
         synthetic_iter = _lazy_state["synthetic_iter"]
 
@@ -342,7 +363,7 @@ def patch_mlperf_warmup(ctx: PatchContext):
             None,
         )
         if callable(reset_forward_counter):
-            reset_forward_counter(0)
+            reset_forward_counter(megatron_args.iteration)
             _log("Reset diffusion forward-step RNG counter after warmup")
         elif os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") == "1":
             raise RuntimeError(
