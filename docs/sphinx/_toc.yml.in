@@ -15,6 +15,12 @@ subtrees:
         title: Quickstart
       - file: 01-getting-started/installation.md
         title: Installation and setup
+        subtrees:
+          - entries:
+              - file: 01-getting-started/bare-metal-installation.md
+                title: Bare-metal installation (Megatron/TorchTitan)
+              - file: 01-getting-started/bare-metal-installation-jax.md
+                title: Bare-metal installation (JAX MaxText)
       - file: 01-getting-started/release-notes.md
         title: Release notes
       - file: 01-getting-started/glossary.md
@@ -96,10 +102,24 @@ subtrees:
         title: Determinism and reproducibility
       - file: 04-technical-guides/native-sft-lora.md
         title: Native SFT LoRA
-      - file: 04-technical-guides/diffusion-models/architecture_overview.md
-        title: Diffusion model architecture
+      - file: 04-technical-guides/hybrid-models/README.md
+        title: Hybrid recurrent-attention models
         subtrees:
           - entries:
+              - file: 04-technical-guides/hybrid-models/gdn-guide.md
+                title: GDN end-to-end guide
+              - file: 04-technical-guides/hybrid-models/gdn-fla-parity.md
+                title: GDN ⇄ FLA parity
+              - file: 04-technical-guides/hybrid-models/kda-guide.md
+                title: KDA end-to-end guide
+              - file: 04-technical-guides/hybrid-models/kda-fla-parity.md
+                title: KDA ⇄ FLA parity
+      - file: 04-technical-guides/diffusion-models/README.md
+        title: Diffusion models
+        subtrees:
+          - entries:
+              - file: 04-technical-guides/diffusion-models/architecture_overview.md
+                title: Architecture overview
               - file: 04-technical-guides/diffusion-models/flux_architecture.md
                 title: Flux architecture
               - file: 04-technical-guides/diffusion-models/fp8_training.md
