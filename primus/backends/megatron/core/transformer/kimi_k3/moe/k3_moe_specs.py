@@ -56,8 +56,8 @@ __all__ = ["build_stable_latent_moe_spec"]
 
 def build_stable_latent_moe_spec(
     *,
-    config: "TransformerConfig",
-    provider: Optional["KimiK3SpecProvider"] = None,
+    config: TransformerConfig,
+    provider: Optional[KimiK3SpecProvider] = None,
 ) -> ModuleSpec:
     """Return the ``ModuleSpec`` for one Kimi K3 Stable Latent MoE layer.
 

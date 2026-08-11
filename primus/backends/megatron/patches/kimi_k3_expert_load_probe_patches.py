@@ -50,6 +50,7 @@ is imported, wrapped or allocated. The path is passed through the normal Primus
 config / CLI channel; it is deliberately NOT read from an environment variable.
 """
 
+import atexit
 import json
 import math
 import os
@@ -117,6 +118,16 @@ def patch_expert_load_probe(ctx: PatchContext):
 
     original = finalize_model_grads.reset_model_temporary_tensors
     state = {"step": 0, "failed": False, "handle": None}
+
+    def _close_handle() -> None:
+        handle = state["handle"]
+        if handle is not None:
+            try:
+                handle.close()
+            finally:
+                state["handle"] = None
+
+    atexit.register(_close_handle)
 
     def _rank() -> int:
         return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0

@@ -56,8 +56,7 @@ from typing import Optional
 __all__ = ["ensure_usable_lld"]
 
 _SHADOW_DIR_NAME = "primus_kda_flydsl_rocm_shadow"
-_state: Optional[str] = None
-_probed = False
+_probe_cache = {"probed": False, "shadow": None}  # once-per-process memoization
 
 
 def _resolves_and_runs_by_bare_name() -> bool:
@@ -146,10 +145,9 @@ def ensure_usable_lld() -> Optional[str]:
             every subsequent kernel compile would otherwise fail with a message
             that does not name the real cause.
     """
-    global _state, _probed
-    if _probed:
-        return _state
-    _probed = True
+    if _probe_cache["probed"]:
+        return _probe_cache["shadow"]
+    _probe_cache["probed"] = True
 
     if _resolves_and_runs_by_bare_name():
         return None
@@ -174,5 +172,5 @@ def ensure_usable_lld() -> Optional[str]:
             f"{real_lld}, but `ld.lld` still does not run by name. Select a different "
             "kda_backend (eager | eager_recurrent | fla)."
         )
-    _state = shadow
+    _probe_cache["shadow"] = shadow
     return shadow

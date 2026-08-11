@@ -164,7 +164,7 @@ class KimiK3VisionProjectorConfig(TransformerConfig):
 # ---------------------------------------------------------------------------
 
 
-def validate_moonvit_fields(config: "KimiK3TransformerConfig") -> None:
+def validate_moonvit_fields(config: KimiK3TransformerConfig) -> None:
     """Validate the ``vt_*`` / ``mm_*`` block of a Kimi K3 config.
 
     Called from ``KimiK3TransformerConfig.__post_init__`` so a bad vision
@@ -289,7 +289,7 @@ def _inherited_env(parent: TransformerConfig) -> dict:
 
 
 def build_moonvit_configs(
-    config: "KimiK3TransformerConfig",
+    config: KimiK3TransformerConfig,
 ) -> Tuple[KimiK3VisionTransformerConfig, KimiK3VisionProjectorConfig]:
     """Derive the tower and projector configs from a Kimi K3 config.
 

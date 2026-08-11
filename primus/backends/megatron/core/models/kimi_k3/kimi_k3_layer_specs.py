@@ -132,14 +132,14 @@ def get_kimi_k3_moe_layer_pattern(config: KimiK3TransformerConfig) -> List[int]:
 # ---------------------------------------------------------------------------
 
 
-def _build_norm_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider") -> ModuleSpec:
+def _build_norm_spec(*, config: KimiK3TransformerConfig, provider: KimiK3SpecProvider) -> ModuleSpec:
     del config
     norm_module = provider.k3_norm_module()
     assert norm_module is not None, "Kimi K3 norm module must be provided by KimiK3SpecProvider."
     return ModuleSpec(module=norm_module)
 
 
-def _build_kda_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider") -> ModuleSpec:
+def _build_kda_spec(*, config: KimiK3TransformerConfig, provider: KimiK3SpecProvider) -> ModuleSpec:
     """One Kimi Delta Attention layer.
 
     :class:`KimiDeltaAttention` passes every constructor argument to its
@@ -192,7 +192,7 @@ def _build_kda_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecPro
 
 
 def _build_full_attention_spec(
-    *, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider"
+    *, config: KimiK3TransformerConfig, provider: KimiK3SpecProvider
 ) -> ModuleSpec:
     """One NoPE MLA layer with the sigmoid output gate.
 
@@ -209,7 +209,7 @@ def _build_full_attention_spec(
     return get_kimi_k3_mla_attention_spec(config=config, backend=provider, attn_mask_type=AttnMaskType.causal)
 
 
-def _build_dense_mlp_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecProvider") -> ModuleSpec:
+def _build_dense_mlp_spec(*, config: KimiK3TransformerConfig, provider: KimiK3SpecProvider) -> ModuleSpec:
     """The dense ``situ`` SwiGLU FFN used by the first ``first_k_dense_replace`` layers.
 
     Upstream :class:`MLP`, not a bespoke class: with ``gated_linear_unit``
@@ -235,7 +235,7 @@ def _build_dense_mlp_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3S
 def build_kimi_k3_layer_spec(
     config: KimiK3TransformerConfig,
     *,
-    provider: "KimiK3SpecProvider",
+    provider: KimiK3SpecProvider,
     layer_idx: int,
     is_moe: bool,
     is_kda: Optional[bool] = None,
@@ -309,7 +309,7 @@ _build_layer_spec = build_kimi_k3_layer_spec
 def _build_stage_layer_specs(
     config: KimiK3TransformerConfig,
     *,
-    provider: "KimiK3SpecProvider",
+    provider: KimiK3SpecProvider,
     vp_stage: Optional[int],
     pp_rank: Optional[int],
 ) -> List[ModuleSpec]:

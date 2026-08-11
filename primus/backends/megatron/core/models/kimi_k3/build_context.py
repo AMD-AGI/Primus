@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # avoid an eager torch import in this lightweight module
 _PROVIDER_ATTR = "_k3_spec_provider_singleton"
 
 
-def resolve_k3_provider(config) -> "KimiK3SpecProvider":
+def resolve_k3_provider(config) -> KimiK3SpecProvider:
     """Return a cached :class:`KimiK3SpecProvider` for ``config``.
 
     Args:
