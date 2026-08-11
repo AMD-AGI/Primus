@@ -310,6 +310,29 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # experts); 0 disables the guard.
     quantile_balancing_kernel_max_tokens: Optional[int] = None
 
+    # ---- expert-load diagnostics ------------------------------------------
+    # Opt-in output path for the expert-load-probe patch
+    # (patches/kimi_k3_expert_load_probe_patches.py). When set to a filesystem
+    # path the probe wraps reset_model_temporary_tensors once per optimizer step
+    # and appends the all-reduced expert-load histogram -- entropy, max/min
+    # ratio, dead-expert count -- to that path as JSONL. That histogram is the
+    # quantity phase 2's Quantile-Balancing-vs-sign A/B compares, and Megatron
+    # logs no such thing.
+    #
+    # None (the default everywhere -- no yaml in the tree sets it and no unit
+    # test does either) leaves the patch's registration condition False, so
+    # nothing is imported, wrapped or allocated: an unset run is byte-for-byte
+    # unaffected. This is a diagnostic OUTPUT sink and NOT a model knob -- it
+    # does not touch the computation, which is why it needs no __post_init__
+    # handling and is read at the args layer by the patch rather than off this
+    # config object.
+    #
+    # It is declared here, as a first-class config parameter, on purpose: the
+    # path must arrive through the normal Primus config / CLI channel (a yaml
+    # key or a --expert-load-probe-path override), NOT through an environment
+    # variable. Mirrors how use_kimi_k3_attention_backend is declared above.
+    expert_load_probe_path: Optional[str] = None
+
     # ---- Multi-Token Prediction --------------------------------------------
     # HF: num_nextn_predict_layers. The released config.json ships 0 and the
     # released modelling code has no MTP module, but tech-report Table 1 lists

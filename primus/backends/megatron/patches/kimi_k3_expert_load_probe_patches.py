@@ -44,10 +44,12 @@ all-reduce over the same TPxCPxDP group.
 
 Activation
 ----------
-Entirely driven by the ``K3_EXPERT_LOAD_PROBE`` environment variable, which
-holds the output path. Unset -- the default everywhere, including every unit
+Entirely driven by the ``expert_load_probe_path`` config parameter (a Kimi K3
+field, declared on ``KimiK3TransformerConfig``), which holds the output path
+and defaults to ``None``. Unset -- the default everywhere, including every unit
 test -- and this module registers a patch whose condition is False, so nothing
-is imported, wrapped or allocated.
+is imported, wrapped or allocated. The path is passed through the normal Primus
+config / CLI channel; it is deliberately NOT read from an environment variable.
 """
 
 import json
@@ -57,7 +59,11 @@ import os
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-_ENV_VAR = "K3_EXPERT_LOAD_PROBE"
+# The Kimi K3 config / CLI key that carries the output path. Read at the args
+# layer (get_args(ctx) == module_config.params) the same way every other K3
+# patch reads its knobs; declared as a field on KimiK3TransformerConfig so it is
+# a first-class parameter rather than an environment variable.
+_CONFIG_KEY = "expert_load_probe_path"
 _LOG_PREFIX = "[Patch:megatron.kimi_k3.expert_load_probe]"
 
 # Dump the full per-layer histogram this often (in optimizer steps). The scalar
@@ -66,20 +72,22 @@ _LOG_PREFIX = "[Patch:megatron.kimi_k3.expert_load_probe]"
 _FULL_DUMP_EVERY = 25
 
 
-def _probe_path() -> str:
-    return os.environ.get(_ENV_VAR, "").strip()
+def _probe_path(ctx: PatchContext) -> str:
+    """Output path from the ``expert_load_probe_path`` config key; "" when unset."""
+    args = get_args(ctx)
+    return str(getattr(args, _CONFIG_KEY, None) or "").strip()
 
 
 def _wants_expert_load_probe(ctx: PatchContext) -> bool:
-    if not _probe_path():
-        return False
     args = get_args(ctx)
     # Kimi K3 only. This probe wraps finalize_model_grads.reset_model_temporary_tensors
     # -- a function SHARED by every MoE model -- so it must be gated on model_type,
     # not just on moe_router_enable_expert_bias (DeepSeek-V3/V4 also set that flag).
-    # Without this a non-K3 run that happened to export K3_EXPERT_LOAD_PROBE would
+    # Without this a non-K3 run that happened to set expert_load_probe_path would
     # have its grad finalization wrapped. Mirrors kimi_k3_flops_patches.py.
     if getattr(args, "model_type", None) != "kimi_k3":
+        return False
+    if not _probe_path(ctx):
         return False
     # The buffer this probe reads only exists when the expert bias is enabled.
     return bool(getattr(args, "moe_router_enable_expert_bias", False))
@@ -106,7 +114,7 @@ def patch_expert_load_probe(ctx: PatchContext):
 
     finalize_model_grads = importlib.import_module("megatron.core.distributed.finalize_model_grads")
 
-    path = _probe_path()
+    path = _probe_path(ctx)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     original = finalize_model_grads.reset_model_temporary_tensors
