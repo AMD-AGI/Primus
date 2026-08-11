@@ -64,9 +64,9 @@ def _emit_precision_linear_class_census(model) -> None:
         "data_parallel_rank": parallel_state.get_data_parallel_rank(),
         "classes": counts,
     }
-    # Emit through logging, not print: the launcher pipes the training process
-    # through a filter that drops fd 1, so a bare print never reaches the run
-    # log and the audit silently reports zero markers.
+    # Emit through logging, not print: fd 1 does not survive to the run log on
+    # this launch path, so a bare print leaves the audit reporting zero markers
+    # on a healthy run. Logging and fd 2 both survive.
     logger.info("PRIMUS_LINEAR_CLASS_CENSUS=%s", json.dumps(payload, sort_keys=True))
 
 

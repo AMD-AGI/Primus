@@ -75,9 +75,9 @@ def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool =
         "sample_count": sample_count,
         "sample_keys_sha256": fingerprint,
     }
-    # Emit through logging, not print: the launcher pipes the training process
-    # through a filter that drops fd 1, so a bare print never reaches the run
-    # log and the audit silently reports zero markers.
+    # Emit through logging, not print: fd 1 does not survive to the run log on
+    # this launch path, so a bare print leaves the audit reporting zero markers
+    # on a healthy run. Logging and fd 2 both survive.
     logger.info("PRIMUS_BATCH_FINGERPRINT=%s", json.dumps(payload, sort_keys=True))
 
 
