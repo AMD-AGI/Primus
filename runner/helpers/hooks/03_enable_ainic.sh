@@ -36,14 +36,22 @@ MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
 # precedence (force-loads the named plugin) irrespective of RCCL_AINIC_ROCE.
 RCCL_AINIC_ROCE="${RCCL_AINIC_ROCE:-1}"
 
-# NCCL_NET_PLUGIN: ANP libraray has different names in different containers: librccl-anp.so or librccl-net.so.
-if [ -z "${NCCL_NET_PLUGIN:-}" ]; then
-    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-        NCCL_NET_PLUGIN="librccl-anp.so"
-    elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-        NCCL_NET_PLUGIN="librccl-net.so"
-    else
-        NCCL_NET_PLUGIN="librccl-anp.so"
+# NCCL_NET_PLUGIN selection.
+# With built-in ANP (RCCL_AINIC_ROCE=1) default to "none" so RCCL uses its built-in
+# ANP transport instead of auto-loading an external plugin. Otherwise auto-detect the
+# external ANP plugin (name varies by container: librccl-anp.so or librccl-net.so).
+# An explicitly-set NCCL_NET_PLUGIN always wins in both cases.
+if [ "${RCCL_AINIC_ROCE}" = "1" ]; then
+    NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+else
+    if [ -z "${NCCL_NET_PLUGIN:-}" ]; then
+        if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+            NCCL_NET_PLUGIN="librccl-anp.so"
+        elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+            NCCL_NET_PLUGIN="librccl-net.so"
+        else
+            NCCL_NET_PLUGIN="librccl-anp.so"
+        fi
     fi
 fi
 NCCL_IB_TC="${NCCL_IB_TC:-104}"

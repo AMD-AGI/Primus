@@ -189,7 +189,12 @@ if [ "$USING_AINIC" == "1" ]; then
         "${RCCL_HOME_DIR}/build/release" \
         "${ANP_HOME_DIR}/build" \
         "${MPI_HOME_DIR}/lib"
-    if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+    # With built-in ANP (RCCL_AINIC_ROCE=1) default to "none" so RCCL uses its
+    # built-in ANP transport instead of auto-loading an external plugin. An
+    # explicitly-set NCCL_NET_PLUGIN always wins.
+    if [ "${RCCL_AINIC_ROCE}" = "1" ]; then
+        export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+    elif [ -n "${NCCL_NET_PLUGIN:-}" ]; then
         export NCCL_NET_PLUGIN
     elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
         export NCCL_NET_PLUGIN=librccl-anp.so
