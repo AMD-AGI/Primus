@@ -100,7 +100,28 @@ python3 examples/megatron/preprocess_data.py \
 ### BookCorpus example scripts
 
 - **`examples/megatron/prepare_bookcorpus_megatron_dataset.py`**—downloads BookCorpus to JSON via Hugging Face `datasets`, optional `--out-dir`.
-- **`runner/helpers/hooks/train/pretrain/megatron/prepare.py`**—orchestrates download and calls `preprocess_data.py` with tokenizer settings from the Primus config; respects `TOKENIZED_DATA_PATH` for the output location.
+- **`runner/helpers/hooks/train/pretrain/megatron/prepare.py`**—orchestrates download and calls `preprocess_data.py` with tokenizer settings from the Primus config. `TOKENIZED_DATA_PATH`, `TOKENIZED_TRAIN_DATA_PATH`, and `TOKENIZED_EVAL_DATA_PATH` are final Megatron prefixes (omit `.bin`/`.idx`), and generated files are written to those exact prefixes.
+
+When evaluation is enabled (`eval_interval > 0` plus `eval_iters > 0` or
+`full_validation: true`) and the config does not already provide
+`valid_data_path`, the hook carves a held-out BookCorpus split. Raw split caches
+are keyed by both the split seed and `test_size`; tokenized validation outputs
+carry matching metadata, so changing either value regenerates train/eval outputs
+instead of silently reusing a different split.
+
+The split seed comes from `--split_seed` (default 42) and is **not** the Megatron
+`seed` training parameter. The two are deliberately separate: `primus-cli` hands
+the same argument list to the hook and to training, so while they shared a name,
+changing the training RNG seed also changed the split cache key and forced a
+BookCorpus re-download and full re-tokenization. Use `--split_seed` to reshape
+the split and `seed` to reseed training; a seed sweep now reuses one tokenized
+corpus.
+
+Only node rank 0 prepares data. It publishes atomic completion or failure
+markers next to the tokenized prefix; other node ranks wait up to
+`PRIMUS_DATA_PREP_TIMEOUT_SECONDS` (default 3600 seconds) and propagate rank 0
+failure. Therefore custom `TOKENIZED_*_DATA_PATH` locations must be writable by
+rank 0 and visible through storage shared by every training node.
 
 ### Tokenizers
 
@@ -144,9 +165,12 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 | Variable | Usage |
 |----------|--------|
-| `TOKENIZED_DATA_PATH` / `PRIMUS_TOKENIZED_DATA_PATH` | Tokenized dataset location for the Megatron pretrain hook (see `docs/03-configuration-reference/environment-variables.md`). |
+| `TOKENIZED_DATA_PATH` | Final generated prefix for the whole-corpus flow; also the validation-flow training fallback. |
+| `TOKENIZED_TRAIN_DATA_PATH` / `TOKENIZED_EVAL_DATA_PATH` | Final generated train and eval/test prefixes when the hook creates a held-out split. |
+| `PRIMUS_TOKENIZED_DATA_PATH` | Existing training prefix interpolated by selected Megatron YAMLs; it does not control the hook's generated output. |
+| `PRIMUS_DATA_PREP_TIMEOUT_SECONDS` | Maximum nonzero-rank wait for rank 0 preparation; tokenized paths must use shared storage. |
 | `DATA_PATH` | General data root used in scripts and CI-style launches. |
-| `HF_TOKEN` | **Required** for gated Hugging Face models and some datasets (TorchTitan `prepare.py`, Kubernetes examples in `examples/README.md`). |
+| `HF_TOKEN` | **Required** for gated Hugging Face models and some datasets (TorchTitan `prepare.py`, Megatron bookcorpus preparation). |
 | `HF_HOME` | Hugging Face cache directory (used by the Megatron pretrain hook). |
 | `NLTK_DATA` | NLTK tokenizer data directory for sentence splitting in `preprocess_data.py` when `NLTK_DATA` is set. |
 
