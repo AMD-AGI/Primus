@@ -235,10 +235,7 @@ class EnergonDatasetProvider(DatasetProvider):
                 "Resuming an Energon run without dataloader_save; "
                 "the dataloader position cannot be restored"
             )
-            if require_restore:
-                raise RuntimeError(message)
-            log_rank_0(f"WARNING: {message}")
-            return None
+            raise RuntimeError(message)
 
         data_parallel_rank = parallel_state.get_data_parallel_rank()
         checkpoint_path = restore_dataloader_state_from_checkpoint(
