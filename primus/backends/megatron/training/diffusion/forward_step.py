@@ -64,9 +64,7 @@ def _emit_batch_fingerprint(batch: dict, step_count: int) -> None:
     from megatron.core import parallel_state
 
     global_rank = (
-        torch.distributed.get_rank()
-        if torch.distributed.is_initialized()
-        else int(os.getenv("RANK", "-1"))
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
     )
     payload = {
         "global_rank": global_rank,

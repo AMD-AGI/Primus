@@ -54,9 +54,7 @@ def _emit_precision_linear_class_census(model) -> None:
     if sum(counts.values()) <= 0:
         raise RuntimeError("No MXFP4 or Float8 linear modules were instantiated")
     global_rank = (
-        torch.distributed.get_rank()
-        if torch.distributed.is_initialized()
-        else int(os.getenv("RANK", "-1"))
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
     )
     payload = {
         "global_rank": global_rank,

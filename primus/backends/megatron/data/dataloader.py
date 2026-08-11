@@ -154,9 +154,7 @@ class MegatronDataloaderWrapper:
             return True
         else:
             if strict:
-                raise RuntimeError(
-                    f"{type(self._dataloader).__name__} does not support restore_state_rank()"
-                )
+                raise RuntimeError(f"{type(self._dataloader).__name__} does not support restore_state_rank()")
             logger.debug(
                 f"{type(self._dataloader).__name__} does not support restore_state_rank() "
                 f"(OK for synthetic data)"
@@ -222,9 +220,7 @@ def restore_dataloader_state_from_checkpoint(
             f"got {type(payload).__name__}"
         )
     if DATALOADER_STATE_KEY not in payload:
-        raise KeyError(
-            f"Dataloader checkpoint {checkpoint_path} has no {DATALOADER_STATE_KEY!r} entry"
-        )
+        raise KeyError(f"Dataloader checkpoint {checkpoint_path} has no {DATALOADER_STATE_KEY!r} entry")
 
     dataloader.restore_state(payload[DATALOADER_STATE_KEY], strict=True)
     return checkpoint_path

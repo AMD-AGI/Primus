@@ -141,20 +141,12 @@ def test_restore_dataloader_state_requires_restore_capability(tmp_path):
         )
 
 
-def test_restore_dataloader_state_real_path_and_torch_round_trip(
-    tmp_path, monkeypatch
-):
+def test_restore_dataloader_state_real_path_and_torch_round_trip(tmp_path, monkeypatch):
     from megatron.training import checkpointing
 
-    monkeypatch.setattr(
-        checkpointing.mpu, "get_pipeline_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(
-        checkpointing.mpu, "get_expert_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(
-        checkpointing.mpu, "get_expert_model_parallel_rank", lambda: 0
-    )
+    monkeypatch.setattr(checkpointing.mpu, "get_pipeline_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_rank", lambda: 0)
 
     uninterrupted_loader = _SequentialStatefulLoader()
     uninterrupted = MegatronDataloaderWrapper(uninterrupted_loader)
@@ -199,12 +191,8 @@ def test_provider_restores_before_first_resumed_batch(monkeypatch, tmp_path):
         dataloader.restore_state({"position": 5}, strict=True)
         return tmp_path / "train_dataloader_dprank003.pt"
 
-    monkeypatch.setattr(
-        provider_module.parallel_state, "get_data_parallel_rank", lambda: 3
-    )
-    monkeypatch.setattr(
-        provider_module, "restore_dataloader_state_from_checkpoint", restore
-    )
+    monkeypatch.setattr(provider_module.parallel_state, "get_data_parallel_rank", lambda: 3)
+    monkeypatch.setattr(provider_module, "restore_dataloader_state_from_checkpoint", restore)
     args = SimpleNamespace(
         load="/checkpoints",
         dataloader_save="/dataloader-state",
@@ -319,16 +307,12 @@ def test_provider_propagates_missing_rank_state(monkeypatch):
         require_dataloader_restore=True,
     )
 
-    monkeypatch.setattr(
-        provider_module.parallel_state, "get_data_parallel_rank", lambda: 7
-    )
+    monkeypatch.setattr(provider_module.parallel_state, "get_data_parallel_rank", lambda: 7)
 
     def missing(*args, **kwargs):
         raise FileNotFoundError("train_dataloader_dprank007.pt")
 
-    monkeypatch.setattr(
-        provider_module, "restore_dataloader_state_from_checkpoint", missing
-    )
+    monkeypatch.setattr(provider_module, "restore_dataloader_state_from_checkpoint", missing)
     with pytest.raises(FileNotFoundError, match="dprank007"):
         provider._restore_train_dataloader_state(args, loader)
 
@@ -338,9 +322,7 @@ def test_provider_rejects_non_boolean_required_flag():
     args = SimpleNamespace(require_dataloader_restore="true")
 
     with pytest.raises(TypeError, match="must be a boolean"):
-        provider._restore_train_dataloader_state(
-            args, MegatronDataloaderWrapper(_StatefulLoader())
-        )
+        provider._restore_train_dataloader_state(args, MegatronDataloaderWrapper(_StatefulLoader()))
 
 
 @pytest.mark.parametrize(

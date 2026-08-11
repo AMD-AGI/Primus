@@ -190,10 +190,7 @@ class EnergonDatasetProvider(DatasetProvider):
         """
         require_restore = getattr(args, "require_dataloader_restore", False)
         if not isinstance(require_restore, bool):
-            raise TypeError(
-                "require_dataloader_restore must be a boolean, "
-                f"got {require_restore!r}"
-            )
+            raise TypeError("require_dataloader_restore must be a boolean, " f"got {require_restore!r}")
 
         load_path = getattr(args, "load", None)
         finetune = bool(getattr(args, "finetune", False))

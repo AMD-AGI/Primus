@@ -52,9 +52,7 @@ def test_emit_batch_fingerprint_is_fail_closed(monkeypatch):
         _emit_batch_fingerprint({}, step_count=1)
 
 
-def test_emit_batch_fingerprint_skips_synthetic_warmup(
-    monkeypatch, capsys
-):
+def test_emit_batch_fingerprint_skips_synthetic_warmup(monkeypatch, capsys):
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
     monkeypatch.setenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE", "1")
 
@@ -82,9 +80,7 @@ def test_diffusion_forward_step_exposes_counter_reset(monkeypatch):
     assert trainer._forward_step_count_initialized is True
 
 
-def test_emit_batch_fingerprint_logs_rank_local_payload(
-    monkeypatch, capsys
-):
+def test_emit_batch_fingerprint_logs_rank_local_payload(monkeypatch, capsys):
     from megatron.core import parallel_state
 
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")

@@ -325,20 +325,15 @@ class DiffusionPretrainTrainer(MegatronPretrainTrainer):
             return self.forward_step(data_iterator, model, return_schedule_plan=False)
 
         def reset_forward_step_count(iteration=0):
-            from megatron.core.num_microbatches_calculator import (
-                get_num_microbatches,
-            )
+            from megatron.core.num_microbatches_calculator import get_num_microbatches
 
             self._forward_step_count = int(iteration) * get_num_microbatches()
             self._forward_step_count_initialized = True
             log_rank_0(
-                "[DiffusionPretrainTrainer] Reset forward-step RNG counter "
-                f"to {self._forward_step_count}"
+                "[DiffusionPretrainTrainer] Reset forward-step RNG counter " f"to {self._forward_step_count}"
             )
 
-        diffusion_forward_step._primus_reset_forward_step_count = (
-            reset_forward_step_count
-        )
+        diffusion_forward_step._primus_reset_forward_step_count = reset_forward_step_count
         return diffusion_forward_step
 
     def get_datasets_provider(self):
