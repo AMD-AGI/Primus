@@ -42,6 +42,6 @@ modules:
       # because dot_product compilation is very heavy at 8192.
       # Mirrors the MI355X configs validated in the v26.6 MAD sweep (fc4dc19b).
       attention: "dot_product"
-      max_target_length: 4096
+      max_target_length: 8192
       # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
       per_device_batch_size: 1
