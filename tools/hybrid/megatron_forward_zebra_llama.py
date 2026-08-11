@@ -80,7 +80,7 @@ def _ensure_primus_logger(rank: int, world_size: int) -> None:
 
 def _ensure_rocm_validate_args_compat(args) -> None:
     """
-    `primus.modules.trainer.megatron.utils.validate_args_on_rocm()` assumes a Primus
+    `rocm_arg_validation.validate_args_on_rocm()` assumes a Primus
     YAML-backed args object that contains some Primus-specific flags.
     When running this standalone script, those attributes may not exist.
     Set safe defaults so validation can run without crashing.
@@ -350,7 +350,6 @@ def main() -> None:
     _setup_sys_path()
 
     # Megatron imports (after sys.path is set)
-    import megatron
     from mamba_builders import mamba_builder
     from megatron.training import get_args, get_model, get_tokenizer, print_rank_0
     from megatron.training.arguments import parse_args, validate_args
@@ -367,16 +366,15 @@ def main() -> None:
     # Builders for MCore Mamba/hybrid models
     from model_provider import model_provider
 
+    from primus.backends.megatron.patches.args.rocm_arg_validation import (
+        validate_args_on_rocm,
+    )
     from primus.backends.megatron.training.global_vars import (
         set_primus_global_variables,
     )
 
     # Primus adds a thin wrapper around Megatron tokenizer building (used in training).
     from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
-    from primus.modules.trainer.megatron.utils import (
-        set_wandb_writer_patch,
-        validate_args_on_rocm,
-    )
 
     # ---------------------------------------------------------------------
     # Primus-style initialization (matches MegatronTrainer.initialize_megatron)
@@ -434,8 +432,8 @@ def main() -> None:
     # Primus utilities used below require logger to be initialized.
     _ensure_primus_logger(rank=int(args.rank), world_size=int(args.world_size))
 
-    # Monkey-patch wandb writer hook (Primus does this before set_global_variables).
-    megatron.training.global_vars._set_wandb_writer = set_wandb_writer_patch
+    # Primus used to swap in its own _set_wandb_writer here; that patch went away
+    # with the legacy trainer, so Megatron's own hook is what runs now.
 
     # Global vars (args/timers/etc), but build tokenizer ourselves (Primus wrapper).
     set_global_variables(args, build_tokenizer=False)
