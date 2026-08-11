@@ -261,6 +261,11 @@ bash ./runner/primus-cli direct --log_file primus_gdn.log \
   --config examples/megatron/configs/MI300X/zebra_llama_300M_gdn_pure-pretrain.yaml
 ```
 
+The FLA Triton autotune workaround (the `megatron.fla.kda_safe_autotune` patch)
+does **not** fire for GDN: it narrows the autotune space of FLA's KDA
+intra-chunk kernels, which a GDN run never reaches — GDN goes through
+`fla/ops/common/chunk_h.py`, which AMD Triton compiles without trouble.
+
 This brings up `torchrun` with 8 ranks on the local node. Expected wall time on a healthy MI300X box: **~1h 54m** for the full 4768 iters.
 
 ### 5.3 Recommended toggle profile (for FLA parity)
@@ -526,7 +531,6 @@ primus/backends/megatron/core/models/hybrid/
 ├── hybrid_block.py                                    ← HybridStack, fp32-residual + fusion
 └── hybrid_mamba_mla_layer_specs.py                    ← gdn_hybrid_stack_spec_no_te
 tools/hybrid/
-├── patch_fla_triton_autotune_hang.sh                  ← MI300X FLA Triton autotune-hang workaround
 ├── convert_fla_to_megatron.py                         ← FLA Arrow → Megatron .bin/.idx
 ├── fla_order_dataset.py                               ← FLA-order dataset shim
 ├── convert_gdn_to_fla_hf.py                           ← Megatron → FLA HF (handles TE + no-TE)
