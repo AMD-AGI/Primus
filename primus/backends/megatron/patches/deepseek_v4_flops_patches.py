@@ -808,48 +808,6 @@ def _make_v4_num_floating_point_operations(original_fn, *, dispatch_v4: bool):
     return wrapped
 
 
-_TRAINER_REBIND_TARGETS: Sequence[str] = (
-    # Primus's Megatron trainer imports ``num_floating_point_operations`` at
-    # module load time (``primus.modules.trainer.megatron.trainer``: line 125)
-    # and resolves the bare name from its OWN globals at the call site
-    # (``trainer.train()``: line 1452).  Updating only
-    # ``megatron.training.training.num_floating_point_operations`` therefore
-    # never reaches that bound name and the trainer keeps using the upstream
-    # GPT/MLA-shaped function.  We rebind the trainer's local name to the
-    # wrapper too so the V4 closed form is what actually drives per-iter
-    # TFLOPs reporting.  Listed explicitly so a missing module is loud rather
-    # than silently silent.
-    "primus.modules.trainer.megatron.trainer",
-)
-
-
-def _rebind_trainer_imports(wrapped_fn) -> List[str]:
-    """Rebind ``num_floating_point_operations`` in every Primus module that
-    captured the upstream symbol at import time.
-
-    Returns the list of modules that were actually rebound so the install log
-    can show whether each downstream binding was wired up.  Modules that were
-    not yet imported (e.g. on a cold-cache trainer init) are skipped silently
-    — the trainer module imports the function at its own load, which
-    happens before ``before_train``, so in practice the targeted module is
-    always present at this point.
-    """
-    import sys
-
-    rebound: List[str] = []
-    for module_name in _TRAINER_REBIND_TARGETS:
-        mod = sys.modules.get(module_name)
-        if mod is None:
-            continue
-        if getattr(mod, "num_floating_point_operations", None) is wrapped_fn:
-            continue
-        if not hasattr(mod, "num_floating_point_operations"):
-            continue
-        mod.num_floating_point_operations = wrapped_fn
-        rebound.append(module_name)
-    return rebound
-
-
 @register_patch(
     "megatron.deepseek_v4.flops_reporting",
     backend="megatron",
@@ -884,7 +842,6 @@ def patch_v4_flops_reporting(ctx: PatchContext):
     # hard-set ``dispatch_v4=True`` here.
     wrapped = _make_v4_num_floating_point_operations(original_fn, dispatch_v4=True)
     training_module.num_floating_point_operations = wrapped
-    rebound = _rebind_trainer_imports(wrapped)
 
     log_rank_0(
         "[Patch:megatron.deepseek_v4.flops_reporting] wrapped "
@@ -892,16 +849,6 @@ def patch_v4_flops_reporting(ctx: PatchContext):
         "with V4-aware closed form (see "
         "deepseek-v4/develop/plan-3/02-phase-details.md#p20 for the formula)."
     )
-    if rebound:
-        log_rank_0(
-            "[Patch:megatron.deepseek_v4.flops_reporting] rebound trainer " f"import bindings: {rebound}"
-        )
-    else:
-        log_rank_0(
-            "[Patch:megatron.deepseek_v4.flops_reporting] no trainer modules "
-            "needed rebinding (none of "
-            f"{list(_TRAINER_REBIND_TARGETS)} were imported yet)."
-        )
 
 
 __all__: Sequence[str] = (
