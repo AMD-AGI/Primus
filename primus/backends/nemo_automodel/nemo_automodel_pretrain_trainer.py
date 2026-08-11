@@ -39,8 +39,11 @@ from primus.core.utils.module_utils import error_rank_0, log_rank_0
 class NemoAutomodelPretrainTrainer(BaseTrainer):
     """Trainer class for NeMo AutoModel diffusion pre-training."""
 
-    def __init__(self, backend_args: Any):
-        super().__init__(backend_args=backend_args)
+    def __init__(self, backend_args: Any = None, **kwargs):
+        # The core runtime instantiates every trainer with BaseModule-style
+        # context kwargs (module_name, primus_config, module_rank, ...). Accept
+        # and forward them so BaseTrainer can filter them cooperatively.
+        super().__init__(backend_args=backend_args, **kwargs)
         self._recipe: Optional[Any] = None
         log_rank_0("Initialized NemoAutomodelPretrainTrainer")
 
