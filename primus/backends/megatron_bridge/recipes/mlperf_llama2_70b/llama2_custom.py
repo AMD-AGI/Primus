@@ -369,7 +369,7 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
     if os.getenv("ENABLE_MLLOG", "0") == "1":
         global _sft_logger
         try:
-            from primus_mllog import MLPerfSFTLogger
+            from primus.backends.megatron_bridge.mlperf_sft import MLPerfSFTLogger
 
             kw = combined_kwargs
             gbs = kw.get("global_batch_size", 8)
@@ -412,8 +412,11 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
                 ),
             )
             _sft_logger.log_init_params(init_cfg)
-        except ImportError:
-            _orig_log_rank_0("primus_mllog not installed — MLPerf logging disabled")
+        except ImportError as exc:
+            _orig_log_rank_0(
+                f"MLPerf SFT logger unavailable ({exc}) — install mlperf-logging "
+                "(pip install git+https://github.com/mlperf/logging.git)"
+            )
             _sft_logger = None
         except Exception as exc:
             _orig_log_rank_0(f"MLPerf logging init failed ({type(exc).__name__}: {exc}) — disabled")

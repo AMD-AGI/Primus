@@ -33,7 +33,7 @@ import os
 from typing import Any, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import error_rank_0, log_rank_0
+from primus.core.utils.module_utils import error_rank_0, log_rank_0
 
 
 class NemoAutomodelPretrainTrainer(BaseTrainer):

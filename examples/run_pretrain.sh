@@ -167,6 +167,9 @@ export NCCL_CHECKS_DISABLE=1
 
 if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
+    # ROCm 7.2.1+ builds ANP into RCCL; RCCL_AINIC_ROCE=1 enables the built-in ANP
+    # path. An explicitly-set NCCL_NET_PLUGIN below still takes precedence.
+    export RCCL_AINIC_ROCE="${RCCL_AINIC_ROCE:-1}"
     export NCCL_IB_GID_INDEX=1
     export NCCL_IB_TC=${NCCL_IB_TC:-104}
     export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}
@@ -186,7 +189,12 @@ if [ "$USING_AINIC" == "1" ]; then
         "${RCCL_HOME_DIR}/build/release" \
         "${ANP_HOME_DIR}/build" \
         "${MPI_HOME_DIR}/lib"
-    if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+    # With built-in ANP (RCCL_AINIC_ROCE=1) default to "none" so RCCL uses its
+    # built-in ANP transport instead of auto-loading an external plugin. An
+    # explicitly-set NCCL_NET_PLUGIN always wins.
+    if [ "${RCCL_AINIC_ROCE}" = "1" ]; then
+        export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+    elif [ -n "${NCCL_NET_PLUGIN:-}" ]; then
         export NCCL_NET_PLUGIN
     elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
         export NCCL_NET_PLUGIN=librccl-anp.so
