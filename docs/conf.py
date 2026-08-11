@@ -43,6 +43,7 @@ extensions = [
 external_toc_path = "./sphinx/_toc.yml"
 external_projects_current_project = "primus"
 myst_fence_as_directive = ["mermaid"]
+myst_heading_anchors = 3
 
 # Publish the llms.txt index at the docs site root and let
 # rocm-docs-core generate llms-full.txt after each build (the llms.txt standard,
