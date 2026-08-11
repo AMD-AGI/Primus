@@ -74,11 +74,14 @@ def patch_quantile_balancing(ctx: PatchContext):
     finalize_model_grads = importlib.import_module("megatron.core.distributed.finalize_model_grads")
 
     original = finalize_model_grads._update_router_expert_bias
-    state = {"step": 0, "warned": False}
+    state = {"step": 0, "warned": False, "routers": None}
 
     def _quantile_update_router_expert_bias(model, config):
-        routers = collect_quantile_balancing_routers(model)
-        if not routers:
+        # The set of QB routers is fixed for the run; discover it once and cache
+        # (model structure does not change across optimizer steps).
+        if state["routers"] is None:
+            state["routers"] = collect_quantile_balancing_routers(model)
+        if not state["routers"]:
             # The rule was selected but no router carries a margin histogram,
             # which means the MoE spec did not pick up the QB router class.
             # Falling back to the sign rule silently would look like QB working
