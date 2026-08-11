@@ -289,7 +289,7 @@ def _decay_weighted_scores(
     those entries to zero) but the backward would not: ``inf`` times the
     zero upstream gradient is ``nan``. Megatron's per-head reference
     achieves the same by applying ``.tril()`` both before and after
-    ``.exp()`` (``gated_delta_net.py:638``).
+    ``.exp()`` (``gated_delta_net.py``).
     """
     columns: List[torch.Tensor] = []
     for c in range(chunk_size):

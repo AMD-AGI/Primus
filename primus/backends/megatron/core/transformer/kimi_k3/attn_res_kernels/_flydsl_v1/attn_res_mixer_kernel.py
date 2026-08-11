@@ -119,7 +119,7 @@ MAX_CANDIDATES = 33
 #: ``mix_normalised``
 #:     Mix the RMS-normalised candidates instead of the raw ones. The easiest
 #:     thing to get wrong and the one the reference is most explicit about
-#:     (``modeling_kimi_linear.py:1083`` builds ``k``, ``:1087`` mixes ``v``).
+#:     (``modeling_kimi_linear.py`` builds ``k``, mixes ``v``).
 #: ``score_unnormalised``
 #:     The mirror image: score the raw candidates, skipping the RMS scaling.
 #: ``no_softmax_max``
@@ -370,7 +370,7 @@ def build_attn_res_mixer_fwd(
         blocks = [(br_ptr, row_br + arith.index(c * H)) for c in range(NB)]
         stream = [(ps_ptr, row_ps)]
         # "the checkpoints, then the stream" is the reference's order
-        # (modeling_kimi_linear.py:1082); `stream_first` inverts it.
+        # (modeling_kimi_linear.py); `stream_first` inverts it.
         cand = {False: blocks + stream, True: stream + blocks}[inject == "stream_first"]
 
         # ---------------- phase 1: one pass over v, two reductions ------------

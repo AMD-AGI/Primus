@@ -241,7 +241,7 @@ def flydsl_attn_res_mix(
     # num_blocks == 0 makes the softmax a single-candidate no-op returning
     # prefix_sum itself. The kernel handles C == 1 correctly, but the eager path
     # is one op and needs no launch, so route it there. The caller normally
-    # skips the call entirely in that case (kimi_k3_block.py:987).
+    # skips the call entirely in that case (kimi_k3_block.py).
     if block_residual.shape[-2] == 0:
         return eager_attn_res_mix(prefix_sum, block_residual, norm_weight, proj_weight, eps)
 

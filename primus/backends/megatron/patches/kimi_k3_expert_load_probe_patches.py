@@ -16,12 +16,11 @@ Where the numbers come from
 ---------------------------
 ``TopKRouter`` keeps a non-persistent ``local_tokens_per_expert`` buffer of
 shape ``[num_moe_experts]`` whenever ``moe_router_enable_expert_bias`` is set
-(``router.py:171-181``) and accumulates ``routing_map.sum(dim=0)`` into it on
-every *training* microbatch (``router.py:578-584`` -- the ``is_grad_enabled``
-guard means evaluation contributes nothing). It is zeroed once per global
-batch by ``reset_model_temporary_tensors`` (``finalize_model_grads.py:278-290``),
-which ``finalize_model_grads`` calls at ``:483``, immediately after the
-expert-bias update at ``:481``.
+(``router.py``) and accumulates ``routing_map.sum(dim=0)`` into it on every
+*training* microbatch (``router.py`` -- the ``is_grad_enabled`` guard means
+evaluation contributes nothing). It is zeroed once per global batch by
+``reset_model_temporary_tensors`` (``finalize_model_grads.py``), which
+``finalize_model_grads`` calls immediately after the expert-bias update.
 
 So the buffers hold exactly one global batch's routing decisions at the moment
 ``reset_model_temporary_tensors`` is entered, and that is where this probe
@@ -34,13 +33,12 @@ Why wrap the reset rather than the bias update
 Wrapping the reset instead makes the probe independent of which bias rule is
 installed and of patch ordering, so both arms of the A/B are measured by
 identical code on an identical schedule. ``reset_model_temporary_tensors`` is
-looked up as a module global at ``:483``, so rebinding the module attribute is
-sufficient.
+looked up as a module global, so rebinding the module attribute is sufficient.
 
 ``get_updated_expert_bias`` all-reduces a ``torch.stack`` *copy*
-(``finalize_model_grads.py:312-316`` -> ``moe_utils.py:1132-1138``), so the
-per-router buffers are still rank-local here and this probe does its own
-all-reduce over the same TPxCPxDP group.
+(``finalize_model_grads.py`` -> ``moe_utils.py``), so the per-router buffers
+are still rank-local here and this probe does its own all-reduce over the same
+TPxCPxDP group.
 
 Activation
 ----------

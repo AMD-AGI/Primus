@@ -39,13 +39,13 @@ Structure (transcribed from ``KimiDeltaAttention`` in the HF
 * a sigmoid-gated head-wise RMSNorm on the output, then ``o_proj``.
 
 Layout follows Megatron's ``GatedDeltaNet``
-(``megatron/core/ssm/gated_delta_net.py:70-75``): input and output are
+(``megatron/core/ssm/gated_delta_net.py``): input and output are
 ``[s, b, h]``; the body works in ``[b, s, h, d]``.
 
 Tensor parallelism
 ------------------
 Sharding is over **heads**, exactly as ``GatedDeltaNet`` does
-(``gated_delta_net.py:160-199``): every per-head / per-channel parameter
+(``gated_delta_net.py``): every per-head / per-channel parameter
 is allocated at its local-TP width and flagged
 ``tensor_model_parallel=True``, the three convolutions are built over
 local channels, ``q``/``k``/``v``/``f_b``/``g``/``b`` projections are
@@ -54,7 +54,7 @@ row-parallel with ``input_is_parallel=True``. The one projection that
 must **not** be sharded is ``f_a_proj``: it produces the shared
 ``head_dim``-wide latent that ``f_b_proj`` expands, so it is built
 duplicated, following the MLA low-rank down-projection idiom at
-``multi_latent_attention.py:409-419``.
+``multi_latent_attention.py``.
 
 The arithmetic is therefore TP-correct for ``tp_size > 1``, but only
 ``tp_size == 1`` is exercised by this module's unit tests; multi-rank
@@ -117,7 +117,7 @@ def _duplicated_linear_kwargs(spec: Union[ModuleSpec, type]) -> dict:
     """Extra kwargs that make a linear spec **replicate** rather than shard.
 
     Mirrors the MLA low-rank down-projection idiom at
-    ``multi_latent_attention.py:409-419``: TE's ``TELinear`` takes
+    ``multi_latent_attention.py``: TE's ``TELinear`` takes
     ``parallel_mode='duplicated'``, while the column-parallel classes
     reach the same result by sharding and gathering back.
     """
@@ -213,7 +213,7 @@ class KimiDeltaAttention(MegatronModule):
             them. ``kda_backend`` is a string selector validated against
             :data:`KDA_BACKENDS` here, mirroring how
             ``DeepseekV4Attention`` validates ``use_v4_attention_backend``
-            (``deepseek_v4_attention.py:695-730``); the ``use_`` prefix is
+            (``deepseek_v4_attention.py``); the ``use_`` prefix is
             dropped because it reads as a boolean and this is a choice.
         submodules: specs for the projections and the gated output norm.
         layer_number: 1-based index of this layer in the block.
@@ -236,7 +236,7 @@ class KimiDeltaAttention(MegatronModule):
             per-channel retention near 1 (``dt_bias`` around ``-6.9 ..
             -2.3`` gives ``α ≈ 0.64 .. 0.995`` under the bounded gate).
             Megatron's ``GatedDeltaNet`` instead uses ``dt_bias = 1``
-            (``gated_delta_net.py:235-240``), which would start the layer
+            (``gated_delta_net.py``), which would start the layer
             near-total forgetting. Exposed so it can be swept.
         attn_mask_type: accepted and recorded, never used. KDA has no
             softmax and no mask tensor -- it is causal by construction,
@@ -244,7 +244,7 @@ class KimiDeltaAttention(MegatronModule):
             argument exists because
             ``MultiTokenPredictionLayer.__init__`` validates the inner
             layer's ``self_attention.params['attn_mask_type']` against
-            ``SUPPORTED_ATTN_MASK`` (``multi_token_prediction.py:773-780``)
+            ``SUPPORTED_ATTN_MASK`` (``multi_token_prediction.py``)
             and refuses to construct without it, so the KDA spec has to
             declare the param and this constructor has to tolerate it.
             DeepSeek-V4 took the identical step at its P16
@@ -311,8 +311,8 @@ class KimiDeltaAttention(MegatronModule):
         self.chunk_size = getattr(config, "kda_chunk_size", 64)
         if self.backend_name not in KDA_BACKENDS:
             raise ValueError(f"kda_backend must be one of {list(KDA_BACKENDS)}; got {self.backend_name!r}.")
-        # Resolve once, at construction, following the DeepSeek-V4 attention idiom
-        # (deepseek_v4_attention.py:737-771): a missing optional dependency then
+        # Resolve once, at construction, following the DeepSeek-V4 attention
+        # idiom (deepseek_v4_attention.py): a missing optional dependency then
         # surfaces while the model is being built rather than on the first
         # forward, and the per-step dispatch disappears from the hot path.
         self.kda_backend = resolve_kda_backend(self.backend_name)
@@ -474,16 +474,16 @@ class KimiDeltaAttention(MegatronModule):
         "this parameter is replicated but its gradient is partial, sum it over
         the tensor-parallel group": ``_allreduce_non_tensor_model_parallel_grads``
         collects every parameter carrying it into a single coalesced
-        all-reduce over ``tp_group`` (``finalize_model_grads.py:357-370``).
-        The same mechanism already covers the attention-residual mixers
-        (``attention_residual.py:127-129``) and upstream's router weight
-        (``router.py:79``). It has to be that mechanism and not an autograd
-        hook on ``.grad``: under DDP the gradient lives in ``main_grad``, and
-        a ``.grad`` hook would be a silent no-op in real training.
+        all-reduce over ``tp_group`` (``finalize_model_grads.py``). The same
+        mechanism already covers the attention-residual mixers
+        (``attention_residual.py``) and upstream's router weight
+        (``router.py``). It has to be that mechanism and not an autograd hook
+        on ``.grad``: under DDP the gradient lives in ``main_grad``, and a
+        ``.grad`` hook would be a silent no-op in real training.
 
         Note the same latent problem exists in upstream's ``GatedDeltaNet``,
-        whose ``out_norm`` is built the same way (``gated_delta_net.py:
-        201-207``) and carries no such flag.
+        whose ``out_norm`` is built the same way (``gated_delta_net.py``)
+        and carries no such flag.
         """
         if self.tp_size <= 1:
             return
@@ -493,9 +493,9 @@ class KimiDeltaAttention(MegatronModule):
             "reasons: (1) out_norm's gain is shared across heads while the heads are "
             "sharded, so its gradient is a partial sum that only "
             "_allreduce_non_tensor_model_parallel_grads reconstructs -- and that runs "
-            "only under `config.sequence_parallel` (finalize_model_grads.py:358); "
+            "only under `config.sequence_parallel` (finalize_model_grads.py); "
             "(2) MoE + TP > 1 is refused at forward time without it anyway "
-            "(moe_layer.py:484-488). Set sequence_parallel: true in the experiment yaml."
+            "(moe_layer.py). Set sequence_parallel: true in the experiment yaml."
         )
         for param in self.out_norm.parameters(recurse=True):
             setattr(param, "sequence_parallel", True)
@@ -518,19 +518,19 @@ class KimiDeltaAttention(MegatronModule):
         input of size <tp * that>`` -- which is what it did before this
         override, so TP > 1 was unreachable for Kimi K3 in practice, because
         MoE + TP > 1 *requires* sequence parallelism
-        (``moe_layer.py:484-488`` raises at forward time otherwise).
+        (``moe_layer.py`` raises at forward time otherwise).
 
         Turning the flag off also fixes the backward: with
         ``sequence_parallel=False`` and ``tp_size > 1``,
         ``ColumnParallelLinear.__init__`` sets ``allreduce_dgrad``
-        (``layers.py:900-902``), so the gradient w.r.t. the replicated ``z``
+        (``layers.py``), so the gradient w.r.t. the replicated ``z``
         is summed across TP -- which is required, since each rank's
         ``f_b_proj`` shard produces only a partial derivative of the loss with
         respect to it. ``f_a_proj``'s ``gather_from_tensor_model_parallel_region``
         then splits that complete gradient back to per-rank slices.
 
         A shallow copy rather than a mutation, following
-        ``StableLatentMoE._latent_config`` and ``SharedExpertMLP.__init__:47``:
+        ``StableLatentMoE._latent_config`` and ``SharedExpertMLP.__init__``:
         the config object is shared with the rest of the layer.
         """
         if not getattr(self.config, "sequence_parallel", False):
@@ -559,7 +559,7 @@ class KimiDeltaAttention(MegatronModule):
 
         ``padding=kernel-1`` plus the ``[..., :seq_len]`` truncation in
         :meth:`_short_conv` is the standard Megatron spelling of a causal
-        depthwise conv (``gated_delta_net.py:166-175, 327``).
+        depthwise conv (``gated_delta_net.py``).
         """
         conv = nn.Conv1d(
             in_channels=channels_local_tp,

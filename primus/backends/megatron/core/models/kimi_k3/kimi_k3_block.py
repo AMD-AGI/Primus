@@ -13,9 +13,9 @@
 The layer interleaves Kimi Delta Attention with NoPE MLA
 (``config.linear_attention_freq``) and threads the attention-residual
 state. It is a transcription of ``KimiDecoderLayer._forward_attn_residual``
-(``modeling_kimi_linear.py:973-1046``) onto Megatron's sequence-first
-``[s, b, h]`` convention, with ``KimiLinearModel.forward``'s stack-level
-bookkeeping (``:1188-1217``) in the block.
+(``modeling_kimi_linear.py``) onto Megatron's sequence-first ``[s, b, h]``
+convention, with ``KimiLinearModel.forward``'s stack-level bookkeeping in
+the block.
 
 Why this is not a plain ``TransformerLayer``
 --------------------------------------------
@@ -25,15 +25,14 @@ upstream's ``TransformerLayer.forward`` returns ``(hidden_states,
 context)`` and pipeline P2P carries a single ``[s, b, h]`` tensor.
 DeepSeek-V4 hit the identical problem with its K parallel
 HyperConnection streams and solved it by folding the extra axis into the
-sequence axis at PP boundaries (``deepseek_v4_block.py:341-429``,
-``:802-806``). This file copies that solution:
-:func:`_lift_res_in` / :func:`_lower_res_out` are the K3 analogues of
-``_lift_streams_in`` / ``_lower_streams_out``.
+sequence axis at PP boundaries (``deepseek_v4_block.py``). This file copies
+that solution: :func:`_lift_res_in` / :func:`_lower_res_out` are the K3
+analogues of ``_lift_streams_in`` / ``_lower_streams_out``.
 
 The K3 wrinkle is that the extra axis **grows with depth**. It is not
 runtime state, though: a checkpoint is appended exactly when
-``layer_idx % attn_res_block_size == 0`` (``:995``), so the number of
-checkpoints in flight on entry to any layer is the pure function
+``layer_idx % attn_res_block_size == 0``, so the number of checkpoints in
+flight on entry to any layer is the pure function
 :func:`attn_res_num_blocks_before` of its *global* index. Nothing but the
 padded tensor has to cross a stage boundary, and the padding width is
 ``config.attn_res_num_blocks_max``.
@@ -43,8 +42,7 @@ Shape contract
 
 * ``pre_process`` stage: ``hidden_states`` arrives ``[s, b, h]`` and
   ``block_residual`` is created empty, ``[s, b, 0, h]`` -- genuinely
-  zero-width, which is what makes layer 0 skip its pre-attention mix
-  (``:1190-1192`` and ``:987``).
+  zero-width, which is what makes layer 0 skip its pre-attention mix.
 * Non-first stage: ``hidden_states`` arrives ``[(1 + nb_max) * s, b, h]``
   and is unfolded.
 * ``post_process`` stage: the head collapses the state and the block
@@ -108,7 +106,7 @@ def attn_res_num_blocks_before(layer_idx: int, block_size: Optional[int]) -> int
     """Checkpoints in flight on entry to the 0-indexed ``layer_idx``.
 
     A checkpoint is appended by every layer whose index is a multiple of
-    ``block_size`` (``modeling_kimi_linear.py:995``), so on entry to layer
+    ``block_size`` (``modeling_kimi_linear.py``), so on entry to layer
     ``L`` the count is ``|{L' < L : L' % block_size == 0}| =
     ceil(L / block_size)``.
 
@@ -136,7 +134,7 @@ class KimiK3LayerSubmodules(TransformerLayerSubmodules):
 
     Extends :class:`TransformerLayerSubmodules` -- as
     :class:`DeepseekV4HybridLayerSubmodules` does
-    (``deepseek_v4_block.py:296-318``) -- so Megatron spec-lifecycle code
+    (``deepseek_v4_block.py``) -- so Megatron spec-lifecycle code
     that inspects ``submodules_config`` needs no K3 branch. The four core
     slots keep their upstream names (``input_layernorm`` /
     ``self_attention`` / ``pre_mlp_layernorm`` / ``mlp``).
@@ -147,7 +145,7 @@ class KimiK3LayerSubmodules(TransformerLayerSubmodules):
 
     The inherited cross-attention and BDA slots stay at their defaults:
     K3 has no cross-attention, and the attention-residual mix replaces the
-    bias-dropout-add residual entirely (``:987-1046`` has no dropout).
+    bias-dropout-add residual entirely (has no dropout).
     """
 
     attn_res_mixer: Optional[Union[ModuleSpec, type]] = None
@@ -159,10 +157,9 @@ class KimiK3TransformerBlockSubmodules:
     """Spec tree for the Kimi K3 decoder block.
 
     ``attn_res_head`` is the post-stack mix
-    (``KimiLinearModel._apply_output_attn_res``, ``:1226-1233``) and is
-    built on the ``post_process`` stage only, mirroring how V4 builds
-    ``hyper_head`` (``deepseek_v4_layer_specs.py:688``,
-    ``deepseek_v4_block.py:899-913``).
+    (``KimiLinearModel._apply_output_attn_res``) and is built on the
+    ``post_process`` stage only, mirroring how V4 builds ``hyper_head``
+    (``deepseek_v4_layer_specs.py``, ``deepseek_v4_block.py``).
     """
 
     layer_specs: Optional[List[ModuleSpec]] = None
@@ -205,7 +202,7 @@ def _lift_res_in(
     if pre_process:
         if num_blocks != 0:
             raise ValueError(f"the first pipeline stage must start with zero checkpoints, got {num_blocks}")
-        # modeling_kimi_linear.py:1190-1192 -- genuinely zero-width, so
+        # modeling_kimi_linear.py -- genuinely zero-width, so
         # layer 0's pre-attention mix is skipped rather than mixing a zero.
         seq, batch, hidden = hidden_states.shape
         return hidden_states, hidden_states.new_zeros(seq, batch, 0, hidden)
@@ -279,7 +276,7 @@ class KimiK3Layer(TransformerLayer):
     ``isinstance(layer, TransformerLayer)`` checks and the
     ``BaseTransformerLayer`` utilities then apply -- but bypasses its
     ``__init__``, exactly as ``DeepseekV4HybridLayer`` does
-    (``deepseek_v4_block.py:504-516``). The parent builds a BDA residual
+    (``deepseek_v4_block.py``). The parent builds a BDA residual
     and a cross-attention slot that K3 does not have, and its
     ``forward`` has the wrong arity.
 
@@ -308,7 +305,7 @@ class KimiK3Layer(TransformerLayer):
         is_mtp_layer: whether this layer belongs to the MTP block.
             Forwarded to the MoE and on to its router, whose aux-loss
             tracker keys MTP depths separately from decoder layers
-            (``router.py:454``, ``:468``, ``:531``, ``:541``).
+            (``router.py``).
     """
 
     def __init__(
@@ -330,7 +327,7 @@ class KimiK3Layer(TransformerLayer):
 
         if pg_collection is None:
             # MultiTokenPredictionLayer builds its inner layer without
-            # forwarding pg_collection (multi_token_prediction.py:835-841), so
+            # forwarding pg_collection (multi_token_prediction.py), so
             # the MTP path always lands here. use_mpu_process_groups() reads
             # parallel_state, i.e. the real groups -- not the same thing as the
             # get_default_pg_collection() fallback used for
@@ -385,18 +382,18 @@ class KimiK3Layer(TransformerLayer):
         if self.use_attn_residuals:
             assert submodules.mlp_res_mixer is not None, (
                 "attn_res_block_size is set but the layer spec carries no mlp_res_mixer; "
-                "every layer runs the pre-MLP mix (:1028-1033)."
+                "every layer runs the pre-MLP mix."
             )
             self.mlp_res_mixer = build_module(submodules.mlp_res_mixer, config=config)
             # The pre-attention mix is skipped while no checkpoint exists,
-            # i.e. on layer 0 only (:987). The reference still allocates
-            # self_attention_res_{norm,proj} there (:908-917) and never
-            # reaches them; building them would leave two parameters that
-            # can never receive a gradient, which permanently disarms the
-            # "every parameter gets a grad" check that is the cheapest test
-            # for an unwired submodule. Drop them instead -- the same
-            # structural choice V4 makes for attn_hc / ffn_hc at
-            # hc_mult == 1 (deepseek_v4_block.py:689-691).
+            # i.e. on layer 0 only. The reference still allocates
+            # self_attention_res_{norm,proj} there and never reaches them;
+            # building them would leave two parameters that can never
+            # receive a gradient, which permanently disarms the "every
+            # parameter gets a grad" check that is the cheapest test for an
+            # unwired submodule. Drop them instead -- the same structural
+            # choice V4 makes for attn_hc / ffn_hc at hc_mult == 1
+            # (deepseek_v4_block.py).
             if self.num_blocks_in > 0:
                 assert submodules.attn_res_mixer is not None, (
                     f"layer {self.layer_idx} enters with {self.num_blocks_in} checkpoint(s) "
@@ -417,11 +414,11 @@ class KimiK3Layer(TransformerLayer):
 
         Upstream gates the ``pg_collection`` forward on an **identity**
         check against ``(MoELayer, TEGroupedMLP, SequentialMLP)``
-        (``transformer_layer.py:374``), so ``StableLatentMoE`` -- a
+        (``transformer_layer.py``), so ``StableLatentMoE`` -- a
         ``MoELayer`` subclass -- does not match and silently falls back to
-        ``get_default_pg_collection()`` (``moe_layer.py:170-171``). A
+        ``get_default_pg_collection()`` (``moe_layer.py``). A
         ``issubclass`` test is what makes the explicitly-threaded groups
-        reach it. The adjacent ``isinstance`` at ``:402`` does match, so
+        reach it. The adjacent ``isinstance`` does match, so
         ``is_moe_layer`` would have come out right either way.
         """
         kwargs = {}
@@ -436,8 +433,8 @@ class KimiK3Layer(TransformerLayer):
         mlp = build_module(mlp_spec, config=self.config, **kwargs)
         if hasattr(mlp, "set_layer_number"):
             # The router's aux-loss tracker indexes by layer number
-            # (router.py:464-479) and the spec deliberately carries none,
-            # so it has to be set after the build (transformer_layer.py:396).
+            # (router.py) and the spec deliberately carries none, so it has
+            # to be set after the build (transformer_layer.py).
             mlp.set_layer_number(self.layer_number)
         return mlp
 
@@ -469,7 +466,7 @@ class KimiK3Layer(TransformerLayer):
         """Run one layer.
 
         Transcribes ``KimiDecoderLayer._forward_attn_residual``
-        (``modeling_kimi_linear.py:984-1046``). ``prefix_sum`` is the
+        (``modeling_kimi_linear.py``). ``prefix_sum`` is the
         running residual stream; ``block_residual`` is the growing set of
         cross-layer checkpoints.
 
@@ -485,7 +482,7 @@ class KimiK3Layer(TransformerLayer):
         Returns:
             ``(hidden_states, block_residual)``. The arity matches
             upstream's ``(hidden_states, context)`` -- and V4's
-            ``(hidden, None)`` (``deepseek_v4_block.py:781``) -- so
+            ``(hidden, None)`` (``deepseek_v4_block.py``) -- so
             callers that unpack two values keep working; the second
             element carries the checkpoint state instead of a
             cross-attention context, because K3 has no cross-attention.
@@ -522,12 +519,12 @@ class KimiK3Layer(TransformerLayer):
         prefix_sum: Optional[Tensor] = hidden_states
 
         # Pre-attention mix. Skipped only while no checkpoint exists, i.e.
-        # at layer 0 (:987), which is also the only layer built without an
+        # at layer 0, which is also the only layer built without an
         # attn_res_mixer.
         if self.attn_res_mixer is not None:
             hidden_states = self.attn_res_mixer(prefix_sum, block_residual)
 
-        # Append this block's checkpoint and reset the running sum (:995-998).
+        # Append this block's checkpoint and reset the running sum.
         if self.appends_checkpoint:
             block_residual = torch.cat((block_residual, prefix_sum.unsqueeze(-2)), dim=-2)
             prefix_sum = None
@@ -539,12 +536,12 @@ class KimiK3Layer(TransformerLayer):
                 packed_seq_params=packed_seq_params,
             )
         )
-        # :1023-1026 -- after a reset the stream restarts from the sublayer
-        # output rather than from the (discarded) pre-attention hidden.
+        # After a reset the stream restarts from the sublayer output rather
+        # than from the (discarded) pre-attention hidden.
         prefix_sum = attn_out if prefix_sum is None else prefix_sum + attn_out
 
-        # Pre-MLP mix (:1028-1033). block_residual is non-empty here on
-        # every layer, because layer 0 has just appended its own.
+        # Pre-MLP mix. block_residual is non-empty here on every layer,
+        # because layer 0 has just appended its own.
         hidden_states = self.mlp_res_mixer(prefix_sum, block_residual)
 
         mlp_out = self._add_bias(*self.mlp(self.pre_mlp_layernorm(hidden_states)))
@@ -564,7 +561,7 @@ class KimiK3TransformerBlock(TransformerBlock):
     Subclasses :class:`TransformerBlock` for type identity and its
     sharded-state-dict surface, bypassing its ``__init__`` for the same
     reasons ``DeepseekV4TransformerBlock`` does
-    (``deepseek_v4_block.py:825-830``): the parent requires a real
+    (``deepseek_v4_block.py``): the parent requires a real
     ``pg_collection`` and runs upstream-specific layer construction, while
     the spec tree plus the lift / lower helpers give the same
     functionality and stay CPU-instantiable.
@@ -596,12 +593,12 @@ class KimiK3TransformerBlock(TransformerBlock):
         # *other* methods read has to be set here. ``tp_group`` is one:
         # ``TransformerBlock.sharded_state_dict`` passes it to
         # ``sharded_state_dict_default`` for every child that is not
-        # ``self.layers`` (``transformer_block.py:953-963``), i.e. for
+        # ``self.layers`` (``transformer_block.py``), i.e. for
         # ``attn_res_head`` and ``final_layernorm``. Without it **saving a
         # Kimi K3 checkpoint raises** ``AttributeError: 'KimiK3TransformerBlock'
         # object has no attribute 'tp_group'`` -- at the first save_interval,
         # long after the run looks healthy. ``DeepseekV4TransformerBlock`` has
-        # the same gap (``deepseek_v4_block.py:838`` sets only pg_collection).
+        # the same gap (``deepseek_v4_block.py`` sets only pg_collection).
         self.tp_group = pg_collection.tp
         # Required by the pipeline schedules, same contract as the parent.
         self.input_tensor = None
@@ -620,7 +617,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         # that have no Primus patch context at all, and an unpatched scheduler
         # fails loudly and immediately anyway (the receiving stage's
         # _lift_res_in rejects a first dim that is not divisible by
-        # 1 + num_blocks_max, at :213-218).
+        # 1 + num_blocks_max).
 
         layer_specs = submodules.layer_specs if submodules is not None else None
         assert layer_specs, "Kimi K3 requires non-empty submodules.layer_specs."
@@ -635,7 +632,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         hidden_size = int(config.hidden_size)
         norm_eps = float(config.layernorm_epsilon)
 
-        # The post-stack mix lives on the final stage only (:1215-1217).
+        # The post-stack mix lives on the final stage only.
         if self.use_attn_residuals and self.post_process:
             head_spec = submodules.attn_res_head if submodules is not None else None
             assert head_spec is not None, (
@@ -693,7 +690,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         """Local indices of the layers to activation-checkpoint.
 
         Same semantics as ``DeepseekV4TransformerBlock``
-        (``deepseek_v4_block.py:956-1001``): Primus's explicit
+        (``deepseek_v4_block.py``): Primus's explicit
         ``recompute_layer_ids`` wins, then ``recompute_method``.
         """
         if not self.training:
@@ -731,7 +728,7 @@ class KimiK3TransformerBlock(TransformerBlock):
         This block overrides the parent's forward, so the per-layer
         ``get_fp8_context`` wrapping the stock loop applies is not
         inherited and has to be re-applied -- the same reason V4 does it
-        (``deepseek_v4_block.py:1003-1032``). Resolved as a module
+        (``deepseek_v4_block.py``). Resolved as a module
         attribute at call time so Primus's ``before_train`` fp8 patch is
         honoured.
         """
@@ -758,7 +755,7 @@ class KimiK3TransformerBlock(TransformerBlock):
 
         Both grad-carrying tensors are passed as checkpointed args and
         both are returned: ``CheckpointFunction`` filters its outputs to
-        the ones that require grad (``random.py:571-578``), so a two-tensor
+        the ones that require grad (``random.py``), so a two-tensor
         signature is supported. The fp8 context is entered *inside* the
         closure so the recomputed forward matches the original.
         """

@@ -99,9 +99,8 @@ def _require_gfx950() -> None:
     arch, but that assert fires at *build* time, deep inside a compile.
     Checking here makes selecting the backend on the wrong hardware fail
     at model-construction time with a message that names the fallbacks —
-    the same reason
-    ``v4_attention_kernels/__init__.py:137-161`` puts its hardware note in
-    the loader's error rather than in the kernel.
+    the same reason ``v4_attention_kernels/__init__.py`` puts its
+    hardware note in the loader's error rather than in the kernel.
 
     Raised as ``ImportError`` (not ``RuntimeError``) so it composes with
     the surrounding ``except ImportError`` and so callers have one

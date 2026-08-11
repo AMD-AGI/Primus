@@ -42,7 +42,7 @@ def _resolve_runtime_decoder_spec(args, config: KimiK3TransformerConfig, vp_stag
     """Resolve the effective runtime decoder spec for the Kimi K3 decoder.
 
     ``args.spec`` is the user override escape hatch, exactly as in
-    ``deepseek_v4_builders.py:46-54``; otherwise the Kimi-K3-owned spec
+    ``deepseek_v4_builders.py``; otherwise the Kimi-K3-owned spec
     builder assembles the stage-local layer tree.
     """
     if args.spec is not None:
@@ -61,8 +61,8 @@ def describe_latent_moe_resolution(args, config, model) -> str:
     The stable latent MoE's bottleneck width is named twice --
     ``routed_expert_hidden_size`` (K3 / HF) and ``moe_latent_size`` (upstream) --
     and lives on two objects (``args`` and the config), with a reconciler on
-    each. Upstream reads only ``config.moe_latent_size`` (``moe_layer.py:198``,
-    ``experts.py:185``, ``mlp.py:210``) while ``training.py:361`` reads only
+    each. Upstream reads only ``config.moe_latent_size`` (``moe_layer.py``,
+    ``experts.py``, ``mlp.py``) while ``training.py`` reads only
     ``args.moe_latent_size``, so the two can disagree and the disagreement is
     invisible: the model is shaped by one and the reported FLOPs/params by the
     other.
@@ -133,7 +133,7 @@ def assert_latent_moe_width_reached_the_model(config, model) -> None:
     a different model from the one the yaml describes. Nothing downstream
     compares the two.
 
-    ``fc1_latent_proj.weight`` is ``[latent, hidden]`` (``moe_layer.py:200-210``)
+    ``fc1_latent_proj.weight`` is ``[latent, hidden]`` (``moe_layer.py``)
     and is only built at all when ``config.moe_latent_size`` is truthy, so its
     presence and its first dimension together certify the whole latent path.
     """
@@ -183,12 +183,12 @@ def kimi_k3_builder(
 
     # core_transformer_config_from_args silently replaces the requested
     # config_class with plain MLATransformerConfig when
-    # args.multi_latent_attention is true (arguments.py:1589-1590), which
+    # args.multi_latent_attention is true (arguments.py), which
     # would drop every Kimi-K3 field without any error. Fail loudly instead.
     assert isinstance(config, KimiK3TransformerConfig), (
         f"Expected a KimiK3TransformerConfig, got {type(config).__name__}. "
         "This happens when the YAML sets multi_latent_attention: true — "
-        "megatron/training/arguments.py:1589-1590 then overrides config_class. "
+        "megatron/training/arguments.py then overrides config_class. "
         "Kimi K3 builds its own attention specs and must leave the flag false."
     )
     assert not args.use_legacy_models, "Kimi K3 requires use_legacy_models=False (Mcore-only)."

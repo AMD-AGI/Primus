@@ -10,9 +10,9 @@ Extends Megatron's :class:`MLATransformerConfig` with the fields the Kimi
 K3 modules need and that upstream does not declare. The MLA geometry of
 the full-attention layers (``q_lora_rank`` / ``kv_lora_rank`` /
 ``qk_head_dim`` / ``qk_pos_emb_head_dim`` / ``v_head_dim`` / ``rope_type``)
-is inherited as-is from ``transformer_config.py:2204-2247``, and the KDA
-geometry reuses upstream's linear-attention fields
-(``transformer_config.py:290-310``) rather than introducing parallel names.
+is inherited as-is from ``transformer_config.py``, and the KDA geometry
+reuses upstream's linear-attention fields (``transformer_config.py``)
+rather than introducing parallel names.
 
 Two upstream behaviours are load-bearing here and worth stating outright.
 
@@ -20,15 +20,15 @@ Two upstream behaviours are load-bearing here and worth stating outright.
     ``core_transformer_config_from_args`` overwrites the caller's
     ``config_class`` with plain ``MLATransformerConfig`` whenever
     ``args.multi_latent_attention`` is true
-    (``megatron/training/arguments.py:1589-1590``). A YAML that turns the
+    (``megatron/training/arguments.py``). A YAML that turns the
     flag on therefore *silently* discards this class and every field
     below. Kimi K3 builds its attention modules from its own specs, so it
     does not need the flag; the family YAML leaves it at the
-    ``language_model.yaml:94`` default of ``false`` and
+    ``language_model.yaml`` default of ``false`` and
     :func:`kimi_k3_builder` asserts the class survived.
 
 New fields need no argparse registration
-    ``train_runtime.py:442`` copies every YAML key onto ``backend_args``
+    ``train_runtime.py`` copies every YAML key onto ``backend_args``
     via ``merge_namespace``, and
     ``core_transformer_config_from_args(args, config_class=...)`` binds
     whatever the dataclass declares.
@@ -45,7 +45,7 @@ from megatron.core.transformer.transformer_config import MLATransformerConfig
 __all__ = ["KimiK3TransformerConfig", "normalize_linear_attention_freq"]
 
 # The character whitelist Megatron's own pattern evaluator uses
-# (arguments.py:204), widened by whitespace so YAML can breathe.
+# (arguments.py), widened by whitespace so YAML can breathe.
 _PATTERN_CHARS = re.compile(r"[^,\d\[\]\(\)\+\*\s]")
 
 
@@ -59,12 +59,12 @@ def normalize_linear_attention_freq(
 
     ``1`` selects KDA (linear attention), ``0`` selects full attention
     (NoPE MLA) — the same polarity as upstream's ``linear_attention_freq``
-    (``transformer_config.py:290-295``).
+    (``transformer_config.py``).
 
     Accepted input forms, mirroring
-    ``_normalize_compress_ratios_field`` (``deepseek_v4_transformer_config.py:31-70``)
+    ``_normalize_compress_ratios_field`` (``deepseek_v4_transformer_config.py``)
     plus the int-N semantics of ``get_linear_attention_pattern``
-    (``experimental_attention_variant_module_specs.py:322-327``):
+    (``experimental_attention_variant_module_specs.py``):
 
     * ``None`` — pattern not configured.
     * ``int N`` — one full-attention layer every ``N`` layers, i.e.
@@ -72,19 +72,19 @@ def normalize_linear_attention_freq(
       is **not** expressible this way; see the class docstring.
     * ``list`` / ``tuple`` — used directly, length-checked.
     * ``str`` — a Python list expression, evaluated the way Megatron's own
-      ``la_freq_type`` does (``arguments.py:199-207, 257-280``), so
+      ``la_freq_type`` does (``arguments.py``), so
       ``"([1]*3+[0])*22+[1]*3+[0]*2"`` works. Megatron's converter is
       unreachable from Primus: ``MegatronArgBuilder`` only applies
       argparse ``type=`` converters for *enum* args
-      (``argument_builder.py:60-82``), so YAML values arrive raw and this
+      (``argument_builder.py``), so YAML values arrive raw and this
       is the only place the string form is resolved.
 
     The result is a ``list`` and not a tuple on purpose. Upstream tests the
     pattern with ``isinstance(..., list)`` in two places that would
     silently take the wrong branch on a tuple:
-    ``transformer_block.py:910`` (which drives ``non_homogeneous_layers``
-    for checkpoint sharding) and
-    ``experimental_attention_variant_module_specs.py:328``, whose ``else``
+    ``transformer_block.py`` (which drives ``non_homogeneous_layers`` for
+    checkpoint sharding) and
+    ``experimental_attention_variant_module_specs.py``, whose ``else``
     raises ``ValueError``.
     """
     if value is None:
@@ -140,13 +140,13 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     # ---- layer interleave -------------------------------------------------
     # 1 = KDA (linear attention), 0 = full attention (NoPE MLA). Redeclared
-    # from transformer_config.py:290 only to widen the type to the string
+    # from transformer_config.py only to widen the type to the string
     # form; the semantics are upstream's.
     linear_attention_freq: Optional[Union[int, str, List[int]]] = None
 
     # ---- KDA (HF: linear_attn_config) -------------------------------------
     # The geometry lives in upstream's linear_* fields
-    # (transformer_config.py:297-310):
+    # (transformer_config.py):
     #   linear_conv_kernel_dim  <- short_conv_kernel_size (4)
     #   linear_key_head_dim     <- head_dim (128)
     #   linear_value_head_dim   <- head_dim (128)   # KDA has K == V dims
@@ -154,7 +154,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     #   linear_num_value_heads  <- num_heads (96)   # KDA has no GQA
     # Only the knobs upstream has no equivalent for are declared here. The
     # defaults match the getattr fallbacks KimiDeltaAttention already uses
-    # (kimi_delta_attention.py:284-287) so landing this config does not
+    # (kimi_delta_attention.py) so landing this config does not
     # change the module's behaviour.
     kda_gate_lower_bound: Optional[float] = -5.0
     kda_use_full_rank_gate: bool = True
@@ -182,7 +182,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # Default is ``None``, NOT "fla", on purpose. ``kda_backend`` is pinned to
     # "eager" in ``kimi_k3_base.yaml`` and overridden to fla per-experiment via
     # ``${PRIMUS_KDA_BACKEND:fla}``. A non-None default here would either flip
-    # every eager preset/test (base, debug, smoke, ``test_kimi_k3_yaml.py:1119``)
+    # every eager preset/test (base, debug, smoke, ``test_kimi_k3_yaml.py``)
     # to fla, or clobber the experiment-level ``kda_backend`` override -- i.e. it
     # would break "unset => behaviour unchanged". ``None`` means "defer to
     # ``kda_backend`` + ``K3P_KDA_CONV``", so adding this field changes nothing
@@ -196,30 +196,30 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # parent's qk_pos_emb_head_dim-wide frequency table with a zero-width
     # RotaryEmbedding(0) (kimi_k3_mla_attention.py). rot_dim then being 0 sends
     # the whole tensor down apply_rotary_pos_emb's t_pass branch, and the
-    # closing torch.cat returns it bit-for-bit (rope_utils.py:110-126).
+    # closing torch.cat returns it bit-for-bit (rope_utils.py).
     #
     # It deliberately does NOT touch qk_pos_emb_head_dim. Zeroing that also
-    # disables rope but changes the architecture: it deletes the 64 MQA-shared
-    # K dims (linear_kv_down_proj's width is kv_lora_rank + qk_pos_emb_head_dim,
-    # multi_latent_attention.py:469, and those dims bypass both the
-    # kv_lora_rank latent and kv_a_layernorm, modeling_kimi_linear.py:427-437),
-    # narrows linear_q_up_proj from H*192 to H*128 (:398, :443), and changes
-    # softmax_scale from 192**-0.5 to 128**-0.5 (:115, 127-128).
+    # disables rope but changes the architecture: it deletes the 64
+    # MQA-shared K dims (linear_kv_down_proj's width is kv_lora_rank +
+    # qk_pos_emb_head_dim, multi_latent_attention.py, and those dims bypass
+    # both the kv_lora_rank latent and kv_a_layernorm,
+    # modeling_kimi_linear.py), narrows linear_q_up_proj from H*192 to
+    # H*128, and changes softmax_scale from 192**-0.5 to 128**-0.5.
     mla_use_nope: bool = True
     # The sigmoid output gate is applied by the Kimi K3 attention subclass,
     # NOT by upstream's attention_output_gate: MLATransformerConfig.__post_init__
-    # raises NotImplementedError for that flag (transformer_config.py:2259-2260).
+    # raises NotImplementedError for that flag (transformer_config.py).
     mla_use_output_gate: bool = True
     # Epsilon for MLA's two low-rank latent norms (HF: ``q_a_layernorm`` /
     # ``kv_a_layernorm``), which is NOT ``rms_norm_eps``.
     #
     # ``KimiRMSNorm.__init__`` defaults ``eps=1e-6``
-    # (``modeling_kimi_linear.py:226-227``), and MLA constructs exactly these
-    # two norms without passing one (``:368``, ``:383``) while every other norm
-    # in the released model is given ``eps=config.rms_norm_eps`` = 1e-5. Both
-    # published releases do it -- Kimi-Linear-48B's ``modeling_kimi.py:365``
-    # too -- so it is inherited from the DeepSeek-V3 code this was adapted
-    # from, where ``rms_norm_eps`` happens to be 1e-6 and the two agree.
+    # (``modeling_kimi_linear.py``), and MLA constructs exactly these two
+    # norms without passing one while every other norm in the released
+    # model is given ``eps=config.rms_norm_eps`` = 1e-5. Both published
+    # releases do it -- Kimi-Linear-48B's ``modeling_kimi.py`` too -- so it
+    # is inherited from the DeepSeek-V3 code this was adapted from, where
+    # ``rms_norm_eps`` happens to be 1e-6 and the two agree.
     # Megatron's ``MLASelfAttention`` passes ``config.layernorm_epsilon`` to
     # both, so without this field we run them at 1e-5.
     #
@@ -257,7 +257,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # ---- MoE load balancing: which bias-update rule ----------------------
     # "sign"     -- DeepSeek-V3's b <- b + rate * sign(violation), i.e. exactly
     #               what upstream's get_updated_expert_bias does
-    #               (moe_utils.py:1119-1142). This is what phase 1 ran, the
+    #               (moe_utils.py). This is what phase 1 ran, the
     #               known-good baseline.
     # "quantile" -- Kimi K3's published rule, tech report §2.3.3 / Eq. 14:
     #               b_j = -quantile_{1-k/n}(s_{:,j} - tau), tau being the
@@ -338,13 +338,13 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # released modelling code has no MTP module, but tech-report Table 1 lists
     # "MTP Layers: 1 layer", so the release was stripped rather than trained
     # without one. This field is the HF-native name for upstream's
-    # ``mtp_num_layers`` (transformer_config.py:54) and ``__post_init__``
+    # ``mtp_num_layers`` (transformer_config.py) and ``__post_init__``
     # mirrors the two, the same way ``routed_expert_hidden_size`` mirrors
     # ``moe_latent_size``.
     #
     # ``0`` is normalised to ``None``, because 0 is *not* "off" upstream:
     # ``mtp_on_this_rank`` tests ``config.mtp_num_layers is not None``
-    # (multi_token_prediction.py:508) and so returns True on the last pipeline
+    # (multi_token_prediction.py) and so returns True on the last pipeline
     # stage, after which ``MultiTokenPredictionBlock.__init__`` asserts on an
     # empty layer list.
     num_nextn_predict_layers: Optional[int] = None
@@ -383,7 +383,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # 1536 = 12 heads x 128 against a 1024 residual stream. None falls back
     # to vt_hidden_size. Reaches the tower config as ``kv_channels``, which
     # upstream already treats as independent of hidden_size
-    # (transformer_config.py:148-150).
+    # (transformer_config.py).
     vt_qkv_hidden_size: Optional[int] = 1536
     vt_patch_size: int = 14
     vt_in_channels: int = 3
@@ -391,9 +391,9 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     vt_init_pos_emb_width: int = 64
     vt_init_pos_emb_time: int = 4
     # ``bilinear`` is the released value. Note MoonVision3dPatchEmbed's own
-    # default is ``bicubic`` (modeling_kimi_k3.py:297) while
-    # VisionTowerConfig's fallback is ``bilinear`` (:877-878), so the two
-    # disagree and only config.json settles it.
+    # default is ``bicubic`` (modeling_kimi_k3.py) while
+    # VisionTowerConfig's fallback is ``bilinear``, so the two disagree and
+    # only config.json settles it.
     vt_pos_emb_interpolation_mode: str = "bilinear"
     vt_merge_kernel_size: Union[List[int], tuple] = (2, 2)
     vt_rope_theta: float = 10000.0
@@ -426,7 +426,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # ---- compat aliases used by the Kimi K3 code paths --------------------
     # None of these three are upstream TransformerConfig fields; they are
     # declared for the same reason DeepSeek-V4 declares them
-    # (deepseek_v4_transformer_config.py:167-172).
+    # (deepseek_v4_transformer_config.py).
     norm_epsilon: Optional[float] = None
     vocab_size: Optional[int] = None
     padded_vocab_size: Optional[int] = None
@@ -465,38 +465,37 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
         # Keep the DeepSeek-style ``norm_epsilon`` alias and MCore's
         # ``layernorm_epsilon`` in step before parent validation runs
-        # (deepseek_v4_transformer_config.py:185-187).
+        # (deepseek_v4_transformer_config.py).
         if self.norm_epsilon is None:
             self.norm_epsilon = float(self.layernorm_epsilon)
         self.layernorm_epsilon = float(self.norm_epsilon)
 
         # A hybrid stack halves the output-layer init scaling
-        # (transformer_config.py:1755, 1761).
+        # (transformer_config.py).
         self.is_hybrid_model = True
 
         if self.mla_use_nope:
             # Only the model-level knob is set here. rope_type stays "rope"
-            # because multi_latent_attention.py:152-155 validates it against
+            # because multi_latent_attention.py validates it against
             # {"rope", "yarn"}, and qk_pos_emb_head_dim stays at the released
             # width because the attention module -- not the geometry -- is what
             # disables the rotation (see the field comment above).
             #
             # position_embedding_type is the field KimiK3Model reads to decide
             # whether to build any positional module at all; the *args* copy has
-            # to stay "rope" or arguments.py:1237-1238 raises before any config
+            # to stay "rope" or arguments.py raises before any config
             # exists.
             self.position_embedding_type = "none"
 
         # Upstream implements the routed-expert latent bottleneck itself, under
-        # its own name for the same quantity: ``moe_latent_size``
-        # (declared at transformer_config.py:790, consumed at
-        # moe_layer.py:198-221 / 359 / 448, experts.py:185, 203-208 and
-        # mlp.py:208-234). Map K3's HF-native name onto it here so the config
-        # the *rest of the layer* sees is right too — ``StableLatentMoE`` maps
-        # it defensively on its own shallow copy, which is correct for the MoE
+        # its own name for the same quantity: ``moe_latent_size`` (declared at
+        # transformer_config.py, consumed at moe_layer.py, experts.py and
+        # mlp.py). Map K3's HF-native name onto it here so the config the
+        # *rest of the layer* sees is right too — ``StableLatentMoE`` maps it
+        # defensively on its own shallow copy, which is correct for the MoE
         # module but leaves the outer config reading None, and that outer copy
         # is what decides the cudagraph pre-MLP-layernorm recompute
-        # (transformer_layer.py:438-441).
+        # (transformer_layer.py).
         #
         # Same agreement rule as ``StableLatentMoE.resolve_latent_size``: either
         # name may be set, and if both are they must match. With the mapping
@@ -523,7 +522,7 @@ class KimiK3TransformerConfig(MLATransformerConfig):
                 raise ValueError(
                     "moe_router_bias_update_rule: quantile updates "
                     "e_score_correction_bias, so moe_router_enable_expert_bias must "
-                    "be true. (transformer_config.py:1769 additionally requires "
+                    "be true. (transformer_config.py additionally requires "
                     "moe_router_score_function: sigmoid, which Kimi K3 uses.)"
                 )
             if int(self.quantile_balancing_num_bins) < 2:
@@ -580,10 +579,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
         Note the args-layer half of this mapping lives in
         ``patches/kimi_k3_flops_patches.py::patch_k3_args_mtp_num_layers``.
-        ``training.py`` reads ``args.mtp_num_layers`` (``:347``, ``:594``,
-        ``:2062``) and never the config, so a config-only mapping would leave
-        the FLOPs report and the per-depth MTP loss logging blind -- exactly
-        the same split we make for ``moe_latent_size``.
+        ``training.py`` reads ``args.mtp_num_layers`` and never the config,
+        so a config-only mapping would leave the FLOPs report and the
+        per-depth MTP loss logging blind -- exactly the same split we make
+        for ``moe_latent_size``.
         """
         nextn = self.num_nextn_predict_layers
         mtp = self.mtp_num_layers
@@ -618,10 +617,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
         # A zero weight builds the MTP layer, runs it, and then hands it no
         # gradient at all: ``process_mtp_loss`` folds
         # ``mtp_loss_scaling_factor / mtp_num_layers * loss`` into the tensor
-        # ``MTPLossAutoScaler`` differentiates (multi_token_prediction.py:693,
-        # :705-710), so the factor multiplies straight through to every MTP
-        # parameter's gradient. That is a silent misconfiguration, not a
-        # cheaper MTP, so it is rejected.
+        # ``MTPLossAutoScaler`` differentiates (multi_token_prediction.py), so
+        # the factor multiplies straight through to every MTP parameter's
+        # gradient. That is a silent misconfiguration, not a cheaper MTP, so
+        # it is rejected.
         scale = self.mtp_loss_scaling_factor
         if scale is None or not float(scale) > 0.0:
             raise ValueError(
@@ -657,9 +656,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     def is_kda_layer(self, layer_idx: int) -> bool:
         """Whether the 0-indexed ``layer_idx`` is a KDA layer.
 
-        Mirrors ``KimiLinearConfig.is_kda_layer`` (``configuration_kimi_k3.py:152-156``)
-        but reads an already-0-indexed, already-normalized pattern, so the
-        HF ``layer_idx + 1`` offset is gone.
+        Mirrors ``KimiLinearConfig.is_kda_layer``
+        (``configuration_kimi_k3.py``) but reads an already-0-indexed,
+        already-normalized pattern, so the HF ``layer_idx + 1`` offset is
+        gone.
         """
         if self.linear_attention_freq is None:
             return False
@@ -684,9 +684,9 @@ class KimiK3TransformerConfig(MLATransformerConfig):
         """Number of attention-residual block checkpoints the stack appends.
 
         A checkpoint is appended whenever ``layer_idx % attn_res_block_size == 0``
-        (``modeling_kimi_linear.py:973-1046``), which over ``num_layers``
-        layers is ``ceil(num_layers / attn_res_block_size)``. Returns 0 when
-        the mechanism is disabled.
+        (``modeling_kimi_linear.py``), which over ``num_layers`` layers is
+        ``ceil(num_layers / attn_res_block_size)``. Returns 0 when the
+        mechanism is disabled.
         """
         if not self.attn_res_block_size:
             return 0

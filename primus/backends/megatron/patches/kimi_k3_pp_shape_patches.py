@@ -11,17 +11,17 @@ softmax mixture over a *growing* set of cross-layer checkpoints, so two
 tensors flow between layers -- ``(hidden_states, block_residual)`` -- while
 pipeline P2P carries exactly one ``[s, b, h]`` tensor.  Inside a stage the
 second tensor is an ordinary second return value threaded by the block's
-python loop (``kimi_k3_block.py:427-435``, ``:520``, ``:785-803``); at the
-stage boundary it is folded into the sequence axis by
+python loop (``kimi_k3_block.py``); at the stage
+boundary it is folded into the sequence axis by
 :func:`~primus.backends.megatron.core.models.kimi_k3.kimi_k3_block._lower_res_out`
-and unfolded by ``_lift_res_in`` (``kimi_k3_block.py:174-265``).  The wire
+and unfolded by ``_lift_res_in`` (``kimi_k3_block.py``).  The wire
 format is therefore::
 
     [(1 + attn_res_num_blocks_max) * s, b, h]
 
 a 3-D tensor of **constant** shape, which is all standard PP P2P kernels
 need.  ``attn_res_num_blocks_max = ceil(num_layers / attn_res_block_size)``
-(``kimi_k3_transformer_config.py:373-384``); the unused slots are
+(``kimi_k3_transformer_config.py``); the unused slots are
 zero-padded by the sender and sliced off by the receiver using
 ``attn_res_num_blocks_before(layer_offset, block_size)``, so no fill count
 crosses the boundary.
@@ -45,19 +45,18 @@ telling:
 
 1. The non-interleaved 1F1B schedule calls
    :func:`megatron.core.pipeline_parallel.schedules.get_tensor_shapes`
-   (``schedules.py:1928-1951``, called at ``:2096`` and ``:2104`` for the
-   recv and send shapes respectively).  Both calls are the same, and the
-   first/last stage suppress their unused direction inside
+   (``schedules.py``, called for the recv and send shapes).  Both calls are
+   the same, and the first/last stage suppress their unused direction inside
    ``P2PCommunicator``, so scaling every returned triple uniformly is
    correct: every P2P transfer that actually happens is stage-to-stage and
    carries the folded tensor.
 2. The interleaved 1F1B / VPP schedule computes ``tensor_shape`` *inline*
-   from its ``seq_length`` argument (``schedules.py:1001-1004``) and never
-   calls ``get_tensor_shapes``.  PyTorch P2P does not validate shape, only
+   from its ``seq_length`` argument (``schedules.py``) and never calls
+   ``get_tensor_shapes``.  PyTorch P2P does not validate shape, only
    ``numel * dtype_size``, so an unpatched VPP receiver would silently copy
    the first ``s * h`` elements and ``_lift_res_in`` would then reject the
    tensor with the "not divisible by 1 + attn_res_num_blocks_max" error it
-   raises at ``kimi_k3_block.py:213-218``.  Scaling the kwarg on the way in
+   raises at ``kimi_k3_block.py``.  Scaling the kwarg on the way in
    is safe because ``seq_length`` is read for nothing else inside that
    function.
 
@@ -65,9 +64,9 @@ Two schedules this patch deliberately **cannot** reach, so it refuses them
 instead of producing a silently wrong wire shape:
 ``primus.backends.megatron.core.pipeline_parallel.zerobubble.runtime`` and
 ``...primuspipe.pipeline_launcher`` both bind ``get_tensor_shapes`` with a
-module-level ``from ... import`` (``runtime.py:31``,
-``pipeline_launcher.py:17``), which captures the *original* function object,
-and ``runtime.py:1103-1106`` additionally recomputes the shape inline.
+module-level ``from ... import`` (``runtime.py``, ``pipeline_launcher.py``),
+which captures the *original* function object, and ``runtime.py``
+additionally recomputes the shape inline.
 Rebinding the ``schedules`` module attribute therefore does not affect
 either.  They are selected by ``patch_zero_bubble`` / ``patch_primus_pipeline``.
 """
@@ -90,7 +89,7 @@ def kimi_k3_pp_seq_multiplier(args) -> int:
     Deliberately recomputed from ``num_layers`` / ``attn_res_block_size``
     rather than read off ``args``: ``attn_res_num_blocks_max`` is a
     ``@property`` on :class:`KimiK3TransformerConfig`
-    (``kimi_k3_transformer_config.py:373-384``) and never becomes an args
+    (``kimi_k3_transformer_config.py``) and never becomes an args
     field, so a ``getattr(args, "attn_res_num_blocks_max", 1)`` would read 1
     and quietly leave the wire shape unscaled.
     """
@@ -112,9 +111,9 @@ def _make_k3_get_tensor_shapes(original_fn, seq_mult: int):
     untouched.
 
     Note the scaling composes correctly with the CP and sequence-parallel
-    divisions ``get_tensor_shapes`` has already applied (``schedules.py:
-    1945-1948``): the block folds whatever *local* sequence length the stage
-    actually holds, so the factor multiplies the already-divided value.
+    divisions ``get_tensor_shapes`` has already applied (``schedules.py``):
+    the block folds whatever *local* sequence length the stage actually
+    holds, so the factor multiplies the already-divided value.
     """
 
     def patched_get_tensor_shapes(*args, **kwargs):
@@ -131,15 +130,15 @@ def _make_k3_interleaved_schedule(original_fn, seq_mult: int):
     """Wrap the interleaved schedule to scale its ``seq_length`` kwarg.
 
     ``forward_backward_pipelining_with_interleaving`` builds its PP wire
-    ``tensor_shape`` inline from ``seq_length`` (``schedules.py:1001``) and
+    ``tensor_shape`` inline from ``seq_length`` (``schedules.py``) and
     reads the argument for nothing else, so scaling it on the way in gives
     the schedule a K3-aware shape without rewriting the function.
     ``decoder_seq_length`` is scaled too, for symmetry with the
     ``get_tensor_shapes`` path -- which *does* prefer it when it is not None
-    (``schedules.py:1943-1944``).  In this Megatron HEAD the interleaved
-    schedule declares the kwarg (``:818``) and never reads it, so the second
-    line is currently inert; it is here so the two paths cannot diverge if a
-    later HEAD starts honouring it.
+    (``schedules.py``).  In this Megatron HEAD the interleaved schedule
+    declares the kwarg and never reads it, so the second line is currently
+    inert; it is here so the two paths cannot diverge if a later HEAD starts
+    honouring it.
     """
 
     def patched_schedule(*args, **kwargs):
@@ -187,15 +186,15 @@ def patch_kimi_k3_pp_tensor_shape(ctx: PatchContext):
     # let them run with an unscaled wire shape. Both capture
     # ``get_tensor_shapes`` in a module-level ``from ... import``, so the
     # rebinding below is invisible to them; the zero-bubble runtime also
-    # recomputes the shape inline (runtime.py:1103-1106).
+    # recomputes the shape inline (runtime.py).
     for flag in ("patch_zero_bubble", "patch_primus_pipeline"):
         if getattr(args, flag, False):
             raise NotImplementedError(
                 f"Kimi K3 attention residuals at pipeline_model_parallel_size > 1 are not "
                 f"supported with {flag}=True. That schedule binds get_tensor_shapes at "
-                "module import time (zerobubble/runtime.py:31, "
-                "primuspipe/pipeline_launcher.py:17) and the zero-bubble runtime also "
-                "recomputes the wire shape inline (runtime.py:1103-1106), so this patch "
+                "module import time (zerobubble/runtime.py, "
+                "primuspipe/pipeline_launcher.py) and the zero-bubble runtime also "
+                "recomputes the wire shape inline (runtime.py), so this patch "
                 "cannot reach it and the PP wire would silently carry "
                 f"[s, b, h] where the block emits [{seq_mult} * s, b, h]. Use the stock "
                 "1F1B or interleaved-1F1B schedule."
@@ -203,7 +202,7 @@ def patch_kimi_k3_pp_tensor_shape(ctx: PatchContext):
 
     # Wrapper 1: get_tensor_shapes (the non-interleaved 1F1B schedule, and
     # Primus's --pp-warmup helper, which imports the symbol inside its own
-    # function body (pp_warmup_patches.py:69) and so sees the wrapper).
+    # function body (pp_warmup_patches.py) and so sees the wrapper).
     original_get_tensor_shapes = schedules_module.get_tensor_shapes
     if getattr(original_get_tensor_shapes, "_k3_pp_shape_patched", False):
         log_rank_0("[Patch:megatron.kimi_k3.pp_tensor_shape] get_tensor_shapes already patched, skip")

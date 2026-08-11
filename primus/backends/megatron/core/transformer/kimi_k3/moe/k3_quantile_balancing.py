@@ -69,8 +69,8 @@ Also §2.3.3, and this is what settles the batch-scope question:
 So the statistic is per global batch, accumulated over microbatches, reduced
 once across ranks, and is **not** an EMA. That is exactly the cadence and the
 collective at which Megatron already runs the sign-based rule, in
-``_update_router_expert_bias`` (``finalize_model_grads.py:293-319``, called at
-``:480-481``) — which is why :data:`k3_stable_latent_moe.QUANTILE_BALANCING_HOOK_SITE`
+``_update_router_expert_bias`` (``finalize_model_grads.py``) — which is why
+:data:`k3_stable_latent_moe.QUANTILE_BALANCING_HOOK_SITE`
 points there. The one thing upstream does not have is the *statistic*: it
 gathers ``local_tokens_per_expert``, and Quantile Balancing needs routing
 scores. :class:`QuantileBalancingMixin` adds a ``local_margin_histogram``
@@ -257,13 +257,13 @@ class QuantileBalancingMixin:
     implementation and then accumulates. It is deliberately a mixin rather
     than a subclass of a specific router: Primus swaps upstream
     ``TopKRouter`` for ``PrimusTopKRouter`` at ``build_args`` time
-    (``moe_patches/topk_router_patches.py:57-75``), and a hard-coded base
+    (``moe_patches/topk_router_patches.py``), and a hard-coded base
     would either lose those features in production or drag
     ``megatron.training.get_args()`` into unit tests that have no args.
     :func:`resolve_quantile_balancing_router` picks the base up from the same
     dataclass slot the patch rewrites.
 
-    The buffer mirrors ``local_tokens_per_expert`` (``router.py:172-181``):
+    The buffer mirrors ``local_tokens_per_expert`` (``router.py``):
     non-persistent, allocated on the current device in ``__init__``, zeroed by
     whoever consumes it.
     """
@@ -319,7 +319,7 @@ class QuantileBalancingMixin:
         ``_accumulate_margin_histogram`` runs under ``@torch.no_grad()``, so the
         same call inside it would always return ``False`` and the histogram
         would silently stay empty. Upstream's ``_apply_expert_bias``
-        (``router.py:580-584``) gets away with the inline check only because it
+        (``router.py``) gets away with the inline check only because it
         opens the ``no_grad`` block *after* testing.
         """
         grad_enabled = torch.is_grad_enabled()
@@ -335,7 +335,7 @@ class QuantileBalancingMixin:
         """Add this microbatch's margins to the running histogram.
 
         Gated by the caller exactly like ``_apply_expert_bias``
-        (``router.py:580``): training mode and grad enabled, so evaluation
+        (``router.py``): training mode and grad enabled, so evaluation
         passes contribute nothing — the report freezes the bias at inference —
         and the two statistics stay in step.
         """
@@ -350,8 +350,8 @@ class QuantileBalancingMixin:
                 return
 
         # Same score as topk_routing_with_score_function's sigmoid branch
-        # (moe_utils.py:773): fp32 sigmoid of the gating output, no
-        # normalisation. KimiMoEGate does the same (modeling_kimi_linear.py:712).
+        # (moe_utils.py): fp32 sigmoid of the gating output, no
+        # normalisation. KimiMoEGate does the same (modeling_kimi_linear.py).
         scores = torch.sigmoid(flat.float())
         hist, clamped = self.qb_histogram(
             scores,
@@ -373,7 +373,7 @@ def make_quantile_balancing_router(base_cls: type) -> type:
 
     Cached, so repeated calls return the *same* class object — Megatron
     compares router classes by identity in places
-    (``topk_router_patches.py:181``), and a fresh type per MoE layer would
+    (``topk_router_patches.py``), and a fresh type per MoE layer would
     also defeat any ``isinstance`` check.
     """
     if issubclass(base_cls, QuantileBalancingMixin):
@@ -395,7 +395,7 @@ def resolve_quantile_balancing_router() -> type:
     Reads ``MoESubmodules.router``'s dataclass default, which is upstream
     ``TopKRouter`` normally and ``PrimusTopKRouter`` once
     ``megatron.moe.primus_topk_router`` has been applied
-    (``topk_router_patches.py:80-96``). Composing rather than hard-coding is
+    (``topk_router_patches.py``). Composing rather than hard-coding is
     what lets the same class work in a unit test with no Megatron args and in
     a real run with the Primus router's softcap / fused paths.
     """
@@ -419,7 +419,7 @@ def collect_quantile_balancing_routers(model: Sequence[torch.nn.Module]) -> List
     """Every training-mode router in ``model`` that carries a margin histogram.
 
     Mirrors ``_update_router_expert_bias``'s own walk
-    (``finalize_model_grads.py:300-308``), including its ``module.training``
+    (``finalize_model_grads.py``), including its ``module.training``
     filter — online distillation puts the teacher in eval mode and its bias
     must not move.
     """
@@ -448,14 +448,14 @@ def update_router_expert_bias_quantile(
     """Set every router's ``expert_bias`` from its pooled margin histogram.
 
     Drop-in replacement for ``_update_router_expert_bias``
-    (``finalize_model_grads.py:293-319``), called at the same point and with
+    (``finalize_model_grads.py``), called at the same point and with
     the same collective group.
 
     Args:
         model: the model chunks, as ``finalize_model_grads`` passes them.
         config: the transformer config.
         group: all-reduce group. Defaults to TP x CP x DP, matching
-            ``get_updated_expert_bias`` (``moe_utils.py:1134-1138``).
+            ``get_updated_expert_bias`` (``moe_utils.py``).
         step: optimizer step, used only for
             ``quantile_balancing_update_interval``. ``None`` means "update now".
 

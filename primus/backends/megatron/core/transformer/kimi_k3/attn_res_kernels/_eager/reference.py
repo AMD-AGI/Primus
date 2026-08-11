@@ -11,7 +11,7 @@ inline, so that it can serve as the permanent numerical oracle for the fused
 FlyDSL kernel — the same role :mod:`...kda_kernels._eager.reference` plays for
 KDA. ``test_attention_residual.py`` already pins this arithmetic bit-exactly
 against an independent transcription of ``_apply_attn_res``
-(``modeling_kimi_linear.py:1075-1088``), and that test keeps passing unchanged,
+(``modeling_kimi_linear.py``), and that test keeps passing unchanged,
 which is what makes the extraction safe.
 
 Three details, restated here because this is now the file a kernel is checked
@@ -19,11 +19,10 @@ against:
 
 1. **The output mixes the un-normalised candidates.** ``v`` is the raw
    ``cat([block_residual, prefix_sum])``; the RMS normalisation feeds the
-   *scores* only (``:1083`` vs ``:1087``).
+   *scores* only.
 2. **The scorer is rank-1**, the elementwise product of the RMSNorm gain and
-   the ``[1, hidden]`` projection row (``:1084``).
-3. **All of it runs in fp32** and casts back once at the end (``:1081``,
-   ``:1088``).
+   the ``[1, hidden]`` projection row.
+3. **All of it runs in fp32** and casts back once at the end.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ def accum_dtype(dtype: torch.dtype) -> torch.dtype:
     """fp32, unless the operand is already wider.
 
     The reference spells this ``.float()`` unconditionally
-    (``modeling_kimi_linear.py:1081``), which is an up-cast for every dtype
+    (``modeling_kimi_linear.py``), which is an up-cast for every dtype
     Kimi K3 actually trains in (bf16 / fp16 / fp32) and a *down*-cast in fp64.
     Promoting instead is bit-identical on all three real cases and keeps the
     module differentiable under ``torch.autograd.gradcheck``, which needs fp64
@@ -52,7 +51,7 @@ def accum_dtype(dtype: torch.dtype) -> torch.dtype:
 def fused_score_weight(
     norm_weight: Tensor, proj_weight: Tensor, dtype: Optional[torch.dtype] = None
 ) -> Tensor:
-    """The rank-1 scoring vector, ``[hidden]`` (``modeling_kimi_linear.py:1084``).
+    """The rank-1 scoring vector, ``[hidden]`` (``modeling_kimi_linear.py``).
 
     Kept as a separate function because both backends need it and because the
     FlyDSL backend forms it with plain autograd-visible torch ops *outside* the

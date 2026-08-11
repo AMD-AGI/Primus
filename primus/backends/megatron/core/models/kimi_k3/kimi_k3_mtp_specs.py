@@ -30,8 +30,7 @@ What the tech report actually specifies
   :class:`AttentionResidualHead`. So the MTP layer consumes the tensor the
   LM head consumes, after ``attn_res_head`` and after
   ``final_layernorm``. That is also precisely what upstream hands it
-  (``gpt_model.py:529-541`` then ``:596-610``), so no divergence is
-  needed.
+  (``gpt_model.py``), so no divergence is needed.
 * **"an MTP layer that mirrors the structure of a backbone layer"**
   (§4.1.4). K3's backbone is heterogeneous, so *which* layer is a
   resolved ambiguity -- see :meth:`KimiK3TransformerConfig.mtp_layer_is_kda`.
@@ -62,7 +61,7 @@ What the report does **not** specify, and what was chosen instead
      project's cheapest detector of an unwired submodule.
   4. There is nothing to carry it in: ``_lower_res_out`` deliberately
      returns the bare ``[s, b, h]`` hidden state on the ``post_process``
-     stage (``kimi_k3_block.py:249-250``), and neither
+     stage (``kimi_k3_block.py``), and neither
      :class:`MultiTokenPredictionBlock` nor
      :class:`MultiTokenPredictionLayer` has a slot for a second tensor.
 
@@ -70,7 +69,7 @@ What the report does **not** specify, and what was chosen instead
   :class:`KimiK3Layer`. Without it the MTP layer would inherit
   ``config.attn_res_block_size``, compute ``num_blocks_in =
   ceil(layer_idx / block_size) > 0``, be handed no ``block_residual``, and
-  trip the drift assert at ``kimi_k3_block.py:482-487`` on the first
+  trip the drift assert at ``kimi_k3_block.py`` on the first
   forward. That failure is loud, which is why this file's job is to make
   the *quiet* alternative -- appending a spurious ninth checkpoint --
   impossible.
@@ -80,14 +79,14 @@ Two upstream contracts this file exists to satisfy
 
 * ``enorm`` / ``hnorm`` / ``layer_norm`` are invoked as **raw callables**,
   ``self.submodules.enorm(config=..., hidden_size=..., eps=...)``
-  (``multi_token_prediction.py:782-792``, ``:843-847``), not through
+  (``multi_token_prediction.py``), not through
   ``build_module``. So they must be the norm *class* from the provider and
   **not** the ``ModuleSpec(module=...)`` wrapper that
   ``kimi_k3_layer_specs._build_norm_spec`` returns for the decoder tree.
 * The inner layer's ``self_attention`` spec must declare
   ``params['attn_mask_type']`` in
   ``{padding, causal, no_mask, padding_causal}``
-  (``multi_token_prediction.py:773-780``), and ``ModuleSpec.params``
+  (``multi_token_prediction.py``), and ``ModuleSpec.params``
   defaults to ``{}``. The MLA spec already declared it; the KDA spec now
   does too, and :class:`KimiDeltaAttention` accepts and ignores it.
 """
@@ -127,12 +126,12 @@ def kimi_k3_mtp_layer_index(config: KimiK3TransformerConfig, depth: int = 0) -> 
 
     * ``KimiK3Layer.layer_number`` defaults to ``layer_idx + 1``, which is
       the key Megatron's MoE aux-loss tracker indexes by
-      (``router.py:464-479``). Reusing a decoder layer's number would make
+      (``router.py``). Reusing a decoder layer's number would make
       an MTP depth's aux loss overwrite a decoder layer's.
 
       Note :class:`MultiTokenPredictionLayer` *also* passes its own
       ``layer_number`` (1-based within the MTP block,
-      ``multi_token_prediction.py:839``) which wins, because
+      ``multi_token_prediction.py``) which wins, because
       ``build_module`` kwargs override spec ``params``. Upstream comments
       that this is deliberate. The index below is therefore what
       ``layer_idx`` becomes, and the guard is that it is out of the
@@ -182,11 +181,11 @@ def build_kimi_k3_mtp_inner_layer_spec(
     is_moe = bool(moe_pattern[-1]) if moe_pattern else False
 
     # ``is_mtp_layer`` is deliberately *not* set here: upstream passes it as a
-    # build_module keyword (``multi_token_prediction.py:835-841``) and a spec
+    # build_module keyword (``multi_token_prediction.py``) and a spec
     # param of the same name collides with it, because build_module unpacks
     # both into one call. ``KimiK3Layer`` records it and forwards it to the MoE
     # router, whose aux-loss tracker keys MTP depths separately from decoder
-    # layers (``router.py:454``, ``:468``, ``:531``, ``:541``).
+    # layers (``router.py``).
     return build_kimi_k3_layer_spec(
         config,
         provider=provider,
@@ -220,7 +219,7 @@ def get_kimi_k3_mtp_block_spec(
             ``get_v4_mtp_block_spec`` and with the decoder spec builder.
             Unused: upstream derives the MTP layer offset from the config and
             the ``vp_stage`` it is given at build time
-            (``multi_token_prediction.py:533-544``, ``:749``), and nothing
+            (``multi_token_prediction.py``), and nothing
             here is stage-dependent.
 
     Returns:
@@ -262,7 +261,7 @@ def get_kimi_k3_mtp_block_spec(
         # One spec per depth even when they are structurally identical:
         # MultiTokenPredictionBlock._build_layers walks the list and builds one
         # module per entry unless config.mtp_use_repeated_layer is set
-        # (multi_token_prediction.py:1336-1343), so a shared spec object would
+        # (multi_token_prediction.py), so a shared spec object would
         # still give independent weights but a shorter list would silently
         # build fewer depths than mtp_num_layers.
         for depth in range(depths)

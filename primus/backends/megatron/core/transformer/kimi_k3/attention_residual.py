@@ -9,10 +9,9 @@
 Kimi K3 replaces the ordinary ``x = x + sublayer(x)`` residual with a
 **learned softmax mixture over a growing set of cross-layer checkpoints
 plus the running residual stream**. The reference implementation is
-``_apply_attn_res`` (``modeling_kimi_linear.py:1075-1088``), driven by
-``KimiDecoderLayer._forward_attn_residual`` (``:973-1046``) twice per
-layer and by ``KimiLinearModel._apply_output_attn_res`` (``:1226-1233``)
-once after the stack.
+``_apply_attn_res`` (``modeling_kimi_linear.py``), driven by
+``KimiDecoderLayer._forward_attn_residual`` twice per layer and by
+``KimiLinearModel._apply_output_attn_res`` once after the stack.
 
 This module owns the mixer only; the per-layer bookkeeping (when a
 checkpoint is appended, when the running sum resets) lives in
@@ -24,18 +23,17 @@ called out here and pinned by ``test_attention_residual.py``:
 1. **The output mixes the un-normalised candidates.** ``v`` is the raw
    ``cat([block_residual, prefix_sum])``; ``k`` is its RMS-normalised
    form. The normalisation feeds the *scores* only
-   (``modeling_kimi_linear.py:1083`` vs ``:1087``). Mixing ``k`` instead
-   would rescale every candidate to unit RMS and destroy the residual
-   stream's magnitude.
+   (``modeling_kimi_linear.py``). Mixing ``k`` instead would rescale
+   every candidate to unit RMS and destroy the residual stream's
+   magnitude.
 2. **The scorer is rank-1.** ``score_weight`` is the elementwise product
    of the RMSNorm gain ``[hidden]`` and the ``[1, hidden]`` projection
-   weight (``:1084``), so scoring costs one dot product per candidate
-   and ``2 * hidden`` parameters. The two factors could be folded into a
+   weight, so scoring costs one dot product per candidate and
+   ``2 * hidden`` parameters. The two factors could be folded into a
    single vector at build time; they are kept separate because the
    released checkpoint stores them separately as
    ``*_res_norm.weight`` / ``*_res_proj.weight``.
-3. **All of it runs in fp32** and casts back once at the end (``:1081``,
-   ``:1088``).
+3. **All of it runs in fp32** and casts back once at the end.
 
 Layout note. The reference flattens ``[batch, seq]`` into a single token
 axis and carries ``block_residual`` as ``[num_tokens, num_blocks,
@@ -77,7 +75,7 @@ class AttentionResidualMixer(MegatronModule):
         hidden_size: candidate width. Defaults to ``config.hidden_size``.
         eps: RMSNorm epsilon. Defaults to ``config.layernorm_epsilon``,
             which the Kimi K3 config keeps in step with ``norm_epsilon``
-            (``kimi_k3_transformer_config.py:220-222``).
+            (``kimi_k3_transformer_config.py``).
 
     Parameters:
         norm_weight: ``[hidden]``, HF ``*_res_norm.weight``. Ones at init,
@@ -85,8 +83,7 @@ class AttentionResidualMixer(MegatronModule):
             direction alone.
         proj_weight: ``[1, hidden]``, HF ``*_res_proj.weight``. Kept 2-D
             to match ``nn.Linear(hidden, 1, bias=False)``'s layout, which
-            is what the reference squeezes at
-            ``modeling_kimi_linear.py:1084``.
+            is what the reference squeezes at ``modeling_kimi_linear.py``.
 
     Neither parameter is tensor-parallel: the residual stream is
     full-width on every TP rank, and the score reduces over the whole
@@ -95,7 +92,7 @@ class AttentionResidualMixer(MegatronModule):
     the two gradients *are* rank-dependent and must be all-reduced across
     TP -- which is exactly what ``sequence_parallel=True`` on a parameter
     asks ``finalize_model_grads`` to do (same treatment as the router's
-    weight, ``router.py:79``).
+    weight, ``router.py``).
     """
 
     def __init__(
@@ -114,9 +111,9 @@ class AttentionResidualMixer(MegatronModule):
 
         # Stored in the model dtype and up-cast inside forward, which is what
         # the reference does: both factors are ordinary bf16 module parameters
-        # and only ``score_weight`` is fp32 (modeling_kimi_linear.py:1084).
+        # and only ``score_weight`` is fp32 (modeling_kimi_linear.py).
         # Storing them fp32 would not survive Float16Module's blanket
-        # ``module.bfloat16()`` anyway (module.py:443-444).
+        # ``module.bfloat16()`` anyway (module.py).
         if params_dtype is None:
             params_dtype = config.params_dtype
         if (
@@ -134,7 +131,7 @@ class AttentionResidualMixer(MegatronModule):
             setattr(param, "sequence_parallel", sequence_parallel)
 
         # Resolve the compute kernel once, at construction, following the
-        # ``KimiDeltaAttention`` idiom (``kimi_delta_attention.py:287-295``): a
+        # ``KimiDeltaAttention`` idiom (``kimi_delta_attention.py``): a
         # missing optional dependency then surfaces while the model is being
         # built rather than on the first forward, and the per-step dispatch
         # disappears from the hot path.
@@ -153,7 +150,7 @@ class AttentionResidualMixer(MegatronModule):
         ``norm_weight`` is ones (a fresh RMSNorm is the identity) and
         ``proj_weight`` follows ``config.init_method`` -- the same
         treatment ``KimiPreTrainedModel._init_weights`` gives an
-        ``nn.Linear`` (``modeling_kimi_linear.py:1063-1068``), which is
+        ``nn.Linear`` (``modeling_kimi_linear.py``), which is
         ``normal_(0, initializer_range)``.
 
         A zero ``proj_weight`` would also be defensible (uniform mixing
@@ -175,7 +172,7 @@ class AttentionResidualMixer(MegatronModule):
         """fp32, unless the operand is already wider.
 
         The reference spells this ``.float()`` unconditionally
-        (``modeling_kimi_linear.py:1081``), which is an up-cast for every
+        (``modeling_kimi_linear.py``), which is an up-cast for every
         dtype Kimi K3 actually trains in (bf16 / fp16 / fp32) and a
         *down*-cast in fp64. Promoting instead is bit-identical on all
         three real cases and keeps the module differentiable under
@@ -186,7 +183,7 @@ class AttentionResidualMixer(MegatronModule):
     def score_weight(self, dtype: Optional[torch.dtype] = None) -> Tensor:
         """The fused rank-1 scoring vector, ``[hidden]``.
 
-        ``modeling_kimi_linear.py:1084``. Exposed so tests and a future
+        ``modeling_kimi_linear.py``. Exposed so tests and a future
         checkpoint adapter can check the factorisation without
         re-deriving it.
         """
@@ -207,7 +204,7 @@ class AttentionResidualMixer(MegatronModule):
                 checkpoints. ``num_blocks == 0`` is legal and makes the
                 result a no-op softmax over a single candidate, i.e.
                 ``prefix_sum`` itself; the caller normally skips the call
-                entirely in that case (``:987``).
+                entirely in that case.
 
         Returns:
             ``[*, hidden]``, in ``prefix_sum``'s dtype.
@@ -221,12 +218,12 @@ class AttentionResidualMixer(MegatronModule):
 
 
 class AttentionResidualHead(AttentionResidualMixer):
-    """The single post-stack mix (``_apply_output_attn_res``, ``:1226-1233``).
+    """The single post-stack mix (``_apply_output_attn_res``).
 
     Identical arithmetic to :class:`AttentionResidualMixer` with its own
     ``output_attn_res_{norm,proj}`` parameters; it exists as a separate
     class for the same reason DeepSeek-V4 splits ``HyperHead`` off
-    ``HyperMixer`` (``hyper_connection.py:244,418``) -- the block builds
+    ``HyperMixer`` (``hyper_connection.py``) -- the block builds
     exactly one of them, on the ``post_process`` stage only, so a type
     check is the cheapest way to assert that.
     """

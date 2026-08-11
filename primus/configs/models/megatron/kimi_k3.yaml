@@ -27,7 +27,7 @@ num_layers: ${K3_NUM_LAYERS:93}
 hidden_size: 7168
 num_attention_heads: 96
 num_query_groups: null
-# MUST be set explicitly: 7168 % 96 != 0, and arguments.py:1051-1053 asserts
+# MUST be set explicitly: 7168 % 96 != 0, and arguments.py asserts
 # hidden_size % num_attention_heads == 0 whenever kv_channels is None.
 kv_channels: 128                            # = v_head_dim
 ffn_hidden_size: 33792                      # intermediate_size (dense MLP + shared-expert base)
@@ -74,7 +74,7 @@ moe_ffn_hidden_size: 3072                   # moe_intermediate_size
 # num_shared_experts: 2 -- MCore expresses shared experts as a width, so this
 # is num_shared_experts * moe_intermediate_size. Note the release derives the
 # shared-expert width from moe_intermediate_size, NOT from intermediate_size
-# (modeling_kimi_linear.py:798).
+# (modeling_kimi_linear.py).
 moe_shared_expert_intermediate_size: 6144
 # Stable Latent MoE: routed experts run in a 3584-dim latent
 # (= hidden_size / 2), with an RMSNorm inside the bottleneck.
@@ -98,7 +98,7 @@ untie_embeddings_and_output_weights: true
 # (tokenizer_type: HuggingFaceTokenizer, tokenizer_model: moonshotai/Kimi-K3), so
 # real-data runs tokenize with the official K3 vocab (vocab_size 163840 above).
 # Mock-data smokes are unaffected: mock_data: true forces
-# tokenizer_type=NullTokenizer while preserving vocab_size (mock_data_patches.py:33-45),
+# tokenizer_type=NullTokenizer while preserving vocab_size (mock_data_patches.py),
 # so this yaml stays self-sufficient for the single-GPU smoke and downloads nothing.
 
 # ---------- init ----------

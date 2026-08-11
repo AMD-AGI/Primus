@@ -6,11 +6,10 @@
 
 """``situ`` — Moonshot's soft-clamped SwiGLU, the Kimi K3 FFN activation.
 
-Reference: ``class SituAndMul`` (``modeling_kimi_linear.py:64-82``),
-registered as ``ACT2FN["situ"]`` (``:85``) and selected by
-``hidden_act: "situ"``. Both ``KimiMLP`` (dense MLP + shared experts,
-``:285-292``) and ``KimiBlockSparseMLP`` (routed experts, ``:253-260``)
-use it with the same two betas.
+Reference: ``class SituAndMul`` (``modeling_kimi_linear.py``), registered
+as ``ACT2FN["situ"]`` and selected by ``hidden_act: "situ"``. Both
+``KimiMLP`` (dense MLP + shared experts) and ``KimiBlockSparseMLP``
+(routed experts) use it with the same two betas.
 
 .. code-block:: python
 
@@ -43,7 +42,7 @@ therefore cannot run it through ``config.activation_func``. With
 
 .. code-block:: python
 
-    # mlp.py:312-319
+    # mlp.py
     def glu(x):
         x_glu, x_linear = torch.chunk(x, 2, dim=-1)
         if (val := self.config.activation_func_clamp_value) is not None:
@@ -58,26 +57,25 @@ single bound with the gate. That cannot express ``situ``.
 The one hook that hands a caller-supplied callable the **fused**
 ``[..., 2I]`` tensor while keeping ``gated_linear_unit=True`` — i.e.
 keeping ``fc1``'s doubled width and ``fc2``'s un-doubled input — is the
-``activation_func`` *module* slot on the MLP submodules
-(``mlp.py:226-229`` + ``mlp.py:256-259``, and identically for grouped
-experts at ``experts.py:196-199`` + ``experts.py:272-275``), gated by
+``activation_func`` *module* slot on the MLP submodules (``mlp.py``, and
+identically for grouped experts at ``experts.py``), gated by
 ``config.use_te_activation_func``. :class:`SituActivation` matches that
-slot's builder protocol (``TEActivationFunctionBuilder``,
-``mlp.py:91-96``), so the wiring is
+slot's builder protocol (``TEActivationFunctionBuilder``, ``mlp.py``), so
+the wiring is
 
 .. code-block:: python
 
     config.use_te_activation_func = True     # route to the fused module slot
     config.activation_func = F.silu          # kept only to satisfy the
-                                             # whitelist at
-                                             # transformer_config.py:1638-1644
+                                             # whitelist in
+                                             # transformer_config.py
     MLPSubmodules(..., activation_func=SituActivation)
 
 ``config.activation_func`` must stay one of ``{F.gelu, F.silu, F.relu}``
 because ``TransformerConfig.__post_init__`` rejects anything else once
 ``use_te_activation_func`` is set; it is dead code on this path (the
-module slot wins at ``mlp.py:226``). ``bias_activation_fusion`` must be
-false — ``transformer_config.py:1631-1636`` rejects the combination, and
+module slot wins at ``mlp.py``). ``bias_activation_fusion`` must be
+false — ``transformer_config.py`` rejects the combination, and
 the fused SwiGLU kernels have no soft clamp anyway (which is why
 ``kimi_k3_base.yaml`` already sets ``bias_swiglu_fusion: false``).
 
@@ -110,7 +108,7 @@ __all__ = [
     "SituActivation",
 ]
 
-# ``SituAndMul.__init__``'s defaults (modeling_kimi_linear.py:70): a beta of
+# ``SituAndMul.__init__``'s defaults (modeling_kimi_linear.py): a beta of
 # 1.0 and no soft clamp on the up branch. Kimi K3's config.json overrides
 # both (4.0 / 25.0).
 _DEFAULT_BETA = 1.0
@@ -136,12 +134,11 @@ def situ_pre_mul(
         beta: soft-clamp bound on the gate branch's linear factor; K3
             uses ``4.0``. ``0`` / ``None`` falls back to HF's default of
             ``1.0``, matching ``_get_situ_activation_params``'s
-            ``beta or 1.0`` (``modeling_kimi_linear.py:88-91``) — note
+            ``beta or 1.0`` (``modeling_kimi_linear.py``) — note
             that this is *not* "clamping disabled".
         linear_beta: soft-clamp bound on the up branch; K3 uses ``25.0``.
             ``None`` leaves ``up`` untransformed, which is what
-            ``SituAndMul`` does when ``linear_beta`` is unset
-            (``:80-81``).
+            ``SituAndMul`` does when ``linear_beta`` is unset.
 
     Returns:
         ``[..., I]`` activation output in ``gate``'s dtype.
@@ -172,10 +169,10 @@ def situ_pre_mul_fused(
 ) -> Tensor:
     """``situ`` on a fused ``[..., 2I]`` ``[gate | up]`` input.
 
-    This is the Megatron GLU packing (``mlp.py:313``) and also what
+    This is the Megatron GLU packing (``mlp.py``) and also what
     ``KimiMLP`` / ``KimiBlockSparseMLP`` hand ``SituAndMul`` — both
     ``cat([gate, up], -1)`` before calling the activation
-    (``modeling_kimi_linear.py:253-260, 285-292``).
+    (``modeling_kimi_linear.py``).
     """
     if x.shape[-1] % 2 != 0:
         raise ValueError(
@@ -193,7 +190,7 @@ def situ_betas_from_config(config) -> Tuple[float, Optional[float]]:
     :class:`KimiK3TransformerConfig` declares:
     ``activation_situ_beta`` / ``activation_situ_linear_beta``. The
     fallbacks mirror ``_get_situ_activation_params``
-    (``modeling_kimi_linear.py:88-91``) — an unset or zero ``beta``
+    (``modeling_kimi_linear.py``) — an unset or zero ``beta``
     becomes ``1.0``, an unset ``linear_beta`` stays ``None``.
     """
     beta = getattr(config, "activation_situ_beta", None)
@@ -208,10 +205,9 @@ class SituActivation(nn.Module):
     :class:`megatron.core.transformer.moe.experts.TEGroupedMLP` from the
     ``activation_func`` slot of their submodules dataclass, which is
     invoked as ``submodules.activation_func(config=config)`` and then
-    called on the **fused** post-``fc1`` tensor (``mlp.py:226-229`` and
-    ``mlp.py:256-259``). The betas therefore come from the config rather
-    than from constructor arguments, so a single spec works for every
-    layer.
+    called on the **fused** post-``fc1`` tensor (``mlp.py``). The betas
+    therefore come from the config rather than from constructor
+    arguments, so a single spec works for every layer.
 
     Parameter-less, so it adds nothing to the state dict -- but it still has
     to *implement* :meth:`sharded_state_dict`; see that method.
@@ -238,14 +234,14 @@ class SituActivation(nn.Module):
         Without this method **no Kimi K3 checkpoint can be saved at all**.
         ``MLP.sharded_state_dict`` walks ``self._modules`` and calls
         ``module.sharded_state_dict(...)`` on every child *unconditionally*
-        (``mlp.py:348-363``), unlike ``sharded_state_dict_default``, which
-        guards the call with ``hasattr`` (``utils.py:240-253``). This class
+        (``mlp.py``), unlike ``sharded_state_dict_default``, which
+        guards the call with ``hasattr`` (``utils.py``). This class
         occupies the ``activation_func`` slot of the dense MLP on layer 0 and
         of the shared experts on every MoE layer, so a save raised
         ``AttributeError: 'SituActivation' object has no attribute
         'sharded_state_dict'`` before this existed. (The *routed* experts are
         unaffected: ``TEGroupedMLP.sharded_state_dict`` goes through
-        ``sharded_state_dict_default`` and its guard, ``experts.py:417-420``.)
+        ``sharded_state_dict_default`` and its guard, ``experts.py``.)
 
         The body is ``sharded_state_dict_default``'s else-branch verbatim
         rather than a bare ``return {}``: the module has no parameters today,

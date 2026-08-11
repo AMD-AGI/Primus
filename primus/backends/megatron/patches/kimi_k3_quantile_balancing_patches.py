@@ -10,15 +10,14 @@
 updated for a whole global batch::
 
     if config.moe_router_enable_expert_bias:
-        _update_router_expert_bias(model, config)     # finalize_model_grads.py:480-481
-    reset_model_temporary_tensors(config, model)      # :483
+        _update_router_expert_bias(model, config)     # finalize_model_grads.py
+    reset_model_temporary_tensors(config, model)
 
-``_update_router_expert_bias`` (``:293-319``) gathers ``local_tokens_per_expert``
-and ``expert_bias`` from every router and hands them to
-``get_updated_expert_bias`` (``moe_utils.py:1119-1142``), which applies
-DeepSeek-V3's ``b + rate * sign(offset)``. Kimi K3 replaces that whole rule,
-so this patch replaces that whole function — token counts are not the
-statistic Quantile Balancing needs.
+``_update_router_expert_bias`` gathers ``local_tokens_per_expert`` and
+``expert_bias`` from every router and hands them to ``get_updated_expert_bias``
+(``moe_utils.py``), which applies DeepSeek-V3's ``b + rate * sign(offset)``.
+Kimi K3 replaces that whole rule, so this patch replaces that whole function —
+token counts are not the statistic Quantile Balancing needs.
 
 Both symbols are module-level globals looked up at call time, so rebinding
 ``finalize_model_grads._update_router_expert_bias`` is sufficient; there is no
@@ -69,7 +68,7 @@ def patch_quantile_balancing(ctx: PatchContext):
     )
 
     # NOT ``from megatron.core.distributed import finalize_model_grads``:
-    # ``megatron/core/distributed/__init__.py:10`` re-exports the *function* of
+    # ``megatron/core/distributed/__init__.py`` re-exports the *function* of
     # that name, so the attribute shadows the module and the import silently
     # hands back a function with no ``_update_router_expert_bias`` on it.
     finalize_model_grads = importlib.import_module("megatron.core.distributed.finalize_model_grads")

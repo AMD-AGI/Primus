@@ -100,7 +100,7 @@ Two tracing rules shape the code below.
 * **Every** ``for`` in the body iterates ``range_constexpr``, including the
   two-deep ``MR``/``NR`` register loops. ``range_constexpr`` *is* ``range``
   (``flydsl/expr/__init__.py``) — it is a marker the rewriter matches by name
-  (``ast_rewriter.py:961`` ``_is_range_constexpr``), and a plain ``range`` loop
+  (``ast_rewriter.py`` ``_is_range_constexpr``), and a plain ``range`` loop
   becomes a traced loop whose induction variable is an ``ArithValue``, which
   then cannot index the Python list an accumulator lives in.
 

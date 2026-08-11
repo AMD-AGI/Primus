@@ -20,14 +20,14 @@ Two per-layer patterns drive the dispatch, and they are independent:
   indexes it.
 * ``config.moe_layer_freq`` -- ``1`` selects the Stable Latent MoE, ``0``
   the dense ``situ`` MLP. Parsed here with upstream's own semantics
-  (``gpt_layer_specs.py:585-599``).
+  (``gpt_layer_specs.py``).
 
 Every MLP spec in this file fills the ``MLPSubmodules.activation_func``
 module slot. That is load-bearing, not tidiness: the K3 yamls set
 ``use_te_activation_func: true``, and with the slot empty ``MLP.__init__``
 falls back to ``config.activation_func`` -- ``F.silu`` -- applied to the
-**fused** ``[gate | up]`` tensor (``mlp.py:226-229``, ``:256-259``), which
-is both the wrong activation and double the width ``linear_fc2`` expects.
+**fused** ``[gate | up]`` tensor (``mlp.py``), which is both the wrong
+activation and double the width ``linear_fc2`` expects.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ __all__ = [
 def get_kimi_k3_moe_layer_pattern(config: KimiK3TransformerConfig) -> List[int]:
     """Per-layer MoE pattern, ``1`` = MoE and ``0`` = dense.
 
-    Upstream's semantics verbatim (``gpt_layer_specs.py:585-599``): an int
+    Upstream's semantics verbatim (``gpt_layer_specs.py``): an int
     ``N`` means ``i % N == 0``, a list is used as-is and length-checked.
 
     The string form (``"([0]*1+[1]*7)"``, which is what the K3 yamls write)
@@ -98,10 +98,10 @@ def get_kimi_k3_moe_layer_pattern(config: KimiK3TransformerConfig) -> List[int]:
     Primus's ``megatron.args.moe_layer_freq`` patch runs at the args layer --
     but only the *launcher* path goes through that patch. A config built
     in-process from a parsed yaml, which is what the config tests and the
-    projection code do (``primus/core/projection/training_config.py:143-147``
+    projection code do (``primus/core/projection/training_config.py``
     evaluates it for the same reason), still carries the raw string. The
     character whitelist is the one Megatron's own pattern evaluator uses
-    (``arguments.py:204``).
+    (``arguments.py``).
 
     With no experts configured the whole stack is dense, which keeps this
     file usable for a no-MoE debug shape.
@@ -144,28 +144,28 @@ def _build_kda_spec(*, config: KimiK3TransformerConfig, provider: "KimiK3SpecPro
     """One Kimi Delta Attention layer.
 
     :class:`KimiDeltaAttention` passes every constructor argument to its
-    projections itself (``kimi_delta_attention.py:394-407``), so these
+    projections itself (``kimi_delta_attention.py``), so these
     slots carry bare classes rather than parameterised ``ModuleSpec``\\ s.
 
     ``f_a_proj`` is the exception and is deliberately **not** the same
     class as the rest. It is the replicated low-rank down-projection of
     the decay gate, and ``_duplicated_linear_kwargs``
-    (``kimi_delta_attention.py:108-119``) replicates a non-``TELinear``
+    (``kimi_delta_attention.py``) replicates a non-``TELinear``
     class by asking for ``gather_output=True`` -- which TE's
     column-parallel wrapper rejects outright
-    (``transformer_engine.py:971-972``). The Megatron-native
+    (``transformer_engine.py``). The Megatron-native
     :class:`ColumnParallelLinear` accepts it, and at TP=1 the gather is an
     identity. Its     ``TELinear`` sibling is not usable here either:
     ``TELinear.__init__`` requires ``skip_weight_param_allocation``
-    (``transformer_engine.py:500``) and KDA's ``build_module`` call does
+    (``transformer_engine.py``) and KDA's ``build_module`` call does
     not pass it.
 
     ``attn_mask_type`` is declared even though KDA has no mask tensor and
     no softmax: ``MultiTokenPredictionLayer.__init__`` reads
     ``self_attention.params['attn_mask_type']`` off the inner layer's spec
     and asserts it is one of ``SUPPORTED_ATTN_MASK``
-    (``multi_token_prediction.py:773-780``), and ``ModuleSpec.params``
-    defaults to ``{}`` (``spec_utils.py:29``) so the missing key would make
+    (``multi_token_prediction.py``), and ``ModuleSpec.params``
+    defaults to ``{}`` (``spec_utils.py``) so the missing key would make
     the MTP block refuse to construct with a confusing message about mask
     types. ``causal`` is the truthful value -- KDA's causality comes from
     the recurrence and the causal short convolution -- and
@@ -264,7 +264,7 @@ def build_kimi_k3_layer_spec(
 
     There is deliberately no ``is_mtp_layer`` argument. Upstream passes it as a
     ``build_module`` keyword when it constructs an MTP depth's inner layer
-    (``multi_token_prediction.py:835-841``), and a spec ``param`` of the same
+    (``multi_token_prediction.py``), and a spec ``param`` of the same
     name would collide -- ``build_module`` unpacks ``params`` and ``kwargs``
     into one call, so the layer would be constructed with two values for it and
     raise ``TypeError``.
@@ -285,7 +285,7 @@ def build_kimi_k3_layer_spec(
 
     use_res = bool(config.attn_res_block_size) if use_attn_residuals is None else bool(use_attn_residuals)
     # Layer 0 enters with no checkpoints, so its pre-attention mix is skipped
-    # (``modeling_kimi_linear.py:987``) and the mixer would be dead weight.
+    # (``modeling_kimi_linear.py``) and the mixer would be dead weight.
     # See the matching comment in ``KimiK3Layer.__init__``.
     runs_pre_attn_mix = use_res and attn_res_num_blocks_before(layer_idx, config.attn_res_block_size) > 0
     submodules = KimiK3LayerSubmodules(
@@ -328,7 +328,7 @@ def _build_stage_layer_specs(
         local_count = int(get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank))
         layer_offset = int(get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank))
     except Exception:
-        # Mirrors deepseek_v4_layer_specs.py:642-647: without an
+        # Mirrors deepseek_v4_layer_specs.py: without an
         # initialised parallel_state (CPU spec-tree tests) build the whole
         # stack on one stage.
         local_count = num_layers
@@ -357,7 +357,7 @@ def get_kimi_k3_runtime_decoder_spec(
     """The Kimi K3 runtime decoder spec tree.
 
     Mirrors ``get_deepseek_v4_runtime_decoder_spec``
-    (``deepseek_v4_layer_specs.py:664-692``). The returned block
+    (``deepseek_v4_layer_specs.py``). The returned block
     submodules always carry a non-empty ``layer_specs``.
     """
     provider = resolve_k3_provider(config)

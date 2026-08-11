@@ -12,20 +12,19 @@ parameter-selection rule and the resolved ambiguities. This module only wires it
 Three things are patched, all inside one registered patch:
 
 1. ``TensorParallelMuon.orthogonalize`` — the per-head branch itself
-   (``muon.py:110-162`` is upstream's documented override point).
+   (``muon.py`` is upstream's documented override point).
 2. ``TensorParallelMuon.__init__`` — records the Newton-Schulz kwargs on the instance.
    They are otherwise captured only in the ``scaled_orthogonalize_fn`` closure
-   (``muon.py:67-90``) and never stored, and ``coefficient_type`` in particular is not
+   (``muon.py``) and never stored, and ``coefficient_type`` in particular is not
    exposed on ``OptimizerConfig`` at all, so the batched implementation has no other
    honest source for them.
 3. ``get_megatron_muon_optimizer`` — wrapped to tag the selected parameters *before*
    the optimizer is built and to copy the tags onto the fp32 master weights *after*.
    It is patched in **both** binding locations, because
-   ``megatron/training/training.py:130`` does
+   ``megatron/training/training.py`` does
    ``from megatron.core.optimizer.muon import get_megatron_muon_optimizer`` at module
    scope, so rebinding only the defining module would have no effect on the call at
-   ``training.py:1538``. Same two-location treatment as
-   ``optimizer_patches.py:72-98``.
+   ``training.py``. Same two-location treatment as ``optimizer_patches.py``.
 
 Why patch rather than replace ``get_megatron_muon_optimizer`` wholesale: everything
 else in that function — master weights, the chained AdamW for non-2-D parameters, the
@@ -43,7 +42,7 @@ def _muon_selected(args) -> bool:
     """Whether this job actually runs Muon.
 
     ``args.optimizer`` and not ``config.optimizer``: ``get_megatron_muon_optimizer``
-    overwrites the latter with ``'adam'`` on entry (``muon.py:186``).
+    overwrites the latter with ``'adam'`` on entry (``muon.py``).
     """
     return "muon" in str(getattr(args, "optimizer", "") or "")
 
@@ -127,7 +126,7 @@ def patch_per_head_muon(ctx: PatchContext):
         def patched_init(self, *init_args, **init_kwargs):
             original_init(self, *init_args, **init_kwargs)
             # bind_partial + apply_defaults so a positional call or an omitted kwarg
-            # still yields the same value the closure in muon.py:67-90 captured.
+            # still yields the same value the closure in muon.py captured.
             bound = init_signature.bind_partial(self, *init_args, **init_kwargs)
             bound.apply_defaults()
             self._primus_muon_ns_kwargs = {
@@ -188,7 +187,7 @@ def patch_per_head_muon(ctx: PatchContext):
         log_rank_0(f"{_LOG_PREFIX} propagated the per-head spec to {tagged_masters} fp32 master " "weight(s)")
         if total_selected > 0 and tagged_masters == 0 and getattr(config, "bf16", False):
             # bf16 means Float16OptimizerWithFloat16Params, whose fp32 clone is what
-            # orthogonalize() actually sees (optimizer.py:675-684).
+            # orthogonalize() actually sees (optimizer.py).
             log_rank_0(
                 f"WARNING {_LOG_PREFIX} bf16 is on but no master weight was tagged; "
                 "per-head blocking would silently not apply."
@@ -206,7 +205,7 @@ def patch_per_head_muon(ctx: PatchContext):
     except ImportError as exc:
         # megatron.training is expected to import at before_train; a failure means a
         # broken install, not an optional dependency. Fail loudly rather than leave the
-        # module-scope binding at training.py:1538 unpatched (per-head Muon would then
+        # module-scope binding at training.py unpatched (per-head Muon would then
         # silently not apply there).
         raise RuntimeError(
             f"{_LOG_PREFIX} could not import megatron.training.training to patch the "

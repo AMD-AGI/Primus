@@ -10,7 +10,7 @@ Importing this package pulls in ``flydsl``, so it must only ever be reached
 through :func:`...kda_kernels.load_flydsl_kda_backend`, never from module
 scope of anything on the default import path. See the lazy-loader rationale
 in :mod:`...kda_kernels` and its DeepSeek-V4 precedent
-(``v4_attention_kernels/__init__.py:137-161``).
+(``v4_attention_kernels/__init__.py``).
 """
 
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.chunk import (

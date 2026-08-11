@@ -7,7 +7,7 @@
 """Kimi K3 top-level model.
 
 Rooted on :class:`LanguageModule` rather than ``GPTModel`` for the same
-reason DeepSeek-V4 is (``deepseek_v4_model.py:10-12``): the decoder is
+reason DeepSeek-V4 is (``deepseek_v4_model.py``): the decoder is
 built from a Kimi-K3-owned spec tree, so there is nothing to gain from
 GPT's ``TransformerBlock`` construction path.
 
@@ -24,7 +24,7 @@ chosen.
 ``transformer_layer_spec`` is the whole decoder tree — a
 :class:`KimiK3TransformerBlock` spec from
 ``kimi_k3_layer_specs.get_kimi_k3_runtime_decoder_spec`` — not a single layer
-spec, matching how ``DeepseekV4Model`` is built (``deepseek_v4_model.py:120``).
+spec, matching how ``DeepseekV4Model`` is built (``deepseek_v4_model.py``).
 """
 
 from typing import Literal, Optional, Union
@@ -98,7 +98,7 @@ class KimiK3Model(LanguageModule):
         )
 
         # Resolved before the embedding, as upstream ``GPTModel`` does
-        # (``gpt_model.py:145-149``): a pipeline stage that owns MTP layers but
+        # (``gpt_model.py``): a pipeline stage that owns MTP layers but
         # is not ``pre_process`` still needs a tied copy of the input
         # embedding, because :class:`MultiTokenPredictionLayer` embeds the
         # rolled ``input_ids`` itself. Without it
@@ -114,7 +114,7 @@ class KimiK3Model(LanguageModule):
             # both need a real distributed init. On a CPU spec smoke we leave
             # ``self.mtp`` unset and expose the spec through
             # ``self.mtp_block_spec``, so the wiring stays inspectable —
-            # ``deepseek_v4_model.py:110-120`` does the same.
+            # ``deepseek_v4_model.py`` does the same.
             try:
                 self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
             except (AssertionError, RuntimeError, AttributeError):
@@ -143,7 +143,7 @@ class KimiK3Model(LanguageModule):
         # ``set_current_microbatch`` probes ``hasattr(model, 'mtp')`` and then
         # iterates ``model.mtp.layers`` unconditionally, so the attribute must
         # exist only when MTP is live. Upstream ``GPTModel`` has the same
-        # asymmetry (``gpt_model.py:218-221``).
+        # asymmetry (``gpt_model.py``).
         if self.mtp_process:
             self.mtp = MultiTokenPredictionBlock(
                 config=self.config,
@@ -203,7 +203,7 @@ class KimiK3Model(LanguageModule):
         """Forward pass for Kimi K3.
 
         With MTP enabled the tail of this method mirrors
-        ``GPTModel._postprocess`` (``gpt_model.py:592-629``): the decoder's
+        ``GPTModel._postprocess`` (``gpt_model.py``): the decoder's
         output feeds :class:`MultiTokenPredictionBlock`, whose return value is
         the sequence-axis concatenation of the main hidden state and one
         shifted hidden state per MTP depth;
@@ -219,7 +219,7 @@ class KimiK3Model(LanguageModule):
         aggregates all N block representations" makes of the checkpoint set.
         No ``block_residual`` reaches the MTP layer, by construction: the
         decoder block returns the bare ``[s, b, h]`` tensor on
-        ``post_process`` (``kimi_k3_block.py:249-250``).
+        ``post_process`` (``kimi_k3_block.py``).
         """
         if decoder_input is None and self.pre_process:
             if input_ids is None:
@@ -246,7 +246,7 @@ class KimiK3Model(LanguageModule):
                 raise ValueError(
                     "Multi-Token Prediction needs input_ids on the MTP stage: each depth "
                     "embeds the ids rolled one position left "
-                    "(multi_token_prediction.py:874-889)."
+                    "(multi_token_prediction.py)."
                 )
             if position_ids is None:
                 batch, seq = input_ids.shape

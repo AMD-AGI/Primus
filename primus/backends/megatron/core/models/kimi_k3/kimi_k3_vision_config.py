@@ -11,7 +11,7 @@ The vision tower disagrees with the text backbone on almost every field a
 33792 FFN, 12 against 96 heads, non-gated GELU against gated ``situ``,
 non-causal against causal -- so it needs its **own** config object. That is
 also what Megatron's own VLM path does
-(``pretrain_vlm.py:151-171`` builds ``get_vision_model_config(deepcopy(config))``).
+(``pretrain_vlm.py`` builds ``get_vision_model_config(deepcopy(config))``).
 
 Two configs come out of one :class:`KimiK3TransformerConfig`:
 
@@ -19,10 +19,10 @@ Two configs come out of one :class:`KimiK3TransformerConfig`:
     the 27-layer tower. ``hidden_size`` 1024, ``kv_channels`` 128 with 12
     heads -- note ``kv_channels * num_attention_heads`` is 1536, **not**
     ``hidden_size``. Upstream supports that directly: ``kv_channels`` is an
-    independent field (``transformer_config.py:148-150``) and
+    independent field (``transformer_config.py``) and
     ``Attention.__init__`` sizes the projections from it rather than from
     ``hidden_size // num_attention_heads``
-    (``attention.py:267-273``).
+    (``attention.py``).
 
 ``KimiK3VisionProjectorConfig``
     the ``patchmergerv2`` head: ``4096 -> 4096 -> 7168``. It is a separate
@@ -37,7 +37,7 @@ that is not copied is a field the vision tower is deliberately not given.
 
 The epsilon trap
     The released tower's norms are ``nn.RMSNorm(hidden_dim)`` with **no**
-    ``eps`` argument (``modeling_kimi_k3.py:490-491``, ``:591``), for which
+    ``eps`` argument (``modeling_kimi_k3.py``), for which
     ATen substitutes double-precision epsilon, **2.22e-16** -- measured by
     :func:`moonvit_default_rmsnorm_eps`, not assumed. That is nine orders of
     magnitude below float32's own epsilon, so it is effectively zero in
@@ -45,7 +45,7 @@ The epsilon trap
     is **1e-5**, which on unit-RMS activations is a 5e-6 relative error:
     invisible in bf16, and the difference between "matches the official
     implementation" and "nearly matches" in fp32. Only the *projector's*
-    ``post_norm`` uses 1e-5 (``:795``), from ``projector_ln_eps`` -- the two
+    ``post_norm`` uses 1e-5, from ``projector_ln_eps`` -- the two
     epsilons in the released config are genuinely different numbers.
 
     ``vt_layernorm_epsilon`` therefore defaults to the measured value rather
@@ -82,20 +82,20 @@ __all__ = [
 
 #: ``F.interpolate`` modes the resampler accepts. The released config picks
 #: ``bilinear``; ``MoonVision3dPatchEmbed``'s own default is ``bicubic``
-#: (``modeling_kimi_k3.py:297``) and ``VisionTowerConfig``'s fallback is
-#: ``bilinear`` (``:877-878``), so the two disagree and only the explicit
-#: value in ``config.json`` settles it.
+#: (``modeling_kimi_k3.py``) and ``VisionTowerConfig``'s fallback is
+#: ``bilinear``, so the two disagree and only the explicit value in
+#: ``config.json`` settles it.
 MOONVIT_INTERPOLATION_MODES = ("nearest", "bilinear", "bicubic", "area")
 
 #: ``mm_projector_type`` values that map onto something we build. The
 #: released config is ``patchmergerv2``; the other three branches
-#: (``identity`` / ``mlp`` / ``patchmerger``, ``:906-917``) are dead code in
+#: (``identity`` / ``mlp`` / ``patchmerger``) are dead code in
 #: this release and are rejected rather than half-implemented.
 MOONVIT_PROJECTOR_TYPES = ("patchmergerv2",)
 
 
 def gelu_tanh(x: torch.Tensor) -> torch.Tensor:
-    """``PytorchGELUTanh`` (``modeling_kimi_k3.py:686``).
+    """``PytorchGELUTanh`` (``modeling_kimi_k3.py``).
 
     A named module-level function rather than a ``functools.partial`` so it
     survives config ``repr``, pickling for the dataloader workers, and the
@@ -103,7 +103,7 @@ def gelu_tanh(x: torch.Tensor) -> torch.Tensor:
     whether a fusion applies.
 
     The tower uses the **tanh** approximation; the projector uses
-    ``nn.GELU()``, the exact erf form (``:792``). They differ by about 1e-3
+    ``nn.GELU()``, the exact erf form. They differ by about 1e-3
     absolute near the knee and are not interchangeable.
     """
     return F.gelu(x, approximate="tanh")
@@ -196,7 +196,7 @@ def validate_moonvit_fields(config: "KimiK3TransformerConfig") -> None:
         )
     head_dim = qkv // heads
     if head_dim % 4:
-        # Rope2DPosEmbRepeated.__init__ asserts it (modeling_kimi_k3.py:370):
+        # Rope2DPosEmbRepeated.__init__ asserts it (modeling_kimi_k3.py):
         # the table interleaves an x and a y frequency per pair of channels,
         # so it consumes 4 channels per frequency.
         raise ValueError(
@@ -325,7 +325,7 @@ def build_moonvit_configs(
         apply_rope_fusion=False,
         # The tower is not pipelined: MoonViT is 0.4 B against the backbone's
         # 2.78 T, and Megatron's own VLM path pins the vision encoder to one
-        # stage for the same reason (pretrain_vlm.py:151-171).
+        # stage for the same reason (pretrain_vlm.py).
         pipeline_model_parallel_size=1,
         expert_model_parallel_size=1,
         num_moe_experts=None,
@@ -351,7 +351,7 @@ def build_moonvit_configs(
         num_attention_heads=1,  # unused, but TransformerConfig requires it
         gated_linear_unit=False,
         # The projector's activation is nn.GELU(), the exact erf form, not
-        # the tower's tanh approximation (modeling_kimi_k3.py:792).
+        # the tower's tanh approximation (modeling_kimi_k3.py).
         activation_func=F.gelu,
         add_bias_linear=False,
         normalization="RMSNorm",

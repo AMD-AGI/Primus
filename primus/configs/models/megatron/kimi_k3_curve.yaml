@@ -53,13 +53,13 @@
 #
 # vocab_size is set to that number so the config does not lie. It matters that
 # it is explicit: with tokenizer_type: HuggingFaceTokenizer,
-# build_tokenizer.py:114-117 sets
+# build_tokenizer.py sets
 #   args.padded_vocab_size = vocab_size_with_padding(tokenizer.vocab_size, args)
-# and huggingface_tokenizer.py:291-293 returns len(tokenizer) there — so the
+# and huggingface_tokenizer.py returns len(tokenizer) there — so the
 # model is built at ceil(151665 / 64) * 64 = 151680 regardless of what vocab_size
 # says. Leaving vocab_size at 163840 would produce a config whose stated
 # vocabulary is 12 160 rows larger than the tensor actually allocated, with no
-# error anywhere: KimiK3TransformerConfig.__post_init__:345 only back-fills
+# error anywhere: KimiK3TransformerConfig.__post_init__ only back-fills
 # padded_vocab_size when it is None, and by then it is not.
 #
 # 151680 > 151664, the highest id the tokenizer can emit, so no real token id
@@ -77,7 +77,7 @@ hidden_size: 2048
 num_attention_heads: 16
 num_query_groups: null
 # 2048 % 16 == 128 exactly, so kv_channels is not strictly forced here the way
-# it is at the production shape (7168 % 96 != 0, arguments.py:1051-1053) — set
+# it is at the production shape (7168 % 96 != 0, arguments.py) — set
 # explicitly anyway so the value is auditable rather than derived.
 kv_channels: 128                            # = v_head_dim
 # Production ratio 33792 / 7168 = 4.714x. Layer 0 is the only dense MLP.
@@ -126,7 +126,7 @@ moe_router_topk: 4
 moe_ffn_hidden_size: 1024
 # num_shared_experts: 2, as the release. MCore expresses shared experts as a
 # width, and the release derives it from moe_intermediate_size, not from
-# intermediate_size (modeling_kimi_linear.py:798).
+# intermediate_size (modeling_kimi_linear.py).
 moe_shared_expert_intermediate_size: 2048
 # THE structural invariant: hidden_size / 2, exactly as 3584 / 7168.
 routed_expert_hidden_size: 1024

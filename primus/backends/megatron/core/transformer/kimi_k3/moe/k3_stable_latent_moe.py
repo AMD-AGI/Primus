@@ -6,8 +6,8 @@
 
 """Stable Latent MoE — the FFN sub-block of the Kimi K3 text backbone.
 
-Reference: ``KimiSparseMoeBlock`` (``modeling_kimi_linear.py:762-838``) and
-``KimiMoEGate`` (``:666-759``).
+Reference: ``KimiSparseMoeBlock`` (``modeling_kimi_linear.py``) and
+``KimiMoEGate``.
 
 What "latent" means
 -------------------
@@ -17,12 +17,12 @@ into a ``routed_expert_hidden_size = 3584`` latent space; the experts live
 there; one shared projection lifts the combined result back to 7168::
 
     identity = hidden_states
-    topk_idx, topk_w = gate(hidden_states)          # :818  FULL-WIDTH router
-    h = routed_expert_down_proj(hidden_states)      # :822  7168 -> 3584
-    y = moe_infer(h, topk_idx, topk_w)              # :825  experts in latent
-    y = routed_expert_norm(y)                       # :831  the "STABLE" trick
-    y = routed_expert_up_proj(y)                    # :832  3584 -> 7168
-    y = y + shared_experts(identity)                # :837  bypasses the latent
+    topk_idx, topk_w = gate(hidden_states)          # FULL-WIDTH router
+    h = routed_expert_down_proj(hidden_states)      # 7168 -> 3584
+    y = moe_infer(h, topk_idx, topk_w)              # experts in latent
+    y = routed_expert_norm(y)                       # the "STABLE" trick
+    y = routed_expert_up_proj(y)                    # 3584 -> 7168
+    y = y + shared_experts(identity)                # bypasses the latent
 
 Per expert this is ``3 x 3584 x 3072 ~ 33.0 M`` parameters instead of
 ``3 x 7168 x 3072 ~ 66.1 M`` in model space — the bottleneck halves the
@@ -32,8 +32,8 @@ Three things are easy to get wrong, and all three are asserted by
 ``tests/unit_tests/megatron/transformer/kimi_k3/test_stable_latent_moe.py``:
 
 1. The router scores the **full-width** hidden state. ``self.gate(...)``
-   runs at ``:818``, *before* the down-projection at ``:822``, so the
-   router weight is ``[num_experts, hidden_size]`` and never
+   runs *before* the down-projection, so the router weight is
+   ``[num_experts, hidden_size]`` and never
    ``[num_experts, latent]``.
 2. The norm is applied to the **already-combined, top-k-weighted sum** of
    expert outputs, inside the bottleneck, before the up-projection — not
@@ -48,17 +48,17 @@ Why this class is so short
 Upstream Megatron **already implements the latent bottleneck**, under the
 name ``config.moe_latent_size``:
 
-* ``moe_layer.py:198-221`` builds ``fc1_latent_proj`` / ``fc2_latent_proj``
+* ``moe_layer.py`` builds ``fc1_latent_proj`` / ``fc2_latent_proj``
   as duplicated ``TELinear`` (shared across experts, as K3 requires);
-* ``moe_layer.py:359-363`` applies the down-projection in ``preprocess``,
-  which runs **after** ``route`` (``:498-499``) — so the router already sees
+* ``moe_layer.py`` applies the down-projection in ``preprocess``,
+  which runs **after** ``route`` — so the router already sees
   the full-width hidden state;
-* ``moe_layer.py:447-449`` applies the up-projection in ``postprocess``,
+* ``moe_layer.py`` applies the up-projection in ``postprocess``,
   after the dispatcher combine;
-* ``moe_layer.py:497`` computes the shared experts on the original
+* ``moe_layer.py`` computes the shared experts on the original
   ``hidden_states``, before ``route`` / ``preprocess`` — the K3 ``identity``
   bypass, for free;
-* ``experts.py:185,203-208`` (TEGroupedMLP) and ``mlp.py:210-234``
+* ``experts.py`` (TEGroupedMLP) and ``mlp.py``
   (SequentialMLP) size the routed experts on ``moe_latent_size`` while
   leaving ``is_expert=False`` shared experts in model space.
 
@@ -77,17 +77,16 @@ redundant against the upstream this tree actually vendors, so they are not used.
 The router
 ----------
 No new router class. ``KimiMoEGate`` is DeepSeek-V3's ``noaux_tc``, and
-``moe_utils.topk_routing_with_score_function`` (``:772-785``) is the same
-math line for line: sigmoid over an fp32 gating GEMM (``:773`` vs HF
-``:712``), ``expert_bias`` shifts **selection only** while the returned
-weights are gathered from the un-shifted scores (``:775-777`` vs HF
-``:723,747-750``), renormalize by the top-k sum with the same ``1e-20``
-epsilon (``:780`` vs HF ``:753-755``), then scale (``:784`` vs HF ``:757``).
-Configure it with ``moe_router_score_function="sigmoid"`` +
+``moe_utils.topk_routing_with_score_function`` is the same math line for
+line: sigmoid over an fp32 gating GEMM, ``expert_bias`` shifts
+**selection only** while the returned weights are gathered from the
+un-shifted scores, renormalize by the top-k sum with the same ``1e-20``
+epsilon, then scale. Configure it with
+``moe_router_score_function="sigmoid"`` +
 ``moe_router_enable_expert_bias=True``. The release has
-``num_expert_group == topk_group == 1``, so HF's group-limited branch
-(``:724-744``) is dead code; leave ``moe_router_num_groups`` /
-``moe_router_group_topk`` at ``None`` and no machinery is built for it.
+``num_expert_group == topk_group == 1``, so HF's group-limited branch is
+dead code; leave ``moe_router_num_groups`` / ``moe_router_group_topk`` at
+``None`` and no machinery is built for it.
 
 Load balancing
 --------------
@@ -98,7 +97,7 @@ which has no public reference implementation; Primus implements it in
 ``k3_quantile_balancing.py``. It is a
 *bias-update rule*, not a loss, so it does not belong in this module: it
 replaces ``get_updated_expert_bias`` at
-``megatron/core/distributed/finalize_model_grads.py:314-319``, which is
+``megatron/core/distributed/finalize_model_grads.py``, which is
 the single place the sign-based DeepSeek-V3 update is applied to
 ``TopKRouter.expert_bias``. See :data:`QUANTILE_BALANCING_HOOK_SITE`.
 """
@@ -131,19 +130,19 @@ __all__ = [
 class StableLatentMoESubmodules(MoESubmodules):
     """Spec tree for :class:`StableLatentMoE`.
 
-    Extends upstream :class:`MoESubmodules` (``moe_layer.py:89-95``) —
+    Extends upstream :class:`MoESubmodules` (``moe_layer.py``) —
     ``experts`` / ``shared_experts`` / ``router`` keep their upstream
     meaning and are consumed by the parent ``__init__`` — with the one
     slot Kimi K3 adds.
 
     Note that ``router`` is a *builder callable*, not a ``ModuleSpec``:
-    ``moe_layer.py:192`` invokes it as
+    ``moe_layer.py`` invokes it as
     ``submodules.router(config=..., pg_collection=..., is_mtp_layer=...)``.
     Leave it at the :class:`TopKRouter` default.
 
     There is deliberately no slot for the latent down / up projections or
     for the token dispatcher: upstream owns all three
-    (``moe_layer.py:198-221`` and ``:224-248`` respectively), the latter
+    (``moe_layer.py``), the latter
     keyed off ``config.moe_token_dispatcher_type``.
 
     Args:
@@ -151,7 +150,7 @@ class StableLatentMoESubmodules(MoESubmodules):
             the combined routed output before the up-projection. Built with
             ``(config=..., hidden_size=latent, eps=config.layernorm_epsilon)``,
             which is :class:`TENorm`'s signature
-            (``transformer_engine.py:441-443``). Required when
+            (``transformer_engine.py``). Required when
             ``config.latent_moe_use_norm`` is set; ``IdentityOp`` or ``None``
             both mean "no norm".
     """
@@ -165,7 +164,7 @@ def resolve_latent_size(config: TransformerConfig) -> Optional[int]:
     ``KimiK3TransformerConfig.routed_expert_hidden_size`` is the K3-native
     field name (HF: ``routed_expert_hidden_size``); ``moe_latent_size`` is
     upstream's name for the same quantity
-    (``transformer_config.py:790-791``). Either may be set; when both are,
+    (``transformer_config.py``). Either may be set; when both are,
     they must agree.
     """
     k3 = getattr(config, "routed_expert_hidden_size", None)
@@ -200,9 +199,9 @@ def resolve_latent_size(config: TransformerConfig) -> Optional[int]:
 # from every router in the model and writes the result back in place. Quantile
 # Balancing needs the routing *scores* rather than token counts, so it also
 # needs a per-step statistic stashed on ``TopKRouter`` alongside
-# ``local_tokens_per_expert`` (``router.py:172-189``, zeroed at
-# ``finalize_model_grads.py:284-285``).
-QUANTILE_BALANCING_HOOK_SITE = "megatron/core/distributed/finalize_model_grads.py:314-319"
+# ``local_tokens_per_expert`` (``router.py``, zeroed at
+# ``finalize_model_grads.py``).
+QUANTILE_BALANCING_HOOK_SITE = "megatron/core/distributed/finalize_model_grads.py"
 
 
 class StableLatentMoE(MoELayer):
@@ -211,12 +210,12 @@ class StableLatentMoE(MoELayer):
     Layer-assembly note for the K3 layer class. Upstream
     ``TransformerLayer`` decides whether to forward ``pg_collection`` and
     ``is_mtp_layer`` to the mlp with an **identity** check against
-    ``(MoELayer, TEGroupedMLP, SequentialMLP)`` (``transformer_layer.py:374``),
+    ``(MoELayer, TEGroupedMLP, SequentialMLP)`` (``transformer_layer.py``),
     so a subclass does not match and falls back to
-    ``get_default_pg_collection()`` (``moe_layer.py:170-171``) — correct, but
+    ``get_default_pg_collection()`` (``moe_layer.py``) — correct, but
     it silently ignores an explicitly-threaded collection. ``KimiK3Layer``
     should pass ``pg_collection`` itself. The neighbouring
-    ``isinstance(self.mlp, MoELayer)`` at ``:402`` does match, so
+    ``isinstance(self.mlp, MoELayer)`` does match, so
     ``is_moe_layer`` comes out right either way.
 
     Args:
@@ -227,9 +226,9 @@ class StableLatentMoE(MoELayer):
             the parent.
         layer_number: 1-based layer number, threaded by Megatron's spec
             lifecycle. Must be set before a training-mode forward — the
-            aux-loss tracker indexes by it (``router.py:464-479``).
+            aux-loss tracker indexes by it (``router.py``).
         pg_collection: Megatron process groups. ``None`` falls back to
-            ``get_default_pg_collection()`` (``moe_layer.py:170-171``).
+            ``get_default_pg_collection()`` (``moe_layer.py``).
         is_mtp_layer: forwarded to the parent. Always ``False`` for K3 —
             the release has no MTP.
     """
@@ -261,7 +260,7 @@ class StableLatentMoE(MoELayer):
             assert norm_spec is not None and norm_spec is not IdentityOp, (
                 "config.latent_moe_use_norm is set but submodules.latent_norm is empty. "
                 "The aggregated RMSNorm is the 'stable' half of Stable Latent MoE "
-                "(modeling_kimi_linear.py:810-813) -- build the spec with "
+                "(modeling_kimi_linear.py) -- build the spec with "
                 "build_stable_latent_moe_spec(), or pass latent_norm explicitly."
             )
             self.routed_expert_norm = build_module(
@@ -272,11 +271,11 @@ class StableLatentMoE(MoELayer):
             )
         elif use_norm:
             # latent_moe_use_norm is meaningless without a bottleneck: HF gates
-            # the norm on use_latent_moe too (modeling_kimi_linear.py:829-831).
+            # the norm on use_latent_moe too (modeling_kimi_linear.py).
             logger.warning(
                 "[Kimi K3] latent_moe_use_norm is set but routed_expert_hidden_size "
                 "is None; there is no bottleneck to normalise, so no norm is built. "
-                "This matches modeling_kimi_linear.py:829-831."
+                "This matches modeling_kimi_linear.py."
             )
 
     @staticmethod
@@ -287,13 +286,13 @@ class StableLatentMoE(MoELayer):
         so K3's ``routed_expert_hidden_size`` has to reach it. When the
         caller already set ``moe_latent_size`` the config is used as-is;
         otherwise a shallow copy carries the value, following
-        ``SharedExpertMLP.__init__:47`` rather than mutating a config the
+        ``SharedExpertMLP.__init__`` rather than mutating a config the
         caller shares with the rest of the layer.
 
         Two things ride along on the copy:
 
         * ``moe_shared_expert_overlap`` is forced off. Upstream asserts
-          against it in ``preprocess`` (``moe_layer.py:360-362``) whenever
+          against it in ``preprocess`` (``moe_layer.py``) whenever
           the latent projections are live, and that assert fires at *forward*
           time, i.e. after a full model has been built. Kimi K3's family
           YAML enables the overlap, so leaving it alone turns a config
@@ -312,7 +311,7 @@ class StableLatentMoE(MoELayer):
             logger.warning(
                 "[Kimi K3] disabling moe_shared_expert_overlap for this MoE layer: "
                 "upstream rejects it whenever the MoE latent projections are active "
-                "(moe_layer.py:360-362). Set moe_shared_expert_overlap: false in the "
+                "(moe_layer.py). Set moe_shared_expert_overlap: false in the "
                 "YAML to make the trade-off explicit."
             )
             latent_config.moe_shared_expert_overlap = False
@@ -321,11 +320,11 @@ class StableLatentMoE(MoELayer):
     def postprocess(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
         """Norm the combined routed output, lift it back, add the shared experts.
 
-        A copy of ``MoELayer.postprocess`` (``moe_layer.py:443-453``) with
+        A copy of ``MoELayer.postprocess`` (``moe_layer.py``) with
         one call inserted. ``combine_postprocess`` has just produced the
         top-k-weighted sum of expert outputs *in latent space*, which is
-        exactly HF's ``moe_infer`` return value at ``:825`` — so normalising
-        here and only here reproduces ``:829-832``:
+        exactly HF's ``moe_infer`` return value — so normalising here and
+        only here reproduces HF's norm-then-up-projection:
 
             y = routed_expert_norm(y)      # combined, weighted, in latent
             y = routed_expert_up_proj(y)   # then back to model space

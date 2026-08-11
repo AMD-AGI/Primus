@@ -10,9 +10,9 @@ One :class:`torch.autograd.Function` serves every fused KDA backend. A
 backend supplies a ``(fwd_fn, bwd_fn)`` pair and :func:`make_kda_chunk`
 returns something with the shared backend signature documented in
 :mod:`..kda_kernels`. This mirrors
-``v4_attention_kernels/v4_sparse_mla_adapter.py:239-292``, where the
-kernel pair is passed to the Function as non-tensor arguments so a new
-kernel needs no new Function.
+``v4_attention_kernels/v4_sparse_mla_adapter.py``, where the kernel
+pair is passed to the Function as non-tensor arguments so a new kernel
+needs no new Function.
 
 The contract between the adapter and a kernel pair::
 

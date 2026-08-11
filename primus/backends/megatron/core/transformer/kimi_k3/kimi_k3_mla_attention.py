@@ -13,12 +13,12 @@
 """Kimi K3 full-attention layers — NoPE MLA with a sigmoid output gate.
 
 24 of the 93 decoder layers use ``KimiMLAAttention``
-(``modeling_kimi_linear.py:335-474``); the other 69 use KDA
+(``modeling_kimi_linear.py``); the other 69 use KDA
 (:mod:`.kimi_delta_attention`). Structurally it is DeepSeek-V3 MLA with
 exactly two deltas, so this class *keeps* the upstream
 :class:`~megatron.core.transformer.multi_latent_attention.MLASelfAttention`
 ``__init__`` — unlike :class:`DeepseekV4Attention`, which bypasses the
-parent (``deepseek_v4_attention.py:505``) because V4 replaced MLA's
+parent (``deepseek_v4_attention.py``) because V4 replaced MLA's
 compressed KV with a single latent. Kimi K3's parameter layout is MLA's,
 projection for projection::
 
@@ -33,44 +33,44 @@ projection for projection::
 
 Delta 1 — NoPE
 --------------
-``KimiMLAAttention`` asserts ``use_nope`` (``:396``), sets
-``self.rotary_emb = None`` (``:403``), and splits ``q_rot`` / ``k_rot``
-out (``:423-428``) only to concatenate them back **unrotated**
-(``:439-440``). The 64 "rope" dims are just 64 extra learned
-non-positional dims that keep the checkpoint layout DeepSeek-V3-shaped.
+``KimiMLAAttention`` asserts ``use_nope``, sets
+``self.rotary_emb = None``, and splits ``q_rot`` / ``k_rot`` out only to
+concatenate them back **unrotated**. The 64 "rope" dims are just 64
+extra learned non-positional dims that keep the checkpoint layout
+DeepSeek-V3-shaped.
 
 Megatron has no NoPE flag: ``rope_type`` is validated against exactly
-``{"rope", "yarn"}`` (``multi_latent_attention.py:151-155``) and the
-rotary application is unconditional (``:803``, ``:812``). Rather than
-duplicate the parent's ~150-line ``get_query_key_value_tensors`` minus
-two calls, this class hands the parent a **zero-width frequency table**:
+``{"rope", "yarn"}`` (``multi_latent_attention.py``) and the rotary
+application is unconditional. Rather than duplicate the parent's
+~150-line ``get_query_key_value_tensors`` minus two calls, this class
+hands the parent a **zero-width frequency table**:
 ``apply_rotary_pos_emb`` opens with
 
 .. code-block:: python
 
-    # rope_utils.py:110-113
+    # rope_utils.py
     rot_dim = freqs.shape[-1]
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
 so at ``rot_dim == 0`` the whole tensor lands in ``t_pass`` and the
-closing ``torch.cat((t, t_pass), dim=-1)`` (``:126``) returns a
-bit-exact copy. ``test_k3_mla_nope.py`` asserts that bit-identity on
-both Q and K, so the implicit contract cannot rot silently.
+closing ``torch.cat((t, t_pass), dim=-1)`` returns a bit-exact copy.
+``test_k3_mla_nope.py`` asserts that bit-identity on both Q and K, so
+the implicit contract cannot rot silently.
 
 **Do not** reach for ``qk_pos_emb_head_dim = 0`` instead. It also
 disables rope — ``RotaryEmbedding(0)`` builds an empty ``inv_freq`` —
 but it is a *different architecture*:
 
 * it deletes ``k_rot`` outright, because ``linear_kv_down_proj``'s width
-  is ``kv_lora_rank + qk_pos_emb_head_dim`` (``:469``). K3's 64 K dims
-  are MQA-shared and come straight off the raw down-projection, *not*
+  is ``kv_lora_rank + qk_pos_emb_head_dim``. K3's 64 K dims are
+  MQA-shared and come straight off the raw down-projection, *not*
   through the ``kv_lora_rank`` latent or ``kv_a_layernorm``
-  (``modeling_kimi_linear.py:427-437``), so no setting of
-  ``qk_head_dim`` can reproduce them;
+  (``modeling_kimi_linear.py``), so no setting of ``qk_head_dim`` can
+  reproduce them;
 * it narrows ``q_b_proj`` from ``96 * 192`` to ``96 * 128``;
 * it changes ``softmax_scale`` from K3's ``192 ** -0.5`` to
   ``128 ** -0.5``, because the scale is derived from
-  ``q_head_dim = qk_head_dim + qk_pos_emb_head_dim`` (``:115, 127-128``).
+  ``q_head_dim = qk_head_dim + qk_pos_emb_head_dim``.
 
 The released geometry is ``qk_head_dim: 128`` **and**
 ``qk_pos_emb_head_dim: 64``; :class:`KimiK3MLASelfAttention` logs a loud
@@ -80,13 +80,13 @@ Delta 2 — sigmoid output gate
 -----------------------------
 ``attn_out = attn_out * sigmoid(g_proj(hidden_states))`` applied
 elementwise over ``num_heads * v_head_dim`` **before** ``o_proj``
-(``modeling_kimi_linear.py:398-401, 470-473``).
+(``modeling_kimi_linear.py``).
 
 Upstream already implements this feature for vanilla attention as
-``config.attention_output_gate`` (``transformer_config.py:242``,
-``attention.py:997, 1008, 1210-1236``) but **refuses it under MLA**::
+``config.attention_output_gate`` (``transformer_config.py``,
+``attention.py``) but **refuses it under MLA**::
 
-    # transformer_config.py:2259-2260
+    # transformer_config.py
     if self.attention_output_gate:
         raise NotImplementedError("Output gate is not supported for MLA yet.")
 
@@ -96,20 +96,18 @@ module exists — so no amount of ``__init__`` bypassing in an attention
 subclass can dodge it. It is dodged at the config layer instead:
 :class:`KimiK3TransformerConfig` carries its own ``mla_use_output_gate``
 and leaves upstream's ``attention_output_gate`` at ``False``
-(``kimi_k3_transformer_config.py:171-174``), and this class builds and
-applies the gate itself, and it keeps the whole diff inside Primus rather
-than patching out an
-upstream ``NotImplementedError`` that exists precisely because the MLA
-gate path is untested.
+(``kimi_k3_transformer_config.py``), and this class builds and applies
+the gate itself, and it keeps the whole diff inside Primus rather than
+patching out an upstream ``NotImplementedError`` that exists precisely
+because the MLA gate path is untested.
 
 Core attention must come from TransformerEngine
 -----------------------------------------------
 MLA's K and V head dims differ (192 vs 128), so
 ``MultiLatentAttention.__init__`` always passes ``k_channels`` /
 ``v_channels`` to the core-attention builder
-(``multi_latent_attention.py:164-165``). Only
-``TEDotProductAttention`` accepts them; the pure-PyTorch
-``DotProductAttention`` does not, which makes
+(``multi_latent_attention.py``). Only ``TEDotProductAttention`` accepts
+them; the pure-PyTorch ``DotProductAttention`` does not, which makes
 ``LocalSpecProvider().core_attention()`` unusable here (and makes
 upstream's own local MLA spec latently broken).
 :func:`_check_core_attention_supports_mla` turns that into an
@@ -169,12 +167,12 @@ def apply_sigmoid_output_gate(x: Tensor, gate: Tensor) -> Tensor:
     """``x * sigmoid(gate)``, with the sigmoid and the multiply in fp32.
 
     Mirrors upstream's ``Attention._apply_output_gate``
-    (``attention.py:1230-1236``) exactly, minus its ``@jit_fuser``, which
-    resolves to ``torch.compile`` (``jit.py:16-24``) and is not worth a
-    compile of two elementwise ops.
+    (``attention.py``) exactly, minus its ``@jit_fuser``, which resolves
+    to ``torch.compile`` (``jit.py``) and is not worth a compile of two
+    elementwise ops.
 
     The HF reference computes ``g_proj(x).sigmoid()`` in the model dtype
-    (``modeling_kimi_linear.py:471``); accumulating in fp32 instead is
+    (``modeling_kimi_linear.py``); accumulating in fp32 instead is
     strictly more accurate and agrees to bf16 tolerance. In fp32 the two
     are bit-identical.
     """
@@ -187,7 +185,7 @@ def apply_sigmoid_output_gate(x: Tensor, gate: Tensor) -> Tensor:
 class KimiK3MLASelfAttentionSubmodules(MLASelfAttentionSubmodules):
     """Upstream's MLA submodules plus Kimi K3's sigmoid output gate.
 
-    ``linear_o_gate`` is HF's ``g_proj`` (``modeling_kimi_linear.py:401``):
+    ``linear_o_gate`` is HF's ``g_proj`` (``modeling_kimi_linear.py``):
     ``hidden_size -> num_attention_heads * v_head_dim``, column-parallel,
     no bias. Required when ``config.mla_use_output_gate`` is set and
     ignored otherwise.
@@ -226,18 +224,18 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         pg_collection: Optional[ProcessGroupCollection] = None,
     ) -> None:
         # Fail loudly rather than half-applying two gates. The config layer is
-        # where upstream's flag is refused for MLA (transformer_config.py:2259-2260),
-        # so seeing it True here would mean the guard moved.
+        # where upstream's flag is refused for MLA (transformer_config.py), so
+        # seeing it True here would mean the guard moved.
         assert not config.attention_output_gate, (
             "Kimi K3 applies its own sigmoid output gate and requires upstream's "
             "attention_output_gate to stay False; MLATransformerConfig.__post_init__ "
-            "raises NotImplementedError for it anyway (transformer_config.py:2259-2260)."
+            "raises NotImplementedError for it anyway (transformer_config.py)."
         )
         if config.rope_type != "rope":
             # The parent builds a YarnRotaryEmbedding for "yarn", whose forward
             # returns (emb, mscale) rather than a bare tensor
-            # (multi_latent_attention.py:550-564). K3 rotates nothing, so the
-            # cheap and unambiguous choice is to require the plain type.
+            # (multi_latent_attention.py). K3 rotates nothing, so the cheap and
+            # unambiguous choice is to require the plain type.
             raise ValueError(
                 f"KimiK3MLASelfAttention requires rope_type='rope', got {config.rope_type!r}. "
                 "K3 never applies a rotation; 'rope' is the type whose zero-width "
@@ -246,7 +244,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         if config.apply_rope_fusion:
             raise ValueError(
                 "KimiK3MLASelfAttention requires apply_rope_fusion=False: the fused "
-                "fused_apply_mla_rope_for_q/kv path (multi_latent_attention.py:747-771) "
+                "fused_apply_mla_rope_for_q/kv path (multi_latent_attention.py) "
                 "takes cos/sin tables rather than a frequency table, so the zero-width "
                 "NoPE trick does not reach it."
             )
@@ -264,9 +262,9 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         # config.mla_use_nope selects the mechanism: replace the parent's
         # qk_pos_emb_head_dim-wide rotary table with a zero-width one.
         # apply_rotary_pos_emb then splits off nothing and returns
-        # cat([<empty>, t]) == t, bit for bit (rope_utils.py:110-126), which
-        # leaves the parent's get_query_key_value_tensors untouched — and, just
-        # as importantly, leaves the *geometry* untouched: q_head_dim stays
+        # cat([<empty>, t]) == t, bit for bit (rope_utils.py), which leaves
+        # the parent's get_query_key_value_tensors untouched — and, just as
+        # importantly, leaves the *geometry* untouched: q_head_dim stays
         # qk_head_dim + qk_pos_emb_head_dim, so linear_kv_down_proj keeps
         # emitting K3's 64 MQA-shared K dims. Clearing the flag restores the
         # parent's real table, which is upstream MLA RoPE and not Kimi K3.
@@ -283,16 +281,16 @@ class KimiK3MLASelfAttention(MLASelfAttention):
                 f"{self.rotary_pos_emb.inv_freq.numel()} frequencies."
             )
 
-        # softmax_scale is mscale**2 / sqrt(q_head_dim) (:127-128) and K3 wants
-        # a plain q_head_dim ** -0.5 == 192 ** -0.5. mscale collapses to 1.0
-        # only while rotary_scaling_factor <= 1 or mscale_all_dim == 0
-        # (yarn_rotary_pos_embedding.py:252-255), and nothing else in the stack
-        # would notice the difference.
+        # softmax_scale is mscale**2 / sqrt(q_head_dim) and K3 wants a plain
+        # q_head_dim ** -0.5 == 192 ** -0.5. mscale collapses to 1.0 only while
+        # rotary_scaling_factor <= 1 or mscale_all_dim == 0
+        # (yarn_rotary_pos_embedding.py), and nothing else in the stack would
+        # notice the difference.
         expected_scale = self.q_head_dim**-0.5
         if not math.isclose(self.softmax_scale, expected_scale, rel_tol=1e-9):
             raise ValueError(
                 f"Kimi K3 uses softmax_scale = q_head_dim ** -0.5 = {expected_scale} "
-                f"(modeling_kimi_linear.py:359), but this config yields "
+                f"(modeling_kimi_linear.py), but this config yields "
                 f"{self.softmax_scale}. The yarn mscale factor is non-unit; set "
                 "mscale_all_dim=0.0 (or rotary_scaling_factor<=1) to restore it."
             )
@@ -315,7 +313,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
                 gate_spec,
                 self.config.hidden_size,
                 # v_head_dim * num_attention_heads, i.e. the same global width
-                # as linear_proj's input (multi_latent_attention.py:113).
+                # as linear_proj's input (multi_latent_attention.py).
                 self.query_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
@@ -331,13 +329,13 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         """Retune ``q_layernorm`` / ``kv_layernorm`` to the released epsilon.
 
         The parent builds both with ``eps=config.layernorm_epsilon``
-        (``multi_latent_attention.py:498-508``), i.e. Kimi K3's
-        ``rms_norm_eps`` of 1e-5. The released model does not: ``KimiRMSNorm``
-        defaults to ``eps=1e-6`` (``modeling_kimi_linear.py:226-227``) and MLA
-        constructs exactly these two norms without passing one (``:368``,
-        ``:383``), while every other ``KimiRMSNorm`` call site in the file is
-        given ``eps=config.rms_norm_eps``. Kimi-Linear-48B's own
-        ``modeling_kimi.py:365`` does the same, so this is not a typo in one
+        (``multi_latent_attention.py``), i.e. Kimi K3's ``rms_norm_eps``
+        of 1e-5. The released model does not: ``KimiRMSNorm`` defaults to
+        ``eps=1e-6`` (``modeling_kimi_linear.py``) and MLA constructs
+        exactly these two norms without passing one, while every other
+        ``KimiRMSNorm`` call site in the file is given
+        ``eps=config.rms_norm_eps``. Kimi-Linear-48B's own
+        ``modeling_kimi.py`` does the same, so this is not a typo in one
         file -- it is inherited from the DeepSeek-V3 MLA this was adapted from,
         where ``rms_norm_eps`` is itself 1e-6 and the two coincide.
 
@@ -411,9 +409,9 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         Without the output gate this delegates to
         :meth:`MultiLatentAttention.forward` verbatim, so the un-gated
         path can never drift from upstream. With it, the training path of
-        ``multi_latent_attention.py:203-361`` is reproduced with the gate
-        spliced in between ``core_attention`` and ``linear_proj``, which
-        is where HF applies it (``modeling_kimi_linear.py:470-473``).
+        ``multi_latent_attention.py`` is reproduced with the gate spliced
+        in between ``core_attention`` and ``linear_proj``, which is where
+        HF applies it (``modeling_kimi_linear.py``).
         """
         if self.linear_o_gate is None:
             return super().forward(
@@ -432,7 +430,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
                 inference_params=inference_params,
             )
 
-        # The parent's preconditions, verbatim (multi_latent_attention.py:221-226).
+        # The parent's preconditions, verbatim (multi_latent_attention.py).
         assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."
         assert attention_bias is None, "Attention bias should not be passed into MLA."
         assert rotary_pos_cos is None and rotary_pos_sin is None, "MLA does not support Flash Decoding"
@@ -448,7 +446,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
             raise NotImplementedError(
                 "experimental_attention_variant='dsa' needs the hidden states and the "
                 "compressed query threaded into core_attention "
-                "(multi_latent_attention.py:288-292); Kimi K3 does not use DSA."
+                "(multi_latent_attention.py); Kimi K3 does not use DSA."
             )
         for flag in ("offload_qkv_linear", "offload_core_attention", "offload_attn_proj"):
             if getattr(self, flag):
@@ -462,8 +460,8 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         # Query, Key, and Value
         # =====================
         # NoPE happens inside here: self.rotary_pos_emb has zero width, so the
-        # parent's two apply_rotary_pos_emb calls (:803, :812) are bit-exact
-        # pass-throughs. Nothing else in the parent's implementation changes.
+        # parent's two apply_rotary_pos_emb calls are bit-exact pass-throughs.
+        # Nothing else in the parent's implementation changes.
         nvtx_range_push(suffix="k3_mla_qkv")
         query, key, value, _q_compressed, _kv_compressed = self.get_query_key_value_tensors(
             hidden_states,
@@ -474,10 +472,10 @@ class KimiK3MLASelfAttention(MLASelfAttention):
         )
         nvtx_range_pop(suffix="k3_mla_qkv")
 
-        # TE only accepts contiguous tensors for MLA (:269-275). With no
-        # inference context _adjust_key_value_for_inference is a pass-through
-        # that only reports self.attn_mask_type back (attention.py:496-498),
-        # so it is elided here.
+        # TE only accepts contiguous tensors for MLA. With no inference
+        # context _adjust_key_value_for_inference is a pass-through that only
+        # reports self.attn_mask_type back (attention.py), so it is elided
+        # here.
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
@@ -511,7 +509,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
             self.qkv_up_checkpoint = None
 
         # =====================================================
-        # Sigmoid output gate, before o_proj (:470-473)
+        # Sigmoid output gate, before o_proj
         # =====================================================
         nvtx_range_push(suffix="k3_mla_output_gate")
         gate, _ = self.linear_o_gate(hidden_states)
@@ -539,16 +537,16 @@ def _check_core_attention_supports_mla(core_attention: type) -> None:
 
     ``MultiLatentAttention.__init__`` always passes
     ``k_channels=q_head_dim`` and ``v_channels=v_head_dim``
-    (``multi_latent_attention.py:164-165``) because MLA's K and V head
-    dims differ (192 vs 128). At this Megatron HEAD only
+    (``multi_latent_attention.py``) because MLA's K and V head dims
+    differ (192 vs 128). At this Megatron HEAD only
     ``TEDotProductAttention`` accepts those kwargs
-    (``extensions/transformer_engine.py:1178``); the pure-PyTorch
+    (``extensions/transformer_engine.py``); the pure-PyTorch
     ``DotProductAttention`` does not, so
     ``LocalSpecProvider().core_attention()`` yields a spec that dies with
     an opaque ``TypeError`` several frames inside ``build_module``.
     Upstream's own ``get_gpt_layer_local_spec(multi_latent_attention=True)``
-    (``gpt_layer_specs.py:366-381``) carries the same latent breakage.
-    Fail here with something actionable instead.
+    (``gpt_layer_specs.py``) carries the same latent breakage. Fail here
+    with something actionable instead.
     """
     try:
         params = inspect.signature(core_attention.__init__).parameters
@@ -559,7 +557,7 @@ def _check_core_attention_supports_mla(core_attention: type) -> None:
     raise ValueError(
         f"{core_attention.__name__} cannot back a Kimi K3 full-attention layer: MLA passes "
         "k_channels / v_channels because its K and V head dims differ "
-        "(multi_latent_attention.py:164-165), and only TEDotProductAttention accepts them at "
+        "(multi_latent_attention.py), and only TEDotProductAttention accepts them at "
         "this Megatron HEAD. Use the TransformerEngine backend, or supply a core_attention that "
         "takes k_channels / v_channels."
     )
@@ -574,11 +572,11 @@ def get_kimi_k3_mla_attention_submodules(
     """Submodule specs for :class:`KimiK3MLASelfAttention`.
 
     Follows the upstream MLA submodule tables verbatim — the TE flavour
-    at ``gpt_layer_specs.py:246-262`` and the local flavour at
-    ``gpt_layer_specs.py:366-381`` — and adds ``linear_o_gate``. K3
-    always wants the ``q_layernorm`` / ``kv_layernorm`` slots filled
-    (HF's ``q_a_layernorm`` / ``kv_a_layernorm``), so unlike upstream
-    they are not gated on ``config.qk_layernorm``: ``kimi_k3_base.yaml``
+    at ``gpt_layer_specs.py`` and the local flavour at
+    ``gpt_layer_specs.py`` — and adds ``linear_o_gate``. K3 always wants
+    the ``q_layernorm`` / ``kv_layernorm`` slots filled (HF's
+    ``q_a_layernorm`` / ``kv_a_layernorm``), so unlike upstream they are
+    not gated on ``config.qk_layernorm``: ``kimi_k3_base.yaml``
     deliberately leaves that flag off because these norms come from the
     spec rather than from the generic MCore switch.
 
@@ -596,7 +594,7 @@ def get_kimi_k3_mla_attention_submodules(
     # The TE providers expose a replicated `linear()` for the low-rank
     # down-projections; LocalSpecProvider does not and upstream's local MLA
     # spec uses column-parallel there instead. MLASelfAttention.__init__
-    # validates whichever class arrives (:410-419, :455-464).
+    # validates whichever class arrives.
     linear_factory = getattr(backend, "linear", None)
     down_proj = linear_factory() if linear_factory is not None else backend.column_parallel_linear()
 
