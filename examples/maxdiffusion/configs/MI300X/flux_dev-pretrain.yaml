@@ -24,7 +24,16 @@ env:
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
   TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
-  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  # The two first_collective_call timeouts are raised from their 20s/40s
+  # defaults: with autotune_level=5 the first step spends >10 min in per-device
+  # kernel autotune/JIT, so the 8 device threads reach the first kAllGather
+  # minutes apart and XLA's rendezvous watchdog aborts the process (SIGABRT,
+  # exit 134) while every thread is still making progress. The wan2.1 runs hit
+  # the same stall and survive only because they happen to unstick inside the
+  # window -- XLA logs "Warning above was a false-positive. Perhaps the timeout
+  # is too short." there. Steady-state steps are seconds, so these long
+  # timeouts never trigger after step 1.
+  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer='' --xla_gpu_first_collective_call_warn_stuck_timeout_seconds=300 --xla_gpu_first_collective_call_terminate_timeout_seconds=2400"
   NVTE_FUSED_ATTN: "1"
   NVTE_FUSED_ATTN_CK: "1"
   NVTE_FUSED_ATTN_AOTRITON: "0"
