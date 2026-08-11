@@ -35,7 +35,7 @@ use_turbo_gemm: false
 use_turbo_grouped_gemm: false
 # let Turbo grouped GEMMs consume non-aligned expert token counts directly,
 # without TE Fp8Padding/Fp8Unpadding
-use_turbo_ragged_grouped_gemm: false
+turbo_grouped_gemm_without_padding: false
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 
