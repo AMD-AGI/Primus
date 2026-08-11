@@ -32,7 +32,7 @@ FIXED (deterministic) dataset for an overfit smoke:
   each sample gets a DISTINCT ``llm_features`` fingerprint. With fresh noise per
   step the per-step loss is noisy, but because ``v=(x_t-x0)/σ`` is recoverable
   from the (fixed, distinct) conditioning the model memorises x0 per sample and
-  the training loss trends clearly DOWN — the signal Phase B.5 checks. Features
+  the training loss trends clearly DOWN — the signal this smoke checks. Features
   are scaled by ``feature_scale`` (real tapped hidden states are ~unit-norm
   per-dim, not a raw 53248-wide unit-variance vector that blows up the input
   projection).

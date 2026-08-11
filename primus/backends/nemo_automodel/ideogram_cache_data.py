@@ -5,8 +5,8 @@
 ###############################################################################
 """Real (pre-encoded) Ideogram-4 cache dataloader (no-fork, Primus-side).
 
-Reads the flat per-sample cache produced by ``scripts/ideogram4_preprocess.py``
-(via :class:`Ideogram4Processor`) and emits the exact batch the
+Reads the flat per-sample cache produced by :class:`Ideogram4Processor`
+(``ideogram_processor.py``) and emits the exact batch the
 :class:`Ideogram4Adapter` + ``FlowMatchingPipeline`` consume — the same contract as
 ``SyntheticIdeogram4DataloaderConfig``, but with REAL Flux-2 VAE latents + Qwen3-VL
 features:
@@ -155,7 +155,7 @@ class Ideogram4CacheDataloaderConfig:
         data:
           dataloader:
             _target_: primus.backends.nemo_automodel.ideogram_cache_data.Ideogram4CacheDataloaderConfig
-            cache_dir: /mnt/m2m_nobackup/datasets/pcam_ideogram4_256
+            cache_dir: /dataset/pcam_ideogram4_256
 
     Every field must be a plain YAML scalar; runtime ``dp_rank`` / ``dp_world_size`` /
     ``batch_size`` are passed to :meth:`build`.

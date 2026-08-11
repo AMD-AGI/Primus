@@ -10,8 +10,8 @@ WHY:
   Ideogram-4's attention runs on **masked torch SDPA** today: the transformer builds
   a dense ``(B,1,L,L)`` block-diagonal boolean mask from ``segment_ids`` and hands it
   to ``dispatch_attention_fn``. A dense mask forces the SDPA/NATIVE backend (flash /
-  aiter backends reject one), so the whole model forgoes flash — and at the customer's
-  1k–2k px targets attention is O(L²) and dominates the step. The mask is, in practice,
+  aiter backends reject one), so the whole model forgoes flash — and at 1k–2k px
+  resolutions attention is O(L²) and dominates the step. The mask is, in practice,
   a per-row block-diagonal over CONTIGUOUS segments (left-padding = {pad}+{text+image};
   future multi-sample packing = several sample blocks). That maps exactly onto
   **variable-length flash attention** (``cu_seqlens``): pack the batch into one flat
@@ -23,7 +23,7 @@ WHAT (NO diffusers / Automodel fork):
   only replaces the attention CALL: it converts the block-diagonal boolean mask to
   ``cu_seqlens`` and runs ``aiter.flash_attn_varlen_func`` (``deterministic=False`` — the
   non-deterministic backward is a large, numerically-equivalent throughput win, and the
-  *deterministic* hd=256 backward needs 150–360 GB and OOMs at 2048²). When the mask is
+  *deterministic* hd=256 backward has a workspace that OOMs at 2048²). When the mask is
   absent or trivial (one full segment per row, e.g. a fixed-length/no-pad batch) it takes
   the plain dense ``flash_attn_func`` fast path.
 

@@ -7,8 +7,8 @@
 # layers on the DDP path (no-fork ideogram_zero1.py hook).
 #
 # CAVEAT: torch.compile is FSDP2-only and single-node comm is ~hidden, so this
-# path trails FSDP2+compile on one node (see 10_PHASE_C_PROFILE.md §3d). It is the
-# multi-node lever / reference; do NOT set fsdp.enable_compile here (no fsdp block).
+# path trails FSDP2+compile on one node. It is the multi-node lever / reference;
+# do NOT set fsdp.enable_compile here (no fsdp block).
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-ddp}

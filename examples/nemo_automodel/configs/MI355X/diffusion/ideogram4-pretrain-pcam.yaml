@@ -1,26 +1,19 @@
-# Primus EXP — Ideogram-4 single-stream T2I PRETRAIN on REAL data (Phase B.3).
+# Primus EXP — Ideogram-4 single-stream T2I PRETRAIN on REAL (pre-encoded) data.
 # =============================================================================
 # Same no-fork Primus path as `ideogram4-pretrain.yaml`, but trains on a REAL
 # pre-encoded cache instead of the synthetic one:
 #   - data.dataloader -> Ideogram4CacheDataloaderConfig
-#     (primus/backends/nemo_automodel/ideogram_cache_data.py), reading the
-#     Flux-2 VAE + Qwen3-VL 13-layer cache built by
-#     scripts/ideogram4_preprocess.py (Ideogram4Processor).
+#     (primus/backends/nemo_automodel/ideogram_cache_data.py), reading a
+#     Flux-2 VAE + Qwen3-VL 13-layer cache produced by Ideogram4Processor
+#     (primus/backends/nemo_automodel/ideogram_processor.py).
 #   - flow_matching.adapter_type: ideogram4 -> Ideogram4Adapter
 #   - fsdp.activation_checkpointing + PRIMUS_IDEOGRAM_REAL_AC=1 -> real AC
-# The DiT still builds from the weightless local config dir (random init, no gated
+# The DiT still builds from a weightless local config dir (random init, no gated
 # transformer weights); only the DATA is real here.
 #
-# One-time cache build (inside container on the docker node, 1 GPU, HF token set):
-#   HF_HOME=/mnt/m2m_nobackup/hf_cache python \
-#     .../ttt_l2_02_IDEOGRAM/scripts/ideogram4_preprocess.py \
-#     --image_dir  /shared_nfs/datasets/ttt_diffusion/pseudo-camera-10k/train \
-#     --caption_dir /shared_nfs/datasets/ttt_diffusion/pseudo-camera-10k/caption \
-#     --out_dir    /mnt/m2m_nobackup/datasets/pcam_ideogram4_256 \
-#     --num_samples 1024 --resolution 256 --max_text_tokens 128
-#
-# Launch (inside container, 8 GPUs) — the wrapper script does this:
-#   bash .../ttt_l2_02_IDEOGRAM/scripts/phase_b3_run.sh
+# Point `data.dataloader.cache_dir` at a cache built by Ideogram4Processor from an
+# image dir + caption dir. Building it needs 1 GPU and a Hugging Face token with
+# access to the gated VAE/text-encoder repos.
 #
 # Goal: a clearly decreasing loss on 8-GPU FSDP2 bf16 (real AC) over REAL Ideogram-4
 # conditioning — validating the processor + cache loader end to end.
@@ -48,6 +41,6 @@ modules:
         enable_compile: false
       data:
         dataloader:
-          cache_dir: /mnt/m2m_nobackup/datasets/pcam_ideogram4_256
+          cache_dir: /dataset/pcam_ideogram4_256
       checkpoint:
         enabled: false           # set true + checkpoint_dir for a real run

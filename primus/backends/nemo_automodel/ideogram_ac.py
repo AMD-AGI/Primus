@@ -126,8 +126,8 @@ def install() -> bool:
                         len(layers),
                     )
                 else:
-                    # FULL AC: recompute the whole block on backward (max memory saved, ~16-20%
-                    # recompute tax). Historical default (activation_checkpointing True / "full").
+                    # FULL AC: recompute the whole block on backward (max memory saved, at the
+                    # cost of a recompute tax). Default for activation_checkpointing True / "full".
                     wrapped = 0
                     for idx in range(len(blocks)):
                         blocks[idx] = P.checkpoint_wrapper(

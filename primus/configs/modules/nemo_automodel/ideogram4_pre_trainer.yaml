@@ -5,7 +5,8 @@
 # (the Wan2.2 video preset): same recipe schema, wired for Ideogram-4:
 #   - data.dataloader -> SyntheticIdeogram4DataloaderConfig (no-fork Primus loader;
 #     emits image_latents [B,128,H_p,W_p] + llm_features [B,·,53248] + text_lengths).
-#     Swap for the real Flux-2 VAE + Qwen3-VL preprocessor cache loader in Phase B.3.
+#     Swap for the real Flux-2 VAE + Qwen3-VL preprocessor cache loader
+#     (`ideogram4_pre_trainer_pcam.yaml`) to train on real data.
 #   - flow_matching.adapter_type -> ideogram4 (routed to Ideogram4Adapter by the
 #     no-fork `ideogram4_adapter.install()` hook; packs the [pad][text][image]
 #     sequence, maps sigma->t=1-sigma, negates the DiT velocity).

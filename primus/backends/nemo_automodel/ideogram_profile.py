@@ -4,17 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 """Env-gated ``torch.profiler`` wrapper for the AutoModel diffusion train loop —
-the no-fork vehicle for Phase-C+ Phase-2 (b): the real 8-GPU FSDP2 COMMS-share
-profile (``09_PHASE_C_SWEEP_DESIGN.md`` §4b).
+the no-fork vehicle for a real multi-GPU FSDP2 comms-share profile.
 
 WHY:
-  Profile (a) (single-GPU ``scripts/attn_profile.py``) isolates the intra-step
-  COMPUTE op-share. To size the FSDP collective (all-gather + reduce-scatter)
-  share — the top remaining lever now that throughput saturates at a low mbs knee
-  (`08`/`09` §1) — we must profile the ACTUAL distributed step. This hook captures
-  a per-rank ``torch.profiler`` Chrome trace of a few steady steps of the real
-  ``TrainDiffusionRecipe`` loop, which TraceLens turns into a gpu-timeline
-  comm/compute split + a per-collective (NcclAnalyser) report.
+  A single-GPU profile isolates the intra-step COMPUTE op-share. To size the FSDP
+  collective (all-gather + reduce-scatter) share — the top remaining lever once
+  throughput saturates at a low mbs knee — we must profile the ACTUAL distributed
+  step. This hook captures a per-rank ``torch.profiler`` Chrome trace of a few
+  steady steps of the real ``TrainDiffusionRecipe`` loop, which TraceLens turns
+  into a gpu-timeline comm/compute split + a per-collective (NcclAnalyser) report.
 
 WHAT (NO Automodel/diffusers fork):
   ``install()`` class-patches ``TrainDiffusionRecipe.run_train_validation_loop`` so
@@ -31,7 +29,7 @@ WHAT (NO Automodel/diffusers fork):
 Activation / knobs (env):
     PRIMUS_IDEOGRAM_PROFILE=1        enable the profiler wrapper
     PRIMUS_PROFILE_DIR=<dir>         per-rank trace output dir (default
-                                     /mnt/m2m_nobackup/ideogram_profile/comms)
+                                     ./output/ideogram_profile/comms)
     PRIMUS_PROFILE_TAG=<tag>         subdir/prefix for this point (e.g. 1024_m32)
     PRIMUS_PROFILE_WAIT=3            steps skipped before profiling (skip warmup/
                                      epoch-boundary data tax)
@@ -102,7 +100,7 @@ def install() -> bool:
 
     orig_loop = TrainDiffusionRecipe.run_train_validation_loop
 
-    out_dir = os.getenv("PRIMUS_PROFILE_DIR", "/mnt/m2m_nobackup/ideogram_profile/comms")
+    out_dir = os.getenv("PRIMUS_PROFILE_DIR", "./output/ideogram_profile/comms")
     tag = os.getenv("PRIMUS_PROFILE_TAG", "run")
     wait = _int("PRIMUS_PROFILE_WAIT", 3)
     warmup = _int("PRIMUS_PROFILE_WARMUP", 1)

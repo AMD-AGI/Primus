@@ -10,9 +10,9 @@
 #   - whole-block checkpoint-wrap the Ideogram layers on the DDP path (the generic
 #     sub-module AC is a no-op for Ideogram blocks; without this it OOMs).
 #
-# CAVEAT (see 10_PHASE_C_PROFILE.md §3d): torch.compile is wired ONLY on the FSDP2
-# path, and single-node exposed comm is 0.7-3 %, so this DDP path (no compile)
-# trails FSDP2+compile on ONE node. It is the multi-node lever / reference point.
+# CAVEAT: torch.compile is wired ONLY on the FSDP2 path, and single-node exposed
+# comm is a small fraction of the step, so this DDP path (no compile) trails
+# FSDP2+compile on ONE node. It is the multi-node lever / reference point.
 #
 # Launch (inside the container, 8 GPUs free):
 #   PYTHONPATH=<primus>:<primus>/third_party/Automodel \

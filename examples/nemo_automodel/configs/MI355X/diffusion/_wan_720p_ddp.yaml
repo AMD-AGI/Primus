@@ -20,6 +20,6 @@ modules:
         log_remote_every_steps: 1
       data:
         dataloader:
-          cache_dir: /mnt/m2m_nobackup/datasets/pusa_v1_720p
+          cache_dir: /dataset/pusa_v1_720p
       checkpoint:
         enabled: false

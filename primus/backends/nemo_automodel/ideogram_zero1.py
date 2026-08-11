@@ -5,24 +5,22 @@
 ###############################################################################
 """DDP + ZeRO-1 (distributed optimizer) for Ideogram-4 in the AutoModel diffusion recipe.
 
-WHY (see 10_PHASE_C_PROFILE.md §3d / 00_PLAN.md sharding workstream):
-  The 288 GB MI355X leaves large memory headroom at the compute-bound knee mbs
-  (more so after torch.compile freed ~16-18 %). One way to spend it is to shard
-  *less* and cut FSDP collectives. Pure **DDP** replicates params+grads (no
-  per-layer all-gather) but also replicates the AdamW optimizer state (fp32 m/v ~=
-  2x params); **ZeRO-1** shards *only* that optimizer state across the DP ranks so
-  we get DDP-like compute with the optimizer memory back.
+WHY:
+  A large-HBM MI355X leaves memory headroom at the compute-bound knee mbs. One way
+  to spend it is to shard *less* and cut FSDP collectives. Pure **DDP** replicates
+  params+grads (no per-layer all-gather) but also replicates the AdamW optimizer
+  state (fp32 m/v ~= 2x params); **ZeRO-1** shards *only* that optimizer state
+  across the DP ranks so we get DDP-like compute with the optimizer memory back.
 
-  IMPORTANT single-node caveat (measured, 10 §2): exposed FSDP comm is only
-  0.7-3 % on one 8-GPU node, AND per-layer torch.compile (our +17-30 % lever) is
-  wired ONLY on the FSDP2 path (fsdp2.py -> _apply_per_layer_compile; DDPManager
-  never compiles). So on a single node DDP+ZeRO-1 (no compile) TRAILS
-  FSDP2+compile and cannot recover the gap from comms. This path is the
-  **multi-node** lever (where all-gather crosses the slow inter-node network) and
-  a reference point; the single-node sharding lever that KEEPS compile is HSDP
-  (fsdp.dp_replicate_size>1). This module exists to (a) validate the DDP+ZeRO-1
-  path runs with the Ideogram adapter + hd256 + real AC, and (b) measure the
-  ZeRO-1 optimizer-memory recovery vs pure DDP.
+  IMPORTANT single-node caveat: exposed FSDP comm is a small fraction of the step
+  on one 8-GPU node, AND per-layer torch.compile is wired ONLY on the FSDP2 path
+  (fsdp2.py -> _apply_per_layer_compile; DDPManager never compiles). So on a single
+  node DDP+ZeRO-1 (no compile) trails FSDP2+compile and cannot recover the gap from
+  comms. This path is the **multi-node** lever (where all-gather crosses the slower
+  inter-node network) and a reference point; the single-node sharding lever that
+  KEEPS compile is HSDP (fsdp.dp_replicate_size>1). This module exists to (a)
+  validate the DDP+ZeRO-1 path runs with the Ideogram adapter + hd256 + real AC,
+  and (b) measure the ZeRO-1 optimizer-memory recovery vs pure DDP.
 
 WHAT (NO diffusers / Automodel fork) — two env-gated monkeypatches:
   1. ZeRO-1 optimizer: wrap the optimizers the recipe builds

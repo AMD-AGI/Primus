@@ -1,10 +1,10 @@
 # NeMo AutoModel pre_trainer module config — Ideogram-4 single-stream
 # rectified-flow T2I pretrain on a REAL pre-encoded cache (Primus backend).
 #
-# Phase B.3 sibling of `ideogram4_pre_trainer.yaml` (the synthetic-cache smoke):
+# Real-data sibling of `ideogram4_pre_trainer.yaml` (the synthetic-cache smoke):
 # identical recipe/optimizer/FSDP wiring, but `data.dataloader` points at the real
-# Flux-2 VAE + Qwen3-VL preprocessor cache produced by
-# `scripts/ideogram4_preprocess.py` and read by `Ideogram4CacheDataloaderConfig`
+# Flux-2 VAE + Qwen3-VL preprocessor cache produced by `Ideogram4Processor`
+# (`ideogram_processor.py`) and read by `Ideogram4CacheDataloaderConfig`
 # (emits image_latents [B,128,gh,gw] + LEFT-padded llm_features [B,·,53248] +
 # text_lengths). A dedicated preset (not an override of the synthetic one) so no
 # synthetic-only dataloader keys leak through the deep-merge into the cache dataclass.
@@ -34,7 +34,7 @@ data:
   dataloader:
     _target_: primus.backends.nemo_automodel.ideogram_cache_data.Ideogram4CacheDataloaderConfig
     # Pre-encoded Ideogram-4 cache dir (override per run in the EXP).
-    cache_dir: /mnt/m2m_nobackup/datasets/pcam_ideogram4_256
+    cache_dir: /dataset/pcam_ideogram4_256
     shuffle: true
     drop_last: true
     # Pad the text region to a constant width so the packed sequence length S does not
