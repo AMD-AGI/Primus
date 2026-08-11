@@ -52,9 +52,13 @@ modules:
       ici_expert_parallelism: -1
 
       # training
-      # Same attention constraint as the bf16 gemma4 configs: the efficient kernels
-      # reject gemma4's bidirectional sliding-window layers on synthetic (unpacked) data.
-      attention: "dot_product"
+      # Same attention choice as the bf16 gemma4 configs: cudnn_flash_te is the only
+      # setting that passes the local layers' sliding window to the kernel (as
+      # window_size). The synthetic-data assertion that used to force dot_product was a
+      # maxtext bug, fixed in the pinned release/v26.6 at 2ec83add, and the fix is not
+      # arch-specific. Does not change the STATUS above: the tracer leak is in the
+      # MoE fp8 path and reproduces with either attention setting.
+      attention: "cudnn_flash_te"
       max_target_length: 4096
       # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
       per_device_batch_size: 1
