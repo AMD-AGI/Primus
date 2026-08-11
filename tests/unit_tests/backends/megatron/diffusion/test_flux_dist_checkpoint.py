@@ -3,6 +3,9 @@
 
 """Distributed-checkpoint regression tests for Flux's heterogeneous layers."""
 
+import tempfile
+from pathlib import Path
+
 import pytest
 import torch
 from megatron.core.dist_checkpointing import load, save
@@ -86,11 +89,13 @@ class TestFluxDistCheckpoint(PrimusUT):
         assert double_weight.global_shape == (6 * model.hidden_size, model.hidden_size)
         assert single_weight.global_shape == (3 * model.hidden_size, model.hidden_size)
 
-    def test_torch_dist_save_load_round_trip(self, tmp_path):
+    def test_torch_dist_save_load_round_trip(self):
         """Save and restore both adaLN shapes through the real torch_dist backend."""
-        self._assert_torch_dist_round_trip(tmp_path, _runtime_device())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._assert_torch_dist_round_trip(Path(tmpdir), _runtime_device())
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-    def test_torch_dist_save_load_round_trip_cuda(self, tmp_path):
+    def test_torch_dist_save_load_round_trip_cuda(self):
         """Explicit GPU runtime coverage for the Flux torch_dist round trip."""
-        self._assert_torch_dist_round_trip(tmp_path, torch.device("cuda"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._assert_torch_dist_round_trip(Path(tmpdir), torch.device("cuda"))
