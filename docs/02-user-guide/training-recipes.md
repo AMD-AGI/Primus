@@ -213,7 +213,7 @@ Direct mode (inside the container)—pretraining Llama 3 8B on **MI355X**:
 ```bash
 ./runner/primus-cli direct \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 Container mode—passing the MaxText image with `--image`:
@@ -221,7 +221,7 @@ Container mode—passing the MaxText image with `--image`:
 ```bash
 ./runner/primus-cli container --image rocm/jax-training:maxtext-v26.4-jax0.9.1-te2.12.0 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 Slurm mode—supplying the image (and any environment variables) via a config file:
@@ -229,7 +229,7 @@ Slurm mode—supplying the image (and any environment variables) via a config fi
 ```bash
 ./runner/primus-cli --config my_maxtext_config.yaml slurm srun -N 8 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
 ```
 
 MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields—see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).

@@ -198,7 +198,7 @@ Some configurations omit an explicit `parallelism:` block; in that case the defa
 
 ```bash
 ./runner/primus-cli container -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama2_7B-bf16-pretrain.yaml
 ```
 
 ### JAX-specific requirements
@@ -213,18 +213,18 @@ pip install -r requirements-jax.txt
 
 | File | Key parallelism (`ici_*` intra-node, `dcn_*` inter-node) |
 | --- | --- |
-| `deepseek_v2_16B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `grok1-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama2_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama2_7B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3.3_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3_70B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `llama3_8B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `mixtral_8x7B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `qwen3_14B-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `qwen3_30B_A3B-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `deepseek_v2_16B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `grok1-nanoo_fp8-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama2_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama2_7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3.3_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `llama3_8B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `mixtral_8x7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `qwen3_14B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `qwen3_30B_A3B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 
-The `llama2_7B-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
+The `llama2_7B-bf16-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
 
 > **fp8 MoE (v26.6):** fp8 Mixture-of-Experts configs must set `pure_nnx_decoder: false` in their overrides; otherwise they crash at step 1 under the v26.6 pure-NNX decoder default. See [MaxText parameters → Precision and quantization](../03-configuration-reference/maxtext-parameters.md#7-precision-and-quantization). Dense fp8 and bf16 configs are unaffected.
 
