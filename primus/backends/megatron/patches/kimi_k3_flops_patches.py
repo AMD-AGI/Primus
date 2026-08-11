@@ -11,24 +11,22 @@ gets Kimi K3 wrong on **five** independent axes. All five were read off the
 smoke run's own argument dump rather than assumed:
 
 * **Dispatch.** ``is_hybrid_model(args)`` is ``args.hybrid_layer_pattern is
-  not None`` (``training/utils.py:434-436``) and K3 leaves that ``None``
-  (log ``:1576``), so K3 lands in ``transformer_flops()``.
+  not None`` and K3 leaves that ``None``, so K3 lands in
+  ``transformer_flops()``.
 * **Attention branch.** ``args.multi_latent_attention`` must stay ``False``
-  for K3 (``arguments.py:1589-1590`` would otherwise replace the config
-  class), so
-  ``transformer_flops`` takes the **MHA/GQA** branch (``training.py:429``)
-  and models every layer as a dense ``h -> 3h`` QKV projection.
+  for K3 (it would otherwise replace the config class), so
+  ``transformer_flops`` takes the **MHA/GQA** branch and models every layer
+  as a dense ``h -> 3h`` QKV projection.
 * **KDA is charged as quadratic attention.** ``args.experimental_attention_variant``
-  is ``None`` (log ``:1508``) — correctly, because K3 builds its own spec
-  tree — so ``num_linear_attention_layers = 0`` (``training.py:521``) and all
-  ``num_layers`` layers pay ``query_projection_size * seq_length / 2 * 2``.
-  KDA's cost is **linear in T**. Upstream's ``gated_delta_net`` branch
-  (``:488-514``) is both unreachable here and shaped wrong for KDA: it has
-  no ``g_proj`` term and models the recurrence as
-  ``4 * num_v_heads * v_head_dim**2`` with no chunk-size dependence.
-* **The latent MoE bottleneck is invisible.** ``training.py:361`` reads
-  ``args.moe_latent_size``, which is ``None`` (log ``:1760``) while
-  ``routed_expert_hidden_size`` is set (log ``:1996``).
+  is ``None`` — correctly, because K3 builds its own spec tree — so
+  ``num_linear_attention_layers = 0`` and all ``num_layers`` layers pay
+  ``query_projection_size * seq_length / 2 * 2``. KDA's cost is **linear in
+  T**. Upstream's ``gated_delta_net`` branch is both unreachable here and
+  shaped wrong for KDA: it has no ``g_proj`` term and models the recurrence
+  as ``4 * num_v_heads * v_head_dim**2`` with no chunk-size dependence.
+* **The latent MoE bottleneck is invisible.** Upstream reads
+  ``args.moe_latent_size``, which is ``None`` while
+  ``routed_expert_hidden_size`` is set.
   :func:`patch_k3_args_moe_latent_size` in this module closes that at the
   args layer; the closed form below does not depend on it.
 * **Two K3 modules are not modelled at all**: the MLA sigmoid output gate
@@ -52,7 +50,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -107,10 +105,10 @@ def _parse_int_sequence(raw: Any) -> Optional[List[int]]:
 def linear_attention_pattern(raw: Any, num_layers: int) -> List[int]:
     """``1`` = KDA (linear attention), ``0`` = full attention, per layer.
 
-    Mirrors upstream's ratio semantics at ``training.py:460-465`` — an int
-    ``N`` means every ``N``-th layer is *full* attention — and requires an
-    explicit list otherwise, because K3's released tail is irregular (both
-    0-indexed 91 and 92 are full attention).
+    Mirrors upstream's ratio semantics — an int ``N`` means every ``N``-th
+    layer is *full* attention — and requires an explicit list otherwise,
+    because K3's released tail is irregular (both 0-indexed 91 and 92 are
+    full attention).
     """
     if isinstance(raw, int) and not isinstance(raw, bool):
         if raw <= 0:
@@ -132,8 +130,8 @@ def linear_attention_pattern(raw: Any, num_layers: int) -> List[int]:
 def moe_layer_pattern(raw: Any, num_layers: int) -> List[int]:
     """``1`` = MoE MLP, ``0`` = dense MLP, per layer.
 
-    Same semantics as ``training.py:329-341``: an int ``N`` means MoE every
-    ``N``-th layer starting at 0.
+    Same semantics as upstream: an int ``N`` means MoE every ``N``-th layer
+    starting at 0.
     """
     if raw is None:
         return [0] * num_layers
@@ -152,10 +150,9 @@ def moe_layer_pattern(raw: Any, num_layers: int) -> List[int]:
 def attn_res_num_blocks_before(layer_idx: int, block_size: Optional[int]) -> int:
     """Checkpoints in flight on **entry** to ``layer_idx``.
 
-    A checkpoint is appended whenever ``layer_idx % block_size == 0``
-    (``modeling_kimi_linear.py:995``), so on entry to layer ``L`` the count
-    is ``ceil(L / block_size)``. Duplicated from
-    ``kimi_k3_block.attn_res_num_blocks_before`` on purpose: this patch
+    A checkpoint is appended whenever ``layer_idx % block_size == 0``, so on
+    entry to layer ``L`` the count is ``ceil(L / block_size)``. Duplicated
+    from ``kimi_k3_block.attn_res_num_blocks_before`` on purpose: this patch
     installs at ``before_train``, before the model modules are importable
     in some configurations, exactly as ``deepseek_v4_flops_patches`` inlines
     ``_parse_int_sequence``.
@@ -180,24 +177,24 @@ def kda_proj_fmac_per_token(
 ) -> int:
     """The nine KDA projections plus the three depthwise causal convolutions.
 
-    Read off ``kimi_delta_attention.py:303-386``:
+    The KDA module's projection inventory:
 
-    ==================  =====================  ====================================
-    module              shape                  line
-    ==================  =====================  ====================================
-    ``q_proj``          ``H -> qk_dim``        ``:303``
-    ``k_proj``          ``H -> qk_dim``        ``:304``
-    ``v_proj``          ``H -> v_dim``         ``:305``
-    ``q/k/v_conv1d``    depthwise, kernel 4    ``:308-310``
-    ``f_a_proj``        ``H -> K`` (duplicated) ``:315``
-    ``f_b_proj``        ``K -> qk_dim``        ``:328``
-    ``b_proj``          ``H -> num_heads``     ``:355``
-    ``g_proj``          ``H -> v_dim``         ``:366``
-    ``o_proj``          ``v_dim -> H``         ``:374``
-    ==================  =====================  ====================================
+    ==================  =======================
+    module              shape
+    ==================  =======================
+    ``q_proj``          ``H -> qk_dim``
+    ``k_proj``          ``H -> qk_dim``
+    ``v_proj``          ``H -> v_dim``
+    ``q/k/v_conv1d``    depthwise, kernel 4
+    ``f_a_proj``        ``H -> K`` (duplicated)
+    ``f_b_proj``        ``K -> qk_dim``
+    ``b_proj``          ``H -> num_heads``
+    ``g_proj``          ``H -> v_dim``
+    ``o_proj``          ``v_dim -> H``
+    ==================  =======================
 
     ``g_proj`` is the full-rank output gate (``kda_use_full_rank_gate:
-    true``, the only variant implemented — ``:360-365`` raises otherwise).
+    true``, the only variant implemented — the config raises otherwise).
     It is the term upstream's ``gated_delta_net`` branch has no slot for.
     """
     qk_dim = key_head_dim * num_heads
@@ -226,24 +223,24 @@ def kda_core_fmac_per_token(
 ) -> int:
     """The chunkwise delta-rule recurrence — **linear in the sequence length**.
 
-    Matmul inventory of ``kda_kernels/_eager/reference.py::eager_chunk_kda``
-    (``:301-402``), which is the numerical definition every KDA backend
-    (``fla``'s ``chunk_kda`` today) is validated against. Per chunk of ``C``
-    steps, per head, with ``K`` the key/state dim and ``V`` the value dim:
+    Matmul inventory of the reference kernel ``eager_chunk_kda``, which is the
+    numerical definition every KDA backend (``fla``'s ``chunk_kda`` today) is
+    validated against. Per chunk of ``C`` steps, per head, with ``K`` the
+    key/state dim and ``V`` the value dim:
 
-    =========================================  ============  ==========
-    term                                       reference     FMAC
-    =========================================  ============  ==========
-    ``L = -beta * tril(<k.Gamma, k>, -1)``      ``:370``      ``C^2 K``
-    ``(I - L)^-1`` by forward substitution      ``:372-375``  ``~C^3/3``
-    ``W = M (Gamma * K)``                       ``:380``      ``C^2 K``
-    ``U = M V``                                 ``:381``      ``C^2 V``
-    ``V~ = U - W S``                            ``:389``      ``C K V``
-    ``A = tril(<q.Gamma, k>)``                  ``:391``      ``C^2 K``
-    ``(Q * Gamma) S``                           ``:394``      ``C K V``
-    ``A V~``                                    ``:394``      ``C^2 V``
-    ``(K * Gamma)^T V~``                        ``:398``      ``C K V``
-    =========================================  ============  ==========
+    =========================================  ==========
+    term                                       FMAC
+    =========================================  ==========
+    ``L = -beta * tril(<k.Gamma, k>, -1)``      ``C^2 K``
+    ``(I - L)^-1`` by forward substitution      ``~C^3/3``
+    ``W = M (Gamma * K)``                       ``C^2 K``
+    ``U = M V``                                 ``C^2 V``
+    ``V~ = U - W S``                            ``C K V``
+    ``A = tril(<q.Gamma, k>)``                  ``C^2 K``
+    ``(Q * Gamma) S``                           ``C K V``
+    ``A V~``                                    ``C^2 V``
+    ``(K * Gamma)^T V~``                        ``C K V``
+    =========================================  ==========
 
     Dividing by ``C`` gives the per-token cost
     ``3 C K + 2 C V + 3 K V + C^2/3``, with **no ``seq_length`` term at
@@ -282,8 +279,7 @@ def mla_fmac_per_token(
     """NoPE MLA with the sigmoid output gate.
 
     Projection layout is upstream ``MLASelfAttention``'s verbatim — K3
-    keeps the parent ``__init__`` (``kimi_k3_mla_attention.py:19-26``) —
-    plus one new module:
+    keeps the parent ``__init__`` — plus one new module:
 
     * ``linear_q_down_proj``   ``H -> q_lora_rank``
     * ``linear_q_up_proj``     ``q_lora_rank -> n * (qk_head_dim + qk_pos_emb_head_dim)``
@@ -291,18 +287,18 @@ def mla_fmac_per_token(
       (the trailing ``qk_pos_emb_head_dim`` dims are MQA-shared and bypass
       the latent)
     * ``linear_kv_up_proj``    ``kv_lora_rank -> n * (qk_head_dim + v_head_dim)``
-    * ``linear_o_gate``        ``H -> n * v_head_dim``   (``:306-318``, new)
+    * ``linear_o_gate``        ``H -> n * v_head_dim``   (new)
     * ``linear_proj``          ``n * v_head_dim -> H``
 
     NoPE costs nothing and saves nothing: the rotary table is zero-width, so
-    the tensors fall through ``t_pass`` unchanged (``rope_utils.py:110-126``).
-    The 64 positional dims are still projected, still concatenated into Q/K
-    and still attended over, which is why ``q_head_dim`` below is
-    ``qk_head_dim + qk_pos_emb_head_dim`` and not ``qk_head_dim``.
+    the tensors fall through ``t_pass`` unchanged. The 64 positional dims are
+    still projected, still concatenated into Q/K and still attended over,
+    which is why ``q_head_dim`` below is ``qk_head_dim + qk_pos_emb_head_dim``
+    and not ``qk_head_dim``.
 
     Core attention is causal, so only half the ``(q, k)`` pairs are visible:
     ``n * q_head_dim * S/2`` for ``QK^T`` plus ``n * v_head_dim * S/2`` for
-    ``PV``, matching upstream's convention at ``training.py:422-425``.
+    ``PV``, matching upstream's convention.
     """
     q_head_dim = qk_head_dim + qk_pos_emb_head_dim
     n_qk = num_heads * q_head_dim
@@ -342,19 +338,18 @@ def latent_moe_fmac_per_token(
 ) -> int:
     """Stable Latent MoE: router + latent down/up + routed experts + shared expert.
 
-    The latent bottleneck is upstream's ``config.moe_latent_size`` feature
-    (``moe_layer.py:198-221``), and the two projections run **once over every
-    token, outside the dispatch** — ``fc1_latent_proj`` in ``preprocess``
-    (``:359-363``) and ``fc2_latent_proj`` in ``postprocess`` (``:448-449``).
-    So they are ``H*latent + latent*H`` per token, *not* per routed expert.
+    The latent bottleneck is upstream's ``config.moe_latent_size`` feature,
+    and the two projections run **once over every token, outside the
+    dispatch** — ``fc1_latent_proj`` in ``preprocess`` and ``fc2_latent_proj``
+    in ``postprocess``. So they are ``H*latent + latent*H`` per token, *not*
+    per routed expert.
 
-    Routed experts then run at ``latent`` width
-    (``mlp.py:208-213``, ``experts.py:185, 206-207``), and each token visits
+    Routed experts then run at ``latent`` width, and each token visits
     ``moe_router_topk`` of them.
 
     The shared expert runs on the **pre-down-projection** hidden state, i.e.
-    at ``H`` — ``shared_experts_compute`` (``:379-402``) is called with the
-    original ``hidden_states``, not the latent-projected copy.
+    at ``H`` — ``shared_experts_compute`` is called with the original
+    ``hidden_states``, not the latent-projected copy.
 
     ``StableLatentMoE``'s only addition over the stock latent ``MoELayer`` is
     an RMSNorm on the combined routed output, which is elementwise and carries
@@ -378,20 +373,17 @@ def attn_res_fmac_per_token(
     """The attention-residual mixers and the post-stack head.
 
     Each mixer scores ``num_blocks + 1`` candidates with a rank-1 vector and
-    then takes a convex combination of them
-    (``attention_residual.py:209-213``), i.e. two ``(num_blocks+1) x hidden``
-    reductions per token. The RMSNorm at ``:206-207`` is elementwise.
+    then takes a convex combination of them, i.e. two ``(num_blocks+1) x
+    hidden`` reductions per token. The RMSNorm is elementwise.
 
-    The schedule is read off ``kimi_k3_block.py``:
+    The schedule:
 
-    * ``mlp_res_mixer`` is built on **every** layer (``:353-358``) and runs
-      *after* the checkpoint append (``:499`` then ``:515``), so it sees the
-      post-append count.
-    * ``attn_res_mixer`` is built only where ``num_blocks_in > 0``
-      (``:368-376``) and runs *before* the append (``:494-495``), so it sees
-      the pre-append count.
-    * exactly one ``attn_res_head`` exists, on the ``post_process`` stage
-      (``:594-601``), and sees the final count.
+    * ``mlp_res_mixer`` is built on **every** layer and runs *after* the
+      checkpoint append, so it sees the post-append count.
+    * ``attn_res_mixer`` is built only where ``num_blocks_in > 0`` and runs
+      *before* the append, so it sees the pre-append count.
+    * exactly one ``attn_res_head`` exists, on the ``post_process`` stage,
+      and sees the final count.
 
     Two orders of magnitude below the MoE term at every shape tried; counted
     because leaving a real module out of a "correct" closed form is how the
@@ -423,10 +415,9 @@ def mtp_eh_proj_fmac_per_token(*, hidden_size: int, mtp_num_layers: int) -> int:
 
     ``MultiTokenPredictionLayer`` concatenates the normalised previous hidden
     state with the normalised embedding of the token one position to the right
-    and projects the pair back to model width
-    (``multi_token_prediction.py:799-810``, ``:905-906``). The two RMSNorms and
-    the final one are elementwise and are charged nowhere, consistent with how
-    this closed form treats every other norm.
+    and projects the pair back to model width. The two RMSNorms and the final
+    one are elementwise and are charged nowhere, consistent with how this
+    closed form treats every other norm.
     """
     return mtp_num_layers * 2 * hidden_size * hidden_size
 
@@ -649,7 +640,7 @@ def compute_kimi_k3_flops(args: Any, batch_size: int) -> Tuple[int, KimiK3FlopsB
 
 
 # ---------------------------------------------------------------------------
-# Args-layer fix: make `moe_latent_size` reach `training.py:361`
+# Args-layer fix: make `moe_latent_size` reach upstream FLOPs reporting
 # ---------------------------------------------------------------------------
 
 
@@ -659,9 +650,8 @@ def compute_kimi_k3_flops(args: Any, batch_size: int) -> Tuple[int, KimiK3FlopsB
     phase="build_args",
     description=(
         "Kimi K3: mirror routed_expert_hidden_size onto the args-layer "
-        "moe_latent_size, which training.py:361 reads for FLOPs/params "
-        "reporting and which the config-layer __post_init__ mapping does "
-        "not reach."
+        "moe_latent_size, which upstream FLOPs/params reporting reads and "
+        "which the config-layer __post_init__ mapping does not reach."
     ),
     # Gated tightly: `routed_expert_hidden_size` is a K3-only field, so this
     # would be a no-op elsewhere anyway, but `patches/__init__.py` asks for
@@ -672,12 +662,10 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
     """Set ``args.moe_latent_size`` from ``routed_expert_hidden_size``.
 
     ``KimiK3TransformerConfig.__post_init__`` already mirrors the two fields on
-    the **config**, which is what every consumer that shapes the model reads:
-    ``moe_layer.py:198`` (the latent projections), ``experts.py:185``/``:206``
-    (the routed-expert widths), ``mlp.py:210`` and
-    ``transformer_layer.py:440``. The *args* copy is a separate object and is
-    read only by ``num_floating_point_operations``
-    (``training.py:236-309``, ``:361``, ``:545-554``, ``:616``).
+    the **config**, which is what every consumer that shapes the model reads
+    (the latent projections, the routed-expert widths, and the layer/MLP
+    construction). The *args* copy is a separate object and is read only by
+    ``num_floating_point_operations``.
 
     **The model was never affected**; this patch only fixes reporting. Verified
     on a live launcher run, not inferred: the builder's own
@@ -690,23 +678,23 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
     ``backend_args``.** This is the phase-ordering trap that made the original
     version of this patch a no-op for its entire life:
 
-    * ``train_runtime.py:404`` builds ``backend_args`` from
-      ``adapter.convert_config``, which only knows the keys Megatron declares.
-      ``routed_expert_hidden_size`` is Kimi-K3-only, so at this point it lives
-      on ``module_config.params`` and **not** on ``backend_args``.
-    * ``train_runtime.py:412`` runs the ``build_args`` phase — here.
-    * ``train_runtime.py:442`` merges the two, *after* the patches.
+    * ``adapter.convert_config`` builds ``backend_args`` from only the keys
+      Megatron declares. ``routed_expert_hidden_size`` is Kimi-K3-only, so at
+      this point it lives on ``module_config.params`` and **not** on
+      ``backend_args``.
+    * the ``build_args`` phase runs — here.
+    * the two are merged, *after* the patches.
 
     So ``getattr(backend_args, "routed_expert_hidden_size")`` returns ``None``
     here and the patch silently did nothing, while still logging
     "✓ Applied". Writing to ``backend_args`` *is* correct, because
     ``merge_namespace(backend_args, module_config.params,
     allow_override=False)`` keeps the destination's value for any key it
-    already has (``yaml_utils.py:121-122``), so the write survives the merge
-    and becomes the live ``get_args()`` value.
+    already has, so the write survives the merge and becomes the live
+    ``get_args()`` value.
 
-    Legal because ``arguments.py:1534-1535`` only asserts ``> 0`` on a
-    non-``None`` value, ``:1656`` forwards it into the config kwargs, and
+    Legal because the args-layer validation only asserts ``> 0`` on a
+    non-``None`` value, forwards it into the config kwargs, and
     ``_resolve_latent_fields`` raises only when the two **disagree**.
     """
     args = ctx.extra.get("backend_args", None)
@@ -737,7 +725,7 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.args.kimi_k3_moe_latent_size] args.moe_latent_size "
         f"= {args.moe_latent_size} (from routed_expert_hidden_size); "
-        "training.py:361 FLOPs/params reporting now sees the latent bottleneck"
+        "FLOPs/params reporting now sees the latent bottleneck"
     )
 
 
@@ -763,23 +751,20 @@ def patch_k3_args_mtp_num_layers(ctx: PatchContext):
 
     ``num_nextn_predict_layers`` is the name Kimi K3's own ``config.json`` and
     ``configuration_kimi_k3.py`` use; ``mtp_num_layers`` is Megatron's. The
-    config dataclass reconciles them
-    (``kimi_k3_transformer_config.py::_resolve_mtp_fields``), but that object is
-    built long after ``args`` and is not what the reporting path reads. Three
-    consumers live on the args side only:
+    config dataclass reconciles them (``_resolve_mtp_fields``), but that object
+    is built long after ``args`` and is not what the reporting path reads.
+    Three consumers live on the args side only:
 
-    * ``arguments.py:1492-1500`` -- the MTP position-embedding validation.
-    * ``training.py:347-351`` and ``:594-623`` -- FLOPs and parameter counts,
-      which add ``mtp_num_layers`` layers to both.
-    * ``training.py:2062-2065`` -- ``MTPLossLoggingHelper.track_mtp_metrics``,
-      i.e. whether the per-depth MTP loss appears in the training log at all.
+    * the MTP position-embedding validation.
+    * FLOPs and parameter counts, which add ``mtp_num_layers`` layers to both.
+    * ``MTPLossLoggingHelper.track_mtp_metrics``, i.e. whether the per-depth
+      MTP loss appears in the training log at all.
 
     **Read the source key off ``module_config.params``, not off
     ``backend_args``.** At this phase ``backend_args`` is only what
-    ``adapter.convert_config`` produced from the keys Megatron declares
-    (``train_runtime.py:404``), and every Kimi-K3-only key is still on the
-    Primus side; the two are merged at ``train_runtime.py:442``, *after* the
-    ``build_args`` phase has run. A patch that reads
+    ``adapter.convert_config`` produced from the keys Megatron declares, and
+    every Kimi-K3-only key is still on the Primus side; the two are merged
+    *after* the ``build_args`` phase has run. A patch that reads
     ``backend_args.num_nextn_predict_layers`` here therefore sees ``None`` and
     silently does nothing. (Verified in a real launcher run: the "Final backend
     args (after patches)" dump lists ``mtp_num_layers ... None`` while the
@@ -790,8 +775,8 @@ def patch_k3_args_mtp_num_layers(ctx: PatchContext):
 
     Writing to ``backend_args`` *is* correct: ``merge_namespace(backend_args,
     module_config.params, allow_override=False)`` keeps the destination's value
-    for any key it already has (``yaml_utils.py:121-122``), so a value set here
-    survives the merge and becomes the live ``get_args()`` value.
+    for any key it already has, so a value set here survives the merge and
+    becomes the live ``get_args()`` value.
 
     ``0`` is normalised to ``None`` for the reason on the config field:
     ``mtp_on_this_rank`` tests ``is not None``, so a literal 0 turns MTP
@@ -903,21 +888,17 @@ def _emit_breakdown(
         )
 
 
-def _make_k3_num_floating_point_operations(original_fn, *, dispatch_k3: bool):
-    """Return a wrapper that dispatches K3 vs upstream model types.
+def _make_k3_num_floating_point_operations(original_fn):
+    """Return a wrapper that reports the Kimi K3 closed form.
 
-    ``dispatch_k3`` is captured at install time from ``args.model_type``
-    rather than re-checked per call: Megatron's ``pretrain()`` overwrites
-    ``args.model_type`` with the ``ModelType`` enum at ``training.py:1210``
-    *before* ``train()`` ever calls ``num_floating_point_operations``, so a
-    runtime string check would silently fall through to the upstream
-    formula. Same reasoning as ``deepseek_v4_flops_patches.py``.
+    The wrapper always computes the K3 number because it is only ever
+    installed for a K3 job: ``patch_k3_flops_reporting`` is gated on
+    ``args.model_type == "kimi_k3"``. It keeps a reference to ``original_fn``
+    so the one-time breakdown can also log what upstream would have reported,
+    for comparison.
     """
 
     def wrapped(args, batch_size):
-        if not dispatch_k3:
-            return original_fn(args, batch_size)
-
         total_flops, breakdown = compute_kimi_k3_flops(args, batch_size)
 
         global _BREAKDOWN_LOGGED
@@ -942,34 +923,6 @@ def _make_k3_num_floating_point_operations(original_fn, *, dispatch_k3: bool):
     return wrapped
 
 
-_TRAINER_REBIND_TARGETS: Sequence[str] = (
-    # Primus's Megatron trainer imports `num_floating_point_operations` at
-    # module load time and resolves the bare name from its OWN globals at the
-    # call site, so patching only `megatron.training.training` never reaches
-    # the name that actually drives per-iter TFLOPs reporting. Same target
-    # list as `deepseek_v4_flops_patches._TRAINER_REBIND_TARGETS`.
-    "primus.modules.trainer.megatron.trainer",
-)
-
-
-def _rebind_trainer_imports(wrapped_fn) -> List[str]:
-    """Rebind ``num_floating_point_operations`` wherever it was captured at import."""
-    import sys
-
-    rebound: List[str] = []
-    for module_name in _TRAINER_REBIND_TARGETS:
-        mod = sys.modules.get(module_name)
-        if mod is None:
-            continue
-        if getattr(mod, "num_floating_point_operations", None) is wrapped_fn:
-            continue
-        if not hasattr(mod, "num_floating_point_operations"):
-            continue
-        mod.num_floating_point_operations = wrapped_fn
-        rebound.append(module_name)
-    return rebound
-
-
 @register_patch(
     "megatron.kimi_k3.flops_reporting",
     backend="megatron",
@@ -984,7 +937,14 @@ def _rebind_trainer_imports(wrapped_fn) -> List[str]:
     condition=lambda ctx: getattr(get_args(ctx), "model_type", None) == "kimi_k3",
 )
 def patch_k3_flops_reporting(ctx: PatchContext):
-    """Install the K3 FLOPs wrapper on ``training.num_floating_point_operations``."""
+    """Install the K3 FLOPs wrapper on ``training.num_floating_point_operations``.
+
+    Megatron's ``train()`` loop resolves ``num_floating_point_operations`` as a
+    bare name from within ``megatron.training.training``, and Primus drives
+    training through Megatron's own ``pretrain()`` rather than a trainer that
+    captured the symbol by value. Replacing the attribute on that module is
+    therefore all that is needed to reach the per-iter reporting call site.
+    """
     import megatron.training.training as training_module
 
     original_fn = training_module.num_floating_point_operations
@@ -994,37 +954,9 @@ def patch_k3_flops_reporting(ctx: PatchContext):
         )
         return
 
-    wrapped = _make_k3_num_floating_point_operations(original_fn, dispatch_k3=True)
-    training_module.num_floating_point_operations = wrapped
-    rebound = _rebind_trainer_imports(wrapped)
-
+    training_module.num_floating_point_operations = _make_k3_num_floating_point_operations(original_fn)
     log_rank_0(
         "[Patch:megatron.kimi_k3.flops_reporting] wrapped "
         "num_floating_point_operations; per-iter TFLOPs now reported with the "
         "K3-aware closed form"
     )
-    if rebound:
-        log_rank_0(f"[Patch:megatron.kimi_k3.flops_reporting] rebound trainer import bindings: {rebound}")
-    else:
-        log_rank_0(
-            "[Patch:megatron.kimi_k3.flops_reporting] no trainer modules needed "
-            f"rebinding (none of {list(_TRAINER_REBIND_TARGETS)} were imported yet)."
-        )
-
-
-__all__: Sequence[str] = (
-    "KimiK3FlopsBreakdown",
-    "attn_res_fmac_per_token",
-    "attn_res_num_blocks_before",
-    "compute_kimi_k3_flops",
-    "dense_mlp_fmac_per_token",
-    "kda_core_fmac_per_token",
-    "kda_proj_fmac_per_token",
-    "latent_moe_fmac_per_token",
-    "linear_attention_pattern",
-    "logits_fmac_per_token",
-    "mla_fmac_per_token",
-    "moe_layer_pattern",
-    "patch_k3_args_moe_latent_size",
-    "patch_k3_flops_reporting",
-)
