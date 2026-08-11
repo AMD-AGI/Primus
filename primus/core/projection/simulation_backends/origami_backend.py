@@ -61,6 +61,32 @@ def _try_import_origami():
     return _origami_available
 
 
+# Some origami builds accept a register-file capacity (``rf_capacity``)
+# parameter in ``get_hardware_for_arch`` — inserted between ``lds_capacity`` and
+# ``L2_capacity`` — while older/public builds expose only the 5-argument
+# signature ``(arch, N_CU, lds_capacity, L2_capacity, compute_clock_khz)``.
+# Detect support once (cached) and dispatch accordingly so the public tree runs
+# against either build without depending on a newer origami.
+_ORIGAMI_HW_ARCH_RF: Optional[bool] = None
+
+
+def _get_hardware_for_arch(arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz):
+    """Call ``origami.get_hardware_for_arch`` tolerating builds without rf_capacity."""
+    global _ORIGAMI_HW_ARCH_RF
+    if _ORIGAMI_HW_ARCH_RF is not False:
+        try:
+            hw = _origami.get_hardware_for_arch(
+                arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz
+            )
+            _ORIGAMI_HW_ARCH_RF = True
+            return hw
+        except TypeError:
+            if _ORIGAMI_HW_ARCH_RF is True:
+                raise
+            _ORIGAMI_HW_ARCH_RF = False
+    return _origami.get_hardware_for_arch(arch_enum, n_cu, lds_capacity, l2_capacity, clock_khz)
+
+
 # ---------------------------------------------------------------------------
 # Known hardware profiles for GPU-less simulation via get_hardware_for_arch.
 # ---------------------------------------------------------------------------
@@ -404,7 +430,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 clock_khz = self._clock_override_mhz * 1000
             n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
             arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
-            hw = _origami.get_hardware_for_arch(
+            hw = _get_hardware_for_arch(
                 arch_enum,
                 n_cu,
                 profile.lds_capacity,
@@ -460,7 +486,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             clock_khz = self._clock_override_mhz * 1000
         n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
         arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
-        hw = _origami.get_hardware_for_arch(
+        hw = _get_hardware_for_arch(
             arch_enum,
             n_cu,
             profile.lds_capacity,
