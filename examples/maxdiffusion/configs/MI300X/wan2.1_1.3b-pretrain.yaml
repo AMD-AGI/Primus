@@ -4,9 +4,12 @@ exp_name: ${PRIMUS_EXP_NAME:wan2.1_1.3b-pretrain}
 workspace: ./output
 
 # Per-config environment (ported from the retired MAD jax-maxdiffusion env
-# scripts). TrainRuntime applies this top-level `env:` before JAX/XLA init.
-# These flags are arch-agnostic; the gfx950-only RCCL_WARP_SPEED_AUTO=0
-# workaround is applied by run.sh and is a no-op on MI300X (gfx942).
+# scripts). TrainRuntime applies this top-level `env:` before JAX/XLA init, and it
+# is the ONLY source of ROCm/RCCL tuning for this backend: the MaxDiffusion adapter
+# deliberately contributes none (primus/backends/maxdiffusion/env_spec.py returns an
+# empty list), and MAD's run.sh exports no tuning env either. These flags are
+# arch-agnostic; the gfx950-only RCCL_WARP_SPEED_AUTO=0 workaround is therefore
+# absent by design, since WarpSpeed does not exist on MI300X (gfx942).
 env:
   KERAS_BACKEND: "jax"
   JAX_SPMD_MODE: "allow_all"
@@ -35,7 +38,30 @@ env:
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
   TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
-  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  # The two first_collective_call timeouts are raised from their 20s/40s defaults:
+  # with autotune_level=5 the first step spends >10 min in per-device autotune, so
+  # the 8 device threads reach the first kAllGather minutes apart and XLA's
+  # rendezvous watchdog aborts the process (SIGABRT, exit 134) while every thread is
+  # still making progress. Steady-state steps are seconds, so these long timeouts
+  # never trigger after step 1. See the MI300X flux_dev config for the full trace.
+  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer='' --xla_gpu_first_collective_call_warn_stuck_timeout_seconds=300 --xla_gpu_first_collective_call_terminate_timeout_seconds=2400"
+  # ROCm/HIP + RCCL/NCCL knobs, mirrored from the MI355X config, which takes them
+  # from the verified-good base_wan_1.3B_env.sh. Dropping NCCL_PROTO=Simple /
+  # HSA_NO_SCRATCH_RECLAIM=1 / GPU_MAX_HW_QUEUES / HIP_FORCE_DEV_KERNARG /
+  # RCCL_MSCCL_ENABLE caused an RCCL init hang there (GPUs 0%, CPU busy-wait) during
+  # model construction, and this config carried none of them. HSA_NO_SCRATCH_RECLAIM
+  # is independently the gfx942-gated default in primus/backends/maxtext/env_spec.py.
+  HSA_FORCE_FINE_GRAIN_PCIE: "1"
+  HSA_NO_SCRATCH_RECLAIM: "1"
+  GPU_MAX_HW_QUEUES: "2"
+  HIP_FORCE_DEV_KERNARG: "1"
+  RCCL_MSCCL_ENABLE: "0"
+  NCCL_MAX_NCHANNELS: "112"
+  NCCL_IB_TC: "41"
+  NCCL_IB_SL: "0"
+  NCCL_DEBUG: "WARN"
+  NCCL_PROTO: "Simple"
+  LIBTPU_INIT_ARGS: ""
   NVTE_FUSED_ATTN: "1"
   NVTE_FUSED_ATTN_CK: "1"
   NVTE_FUSED_ATTN_AOTRITON: "0"
@@ -58,6 +84,16 @@ modules:
       output_dir: "./output/wan2.1_1.3b-pretrain"
       base_output_directory: "./output/wan2.1_1.3b-pretrain"
       max_train_steps: ${MAX_STEPS:20}
+      # Log throughput every step: the perf extractor parses the per-step
+      # "completed step: N, seconds: X, TFLOP/s/device: Y" line. The image default
+      # log_period=100 emits nothing at 20 steps, so perf comes back empty and
+      # madengine silently reuses a stale CSV.
+      log_period: 1
+      # Bound to run.sh's PERF_METRICS_FILE: the trainer writes per-step JSON metrics
+      # here (max_utils.write_metrics_locally). This is the reliable perf source; the
+      # per-step stdout "completed step:" line is dropped under the Primus launcher.
+      # Empty when unset -> no-op (upstream default).
+      metrics_file: "${PERF_METRICS_FILE:}"
       dataset_type: "synthetic"
       hardware: "gpu"
       checkpoint_every: -1

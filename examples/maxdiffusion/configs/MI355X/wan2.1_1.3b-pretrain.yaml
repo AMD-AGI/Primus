@@ -16,15 +16,25 @@ env:
   # of the ephemeral in-container /app/.cache/jax. The WAN fused-attention graph
   # (long video sequence + autotune_level=5) can take 30-45 min to compile on a
   # cold cache; without persistence every run recompiles from scratch and can
-  # exceed the launcher timeout before a single step runs. /myworkspace is the
-  # container bind-mount of the repo root.
-  JAX_COMPILATION_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_1.3b"
-  MIOPEN_CUSTOM_CACHE_DIR: "/myworkspace/.jax_cache/wan2.1_1.3b/miopen"
+  # exceed the launcher timeout before a single step runs. Paths are relative to
+  # the Primus root, which is the working directory for every launch path and is
+  # bind-mounted in container mode, so the cache survives the container without
+  # depending on /myworkspace (which only exists in the MAD image). Deliberately no
+  # CK_JIT_CACHE_DIR -- see the MI300X 1.3B config for why a relative path there
+  # breaks TransformerEngine's CK kernel build.
+  JAX_COMPILATION_CACHE_DIR: "./.jax_cache/wan2.1_1.3b"
+  MIOPEN_CUSTOM_CACHE_DIR: "./.jax_cache/wan2.1_1.3b/miopen"
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
   TF_CUDNN_WORKSPACE_LIMIT_IN_MB: "71296"
-  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer=''"
+  # The two first_collective_call timeouts are raised from their 20s/40s defaults:
+  # with autotune_level=5 the first step spends >10 min in per-device autotune, so
+  # the 8 device threads reach the first kAllGather minutes apart and XLA's
+  # rendezvous watchdog aborts the process (SIGABRT, exit 134) while every thread is
+  # still making progress. Steady-state steps are seconds, so these long timeouts
+  # never trigger after step 1. See the MI300X flux_dev config for the full trace.
+  XLA_FLAGS: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=5 --xla_gpu_enable_reduce_scatter_combine_by_dim=false --xla_gpu_enable_all_gather_combine_by_dim=false --xla_gpu_all_gather_combine_threshold_bytes=134217728 --xla_gpu_reduce_scatter_combine_threshold_bytes=134217728 --xla_gpu_enable_command_buffer='' --xla_gpu_first_collective_call_warn_stuck_timeout_seconds=300 --xla_gpu_first_collective_call_terminate_timeout_seconds=2400"
   # ROCm/HIP + RCCL/NCCL knobs. These MUST match the verified-good
   # base_wan_1.3B_env.sh: dropping NCCL_PROTO=Simple / HSA_NO_SCRATCH_RECLAIM=1 /
   # GPU_MAX_HW_QUEUES / HIP_FORCE_DEV_KERNARG / RCCL_MSCCL_ENABLE caused an RCCL
