@@ -42,6 +42,21 @@ logger = logging.getLogger(__name__)
 
 def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool = True) -> None:
     """Emit a rank-local sample-key digest for explicit continuity audits."""
+    # TEMPORARY DIAGNOSTIC: mirror the marker onto stdout, stderr and logging so
+    # the run log shows which channel survives from inside the training loop.
+    if step_count <= 2:
+        import sys
+
+        rank = os.getenv("RANK", "?")
+        print(f"PRIMUS_PROBE_STDOUT rank={rank} where=fingerprint step={step_count}", flush=True)
+        sys.stderr.write(f"PRIMUS_PROBE_STDERR rank={rank} where=fingerprint step={step_count}\n")
+        sys.stderr.flush()
+        logger.info(
+            "PRIMUS_PROBE_LOGGER rank=%s where=fingerprint step=%s env=%r",
+            rank,
+            step_count,
+            os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS"),
+        )
     if os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") != "1":
         return
     if not is_training:

@@ -38,6 +38,22 @@ PRECISION_LINEAR_CLASSES = (
 )
 
 
+def _probe_marker_channels(where: str) -> None:
+    """TEMPORARY DIAGNOSTIC: find which output channel survives into the run log.
+
+    The audit markers below use bare print() to stdout and never appear in the
+    captured leg log, while logging-based output from the same call site does.
+    Emitting the same token on three channels localises where it is lost.
+    """
+    import sys
+
+    rank = os.getenv("RANK", "?")
+    print(f"PRIMUS_PROBE_STDOUT rank={rank} where={where}", flush=True)
+    sys.stderr.write(f"PRIMUS_PROBE_STDERR rank={rank} where={where}\n")
+    sys.stderr.flush()
+    log_rank_0(f"PRIMUS_PROBE_LOGGER rank={rank} where={where}")
+
+
 def _precision_linear_class_census(model) -> dict[str, int]:
     observed = Counter(type(module).__name__ for module in model.modules())
     return {name: observed.get(name, 0) for name in PRECISION_LINEAR_CLASSES}
@@ -45,6 +61,8 @@ def _precision_linear_class_census(model) -> dict[str, int]:
 
 def _emit_precision_linear_class_census(model) -> None:
     """Emit the actually instantiated precision-linear classes on every rank."""
+    _probe_marker_channels("census_entry")
+    log_rank_0(f"PRIMUS_PROBE_CENSUS_ENV={os.getenv('PRIMUS_AUDIT_LINEAR_CLASS_CENSUS')!r}")
     if os.getenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS") != "1":
         return
 
