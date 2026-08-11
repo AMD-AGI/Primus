@@ -25,11 +25,11 @@ WHY (see 10_PHASE_C_PROFILE.md §3d / 00_PLAN.md sharding workstream):
   ZeRO-1 optimizer-memory recovery vs pure DDP.
 
 WHAT (NO diffusers / Automodel fork) — two env-gated monkeypatches:
-  1. ZeRO-1 optimizer: wrap the recipe's optimizer
-     (nemo_automodel.recipes.diffusion.train._build_optimizer) in
-     torch.distributed.optim.ZeroRedundancyOptimizer. Skipped (with a warning) if
-     the params are DTensors (i.e. FSDP2 mode) since ZeRO-1 only applies to
-     replicated/DDP params.
+  1. ZeRO-1 optimizer: wrap the optimizers the recipe builds
+     (nemo_automodel.components.optim.optimizer.OptimizerConfig.build, which returns
+     one per model part) in torch.distributed.optim.ZeroRedundancyOptimizer. Skipped
+     (with a warning) if the params are DTensors (i.e. FSDP2 mode) since ZeRO-1 only
+     applies to replicated/DDP params.
   2. DDP real activation checkpointing: DDPManager applies AC via
      apply_submodule_checkpointing, which wraps by attribute name
      (mlp/self_attn/norm1...) -- attributes an Ideogram4TransformerBlock does NOT
@@ -75,78 +75,83 @@ def _params_are_dtensor(params) -> bool:
     return False
 
 
-def _install_zero1_optimizer_patch() -> bool:
-    """Wrap the diffusion recipe's optimizer in ZeroRedundancyOptimizer."""
-    import nemo_automodel.recipes.diffusion.train as train_mod
+def _wrap_in_zero1(base):
+    """Return ``base`` re-built as a ZeroRedundancyOptimizer, or ``base`` unchanged."""
+    params = [p for group in base.param_groups for p in group["params"]]
+    if _params_are_dtensor(params):
+        logger.warning(
+            "[PrimusIdeogramZeRO1] PRIMUS_IDEOGRAM_ZERO1 set but params are DTensor (FSDP2 mode); "
+            "ZeRO-1 only applies to replicated/DDP params -> keeping the plain (FSDP-sharded) optimizer."
+        )
+        return base
 
-    if getattr(train_mod, "_primus_zero1_patched", False):
+    import torch.distributed as dist
+    from torch.distributed.optim import ZeroRedundancyOptimizer
+
+    if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
+        logger.warning("[PrimusIdeogramZeRO1] no >1-rank process group; keeping the plain optimizer.")
+        return base
+
+    optimizer_cls = type(base)
+    # base.defaults holds the per-group defaults, but it can contain keys that are
+    # NOT accepted by the optimizer's __init__ (e.g. AdamW stores decoupled_weight_decay
+    # -- set internally by its Adam parent -- yet AdamW.__init__ doesn't take it). ZeRO
+    # forwards these to reconstruct per-rank optimizers, so filter to the ctor signature.
+    defaults = dict(base.defaults)
+    learning_rate = defaults.pop("lr", None)
+    try:
+        _sig = inspect.signature(optimizer_cls.__init__)
+        _has_varkw = any(p.kind == p.VAR_KEYWORD for p in _sig.parameters.values())
+        if not _has_varkw:
+            _accepted = set(_sig.parameters)
+            _dropped = [k for k in defaults if k not in _accepted]
+            for k in _dropped:
+                defaults.pop(k, None)
+            if _dropped:
+                logger.info(
+                    "[PrimusIdeogramZeRO1] dropped non-ctor optimizer defaults %s for %s",
+                    _dropped,
+                    optimizer_cls.__name__,
+                )
+    except (ValueError, TypeError):
+        pass  # signature unavailable (C-impl); pass defaults through unchanged
+    try:
+        zro = ZeroRedundancyOptimizer(
+            params,
+            optimizer_class=optimizer_cls,
+            lr=learning_rate,
+            overlap_with_ddp=False,
+            **defaults,
+        )
+    except Exception as e:  # fall back rather than break the run
+        logger.error("[PrimusIdeogramZeRO1] ZeroRedundancyOptimizer build failed (%s); using plain optimizer.", e)
+        return base
+    logger.info(
+        "[PrimusIdeogramZeRO1] wrapped %s in ZeroRedundancyOptimizer over %d ranks "
+        "(optimizer state sharded; params/grads replicated by DDP).",
+        optimizer_cls.__name__,
+        dist.get_world_size(),
+    )
+    return zro
+
+
+def _install_zero1_optimizer_patch() -> bool:
+    """Wrap the recipe's optimizers in ZeroRedundancyOptimizer."""
+    from nemo_automodel.components.optim.optimizer import OptimizerConfig
+
+    if getattr(OptimizerConfig, "_primus_zero1_patched", False):
         return True
 
-    _orig_build_optimizer = train_mod._build_optimizer
+    _orig_build = OptimizerConfig.build
 
-    def _build_optimizer_zero1(trainable_params, optimizer_cfg, learning_rate, is_peft: bool = False):
-        params = list(trainable_params)
-        base = _orig_build_optimizer(params, optimizer_cfg, learning_rate, is_peft=is_peft)
+    def _build_zero1(self, model, *, device_mesh=None, is_peft: bool = False):
+        optimizers = _orig_build(self, model, device_mesh=device_mesh, is_peft=is_peft)
         if not is_zero1_enabled():
-            return base
-        if _params_are_dtensor(params):
-            logger.warning(
-                "[PrimusIdeogramZeRO1] PRIMUS_IDEOGRAM_ZERO1 set but params are DTensor (FSDP2 mode); "
-                "ZeRO-1 only applies to replicated/DDP params -> keeping the plain (FSDP-sharded) optimizer."
-            )
-            return base
+            return optimizers
+        return [_wrap_in_zero1(opt) for opt in optimizers]
 
-        import torch.distributed as dist
-        from torch.distributed.optim import ZeroRedundancyOptimizer
-
-        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
-            logger.warning("[PrimusIdeogramZeRO1] no >1-rank process group; keeping the plain optimizer.")
-            return base
-
-        optimizer_cls = type(base)
-        # base.defaults holds the per-group defaults, but it can contain keys that are
-        # NOT accepted by the optimizer's __init__ (e.g. AdamW stores decoupled_weight_decay
-        # -- set internally by its Adam parent -- yet AdamW.__init__ doesn't take it). ZeRO
-        # forwards these to reconstruct per-rank optimizers, so filter to the ctor signature.
-        defaults = dict(base.defaults)
-        defaults.pop("lr", None)  # passed explicitly below
-        try:
-            _sig = inspect.signature(optimizer_cls.__init__)
-            _has_varkw = any(p.kind == p.VAR_KEYWORD for p in _sig.parameters.values())
-            if not _has_varkw:
-                _accepted = set(_sig.parameters)
-                _dropped = [k for k in defaults if k not in _accepted]
-                for k in _dropped:
-                    defaults.pop(k, None)
-                if _dropped:
-                    logger.info(
-                        "[PrimusIdeogramZeRO1] dropped non-ctor optimizer defaults %s for %s",
-                        _dropped,
-                        optimizer_cls.__name__,
-                    )
-        except (ValueError, TypeError):
-            pass  # signature unavailable (C-impl); pass defaults through unchanged
-        try:
-            zro = ZeroRedundancyOptimizer(
-                params,
-                optimizer_class=optimizer_cls,
-                lr=learning_rate,
-                overlap_with_ddp=False,
-                **defaults,
-            )
-        except Exception as e:  # fall back rather than break the run
-            logger.error("[PrimusIdeogramZeRO1] ZeroRedundancyOptimizer build failed (%s); using plain optimizer.", e)
-            return base
-        logger.info(
-            "[PrimusIdeogramZeRO1] wrapped %s in ZeroRedundancyOptimizer over %d ranks "
-            "(optimizer state sharded; params/grads replicated by DDP).",
-            optimizer_cls.__name__,
-            dist.get_world_size(),
-        )
-        return zro
-
-    train_mod._build_optimizer = _build_optimizer_zero1
-    train_mod._primus_zero1_patched = True
+    OptimizerConfig.build = _build_zero1
+    OptimizerConfig._primus_zero1_patched = True
     return True
 
 
