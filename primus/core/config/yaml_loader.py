@@ -139,6 +139,8 @@ def _apply_extends(path: str, cfg: dict):
           - preset1.yaml
           - preset2.yaml
 
+    A lone preset may also be given as a scalar: ``extends: preset1.yaml``.
+
     merge order:
         result = deep_merge(preset1, preset2)
         result = deep_merge(result, current_cfg)
@@ -148,7 +150,14 @@ def _apply_extends(path: str, cfg: dict):
 
     merged = {}
 
-    for ext in cfg["extends"]:
+    extends = cfg["extends"]
+    # A single preset may be written as a scalar. Without this, iterating the
+    # string walks it character by character and reports a missing file named
+    # after its first letter.
+    if isinstance(extends, str):
+        extends = [extends]
+
+    for ext in extends:
         ext_path = os.path.join(os.path.dirname(path), ext)
         ext_cfg = parse_yaml(ext_path)
         merged = deep_merge(merged, ext_cfg)  # later preset overrides earlier

@@ -1,0 +1,79 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Hand-written escape hatch for `tools/ci/check_config_schema.py`.
+#
+# Keep this file small. Primus extension fields are derived automatically from
+# `get_param(ctx, "<path>", ...)` calls in the backend patch packages, from the
+# names the Megatron backend package reads off `args`, and from the Primus
+# dataclasses that extend a backend's config class, so a new patch consuming a
+# new field needs no edit here. Only keys that no automatic source can see
+# belong below.
+#
+# Every entry requires:
+#   key      - exact dotted path, or an fnmatch pattern (e.g. `model.*`)
+#   reason   - why the key is legal even though upstream does not define it
+#   consumer - the file that actually reads it (a reviewer must be able to
+#              confirm the key is not dead). Give a path with no line number:
+#              the check verifies the file exists and still mentions the key,
+#              which survives refactoring, whereas a line number does not.
+
+common:
+  - key: work_group
+    reason: Primus experiment envelope, never forwarded to the backend.
+    consumer: primus/core/launcher/parser.py
+  - key: user_name
+    reason: Primus experiment envelope, never forwarded to the backend.
+    consumer: primus/core/launcher/parser.py
+  - key: exp_name
+    reason: Primus experiment envelope, never forwarded to the backend.
+    consumer: primus/core/launcher/parser.py
+  - key: workspace
+    reason: Primus experiment envelope, never forwarded to the backend.
+    consumer: primus/core/launcher/parser.py
+  - key: platform
+    reason: Selects the platform preset and its overrides.
+    consumer: primus/core/launcher/parser.py
+  - key: extends
+    reason: Preset composition directive, consumed and stripped while loading.
+    consumer: primus/core/config/yaml_loader.py
+  - key: trainable
+    reason: Primus module flag declared by primus/configs/modules/module_base.yaml.
+    consumer: primus/core/base_module.py
+  - key: sink_level
+    reason: Primus logging level, declared by primus/configs/modules/module_base.yaml.
+    consumer: primus/core/base_module.py
+  - key: file_sink_level
+    reason: Primus logging level, declared by primus/configs/modules/module_base.yaml.
+    consumer: primus/core/base_module.py
+  - key: stderr_sink_level
+    reason: Primus logging level, declared by primus/configs/modules/module_base.yaml.
+    consumer: primus/core/base_module.py
+
+torchtitan:
+  - key: model.*
+    reason: >-
+      Everything under `model` that is not a JobConfig.Model field is a model-arg
+      override, validated at runtime against the flavor dataclass (an unknown
+      name raises AttributeError there, so it cannot fail silently).
+    consumer: primus/backends/torchtitan/patches/model_override_patches.py
+
+maxtext:
+  - key: base_config
+    reason: pyconfig directive naming the MaxText base config to inherit from; not a field of base.yml itself.
+    consumer: third_party/maxtext/src/maxtext/configs/pyconfig.py
+
+megatron:
+  - key: configs
+    reason: >-
+      Top-level section of a TE-precision quantization recipe, which Megatron
+      loads from a file named by `te_precision_config_file` rather than from a
+      module preset. Such a recipe is not a Primus config and has its own schema.
+    consumer: third_party/Megatron-LM/megatron/core/quantization/quant_config.py
+  - key: matchers
+    reason: >-
+      Top-level section of a TE-precision quantization recipe (see `configs`).
+    consumer: third_party/Megatron-LM/megatron/core/quantization/quant_config.py
