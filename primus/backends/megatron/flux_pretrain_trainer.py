@@ -14,6 +14,7 @@ This trainer implements Flux-specific training logic including:
 """
 
 import json
+import logging
 import os
 from collections import Counter
 
@@ -29,6 +30,8 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
     create_timestep_sampler,
 )
 from primus.core.utils.module_utils import log_rank_0
+
+logger = logging.getLogger(__name__)
 
 PRECISION_LINEAR_CLASSES = (
     "MXFP4ColumnParallelLinear",
@@ -61,10 +64,10 @@ def _emit_precision_linear_class_census(model) -> None:
         "data_parallel_rank": parallel_state.get_data_parallel_rank(),
         "classes": counts,
     }
-    print(
-        "PRIMUS_LINEAR_CLASS_CENSUS=" + json.dumps(payload, sort_keys=True),
-        flush=True,
-    )
+    # Emit through logging, not print: the launcher pipes the training process
+    # through a filter that drops fd 1, so a bare print never reaches the run
+    # log and the audit silently reports zero markers.
+    logger.info("PRIMUS_LINEAR_CLASS_CENSUS=%s", json.dumps(payload, sort_keys=True))
 
 
 def _restore_chimera_rng_state(args) -> None:

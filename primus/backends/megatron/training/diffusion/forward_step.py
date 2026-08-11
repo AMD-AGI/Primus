@@ -75,10 +75,10 @@ def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool =
         "sample_count": sample_count,
         "sample_keys_sha256": fingerprint,
     }
-    print(
-        "PRIMUS_BATCH_FINGERPRINT=" + json.dumps(payload, sort_keys=True),
-        flush=True,
-    )
+    # Emit through logging, not print: the launcher pipes the training process
+    # through a filter that drops fd 1, so a bare print never reaches the run
+    # log and the audit silently reports zero markers.
+    logger.info("PRIMUS_BATCH_FINGERPRINT=%s", json.dumps(payload, sort_keys=True))
 
 
 def prepare_flux_latents(
