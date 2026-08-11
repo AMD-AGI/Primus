@@ -5,18 +5,24 @@
 ###############################################################################
 
 """
-Dataset preparation subcommands for Megatron backend diffusion training.
-
-Provides tools to prepare datasets in Energon WebDataset format specifically
-for diffusion models using the Megatron backend.
+Dataset preparation subcommands for diffusion training.
 
 Commands:
     primus data diffusion-raw      - Prepare raw Energon WebDataset
     primus data diffusion-encoded  - Prepare pre-encoded Energon WebDataset
     primus data diffusion-ingest   - Stream pre-encoded Arrow data into WebDataset
+    primus data automodel-cache    - Prepare a pre-encoded AutoModel flat cache
 
-Supports torch.distributed for multi-GPU processing:
+The three ``diffusion-*`` commands target the **Megatron** backend and output
+Energon WebDataset shards. They support torch.distributed for multi-GPU
+processing:
+
     torchrun --nproc_per_node=8 primus data diffusion-raw ...
+
+``automodel-cache`` targets the **NeMo AutoModel** backend, whose diffusion
+recipe reads a flat per-sample cache instead. It is a single-GPU offline step and
+is kept as a sibling rather than a mode of the commands above, because the two
+pipelines share no format and no code path.
 """
 
 import argparse
@@ -697,6 +703,50 @@ def _prepare_ingest(args):
     logger.info("=" * 80)
 
 
+def _prepare_automodel_cache(args):
+    """Build an offline pre-encoded cache for an AutoModel diffusion model."""
+    from primus.backends.nemo_automodel.data.registry import get_cache_builder
+
+    build_cache = get_cache_builder(args.model)
+
+    logger.info("=" * 80)
+    logger.info(f"AutoModel Diffusion: offline cache for '{args.model}'")
+    logger.info("=" * 80)
+
+    kwargs = dict(
+        image_dir=args.image_dir,
+        caption_dir=args.caption_dir,
+        output_dir=args.output_dir,
+        num_samples=args.num_samples,
+        resolution=args.resolution,
+        max_text_tokens=args.max_text_tokens,
+        tokenizer_source=args.tokenizer_source,
+        device=args.device,
+        dtype=args.dtype,
+        seed=args.seed,
+        shuffle=args.shuffle,
+    )
+    # Unset encoder sources mean "whatever this model defaults to", so leave them
+    # out rather than passing None over the builder's own default.
+    for name in ("vae_source", "text_encoder_source"):
+        value = getattr(args, name)
+        if value is not None:
+            kwargs[name] = value
+
+    metadata = build_cache(**kwargs)
+
+    logger.info("=" * 80)
+    logger.info("Cache complete!")
+    logger.info(f"  Output:  {args.output_dir}")
+    logger.info(f"  Samples: {metadata['num_samples']}")
+    logger.info(
+        f"  Latents: {metadata['in_channels']}x{metadata['grid_h']}x{metadata['grid_w']}"
+        f"  Text features: {metadata['llm_features_dim']}-d"
+    )
+    logger.info("Point the training config's data.dataloader.cache_dir at this directory.")
+    logger.info("=" * 80)
+
+
 def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """
     Register 'primus data' subcommand for Megatron diffusion dataset preparation.
@@ -706,15 +756,16 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
     """
     parser = subparsers.add_parser(
         "data",
-        help="Dataset preparation tools (Megatron diffusion, Energon format)",
+        help="Dataset preparation tools for diffusion training",
         description=(
-            "Data preparation utilities for Megatron-backend diffusion models.\n"
-            "Creates datasets in Energon WebDataset format.\n\n"
-            "Supported modes:\n"
+            "Data preparation utilities for diffusion training.\n\n"
+            "Megatron backend (Energon WebDataset format):\n"
             "  - diffusion-raw: Raw WebDataset (smaller, on-the-fly encoding)\n"
             "  - diffusion-encoded: Pre-encoded WebDataset (larger, faster training)\n"
             "  - diffusion-ingest: Stream pre-encoded Arrow data into WebDataset\n\n"
-            "Multi-GPU support via torch.distributed:\n"
+            "NeMo AutoModel backend (flat per-sample cache):\n"
+            "  - automodel-cache: Pre-encode images + captions for the diffusion recipe\n\n"
+            "Multi-GPU support via torch.distributed (diffusion-* only):\n"
             "  torchrun --nproc_per_node=8 primus data diffusion-raw ...\n"
             "  torchrun --nproc_per_node=8 primus data diffusion-encoded ..."
         ),
@@ -943,6 +994,97 @@ def register_subcommand(subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
 
     ingest_parser.set_defaults(func=lambda args, unknown: _prepare_ingest(args))
+
+    # ===== primus data automodel-cache =====
+    # Sibling of the diffusion-* commands above, not an extension of them: those
+    # produce Energon WebDataset shards for the Megatron backend, this produces the
+    # flat per-sample cache the AutoModel diffusion recipe reads.
+    from primus.backends.nemo_automodel.data.registry import available_models
+
+    automodel_models = available_models()
+    cache_parser = data_subparsers.add_parser(
+        "automodel-cache",
+        help="Prepare a pre-encoded cache for AutoModel diffusion training",
+        description=(
+            "Build the offline pre-encoded cache for an AutoModel diffusion model.\n\n"
+            "The VAE and text encoder run once here, so training needs neither their\n"
+            "weights nor their memory. Output is a flat per-sample cache:\n"
+            "  <output-dir>/metadata.json    index + grid/feature dims\n"
+            "  <output-dir>/samples/<i>.pt   one encoded sample each\n\n"
+            "This is a single-GPU offline step and needs access to the (often gated)\n"
+            "encoder weights; set HF_TOKEN and point HF_HOME at persistent storage.\n\n"
+            "Selection is deterministic: images are taken in sorted order, so the same\n"
+            "source and arguments reproduce the same cache. Use --shuffle to opt out.\n\n"
+            f"Supported models: {', '.join(automodel_models)}\n\n"
+            "Example:\n"
+            "  primus data automodel-cache --model ideogram4 \\\n"
+            "    --image-dir   /dataset/pseudo-camera-10k/train \\\n"
+            "    --caption-dir /dataset/pseudo-camera-10k/caption \\\n"
+            "    --output-dir  /dataset/pcam_ideogram4_256 \\\n"
+            "    --num-samples 1024 --resolution 256 --max-text-tokens 128\n\n"
+            "Then point the training config's data.dataloader.cache_dir at --output-dir."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cache_parser.add_argument(
+        "--model",
+        required=True,
+        choices=automodel_models,
+        help="Model whose cache format to build",
+    )
+
+    cache_source = cache_parser.add_argument_group("Source Configuration")
+    cache_source.add_argument("--image-dir", required=True, help="Directory of source images")
+    cache_source.add_argument(
+        "--caption-dir",
+        required=True,
+        help="Directory of captions, one <image stem>.txt per image",
+    )
+    cache_source.add_argument("--output-dir", required=True, help="Cache output directory")
+    cache_source.add_argument(
+        "--num-samples", type=int, default=1024, help="Samples to encode (default: 1024)"
+    )
+    cache_source.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle source order (seeded) before selecting; default is sorted order",
+    )
+    cache_source.add_argument("--seed", type=int, default=1234, help="Shuffle seed (default: 1234)")
+
+    cache_encode = cache_parser.add_argument_group("Encoding Options")
+    cache_encode.add_argument(
+        "--resolution", type=int, default=256, help="Square image resolution (default: 256)"
+    )
+    cache_encode.add_argument(
+        "--max-text-tokens",
+        type=int,
+        default=128,
+        help="Caption token budget; longer captions are skipped, not truncated (default: 128)",
+    )
+    cache_encode.add_argument(
+        "--dtype",
+        choices=["bf16", "fp16", "fp32"],
+        default="bf16",
+        help="Encoder compute dtype (default: bf16)",
+    )
+    cache_encode.add_argument("--device", default="cuda", help="Encoder device (default: cuda)")
+
+    cache_encoders = cache_parser.add_argument_group("Encoder Sources")
+    cache_encoders.add_argument(
+        "--vae-source", default=None, help="VAE repo or local path (default: the model's own)"
+    )
+    cache_encoders.add_argument(
+        "--text-encoder-source",
+        default=None,
+        help="Text-encoder repo or local path (default: the model's own)",
+    )
+    cache_encoders.add_argument(
+        "--tokenizer-source",
+        default=None,
+        help="Tokenizer repo or local path (default: alongside the text encoder)",
+    )
+
+    cache_parser.set_defaults(func=lambda args, unknown: _prepare_automodel_cache(args))
 
     # Set default for parent parser (required by CLI framework, but never called due to required=True on subparsers)
     parser.set_defaults(func=lambda args, unknown: None)
