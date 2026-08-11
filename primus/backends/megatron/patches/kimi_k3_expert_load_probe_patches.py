@@ -137,7 +137,12 @@ def patch_expert_load_probe(ctx: PatchContext):
             # Line-buffered: a killed run still leaves every completed step on
             # disk. This whole project has lost work to that failure mode.
             state["handle"] = open(path, "a", buffering=1)
-        state["handle"].write(json.dumps(record) + "\n")
+        try:
+            state["handle"].write(json.dumps(record) + "\n")
+            state["handle"].flush()
+        except Exception:
+            _close_handle()
+            raise
 
     @torch.no_grad()
     def _measure(config, model) -> None:
