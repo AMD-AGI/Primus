@@ -20,6 +20,7 @@ Self-removal restores the inner chain intact.
 """
 
 import logging
+import os
 
 import torch
 import torch.distributed
@@ -313,19 +314,45 @@ def patch_mlperf_warmup(ctx: PatchContext):
         saved_lr_num_steps = opt_param_scheduler.num_steps
 
         # ---- 4. Run warmup steps with synthetic data ----
-        for step_idx in range(warmup_steps):
-            _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
-            _wrapped_chain(
-                forward_step_func,
-                synthetic_iter,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                config,
-                forward_backward_func,
-                iteration=iteration,
-            )
+        previous_warmup_marker = os.environ.get(
+            "PRIMUS_SYNTHETIC_WARMUP_ACTIVE"
+        )
+        os.environ["PRIMUS_SYNTHETIC_WARMUP_ACTIVE"] = "1"
+        try:
+            for step_idx in range(warmup_steps):
+                _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
+                _wrapped_chain(
+                    forward_step_func,
+                    synthetic_iter,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    config,
+                    forward_backward_func,
+                    iteration=iteration,
+                )
+        finally:
+            if previous_warmup_marker is None:
+                os.environ.pop("PRIMUS_SYNTHETIC_WARMUP_ACTIVE", None)
+            else:
+                os.environ["PRIMUS_SYNTHETIC_WARMUP_ACTIVE"] = (
+                    previous_warmup_marker
+                )
         _log(f"Completed {warmup_steps} warmup steps")
+
+        reset_forward_counter = getattr(
+            forward_step_func,
+            "_primus_reset_forward_step_count",
+            None,
+        )
+        if callable(reset_forward_counter):
+            reset_forward_counter(0)
+            _log("Reset diffusion forward-step RNG counter after warmup")
+        elif os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") == "1":
+            raise RuntimeError(
+                "Batch continuity audit requires a forward-step counter reset "
+                "after synthetic warmup"
+            )
 
         # ---- 5. Restore optimizer ----
         _restore_optimizer(optimizer, saved_opt)

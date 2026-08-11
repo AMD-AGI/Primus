@@ -17,7 +17,9 @@ Supported data formats (framework-standard keys):
 Architecture follows functional composition for clarity and testability.
 """
 
+import json
 import logging
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -36,6 +38,47 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_batch_fingerprint(batch: dict, step_count: int) -> None:
+    """Emit a rank-local sample-key digest for explicit continuity audits."""
+    if os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") != "1":
+        return
+    if os.getenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE") == "1":
+        return
+
+    fingerprint = batch.get("_audit_sample_key_sha256")
+    sample_count = batch.get("_audit_sample_count")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+        or not isinstance(sample_count, int)
+        or sample_count <= 0
+    ):
+        raise RuntimeError(
+            "Batch-fingerprint audit was requested but the Energon batch has no "
+            "valid sample-key fingerprint"
+        )
+
+    from megatron.core import parallel_state
+
+    global_rank = (
+        torch.distributed.get_rank()
+        if torch.distributed.is_initialized()
+        else int(os.getenv("RANK", "-1"))
+    )
+    payload = {
+        "global_rank": global_rank,
+        "data_parallel_rank": parallel_state.get_data_parallel_rank(),
+        "step": int(step_count),
+        "sample_count": sample_count,
+        "sample_keys_sha256": fingerprint,
+    }
+    print(
+        "PRIMUS_BATCH_FINGERPRINT=" + json.dumps(payload, sort_keys=True),
+        flush=True,
+    )
 
 
 def prepare_flux_latents(
@@ -384,6 +427,9 @@ def flux_forward_step_func(
             prompt_embeds = prompt_embeds.cuda(non_blocking=True)
         if not pooled_prompt_embeds.is_cuda:
             pooled_prompt_embeds = pooled_prompt_embeds.cuda(non_blocking=True)
+
+    if batch is not None:
+        _emit_batch_fingerprint(batch, step_count)
 
     # Obtain latents based on vae_latent_mode
     if vae_latent_mode == "resample":
