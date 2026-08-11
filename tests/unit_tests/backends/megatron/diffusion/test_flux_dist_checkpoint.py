@@ -7,10 +7,6 @@ import pytest
 import torch
 from megatron.core.dist_checkpointing import load, save
 
-from tests.utils import skip_if_no_cuda
-
-skip_if_no_cuda()
-
 from primus.backends.megatron.core.models.diffusion.flux.config import FluxConfig
 from primus.backends.megatron.core.models.diffusion.flux.model import Flux
 from tests.utils import PrimusUT
@@ -34,6 +30,11 @@ def _tiny_flux_config() -> FluxConfig:
     )
 
 
+def _runtime_device() -> torch.device:
+    """Use CUDA when available, otherwise run on CPU for CI coverage."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class TestFluxDistCheckpoint(PrimusUT):
     """Verify that joint and single blocks have independent checkpoint schemas."""
 
@@ -43,7 +44,7 @@ class TestFluxDistCheckpoint(PrimusUT):
 
     def test_adaln_uses_distinct_per_layer_sharded_keys(self):
         """The 6-chunk and 3-chunk adaLN weights must not share a global key."""
-        model = Flux(_tiny_flux_config()).cuda()
+        model = Flux(_tiny_flux_config()).to(_runtime_device())
         sharded_state_dict = model.sharded_state_dict()
 
         double_local_key = "transformer.layers.0.adaln.adaLN_modulation.1.weight"
@@ -61,7 +62,7 @@ class TestFluxDistCheckpoint(PrimusUT):
 
     def test_torch_dist_save_load_round_trip(self, tmp_path):
         """Save and restore both adaLN shapes through the real torch_dist backend."""
-        source = Flux(_tiny_flux_config()).cuda()
+        source = Flux(_tiny_flux_config()).to(_runtime_device())
         double_weight = source.transformer.layers[0].adaln.adaLN_modulation[-1].weight
         single_weight = source.transformer.layers[1].adaln.adaLN_modulation[-1].weight
         with torch.no_grad():
@@ -72,7 +73,7 @@ class TestFluxDistCheckpoint(PrimusUT):
         checkpoint_dir.mkdir()
         save({"model": source.sharded_state_dict()}, checkpoint_dir)
 
-        target = Flux(_tiny_flux_config()).cuda()
+        target = Flux(_tiny_flux_config()).to(_runtime_device())
         loaded = load({"model": target.sharded_state_dict()}, checkpoint_dir)
         target.load_state_dict(loaded["model"])
 

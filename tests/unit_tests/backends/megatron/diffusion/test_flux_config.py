@@ -9,10 +9,6 @@ Tests FluxConfig and BaseDiffusionConfig validation, preset configurations.
 
 import pytest
 
-from tests.utils import skip_if_no_cuda
-
-skip_if_no_cuda()
-
 from primus.backends.megatron.core.models.diffusion.common import BaseDiffusionConfig
 from primus.backends.megatron.core.models.diffusion.flux.config import FluxConfig
 from tests.utils import PrimusUT
