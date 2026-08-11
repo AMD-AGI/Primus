@@ -33,13 +33,12 @@ INFO="${CYAN}ℹ${RESET}"
 PRIMUS_ROOT="/workspace/Primus"
 MEGATRON_BASE_DIR="${PRIMUS_ROOT}/examples/megatron/configs"
 TORCHTITAN_BASE_DIR="${PRIMUS_ROOT}/examples/torchtitan/configs"
-RUN_SCRIPT="${PRIMUS_ROOT}/examples/run_pretrain.sh"
+PRIMUS_CLI="${PRIMUS_ROOT}/runner/primus-cli"
 VALID_DEVICES=(MI300X MI325X MI355X)
 
-# Check if run_pretrain.sh exists, otherwise try run_pretrain_1.sh
-if [[ ! -f "$RUN_SCRIPT" && -f "${PRIMUS_ROOT}/examples/run_pretrain_1.sh" ]]; then
-    RUN_SCRIPT="${PRIMUS_ROOT}/examples/run_pretrain_1.sh"
-    echo "[DEBUG] Using run_pretrain_1.sh instead"
+if [[ ! -x "$PRIMUS_CLI" && ! -f "$PRIMUS_CLI" ]]; then
+    echo "[ERROR] primus-cli not found at $PRIMUS_CLI" >&2
+    exit 1
 fi
 
 # ------------------------------------------
@@ -193,7 +192,7 @@ execute_benchmark_run() {
     cd "$PRIMUS_ROOT" || return 1
 
     set +e
-    bash "$RUN_SCRIPT" 2>&1 | tee "$log_file" || true
+    bash "$PRIMUS_CLI" direct -- train pretrain --config "$EXP" 2>&1 | tee "$log_file" || true
     run_exit_code=$?
     set +e
 

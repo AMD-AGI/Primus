@@ -201,7 +201,7 @@ class FLAFlashAttention(MegatronModule):
             )
             # Megatron silently consumes plain `print()` from rank-non-zero
             # workers (and sometimes from rank-0 once its logger is set up),
-            # so emit to stderr -- which the run_pretrain.sh tee pipeline
+            # so emit to stderr -- which the primus-cli tee pipeline
             # still captures -- AND drop a marker file so activation is
             # provable even if all stdio gets eaten.
             print(_msg, file=sys.stderr, flush=True)

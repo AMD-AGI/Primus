@@ -71,4 +71,4 @@ if [ ! -d "${PRIMUS_FLA_CACHE_DIR}" ]; then
     echo "         shuffler, and you'll see the +0.02 late-training loss gap reappear."
 fi
 
-EXP="${EXP}" bash examples/run_pretrain.sh 2>&1 | tee "${LOG}"
+bash ./runner/primus-cli direct -- train pretrain --config "${EXP}" 2>&1 | tee "${LOG}"
