@@ -919,7 +919,6 @@ def _make_k3_num_floating_point_operations(original_fn):
         return total_flops
 
     wrapped.__wrapped__ = original_fn
-    wrapped._k3_flops_patched = True
     return wrapped
 
 
@@ -948,12 +947,6 @@ def patch_k3_flops_reporting(ctx: PatchContext):
     import megatron.training.training as training_module
 
     original_fn = training_module.num_floating_point_operations
-    if getattr(original_fn, "_k3_flops_patched", False):
-        log_rank_0(
-            "[Patch:megatron.kimi_k3.flops_reporting] " "num_floating_point_operations already patched, skip"
-        )
-        return
-
     training_module.num_floating_point_operations = _make_k3_num_floating_point_operations(original_fn)
     log_rank_0(
         "[Patch:megatron.kimi_k3.flops_reporting] wrapped "

@@ -30,7 +30,7 @@ one-key config change.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import error_rank_0, log_rank_0
 
 
 def _wants_quantile_balancing(ctx: PatchContext) -> bool:
@@ -89,7 +89,7 @@ def patch_quantile_balancing(ctx: PatchContext):
             # then behave exactly as before the patch.
             if not state["warned"]:
                 state["warned"] = True
-                log_rank_0(
+                error_rank_0(
                     "[Patch:megatron.kimi_k3.quantile_balancing]   ERROR: "
                     "moe_router_bias_update_rule=quantile but no router exposes a "
                     "local_margin_histogram buffer. The MoE spec is not using the "

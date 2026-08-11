@@ -121,7 +121,6 @@ def _make_k3_get_tensor_shapes(original_fn, seq_mult: int):
         return [(s * seq_mult, b, h) for (s, b, h) in shapes]
 
     patched_get_tensor_shapes.__wrapped__ = original_fn
-    patched_get_tensor_shapes._k3_pp_shape_patched = True
     patched_get_tensor_shapes._k3_pp_seq_mult = seq_mult
     return patched_get_tensor_shapes
 
@@ -149,7 +148,6 @@ def _make_k3_interleaved_schedule(original_fn, seq_mult: int):
         return original_fn(*args, **kwargs)
 
     patched_schedule.__wrapped__ = original_fn
-    patched_schedule._k3_pp_interleaved_patched = True
     return patched_schedule
 
 
@@ -204,27 +202,21 @@ def patch_kimi_k3_pp_tensor_shape(ctx: PatchContext):
     # Primus's --pp-warmup helper, which imports the symbol inside its own
     # function body (pp_warmup_patches.py) and so sees the wrapper).
     original_get_tensor_shapes = schedules_module.get_tensor_shapes
-    if getattr(original_get_tensor_shapes, "_k3_pp_shape_patched", False):
-        log_rank_0("[Patch:megatron.kimi_k3.pp_tensor_shape] get_tensor_shapes already patched, skip")
-    else:
-        schedules_module.get_tensor_shapes = _make_k3_get_tensor_shapes(original_get_tensor_shapes, seq_mult)
-        log_rank_0(
-            f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped get_tensor_shapes; "
-            f"PP wire seq_len * (1 + attn_res_num_blocks_max) = {seq_mult} "
-            f"(num_layers={getattr(args, 'num_layers', None)}, "
-            f"attn_res_block_size={getattr(args, 'attn_res_block_size', None)})."
-        )
+    schedules_module.get_tensor_shapes = _make_k3_get_tensor_shapes(original_get_tensor_shapes, seq_mult)
+    log_rank_0(
+        f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped get_tensor_shapes; "
+        f"PP wire seq_len * (1 + attn_res_num_blocks_max) = {seq_mult} "
+        f"(num_layers={getattr(args, 'num_layers', None)}, "
+        f"attn_res_block_size={getattr(args, 'attn_res_block_size', None)})."
+    )
 
     # Wrapper 2: forward_backward_pipelining_with_interleaving (VPP).
     original_interleaved = schedules_module.forward_backward_pipelining_with_interleaving
-    if getattr(original_interleaved, "_k3_pp_interleaved_patched", False):
-        log_rank_0("[Patch:megatron.kimi_k3.pp_tensor_shape] interleaved schedule already patched, skip")
-    else:
-        schedules_module.forward_backward_pipelining_with_interleaving = _make_k3_interleaved_schedule(
-            original_interleaved, seq_mult
-        )
-        log_rank_0(
-            f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped "
-            f"forward_backward_pipelining_with_interleaving; seq_length * {seq_mult} on the "
-            "way into the interleaved-1F1B / VPP schedule."
-        )
+    schedules_module.forward_backward_pipelining_with_interleaving = _make_k3_interleaved_schedule(
+        original_interleaved, seq_mult
+    )
+    log_rank_0(
+        f"[Patch:megatron.kimi_k3.pp_tensor_shape] wrapped "
+        f"forward_backward_pipelining_with_interleaving; seq_length * {seq_mult} on the "
+        "way into the interleaved-1F1B / VPP schedule."
+    )

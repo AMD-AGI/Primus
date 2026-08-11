@@ -110,41 +110,35 @@ def patch_per_head_muon(ctx: PatchContext):
         )
 
     # ---- 1. the orthogonalize override --------------------------------------
-    if not getattr(TensorParallelMuon.orthogonalize, "_primus_per_head_wrapped", False):
-        TensorParallelMuon.orthogonalize = make_per_head_orthogonalize(
-            TensorParallelMuon.orthogonalize, per_head_config
-        )
-        log_rank_0(f"{_LOG_PREFIX} wrapped TensorParallelMuon.orthogonalize")
+    TensorParallelMuon.orthogonalize = make_per_head_orthogonalize(
+        TensorParallelMuon.orthogonalize, per_head_config
+    )
+    log_rank_0(f"{_LOG_PREFIX} wrapped TensorParallelMuon.orthogonalize")
 
     # ---- 2. record the Newton-Schulz kwargs on each instance ----------------
-    if not getattr(TensorParallelMuon.__init__, "_primus_per_head_wrapped", False):
-        import inspect
+    import inspect
 
-        original_init = TensorParallelMuon.__init__
-        init_signature = inspect.signature(original_init)
+    original_init = TensorParallelMuon.__init__
+    init_signature = inspect.signature(original_init)
 
-        def patched_init(self, *init_args, **init_kwargs):
-            original_init(self, *init_args, **init_kwargs)
-            # bind_partial + apply_defaults so a positional call or an omitted kwarg
-            # still yields the same value the closure in muon.py captured.
-            bound = init_signature.bind_partial(self, *init_args, **init_kwargs)
-            bound.apply_defaults()
-            self._primus_muon_ns_kwargs = {
-                "steps": bound.arguments.get("num_ns_steps", 5),
-                "coefficient_type": bound.arguments.get("coefficient_type", "quintic"),
-                "scale_mode": bound.arguments.get("scale_mode", "spectral"),
-                "extra_scale_factor": bound.arguments.get("extra_scale_factor", 1.0),
-            }
+    def patched_init(self, *init_args, **init_kwargs):
+        original_init(self, *init_args, **init_kwargs)
+        # bind_partial + apply_defaults so a positional call or an omitted kwarg
+        # still yields the same value the closure in muon.py captured.
+        bound = init_signature.bind_partial(self, *init_args, **init_kwargs)
+        bound.apply_defaults()
+        self._primus_muon_ns_kwargs = {
+            "steps": bound.arguments.get("num_ns_steps", 5),
+            "coefficient_type": bound.arguments.get("coefficient_type", "quintic"),
+            "scale_mode": bound.arguments.get("scale_mode", "spectral"),
+            "extra_scale_factor": bound.arguments.get("extra_scale_factor", 1.0),
+        }
 
-        patched_init._primus_per_head_wrapped = True
-        patched_init._primus_original = original_init
-        TensorParallelMuon.__init__ = patched_init
+    patched_init._primus_original = original_init
+    TensorParallelMuon.__init__ = patched_init
 
     # ---- 3. tag the parameters around the factory ---------------------------
     original_factory = muon_module.get_megatron_muon_optimizer
-    if getattr(original_factory, "_primus_per_head_wrapped", False):
-        log_rank_0(f"{_LOG_PREFIX} already installed; nothing to do")
-        return
 
     def patched_get_megatron_muon_optimizer(config, model_chunks, *f_args, **f_kwargs):
         total_selected = 0
@@ -194,7 +188,6 @@ def patch_per_head_muon(ctx: PatchContext):
             )
         return optimizer
 
-    patched_get_megatron_muon_optimizer._primus_per_head_wrapped = True
     patched_get_megatron_muon_optimizer._primus_original = original_factory
 
     patched = 0
