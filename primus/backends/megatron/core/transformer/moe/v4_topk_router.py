@@ -59,6 +59,7 @@ callers should use :class:`DeepseekV4LearnedRouter`.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, Tuple
 
 import torch
@@ -71,6 +72,13 @@ from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
     v4_router_post_triton,
 )
+from primus.backends.megatron.core.transformer.moe.v4_seq_balance_loss import (
+    log_seq_balance_loss,
+    normalise_affinities,
+    sequence_balance_loss,
+)
+
+logger = logging.getLogger(__name__)
 
 _VALID_SCORE_FUNCTIONS = {"softmax", "sigmoid", "sqrtsoftplus"}
 
@@ -189,6 +197,14 @@ class DeepseekV4LearnedRouter(nn.Module):
             HF reference ``Gate.route_scale``). Defaults to ``1.0``.
         dtype: dtype of the gate weight; defaults to fp32 (matches HF
             reference; the routing math runs in fp32 regardless).
+        seq_balance_loss_coeff: coefficient of the sequence-wise balance loss
+            (paper 2.1). ``0`` disables it. The caller is responsible for
+            checking ``moe_router_load_balancing_type``, so this single number
+            fully decides whether the loss runs.
+        seq_balance_reduce_group: group the sequence axis is sharded over, or
+            ``None`` when each rank holds whole sequences.
+        layer_number: 1-based layer index, and ``num_layers`` the total, both
+            only used to report the loss. Reporting is skipped without them.
     """
 
     def __init__(
@@ -201,6 +217,10 @@ class DeepseekV4LearnedRouter(nn.Module):
         enable_expert_bias: bool = False,
         topk_scaling_factor: float = 1.0,
         dtype: Optional[torch.dtype] = None,
+        seq_balance_loss_coeff: float = 0.0,
+        seq_balance_reduce_group: Optional["torch.distributed.ProcessGroup"] = None,
+        layer_number: Optional[int] = None,
+        num_layers: Optional[int] = None,
     ) -> None:
         super().__init__()
         if num_experts <= 0:
@@ -218,6 +238,13 @@ class DeepseekV4LearnedRouter(nn.Module):
         self.topk = int(topk)
         self.score_function = str(score_function)
         self.topk_scaling_factor = float(topk_scaling_factor)
+        self.seq_balance_loss_coeff = float(seq_balance_loss_coeff or 0.0)
+        # Held by reference so the group is not treated as module state.
+        self._seq_balance_reduce_group = seq_balance_reduce_group
+        self.layer_number = layer_number
+        self.num_layers = num_layers
+        # Last computed value (detached), for tests and ad-hoc inspection.
+        self.last_seq_balance_loss: Optional[torch.Tensor] = None
 
         weight_dtype = dtype or torch.float32
         # Gate weight: [num_experts, hidden_size] (matches Megatron TopKRouter
@@ -232,6 +259,52 @@ class DeepseekV4LearnedRouter(nn.Module):
             self.register_parameter("expert_bias", None)
 
     # ------------------------------------------------------------------
+
+    @property
+    def seq_balance_loss_enabled(self) -> bool:
+        """Whether the sequence-wise balance loss is on for this router."""
+        return self.seq_balance_loss_coeff > 0.0
+
+    def _apply_seq_balance_loss(
+        self,
+        probs: torch.Tensor,
+        logits: torch.Tensor,
+        routing_map: torch.Tensor,
+        *,
+        batch_size: int,
+        seq_length: int,
+    ) -> torch.Tensor:
+        """Attach the sequence-wise balance loss to ``probs``.
+
+        ``probs`` is returned unchanged in value; the loss rides along in the
+        autograd graph via ``MoEAuxLossAutoScaler``, the same mechanism the
+        framework's own routers use, so the schedule's per-microbatch loss scale
+        applies automatically.
+        """
+        num_experts = logits.shape[-1]
+        # Unbiased, normalised affinities -- the ``s'_{i,t}`` of the paper.
+        affinities = normalise_affinities(v4_score_fn(logits, score_function=self.score_function))
+
+        loss = sequence_balance_loss(
+            scores=affinities.view(batch_size, seq_length, num_experts),
+            routing_map=routing_map.view(batch_size, seq_length, num_experts),
+            topk=self.topk,
+            coeff=self.seq_balance_loss_coeff,
+            reduce_group=self._seq_balance_reduce_group,
+        )
+        self.last_seq_balance_loss = loss.detach()
+
+        if self.num_layers:
+            log_seq_balance_loss(
+                loss,
+                layer_number=self.layer_number,
+                num_layers=int(self.num_layers),
+                reduce_group=self._seq_balance_reduce_group,
+            )
+
+        from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+
+        return MoEAuxLossAutoScaler.apply(probs, loss)
 
     def forward(self, hidden: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Route ``hidden`` to top-K experts.
@@ -251,13 +324,41 @@ class DeepseekV4LearnedRouter(nn.Module):
         # Match HF reference: routing math runs in fp32 regardless of
         # input dtype.
         logits = F.linear(flat.to(torch.float32), self.weight.to(torch.float32))
-        return _compute_route(
+        probs, routing_map = _compute_route(
             logits=logits,
             expert_bias=self.expert_bias,
             score_function=self.score_function,
             topk=self.topk,
             topk_scaling_factor=self.topk_scaling_factor,
         )
+
+        # The balance loss is per-sequence, so it needs the [B, S] structure
+        # that ``flat`` just collapsed. V4 carries activations as [B, S, D]
+        # throughout (not the framework's usual [S, B, D]), so the sequence is
+        # axis -2.
+        if self.seq_balance_loss_enabled and self.training and torch.is_grad_enabled() and hidden.dim() >= 3:
+            seq_length = int(hidden.shape[-2])
+            num_tokens = flat.shape[0]
+            if seq_length > 0 and num_tokens % seq_length == 0:
+                probs = self._apply_seq_balance_loss(
+                    probs,
+                    logits,
+                    routing_map,
+                    batch_size=num_tokens // seq_length,
+                    seq_length=seq_length,
+                )
+            else:
+                # Grouping tokens into the wrong sequences would silently change
+                # what the loss measures, so skip rather than guess.
+                logger.warning(
+                    "[V4-router] skipping the sequence-wise balance loss: %d tokens do not "
+                    "divide into sequences of %d (input shape %s)",
+                    num_tokens,
+                    seq_length,
+                    tuple(hidden.shape),
+                )
+
+        return probs, routing_map
 
 
 # Back-compat alias. New callers should use ``DeepseekV4LearnedRouter``.

@@ -33,6 +33,9 @@ use_turbo_gemm: false
 # ===== Grouped MLP =====
 # use turbo grouped gemm
 use_turbo_grouped_gemm: false
+# let Turbo grouped GEMMs consume non-aligned expert token counts directly,
+# without TE Fp8Padding/Fp8Unpadding
+turbo_grouped_gemm_without_padding: false
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 
@@ -55,3 +58,7 @@ use_turbo_mega_moe: false
 # ===== Layer Norm =====
 # operator switch
 use_turbo_rms_norm: false
+# Route the fused layernorm+QKV site through Turbo's rmsnorm while leaving its
+# GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
+# which costs more than the norm saves on the GPT-OSS-20B shapes.
+use_turbo_norm_te_linear: false

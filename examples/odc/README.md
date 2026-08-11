@@ -11,19 +11,18 @@ This guide distills the experiments into a follow-along, copy-pasteable tutorial
 3. **Prepare offline data** (see "Prerequisites"): stage the HF model/data, set `HF_HOME` + `HF_HUB_OFFLINE=1`.
 4. **Turn on ODC via config** (see "Turning on ODC = changing config items"): the `odc_nopad` arm = `enable_odc:true`+`enable_odc_lb_mini:true`+`odc_p2p_backend:rocshmem`; the `nccl_pad` aligned baseline = `enable_odc:false`+`enable_odc_lb_mini:true`.
 5. **Start training**: for single-node see "Single-node 1.5B `odc_nopad`" (8 GPUs, no RoCE/GDA needed, **newcomers do this first**); once it works, move to dual-node per "Dual-node 14B `odc_nopad`" (16 GPUs, rocSHMEM GDA).
-6. **Validate + compute the speedup** (see "Judging success, reading results, computing the speedup"): confirm from the logs that the three fixes are in effect, loss is decreasing, 0 nan, and `speedup = nccl_pad's ms/iter ÷ odc_nopad's ms/iter`.
+6. **Validate + compute the speedup** (see "Judging success, reading results, computing the speedup"): confirm from the logs that both fixes are in effect, loss is decreasing, 0 nan, and `speedup = nccl_pad's ms/iter ÷ odc_nopad's ms/iter`.
 
 When stuck, first check the "Pitfalls checklist" section below.
 
 > **Important change — ODC is now driven by "config items," no longer by environment variables.** PR [#864](https://github.com/AMD-AGI/Primus/pull/864) (branch `feat/odc-consume-turbo`) changed all production feature switches into Primus yaml config items (`enable_odc`, `odc_phase`, `enable_odc_lb_mini`, `odc_p2p_backend`, `odc_rocshmem_gda`, `odc_gda_*` …), which are no longer read from `os.environ` at runtime. So all commands in this guide are based on "change config item / CLI override"; the legacy `ODC_*` environment variables have been deprecated.
 
-To make ODC **run, run correctly, and run fast** on ROCm, **three fixes are indispensable** (division of labor: **Primus** owns the algorithm layer + integration, pure Python under `primus/core/odc/`; **Primus-Turbo** owns the rocSHMEM comm operators):
+To make ODC **run, run correctly, and run fast** on ROCm, **two fixes are indispensable** (division of labor: **Primus** owns the algorithm layer + integration, pure Python under `primus/core/odc/`; **Primus-Turbo** owns the rocSHMEM comm operators):
 
 - **① Primus-Turbo comm operators (`odc_rocshmem_host` / `odc_rocshmem_gda`).** The body of ODC's P2P communication. The operator source has been merged into [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) official `main` (PR #409, including the `--lto-partitions=1` required by GDA), but is gated by `#ifndef DISABLE_ROCSHMEM` — a plain `pip install @main` **will not build the operators** (`has_gda=False`). You must **build from source, pointing `ROCSHMEM_HOME` at a prebuilt rocSHMEM at build time** (one for single-node host / one for dual-node GDA); see "Build Primus-Turbo with ODC operators".
 - **② hook into the correct FSDP2 class (PR [#808](https://github.com/AMD-AGI/Primus/pull/808) / [#864](https://github.com/AMD-AGI/Primus/pull/864)).** ODC must hook the new `PrimusTorchFullyShardedDataParallel`, otherwise `reduction_service` is `None` and **iter2 crashes** with `'NoneType' ... clear_accumulations`. PR #864 fixes this, taking effect only when `enable_odc: true` + `use_torch_fsdp2: true`.
-- **③ #856 device_id gating (speed preservation).** The ODC arm (`enable_odc: true`) automatically skips the eager-RCCL `device_id` injection of [#856](https://github.com/AMD-AGI/Primus/pull/856) (patch `condition = use_torch_fsdp2 and not enable_odc`); without it, single-node gets its ODC XGMI copy stream serialized by eager-RCCL, ~6% slower.
 
-All three above are **gated by yaml config items** (no longer by `ODC_*` environment variables), with zero impact on `nccl_pad` / native FSDP2.
+Both above are **gated by yaml config items** (no longer by `ODC_*` environment variables), with zero impact on `nccl_pad` / native FSDP2.
 
 ## Prerequisites
 
@@ -304,7 +303,7 @@ Here `KEY=VAL` only passes infrastructure env, while ODC feature switches still 
    ```
 
    The wrapper must be **`PrimusTorchFullyShardedDataParallel`** (not the old `TorchFullyShardedDataParallel`; hooking the old class crashes in iter2 with `NoneType ... clear_accumulations`); `same_micro_num=False` means nopad/decoupled.
-   > Note: the code also has `log_rank_0` markers like `[ODC.torch_fsdp2] runtime config populated ...` and `[Patch] ⊘ Skipped ... device_id` (fix ③, `condition = use_torch_fsdp2 and not enable_odc` being false → skip eager-RCCL); they print at patch registration / early `before_train` and can corroborate but may not necessarily land in the torchrun capture stream, so rely on the lines above. The control group `nccl_pad`, needing an RCCL comm, prints `[Patch] ✓ Applied ... device_id`.
+   > Note: the code also has `log_rank_0` markers like `[ODC.torch_fsdp2] runtime config populated ...`; they print at patch registration / early `before_train` and can corroborate but may not necessarily land in the torchrun capture stream, so rely on the lines above.
 
 4. **Training advances stably**: `lm loss` **decreases** with iter, **0 nan / 0 crash**, steady-state `ms/iter` is stable, and **`grad norm` is nonzero throughout** — `grad_norm=0` means cross-node GDA `getmem` reads 0 (device-LTO multi-partition), indicating the GDA Turbo was not built correctly.
 
@@ -334,7 +333,6 @@ grep -E "lm loss|elapsed time per iteration|grad norm|nan iterations" "$LOG" | t
 
 - **`has_host=False has_gda=False` (fix ①)**: you're using stock turbo or the hollow package from `pip install @main` (operators compiled out by `-DDISABLE_ROCSHMEM`). The correct fix is in "Build Primus-Turbo with ODC operators": build from source, point `ROCSHMEM_HOME` at prebuilt rocSHMEM at build time, then confirm `has_gda==True` via `PRIMUS_TURBO_PATH` (or `.image_bak` de-shadowing in site-packages).
 - **iter2 crashes with `'NoneType' ... clear_accumulations` (fix ②)**: you hooked the old FSDP2 class. Confirm Primus is on the `feat/odc-consume-turbo` branch, and that `PrimusTorchFullyShardedDataParallel` appears in the wrap-chain.
-- **runs but single-node is ~6% slower (fix ③ not in effect)**: confirm `enable_odc: true` is truly in place and the device_id patch is `⊘ Skipped` (the gate is the `enable_odc` config item, not `ODC_ENABLE`).
 - **backend runs as mori**: the global default in `trainer_base.yaml` is `mori`, so a self-written config that forgets to set `rocshmem` will run mori (**dual-node mori has a known bug**); the absence of `rocSHMEM GDA`/`gda_*` lines in the log identifies it.
 - **NaN on the very first step**: reused a Triton cache from a heterogeneous toolchain. Use a **fresh timestamped** `TRITON_CACHE_DIR` per run.
 - **dual-node `grad_norm=0`**: device-LTO multi-partition; the dual-node GDA Turbo must use `-Xoffload-linker --lto-partitions=1` (built in by PR #409).

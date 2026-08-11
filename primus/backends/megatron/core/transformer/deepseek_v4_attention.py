@@ -77,6 +77,16 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+from primus.backends.megatron.core.transformer.indexer_distill_loss import (
+    V4IndexerLossAutoScaler,
+    compute_indexer_distill_loss,
+    log_indexer_distill_loss,
+)
+from primus.backends.megatron.core.transformer.keep_in_fp32 import (
+    KeepInFp32Mixin,
+    mark_keep_in_fp32,
+    unmark_keep_in_fp32,
+)
 from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
@@ -103,6 +113,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
     fused_rms_norm,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
+    apply_rope_from_positions,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -403,7 +416,7 @@ def _build_local_rms_norm(dim: int, *, eps: float) -> nn.Module:
 # ---------------------------------------------------------------------------
 
 
-class DeepseekV4Attention(MLASelfAttention):
+class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
     """V4 attention faithful to the released ``DeepSeek-V4-Flash`` checkpoint.
 
     Subclasses :class:`MLASelfAttention` for type identity (so downstream
@@ -640,33 +653,44 @@ class DeepseekV4Attention(MLASelfAttention):
         # ``try/except`` masked AttentionSink build failures.  A future
         # TE-fused sink primitive can land as a new spec field once it
         # actually replaces the inline path.
+        #
+        # FP32 in the released checkpoint, and the gluon / flydsl_v1 kernels
+        # assert ``attn_sink.dtype == torch.float32`` at their entry. That
+        # assertion is satisfied by the promotion the callers already do
+        # (``sink.float()`` in the sparse-MLA adapter and the eager reference),
+        # so the parameter itself may follow the model dtype. Pinning it to FP32
+        # is therefore opt-in via ``PRIMUS_V4_KEEP_FP32`` -- see
+        # ``keep_in_fp32`` for why holding a second parameter dtype is not free.
         if attn_sink_enabled:
-            self.attn_sink = nn.Parameter(torch.zeros(num_heads))
+            self.attn_sink = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
+            mark_keep_in_fp32(self.attn_sink)
         else:
             self.register_parameter("attn_sink", None)
 
         # ---- compressor / indexer (compressed branches only) ----
         self.compressor: Optional[nn.Module] = None
         self.indexer: Optional[nn.Module] = None
+        # Last indexer distillation loss (detached), for logging. None until a
+        # training step runs with the loss enabled.
+        self.last_indexer_distill_loss: Optional[torch.Tensor] = None
         if self.compress_ratio > 0:
             self.compressor = self._build_compressor(submodules.compressor)
             if self.compress_ratio == 4:
                 self.indexer = self._build_indexer(submodules.indexer)
-                # The Indexer is a non-differentiable top-K *selector*: the only
-                # consumed output is ``topk_idxs`` (argTopK indices); its scores
-                # are discarded (``topk_idxs, _ = self.indexer(...)`` in forward)
-                # and this model has no indexer auxiliary/distillation loss, so
-                # none of the Indexer's params can ever receive a gradient.
-                # Leaving them trainable inserts permanently-dead params into the
-                # distributed-optimizer grad buckets, which both wastes grad /
-                # optimizer state + cross-node grad-sync bandwidth AND trips
+                # ``topk`` is not differentiable and the forward only consumes
+                # ``topk_idxs``, so the Indexer can only learn through the
+                # distillation loss (see ``indexer_distill_loss``). Without it,
+                # leaving the params trainable inserts permanently-dead params
+                # into the distributed-optimizer grad buckets: that wastes grad /
+                # optimizer state plus cross-node grad-sync bandwidth AND trips
                 # Megatron's overlap_grad_reduce invariant (every bucket param
-                # must fire its grad-ready backward hook) -- the latter is what
-                # forced overlap_grad_reduce/param_gather OFF and crippled
-                # cross-node DP scaling. Freeze them so Megatron excludes them
-                # from the grad buckets entirely. Set PRIMUS_V4_INDEXER_TRAINABLE=1
-                # to re-enable (e.g. once an indexer aux loss is added).
-                if os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1":
+                # must fire its grad-ready backward hook), which is what forced
+                # overlap_grad_reduce / param_gather OFF and crippled cross-node
+                # DP scaling. So freeze unless the loss is actually enabled.
+                # PRIMUS_V4_INDEXER_TRAINABLE=1 still forces trainable.
+                if not self.indexer_distill_enabled and (
+                    os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
+                ):
                     for _indexer_param in self.indexer.parameters():
                         _indexer_param.requires_grad_(False)
 
@@ -810,12 +834,17 @@ class DeepseekV4Attention(MLASelfAttention):
             # softmax-with-sink path still produces the right math.
             core_use_sink = bool(getattr(self.core_attention, "use_sink_attention", False))
             if attn_sink_enabled and core_use_sink:
-                # Cast V4's sink parameter to match the dtype Turbo allocated
-                # so the alias doesn't break dtype contracts.  The eager
-                # path always promotes to float32 inside the softmax, so
-                # casting the parameter dtype is safe.
+                # Aliasing means Turbo and V4 share one Parameter object, so the
+                # sink has to carry the dtype Turbo allocated for its own
+                # ``sinks``. That is the one configuration where the sink cannot
+                # stay FP32, so drop the keep-in-FP32 mark as well -- otherwise
+                # the model-wide dtype conversion would silently undo the cast
+                # and hand Turbo a tensor it did not allocate for. The eager
+                # path promotes to float32 inside the softmax either way, so
+                # only the stored resolution differs.
                 turbo_sinks = getattr(self.core_attention, "sinks", None)
                 if turbo_sinks is not None and turbo_sinks.dtype != self.attn_sink.dtype:
+                    unmark_keep_in_fp32(self.attn_sink)
                     self.attn_sink.data = self.attn_sink.data.to(turbo_sinks.dtype)
                 self.core_attention.sinks = self.attn_sink
                 self._use_core_attention = True
@@ -923,6 +952,11 @@ class DeepseekV4Attention(MLASelfAttention):
             index_topk=index_topk,
             compress_ratio=self.compress_ratio,
             use_fp8_qk=bool(getattr(self.config, "use_v4_fp8_indexer", False)),
+            # The indexer rotates its own Q / K with this layer's compressed
+            # RoPE before scoring, so it needs the same cache the compressed
+            # pool uses. Passed by reference; the Indexer does not register it.
+            rope=self.rope.get_rope(compress_ratio=self.compress_ratio),
+            rotary_dim=self.rotary_dim,
         )
         if spec is None:
             return Indexer(**kwargs)
@@ -936,10 +970,65 @@ class DeepseekV4Attention(MLASelfAttention):
     def rope(self) -> DualRoPE:
         return self._rope[0]
 
+    @property
+    def indexer_distill_coeff(self) -> float:
+        """Coefficient of the indexer distillation loss (``0`` = disabled)."""
+        return float(getattr(self.config, "v4_indexer_distill_loss_coeff", 0.0) or 0.0)
+
+    @property
+    def indexer_distill_enabled(self) -> bool:
+        """True when this layer trains its indexer via the distillation loss."""
+        return self.compress_ratio == 4 and self.indexer_distill_coeff > 0.0
+
+    def _indexer_loss_head_group(self):
+        """Group the attention heads are sharded over, or ``None`` if they are not.
+
+        ``linear_q_up_proj`` is column-parallel with ``gather_output=True``, so
+        every TP rank holds all heads and the distillation loss's head sum is
+        already complete -- unlike the open-source reference, whose attention
+        keeps them sharded and therefore all-reduces. Resolve the group anyway
+        when the shapes say the heads *are* sharded, so dropping the gather
+        cannot silently turn the target distribution into a partial sum.
+        """
+        if self.num_attention_heads_per_partition == int(self.config.num_attention_heads):
+            return None
+        group = getattr(self.pg_collection, "tp", None)
+        if group is not None:
+            return group
+        from megatron.core import parallel_state
+
+        return parallel_state.get_tensor_model_parallel_group()
+
+    def _log_indexer_distill_loss(self, device: torch.device) -> None:
+        """Report this layer's indexer loss, zero on layers without an indexer.
+
+        Every V4 layer reports so the tracker key exists on every pipeline rank
+        -- see :func:`log_indexer_distill_loss`.
+        """
+        if self.indexer_distill_coeff <= 0.0:
+            return
+        if not (self.training and torch.is_grad_enabled()):
+            # Matches the condition the loss is computed under, so a stale
+            # value from an earlier step can never be reported.
+            return
+        mtp_layers = getattr(self.config, "mtp_num_layers", 0) or 0
+        log_indexer_distill_loss(
+            self.last_indexer_distill_loss,
+            layer_number=self.layer_number,
+            num_layers=int(self.config.num_layers) + int(mtp_layers),
+            device=device,
+        )
+
     def _attention_scale(self) -> float:
-        base = 1.0 / math.sqrt(self.head_dim)
-        rope_scale = self.rope.attn_scale(compress_ratio=self.compress_ratio)
-        return base * rope_scale
+        """Softmax temperature for every branch: plain ``1 / sqrt(head_dim)``.
+
+        V4 keeps attention logits in range via the Q / KV RMSNorms, so the
+        YaRN magnitude factor (``m_scale``) is deliberately NOT folded in here
+        -- ``inference/model.py`` uses ``self.softmax_scale = head_dim ** -0.5``
+        for both the core attention and the indexer. The YaRN *frequency*
+        interpolation on ``inv_freq`` is unaffected.
+        """
+        return 1.0 / math.sqrt(self.head_dim)
 
     def _apply_q(self, hidden: torch.Tensor) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, H, head_dim]`` (Q after q_norm + q_rms)."""
@@ -1201,6 +1290,56 @@ class DeepseekV4Attention(MLASelfAttention):
         B, S, H, Dh = attn.shape
         return _projection_forward(self.linear_proj, attn.reshape(B, S, H * Dh))
 
+    def _apply_inverse_rope(self, attn: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """De-rotate the core-attention output (RoPE at ``position = -t``).
+
+        V4 shares a single latent between K and V, so the values entering the
+        softmax are already rotated and the naive output
+
+            ``o_t = sum_s P[t,s] * R(s) v_s``
+
+        carries *absolute* positions. Rotating it by ``-t`` turns every
+        contribution into ``R(s - t) v_s``, i.e. the relative encoding the
+        model expects. The released ``inference/model.py`` does exactly this
+        with ``apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)`` right
+        before ``wo_a``, and the inverse rotation must use the *same* per-layer
+        RoPE base that Q / KV were rotated with.
+
+        Routed through the same fused ``apply_rope_from_positions`` path Q / KV
+        use, with ``inverse=True`` negating the angle in-kernel
+        (``R(-t) == R(t)^T``). Generating cos / sin inside the kernel matters
+        here: this runs once per layer, so the alternative -- building cos / sin
+        eagerly and broadcasting them to ``[B, S, rd/2]`` in HBM -- adds three
+        small launches and a materialised tensor per layer, on all 43 of them.
+
+        Returns a new tensor: ``attn`` is what the attention backward saved and
+        must not be mutated.
+        """
+        if self.rotary_dim == 0:
+            return attn
+        rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        return apply_rope_from_positions(
+            attn,
+            position_ids,
+            rope.inv_freq,
+            rotary_dim=self.rotary_dim,
+            inverse=True,
+        )
+
+    def _project_output(self, attn: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Inverse-RoPE then O projection -- the single exit for every branch.
+
+        Kept as one helper so no attention path can reach the O projection
+        without de-rotating first. Being the single exit also makes it the one
+        place that reports the layer's indexer distillation loss, which has to
+        happen on every layer (see :meth:`_log_indexer_distill_loss`).
+        """
+        self._log_indexer_distill_loss(attn.device)
+        attn = self._apply_inverse_rope(attn, position_ids)
+        if self.linear_o_a is not None:
+            return self._grouped_o_projection(attn)
+        return self._flat_o_projection(attn)
+
     # ------------------------------------------------------------------
     # compressed branches (HCA / CSA)
     # ------------------------------------------------------------------
@@ -1214,10 +1353,16 @@ class DeepseekV4Attention(MLASelfAttention):
         pooled = self.compressor(hidden)  # [B, P, head_dim]
         B, P = pooled.shape[0], pooled.shape[1]
 
-        # Compress-base partial RoPE on compressed indices [0..P). Positions are
-        # the deterministic arange(P), so use the cached table instead of
-        # rebuilding arange -> outer -> cos/sin every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device)
+        # Compress-base partial RoPE. Compressed entry ``s`` stands for the
+        # window starting at original token ``s * compress_ratio``, so it is
+        # rotated at that position -- not at the bare block index ``s``. The
+        # queries are rotated at their own original positions, so using block
+        # indices here would put the two sides on different coordinate systems.
+        # Matches inference/model.py, which slices ``freqs_cis[:cutoff:ratio]``
+        # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
+        # land on the window's first token. Positions stay deterministic, so the
+        # cached table is still reused every forward.
+        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)
@@ -1286,6 +1431,7 @@ class DeepseekV4Attention(MLASelfAttention):
         k_local_bh: torch.Tensor,  # [B, H, S, head_dim]
         v_local_bh: torch.Tensor,  # [B, H, S, head_dim]
         local_mask: torch.Tensor,  # [S, S] — built by caller; unused here, see below
+        position_ids: Optional[torch.Tensor] = None,  # [B, S] or [S]; rotates the indexer Q
     ) -> torch.Tensor:
         """CSA (compress_ratio == 4) joint local-SWA + sparse-compressed attention.
 
@@ -1319,8 +1465,33 @@ class DeepseekV4Attention(MLASelfAttention):
         pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
         P = pool.shape[1]
 
-        # 2) Indexer top-K per query.
-        topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
+        # 2) Indexer top-K per query. The indexer is fed a *detached* hidden
+        # state: it is a selector, so the only thing that should learn from its
+        # distillation loss is the indexer itself. Detaching here keeps the KL
+        # from leaking into the layers below (the open-source reference detaches
+        # the same way), and when the indexer is frozen it also stops autograd
+        # from building a subgraph whose output is discarded.
+        topk_idxs, topk_scores = self.indexer(hidden.detach(), position_ids)  # [B, S, K]
+
+        # 2b) Indexer distillation. argTopK is not differentiable and the
+        # scores are otherwise discarded, so this loss is the indexer's only
+        # learning signal. It is attached to ``pool`` -- which every CSA
+        # backend consumes -- so the aux gradient is seeded no matter which
+        # kernel the layer dispatches to, without threading a second return
+        # value through all of them.
+        if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            indexer_loss = compute_indexer_distill_loss(
+                index_topk_scores=topk_scores,
+                topk_idxs=topk_idxs,
+                query=q_bh,
+                pool=pool,
+                softmax_scale=self._attention_scale(),
+                loss_coeff=self.indexer_distill_coeff,
+                head_reduce_group=self._indexer_loss_head_group(),
+            )
+            self.last_indexer_distill_loss = indexer_loss.detach()
+            pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)
+
         # Dispatch on ``use_v4_csa_attention_backend``. gluon / triton_v2 /
         # triton_v1 consume (pool, topk) directly; eager / triton_v0 / flydsl_v0
         # use the per-query gathered [B, S, K, Dh] representation.
@@ -1584,9 +1755,7 @@ class DeepseekV4Attention(MLASelfAttention):
             out_bh = self._attention_forward_via_core(q, kv)
             out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
             out = out.to(dtype=dtype)
-            if self.linear_o_a is not None:
-                return self._grouped_o_projection(out)
-            return self._flat_o_projection(out)
+            return self._project_output(out, position_ids)
 
         # Broadcast K / V across the H query-head axis.
         k_h = kv.expand(B, S, self.num_heads, self.head_dim)
@@ -1633,7 +1802,7 @@ class DeepseekV4Attention(MLASelfAttention):
             # different per-query subset of keys from a pool.  Stays on
             # eager-Python under plan-3 (a custom kernel is required).
             local_mask = self._local_mask(S, device=device, dtype=dtype)
-            out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask)
+            out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask, position_ids)
         else:
             # Guarded by __init__; included for static-analysis completeness.
             raise ValueError(f"Unsupported compress_ratio {self.compress_ratio}")
@@ -1641,9 +1810,7 @@ class DeepseekV4Attention(MLASelfAttention):
         out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
         out = out.to(dtype=dtype)
 
-        if self.linear_o_a is not None:
-            return self._grouped_o_projection(out)
-        return self._flat_o_projection(out)
+        return self._project_output(out, position_ids)
 
 
 __all__ = [

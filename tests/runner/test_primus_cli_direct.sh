@@ -388,7 +388,7 @@ test_slurm_env_derivation() {
     # Sub-test 12a: SLURM_JOB_ID + SLURM_NNODES + SLURM_NODEID -> NNODES /
     # NODE_RANK derived.
     local out_slurm
-    out_slurm=$(SLURM_JOB_ID=999 SLURM_NNODES=4 SLURM_NODEID=0 SLURM_NODELIST=tus1-p3-g25 \
+    out_slurm=$(SLURM_JOB_ID=999 SLURM_NNODES=4 SLURM_NODEID=0 SLURM_NODELIST=node001 \
         timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_slurm" "SLURM detected" "SLURM detection log fires"
     assert_contains "$out_slurm" "NNODES=4" "NNODES derived from SLURM_NNODES"
@@ -396,7 +396,7 @@ test_slurm_env_derivation() {
 
     # Sub-test 12b: pre-exported NNODES wins over SLURM_NNODES.
     local out_preset
-    out_preset=$(SLURM_JOB_ID=999 SLURM_NNODES=4 NNODES=7 NODE_RANK=0 SLURM_NODELIST=tus1-p3-g25 \
+    out_preset=$(SLURM_JOB_ID=999 SLURM_NNODES=4 NNODES=7 NODE_RANK=0 SLURM_NODELIST=node001 \
         timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- benchmark gemm 2>&1 || true)
     assert_contains "$out_preset" "NNODES=7" "Pre-exported NNODES=7 wins over SLURM_NNODES=4"
     assert_contains "$out_preset" "--nnodes 7" "torchrun honors pre-exported NNODES=7"
@@ -507,21 +507,21 @@ test_slurm_entry_direct_dispatch() {
     # (scontrol absent). We set a plain SLURM_NODELIST so both paths agree.
     # Sub-test 15a: -- direct -- preflight ... routes through primus-cli-direct.sh.
     local out_direct
-    out_direct=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
+    out_direct=$(SLURM_NODELIST=node001 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
         timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- direct -- preflight --quick 2>&1 || true)
     assert_contains "$out_direct" "Entry mode: direct" "slurm-entry parses 'direct' keyword"
     assert_contains "$out_direct" "primus-cli-direct.sh" "slurm-entry dispatches to primus-cli-direct.sh"
 
     # Sub-test 15b: -- container -- ... routes through primus-cli-container.sh (existing path).
     local out_container
-    out_container=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
+    out_container=$(SLURM_NODELIST=node001 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
         timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- container -- train pretrain 2>&1 || true)
     assert_contains "$out_container" "Entry mode: container" "slurm-entry parses 'container' keyword"
     assert_contains "$out_container" "primus-cli-container.sh" "slurm-entry dispatches to primus-cli-container.sh"
 
     # Sub-test 15c: terse form `-- preflight` (no keyword) defaults to container.
     local out_terse
-    out_terse=$(SLURM_NODELIST=tus1-p3-g25 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
+    out_terse=$(SLURM_NODELIST=node001 SLURM_JOB_ID=1 SLURM_NNODES=1 SLURM_NODEID=0 \
         timeout 30 bash "$RUNNER_DIR/primus-cli-slurm-entry.sh" --dry-run -- preflight --quick 2>&1 || true)
     assert_contains "$out_terse" "Entry mode: container" "Terse form defaults to container"
     assert_contains "$out_terse" "primus-cli-container.sh" "Terse form dispatches to primus-cli-container.sh"

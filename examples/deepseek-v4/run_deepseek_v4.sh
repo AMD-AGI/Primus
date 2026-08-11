@@ -24,17 +24,15 @@ export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
-# pr-927 ships the Primus-Turbo build (0.3.2.dev55) that carries the MegaMoE
-# kernels; the older pr-882 turbo cannot run USE_TURBO_MEGA_MOE=True.
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-927-ainic"}
-export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
-export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
+export DOCKER_IMAGE=${DOCKER_IMAGE:?set DOCKER_IMAGE to a Primus container image}
+export SLURM_PARTITION=${SLURM_PARTITION:-}
+export SLURM_NODELIST=${SLURM_NODELIST:-}
 export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1"
 # Default socket interface to loopback (single-node fallback). Override with
-# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME for multi-node (e.g. ens3 on amd-spur).
+# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME for multi-node (e.g. ens3).
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-lo}
 export NCCL_IB_GID_INDEX=1
@@ -190,6 +188,12 @@ export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-turbo}
 # in-container config regardless of env propagation.
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
 
+# Indexer distillation loss coefficient (CSA selector training). 0 keeps the
+# loss off and the indexer frozen -- correct when loading an already-trained
+# indexer. A from-scratch pretrain needs it ON (1e-2 is a reasonable starting
+# value), which also unfreezes the indexer params.
+export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-0.0}
+
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
 # cached torch.compile build. Default OFF here; the proxy script
 # (run_deepseek_v4_flash_proxy.sh) flips it ON. After G32 + G33b are
@@ -291,15 +295,32 @@ export PRIMUS_EXIT_FAST=1
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-slurm}
 if [ "$PRIMUS_LAUNCHER" = "direct" ]; then
   LAUNCHER_ARGS=(direct)
+  if [ "${PRIMUS_NUMA_BIND:-1}" = "1" ]; then
+    LAUNCHER_ARGS+=(--numa)
+  fi
 else
   LAUNCHER_ARGS=(slurm "${SLURM_LAUNCH_CMD:-srun}" -N "$NNODES")
-  [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
-  [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
-  [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
-  [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
-  # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
-  # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
-  [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ] && LAUNCHER_ARGS+=(--exclusive)
+  if [ -n "${SLURM_ATTACH_JOBID:-}" ]; then
+    # Run as a step inside an allocation that is already held (e.g. a long-lived
+    # `sbatch --exclusive --wrap "sleep ..."` holder), so a sweep of runs lands on
+    # the same nodes without re-queueing per run. partition / qos / account /
+    # nodelist / exclusive belong to the holder job -- passing them again on an
+    # attached step is redundant and spur rejects some of them.
+    LAUNCHER_ARGS+=(--jobid="${SLURM_ATTACH_JOBID}" --overlap)
+  else
+    [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
+    [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
+    [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
+    [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
+    # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
+    # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
+    # Spelled as an `if` rather than an `&&` chain because this is the last command
+    # of the else branch: under `set -e` a false `&&` chain there would make the
+    # whole compound command fail and abort the script.
+    if [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ]; then
+      LAUNCHER_ARGS+=(--exclusive)
+    fi
+  fi
   # Each patch self-skips (exit 2) when its PRIMUS_* env gate is unset, so both
   # can be passed unconditionally.
   LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean --
@@ -344,6 +365,7 @@ fi
   --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
   --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
+  --v4_indexer_distill_loss_coeff "$PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \

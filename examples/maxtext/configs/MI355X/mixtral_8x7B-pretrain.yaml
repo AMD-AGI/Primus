@@ -39,3 +39,4 @@ modules:
       max_target_length: 4096
       per_device_batch_size: 11
       remat_policy: "minimal"
+      moe_dispatch_no_expert_sharding: true
