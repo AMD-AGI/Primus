@@ -124,7 +124,7 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 | ----------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `model_name`            | `"default"` in `model_base`; e.g. `"llama3-8b"` in `llama3_8B.yaml` | Selects MaxText’s bundled model YAML when present.                      |
 | `override_model_config` | `true`                                                              | When `true`, CLI / kwargs override values from the loaded model config. |
-| `attention`             | `"cudnn_flash_te"`                                                  | Attention implementation (Primus default favors TE flash on AMD GPUs). **gemma4 on gfx950 (MI355X) must use `attention: dot_product`** — its `head_dim=256` + bidirectional sliding-window shape has no fused/flash (TE/CK/AITER) kernel coverage there, so fused/`cudnn_flash_te` fails at XLA compile. |
+| `attention`             | `"autoselected"`                                                    | Attention implementation. **gemma4 must pin this**: its local layers are sliding-window, and only `cudnn_flash_te` passes the window to the kernel (as `window_size`) — `autoselected` reaches a pallas kernel that builds a plain causal mask. The MI355X configs use `cudnn_flash_te`; the MI300X configs still pin `dot_product`. |
 | `use_iota_embed`        | `true`                                                              | Use iota-based embedding for performance on accelerator backends.       |
 | `tokenizer_path`        | e.g. `"meta-llama/Meta-Llama-3-8B"`                                 | Hugging Face tokenizer id or local path.                                |
 

@@ -34,11 +34,11 @@ modules:
       ici_expert_parallelism: -1
 
       # training
-      # v26.6 (rocm-main) maxtext: use reference dot_product attention (fused/flash
-      # kernels native-crash on gemma4 head_dim=256 + sliding-window on this ROCm
-      # stack). NOTE: MoE + dot_product compilation is very heavy; the gemma sweep
-      # bounds this with a short per-model timeout.
-      attention: "dot_product"
+      # gemma4's local layers need their sliding window honored: cudnn_flash_te takes it
+      # as window_size, while the autoselected pallas kernel only builds a causal mask.
+      # The global layers' head_dim=512 is past TE's fused limit, so those fall back to
+      # unfused attention.
+      attention: "cudnn_flash_te"
       max_target_length: 4096
       per_device_batch_size: 1
       remat_policy: "full"
