@@ -52,14 +52,13 @@ modules:
         max_steps: 25            # cap for a quick test; remove for a real finetune
         local_batch_size: 8
         global_batch_size: 64    # 8 x dp8
-      optim:
-        learning_rate: 5e-6      # gentle finetune LR
-        optimizer:
-          weight_decay: 0.01
-          betas: [0.9, 0.999]
-          # finetune uses foreach AdamW (fused is the pretrain throughput knob)
-          foreach: true
-          fused: false
+      optimizer:
+        lr: 5e-6                 # gentle finetune LR
+        weight_decay: 0.01
+        betas: [0.9, 0.999]
+        # finetune uses foreach AdamW (fused is the pretrain throughput knob)
+        foreach: true
+        fused: false
       fsdp:
         activation_checkpointing: true
       data:

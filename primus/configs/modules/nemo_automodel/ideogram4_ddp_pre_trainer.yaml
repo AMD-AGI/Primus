@@ -39,7 +39,7 @@ step_scheduler:
   local_batch_size: 2
   ckpt_every_steps: 1000
   num_epochs: 1000
-  log_every: 1
+  log_remote_every_steps: 1
   save_checkpoint_every_epoch: false
 
 data:
@@ -62,16 +62,15 @@ data:
     num_workers: 0
     pin_memory: true
 
-optim:
-  learning_rate: 1e-4
-  optimizer:
-    _target_: torch.optim.AdamW
-    weight_decay: 0.01
-    betas: [0.9, 0.999]
-    # ZeRO-1 shards these local AdamW states across ranks. fused AdamW is fine
-    # (the per-rank local optimizer runs over its shard of regular tensors).
-    foreach: false
-    fused: true
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  # ZeRO-1 shards these local AdamW states across ranks. fused AdamW is fine
+  # (the per-rank local optimizer runs over its shard of regular tensors).
+  foreach: false
+  fused: true
 
 performance:
   check_loss: false

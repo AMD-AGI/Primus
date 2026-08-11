@@ -17,7 +17,7 @@ modules:
         max_steps: 20
         local_batch_size: 2
         global_batch_size: 16
-        log_every: 1
+        log_remote_every_steps: 1
       data:
         dataloader:
           cache_dir: /checkpoints/pcam_flux_1024_hero

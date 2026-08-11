@@ -17,7 +17,7 @@ modules:
         max_steps: 12
         local_batch_size: 1
         global_batch_size: 8
-        log_every: 2
+        log_remote_every_steps: 2
       fsdp:
         activation_checkpointing: true
       data:

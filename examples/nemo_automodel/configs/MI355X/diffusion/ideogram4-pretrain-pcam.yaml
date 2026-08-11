@@ -40,9 +40,9 @@ modules:
         max_steps: 200           # real-data loss-decrease validation (remove for full run)
         local_batch_size: 2
         global_batch_size: 16    # 2 x dp8 (grad_acc = 1)
-        log_every: 1
-      optim:
-        learning_rate: 1.0e-4
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
       fsdp:
         activation_checkpointing: true
         enable_compile: false
