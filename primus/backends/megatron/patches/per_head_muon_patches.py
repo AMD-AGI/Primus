@@ -33,12 +33,8 @@ expert-parallel split, ``LayerWiseDistributedOptimizer`` — is orthogonal to pe
 blocking and must not fork.
 """
 
-import logging
-
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
-
-logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[Patch:megatron.optimizer.per_head_muon]"
 
@@ -207,12 +203,20 @@ def patch_per_head_muon(ctx: PatchContext):
     patched += 1
     try:
         from megatron.training import training as megatron_training
+    except ImportError as exc:
+        # megatron.training is expected to import at before_train; a failure means a
+        # broken install, not an optional dependency. Fail loudly rather than leave the
+        # module-scope binding at training.py:1538 unpatched (per-head Muon would then
+        # silently not apply there).
+        raise RuntimeError(
+            f"{_LOG_PREFIX} could not import megatron.training.training to patch the "
+            "module-scope get_megatron_muon_optimizer binding. This indicates a broken "
+            "megatron installation."
+        ) from exc
 
-        if hasattr(megatron_training, "get_megatron_muon_optimizer"):
-            megatron_training.get_megatron_muon_optimizer = patched_get_megatron_muon_optimizer
-            patched += 1
-    except ImportError:  # pragma: no cover - megatron.training is always importable here
-        pass
+    if hasattr(megatron_training, "get_megatron_muon_optimizer"):
+        megatron_training.get_megatron_muon_optimizer = patched_get_megatron_muon_optimizer
+        patched += 1
 
     log_rank_0(
         f"{_LOG_PREFIX} wrapped get_megatron_muon_optimizer in {patched} location(s); "

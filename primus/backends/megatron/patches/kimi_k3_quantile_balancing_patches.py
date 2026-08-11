@@ -95,7 +95,8 @@ def patch_quantile_balancing(ctx: PatchContext):
                     "submodules.router only when quantile_balancing_enabled(config)). "
                     "Falling back to the sign-based rule."
                 )
-            return original(model, config)
+            original(model, config)
+            return
 
         state["step"] += 1
         update_router_expert_bias_quantile(model, config, step=state["step"])
