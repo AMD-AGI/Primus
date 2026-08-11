@@ -50,7 +50,7 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: true
       init_method_std: 0.02
-      norm_epsilon: 1.0e-5
+      layernorm_epsilon: 1.0e-5
 
       # ---------- parallel ----------
       # EP=8 over the 8 GPUs of one node, TP=1, PP=1. num_experts is 32, so each

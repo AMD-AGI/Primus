@@ -52,7 +52,7 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: true
       init_method_std: 0.02
-      norm_epsilon: 1.0e-5
+      layernorm_epsilon: 1.0e-5
 
       # ---------- parallel ----------
       tensor_model_parallel_size: ${PRIMUS_TP:1}

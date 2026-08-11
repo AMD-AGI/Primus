@@ -33,7 +33,7 @@ tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: moonshotai/Kimi-K3
 
 # norm
-norm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05
 normalization: RMSNorm
 
 # ---------- attention: MLA geometry, Megatron's MLA switch OFF ----------

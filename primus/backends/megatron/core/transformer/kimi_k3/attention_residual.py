@@ -73,9 +73,7 @@ class AttentionResidualMixer(MegatronModule):
         config: the runtime config. ``hidden_size`` and
             ``layernorm_epsilon`` are read from it unless overridden.
         hidden_size: candidate width. Defaults to ``config.hidden_size``.
-        eps: RMSNorm epsilon. Defaults to ``config.layernorm_epsilon``,
-            which the Kimi K3 config keeps in step with ``norm_epsilon``
-            (``kimi_k3_transformer_config.py``).
+        eps: RMSNorm epsilon. Defaults to ``config.layernorm_epsilon``.
 
     Parameters:
         norm_weight: ``[hidden]``, HF ``*_res_norm.weight``. Ones at init,

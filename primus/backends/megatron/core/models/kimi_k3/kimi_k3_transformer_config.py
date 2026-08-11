@@ -424,10 +424,13 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     projector_ln_eps: float = 1e-5
 
     # ---- compat aliases used by the Kimi K3 code paths --------------------
-    # None of these three are upstream TransformerConfig fields; they are
-    # declared for the same reason DeepSeek-V4 declares them
-    # (deepseek_v4_transformer_config.py).
-    norm_epsilon: Optional[float] = None
+    # Neither ``vocab_size`` nor ``padded_vocab_size`` is an upstream
+    # TransformerConfig field; they are declared for the same reason
+    # DeepSeek-V4 declares them (deepseek_v4_transformer_config.py). Kimi K3
+    # deliberately does NOT declare DeepSeek-V4's ``norm_epsilon`` alias: every
+    # K3 norm reads ``config.layernorm_epsilon`` (never ``config.norm_epsilon``),
+    # so K3 yaml sets ``layernorm_epsilon`` directly instead of shadowing it
+    # with a second field.
     vocab_size: Optional[int] = None
     padded_vocab_size: Optional[int] = None
     position_embedding_type: str = "none"
@@ -462,13 +465,6 @@ class KimiK3TransformerConfig(MLATransformerConfig):
             self.use_kimi_k3_attention_backend = selector
             # The unified knob is authoritative for the chunk kernel.
             self.kda_backend = selector
-
-        # Keep the DeepSeek-style ``norm_epsilon`` alias and MCore's
-        # ``layernorm_epsilon`` in step before parent validation runs
-        # (deepseek_v4_transformer_config.py).
-        if self.norm_epsilon is None:
-            self.norm_epsilon = float(self.layernorm_epsilon)
-        self.layernorm_epsilon = float(self.norm_epsilon)
 
         # A hybrid stack halves the output-layer init scaling
         # (transformer_config.py).
