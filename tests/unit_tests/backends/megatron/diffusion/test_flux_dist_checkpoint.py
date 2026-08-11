@@ -38,6 +38,32 @@ def _runtime_device() -> torch.device:
 class TestFluxDistCheckpoint(PrimusUT):
     """Verify that joint and single blocks have independent checkpoint schemas."""
 
+    @staticmethod
+    def _assert_torch_dist_round_trip(tmp_path, device: torch.device) -> None:
+        source = Flux(_tiny_flux_config()).to(device)
+        double_weight = source.transformer.layers[0].adaln.adaLN_modulation[-1].weight
+        single_weight = source.transformer.layers[1].adaln.adaLN_modulation[-1].weight
+        with torch.no_grad():
+            double_weight.fill_(1.25)
+            single_weight.fill_(-2.5)
+
+        checkpoint_dir = tmp_path / "flux_torch_dist"
+        checkpoint_dir.mkdir()
+        save({"model": source.sharded_state_dict()}, checkpoint_dir)
+
+        target = Flux(_tiny_flux_config()).to(device)
+        loaded = load({"model": target.sharded_state_dict()}, checkpoint_dir)
+        target.load_state_dict(loaded["model"])
+
+        torch.testing.assert_close(
+            target.transformer.layers[0].adaln.adaLN_modulation[-1].weight,
+            double_weight,
+        )
+        torch.testing.assert_close(
+            target.transformer.layers[1].adaln.adaLN_modulation[-1].weight,
+            single_weight,
+        )
+
     @pytest.fixture(autouse=True)
     def setup_parallel(self, init_parallel_state):
         """Initialize single-rank model parallelism."""
@@ -62,26 +88,9 @@ class TestFluxDistCheckpoint(PrimusUT):
 
     def test_torch_dist_save_load_round_trip(self, tmp_path):
         """Save and restore both adaLN shapes through the real torch_dist backend."""
-        source = Flux(_tiny_flux_config()).to(_runtime_device())
-        double_weight = source.transformer.layers[0].adaln.adaLN_modulation[-1].weight
-        single_weight = source.transformer.layers[1].adaln.adaLN_modulation[-1].weight
-        with torch.no_grad():
-            double_weight.fill_(1.25)
-            single_weight.fill_(-2.5)
+        self._assert_torch_dist_round_trip(tmp_path, _runtime_device())
 
-        checkpoint_dir = tmp_path / "flux_torch_dist"
-        checkpoint_dir.mkdir()
-        save({"model": source.sharded_state_dict()}, checkpoint_dir)
-
-        target = Flux(_tiny_flux_config()).to(_runtime_device())
-        loaded = load({"model": target.sharded_state_dict()}, checkpoint_dir)
-        target.load_state_dict(loaded["model"])
-
-        torch.testing.assert_close(
-            target.transformer.layers[0].adaln.adaLN_modulation[-1].weight,
-            double_weight,
-        )
-        torch.testing.assert_close(
-            target.transformer.layers[1].adaln.adaLN_modulation[-1].weight,
-            single_weight,
-        )
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    def test_torch_dist_save_load_round_trip_cuda(self, tmp_path):
+        """Explicit GPU runtime coverage for the Flux torch_dist round trip."""
+        self._assert_torch_dist_round_trip(tmp_path, torch.device("cuda"))

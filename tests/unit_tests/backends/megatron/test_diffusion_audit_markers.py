@@ -16,6 +16,8 @@ from primus.backends.megatron.training.diffusion.forward_step import (
     _emit_batch_fingerprint,
 )
 
+_FORWARD_STEP_LOGGER = "primus.backends.megatron.training.diffusion.forward_step"
+
 
 def test_sample_key_fingerprint_is_order_sensitive():
     first = [
@@ -53,21 +55,23 @@ def test_emit_batch_fingerprint_is_fail_closed(monkeypatch):
         _emit_batch_fingerprint({}, step_count=1)
 
 
-def test_emit_batch_fingerprint_skips_synthetic_warmup(monkeypatch, capsys):
+def test_emit_batch_fingerprint_skips_synthetic_warmup(monkeypatch, caplog):
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
     monkeypatch.setenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE", "1")
+    caplog.set_level("INFO", logger=_FORWARD_STEP_LOGGER)
 
     _emit_batch_fingerprint({}, step_count=1)
 
-    assert capsys.readouterr().out == ""
+    assert not any(record.message.startswith("PRIMUS_BATCH_FINGERPRINT=") for record in caplog.records)
 
 
-def test_emit_batch_fingerprint_skips_validation(monkeypatch, capsys):
+def test_emit_batch_fingerprint_skips_validation(monkeypatch, caplog):
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
+    caplog.set_level("INFO", logger=_FORWARD_STEP_LOGGER)
 
     _emit_batch_fingerprint({}, step_count=5, is_training=False)
 
-    assert capsys.readouterr().out == ""
+    assert not any(record.message.startswith("PRIMUS_BATCH_FINGERPRINT=") for record in caplog.records)
 
 
 @pytest.mark.parametrize(
@@ -102,12 +106,13 @@ def test_diffusion_forward_step_exposes_counter_reset(monkeypatch):
     assert trainer._forward_step_count_initialized is True
 
 
-def test_emit_batch_fingerprint_logs_rank_local_payload(monkeypatch, capsys):
+def test_emit_batch_fingerprint_logs_rank_local_payload(monkeypatch, caplog):
     from megatron.core import parallel_state
 
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
     monkeypatch.setenv("RANK", "3")
     monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 3)
+    caplog.set_level("INFO", logger=_FORWARD_STEP_LOGGER)
     _emit_batch_fingerprint(
         {
             "_audit_sample_key_sha256": "a" * 64,
@@ -116,8 +121,13 @@ def test_emit_batch_fingerprint_logs_rank_local_payload(monkeypatch, capsys):
         step_count=6,
     )
 
-    line = capsys.readouterr().out.strip()
-    payload = json.loads(line.split("=", 1)[1])
+    marker_lines = [
+        record.message
+        for record in caplog.records
+        if record.name == _FORWARD_STEP_LOGGER and record.message.startswith("PRIMUS_BATCH_FINGERPRINT=")
+    ]
+    assert len(marker_lines) == 1
+    payload = json.loads(marker_lines[0].split("=", 1)[1])
     assert payload == {
         "data_parallel_rank": 3,
         "global_rank": 3,
