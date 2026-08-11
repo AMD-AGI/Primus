@@ -12,7 +12,7 @@ to inject additional information into Megatron training logs:
 
     - ROCm/HIP memory stats.
     - Running average elapsed time per iteration (ms).
-    - Running average throughput per GPU (TFLOP/s/GPU).
+    - Running average compute per GPU (TFLOP/s/GPU).
     - Running average token throughput per GPU (tokens/s/GPU) (language models only).
     - Diffusion-specific metrics (diffusion models only):
       * Images per GPU (images/s/GPU): instant/average
@@ -461,7 +461,7 @@ class ThroughputAverageExtension:
                 idx = parsed.throughput_index
                 if idx is not None and 0 <= idx < len(parsed.segments):
                     parsed.segments[idx] = (
-                        f"throughput per GPU (TFLOP/s/GPU): {tflops_value:.1f}/{avg_tflops:.1f}"
+                        f"compute per GPU (TFLOP/s/GPU): {tflops_value:.1f} (avg {avg_tflops:.1f})"
                     )
 
     def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
@@ -469,9 +469,9 @@ class ThroughputAverageExtension:
         Update ``parsed`` with running-average TFLOP and token throughput.
 
         - TFLOPs are rendered inline as:
-              throughput per GPU (TFLOP/s/GPU): inst/avg
-        - Tokens are appended as a new segment immediately after throughput:
-              tokens per GPU (tokens/s/GPU): inst/avg
+              compute per GPU (TFLOP/s/GPU): inst (avg <mean>)
+        - Tokens are appended to the same segment immediately after compute:
+              tokens/s/GPU inst/harmonic mean: inst/<harmonic mean>
         """
         try:
             # If no parsed info is provided (e.g., unit tests calling this

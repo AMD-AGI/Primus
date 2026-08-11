@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: MIT
-# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions copied and modified from ROCm/aiter (https://github.com/ROCm/aiter) and
+# DeepSeek FlashMLA (https://github.com/deepseek-ai/FlashMLA); see comments below.
 
 # Gluon MLA decode kernel originated from FlashMLA triton kernel(https://github.com/deepseek-ai/FlashMLA/blob/main/benchmark/bench_flash_mla.py).
 # Stage-1 split-KV MLA attention using explicit Gluon layouts. Three regimes:

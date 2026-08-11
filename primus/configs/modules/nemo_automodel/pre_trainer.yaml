@@ -1,0 +1,100 @@
+# NeMo AutoModel pre_trainer module config (Primus backend: nemo_automodel).
+#
+# This is the AutoModel recipe schema (model:/fsdp:/optim:/step_scheduler:/...);
+# the Primus launcher deep-merges the `model:` preset and the EXP `overrides:`
+# on top of it, then the nemo_automodel backend materialises the whole tree into
+# an AutoModel ConfigNode and runs TrainDiffusionRecipe. The defaults below are
+# the optimized pretrain knobs: aiter + torch.compile + bf16 reduce + fused AdamW.
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset
+# (merge is allow_override=False and would conflict).
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 256
+  local_batch_size: 32
+  ckpt_every_steps: 1000
+  num_epochs: 100
+  log_every: 2
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: nemo_automodel.components.datasets.diffusion.build_video_multiresolution_dataloader
+    cache_dir: /dataset
+    model_type: wan
+    base_resolution: [512, 512]
+    dynamic_batch_size: false
+    shuffle: true
+    drop_last: false
+    num_workers: 2
+
+optim:
+  learning_rate: 5e-5
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    # fused AdamW (mutually exclusive with foreach).
+    foreach: false
+    fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: simple
+  adapter_kwargs: {}
+  timestep_sampling: uniform
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  num_train_timesteps: 1000
+  i2v_prob: 0.3
+  use_loss_weighting: true
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  # dp_size is intentionally left unset: AutoModel derives it from the runtime
+  # world size and the parallel dims (dp = world_size / (tp*cp*pp)), so single-
+  # and multi-node runs work without edits. Pin `dp_size: <n>` only to force a
+  # specific value.
+  defer_fsdp_grad_sync: true
+  enable_fsdp2_prefetch: true
+  # Optimized knobs:
+  fsdp2_backward_prefetch_depth: 3
+  fsdp2_forward_prefetch_depth: 2
+  reduce_dtype: bfloat16
+  enable_compile: true
+  # Keep AC on for bs>8; flip false via overrides for the bs6-8 AC-off point.
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: /checkpoints/wan22_primus_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

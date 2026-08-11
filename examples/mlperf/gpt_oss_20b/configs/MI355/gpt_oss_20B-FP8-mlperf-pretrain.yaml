@@ -1,7 +1,7 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
 exp_name: ${EXP_NAME:gpt_oss_20b}
-workspace: ./output
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:
@@ -13,7 +13,7 @@ modules:
     overrides:
 
       # Activate the migrated MLPerf pretrain trainer (mllog + MLPerf hooks).
-      stage: mlperf_pretrain
+      stage: ${PRIMUS_STAGE:mlperf_pretrain}
 
       # tokenizer
       tokenizer_type: Llama3Tokenizer
@@ -39,7 +39,7 @@ modules:
       # log
       wandb_project: "Primus_GPT_OSS_20B"
       stderr_sink_level: ERROR
-      log_interval: 999999
+      log_interval: ${LOG_INTERVAL:999999}
 
       # debug
       # moe_router_force_load_balancing: true
@@ -47,14 +47,14 @@ modules:
       # log_avg_reset_interval: 50
 
       # profile
-      profile: ${PRIMUS_PROFILE:false}
-      use_pytorch_profiler: ${PRIMUS_PROFILE:false}
+      profile: ${PRIMUS_PROFILE:False}
+      use_pytorch_profiler: ${PRIMUS_PROFILE:False}
       profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
       profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
-      profile_ranks: [0,1,2,3,4,5,6,7]
+      profile_ranks: [0]
 
       # enable fp8 training
-      fp8: e4m3
+      fp8: ${PRIMUS_FP8:e4m3}
       fp8_recipe: tensorwise
       clip_grad: 1.0  # Gradient clipping (already default, but explicit)
       check_for_nan_in_loss_and_grad: false
@@ -150,6 +150,8 @@ modules:
       moe_router_load_balancing_type: none
       moe_router_num_groups: null
       moe_router_padding_for_fp8: false
+      # Keep routing exact. PrimusTurbo consumes the ragged expert token counts
+      # directly, so no fake routes or TE multi_padding/unpadding are needed.
       moe_router_padding_for_quantization: false
       moe_router_pre_softmax: false
       moe_router_score_function: softmax
@@ -183,14 +185,13 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
+      use_turbo_ragged_grouped_gemm: ${USE_TURBO_RAGGED_GROUPED_GEMM:true}
       use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
+      # Keeps the fused layernorm+QKV site's norm on Turbo and its GEMM on
+      # hipBLASLt, which is where each backend is faster on these shapes.
+      use_turbo_norm_te_linear: ${USE_TURBO_NORM_TE_LINEAR:true}
       use_turbo_fused_act_with_probs : true
-      # Pad tokens-per-expert so the fp8 grouped GEMM path skips the buggy
-      # quantization_padding branch in PrimusGroupedMLP.forward (experts.py:97-109),
-      # which yields NaN with recompute. Not auto-enabled here because
-      # turbo_sync_free_moe_stage=0 (it is only auto-set for sync-free stages 1-3).
-      use_turbo_permute_padding: true
 
       # deepep
       use_turbo_deepep: false
@@ -209,8 +210,8 @@ modules:
       cross_entropy_loss_fusion: true
 
       # tensorboard logging, set 'disable_tensorboard: false' to enable tensorboard logging
-      disable_tensorboard: true
-      tensorboard_dir: /workspace/code/tensorboard
+      disable_tensorboard: ${PRIMUS_DISABLE_TENSORBOARD:true}
+      tensorboard_dir: ${PRIMUS_WORKSPACE:./output}/tensorboard
       tensorboard_log_interval: 1
       tensorboard_queue_size: 1000
       log_timers_to_tensorboard: true

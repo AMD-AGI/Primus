@@ -44,6 +44,9 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
+      # NOTE: gradient_accumulation_fusion=true raised throughput ~1% but caused
+      # an intermittent NaN in the grad-norm check (backward wgrad accumulation),
+      # so it is kept off for reliability.
       gradient_accumulation_fusion: false
 
       # data
@@ -73,10 +76,13 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: true
-      use_turbo_grouped_gemm: false
+      # PrimusTurbo grouped GEMM for the MoE experts (replaces the removed
+      # use_turbo_grouped_gemm). Required for sync-free MoE stage >= 2.
+      use_turbo_grouped_gemm: true
 
       # deepep
       use_turbo_deepep: true
+      # DeepEP does not support moe_shared_expert_overlap; keep it off.
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
@@ -87,7 +93,7 @@ modules:
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
+      turbo_sync_free_moe_stage: 2
 
       # remove once super flag is functional again
       moe_use_fused_router_with_aux_score: true

@@ -1,0 +1,75 @@
+bases:
+  - mamba_base.yaml
+
+# 75% Hybrid Mamba2 + MLA 300M — parallel to the GDN hybrid 300M, drop-in
+# replacement of the GDN mixer with Mamba2 (SSM).
+#
+#   12 mixer blocks: 3 MLA + 9 Mamba2 (i.e. 75% Mamba2, 25% MLA)
+#   +12 MLP blocks = 24 Megatron sublayers
+#
+# Megatron HybridStack with hybrid_override_pattern '*-M-M-M-*-M-M-M-*-M-M-M-':
+#   MLA at mixer indices [0, 4, 8] (matches the user's `"layers": [0, 4, 8]`).
+#
+# Uses the same `hybrid_stack_spec` as zebra_llama_{1B,3B,8B}.yaml (the proven
+# TE-backed Mamba2+MLA spec); model dims scaled down to 300M (same hidden/ffn
+# as the GDN hybrid 300M for an apples-to-apples comparison).
+
+model_type: mamba                                 # CRITICAL: hybrid models use mamba model type
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B
+
+# ── Model dimensions ──
+num_layers: 24                                    # 12 mixer + 12 MLP sublayers
+hidden_size: 1024
+ffn_hidden_size: 4096
+
+# ── Hybrid pattern ──
+# 24 sublayers = 12 mixer blocks alternating with 12 MLPs.
+#   indices 0, 8, 16 → '*' (MLA attention) ⇔ FLA-style mixer indices [0, 4, 8]
+#   indices 2, 4, 6, 10, 12, 14, 18, 20, 22 → 'M' (Mamba2 mixer, 9 total)
+#   indices 1, 3, 5, …, 23 → '-' (MLP)
+is_hybrid_model: true
+hybrid_attention_ratio: 0.25                     # informational (allocator uses pattern below)
+hybrid_override_pattern: "*-M-M-M-*-M-M-M-*-M-M-M-"
+
+# ── Mamba2 parameters ──
+# Match the 1B/3B/8B convention (mamba_state_dim=64, head_dim=64, groups=8) so
+# the 300M run is just a smaller version of the same architecture.  Expand=2 is
+# the standard Mamba2 expansion ratio; d_conv=4 matches the spec params.
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 8
+mamba_expand: 2
+
+# ── MLA parameters (identical to the 300M GDN hybrid for direct comparison) ──
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: true
+num_attention_heads: 16                           # MLA head count
+q_lora_rank: 672
+kv_lora_rank: 64
+qk_head_dim: 32                                   # = qk_nope_head_dim
+qk_pos_emb_head_dim: 32                           # = qk_rope_head_dim
+v_head_dim: 64
+rotary_scaling_factor: 1.0
+mscale: 1.0
+mscale_all_dim: 1.0
+
+# Embedding tying
+untie_embeddings_and_output_weights: false
+
+# All projections bias=False
+add_bias_linear: false
+
+# Scale-only RMSNorm, no bias (1e-6 set in pretrain override)
+normalization: RMSNorm
+norm_epsilon: 1.0e-6
+
+# Positional encoding — MLA handles its own RoPE (rotary_base=500000);
+# Mamba2 layers are recurrent and don't use position embeddings.
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072
