@@ -21,6 +21,11 @@
 ###############################################################################
 set -euo pipefail
 
+if [[ "${PRIMUS_SKIP_PIP:-0}" == "1" ]]; then
+  echo "[install_eo] PRIMUS_SKIP_PIP=1: skipping emerging_optimizers installation."
+  exit 0
+fi
+
 # Only do work when explicitly requested (the Muon launch path sets this).
 case "${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-0}" in
   1 | true | True | TRUE | yes | on)

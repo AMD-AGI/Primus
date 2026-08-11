@@ -48,7 +48,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_PREFLIGHT_MIN_FREE_MEM_GB` | `1` | User | `primus/tools/preflight/gpu/utils.py` | Minimum free GPU memory (GB) for preflight checks. |
 | `PRIMUS_PREFLIGHT_MIN_TFLOPS` | `10.0` | User | `primus/tools/preflight/gpu/utils.py` | Minimum TFLOPS threshold for preflight GEMM checks. |
 | `PRIMUS_TURBO_AUTO_TUNE` | (unset) | User / tests | `tests/trainer/test_megatron_trainer.py` (integration) | Enables Turbo auto-tuning in supported Turbo/Megatron test flows; not referenced in core `primus/` Python outside tests. **Optional**. |
-| `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `examples/run_pretrain.sh`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
+| `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
 
 ---
 
@@ -70,7 +70,7 @@ Parsed by `primus/core/config/yaml_loader.py` for patterns `${VAR}` (required) a
 | `PRIMUS_GLOBAL_BATCH_SIZE` | per-model | User | Megatron example YAMLs | Global batch override. |
 | `PRIMUS_NUM_LAYERS` | per-model | User | Tests and MoE examples | Transformer layer count override. |
 | `PRIMUS_MOE_LAYER_FREQ` | MoE patterns | User | MoE examples / tests | MoE layer frequency pattern. |
-| `PRIMUS_TOKENIZED_DATA_PATH` | `null` | User | Megatron examples | Path to tokenized training data. |
+| `PRIMUS_TOKENIZED_DATA_PATH` | `null` | User | Megatron example YAML interpolation | Existing tokenized training prefix consumed by configs that reference this variable. Unlike `TOKENIZED_*_DATA_PATH`, it does not select where the preparation hook writes generated BookCorpus data. |
 | `PRIMUS_MODEL` | per-stack | User | Megatron examples | Model preset stem (e.g. `llama3_8B`). |
 | `PRIMUS_VPP` | `null` | User | `tests/trainer/test_megatron_trainer.yaml` | Virtual pipeline stages override. |
 
@@ -85,7 +85,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NCCL_DEBUG` | unset | User / `base_env.sh` empty default | Preflight reports, RCCL runtime | Log verbosity: `NONE`, `WARN`, `INFO`, `TRACE`, etc. **Optional** unless debugging comms. |
 | `NCCL_SOCKET_IFNAME` | derived from `IP_INTERFACE` | `base_env.sh` | `primus/tools/preflight/network/*.py`, GPU topology helpers | Socket NIC for host networking. |
 | `GLOO_SOCKET_IFNAME` | same as NCCL if unset | `base_env.sh` | Preflight | Gloo TCP backend interface. |
-| `NCCL_IB_HCA` | auto via `get_nccl_ib_hca.sh` if empty | `base_env.sh`, container passthrough | Preflight, multi-node tuning | InfiniBand HCAs to use. |
+| `NCCL_IB_HCA` | auto via `runner/helpers/envs/get_nccl_ib_hca.sh` if empty | `base_env.sh`, container passthrough | Preflight, multi-node tuning | InfiniBand HCAs to use. |
 | `NCCL_IB_GID_INDEX` | `3` | `base_env.sh` | RCCL | GID index for IB/RoCE; many sites use `1` for RoCE v2 (override as needed). |
 | `NCCL_IB_TC` | (unset) | User | RCCL | InfiniBand traffic class. |
 | `NCCL_IB_FIFO_TC` | (unset) | User | RCCL | InfiniBand FIFO traffic class. |
@@ -139,7 +139,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 |----------|---------|-----------|------------|-------------|
 | `NVTE_ROCM_ENABLE_MXFP8` | `1` | `base_env.sh` | Transformer Engine on ROCm | Enable MXFP8 paths. |
 | `NVTE_CK_USES_BWD_V3` | `1` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
-| `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / `examples/run_pretrain.sh`, container passthrough | TE / CK | Atomic FP32 mode for CK v3 backward. |
+| `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / container passthrough (`runner/.primus.yaml`) | TE / CK | Atomic FP32 mode for CK v3 backward. |
 | `PATCH_TE_FLASH_ATTN` | `0` | `base_env.sh`, container passthrough | `runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh` | Trigger TE flash-attn patch hook when `1`. |
 
 ---
@@ -161,7 +161,11 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `MLFLOW_TRACKING_URI` | (unset) | User | `mlflow` (via Megatron integrations) | MLflow tracking server URI. **Optional** unless using MLflow. |
 | `MLFLOW_REGISTRY_URI` | (unset) | User | MLflow | Model registry endpoint. |
 | `NLTK_DATA` | (unset) | User | `runner/helpers/hooks/train/pretrain/megatron/preprocess_data.py`, Megatron-LM tools | Punkt and other tokenizer data for preprocessing. |
-| `TOKENIZED_DATA_PATH` | per-hook default | User | `runner/helpers/hooks/train/pretrain/megatron/prepare.py` | Pre-tokenized dataset location for Megatron data prep hooks. |
+| `TOKENIZED_DATA_PATH` | per-hook default | User | `runner/helpers/hooks/train/pretrain/megatron/prepare.py` | Final Megatron indexed-data prefix (`.bin`/`.idx` omitted). Used for the whole corpus when validation is not requested and as the validation-flow training fallback. |
+| `TOKENIZED_TRAIN_DATA_PATH` | per-hook default | User | `runner/helpers/hooks/train/pretrain/megatron/prepare.py` | Final training prefix when the hook must create a held-out validation split; overrides `TOKENIZED_DATA_PATH`. |
+| `TOKENIZED_EVAL_DATA_PATH` | per-hook default | User | `runner/helpers/hooks/train/pretrain/megatron/prepare.py` | Final validation/test prefix generated for a held-out split. |
+| `PRIMUS_DATA_PREP_TIMEOUT_SECONDS` | `3600` | User | `runner/helpers/hooks/train/pretrain/megatron/prepare.py` | Maximum time a nonzero node rank waits for rank 0 data preparation. Tokenized prefixes and their completion/failure markers must be on storage shared by all nodes. |
+| `PRIMUS_SKIP_PIP` | `0` | User | Backend requirement hooks | `1` skips per-run requirement installation and uses dependencies already present in the image/environment. Backend preparation still runs. |
 
 ---
 
@@ -169,13 +173,13 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
-| `PRIMUS_HIPBLASLT_TUNING` | `0` | User | `examples/run_pretrain.sh` | **Master switch** for the HipBLASLt tuning flow (`1` enables). Must be set before `PRIMUS_HIPBLASLT_TUNING_STAGE` takes effect, and is mutually exclusive with deterministic mode (`PRIMUS_DETERMINISTIC=1`). |
-| `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `examples/run_pretrain.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
-| `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `examples/run_pretrain.sh` | Path to tuned-kernel override file for stage `3`. |
-| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `examples/run_pretrain.sh` | Number of benchmark runs per shape during TE hipBLASLt tuning. |
-| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `examples/run_pretrain.sh` | Transformer Engine hipBLASLt search breadth. |
+| `PRIMUS_HIPBLASLT_TUNING` | `0` | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | **Master switch** for the HipBLASLt tuning flow (`1` enables). Must be set before `PRIMUS_HIPBLASLT_TUNING_STAGE` takes effect, and is mutually exclusive with deterministic mode (`PRIMUS_DETERMINISTIC=1`). |
+| `PRIMUS_HIPBLASLT_TUNING_STAGE` | `0` | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Stages `0` off, `1` dump shapes, `2` offline tune, `3` apply tuned kernels. |
+| `HIPBLASLT_TUNING_OVERRIDE_FILE` | (unset) | User / tuning scripts | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Path to tuned-kernel override file for stage `3`. |
+| `TE_HIPBLASLT_TUNING_RUN_COUNT` | varies | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Number of benchmark runs per shape during TE hipBLASLt tuning. |
+| `TE_HIPBLASLT_TUNING_ALGO_COUNT` | varies | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | Transformer Engine hipBLASLt search breadth. |
 | `TE_HIPBLASLT_TUNING_ALGO_FILE` | (unset) | User | TE + HipBLASLt | Algorithm file for TE tuning flows. |
-| `TE_HIPBLASLT_TUNING` | (unset) | User | `examples/run_pretrain.sh` | When set, interacts with deterministic mode and tuning stages (disable conflicting modes per script comments). |
+| `TE_HIPBLASLT_TUNING` | (unset) | User | `runner/helpers/hooks/train/pretrain/prepare_experiment.sh` | When set, interacts with deterministic mode and tuning stages (disable conflicting modes per hook comments). |
 | `HIPBLASLT_LOG_LEVEL` | (unset) | User | HipBLASLt | Library log level. |
 | `HIPBLASLT_LOG_MASK` | (unset) | User | HipBLASLt | Bitmask for log categories. |
 
@@ -186,6 +190,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `REBUILD_PRIMUS_TURBO` | `0` | User, container passthrough | `runner/helpers/hooks/00_rebuild_primus_turbo.sh` | `1` rebuilds Primus-Turbo on startup. |
+| `GPU_ARCHS` | `gfx942;gfx950` | User, container passthrough | `runner/helpers/hooks/00_rebuild_primus_turbo.sh` | Semicolon-separated GPU targets compiled into a Primus-Turbo rebuild. |
 | `REBUILD_BNXT` | `0` | User, container passthrough | `runner/helpers/hooks/02_rebuild_bnxt.sh` | `1` rebuilds BNXT driver artifacts when packaged. |
 | `USING_AINIC` | (unset) | User | `runner/helpers/hooks/03_enable_ainic.sh` | `1` enables AINIC-oriented networking hooks. |
 | `MAX_JOBS` | (unset) | User / tooling | `tools/daily/safe_wrapper.py` | Parallel compile jobs for pip builds. |
@@ -199,7 +204,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 Forwarded keys:
 
-`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`
+`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `DATABRICKS_TOKEN`, `DATABRICKS_HOST`, `MLFLOW_TRACKING_URI`, `MLFLOW_REGISTRY_URI`, `MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `GPU_ARCHS`, `USING_UEP`, `REBUILD_UEP`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`
 
 ---
 

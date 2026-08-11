@@ -10,10 +10,10 @@
 # Launch (inside the Primus container, 8 GPUs free):
 #   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
 #   GPUS_PER_NODE=8 \
-#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain.yaml \
-#   bash examples/run_pretrain.sh
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-pretrain.yaml
 #   # AC-off operating points (Wan 2.1 GB300-comparable) via CLI overrides, e.g.:
-#   #   ... bash examples/run_pretrain.sh \
+#   #   ... bash ./runner/primus-cli direct -- train pretrain --config <exp> \
 #   #       fsdp.activation_checkpointing=false \
 #   #       step_scheduler.local_batch_size=8 step_scheduler.global_batch_size=64
 #

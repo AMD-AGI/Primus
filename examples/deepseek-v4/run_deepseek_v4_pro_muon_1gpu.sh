@@ -6,7 +6,7 @@
 # The upstream run_deepseek_v4_pro_muon.sh uses `primus-cli direct`, which
 # assumes it is ALREADY inside the 8x288GB MI355X container at EP=8. This host
 # is one gfx1250 box with no SLURM and one GPU, so this script instead wraps
-# the SAME examples/run_pretrain.sh entrypoint in a local `docker run` (the
+# the SAME `primus-cli direct` entrypoint in a local `docker run` (the
 # validated gfx1250 docker + TransformerEngine recipe from
 # ../../mi450/Primus/run_dsv3_proxy_4L.sh), selects the Pro model via
 # PRIMUS_MODEL, and scales it down to a MINIMUM single-GPU proxy:
@@ -289,8 +289,8 @@ LOG=${LOG:-deepseek-v4-pro-muon-1gpu.log}
 #
 # CK-free by construction: this 1gpu launcher already has TURBO_USE_GROUPED_MLP=
 # False + USE_TURBO_DEEPEP=False, so experts route to TEGroupedMLP (hipBLASLt),
-# not PrimusTurboGroupedMLP (ck_grouped_gemm). NVTE_ROCM_ENABLE_MXFP8=1 is set
-# by examples/run_pretrain.sh.
+# not PrimusTurboGroupedMLP (ck_grouped_gemm). NVTE_ROCM_ENABLE_MXFP8=1 is
+# exported below and forwarded into the container.
 #
 # WHY NOT mxfp8 (paper ue8m0): two blockers on this build, both upstream-
 # root-caused. (1) TE-ROCm MXFP8 asserts GEMM K % 128 == 0 (rocm_gemm.hip:1529)
@@ -336,8 +336,8 @@ fi
 
 echo "[pro] model=$PRIMUS_MODEL layers=$PRIMUS_TOTAL_LAYERS experts=$PRIMUS_NUM_EXPERTS seq=$PRIMUS_SEQ_LENGTH optimizer=$OPTIMIZER compress_ratios=$PRIMUS_COMPRESS_RATIOS"
 
-# V4-Pro single-GPU overrides (trailing args -> run_pretrain.sh -> primus cli
-# train pretrain --config $EXP ...). Mirrors run_deepseek_v4_pro_muon.sh's CLI
+# V4-Pro single-GPU overrides (trailing args -> primus-cli direct -> train
+# pretrain --config $EXP ...). Mirrors run_deepseek_v4_pro_muon.sh's CLI
 # set, minus the DeepEP wiring, scaled to one GPU / minimum layers.
 # overlap_grad_reduce/param_gather stay OFF: upstream enabled them for multi-
 # node DP scaling (needs the distributed optimizer + the indexer-param freeze),
@@ -492,6 +492,6 @@ docker run --rm \
         ${HBL_PRELOAD_PREFIX}\
         ${TE_INSTALL_PREFIX}\
         echo '==================== V4-PRO + MUON 1-GPU PROXY (gfx1250, BF16, eager, no profiler) ====================' && \
-        EXP=$EXP PRIMUS_MODEL=$PRIMUS_MODEL GPUS_PER_NODE=1 NNODES=1 bash examples/run_pretrain.sh \
-            ${PROXY_OVERRIDES} ${EXTRA_CLI:-}" \
+        PRIMUS_MODEL=$PRIMUS_MODEL GPUS_PER_NODE=1 NNODES=1 bash runner/primus-cli direct \
+            -- train pretrain --config $EXP ${PROXY_OVERRIDES} ${EXTRA_CLI:-}" \
     2>&1 | tee "$LOG"

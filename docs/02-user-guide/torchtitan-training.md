@@ -261,10 +261,10 @@ Launch the training using `primus-cli` (recommended):
 ./runner/primus-cli slurm srun -N 4 -- train pretrain --config examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml --training.local_batch_size 6 --training.global_batch_size 192 --training.mock_data True
 ```
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=4 EXP=examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --training.local_batch_size 6 --training.global_batch_size 192 --training.mock_data True
+NNODES=4 EXP=examples/torchtitan/configs/MI355X/llama3.1_70B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --training.local_batch_size 6 --training.global_batch_size 192 --training.mock_data True
 ```
 
 - **Llama3.1-405B FP8, 8 nodes, MI355X**
@@ -276,10 +276,10 @@ Launch the training using `primus-cli` (recommended):
 ./runner/primus-cli slurm srun -N 8 -- train pretrain --config examples/torchtitan/configs/MI355X/llama3.1_405B-FP8-pretrain.yaml --training.local_batch_size 3 --training.global_batch_size 192 --training.mock_data True
 ```
 
-Launch the training using the legacy script:
+Or with the shared `EXP` / `NNODES` helper:
 
 ```bash
-NNODES=8 EXP=examples/torchtitan/configs/MI355X/llama3.1_405B-FP8-pretrain.yaml bash examples/run_slurm_pretrain.sh --training.local_batch_size 3 --training.global_batch_size 192 --training.mock_data True
+NNODES=8 EXP=examples/torchtitan/configs/MI355X/llama3.1_405B-FP8-pretrain.yaml bash ./runner/helpers/launch/slurm_pretrain.sh --training.local_batch_size 3 --training.global_batch_size 192 --training.mock_data True
 ```
 
 ---

@@ -5,9 +5,11 @@ Primus routes training through **Megatron-LM**, **TorchTitan**, and **MaxText**.
 Scripts referenced below live under the Primus repository root, for example:
 
 - `examples/megatron/preprocess_data.py`
-- `examples/megatron/prepare.py`
 - `examples/megatron/prepare_bookcorpus_megatron_dataset.py`
-- `examples/torchtitan/prepare.py`
+- `runner/helpers/hooks/train/pretrain/megatron/prepare.py`
+- `runner/helpers/hooks/train/pretrain/torchtitan/prepare.py`
+
+The `prepare.py` scripts are launcher hooks: `primus-cli` runs them automatically before training, so you rarely invoke them by hand.
 
 ---
 
@@ -73,7 +75,7 @@ The script tokenizes input and writes **Megatron indexed datasets** (`.bin` + `.
 | `--split-sentences` | Run NLTK sentence splitting before encode. |
 | `--append-eod` | Append end-of-document token. |
 
-**Example** (mirrors `examples/megatron/prepare.py` for BookCorpus-style flows):
+**Example** (mirrors the Megatron pretrain hook for BookCorpus-style flows):
 
 ```bash
 python3 examples/megatron/preprocess_data.py \
@@ -98,7 +100,7 @@ python3 examples/megatron/preprocess_data.py \
 ### BookCorpus example scripts
 
 - **`examples/megatron/prepare_bookcorpus_megatron_dataset.py`**—downloads BookCorpus to JSON via Hugging Face `datasets`, optional `--out-dir`.
-- **`examples/megatron/prepare.py`**—orchestrates download, train/valid split, and calls `preprocess_data.py` with tokenizer settings from Primus config; respects `TOKENIZED_TRAIN_DATA_PATH` / `TOKENIZED_EVAL_DATA_PATH` for output locations.
+- **`runner/helpers/hooks/train/pretrain/megatron/prepare.py`**—orchestrates download and calls `preprocess_data.py` with tokenizer settings from the Primus config; respects `TOKENIZED_DATA_PATH` for the output location.
 
 ### Tokenizers
 
@@ -115,7 +117,7 @@ TorchTitan uses **Hugging Face datasets** style identifiers and local paths.
 | `training.dataset` | `c4` | Dataset identifier for TorchTitan loaders. |
 | `training.dataset_path` | `null` | Local directory for dataset assets when needed. |
 
-Tokenizer and model assets are resolved from **`model.hf_assets_path`** (or equivalent in your model preset). The preparation script **`examples/torchtitan/prepare.py`**:
+Tokenizer and model assets are resolved from **`model.hf_assets_path`** (or equivalent in your model preset). The preparation hook **`runner/helpers/hooks/train/pretrain/torchtitan/prepare.py`**:
 
 - Resolves the TorchTitan checkout path.
 - Runs `scripts/download_hf_assets.py` inside TorchTitan to fetch tokenizer assets for a given `repo_id`.
@@ -142,11 +144,10 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 | Variable | Usage |
 |----------|--------|
-| `TOKENIZED_DATA_PATH` / `PRIMUS_TOKENIZED_DATA_PATH` | Tokenized dataset locations for Megatron hooks and examples (see `docs/03-configuration-reference/environment-variables.md`). |
-| `TOKENIZED_TRAIN_DATA_PATH`, `TOKENIZED_EVAL_DATA_PATH` | Override output paths in `examples/megatron/prepare.py`. |
+| `TOKENIZED_DATA_PATH` / `PRIMUS_TOKENIZED_DATA_PATH` | Tokenized dataset location for the Megatron pretrain hook (see `docs/03-configuration-reference/environment-variables.md`). |
 | `DATA_PATH` | General data root used in scripts and CI-style launches. |
 | `HF_TOKEN` | **Required** for gated Hugging Face models and some datasets (TorchTitan `prepare.py`, Kubernetes examples in `examples/README.md`). |
-| `HF_HOME` | Hugging Face cache directory (used in `examples/megatron/prepare.py`). |
+| `HF_HOME` | Hugging Face cache directory (used by the Megatron pretrain hook). |
 | `NLTK_DATA` | NLTK tokenizer data directory for sentence splitting in `preprocess_data.py` when `NLTK_DATA` is set. |
 
 ---
@@ -155,5 +156,5 @@ See MaxText’s data input documentation for Grain and TFDS specifics.
 
 1. Use **mock or synthetic** data to validate configs and performance before investing in large preprocessing jobs.
 2. For **Megatron**, convert JSON/JSONL to `.bin`/`.idx` with `preprocess_data.py` and point `data_path` or split paths at the outputs.
-3. For **TorchTitan**, set `training.dataset` / `dataset_path` and run **`examples/torchtitan/prepare.py`** to fetch tokenizer assets.
+3. For **TorchTitan**, set `training.dataset` / `dataset_path`; the launcher's TorchTitan pretrain hook fetches the tokenizer assets.
 4. For **MaxText**, configure `dataset_type` and `per_device_batch_size` per upstream `base.yml` and model YAMLs.

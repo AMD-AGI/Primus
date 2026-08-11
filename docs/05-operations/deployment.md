@@ -157,9 +157,7 @@ The shipped `primus-cli-slurm-entry.sh` invokes **`primus-cli-container.sh`** wi
 
 ## 4. Kubernetes deployment
 
-Kubernetes integration is **not** shipped as a Helm chart or operator in this repository. The repo includes **`examples/run_k8s_pretrain.sh`**, a client script that talks to a Kubernetes **API** to create and manage training workloads (image default `docker.io/rocm/primus:v26.5`).
-
-Use that script as a reference for your platform; adapt networking, storage, and scheduling to your cluster policies.
+Kubernetes integration is **not** shipped in this repository — no Helm chart, operator, or submission client. Primus only needs the distributed variables of [Multi-node configuration](#5-multi-node-configuration) to be set consistently across pods, after which every pod runs the same `primus-cli direct` command; see [Without Slurm: Kubernetes or `parallel-ssh`](../01-getting-started/installation.md) for the variable mapping. Adapt networking, storage, and scheduling to your cluster policies.
 
 ---
 
