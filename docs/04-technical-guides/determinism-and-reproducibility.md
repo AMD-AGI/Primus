@@ -62,12 +62,13 @@ For a fully reproducible Megatron run: set a fixed `seed`, `deterministic_mode: 
 
 ## 4. Seeds and determinism (TorchTitan)
 
-Under `training:` in `primus/configs/modules/torchtitan/pre_trainer.yaml`:
+Under `debug:` in `primus/configs/modules/torchtitan/pre_trainer.yaml` (TorchTitan v0.2.2 moved these keys out of `training:`):
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | `seed` | `null` | RNG seed; set an integer for reproducible runs. |
 | `deterministic` | `false` | Enable deterministic algorithms (disables some optimized kernels; slower). |
+| `deterministic_warn_only` | `false` | With `deterministic: true`, warn instead of erroring when an op has no deterministic implementation. |
 
 Related: `checkpoint.create_seed_checkpoint` (`false`) creates a deterministic seed checkpoint that all ranks load, ensuring identical initialization across a distributed run.
 
@@ -102,7 +103,7 @@ Determinism is not free:
 ## 7. Reproducibility checklist
 
 1. **Pin the environment**—same container image, ROCm version, and backend (Megatron/TorchTitan) commit.
-2. **Fix seeds**—Megatron `seed`; TorchTitan `training.seed`.
+2. **Fix seeds**—Megatron `seed`; TorchTitan `debug.seed`.
 3. **Hold the layout constant**—same world size and TP/PP/DP/EP/CP degrees.
 4. **Enable determinism**—`PRIMUS_DETERMINISTIC=1` plus backend `deterministic_mode`/`deterministic`.
 5. **Disable autotuning**—automatic in deterministic mode (HipBLASLt tuning off).

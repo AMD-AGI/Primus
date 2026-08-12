@@ -97,6 +97,17 @@ def validate_fsdp2_optimizer_exclusivity(args) -> None:
         )
 
 
+def validate_turbo_grouped_gemm_without_padding(args) -> None:
+    """Validate the no-padding PrimusTurbo grouped-GEMM path."""
+    option = "turbo_grouped_gemm_without_padding"
+    if not getattr(args, option, False):
+        return
+    if not getattr(args, "enable_primus_turbo", False) or not getattr(args, "use_turbo_grouped_gemm", False):
+        raise ValueError(f"{option}=True requires enable_primus_turbo=True and use_turbo_grouped_gemm=True.")
+    if getattr(args, "moe_router_padding_for_quantization", False):
+        raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
+
+
 def validate_args_on_rocm(args):
     # Primus-Turbo auto-tuning
     use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
@@ -186,6 +197,8 @@ def validate_args_on_rocm(args):
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )
+
+    validate_turbo_grouped_gemm_without_padding(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

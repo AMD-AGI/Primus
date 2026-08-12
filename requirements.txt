@@ -21,3 +21,4 @@ megatron-energon==7.3.2
 webdataset==1.0.2
 tqdm==4.67.3
 pyarrow==21.0.0
+flash-linear-attention==0.5.2
