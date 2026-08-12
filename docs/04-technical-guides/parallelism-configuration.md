@@ -49,9 +49,9 @@ Set these to `true` in your experiment when you want communication/compute overl
 
 For Megatron, data parallel size is not a single YAML key; it is implied by the world size and the product of parallel degrees:
 
-\[
+$$
 \text{DP} = \frac{\text{world\_size}}{\text{TP} \times \text{PP} \times \text{EP}}
-\]
+$$
 
 (Adjust if you also use context parallelism or other groupings; your job’s process layout must match the configured degrees.)
 
@@ -64,15 +64,15 @@ For Megatron, data parallel size is not a single YAML key; it is implied by the 
 
 Megatron derives **gradient accumulation** from `global_batch_size`, `micro_batch_size`, and the effective data parallel size so that:
 
-\[
+$$
 \text{GBS} = \text{MBS} \times \text{DP} \times \text{gradient\_accumulation\_steps}
-\]
+$$
 
 Equivalently:
 
-\[
+$$
 \text{gradient\_accumulation\_steps} = \frac{\text{GBS}}{\text{MBS} \times \text{DP}}
-\]
+$$
 
 You normally set `global_batch_size` and `micro_batch_size` in YAML; Megatron computes the number of accumulation steps automatically.
 
@@ -108,9 +108,9 @@ TorchTitan parallelism is grouped under the `parallelism:` key in the TorchTitan
 
 For TorchTitan, a useful relationship when using replicate and shard degrees explicitly is:
 
-\[
+$$
 \text{global\_batch\_size} \approx \text{local\_batch\_size} \times \text{data\_parallel\_replicate\_degree} \times \text{data\_parallel\_shard\_degree}
-\]
+$$
 
 Exact semantics follow TorchTitan’s distributed layout; set `training.global_batch_size` and parallelism degrees consistently with your launcher’s world size.
 
@@ -141,13 +141,13 @@ Consult MaxText’s mesh documentation and your chosen model YAML for valid comb
 
 ### Megatron-style identity
 
-\[
+$$
 \text{GBS} = \text{MBS} \times \text{DP} \times \text{grad\_accum}
-\]
+$$
 
-\[
+$$
 \text{DP} = \frac{\text{world\_size}}{\text{TP} \times \text{PP} \times \text{EP}}
-\]
+$$
 
 (Subject to your exact parallel groups; CP and custom layouts can introduce additional groups.)
 

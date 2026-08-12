@@ -15,7 +15,7 @@ Primus projection tools estimate **per-GPU memory** and **training throughput** 
 - Memory: `primus/core/projection/memory_projection/`
 - Performance: `primus/core/projection/performance_projection/`
 
-Related: [Benchmark suite](./benchmarking.md), [Preflight diagnostics](./preflight.md), [Megatron parameters](../03-configuration-reference/megatron-parameters.md).
+Related: [Micro-benchmarking suite](./micro-benchmarking.md), [Preflight diagnostics](./preflight.md), [Megatron parameters](../03-configuration-reference/megatron-parameters.md).
 
 ---
 
@@ -170,7 +170,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 
 ## Related documentation
 
-- [Benchmark suite](./benchmarking.md)
+- [Micro-benchmarking suite](./micro-benchmarking.md)
 - [Preflight diagnostics](./preflight.md)
 - [Post-training workflows](./posttraining.md)
 - [Tuning agent](./tuning-agent.md)

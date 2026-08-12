@@ -93,8 +93,8 @@ Primus never forks the vendored `third_party/Megatron-LM` submodule.
 Instead these six patches are runtime monkey-patches registered with
 `@register_patch` and applied automatically at `phase="before_train"` by
 `primus/core/patches` -- see the
-[Backend Patch Explorer](../../.cursor/skills/backend-patch-explorer/SKILL.md)
-skill for how the engine works in general. Each patch's `condition=` gates
+`Backend Patch Explorer` skill (`.cursor/skills/backend-patch-explorer/SKILL.md`,
+available in a local checkout) for how the engine works in general. Each patch's `condition=` gates
 it on the relevant config flag, so it's a no-op unless that flag is set.
 
 | Patch id | File | Change | Reason |
