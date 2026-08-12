@@ -72,6 +72,7 @@ class SyntheticIdeogram4Dataset(Dataset):
         latent_scale: float,
         seed: int,
         cache_in_memory: bool = False,
+        share_text_features: bool = False,
     ) -> None:
         self.num_samples = max(int(num_samples), 1)
         self.in_channels = int(in_channels)
@@ -84,7 +85,9 @@ class SyntheticIdeogram4Dataset(Dataset):
         self.latent_scale = float(latent_scale)
         self.seed = int(seed)
         self.cache_in_memory = bool(cache_in_memory)
+        self.share_text_features = bool(share_text_features)
         self._cache: Dict[int, Dict[str, torch.Tensor]] = {}
+        self._shared_features: torch.Tensor | None = None
 
     def __len__(self) -> int:
         return self.num_samples
@@ -102,9 +105,24 @@ class SyntheticIdeogram4Dataset(Dataset):
         )
         # Full [max_text, dim] features; pad-region positions are masked out by the
         # adapter's segment_ids, so only the real-text region is attended.
-        llm_features = self.feature_scale * torch.randn(
-            self.max_text_tokens, self.llm_features_dim, dtype=torch.float32, generator=gen
-        )
+        if self.share_text_features:
+            # One buffer for every index. At a realistic text width this tensor is large
+            # enough that generating a distinct one per sample dominates the micro-batch on
+            # the CPU side, which makes a throughput run measure the dataloader rather than
+            # the model. Nothing about throughput depends on the samples holding DIFFERENT
+            # noise, only on their shapes and lengths, and ``text_lengths`` below still vary.
+            # Aliasing contract is the same one ``cache_in_memory`` already relies on:
+            # repeat reads hand back the identical tensor object.
+            if self._shared_features is None:
+                shared_gen = torch.Generator().manual_seed(self.seed)
+                self._shared_features = self.feature_scale * torch.randn(
+                    self.max_text_tokens, self.llm_features_dim, dtype=torch.float32, generator=shared_gen
+                )
+            llm_features = self._shared_features
+        else:
+            llm_features = self.feature_scale * torch.randn(
+                self.max_text_tokens, self.llm_features_dim, dtype=torch.float32, generator=gen
+            )
         # Deterministic per-sample real-text length in [min_text, max_text].
         span = self.max_text_tokens - self.min_text_tokens + 1
         text_len = self.min_text_tokens + (int(idx) % span)
@@ -165,6 +183,12 @@ class SyntheticIdeogram4DataloaderConfig:
     # Perf: cache generated samples in-process (use with num_workers=0 so the cache
     # persists across epochs) to isolate model throughput from feature generation.
     cache_in_memory: bool = False
+    # Perf: reuse ONE generated [max_text_tokens, llm_features_dim] buffer for every
+    # sample. Throughput depends on shapes and text lengths, not on the noise differing
+    # per sample, and at a realistic text width generating it per sample costs more CPU
+    # than the training step costs GPU. Leave false for the overfit smoke, where the
+    # samples must be distinct for the loss-decrease signal to mean anything.
+    share_text_features: bool = False
 
     def build(self, *, dp_rank: int, dp_world_size: int, batch_size: int) -> DiffusionDataloaderBuild:
         """Build the synthetic dataset, per-rank sampler, and dataloader."""
@@ -180,6 +204,7 @@ class SyntheticIdeogram4DataloaderConfig:
             latent_scale=self.latent_scale,
             seed=self.seed,
             cache_in_memory=self.cache_in_memory,
+            share_text_features=self.share_text_features,
         )
 
         sampler = None
