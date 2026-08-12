@@ -470,7 +470,8 @@ class BaseWanTrainer:
             return
         c = self.mlperf_constants
         opt = self.optimizer.param_groups[0]
-        self.mlperf_logger.event(key=c.CACHE_CLEAR, value="True")
+        cache_cleared = os.getenv("MLPERF_CLEAR_CACHES", "true").strip().lower() == "true"
+        self.mlperf_logger.event(key=c.CACHE_CLEAR, value=cache_cleared)
         self.mlperf_logger.event(key=c.SUBMISSION_BENCHMARK, value="flux1")
         self.mlperf_logger.event(
             key=c.SUBMISSION_DIVISION,
@@ -879,7 +880,12 @@ class BaseWanTrainer:
                     try:
                         raw_loss = self.compute_loss(batch)
                     except BaseException as exc:
-                        logger.exception("First training forward failed: %r", exc)
+                        logger.exception(
+                            "Training forward failed at step %d, batch %d: %r",
+                            self.global_step,
+                            batch_idx,
+                            exc,
+                        )
                         raise
                     if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                         logger.info("First training forward completed; entering backward pass")

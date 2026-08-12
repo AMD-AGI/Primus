@@ -1,4 +1,4 @@
 datasets>=3.6.0
 webdataset==1.0.2
 git+https://github.com/mlcommons/logging.git@6.0.0-rc5
-git+https://github.com/NVIDIA/mlperf-common.git
+git+https://github.com/NVIDIA/mlperf-common.git@b86d175a05849d650a8ff69c1e2c37b9f4e61d51
