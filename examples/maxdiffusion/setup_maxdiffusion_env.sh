@@ -23,6 +23,15 @@ PRIMUS_PATH="${PRIMUS_PATH:-$(realpath "$(dirname "$0")/../..")}"
 MAXDIFFUSION_PATH="${MAXDIFFUSION_PATH:-$PRIMUS_PATH/third_party/maxdiffusion}"
 log() { echo "[setup-maxdiffusion] $*"; }
 
+# Images that bake the stack (maxdiffusion installed, patches applied) need none
+# of this, and on those there may be no submodule to install from at all -- so
+# detect that first, before the source check below can fail on its absence.
+# PRIMUS_SKIP_SETUP_CHECK=1 forces the install path even when it looks present.
+if [ "${PRIMUS_SKIP_SETUP_CHECK:-0}" != "1" ] && python -c "import maxdiffusion" 2>/dev/null; then
+  log "maxdiffusion already installed ($(python -c 'import maxdiffusion,os; print(os.path.dirname(maxdiffusion.__file__))' 2>/dev/null)): nothing to install"
+  exit 0
+fi
+
 if [ ! -e "$MAXDIFFUSION_PATH/pyproject.toml" ] && [ ! -e "$MAXDIFFUSION_PATH/setup.py" ]; then
   log "ERROR: no maxdiffusion source at $MAXDIFFUSION_PATH"
   log "       run: git -C \"$PRIMUS_PATH\" submodule update --init third_party/maxdiffusion"
