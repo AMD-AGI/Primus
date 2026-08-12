@@ -45,7 +45,13 @@ class MegatronAdapter(BackendAdapter):
         # only after this backend package has finished initializing to avoid:
         # primus_mllog -> primus.backends.megatron -> primus_mllog.
         if stage == "mlperf_pretrain":
-            from primus_mllog import MLPerfMegatronPretrainTrainer
+            try:
+                from primus_mllog import MLPerfMegatronPretrainTrainer
+            except ImportError as exc:
+                raise ImportError(
+                    "Stage 'mlperf_pretrain' requires the optional dependency 'primus_mllog'. "
+                    "Install primus_mllog (or select a different stage) to proceed."
+                ) from exc
 
             BackendRegistry.register_trainer_class(
                 MLPerfMegatronPretrainTrainer,
