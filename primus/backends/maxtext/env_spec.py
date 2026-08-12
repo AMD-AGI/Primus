@@ -38,7 +38,6 @@ import os
 from typing import List
 
 from primus.core.backend.env_registry import (
-    ARCH_ALL,
     ARCH_GFX942,
     ARCH_GFX950,
     MODE_XLA_MERGE,
@@ -82,12 +81,14 @@ def maxtext_env_defaults() -> List[EnvVar]:
     """
     entries: List[EnvVar] = [
         # ---- XLA / JAX ----
-        EnvVar("XLA_FLAGS", _build_xla_flags(), mode=MODE_XLA_MERGE,
-               note="managed XLA knobs incl. autotune (fp8 MoE NaN fix)"),
-        EnvVar("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97",
-               note="avoid HSA OOM during multi-node"),
-        EnvVar("TF_CPP_MIN_LOG_LEVEL", "2",
-               note="suppress benign JAX/MaxText shutdown errors"),
+        EnvVar(
+            "XLA_FLAGS",
+            _build_xla_flags(),
+            mode=MODE_XLA_MERGE,
+            note="managed XLA knobs incl. autotune (fp8 MoE NaN fix)",
+        ),
+        EnvVar("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97", note="avoid HSA OOM during multi-node"),
+        EnvVar("TF_CPP_MIN_LOG_LEVEL", "2", note="suppress benign JAX/MaxText shutdown errors"),
         # ---- Transformer Engine (NVTE) ----
         EnvVar("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"),
         EnvVar("NVTE_USE_HIPBLASLT", "1"),
@@ -107,10 +108,13 @@ def maxtext_env_defaults() -> List[EnvVar]:
         # a shared empty default (base_env.sh / run_pretrain.sh), so owning it in
         # the adapter would only create a cosmetic empty-vs-VERSION cross-path diff.
         # ---- Architecture-gated (the ONLY two arch differences) ----
-        EnvVar("RCCL_WARP_SPEED_AUTO", "0", arch=ARCH_GFX950,
-               note="gfx950 WarpSpeed default-on can cause NaN losses"),
-        EnvVar("HSA_NO_SCRATCH_RECLAIM", "1", arch=ARCH_GFX942,
-               note="gfx942 scratch-reclaim stability"),
+        EnvVar(
+            "RCCL_WARP_SPEED_AUTO",
+            "0",
+            arch=ARCH_GFX950,
+            note="gfx950 WarpSpeed default-on can cause NaN losses",
+        ),
+        EnvVar("HSA_NO_SCRATCH_RECLAIM", "1", arch=ARCH_GFX942, note="gfx942 scratch-reclaim stability"),
     ]
 
     # Multi-node JAX coordinator: derive from MASTER_ADDR/PORT so both the

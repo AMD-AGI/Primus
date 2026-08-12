@@ -37,7 +37,7 @@ The MaxDiffusion-touching (JAX) work happens inside ``train()`` and within the
 """
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.module_utils import (
@@ -204,7 +204,10 @@ class MaxDiffusionPretrainTrainer(BaseTrainer):
         module_name, trainer_path, init_kwargs = _FAMILY_SPECS[self._family]
 
         from maxdiffusion import pyconfig
-        from maxdiffusion.train_utils import transformer_engine_context, validate_train_config
+        from maxdiffusion.train_utils import (
+            transformer_engine_context,
+            validate_train_config,
+        )
 
         log_rank_0(f"Executing MaxDiffusion {self._family} pretrain...")
         try:
@@ -258,4 +261,6 @@ class MaxDiffusionPretrainTrainer(BaseTrainer):
             try:
                 os.unlink(self._yaml_path)
             except OSError as e:
-                error_rank_0(f"MaxDiffusionPretrainTrainer: failed to delete temp YAML {self._yaml_path}: {e}")
+                error_rank_0(
+                    f"MaxDiffusionPretrainTrainer: failed to delete temp YAML {self._yaml_path}: {e}"
+                )

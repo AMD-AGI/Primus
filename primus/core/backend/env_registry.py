@@ -89,9 +89,7 @@ def detect_gpu_arch() -> str:
     arch = "unknown"
     rocminfo = shutil.which("rocminfo") or "/opt/rocm/bin/rocminfo"
     try:
-        out = subprocess.run(
-            [rocminfo], capture_output=True, text=True, timeout=15
-        ).stdout
+        out = subprocess.run([rocminfo], capture_output=True, text=True, timeout=15).stdout
         for cand in (ARCH_GFX950, ARCH_GFX942):
             if cand in out:
                 arch = cand

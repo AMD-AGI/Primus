@@ -40,9 +40,7 @@ from primus.core.utils.module_utils import debug_rank_all, set_logging_rank
 
 # PRIMUS_LOG_LEVEL follows shell conventions; loguru spells some levels differently.
 _ENV_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
-_LOGURU_LEVELS = frozenset(
-    {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
-)
+_LOGURU_LEVELS = frozenset({"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"})
 
 
 _LEVEL_SEVERITY = {
