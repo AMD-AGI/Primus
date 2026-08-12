@@ -1,0 +1,62 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_31B-fp8-pretrain}
+workspace: ./output
+
+# STATUS (MI300X / gfx942, maxtext release/v26.6): DOES NOT RUN.
+# The attention fix below clears the sliding-window assertion and the model then
+# compiles for ~10 min, but the run aborts in collective init:
+#   F rendezvous.cc:161] Termination timeout for `[0] first call before collective
+#   operation: kind=kAllGather` of 40 seconds exceeded   -> SIGABRT (signal 6)
+# Unlike gemma4_26B-fp8 this is not the MoE fp8 tracer leak (31B is Dense); it looks
+# like the RCCL init problem the MI355X configs guard against with a block of
+# NCCL/HSA env (NCCL_PROTO=Simple, GPU_MAX_HW_QUEUES, HIP_FORCE_DEV_KERNARG,
+# RCCL_MSCCL_ENABLE), which the MI300X configs do not carry. Porting those knobs is
+# the untested next step. The bf16 gemma4_31B config trains normally
+# (245 TFLOP/s/device, seq 4096).
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: gemma4_31B.yaml
+    overrides:
+      run_name: "gemma4_31b_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 8
+      ici_data_parallelism: 1
+      ici_tensor_sequence_parallelism: -1
+
+      remat_policy: "full"
+      # Same attention constraint as the bf16 gemma4 configs: the efficient kernels
+      # reject gemma4's bidirectional sliding-window layers on synthetic (unpacked)
+      # data. gemma4_31B is Dense, so the fp8-MoE pure_nnx_decoder pin does not apply.
+      attention: "dot_product"
+      max_target_length: 8192
+      # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
+      per_device_batch_size: 1
+
+      # quantization (nanoo_fp8)
+      # Vendor-specific in MaxText (see layers/quantizations.py): "fp8" selects
+      # Fp8Quantization, documented "for NVIDIA GPUs"; "nanoo_fp8" selects
+      # NANOOFp8Quantization, "for AMD MI300/MI325 GPUs", using the e4m3fnuz/e5m2fnuz
+      # types gfx942 implements. Matches every other MI300X fp8 config.
+      quantization: "nanoo_fp8"
