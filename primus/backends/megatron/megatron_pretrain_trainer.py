@@ -136,14 +136,32 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt / mamba / deepseek_v4 / diffusion) from backend_args
+        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / diffusion)
+        # from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
 
         # Import the appropriate training components based on model_type.
-        # DeepSeek-V4 is causal-LM with the same data shape as GPT, so we
-        # reuse pretrain_gpt's forward_step + dataset provider; only the
-        # model_provider itself is V4-specific.
+        # DeepSeek-V4 and Kimi K3 are causal-LM with the same data shape as
+        # GPT, so we reuse pretrain_gpt's forward_step + dataset provider;
+        # only the model_provider itself is model-family-specific.
+        #
+        # Each of the three branches below imports a provider *function* from an
+        # upstream pretrain entrypoint, and every one of those entrypoints sets
+        # `is_distributed = True` on it from inside `if __name__ == "__main__":`
+        # (pretrain_gpt.py:333). Primus imports the function and calls pretrain()
+        # programmatically, so that line never runs and the attribute is absent.
+        # Left absent, `training.py:3474-3477` admits only TP rank 0 into dataset
+        # construction, while `blended_megatron_dataset_builder.py:448-452` still
+        # expects every non-building rank to enter and execute the matching
+        # `torch.distributed.barrier()`. At TP > 1 the other TP ranks never arrive:
+        # rank 0 blocks in the builder's barrier while they run ahead to
+        # `training.py:3520`'s `broadcast(flags, 0)`, and training deadlocks before
+        # iteration 1. Invisible at TP == 1, where every rank *is* TP rank 0.
+        # Restoring the flag is therefore mandatory, and is a no-op at TP == 1.
+        # Do NOT hoist this past the `else` branch: DiffusionPretrainTrainer
+        # overrides get_datasets_provider() and sets `is_distributed` from its own
+        # data provider, where False is a legitimate choice (dataset_provider.py:55).
         if model_type == "mamba":
             from pretrain_mamba import (  # type: ignore
                 forward_step,
@@ -151,10 +169,6 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             )
 
             log_rank_0("Using Mamba model provider and training components")
-            # Upstream pretrain entrypoints set this in their __main__ blocks, but Primus imports the
-            # provider directly and calls pretrain() programmatically. Without restoring this flag,
-            # only TP rank 0 enters dataset construction while the core dataset builder still issues
-            # distributed barriers, which deadlocks for TP>1.
             train_valid_test_datasets_provider.is_distributed = True
         elif model_type == "deepseek_v4":
             from pretrain_gpt import (  # type: ignore
@@ -163,6 +177,15 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             )
 
             log_rank_0("Using DeepSeek-V4 model provider; reusing pretrain_gpt forward_step + datasets")
+            train_valid_test_datasets_provider.is_distributed = True
+        elif model_type == "kimi_k3":
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+
+            log_rank_0("Using Kimi-K3 model provider; reusing pretrain_gpt forward_step + datasets")
+            train_valid_test_datasets_provider.is_distributed = True
         else:
             # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own
             # forward_step / dataset_provider. Defaults pull from pretrain_gpt.
