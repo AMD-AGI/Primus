@@ -1,4 +1,4 @@
-# Benchmark suite
+# Micro-benchmarking suite
 
 Primus ships microbenchmarks for GPU compute and distributed communication. They are exposed as the `benchmark` subcommand of the Primus CLI. Use them to validate a node or cluster before long training jobs.
 
