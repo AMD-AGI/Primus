@@ -711,7 +711,6 @@ class AttentionProfiler(BaseModuleProfiler):
         hca = 1.0 if cr == 128 else 0.0
 
         tnd = T * n_d * bpe  # per-pass bf16 bytes of the n_d-wide q / attn-out tensor
-        tD = T * hidden * bpe  # per-pass bf16 bytes of the hidden-wide residual stream
         tqr = T * q_lora * bpe  # q-LoRA-wide tensor (q_layernorm)
         thd = T * hd * bpe  # single-latent KV-wide tensor (kv_layernorm, RoPE-k)
 

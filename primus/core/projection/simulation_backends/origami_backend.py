@@ -61,29 +61,33 @@ def _try_import_origami():
     return _origami_available
 
 
-# Some origami builds accept a register-file capacity (``rf_capacity``)
-# parameter in ``get_hardware_for_arch`` — inserted between ``lds_capacity`` and
-# ``L2_capacity`` — while older/public builds expose only the 5-argument
-# signature ``(arch, N_CU, lds_capacity, L2_capacity, compute_clock_khz)``.
-# Detect support once (cached) and dispatch accordingly so the public tree runs
-# against either build without depending on a newer origami.
-_ORIGAMI_HW_ARCH_RF: Optional[bool] = None
+# Origami API-capability cache, populated lazily on first use.  Different
+# origami builds expose different signatures; we probe once and remember the
+# result so the public tree runs against either build without depending on a
+# newer origami.  Keys: ``"hw_arch_rf"`` -> whether ``get_hardware_for_arch``
+# accepts a register-file (``rf_capacity``) argument.
+_ORIGAMI_API_CAPS: Dict[str, bool] = {}
 
 
 def _get_hardware_for_arch(arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz):
-    """Call ``origami.get_hardware_for_arch`` tolerating builds without rf_capacity."""
-    global _ORIGAMI_HW_ARCH_RF
-    if _ORIGAMI_HW_ARCH_RF is not False:
+    """Call ``origami.get_hardware_for_arch`` tolerating builds without rf_capacity.
+
+    Newer origami builds accept a register-file capacity argument (inserted
+    between ``lds_capacity`` and ``L2_capacity``); older/public builds expose
+    only the 5-argument signature ``(arch, N_CU, lds_capacity, L2_capacity,
+    compute_clock_khz)``.
+    """
+    if _ORIGAMI_API_CAPS.get("hw_arch_rf", True):
         try:
             hw = _origami.get_hardware_for_arch(
                 arch_enum, n_cu, lds_capacity, rf_capacity, l2_capacity, clock_khz
             )
-            _ORIGAMI_HW_ARCH_RF = True
+            _ORIGAMI_API_CAPS["hw_arch_rf"] = True
             return hw
         except TypeError:
-            if _ORIGAMI_HW_ARCH_RF is True:
+            if _ORIGAMI_API_CAPS.get("hw_arch_rf") is True:
                 raise
-            _ORIGAMI_HW_ARCH_RF = False
+            _ORIGAMI_API_CAPS["hw_arch_rf"] = False
     return _origami.get_hardware_for_arch(arch_enum, n_cu, lds_capacity, l2_capacity, clock_khz)
 
 
