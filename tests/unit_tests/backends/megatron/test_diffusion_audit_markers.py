@@ -50,9 +50,7 @@ def test_precision_linear_class_census_reports_exact_classes():
     }
 
 
-def test_precision_linear_class_census_emits_zero_counts_for_bf16(
-    monkeypatch, capsys
-):
+def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, capsys):
     from megatron.core import parallel_state
 
     monkeypatch.setenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS", "1")
