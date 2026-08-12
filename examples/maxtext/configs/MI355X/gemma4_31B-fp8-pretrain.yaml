@@ -34,13 +34,9 @@ modules:
       ici_tensor_sequence_parallelism: -1
 
       remat_policy: "full"
-      # gemma4's local layers need their sliding window honored: cudnn_flash_te takes it
-      # as window_size, while the autoselected pallas kernel only builds a causal mask.
-      # The global layers' head_dim=512 is past TE's fused limit, so those fall back to
-      # unfused attention.
       attention: "cudnn_flash_te"
       max_target_length: 8192
-      per_device_batch_size: 2
+      # measured ceiling on MI355X (288GB HBM): 3 fits at 259GB, 4 OOMs
+      per_device_batch_size: 3
 
-      # quantization (fp8)
       quantization: "fp8"
