@@ -63,6 +63,16 @@ case $STAGE in
     ;;
 esac
 
+# The layout alone already puts Megatron on the interleaved schedule (it derives
+# VPP from stage count / PP), but args.virtual_pipeline_model_parallel_size stays
+# None unless it is passed, and validate_args then takes its "not interleaved"
+# branch and force-disables overlap_p2p_comm and align_param_gather -- both of
+# which trainer_base.yaml asks for. Losing align_param_gather is what lets
+# overlap_param_gather hand a chunk's forward parameters whose all-gather has not
+# landed: training dies a few steps in with "found NaN in local grad norm for
+# bucket #0", on a different rank every run.
+[ "$PRIMUS_VPP" -gt 1 ] && FEATURE_ARGS+=(--virtual_pipeline_model_parallel_size "$PRIMUS_VPP")
+
 # Best recompute config for EP8_PP16_VPP2
 # 32N
 # RECOMP_IDS="0,1,2,4,6,8,10,12,14,16,34,36,38,40,50"
