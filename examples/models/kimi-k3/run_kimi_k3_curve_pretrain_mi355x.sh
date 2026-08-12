@@ -46,46 +46,54 @@
 #     MLA (6 layers) + router + norms                         ~= 0.06 B
 #     -------------------------------------------------------------------
 #     TOTAL                                                   ~= 3.85 B
-#   The model + optimizer fit comfortably on 8 x 288 GB (no distributed optimizer
-#   needed). Activation recompute is what keeps the larger micro-batches in
-#   memory: MBS=8 with full/block/12 peaks at 139.6 GB of 288 (measured), while
-#   MBS=16 without recompute OOMs at 276.2 GB allocated (measured).
+#   The model + optimizer fit on 8 x 288 GB. The perf default still turns ON the
+#   distributed + precision-aware (bf16-state) optimizer (PERF_OPT=1): at EP=8 only the
+#   1.5 B non-expert params shard, but the bf16 grad/moment states cut memory and it is
+#   part of the measured winner. Activation recompute keeps the micro-batch in memory:
+#   MBS=16 with full/block/6 + flydsl peaks at ~210 GB of 288 (measured); MBS=8 with
+#   full/block/12 peaked at 139.6 GB; MBS=16 without recompute OOMs (276 GB).
 #
-# PERFORMANCE -- MEASURED, 1 node x 8 MI355X, bf16, mock data
-#   Measured 2026-08-10 on the MI355X reservation with
-#   docker.io/tasimage/primus:pr-927, kda_backend=fla, attn_res_backend=eager
-#   (eager is that knob's DEFAULT, not a fallback -- see attn_res_backend in
-#   kimi_k3_transformer_config.py), HSA_NO_SCRATCH_RECLAIM=0,
-#   ENABLE_NUMA_BINDING=1, Turbo grouped_gemm + rms_norm + permute.
+# PERFORMANCE -- MEASURED, 1 node x 8 MI355X, bf16, mock data, docker.io/rocm/primus:v26.4
+#   Measured 2026-08-12 with the DEFAULTS below: attn_res_backend=flydsl, MBS=16,
+#   GBS=128, seq 2048, recompute full/block/6, PERF_OPT=1 (distributed +
+#   precision-aware optimizer, bf16 grads/moments), Turbo grouped_gemm + rms_norm +
+#   permute, NUMA binding ON, kda_backend=fla. The perf run additionally exported the
+#   perf reference's allocator env (matches perf/run_perf.sh and the 211 reference):
+#       HSA_NO_SCRATCH_RECLAIM=1 PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
+#       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True EVAL_ITERS=0
 #
-#   Best CLEAN configuration: MBS=8 / GBS=128 / seq 2048 / recompute full/block/12.
-#   50/50 iterations, 0 NaN, 0 skipped, 139.6 GB peak of 288, lm loss 12.33 -> 3.26:
-#       all 50 iters (incl. the 2 compile iters)  64.1 TFLOP/s/GPU
-#       iters 3-50  (compile excluded)            66.6 TFLOP/s/GPU
-#       iters 41-50                               76.6 TFLOP/s/GPU (4045 ms/iter)
-#       iters 45-50                               80.2 TFLOP/s/GPU (3849 ms/iter)
-#   Throughput was still RISING at iteration 50, so a 50-iteration run does not
-#   reach steady state and its whole-run average under-reports the sustained
-#   number by ~20%. Always quote which segment a figure came from.
+#   >>> THE SINGLE BIGGEST LEVER IS NUMA BINDING, AND IT WAS SILENTLY OFF. <<<
+#   `primus-cli direct` has its OWN --numa/--no-numa flag (default AUTO = OFF) and does
+#   NOT read ENABLE_NUMA_BINDING -- that env is only consulted by run_pretrain.sh's
+#   torchrun wrapper (the multi-node path). So on this single-node launch path NUMA
+#   binding never actually happened, even with MoE feature 3 on. Forwarding it as
+#   `primus-cli direct --numa` (added below, gated on ENABLE_NUMA_BINDING) took the
+#   SAME recipe from ~94 -> ~194 TFLOP/s/GPU. This shape is overhead-bound, so per-rank
+#   numactl cpubind/membind is worth ~2x here (perf/FINDINGS calls it the biggest win).
 #
-#   MBS=16 does NOT train on this stack -- it NaNs on iteration 1, reproduced
-#   four times with different knobs (so the default below is MBS=8, the largest
-#   micro-batch that trains clean here):
-#       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN fwd loss (rank 7)
-#       full/block/24, GBS=128, HSA_NO_SCRATCH_RECLAIM=0 -> NaN grad norm(rank 3)
-#       full/block/12, GBS=128, HSA_NO_SCRATCH_RECLAIM=1 -> NaN fwd loss (rank 7)
-#       full/block/12, GBS=256 (2 micro-batches)         -> NaN fwd loss (rank 0)
-#   and with recompute off it OOMs instead. That rules out recompute depth,
-#   scratch reclaim and the single-micro-batch (no grad-accum) path: what is left
-#   is the 16 x 2048 micro-batch itself. MBS=4 and MBS=8 are clean with the same
-#   recompute settings, so the model and the recompute path are both fine. The
-#   default below is therefore MBS=8; request MBS=16 explicitly
-#   (`MBS=16 bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh`)
-#   only after the 16 x 2048 kernel NaN is fixed.
+#   Measured throughput (single 60-iter run, EVAL disabled, 0 NaN / 0 skipped for all
+#   60 iters; MBS=16 FITS at ~210 GB peak of 288 = ~73%):
+#       iters 40-60 (harmonic mean)     ~189-194 TFLOP/s/GPU   (~1585 ms/iter)
+#       iters 50-60 (instantaneous)     ~193-195 TFLOP/s/GPU
+#   Throughput was STILL RISING at iter 60 (this shape needs ~150 iters to reach
+#   steady state), so this 60-iter window UNDER-reports the sustained number. The
+#   internal 450-iter perf reference for the identical knobs reaches 211 TFLOP/s/GPU
+#   steady-state at iter 400 (1460 ms/iter, 0 NaN). A clean self-measured 450-iter
+#   headline is not quoted here: every idle amd-spur node reachable in this session was
+#   sharing GPUs with non-SLURM docker containers, which hung/crashed the long runs.
+#   For a steady-state number run TRAIN_ITERS>=450. Always quote which segment you use.
 #
-#   No ~130.7 and no ~190 TFLOP/s single-node figure has been reproduced here;
-#   ~191 TFLOP/s is the 8L official 4-NODE number and belongs to
-#   run_kimi_k3_8L_official_pretrain_mi355x.sh, not to curve.
+#   flydsl FIXES the MBS=16 instability. On eager, MBS=16 NaNs/OOMs on iteration 1 at
+#   attention_residual.py's 1024 MiB fp32 up-cast of the concatenated residual
+#   candidates. The fused flydsl mixer (one kernel per direction) removes that up-cast,
+#   so MBS=16 trains clean AND fits. flydsl needs gfx950/CDNA4 + the `flydsl` pip
+#   package (present in rocm/primus:v26.4).
+#
+#   Baseline for contrast: the previous default (MBS=8 / eager / recompute 12, and --
+#   crucially -- NUMA silently OFF) was 64-80 TFLOP/s (iters 45-50, still rising) on
+#   docker.io/tasimage/primus:pr-927. A "Stream-K Data Parallel does not support GSU"
+#   warning FLOODS stderr on v26.4; it is COSMETIC (the 211 reference logged 869510 of
+#   them and still hit 211) -- filter it, do not chase it.
 #
 # DATA (portable by default)
 #   Defaults to MOCK data so the perf reproduction has no external dependency.
@@ -104,7 +112,13 @@
 #   container it brings up from DOCKER_IMAGE on this node. The 8-layer official
 #   sibling stays on run_slurm_pretrain.sh because it is multi-node (>= 4 nodes).
 #
-# USAGE (run from the Primus repo root)
+# USAGE (run from the Primus repo root, INSIDE the rocm/primus:v26.4 container)
+#   # Perf headline -- defaults are the measured winner; add the reference allocator
+#   # env + a longer run for a steady-state number:
+#   HSA_NO_SCRATCH_RECLAIM=1 PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
+#     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TRAIN_ITERS=450 EVAL_ITERS=0 \
+#     bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh
+#   # Quick smoke (defaults, 50 iters):
 #   bash examples/models/kimi-k3/run_kimi_k3_curve_pretrain_mi355x.sh
 ###############################################################################
 
@@ -132,6 +146,22 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 export PRIMUS_KDA_BACKEND=${PRIMUS_KDA_BACKEND:-fla}
 export K3P_KDA_CONV=${K3P_KDA_CONV:-fla}
 
+# Kimi K3 attention-residual mixer backend (attention_residual.py / attn_res_kernels):
+#   eager  -> pure-PyTorch reference; the config DEFAULT and the permanent oracle.
+#             Materialises six full-size candidate intermediates, five of them fp32,
+#             so at MBS=16 it OOMs inside iteration 1 at the 1024 MiB fp32 up-cast in
+#             attention_residual.py (measured), and on rocm/primus:v26.4 that same
+#             path NaNs at MBS=16.
+#   flydsl -> one fused FlyDSL kernel per direction (gfx950 / CDNA4 only; needs the
+#             `flydsl` pip package present in the image, loaded lazily). Deletes that
+#             fp32 up-cast, which is exactly what lets MBS=16 fit and train clean --
+#             the ~211 TFLOP/s single-node reference below used it.
+# Forwarded as a CLI override to the pretrain call. Defaults to flydsl: it is the
+# measured perf winner AND the only backend on which the default MBS=16 trains clean
+# on rocm/primus:v26.4. Set ATTN_RES_BACKEND=eager for the pure-PyTorch oracle (then
+# also drop to MBS<=8, since eager MBS=16 NaNs/OOMs at the fp32 up-cast).
+export ATTN_RES_BACKEND=${ATTN_RES_BACKEND:-flydsl}
+
 # Single node. primus-cli `direct` does NOT allocate via SLURM -- it runs torchrun
 # on the CURRENT host (only `primus-cli slurm` submits via srun/sbatch). So on a
 # reserved cluster you must already BE on a GPU node before running this, e.g.
@@ -154,8 +184,8 @@ export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_k3_curve}
 export PRIMUS_MODEL=${PRIMUS_MODEL:-kimi_k3_curve}
 
 ######################### Training Config (single-node perf) #########################
-export MBS=${MBS:-8}                               # 8 = largest micro-batch that trains clean here (MBS=16 NaNs, see header)
-export GBS=${GBS:-128}                             # 128 = MBS(8) * DP(8) * 2 -> 2 micro-batches (grad accum 2)
+export MBS=${MBS:-16}                              # 16 = the measured perf winner; clean (0 NaN) with attn_res_backend=flydsl (see header). On eager MBS=16 NaNs/OOMs.
+export GBS=${GBS:-128}                             # 128 = MBS(16) * DP(8) * 1 -> 1 micro-batch (grad accum 1)
 export SEQ_LENGTH=${SEQ_LENGTH:-2048}
 export TP=${TP:-1}
 export ETP=${ETP:-1}
@@ -166,7 +196,7 @@ export OPTIMIZER=${OPTIMIZER:-adam}
 export FP8=${FP8:-False}                           # False = bf16
 export TRAIN_ITERS=${TRAIN_ITERS:-50}
 export MOCK_DATA=${MOCK_DATA:-True}                # True = portable perf; False = real-data convergence
-export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-12}    # full/block/12: MBS=8 -> 139.6GB peak; 0=off -> MBS=16 OOMs at 276GB
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-6}     # full/block/6: fewer recompute layers -> higher reported (model-FLOP) TFLOP; MBS=16+flydsl fits at ~210GB peak (measured). 0=off -> OOM.
 
 # MoE_Features legend (K3-applicable, contiguous ids):
 #   0 baseline | 1 turbo grouped GEMM | 2 cross-entropy loss fusion |
@@ -240,15 +270,53 @@ if [ "${RECOMPUTE_LAYERS}" -gt 0 ]; then
     RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
 fi
 
+# Distributed + precision-aware optimizer with bf16 grads/moments (env-gated).
+# ON by default (PERF_OPT=1) -- it is part of the measured perf winner; set PERF_OPT=0
+# to restore plain fp32 Adam with no distributed optimizer.
+# PERF_OPT=1 mirrors the 8L official recipe's MEM_ARGS and the ~211 TFLOP/s
+# single-node reference: shard the optimizer state across DP (EP=8 -> only the
+# 1.5 B non-expert params actually shard, but distributed-optimizer also stores
+# grads/moments in bf16), overlap the grad reduce-scatter and param all-gather with
+# compute, and keep bf16 gradient + Adam-moment states while fp32 master weights are
+# retained. This is the second half of the MBS=16 story: flydsl removes the eager
+# attn-residual up-cast, and the bf16 optimizer state frees the memory the larger
+# micro-batch needs. Numerically validated over 450 iters (0 NaN) in the reference.
+PERF_OPT=${PERF_OPT:-1}
+MEM_ARGS=()
+if [ "${PERF_OPT}" = "1" ]; then
+    MEM_ARGS+=("--use_distributed_optimizer" "True")
+    MEM_ARGS+=("--overlap_grad_reduce" "True")
+    MEM_ARGS+=("--overlap_param_gather" "True")
+    MEM_ARGS+=("--use_precision_aware_optimizer" "True")
+    MEM_ARGS+=("--main_grads_dtype" "bf16")
+    MEM_ARGS+=("--exp_avg_dtype" "bf16")
+    MEM_ARGS+=("--exp_avg_sq_dtype" "bf16")
+fi
+
 FP8_ARGS=()
 if [ "$FP8" = "True" ]; then
     FP8_ARGS+=("--fp8" "hybrid")
 fi
 
+# NUMA binding for the single-node `primus-cli direct` launch path.
+# `direct` has its OWN NUMA control (--numa / --no-numa) that defaults to AUTO=OFF
+# and does NOT consult ENABLE_NUMA_BINDING -- that env is only read by
+# examples/run_pretrain.sh's torchrun wrapper (the multi-node path). MoE feature 3
+# sets ENABLE_NUMA_BINDING=1 to get the per-rank `numactl --cpunodebind --membind`
+# wrap that perf/FINDINGS measured as the single biggest lever on this overhead-bound
+# shape, so without forwarding it to `direct` as --numa the curve run silently loses
+# NUMA binding (torchrun launches unwrapped). Gate on the same env feature 3 sets so
+# turning feature 3 off (or ENABLE_NUMA_BINDING=0) still disables it.
+DIRECT_ARGS=()
+if [ "${ENABLE_NUMA_BINDING:-0}" = "1" ]; then
+    DIRECT_ARGS+=("--numa")
+fi
+
 # NOTE: no MLA/MTP CLI args (K3 builds MLA from its own specs; multi_latent_attention
-# stays false) and no distributed optimizer (3.85 B fits on one node). Activation
-# recompute (RECOMPUTE_ARGS) IS passed via CLI so the micro-batch fits (measured:
-# MBS=8 -> 139.6 GB peak); it is kept OUT of kimi_k3-BF16-curve.yaml because that file is the convergence
+# stays false). The distributed + precision-aware optimizer IS now passed via MEM_ARGS
+# (PERF_OPT=1, the perf default). Activation recompute (RECOMPUTE_ARGS) IS passed via
+# CLI so the micro-batch fits (measured: MBS=16 + full/block/6 + flydsl -> ~210 GB
+# peak); it is kept OUT of kimi_k3-BF16-curve.yaml because that file is the convergence
 # CONTROL, where recompute would distort the ms/iter and FLOPs figures.
 
 ######################### Training Experiments #########################
@@ -279,6 +347,9 @@ echo "NNODES=${NNODES}  TP=${TP} PP=${PP} EP=${EP}  MBS=${MBS} GBS=${GBS} SEQ=${
 echo "LOG_DIR=${LOG_DIR}" | tee -a "$LOG_FILE"
 echo "FEATURE_ARGS=${FEATURE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "K3_TURBO_ARGS=${K3_TURBO_ARGS[*]}" | tee -a "$LOG_FILE"
+echo "ATTN_RES_BACKEND=${ATTN_RES_BACKEND}" | tee -a "$LOG_FILE"
+echo "MEM_ARGS=${MEM_ARGS[*]}  (PERF_OPT=${PERF_OPT})" | tee -a "$LOG_FILE"
+echo "DIRECT_ARGS=${DIRECT_ARGS[*]}  (ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0})" | tee -a "$LOG_FILE"
 echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
@@ -289,6 +360,7 @@ echo "--------------------------------" | tee -a "$LOG_FILE"
 # Same args, same $EXP; only the launch entrypoint differs.
 mkdir -p "$LOG_DIR"
 ./primus-cli direct \
+    "${DIRECT_ARGS[@]}" \
     -- train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
@@ -301,8 +373,10 @@ mkdir -p "$LOG_DIR"
     --context_parallel_size "$CP" \
     --optimizer "$OPTIMIZER" \
     --mock_data "$MOCK_DATA" \
+    --attn_res_backend "$ATTN_RES_BACKEND" \
     "${FEATURE_ARGS[@]}" \
     "${K3_TURBO_ARGS[@]}" \
+    "${MEM_ARGS[@]}" \
     "${RECOMPUTE_ARGS[@]}" \
     "${FP8_ARGS[@]}" \
     --train_iters "$TRAIN_ITERS" 2>&1 | tee -a "$LOG_FILE"
