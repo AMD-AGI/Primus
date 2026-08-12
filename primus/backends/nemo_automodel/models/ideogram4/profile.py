@@ -37,8 +37,15 @@ Activation / knobs (env):
     PRIMUS_PROFILE_ACTIVE=3          steps actually captured
     PRIMUS_PROFILE_WITH_STACK=0      include python call stacks (bigger trace;
                                      needed for nn.Module attribution / recompute)
+    PRIMUS_PROFILE_WITH_MODULES=0    include the nn.Module hierarchy per op
     PRIMUS_PROFILE_RECORD_SHAPES=1   record op input shapes (GEMM M/N/K + coll size)
     PRIMUS_PROFILE_MEMORY=0          record allocator events
+
+Note on ``WITH_STACK``/``WITH_MODULES``: these are what let a reader say *which part of
+the model* a kernel belongs to. Without them a trace still answers "what ran and on what
+shapes" but not "who called it", which is usually the question being asked of a trace.
+They are off by default because both inflate trace size and CPU-side step time; turn them
+on deliberately when the trace is for someone to read, not for timing.
 """
 from __future__ import annotations
 
@@ -106,6 +113,7 @@ def install() -> bool:
     warmup = _int("PRIMUS_PROFILE_WARMUP", 1)
     active = _int("PRIMUS_PROFILE_ACTIVE", 3)
     with_stack = _flag("PRIMUS_PROFILE_WITH_STACK", "0")
+    with_modules = _flag("PRIMUS_PROFILE_WITH_MODULES", "0")
     record_shapes = _flag("PRIMUS_PROFILE_RECORD_SHAPES", "1")
     profile_memory = _flag("PRIMUS_PROFILE_MEMORY", "0")
 
@@ -134,6 +142,7 @@ def install() -> bool:
             on_trace_ready=_on_ready,
             record_shapes=record_shapes,
             with_stack=with_stack,
+            with_modules=with_modules,
             profile_memory=profile_memory,
         )
 
@@ -158,8 +167,8 @@ def install() -> bool:
 
         logger.info(
             "[PrimusIdeogramProfile] rank%s profiling '%s' (wait=%d warmup=%d active=%d "
-            "with_stack=%s record_shapes=%s) -> %s",
-            rank, tag, wait, warmup, active, with_stack, record_shapes, point_dir,
+            "with_stack=%s with_modules=%s record_shapes=%s) -> %s",
+            rank, tag, wait, warmup, active, with_stack, with_modules, record_shapes, point_dir,
         )
         target_optimizer.step = opt_step_and_prof
         prof.start()
