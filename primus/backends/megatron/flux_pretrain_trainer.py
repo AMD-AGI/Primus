@@ -54,8 +54,6 @@ def _emit_precision_linear_class_census(model) -> None:
     from megatron.core import parallel_state
 
     counts = _precision_linear_class_census(model)
-    if sum(counts.values()) <= 0:
-        raise RuntimeError("No MXFP4 or Float8 linear modules were instantiated")
     global_rank = (
         torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
     )
