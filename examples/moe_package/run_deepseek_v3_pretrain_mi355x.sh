@@ -11,16 +11,24 @@ export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your ow
 
 export NNODES=${NNODES:-32}
 
-export TRAIN_ITERS=10
+export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
-export USING_AINIC=1
-export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
-export GLOO_SOCKET_IFNAME=ens9np0
-export NCCL_SOCKET_IFNAME=ens9np0
+# Interconnect. The HCA list and the socket interface are site-specific; these
+# defaults are for the AINIC nodes this recipe was tuned on. A cluster whose
+# front-end NIC is named differently (ens3 on Crusoe) must override both socket
+# variables or rendezvous hangs.
+export USING_AINIC=${USING_AINIC:-1}
+export NCCL_IB_HCA="${NCCL_IB_HCA:-ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1}"
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-ens9np0}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens9np0}
+# base_env.sh defaults this to 3 and runs before the AINIC hook, so the hook's
+# own default of 1 never applies. On ionic, GID 3 makes ibv_modify_qp fail with
+# "No data available" the first time a QP goes INIT -> RTR.
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-1}
 
 export MBS=${MBS:-2}
 export GBS=$((128 * NNODES))
-export PRIMUS_TOTAL_LAYERS=61
+export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-61}
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=${PRIMUS_EP:-8}
 export PRIMUS_PP=${PRIMUS_PP:-16}
@@ -47,18 +55,30 @@ export HSA_KERNARG_POOL_SIZE=12582912
 
 STAGE=$((PRIMUS_PP * PRIMUS_VPP))
 FEATURE_ARGS=()
+# The layout value carries no surrounding quotes: overrides are taken literally,
+# so a quoted string reaches Megatron's layout parser with the quotes still
+# attached and it rejects ' as a layer character.
 case $STAGE in
+  1)
+    # PP=1: there is nothing to lay out, every layer lives on the one stage.
+    # This is the shape small-scale bring-up runs need, because EP is bounded by
+    # DP = world/(TP*PP) and EP=8 on a single node only works at PP=1.
+    # The experiment yaml hardcodes the 32-stage layout, so leaving the flag off
+    # is not the same as having no layout: it has to be cleared, or Megatron
+    # applies a 61-layer 32-stage plan to a one-stage run.
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "None")
+    ;;
   8)
-    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L'")
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L")
     ;;
   16)
-    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*2,L'")
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*2,L")
     ;;
   32)
-    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L")
     ;;
   *)
-    echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 8, 16, 32." >&2
+    echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 1, 8, 16, 32." >&2
     exit 1
     ;;
 esac
@@ -85,7 +105,10 @@ if [ -n "$RECOMP_IDS" ]; then
   export RECOMP_IDS
   RECOMP_ARGS=(--recompute_layer_ids "$RECOMP_IDS" --recompute_granularity full)
 else
-  RECOMP_ARGS=(--recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" --recompute_granularity full --recompute_method block)
+  # The experiment yaml ships a recompute_layer_ids list for the 61-layer recipe.
+  # It is mutually exclusive with recompute_method and its indices reach 51, so
+  # it has to be cleared or validation rejects the run before step 1.
+  RECOMP_ARGS=(--recompute_layer_ids None --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" --recompute_granularity full --recompute_method block)
 fi
 
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
@@ -107,13 +130,38 @@ else
 fi
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
-# ./primus-cli slurm -N $NNODES \
-#   ${SLURM_TIME:+--time="${SLURM_TIME}"} \
-#   ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
-#   ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
-#   -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean -- --numa \
 
-./primus-cli direct --numa \
+# Launcher: `direct` runs here, inside a container that is already up on every
+# node; `slurm` allocates the nodes and starts the container itself, which is
+# how this is submitted from a login node.
+export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-direct}
+if [ "$PRIMUS_LAUNCHER" = "slurm" ]; then
+  : "${DOCKER_IMAGE:?PRIMUS_LAUNCHER=slurm needs DOCKER_IMAGE}"
+  export DOCKER_IMAGE
+  LAUNCHER_ARGS=(slurm "${SLURM_LAUNCH_CMD:-sbatch}" -N "$NNODES")
+  [ -n "${SLURM_TIME:-}" ] && LAUNCHER_ARGS+=(--time="${SLURM_TIME}")
+  [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
+  [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
+  [ -n "${SLURM_EXCLUDE:-}" ] && LAUNCHER_ARGS+=(--exclude="${SLURM_EXCLUDE}")
+  [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
+  [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
+  if [ "${SLURM_LAUNCH_CMD:-sbatch}" = "sbatch" ]; then
+    [ "${SLURM_EXCLUSIVE:-1}" != "0" ] && LAUNCHER_ARGS+=(--exclusive)
+    # sbatch returns as soon as the job is queued, so the per-node log cannot be
+    # tee'd here. %N keeps each node in its own file; a single path would have
+    # every node truncate the same file and only the last writer survives.
+    export SBATCH_OUTPUT="${SBATCH_OUTPUT:-output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/train_%N.log}"
+    export SBATCH_ERROR="${SBATCH_ERROR:-output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/train_%N.err}"
+  fi
+  # Each patch self-skips (exit 2) when its PRIMUS_* env gate is unset.
+  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa
+    --patch runner/helpers/patches/10_fix_libionic_abi4.sh
+    --patch runner/helpers/patches/11_fix_lld_stub.sh)
+else
+  LAUNCHER_ARGS=(direct --numa)
+fi
+
+./primus-cli "${LAUNCHER_ARGS[@]}" \
   -- train pretrain --config "$EXP" \
   --num_layers $PRIMUS_TOTAL_LAYERS \
   --train_iters $TRAIN_ITERS \

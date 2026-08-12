@@ -168,6 +168,34 @@ _expand_nodelist() {
     done
 }
 
+# Every short name a host answers to, one per line, `localhost` dropped.
+# Reading only the canonical name is not enough: a node's own /etc/hosts entry
+# can be canonicalised to `localhost.localdomain` with the real hostname sitting
+# further along as an alias, and every node carries `localhost`, so matching on
+# it would make any two names look like the same machine.
+_host_labels() {
+    getent hosts "$1" 2>/dev/null | awk '
+        { for (i = 2; i <= NF; i++) { split($i, p, "."); print p[1] } }
+    ' | grep -v '^localhost$' | sort -u
+}
+
+# True when both arguments name the same machine. Returns false whenever either
+# side cannot be resolved, so an unverifiable mismatch still fails.
+_same_host() {
+    local a b label
+    command -v getent >/dev/null 2>&1 || return 1
+    a="$(_host_labels "$1")"
+    b="$(_host_labels "$2")"
+    [[ -n "$a" && -n "$b" ]] || return 1
+    while IFS= read -r label; do
+        [[ -n "$label" ]] || continue
+        case $'\n'"$b"$'\n' in
+            *$'\n'"$label"$'\n'*) return 0 ;;
+        esac
+    done <<< "$a"
+    return 1
+}
+
 # Get all node hostnames. Prefer `scontrol show hostnames`, which correctly
 # expands compressed nodelists on stock Slurm. Some Slurm-compatible schedulers
 # (e.g. Spur) lack that subcommand, and CI containers / dev VMs may lack the
@@ -189,11 +217,13 @@ fi
 
 if [[ -z "${MASTER_ADDR:-}" ]]; then
     MASTER_ADDR="$SLURM_MASTER_ADDR"
-elif [[ "${MASTER_ADDR%%.*}" != "${SLURM_MASTER_ADDR%%.*}" ]]; then
-    # Compare only the leading hostname label so a scheduler-provided FQDN
-    # (e.g. Spur exports MASTER_ADDR=node.crusoe.amd.com) still matches the
-    # short name produced by nodelist expansion. A genuine mismatch (a
-    # different node entirely) is still caught.
+elif [[ "${MASTER_ADDR%%.*}" != "${SLURM_MASTER_ADDR%%.*}" ]] &&
+    ! _same_host "$MASTER_ADDR" "$SLURM_MASTER_ADDR"; then
+    # Compare the leading hostname label first so a scheduler-provided FQDN
+    # (e.g. node.crusoe.amd.com) still matches the short name produced by
+    # nodelist expansion, then fall back to resolving both -- Spur exports
+    # MASTER_ADDR as a bare IP, which no string comparison can match. A genuine
+    # mismatch (a different node entirely) is still caught.
     LOG_ERROR "[slurm-entry] MASTER_ADDR must match the first host in SLURM_NODELIST."
     LOG_ERROR "[slurm-entry] MASTER_ADDR=$MASTER_ADDR, expected=$SLURM_MASTER_ADDR"
     exit 2
