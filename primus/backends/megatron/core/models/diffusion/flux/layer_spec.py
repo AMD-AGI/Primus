@@ -529,18 +529,30 @@ def get_flux_layer_spec(
 
     # Default backend selection based on config
     sensitive_backend = None
+    outer_sensitive_backend = None
 
     if backend is None:
         if config.transformer_impl == "local":
             if config.fp4 is not None and PrimusTurboMXFP4LocalSpecProvider is not None:
                 backend = PrimusTurboMXFP4LocalSpecProvider()
 
-                # Resolve sensitive layer backend
-                sensitive_precision = getattr(config, "sensitive_layer_precision", "bf16")
-                if sensitive_precision == "tw_fp8":
-                    sensitive_backend = PrimusTurboFloat8LocalSpecProvider()
-                elif sensitive_precision == "bf16":
-                    sensitive_backend = PrimusTurboLocalSpecProvider()
+                def resolve_sensitive_backend(precision):
+                    if precision == "tw_fp8":
+                        return PrimusTurboFloat8LocalSpecProvider()
+                    if precision == "bf16":
+                        return PrimusTurboLocalSpecProvider()
+                    raise ValueError(f"unsupported sensitive layer precision: {precision!r}")
+
+                sensitive_backend = resolve_sensitive_backend(
+                    getattr(config, "sensitive_layer_precision", "bf16")
+                )
+                if (
+                    getattr(config, "outer_sensitive_layers_start", 0) > 0
+                    or getattr(config, "outer_sensitive_layers_end", 0) > 0
+                ):
+                    outer_sensitive_backend = resolve_sensitive_backend(
+                        getattr(config, "outer_sensitive_layer_precision", "bf16")
+                    )
             elif (
                 config.fp8 is not None
                 and HAVE_PRIMUS_TURBO_LOCAL
@@ -566,12 +578,22 @@ def get_flux_layer_spec(
     sensitive_enabled = getattr(config, "sensitive_layers_enabled", False)
     num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
     num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
+    outer_num_start = getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
+    outer_num_end = getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
     total = config.num_joint_layers + config.num_single_layers
 
     layer_specs = []
     for i in range(total):
+        is_outer_sensitive = outer_sensitive_backend is not None and (
+            (i < outer_num_start) or (i >= total - outer_num_end)
+        )
         is_sensitive = sensitive_backend is not None and ((i < num_start) or (i >= total - num_end))
-        layer_backend = sensitive_backend if is_sensitive else backend
+        if is_outer_sensitive:
+            layer_backend = outer_sensitive_backend
+        elif is_sensitive:
+            layer_backend = sensitive_backend
+        else:
+            layer_backend = backend
 
         if i < config.num_joint_layers:
             layer_specs.append(get_flux_double_transformer_spec_for_backend(layer_backend))

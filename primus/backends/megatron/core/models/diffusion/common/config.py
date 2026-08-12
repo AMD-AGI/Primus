@@ -38,6 +38,12 @@ class BaseDiffusionConfig(TransformerConfig):
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
         sensitive_layer_precision: Precision for sensitive layers (default: 'bf16')
+        outer_sensitive_layers_start: Number of outermost starting layers that
+            override the sensitive-layer precision (default: 0)
+        outer_sensitive_layers_end: Number of outermost ending layers that
+            override the sensitive-layer precision (default: 0)
+        outer_sensitive_layer_precision: Precision for the outer override
+            (default: 'bf16')
 
     Inherited from TransformerConfig:
         hidden_size: Hidden dimension size
@@ -82,6 +88,9 @@ class BaseDiffusionConfig(TransformerConfig):
     sensitive_layers_start: int = 0
     sensitive_layers_end: int = 0
     sensitive_layer_precision: str = "bf16"  # "bf16", "tw_fp8", or "mxfp8" (future)
+    outer_sensitive_layers_start: int = 0
+    outer_sensitive_layers_end: int = 0
+    outer_sensitive_layer_precision: str = "bf16"
 
     def __post_init__(self):
         """Post-initialization processing."""
@@ -96,6 +105,12 @@ class BaseDiffusionConfig(TransformerConfig):
                 f"got pipeline_model_parallel_size={self.pipeline_model_parallel_size}. "
                 "Set pipeline_model_parallel_size=1."
             )
+
+        if self.outer_sensitive_layers_start < 0 or self.outer_sensitive_layers_end < 0:
+            raise ValueError("outer sensitive layer counts must be non-negative")
+        outer_sensitive_count = self.outer_sensitive_layers_start + self.outer_sensitive_layers_end
+        if outer_sensitive_count and not self.sensitive_layers_enabled:
+            raise ValueError("outer sensitive layers require sensitive_layers_enabled=True")
 
         if self.sensitive_layers_enabled:
             if self.num_layers <= 1:
@@ -112,11 +127,31 @@ class BaseDiffusionConfig(TransformerConfig):
                     f"sensitive_layers_end ({self.sensitive_layers_end}) exceeds "
                     f"num_layers ({self.num_layers})"
                 )
+            if self.outer_sensitive_layers_start > self.sensitive_layers_start:
+                raise ValueError(
+                    "outer_sensitive_layers_start "
+                    f"({self.outer_sensitive_layers_start}) exceeds "
+                    f"sensitive_layers_start ({self.sensitive_layers_start})"
+                )
+            if self.outer_sensitive_layers_end > self.sensitive_layers_end:
+                raise ValueError(
+                    "outer_sensitive_layers_end "
+                    f"({self.outer_sensitive_layers_end}) exceeds "
+                    f"sensitive_layers_end ({self.sensitive_layers_end})"
+                )
+
+            # The FP4 context uses these legacy fields to exclude the complete
+            # heterogeneous boundary from MXFP4. The Flux layer spec chooses
+            # BF16 versus FP8 within that excluded boundary.
             self.first_last_layers_bf16 = True
             self.num_layers_at_start_in_bf16 = self.sensitive_layers_start
             self.num_layers_at_end_in_bf16 = self.sensitive_layers_end
 
-        if self.sensitive_layers_enabled and self.sensitive_layer_precision == "tw_fp8":
+        uses_tw_fp8 = self.sensitive_layers_enabled and (
+            self.sensitive_layer_precision == "tw_fp8"
+            or (outer_sensitive_count > 0 and self.outer_sensitive_layer_precision == "tw_fp8")
+        )
+        if uses_tw_fp8:
             _deferred_fp8 = "e4m3" if self.fp8 is None else None
             _deferred_fp8_recipe = (
                 Fp8Recipe.tensorwise

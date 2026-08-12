@@ -77,3 +77,40 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
                     attn_spec.submodules.linear_qkv == ColumnParallelLinear
                 ), f"Expected native ColumnParallelLinear when fp8=None, got {attn_spec.submodules.linear_qkv}"
         assert found_any, "No attention linear_qkv specs found to validate backend selection"
+
+    def test_graduated_boundary_routes_outer_bf16_inner_fp8_middle_mxfp4(self):
+        """Outermost BF16 overrides the enclosing FP8 boundary."""
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+
+        from primus.backends.megatron.core.extensions.primus_turbo_float8_local import (
+            Float8ColumnParallelLinear,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4ColumnParallelLinear,
+        )
+
+        config = FluxConfig.flux_12b(
+            transformer_impl="local",
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            mxfp4_backward_precision="mxfp4",
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=4,
+            sensitive_layers_end=4,
+            sensitive_layer_precision="tw_fp8",
+            outer_sensitive_layers_start=1,
+            outer_sensitive_layers_end=1,
+            outer_sensitive_layer_precision="bf16",
+        )
+
+        block_submodules = get_flux_layer_spec(config, backend=None)
+        qkv_classes = [
+            layer_spec.submodules.self_attention.submodules.linear_qkv
+            for layer_spec in block_submodules.layer_specs
+        ]
+
+        assert len(qkv_classes) == 57
+        assert qkv_classes[0] is ColumnParallelLinear
+        assert all(qkv_classes[index] is Float8ColumnParallelLinear for index in [1, 2, 3, 53, 54, 55])
+        assert all(qkv_classes[index] is MXFP4ColumnParallelLinear for index in range(4, 53))
+        assert qkv_classes[56] is ColumnParallelLinear
