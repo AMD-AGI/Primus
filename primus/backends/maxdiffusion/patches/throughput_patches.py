@@ -152,7 +152,9 @@ def _resolve_work_per_step(config: Any) -> Dict[str, float]:
     # data_sharding spreads the batch over every mesh axis, so a step trains
     # per_device_batch_size samples on each of jax.device_count() devices --
     # the same normalization calculate_tflops uses for TFLOP/s/device.
-    global_samples = float(keys.get("global_batch_size_to_train_on") or per_device_samples * jax.device_count())
+    global_samples = float(
+        keys.get("global_batch_size_to_train_on") or per_device_samples * jax.device_count()
+    )
 
     work = {"per_device_samples": per_device_samples, "global_samples": global_samples}
 
