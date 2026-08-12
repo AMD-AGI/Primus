@@ -371,7 +371,7 @@ Once these are in place, your backend is fully integrated into the Primus runtim
 For more advanced scenarios (for example installing extra Python packages or configuring backend-specific environment variables at runtime), you can use **train hooks** under `runner/helpers/hooks`.
 
 - **Hook locations for training**:
-  - Global hooks (run for all commands): `runner/helpers/hooks/*.sh` and `runner/helpers/hooks/*.py`. These are discovered with `find ... -maxdepth 1 $ -name "*.sh" -o -name "*.py" $` and executed in **lexicographical order** of their filenames (see `runner/helpers/execute_hooks.sh`).
+  - Global hooks (run for all commands): `runner/helpers/hooks/*.sh` and `runner/helpers/hooks/*.py`. These are discovered with `find ... -maxdepth 1 \( -name "*.sh" -o -name "*.py" \)` and executed in **lexicographical order** of their filenames (see `runner/helpers/execute_hooks.sh`).
   - Command-specific hooks: `runner/helpers/hooks/train/pretrain/*.sh|*.py` (and `.../posttrain/...`), discovered and ordered the same way. For pretrain, this directory contains the dispatcher `prepare_experiment.sh`.
   - Per-framework hooks: `runner/helpers/hooks/train/pretrain/<framework>/` and `runner/helpers/hooks/train/posttrain/<framework>/`, where `<framework>` is `megatron`, `torchtitan`, `dummy`, and so on. These are **not** run directly by `execute_hooks`; instead `prepare_experiment.sh` detects the framework from the experiment config, runs that framework folder's `*.sh` files in lexicographical order, and then invokes the framework's `prepare.py` dispatcher.
 
