@@ -99,6 +99,7 @@ def patch_megatron_fsdp_mori_allgather(ctx: PatchContext) -> None:
                 )
             return
 
+        mori_all_gather.observe_fsdp_param_group(groups[0])
         try:
             fsdp_module.set_custom_all_gather(mori_all_gather)
         except (AttributeError, ValueError, AssertionError) as e:

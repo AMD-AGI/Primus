@@ -35,6 +35,54 @@ else:
     _FSDP_ALL_GATHER_IMPORT_ERROR = None
 
 _MORI_SHMEM_INITIALIZED = False
+_MIB = 1 << 20
+_DEFAULT_SLICE_MIN_BYTES = 8 * _MIB
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _env_nonnegative_int(name: str, default: int = 0) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+    return value
+
+
+def _compact_workspace_sizes(
+    cap_bytes: int,
+    world_size: int,
+    ranks_per_node: int,
+    slice_min_bytes: int,
+) -> tuple[int, int]:
+    """Return MORI's input/output capacities for its compact direct path.
+
+    Large messages use MORI's sliced path: the inter-node ring holds one shard
+    per node, and the intra-node phase writes directly to the FSDP output.
+    Messages below ``slice_min_bytes`` may use the non-sliced fallback, whose
+    full-world output must also fit. The pinned MORI implementation uses the
+    larger capacity for both fused transits, so this is conservative while
+    avoiding full-layer allocations.
+    """
+    if cap_bytes <= 0:
+        raise ValueError(f"cap_bytes must be positive, got {cap_bytes}")
+    if ranks_per_node <= 0 or world_size % ranks_per_node != 0:
+        raise ValueError(
+            f"world_size ({world_size}) must be divisible by ranks_per_node ({ranks_per_node})"
+        )
+    if slice_min_bytes < 0:
+        raise ValueError(f"slice_min_bytes must be non-negative, got {slice_min_bytes}")
+
+    num_nodes = world_size // ranks_per_node
+    fallback_per_rank = min(cap_bytes, slice_min_bytes)
+    sliced_ring_bytes = num_nodes * cap_bytes
+    fallback_output_bytes = world_size * fallback_per_rank
+    workspace_bytes = max(sliced_ring_bytes, fallback_output_bytes)
+    return fallback_per_rank, workspace_bytes
 
 
 def _safe_log_rank_0(message: str) -> None:
@@ -172,6 +220,7 @@ class MoriAllGather(_FSDPAllGather):
         self._rank: int | None = None
         self._world_size: int | None = None
         self._cap_bytes = 0
+        self._observed_max_shard_bytes = 0
         self._output_buffer: torch.Tensor | None = None
 
         world = int(os.environ.get("WORLD_SIZE", "0") or "0")
@@ -189,7 +238,7 @@ class MoriAllGather(_FSDPAllGather):
                     setdefault("MORI_HIER_DEEP_PIPE", "auto")
                     setdefault("MORI_SDMA_NUM_CHANNELS", "8")
                 else:
-                    setdefault("MORI_HIER_DEBUG_SYNC", "1")
+                    setdefault("MORI_HIER_DEBUG_SYNC", "0")
                     setdefault("MORI_HIER_CUDA_GRAPH", "0")
                     setdefault("MORI_FSDP_DEFER_HOSTSYNC", "1")
                     setdefault("MORI_FSDP_EVENT_FENCE", "1")
@@ -229,6 +278,24 @@ class MoriAllGather(_FSDPAllGather):
             "False",
         )
 
+    def observe_fsdp_param_group(self, param_group: Any) -> int:
+        """Record a conservative all-gather shard size before training starts."""
+        param_dtype = getattr(getattr(param_group, "mp_policy", None), "param_dtype", None)
+        shard_bytes = 0
+        for fsdp_param in getattr(param_group, "fsdp_params", ()):
+            tensor = getattr(fsdp_param, "_sharded_param_data", None)
+            if tensor is None:
+                continue
+            dtype = tensor.dtype
+            if param_dtype is not None and dtype.is_floating_point:
+                dtype = param_dtype
+            shard_bytes += tensor.numel() * torch.empty((), dtype=dtype).element_size()
+
+        if shard_bytes > 0:
+            shard_bytes = ((shard_bytes + _MIB - 1) // _MIB) * _MIB
+            self._observed_max_shard_bytes = max(self._observed_max_shard_bytes, shard_bytes)
+        return shard_bytes
+
     def allocate(
         self,
         size: Sequence[int | torch.SymInt],
@@ -259,11 +326,16 @@ class MoriAllGather(_FSDPAllGather):
 
     def _get_collective(self, group: dist.ProcessGroup, per_rank_bytes: int) -> Any:
         rank, world_size = group.rank(), group.size()
+        cap_floor = self._observed_max_shard_bytes
+        if self._host_proxy:
+            hostproxy_floor = _env_nonnegative_int("MORI_FSDP_HOSTPROXY_CAP_MB", 160) * _MIB
+            cap_floor = max(cap_floor, hostproxy_floor)
+        required_cap = max(per_rank_bytes, cap_floor)
         if (
             self._collective is not None
             and self._rank == rank
             and self._world_size == world_size
-            and self._cap_bytes >= per_rank_bytes
+            and self._cap_bytes >= required_cap
         ):
             return self._collective
 
@@ -280,15 +352,13 @@ class MoriAllGather(_FSDPAllGather):
                 f"my_pe/npes={my_pe}/{npes}"
             )
 
-        cap = max(per_rank_bytes, self._cap_bytes)
+        cap = max(required_cap, self._cap_bytes)
         ranks_per_node = self._ranks_per_node_value(world_size)
         if self._host_proxy:
-            cap_floor = int(os.environ.get("MORI_FSDP_HOSTPROXY_CAP_MB", "160")) * (1 << 20)
-            cap = max(cap, cap_floor)
             if self._collective is not None:
                 raise RuntimeError(
                     "HostProxyHierAllGather built with cap "
-                    f"{self._cap_bytes} B but a {per_rank_bytes} B AG arrived; "
+                    f"{self._cap_bytes} B but requires {required_cap} B; "
                     "raise MORI_FSDP_HOSTPROXY_CAP_MB"
                 )
             collective = ccl.HostProxyHierAllGather(
@@ -298,13 +368,37 @@ class MoriAllGather(_FSDPAllGather):
                 output_buffer_size=cap * world_size,
             )
         else:
+            num_nodes = world_size // ranks_per_node
+            compact = num_nodes >= 2 and _env_flag("MORI_FSDP_COMPACT_WORKSPACE", True)
+            if compact:
+                slice_min_bytes = _env_nonnegative_int(
+                    "MORI_FSDP_SLICE_MIN_MB", _DEFAULT_SLICE_MIN_BYTES // _MIB
+                ) * _MIB
+                input_buffer_size, output_buffer_size = _compact_workspace_sizes(
+                    cap,
+                    world_size,
+                    ranks_per_node,
+                    slice_min_bytes,
+                )
+            else:
+                slice_min_bytes = _DEFAULT_SLICE_MIN_BYTES
+                input_buffer_size = cap
+                output_buffer_size = cap * world_size
+
+            _safe_log_rank_0(
+                "[MORI:FSDP] building HierAllGather "
+                f"cap={cap} B input_workspace={input_buffer_size} B "
+                f"output_workspace={output_buffer_size} B compact={compact}"
+            )
             collective = ccl.HierAllGather(
                 my_pe,
                 npes,
-                input_buffer_size=cap,
-                output_buffer_size=cap * world_size,
+                input_buffer_size=input_buffer_size,
+                output_buffer_size=output_buffer_size,
                 copy_output_to_user=True,
                 ranks_per_node=ranks_per_node,
+                slice_min_bytes=slice_min_bytes,
+                slice_direct=True if compact else None,
             )
 
         self._collective = collective

@@ -128,8 +128,9 @@ If an SDMA run hangs before any FSDP forward progress, please try to dump stack 
 
 ## MORI hierarchical all-gather
 
-MORI replaces FSDP2 all-gather with `mori.ccl.HierAllGather`. It uses SDMA for
-the intra-node comm and vendor direct verbs for the cross-node RDMA comm.
+MORI replaces FSDP2 all-gather with a hierarchical intra-node and cross-node
+collective. The default device-driven mode uses SDMA inside each node and
+vendor direct verbs for cross-node RDMA. A host-proxy mode is also available.
 
 ### Enablement
 
@@ -167,10 +168,61 @@ The adapter:
    avoids creating an eager cross-node RCCL transport solely for MORI
    bootstrap.
 2. Derives ranks per node from `LOCAL_WORLD_SIZE`.
-3. Builds and caches `HierAllGather` for the FSDP process group and largest
-   observed per-rank input.
+3. Inspects every compatible FSDP parameter group before training, computes the
+   largest padded per-rank shard using its effective communication dtype, and
+   builds `HierAllGather` once at that capacity.
 4. Launches MORI on the current CUDA stream and returns a Work-like object when
    FSDP requests asynchronous completion.
+
+
+### Inter-node execution modes
+
+Primus supports two MORI implementations for the cross-node leg.
+
+#### Device-driven RDMA (default)
+
+When `MORI_FSDP_HOST_PROXY` is unset or false, Primus constructs
+`mori.ccl.HierAllGather`. GPU kernels post cross-node RDMA operations directly
+through MORI's device-verbs/IBGDA path, while intra-node traffic uses MORI SDMA.
+The CPU is not in the per-collective data path.
+
+This mode provides direct GPU/NIC overlap, but requires a compatible live NIC
+stack and working device-side queue support. For Ionic devices, that includes
+the effective CCQE capability checked by MORI preflight. Driver, firmware,
+vendor-library, GID, or CCQE mismatches can prevent initialization or cause a
+device-side collective failure.
+
+#### CPU host proxy
+
+Set the following to use MORI's persistent host-proxy implementation:
+
+```bash
+export MORI_FSDP_HOST_PROXY=1
+```
+
+Primus then constructs `mori.ccl.HostProxyHierAllGather`. A CPU proxy posts
+RDMA work requests and polls completion queues on behalf of the GPU. Collective
+payloads remain in registered GPU memory; host proxy does not bounce the data
+through CPU memory. This path can maintain deeper NIC send queues and avoids
+depending on GPU-posted RDMA, but it adds CPU progress and synchronization to
+the hot path.
+
+By default, host proxy uses PyTorch/RCCL for its intra-node gather legs. Enable
+MORI SDMA for those legs with:
+
+```bash
+export MORI_HOSTPROXY_SDMA_INTRA=1
+```
+
+The
+[currently pinned host-proxy implementation](https://github.com/ROCm/mori/blob/12d1bc32d0c93dcd5062e74f4e0f772e36e1aac4/python/mori/ccl/host_proxy_ag.py#L177-L185)
+has a single-node degenerate path and a two-node cross-node path; more than two
+nodes raises `NotImplementedError`. This limitation applies only to host proxy,
+not the default device-driven `HierAllGather`. Host proxy allocates a
+persistent full-output GPU staging buffer. Primus automatically derives the
+maximum per-rank shard from the attached FSDP groups; no manual size calculation
+is required. The host-proxy-specific `MORI_FSDP_HOSTPROXY_CAP_MB` remains
+available as an additional minimum.
 
 
 ### Runtime preflight
