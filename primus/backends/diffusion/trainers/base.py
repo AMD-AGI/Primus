@@ -619,7 +619,7 @@ class BaseWanTrainer:
         use_custom_master_weights = (
             self.args.get("bf16", False) or self.args.get("fp16", False)
         ) and os.getenv("FP32_MASTER_WEIGHTS", "0") == "1"
-        if self.mlperf_enabled and use_custom_master_weights:
+        if getattr(self, "mlperf_enabled", False) and use_custom_master_weights:
             raise ValueError(
                 "MLPerf FLUX uses TorchTitan-aligned FP32 FSDP parameters with ordinary AdamW; "
                 "unset FP32_MASTER_WEIGHTS."
