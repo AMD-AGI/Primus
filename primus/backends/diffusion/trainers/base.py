@@ -63,17 +63,13 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     def linear_decay(step):
         if step <= warmup_steps:
             return linear_warmup(step)
-        progress = float(step - warmup_steps) / float(
-            max(1, total_steps - warmup_steps)
-        )
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         return max(0.0, 1.0 - progress)
 
     def cosine_decay(step):
         if step <= warmup_steps:
             return linear_warmup(step)
-        progress = float(step - warmup_steps) / float(
-            max(1, total_steps - warmup_steps)
-        )
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     def constant_with_warmup(step):
@@ -82,9 +78,7 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     def polynomial_decay(step, power=1.0):
         if step <= warmup_steps:
             return linear_warmup(step)
-        progress = float(step - warmup_steps) / float(
-            max(1, total_steps - warmup_steps)
-        )
+        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         return max(0.0, (1.0 - progress) ** power)
 
     scheduler_type = (scheduler_type or "constant").lower()
@@ -98,9 +92,7 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
     }
     lr_lambda = lambdas.get(scheduler_type)
     if lr_lambda is None:
-        logger.warning(
-            f"Unknown lr_scheduler_type={scheduler_type}, falling back to constant."
-        )
+        logger.warning(f"Unknown lr_scheduler_type={scheduler_type}, falling back to constant.")
 
         def lr_lambda(step):
             return 1.0
@@ -174,11 +166,7 @@ class BaseWanTrainer:
         self.output_dir = self.args.get("output_dir", "./output")
         self.logging_steps = int(self.args.get("logging_steps", 1))
         self.save_steps = int(self.args.get("save_steps", 0))
-        self.max_steps = int(
-            self.args.get("max_steps", -1)
-            if self.args.get("max_steps") is not None
-            else -1
-        )
+        self.max_steps = int(self.args.get("max_steps", -1) if self.args.get("max_steps") is not None else -1)
         self.grad_accum_steps = int(self.args.get("gradient_accumulation_steps", 1))
         self.max_grad_norm = float(self.args.get("max_grad_norm", 1.0))
         self.num_train_epochs = int(self.args.get("num_train_epochs", 1))
@@ -198,9 +186,7 @@ class BaseWanTrainer:
                 self.model.gradient_checkpointing_enable(
                     {"ratio": float(self.args.get("gradient_checkpointing_ratio", 1.0))}
                 )
-            elif hasattr(self.model, "dit") and hasattr(
-                self.model.dit, "gradient_checkpointing"
-            ):
+            elif hasattr(self.model, "dit") and hasattr(self.model.dit, "gradient_checkpointing"):
                 self.model.dit.gradient_checkpointing = True
             if self.rank == 0:
                 logger.info(
@@ -240,16 +226,10 @@ class BaseWanTrainer:
         if self.base_seed is not None:
             set_seed(self.base_seed + dp_rank)
             if self.rank == 0:
-                logger.info(
-                    f"Training RNG: base_seed={self.base_seed} with distinct DP-rank offsets"
-                )
-        self.per_device_train_batch_size = int(
-            self.args.get("per_device_train_batch_size", 1)
-        )
+                logger.info(f"Training RNG: base_seed={self.base_seed} with distinct DP-rank offsets")
+        self.per_device_train_batch_size = int(self.args.get("per_device_train_batch_size", 1))
         self.per_device_eval_batch_size = int(
-            self.args.get(
-                "per_device_eval_batch_size", self.per_device_train_batch_size
-            )
+            self.args.get("per_device_eval_batch_size", self.per_device_train_batch_size)
         )
 
         mlperf_mode = bool(self.args.get("mlperf_enable", False))
@@ -305,20 +285,14 @@ class BaseWanTrainer:
             )
 
         self.mlperf_enabled = bool(self.args.get("mlperf_enable", False))
-        self.mlperf_target_eval_loss = float(
-            self.args.get("mlperf_target_eval_loss", 0.586)
-        )
+        self.mlperf_target_eval_loss = float(self.args.get("mlperf_target_eval_loss", 0.586))
         self.mlperf_eval_samples = int(self.args.get("mlperf_eval_samples", 262144))
         self.mlperf_run_success = False
         self.mlperf_logger = None
         self.mlperf_constants = None
         self.mlperf_train_start_time = None
-        global_batch_size = (
-            self.per_device_train_batch_size * self.grad_accum_steps * dp_world_size
-        )
-        self.mlperf_eval_freq_steps = max(
-            1, math.ceil(self.mlperf_eval_samples / global_batch_size)
-        )
+        global_batch_size = self.per_device_train_batch_size * self.grad_accum_steps * dp_world_size
+        self.mlperf_eval_freq_steps = max(1, math.ceil(self.mlperf_eval_samples / global_batch_size))
         if self.mlperf_enabled and self.eval_dataloader is None:
             raise ValueError("MLPerf Flux training requires `data.eval_dataset_path`.")
         if self.mlperf_enabled:
@@ -329,9 +303,7 @@ class BaseWanTrainer:
                     "MLPerf FLUX training requires exactly "
                     f"{expected_train_samples} samples, found {actual_train_samples}."
                 )
-            expected_eval_samples = int(
-                self.args.get("mlperf_eval_total_samples", 29696)
-            )
+            expected_eval_samples = int(self.args.get("mlperf_eval_total_samples", 29696))
             actual_eval_samples = len(self.eval_dataset)
             if actual_eval_samples != expected_eval_samples:
                 raise ValueError(
@@ -348,14 +320,8 @@ class BaseWanTrainer:
         self.optimizer = self._create_optimizer()
 
         # --- LR Scheduler ---
-        steps_per_epoch = math.ceil(
-            len(self.dataloader) / max(1, self.grad_accum_steps)
-        )
-        self.total_steps = (
-            self.max_steps
-            if self.max_steps > 0
-            else self.num_train_epochs * steps_per_epoch
-        )
+        steps_per_epoch = math.ceil(len(self.dataloader) / max(1, self.grad_accum_steps))
+        self.total_steps = self.max_steps if self.max_steps > 0 else self.num_train_epochs * steps_per_epoch
         self.lr_scheduler = create_lr_scheduler(
             self.optimizer,
             self.args.get("lr_scheduler_type", "constant"),
@@ -416,9 +382,7 @@ class BaseWanTrainer:
         if dtensor_cls is not None and isinstance(norm, dtensor_cls):
             norm = norm.full_tensor()
 
-        torch.nn.utils.clip_grads_with_norm_(
-            parameters, self.max_grad_norm, norm, foreach=True
-        )
+        torch.nn.utils.clip_grads_with_norm_(parameters, self.max_grad_norm, norm, foreach=True)
         return norm
 
     def _save_checkpoint(self):
@@ -445,15 +409,9 @@ class BaseWanTrainer:
             return value or None
 
         kwargs = {
-            "project": self.args.get("wandb_project")
-            or env("WANDB_PROJECT")
-            or "mlperf-flux1",
-            "name": self.args.get("wandb_name")
-            or env("WANDB_RUN_NAME")
-            or self.args.get("run_name"),
-            "dir": self.args.get("wandb_dir")
-            or env("WANDB_SAVE_DIR")
-            or env("WANDB_DIR"),
+            "project": self.args.get("wandb_project") or env("WANDB_PROJECT") or "mlperf-flux1",
+            "name": self.args.get("wandb_name") or env("WANDB_RUN_NAME") or self.args.get("run_name"),
+            "dir": self.args.get("wandb_dir") or env("WANDB_SAVE_DIR") or env("WANDB_DIR"),
             "entity": env("WANDB_ENTITY"),
             "group": env("WANDB_GROUP"),
             "job_type": env("WANDB_JOB_TYPE"),
@@ -503,11 +461,7 @@ class BaseWanTrainer:
             mllog.config(filename=output_file, default_stack_offset=3)
 
     def _global_batch_size(self) -> int:
-        return (
-            self.per_device_train_batch_size
-            * self.grad_accum_steps
-            * self.data_parallel_world_size
-        )
+        return self.per_device_train_batch_size * self.grad_accum_steps * self.data_parallel_world_size
 
     def _mlperf_log_run_start(self):
         if not self.mlperf_enabled:
@@ -522,9 +476,7 @@ class BaseWanTrainer:
             key=c.SUBMISSION_DIVISION,
             value=os.getenv("MLLOG_SUBMISSION_DIVISION", "closed"),
         )
-        self.mlperf_logger.event(
-            key=c.SUBMISSION_ORG, value=os.getenv("MLLOG_SUBMISSION_ORG", "reference")
-        )
+        self.mlperf_logger.event(key=c.SUBMISSION_ORG, value=os.getenv("MLLOG_SUBMISSION_ORG", "reference"))
         self.mlperf_logger.event(
             key=c.SUBMISSION_PLATFORM,
             value=os.getenv("MLLOG_SUBMISSION_PLATFORM", "reference"),
@@ -553,33 +505,19 @@ class BaseWanTrainer:
             key=c.EVAL_SAMPLES,
             value=int(self.args.get("mlperf_eval_total_samples", 29696)),
         )
-        self.mlperf_logger.event(
-            key="target_accuracy", value=self.mlperf_target_eval_loss
-        )
+        self.mlperf_logger.event(key="target_accuracy", value=self.mlperf_target_eval_loss)
         self.mlperf_logger.event(key=c.SEED, value=self.args.get("seed"))
-        self.mlperf_logger.event(
-            key=c.GLOBAL_BATCH_SIZE, value=self._global_batch_size()
-        )
-        self.mlperf_logger.event(
-            key=c.GRADIENT_ACCUMULATION_STEPS, value=self.grad_accum_steps
-        )
+        self.mlperf_logger.event(key=c.GLOBAL_BATCH_SIZE, value=self._global_batch_size())
+        self.mlperf_logger.event(key=c.GRADIENT_ACCUMULATION_STEPS, value=self.grad_accum_steps)
         self.mlperf_logger.event(key=c.OPT_NAME, value=c.ADAMW)
-        self.mlperf_logger.event(
-            key=c.OPT_LR_WARMUP_STEPS, value=int(self.args.get("warmup_steps", 0))
-        )
+        self.mlperf_logger.event(key=c.OPT_LR_WARMUP_STEPS, value=int(self.args.get("warmup_steps", 0)))
         self.mlperf_logger.event(key=c.OPT_ADAMW_BETA_1, value=opt["betas"][0])
         self.mlperf_logger.event(key=c.OPT_ADAMW_BETA_2, value=opt["betas"][1])
         self.mlperf_logger.event(key=c.OPT_ADAMW_EPSILON, value=opt["eps"])
-        self.mlperf_logger.event(
-            key=c.OPT_ADAMW_WEIGHT_DECAY, value=opt["weight_decay"]
-        )
-        self.mlperf_logger.event(
-            key=c.OPT_BASE_LR, value=float(self.args["learning_rate"])
-        )
+        self.mlperf_logger.event(key=c.OPT_ADAMW_WEIGHT_DECAY, value=opt["weight_decay"])
+        self.mlperf_logger.event(key=c.OPT_BASE_LR, value=float(self.args["learning_rate"]))
         self.mlperf_logger.event(key=c.OPT_GRADIENT_CLIP_NORM, value=self.max_grad_norm)
-        self.mlperf_logger.event(
-            key="evaluation_frequency", value=self.mlperf_eval_samples
-        )
+        self.mlperf_logger.event(key="evaluation_frequency", value=self.mlperf_eval_samples)
         self.mlperf_logger.start(key=c.INIT_START)
 
     def _mlperf_log_train_start(self):
@@ -639,9 +577,7 @@ class BaseWanTrainer:
         c = self.mlperf_constants
         samples = self.global_step * self._global_batch_size()
         status = c.SUCCESS if self.mlperf_run_success else c.ABORTED
-        self.mlperf_logger.end(
-            key=c.RUN_STOP, metadata={c.SAMPLES_COUNT: samples, c.STATUS: status}
-        )
+        self.mlperf_logger.end(key=c.RUN_STOP, metadata={c.SAMPLES_COUNT: samples, c.STATUS: status})
 
     def _resolve_dtype(self) -> torch.dtype:
         return resolve_dtype(self.args)
@@ -741,20 +677,14 @@ class BaseWanTrainer:
         count_sum = torch.zeros((), device=self.device, dtype=torch.float32)
         max_steps = int(self.args.get("mlperf_eval_steps", -1))
         if self.mlperf_enabled and max_steps > 0:
-            raise ValueError(
-                "MLPerf FLUX validation must consume all 29,696 evaluation samples."
-            )
+            raise ValueError("MLPerf FLUX validation must consume all 29,696 evaluation samples.")
 
         with torch.no_grad():
             for step, batch in enumerate(self.eval_dataloader):
                 if max_steps > 0 and step >= max_steps:
                     break
                 local_count = self._infer_local_batch_size(batch)
-                loss = (
-                    self.compute_loss(batch, processor=self.eval_processor)
-                    .detach()
-                    .float()
-                )
+                loss = self.compute_loss(batch, processor=self.eval_processor).detach().float()
                 loss_sum += loss * float(local_count)
                 count_sum += float(local_count)
 
@@ -829,12 +759,7 @@ class BaseWanTrainer:
         local_samples: int,
         interval_seconds: float | None,
     ) -> float | None:
-        if (
-            interval_seconds is None
-            or interval_seconds <= 0
-            or local_samples <= 0
-            or self.world_size <= 0
-        ):
+        if interval_seconds is None or interval_seconds <= 0 or local_samples <= 0 or self.world_size <= 0:
             return None
 
         global_samples = float(local_samples) * float(self.data_parallel_world_size)
@@ -878,9 +803,7 @@ class BaseWanTrainer:
 
         if self.use_wandb:
             global_batch_size = (
-                self.per_device_train_batch_size
-                * self.grad_accum_steps
-                * self.data_parallel_world_size
+                self.per_device_train_batch_size * self.grad_accum_steps * self.data_parallel_world_size
             )
             payload = {
                 "train/loss": loss_value,
@@ -898,12 +821,8 @@ class BaseWanTrainer:
                 payload["time/step_s"] = step_time
             if throughput_samples_per_gpu_s is not None:
                 payload["perf/samples_per_gpu_s"] = throughput_samples_per_gpu_s
-                payload["performance/throughput"] = (
-                    throughput_samples_per_gpu_s * self.world_size
-                )
-                payload["throughput(global_samples/s)"] = (
-                    throughput_samples_per_gpu_s * self.world_size
-                )
+                payload["performance/throughput"] = throughput_samples_per_gpu_s * self.world_size
+                payload["throughput(global_samples/s)"] = throughput_samples_per_gpu_s * self.world_size
             if elapsed is not None:
                 payload["time/elapsed_s"] = elapsed
             if eta_seconds is not None:
@@ -933,21 +852,15 @@ class BaseWanTrainer:
         update_loss_count = 0
         mlperf_train_started = False
 
-        steps_per_epoch = math.ceil(
-            len(self.dataloader) / max(1, self.grad_accum_steps)
-        )
+        steps_per_epoch = math.ceil(len(self.dataloader) / max(1, self.grad_accum_steps))
         start_epoch = self.global_step // steps_per_epoch
-        resume_batch_offset = (
-            self.global_step % steps_per_epoch
-        ) * self.grad_accum_steps
+        resume_batch_offset = (self.global_step % steps_per_epoch) * self.grad_accum_steps
 
         for epoch in range(start_epoch, self.num_train_epochs):
             self.sampler.set_epoch(epoch)
             if isinstance(self.sampler, ContiguousDistributedSampler):
                 sample_offset = (
-                    resume_batch_offset * self.per_device_train_batch_size
-                    if epoch == start_epoch
-                    else 0
+                    resume_batch_offset * self.per_device_train_batch_size if epoch == start_epoch else 0
                 )
                 self.sampler.set_offset(sample_offset)
 
@@ -969,14 +882,10 @@ class BaseWanTrainer:
                         logger.exception("First training forward failed: %r", exc)
                         raise
                     if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
-                        logger.info(
-                            "First training forward completed; entering backward pass"
-                        )
+                        logger.info("First training forward completed; entering backward pass")
                     detached_loss = raw_loss.detach().float()
                     update_loss_sum = (
-                        detached_loss
-                        if update_loss_sum is None
-                        else update_loss_sum + detached_loss
+                        detached_loss if update_loss_sum is None else update_loss_sum + detached_loss
                     )
                     update_loss_count += 1
                     loss = raw_loss / max(1, self.grad_accum_steps)
@@ -1008,11 +917,9 @@ class BaseWanTrainer:
                         elapsed = now - start_time
                         steps_left = max(0, self.total_steps - self.global_step)
                         eta_seconds = step_time * steps_left
-                        throughput_samples_per_gpu_s = (
-                            self._compute_samples_per_gpu_per_second(
-                                local_samples=local_samples_since_log,
-                                interval_seconds=log_interval,
-                            )
+                        throughput_samples_per_gpu_s = self._compute_samples_per_gpu_per_second(
+                            local_samples=local_samples_since_log,
+                            interval_seconds=log_interval,
                         )
                         self._log_step(
                             loss_val,
@@ -1029,10 +936,7 @@ class BaseWanTrainer:
                     if self.save_steps > 0 and self.global_step % self.save_steps == 0:
                         self._save_checkpoint()
 
-                    if (
-                        self.mlperf_enabled
-                        and self.global_step % self.mlperf_eval_freq_steps == 0
-                    ):
+                    if self.mlperf_enabled and self.global_step % self.mlperf_eval_freq_steps == 0:
                         self._mlperf_log_eval_start()
                         val_loss = self.validate_loss()
                         self._mlperf_log_eval_stop(val_loss)
@@ -1050,10 +954,7 @@ class BaseWanTrainer:
                                         self.global_step * self._global_batch_size()
                                     ),
                                 }
-                                if (
-                                    val_loss <= self.mlperf_target_eval_loss
-                                    and self.mlperf_train_start_time
-                                ):
+                                if val_loss <= self.mlperf_target_eval_loss and self.mlperf_train_start_time:
                                     payload["time_metrics/time_to_converge(s)"] = (
                                         time.time() - self.mlperf_train_start_time
                                     )
@@ -1061,9 +962,7 @@ class BaseWanTrainer:
                         if val_loss <= self.mlperf_target_eval_loss:
                             self.mlperf_run_success = True
                             if self.rank == 0 and self.mlperf_train_start_time:
-                                time_to_converge = (
-                                    time.time() - self.mlperf_train_start_time
-                                )
+                                time_to_converge = time.time() - self.mlperf_train_start_time
                                 logger.info(
                                     "MLPerf target reached: "
                                     f"validation_loss={val_loss:.6f}, "

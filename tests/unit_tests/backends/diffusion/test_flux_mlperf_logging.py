@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import torch
 
-from primus.backends.diffusion.trainers.base import BaseWanTrainer, ContiguousDistributedSampler
+from primus.backends.diffusion.trainers.base import (
+    BaseWanTrainer,
+    ContiguousDistributedSampler,
+)
 
 
 class RecordingLogger:

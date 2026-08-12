@@ -76,7 +76,9 @@ class FSDP2Trainer(BaseWanTrainer):
         # Checkpoint loading (after optimizer & scheduler are fully initialized)
         resume_from = self.args.get("resume_from_checkpoint")
         if resume_from:
-            path = self._latest_checkpoint() if str(resume_from).lower() in {"auto", "latest"} else resume_from
+            path = (
+                self._latest_checkpoint() if str(resume_from).lower() in {"auto", "latest"} else resume_from
+            )
             if path:
                 self._load_checkpoint(path)
             elif str(resume_from).lower() not in {"auto", "latest"}:
@@ -139,7 +141,9 @@ class FSDP2Trainer(BaseWanTrainer):
             else self.model
         )
 
-        non_fp32_params = [name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32]
+        non_fp32_params = [
+            name for name, param in wrap_root.named_parameters() if param.dtype != torch.float32
+        ]
         if non_fp32_params:
             raise ValueError(
                 "TorchTitan-aligned FSDP2 requires FP32 parameter storage before wrapping; "
@@ -510,7 +514,9 @@ class FSDP2Trainer(BaseWanTrainer):
         self._save_dtcp(path)
 
 
-def build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None):
+def build_fsdp2_trainer(
+    *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
+):
     rank, world_size, local_rank = setup_distributed()
     return FSDP2Trainer(
         model=model,

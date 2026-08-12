@@ -46,7 +46,9 @@ def _build_flux_dataset(dataset_config: dict):
     return build_flux_dataset(dataset_config)
 
 
-def _build_fsdp2_trainer(*, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None):
+def _build_fsdp2_trainer(
+    *, model, dataset, processor, trainer_args: dict, eval_dataset=None, eval_processor=None
+):
     from primus.backends.diffusion.trainers.fsdp2 import build_fsdp2_trainer
 
     return build_fsdp2_trainer(

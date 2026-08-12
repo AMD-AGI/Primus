@@ -22,7 +22,9 @@ from primus.backends.diffusion.models.flux.math import apply_rope
 from primus.backends.diffusion.models.flux.math import attention as flux_attention
 from primus.backends.diffusion.models.flux.math import rope
 from primus.backends.diffusion.models.flux.model import Flux, flux_1_schnell_params
-from primus.backends.diffusion.models.flux.train_pipeline import FluxFlowMatchTrainPipeline
+from primus.backends.diffusion.models.flux.train_pipeline import (
+    FluxFlowMatchTrainPipeline,
+)
 from primus.backends.diffusion.models.registrations.flux import build_flux_model
 from primus.backends.diffusion.trainers.fsdp2 import FSDP2Trainer
 
@@ -455,9 +457,7 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
     def fake_load_weights(dit, *args, **kwargs):
         events.append("load")
         original_param_ids.update({name: id(param) for name, param in dit.named_parameters()})
-        original_param_values.update(
-            {name: param.detach().clone() for name, param in dit.named_parameters()}
-        )
+        original_param_values.update({name: param.detach().clone() for name, param in dit.named_parameters()})
         original_state_keys.update(dit.state_dict())
 
     monkeypatch.setattr(
@@ -486,9 +486,7 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
     )
 
     converted_fqns = {
-        fqn
-        for fqn, module in model.dit.named_modules()
-        if type(module) is float8_linear.Float8Linear
+        fqn for fqn, module in model.dit.named_modules() if type(module) is float8_linear.Float8Linear
     }
     assert events == ["load", "convert", "convert"]
     assert len(converted_fqns) == 10
@@ -517,7 +515,9 @@ def test_flux_tensorwise_fp8_converts_only_block_linears(monkeypatch):
         == "disabled"
     )
     assert (
-        model.dit.double_blocks[0].img_attn.qkv.config.cast_config_grad_output_for_grad_weight.scaling_type.value
+        model.dit.double_blocks[
+            0
+        ].img_attn.qkv.config.cast_config_grad_output_for_grad_weight.scaling_type.value
         == "disabled"
     )
     assert (

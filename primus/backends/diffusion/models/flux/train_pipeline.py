@@ -149,14 +149,10 @@ class FluxFlowMatchTrainPipeline:
             # from the CPU generator, then cast/move them to the latent tensor.
             # Drawing BF16 values directly on the GPU changes both the values and
             # the CPU/CUDA RNG streams.
-            timesteps = torch.rand((bsz,), device="cpu", dtype=torch.float32).to(
-                device=device, dtype=dtype
-            )
+            timesteps = torch.rand((bsz,), device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
         else:
             if "timestep" not in batch:
-                raise ValueError(
-                    "MLPerf FLUX evaluation requires per-sample integer `timestep` metadata."
-                )
+                raise ValueError("MLPerf FLUX evaluation requires per-sample integer `timestep` metadata.")
             timestep_ids = batch["timestep"].to(device=device, dtype=torch.int64).reshape(-1)
             if timestep_ids.shape[0] != bsz or bool(((timestep_ids < 0) | (timestep_ids > 7)).any()):
                 raise ValueError(
