@@ -12,10 +12,11 @@ The following aligns with the backend overview and the configs present in this t
 
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
-| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite) and DeepSeek-V3, Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA, Mamba, and generic `language_model.yaml` bases. |
+| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, Kimi K2, LFM2, MiniMax, Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
+| **Diffusion** | Flux.1 (`schnell` / `dev`) text-to-image and Wan 2.1 / 2.2 text- and image-to-video presets under `primus/configs/models/diffusion/`, with examples under `examples/diffusion/configs/` and `examples/megatron/configs/*/diffusion/`. See [Diffusion models](../04-technical-guides/diffusion-models/README.md). |
 | **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
 **Interpretation:** “Supported” in upstream code can exceed what this repository ships as YAML. Rows below reference representative files that exist under `primus/configs/models/` and `examples/`; they should not be treated as a complete generated inventory.

@@ -7,8 +7,17 @@
 
 set -euo pipefail
 
-# Resolve runner directory robustly (handles symlinks)
-RUNNER_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+# Resolve runner directory. Prefer PRIMUS_RUNNER_DIR when the launcher exported
+# it: schedulers relocate a batch script into their spool dir (spur copies it to
+# /var/spool/spur/job<id>/spur_job.sh, standard Slurm to
+# /var/spool/slurmd/job<id>/slurm_script), so on the sbatch path $0 points at a
+# copy with no sibling lib/. Fall back to self-location (handles symlinks) for
+# srun and direct invocation.
+if [[ -n "${PRIMUS_RUNNER_DIR:-}" && -f "${PRIMUS_RUNNER_DIR}/lib/common.sh" ]]; then
+    RUNNER_DIR="$PRIMUS_RUNNER_DIR"
+else
+    RUNNER_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+fi
 
 # Load common library (required)
 # shellcheck disable=SC1091

@@ -1,0 +1,87 @@
+extends:
+  - mamba_base.yaml
+
+# 75% Hybrid Gated DeltaNet 300M — matches FLA gated_deltanet_300M_hybrid.json exactly
+#   ~338M params (tied embeddings; +38M vs pure 300M because of the 3 MLA blocks)
+#   12 mixer blocks: 3 MLA + 9 GDN (i.e. 75% GDN, 25% MLA)
+#   +12 MLP blocks = 24 Megatron sublayers
+#
+# Megatron HybridStack.allocate_layers(num_layers=24, hybrid_attention_ratio=0.25):
+#   blocks: [ATTN, MAMBA, MAMBA, MAMBA, ATTN, MAMBA, MAMBA, MAMBA, ATTN, MAMBA, MAMBA, MAMBA]
+#   → MLA at blocks [0, 4, 8] — matches FLA's `attn.layers: [0, 4, 8]` exactly
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B
+
+# Model dimensions
+num_layers: 24                  # 12 mixer + 12 MLP sublayers
+hidden_size: 1024
+ffn_hidden_size: 4096
+
+# Hybrid: 25% attention (= 3 of 12 mixer blocks); rest are GDN
+#
+# Megatron-LM removed `--hybrid-attention-ratio` as a CLI argument (only
+# `--hybrid-layer-pattern` remains).  So we declare the concrete pattern
+# explicitly via `hybrid_override_pattern` (the deprecated alias is still
+# forwarded to `--hybrid-layer-pattern`, and unlike the bare arg it lets
+# `num_layers` stay in this YAML as a sanity-check).
+#
+# Pattern: 24 sublayers = 12 mixer blocks alternating with 12 MLPs.
+#   indices 0, 8, 16 → '*' (MLA attention)  ⇔  FLA mixer indices [0, 4, 8]
+#   indices 2, 4, 6, 10, 12, 14, 18, 20, 22 → 'M' (GDN mixer, 9 total)
+#   indices 1, 3, 5, ... 23 → '-' (MLP)
+is_hybrid_model: true
+hybrid_attention_ratio: 0.25     # informational only — upstream ignores it
+hybrid_override_pattern: "*-M-M-M-*-M-M-M-*-M-M-M-"
+
+# Mamba params kept for base config compatibility (unused in GDN)
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 8
+
+# GDN parameters — matched to FLA config:
+#   num_heads=4, num_v_heads=8, head_dim=64, expand_v=1.0, conv_size=4
+#   key_dim   = 4 heads × 64 dim = 256
+#   value_dim = 8 heads × 64 dim = 512   (Grouped Value Attention: each Q/K head serves 2 V heads)
+use_short_conv: true
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 64
+linear_value_head_dim: 64
+linear_num_key_heads: 4
+linear_num_value_heads: 8
+
+# MLA parameters — matched to FLA `attn` block exactly:
+#   num_heads=16, q_lora_rank=672, kv_lora_rank=64,
+#   qk_nope_head_dim=32, qk_rope_head_dim=32 (→ qk_head_dim=64), v_head_dim=64,
+#   rope_theta=500000
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: true
+num_attention_heads: 16         # MLA head count (FLA: attn.num_heads = 16)
+q_lora_rank: 672
+kv_lora_rank: 64
+qk_head_dim: 32                 # = FLA qk_nope_head_dim
+qk_pos_emb_head_dim: 32         # = FLA qk_rope_head_dim
+v_head_dim: 64
+rotary_scaling_factor: 1.0
+mscale: 1.0
+mscale_all_dim: 1.0
+
+# Embedding tying (matches FLA tie_word_embeddings=true)
+untie_embeddings_and_output_weights: false
+
+# All projections bias=False (matches FLA)
+add_bias_linear: false
+
+# Scale-only RMSNorm, no bias (matches FLA norm)
+normalization: RMSNorm
+norm_epsilon: 1.0e-6
+
+# Positional encoding — MLA handles its own RoPE (rotary_base=500000);
+# GDN layers use delta-rule recurrence and need no position embedding.
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072

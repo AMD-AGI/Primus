@@ -1,5 +1,8 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Portions of this file are copied and modified from NeMo MLPerf
+# (mlperf-training-6-0/llama2_sft/nemo/src/custom_llama.py).
 #
 # See LICENSE for license information.
 ###############################################################################

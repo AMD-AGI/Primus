@@ -79,8 +79,8 @@ def test_parse_size_with_unit(s, expected):
 
 def test_short_name_strips_fqdn():
     """A.2 -- FQDN normalisation (history item: SLURM-ready txt outputs)."""
-    assert _short_name("tus1-p3-g25.cluster.example.com") == "tus1-p3-g25"
-    assert _short_name("tus1-p3-g25") == "tus1-p3-g25"
+    assert _short_name("node001.cluster.example.com") == "node001"
+    assert _short_name("node001") == "node001"
     assert _short_name("") == ""
 
 

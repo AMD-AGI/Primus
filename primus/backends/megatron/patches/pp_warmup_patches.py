@@ -125,9 +125,16 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
     device = torch.cuda.current_device()
     mbs = args.micro_batch_size
     seqlen = args.seq_length
+    # Tokens are drawn at random rather than zeroed. An all-zero batch makes every
+    # token's hidden state identical, so a top-k MoE router scores every expert the
+    # same and top-k degenerates to experts 0..k-1 for the whole batch -- every token
+    # lands on one EP rank. That routing collapse never occurs in real training, and
+    # it hangs the fused MegaMoE combine kernel. RNG state is restored at the end of
+    # warmup, so drawing here keeps training bit-identical.
+    vocab_size = getattr(args, "padded_vocab_size", None) or getattr(args, "vocab_size", 1) or 1
     fake_batch = {
-        "tokens": torch.zeros(mbs, seqlen, dtype=torch.int64, device=device),
-        "labels": torch.zeros(mbs, seqlen, dtype=torch.int64, device=device),
+        "tokens": torch.randint(0, vocab_size, (mbs, seqlen), dtype=torch.int64, device=device),
+        "labels": torch.randint(0, vocab_size, (mbs, seqlen), dtype=torch.int64, device=device),
         "loss_mask": torch.ones(mbs, seqlen, dtype=torch.float32, device=device),
         "position_ids": (
             torch.arange(seqlen, dtype=torch.int64, device=device)
@@ -180,8 +187,10 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
         if chunk_pre_process:
             input_tensor = None
         else:
+            # Random, not zeros: a zero activation collapses MoE top-k routing onto
+            # experts 0..k-1 for every token (see the fake_batch note above).
             input_tensor = [
-                torch.zeros(shape, dtype=activation_dtype, device=device, requires_grad=True)
+                torch.randn(shape, dtype=activation_dtype, device=device).requires_grad_(True)
                 for shape in tensor_shapes
             ]
 

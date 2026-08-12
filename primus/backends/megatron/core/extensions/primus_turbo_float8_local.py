@@ -686,6 +686,7 @@ class DelayedFP8LinearTensorwiseFunction(torch.autograd.Function):
         )
 
 
+@torch._dynamo.allow_in_graph
 class DualFP8LinearTensorwiseFunction(torch.autograd.Function):
     """Two independent FP8 linears in a single autograd node.
 
@@ -697,6 +698,18 @@ class DualFP8LinearTensorwiseFunction(torch.autograd.Function):
 
     Backward GEMMs are normalized to NT layout (transA=F, transB=T, transC=F)
     so that hipBLASLt always selects the fast TN Tensile kernel on MI355X.
+
+    @torch._dynamo.allow_in_graph is required on top of the modern
+    forward/setup_context split: under PyTorch 2.12's AOTAutograd, letting
+    Dynamo trace *into* this Function's forward (the default for the
+    forward/setup_context API) silently produces wrong gradients for the 6
+    outputs that exist only to be captured by setup_context/save_for_backward
+    and are otherwise unused by the outer graph (matches
+    https://github.com/pytorch/pytorch/issues/131794, regressed by the fix in
+    https://github.com/pytorch/pytorch/pull/186355). allow_in_graph makes
+    Dynamo treat .apply() as a single opaque node instead of inlining into
+    forward, which sidesteps the bug while still keeping everything in one
+    fused graph (verified: graph_count=1, graph_break_count=0).
     """
 
     @staticmethod

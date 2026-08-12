@@ -7,6 +7,7 @@ Deep technical topics for advanced users.
 - [Collective operations](collective-operations.md): NCCL/RCCL operations and their role in each parallelism strategy
 - [Performance tuning](performance-tuning.md): HipBLASLt, Primus-Turbo, FP8, MoE optimization
 - [MoE training deep-dive](moe-training.md): bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
+- [MegaMoE fused MoE layer](mega-moe.md): FlyDSL-based fused MoE layer for EP-only bf16 training, setup and reproduction
 - [Data preparation](data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
@@ -15,6 +16,7 @@ Deep technical topics for advanced users.
 - [Fault tolerance and elastic training](fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
 - [Determinism and reproducibility](determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
+- [Hybrid models](hybrid-models/README.md): Zebra-Llama hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
 - [Native SFT and LoRA](native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 
 ---

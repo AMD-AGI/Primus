@@ -16,8 +16,9 @@ This replaces the in-place edits the source patch made to
   1. ``_ParamAndGradBucketGroup.start_param_sync`` -- the distributed-optimizer
      path is re-implemented to dispatch one all-gather per bucket through
      :func:`all_gather_into_tensor_sdma` (copy-engine) instead of the RCCL
-     ``_coalescing_manager`` group. The first two bucket groups (by gather
-     order) stay on the regular RCCL fallback. The layer-wise optimizer path is
+     ``_coalescing_manager`` group. By default, the first two bucket groups (by
+     gather order) stay on the regular RCCL fallback; this is tunable with
+     ``MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS``. The layer-wise optimizer path is
      delegated unchanged to the original method.
   2. ``DistributedDataParallel.__init__`` -- after construction, each bucket
      group is annotated with ``param_gather_order`` (reverse dispatch order,
@@ -33,6 +34,7 @@ on images without the kernels.
 """
 
 import os
+import warnings
 
 import torch
 
@@ -42,6 +44,19 @@ from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 def _sdma_allgather_enabled(_ctx: PatchContext) -> bool:
     return os.environ.get("ENABLE_SDMA_ALLGATHER", "0") == "1"
+
+
+def _get_rccl_fallback_bucket_count() -> int:
+    value = os.getenv("MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS", "2")
+    try:
+        count = int(value)
+    except ValueError:
+        warnings.warn(f"Invalid MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS={value!r}; using 2.")
+        return 2
+    if count < 0:
+        warnings.warn(f"MEGATRON_SDMA_RCCL_FALLBACK_BUCKETS must be non-negative; got {count}, using 2.")
+        return 2
+    return count
 
 
 def _make_start_param_sync(orig_start_param_sync):
@@ -70,15 +85,17 @@ def _make_start_param_sync(orig_start_param_sync):
 
         async_op = self.ddp_config.overlap_param_gather and not force_sync
 
-        # Keep the first two bucket groups (by gather order) on the regular
-        # RCCL all-gather; route the rest through SDMA. param_gather_order is
-        # assigned in the DDP __init__ wrapper below.
+        # Keep a configurable number of leading bucket groups on regular RCCL;
+        # route the rest through SDMA. param_gather_order is assigned in the
+        # DDP __init__ wrapper below.
         param_gather_order = getattr(self, "param_gather_order", None)
         enable_sdma = os.getenv("ENABLE_SDMA_ALLGATHER") == "1"
+        rccl_fallback_bucket_count = _get_rccl_fallback_bucket_count()
+        use_rccl_fallback = not enable_sdma or (
+            param_gather_order is not None and param_gather_order < rccl_fallback_bucket_count
+        )
         all_gather_func = (
-            _all_gather_into_tensor_waitable_fallback
-            if (param_gather_order is not None and param_gather_order < 2) or not enable_sdma
-            else all_gather_into_tensor_sdma
+            _all_gather_into_tensor_waitable_fallback if use_rccl_fallback else all_gather_into_tensor_sdma
         )
 
         param_gather_handles = []
@@ -117,7 +134,8 @@ def _make_wrapped_ddp_init(orig_init):
     def __init__(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
         # Mirror the source patch: number bucket groups in reverse dispatch
-        # order so start_param_sync can keep the first two on RCCL.
+        # order so start_param_sync can keep the configured leading groups on
+        # RCCL.
         for groups_attr in ("bucket_groups", "expert_parallel_bucket_groups"):
             groups = getattr(self, groups_attr, None) or []
             for order, bucket_group in enumerate(reversed(groups)):

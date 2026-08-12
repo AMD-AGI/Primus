@@ -200,7 +200,6 @@ use_torch_fsdp2: false
 # every ODC integration patch is skipped (byte-for-byte stock behaviour). When
 # true (requires use_torch_fsdp2=true), Primus:
 #   * routes FSDP2 gradient reduce-scatter through ODC (scatter_accumulate),
-#   * skips #856's eager-RCCL device_id injection (distributed_init_patches.py),
 #   * skips #808's FSDP2 forward all-gather prefetch (it cannot overlap ODC's
 #     serial transport); backward prefetch is kept.
 # Formerly gated by the ODC_ENABLE env var; now config-driven.

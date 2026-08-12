@@ -14,7 +14,7 @@ captured `seq` and `micro_batch_size`.
   "generated_at": "2026-06-18T11:00:00Z",
   "provenance": {
     "commit": "dac0a60c",
-    "host": "smci355-ccs-aus-n06-25",
+    "host": "node001",
     "container": "dev_primus_wenx",
     "traces": { "cr0": "<path>", "cr4": "<path>", "cr128": "<path>" }
   },

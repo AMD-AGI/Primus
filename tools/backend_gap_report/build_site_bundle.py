@@ -14,10 +14,11 @@ import periodic_reports as periodic
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_GAP_DOCS_ROOT = REPO_ROOT / "docs" / "backend-gap"
 SITE_SOURCE_ROOT = REPO_ROOT / "tools" / "backend_gap_report" / "site"
-# Standalone DeepSeek-V4 performance-projection site, published as a subpath of
-# the same Pages bundle (served at /<repo>/deepseek-v4-projection/).
-PROJECTION_SITE_ROOT = REPO_ROOT / "deepseek-v4" / "projection" / "site"
-PROJECTION_SITE_SUBDIR = "deepseek-v4-projection"
+# Declarative registry of extra, independent static sites mounted as subpaths of
+# the single Pages bundle. A repo has exactly ONE Pages site, so this one builder
+# aggregates every section; each is decoupled (add a manifest entry, no code
+# change). See pages-sections.json.
+PAGES_SECTIONS_MANIFEST = Path(__file__).resolve().with_name("pages-sections.json")
 SOURCE_DASHBOARD_DATA_DIR = BACKEND_GAP_DOCS_ROOT / "dashboard-data"
 METADATA_REPORTS_DIR = SOURCE_DASHBOARD_DATA_DIR / "reports"
 PDF_TEMPLATE = REPO_ROOT / "tools" / "backend_gap_report" / "templates" / "pdf-report.css"
@@ -258,6 +259,89 @@ def validate_bundle(bundle_dir: Path) -> None:
     if not isinstance(combined_payload["reports"], list):
         fail("combined reports index field 'reports' must be a list")
 
+    sections_index = bundle_dir / "sections.json"
+    if not sections_index.exists():
+        fail(f"bundle missing sections manifest: {sections_index}")
+    sections_payload = load_json(sections_index)
+    if not isinstance(sections_payload.get("sections"), list):
+        fail("sections.json field 'sections' must be a list")
+    if not isinstance(sections_payload.get("links", []), list):
+        fail("sections.json field 'links' must be a list")
+    for section in sections_payload["sections"]:
+        section_dir = bundle_dir / section["name"]
+        if not (section_dir / "index.html").exists():
+            fail(f"mounted section '{section['name']}' missing index.html in bundle")
+
+
+def mount_extra_sections(output_dir: Path) -> None:
+    """Aggregate manifest-declared sections/links into the bundle.
+
+    ``sections`` are static dirs copied to ``/<name>/``; ``links`` are nav-only
+    entries. Both are written to ``sections.json`` so the shell renders nav
+    without hardcoding any entry. A missing section source is skipped with a
+    warning. See pages-sections.json.
+    """
+
+    mounted: list[dict] = []
+    links: list[dict] = []
+    if PAGES_SECTIONS_MANIFEST.exists():
+        manifest = load_json(PAGES_SECTIONS_MANIFEST)
+        sections = manifest.get("sections", [])
+        if not isinstance(sections, list):
+            fail(f"{PAGES_SECTIONS_MANIFEST}: 'sections' must be a list")
+
+        raw_links = manifest.get("links", [])
+        if not isinstance(raw_links, list):
+            fail(f"{PAGES_SECTIONS_MANIFEST}: 'links' must be a list")
+        for link in raw_links:
+            if not isinstance(link, dict):
+                fail(f"{PAGES_SECTIONS_MANIFEST}: each link must be an object")
+            title = link.get("title")
+            path = link.get("path")
+            if not isinstance(title, str) or not title.strip():
+                fail(f"{PAGES_SECTIONS_MANIFEST}: link missing valid 'title'")
+            if not isinstance(path, str) or not path.strip():
+                fail(f"{PAGES_SECTIONS_MANIFEST}: link '{title}' missing valid 'path'")
+            entry = {"title": title, "path": path}
+            if link.get("probe"):
+                entry["probe"] = True
+            if isinstance(link.get("hint"), str) and link["hint"].strip():
+                entry["hint"] = link["hint"]
+            links.append(entry)
+        seen: set[str] = set()
+        for entry in sections:
+            if not isinstance(entry, dict):
+                fail(f"{PAGES_SECTIONS_MANIFEST}: each section must be an object")
+            name = entry.get("name")
+            source = entry.get("source")
+            if not isinstance(name, str) or not name.strip():
+                fail(f"{PAGES_SECTIONS_MANIFEST}: section missing valid 'name'")
+            if "/" in name or name in {".", ".."}:
+                fail(f"{PAGES_SECTIONS_MANIFEST}: section 'name' must be a single path segment: {name!r}")
+            if not isinstance(source, str) or not source.strip():
+                fail(f"{PAGES_SECTIONS_MANIFEST}: section '{name}' missing valid 'source'")
+            if name in seen:
+                fail(f"{PAGES_SECTIONS_MANIFEST}: duplicate section name: {name}")
+            seen.add(name)
+
+            source_dir = ensure_within(REPO_ROOT, REPO_ROOT / source, f"section '{name}' source")
+            title = entry.get("title") or name
+            if not source_dir.exists():
+                print(
+                    f"[sections] skip '{name}': source not present in checkout ({source})",
+                    flush=True,
+                )
+                continue
+            if not (source_dir / "index.html").exists():
+                fail(f"section '{name}' source has no index.html: {source}")
+            print(f"[sections] mount '{name}' -> /{name}/ (from {source})", flush=True)
+            copy_tree(source_dir, output_dir / name)
+            mounted.append({"name": name, "title": title, "path": f"./{name}/"})
+
+    (output_dir / "sections.json").write_text(
+        json.dumps({"sections": mounted, "links": links}, indent=2) + "\n", encoding="utf-8"
+    )
+
 
 def build_site(output_dir: Path) -> None:
     run_build_index()
@@ -275,9 +359,7 @@ def build_site(output_dir: Path) -> None:
     copy_tree(SOURCE_DASHBOARD_DATA_DIR, output_dir / "dashboard-data")
     build_combined_reports_index(output_dir)
     build_pdf_artifacts(output_dir)
-    if PROJECTION_SITE_ROOT.exists():
-        print("[projection] Copy DeepSeek-V4 projection site", flush=True)
-        copy_tree(PROJECTION_SITE_ROOT, output_dir / PROJECTION_SITE_SUBDIR)
+    mount_extra_sections(output_dir)
     print("[backend-gap] Validate standalone dashboard bundle", flush=True)
     validate_bundle(output_dir)
 
