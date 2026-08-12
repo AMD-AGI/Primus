@@ -65,6 +65,7 @@ _FLUX_MODEL_NAMES = frozenset({"flux", "flux-dev", "flux-schnell"})
 
 _work_per_step: Dict[str, float] = {}
 _enabled = True
+_tensorboard_hint_logged = False
 
 
 def _config_keys(config: Any) -> Dict[str, Any]:
@@ -227,8 +228,9 @@ def patch_maxdiffusion_throughput(ctx: PatchContext) -> None:
         return
 
     # Reset in case a previous run in this process left state behind.
-    global _enabled
+    global _enabled, _tensorboard_hint_logged
     _enabled = True
+    _tensorboard_hint_logged = False
     _work_per_step.clear()
 
     upstream_record_scalar_metrics = train_utils.record_scalar_metrics
@@ -260,6 +262,7 @@ def patch_maxdiffusion_throughput(ctx: PatchContext) -> None:
             upstream_write_metrics_to_tensorboard(writer, metrics, step, config)
             return
 
+        global _tensorboard_hint_logged
         if jax.process_index() == 0:
             max_logging.log(step_line)
             for metric_name in metrics.get("scalar", []):
@@ -267,8 +270,14 @@ def patch_maxdiffusion_throughput(ctx: PatchContext) -> None:
             for metric_name in metrics.get("scalars", []):
                 writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-            if step % config.log_period == 0:
+            # Upstream reprints the tensorboard hint on every log_period, which
+            # at log_period=1 doubles the length of the step log to repeat a
+            # string that never changes.
+            if not _tensorboard_hint_logged:
+                _tensorboard_hint_logged = True
                 max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
+
+            if step % config.log_period == 0:
                 writer.flush()
 
     train_utils.record_scalar_metrics = record_scalar_metrics
