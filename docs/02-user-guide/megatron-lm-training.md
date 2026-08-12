@@ -207,11 +207,7 @@ export HF_TOKEN=<your_hftoken>
 
 ### 3.1 Single-node training
 
-To run model training on a single node, go to the `/workspace/Primus/` folder and use the following command for setup. Once the setup is complete, use the individual model commands to start training:
-
-```bash
-pip install -r requirements.txt
-```
+To run model training on a single node, run the commands below from your `release/v26.5` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
 
 #### MI300X performance configs
 
