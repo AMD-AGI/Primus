@@ -12,8 +12,24 @@
 #   moonshotai/Kimi-K3: hidden 7168, 96 heads, 896 routed + 2 shared experts,
 #   top-16, MoE FFN 3072, Stable-Latent-MoE latent 3584 = hidden/2, MLA q_head_dim
 #   192), with only the DEPTH compressed from the production 93 layers to 8
-#   (1 dense + 7 MoE). This is the shape our 4-node throughput tuning measured at
-#   ~191 TFLOP/s/GPU, 0-NaN, ~96% of 288 GB HBM on 4 x 8 MI355X (bf16).
+#   (1 dense + 7 MoE). On 4 x 8 MI355X (bf16) this shape trains at ~189 TFLOP/s/GPU,
+#   0-NaN, ~97% of 288 GB HBM -- BUT ONLY WITH NUMA BINDING ON (the --numa note at the
+#   launch below). Without it the primus-cli launch path silently ran CPU/mem-unbound
+#   and this same config measured only ~134 TFLOP/s/GPU.
+#
+# MEASURED PERFORMANCE (this session; only numbers actually observed)
+#   image rocm/primus:v26.4, 4 x 8 MI355X (crsuse2-m2m-[055,195,271,288]; ordinary
+#   amd-spur nodes, SLURM-picked -- NOT a reservation), NNODES=4, TRAIN_ITERS=50,
+#   MBS=2 GBS=128 SEQ=7168 EP=8 TP=PP=1, recompute full/block/8, bf16.
+#     NUMA ON  (this launcher w/ --numa, job 1318): steady ~9.4 s/iter, harmonic
+#              188.9 TFLOP/s/GPU at iter 50 (iters 5-50 window 186-189), peak HBM
+#              97.4%, 0 NaN, loss 13.4 -> 0.035.
+#     NUMA OFF (pre-fix, job 1015, same node class + byte-identical config):
+#              ~13.9 s/iter, ~134 TFLOP/s/GPU, peak HBM 97.4%, 0 NaN.
+#   So the ~134->~189 gap is NUMA binding, NOT node topology/bandwidth: both runs
+#   used the same ionic RoCE transport, same v26.4 image and identical FLOP/config.
+#   The internal run_pretrain.sh reference (NUMA on) measured ~190-191 TFLOP/s/GPU on
+#   this shape; seq_length 8192 (vs 7168) pushes it to ~200-206 at ~99.7% HBM.
 #
 #   The 8-layer depth is encoded by the kimi_k3_8L_official preset
 #   (primus/configs/models/megatron/kimi_k3_8L_official.yaml), which extends the
@@ -373,9 +389,26 @@ SLURM_FLAGS=("-N" "$NNODES" "-t" "$SLURM_TIME" "--output=${PRIMUS_WORKSPACE}/8L_
 # suffixes, and keep NNODES consistent with the list length.
 [ -n "${SLURM_NODELIST:-}" ] && SLURM_FLAGS+=("-w" "$SLURM_NODELIST")
 
+# NUMA binding for the slurm->container->primus-cli-direct launch path.
+# THE SINGLE BIGGEST LEVER, AND IT WAS SILENTLY OFF: primus-cli-direct.sh has its
+# OWN --numa/--no-numa flag (default AUTO = OFF) and does NOT read ENABLE_NUMA_BINDING
+# -- that env is only consulted by run_pretrain.sh's torchrun wrapper (the path the
+# historical 190 TFLOP/s reference used). This launcher drives
+# `primus-cli slurm srun ... -- container ... -- train pretrain`, and the container
+# stage runs `bash runner/primus-cli-direct.sh "$@"` inside the container, so without
+# forwarding --numa the per-rank `numactl --cpunodebind --membind` never happened and
+# NUMA binding was silently OFF (measured ~134 TFLOP/s/GPU vs ~189 with it on -- a
+# ~1.4x lever, independent of node topology). Inject --numa AFTER the container '--'
+# so it reaches primus-cli-direct.sh as a runner flag (parsed before the train
+# command), gated on ENABLE_NUMA_BINDING so turning MoE feature 3 off still disables it.
+NUMA_CLI_ARGS=()
+if [ "${ENABLE_NUMA_BINDING:-0}" = "1" ]; then
+    NUMA_CLI_ARGS+=("--numa")
+fi
+
 ./primus-cli slurm srun "${SLURM_FLAGS[@]}" \
     -- container --shm-size 64g "${CONTAINER_VOL_ARGS[@]}" "${CONTAINER_DEV_ARGS[@]}" "${CONTAINER_ENV_ARGS[@]}" \
-    -- train pretrain --config "$EXP" \
+    -- "${NUMA_CLI_ARGS[@]}" train pretrain --config "$EXP" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \
