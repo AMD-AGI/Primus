@@ -251,9 +251,101 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
 
     assert compiled_inputs == [(block, "reduce-overhead") for block in original_blocks]
     assert [*root.double_blocks, *root.single_blocks] == original_blocks
-    trainer.args["compile_strategy"] = "stack"
-    with pytest.raises(ValueError, match="Unsupported compile_strategy='stack'"):
+    trainer.args["compile_strategy"] = "unknown"
+    with pytest.raises(ValueError, match="Unsupported compile_strategy='unknown'"):
         trainer._compile_transformer_blocks(root)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        ("single_stack", ["_run_single_blocks"]),
+        ("double_stack", ["_run_double_blocks"]),
+        ("stack", ["_run_double_blocks", "_run_single_blocks"]),
+        ("full_dit", ["_run_dit"]),
+    ],
+)
+def test_fsdp2_compile_stack_strategies(monkeypatch, strategy, expected):
+    class StackRoot(torch.nn.Module):
+        def _run_double_blocks(self):
+            pass
+
+        def _run_single_blocks(self):
+            pass
+
+        def _run_dit(self):
+            pass
+
+    root = StackRoot()
+    compiled_regions = []
+
+    def fake_compile(region, **kwargs):
+        assert kwargs == {
+            "backend": "inductor",
+            "fullgraph": True,
+            "dynamic": False,
+            "mode": None,
+        }
+        compiled_regions.append(region.__name__)
+        return region
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.args = {"compile_strategy": strategy}
+
+    trainer._compile_transformer_blocks(root)
+
+    assert compiled_regions == expected
+
+
+@pytest.mark.parametrize(
+    ("strategy", "wrapped_stacks"),
+    [
+        ("per_block", {"double_blocks", "single_blocks"}),
+        ("single_stack", {"double_blocks"}),
+        ("double_stack", {"single_blocks"}),
+        ("stack", set()),
+        ("full_dit", set()),
+    ],
+)
+def test_fsdp2_compile_strategy_controls_layer_sharding(monkeypatch, strategy, wrapped_stacks):
+    class DoubleStreamBlock(torch.nn.Module):
+        pass
+
+    class SingleStreamBlock(torch.nn.Module):
+        pass
+
+    root = torch.nn.Module()
+    root.double_blocks = torch.nn.ModuleList([DoubleStreamBlock()])
+    root.single_blocks = torch.nn.ModuleList([SingleStreamBlock()])
+    shard_calls = []
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.trainers.fsdp2.fully_shard",
+        lambda module, **kwargs: shard_calls.append(module),
+    )
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.world_size = 8
+    trainer.mesh = object()
+    trainer.sp_group = None
+    trainer.model = root
+    trainer.args = {
+        "bf16": True,
+        "compile_transformer_blocks": True,
+        "compile_strategy": strategy,
+        "fsdp_transformer_layer_cls_to_wrap": "DoubleStreamBlock,SingleStreamBlock",
+    }
+    trainer._compile_transformer_blocks = lambda model: None
+
+    trainer._apply_fsdp2()
+
+    assert shard_calls[-1] is root
+    wrapped_names = {
+        name.split(".", 1)[0] for name, module in root.named_modules() if module in shard_calls[:-1]
+    }
+    assert wrapped_names == wrapped_stacks
 
 
 def test_fsdp2_compile_output_head_in_place(monkeypatch):
