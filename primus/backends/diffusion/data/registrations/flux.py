@@ -45,7 +45,7 @@ def build_flux_dataset(dataset_config: dict):
     dataset, processor = _build_flux_dataset_from_config(dataset_config, role="train")
     eval_dataset_path = dataset_config.get("eval_dataset_path")
     if not eval_dataset_path:
-        return dataset, processor
+        return dataset, processor, None, None
 
     eval_config = dict(dataset_config)
     eval_config["dataset_path"] = eval_dataset_path
