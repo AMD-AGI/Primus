@@ -9,6 +9,7 @@ from primus.backends.megatron.data.diffusion.task_encoders.image import (
 )
 from primus.backends.megatron.flux_pretrain_trainer import (
     FluxPretrainTrainer,
+    _emit_precision_linear_class_census,
     _precision_linear_class_census,
 )
 from primus.backends.megatron.patches.mlperf_warmup_patches import _is_resumed_training
@@ -46,6 +47,31 @@ def test_precision_linear_class_census_reports_exact_classes():
         "MXFP4RowParallelLinear": 1,
         "Float8ColumnParallelLinear": 1,
         "Float8RowParallelLinear": 0,
+    }
+
+
+def test_precision_linear_class_census_emits_zero_counts_for_bf16(
+    monkeypatch, capsys
+):
+    from megatron.core import parallel_state
+
+    monkeypatch.setenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS", "1")
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 3)
+
+    _emit_precision_linear_class_census(nn.Linear(2, 2))
+
+    line = capsys.readouterr().out.strip()
+    payload = json.loads(line.split("=", 1)[1])
+    assert payload == {
+        "data_parallel_rank": 3,
+        "global_rank": 3,
+        "classes": {
+            "MXFP4ColumnParallelLinear": 0,
+            "MXFP4RowParallelLinear": 0,
+            "Float8ColumnParallelLinear": 0,
+            "Float8RowParallelLinear": 0,
+        },
     }
 
 
