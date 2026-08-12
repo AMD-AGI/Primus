@@ -80,6 +80,9 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             # Ideogram-4
             (f"{_PKG}.models.ideogram4.attention", "Ideogram-4 var-len flash attention"),
             (f"{_PKG}.models.ideogram4.adapter", "Ideogram-4 flow-matching adapter"),
+            # Not env-gated: it supplies a class attribute upstream requires before it
+            # will enable CP, and nothing reads it while cp_size=1.
+            (f"{_PKG}.models.ideogram4.context_parallel", "Ideogram-4 context-parallel plan"),
             (f"{_PKG}.models.ideogram4.parallelize", "Ideogram-4 real activation checkpointing"),
             (f"{_PKG}.models.ideogram4.zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
             (f"{_PKG}.models.ideogram4.profile", "Ideogram-4 torch.profiler train-loop wrapper"),
