@@ -304,8 +304,14 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem.b_mx_block_size = 0
 
         # ----- Select best config & predict latency (in clock cycles) -----
+        # Newer origami builds take a ``model_t`` selector as a 4th argument;
+        # the public/CI build exposes only the 3-argument signature.  Dispatch
+        # on availability so the public tree runs against either build.
         try:
-            result = _origami.select_config(problem, self._hardware, self._configs, _origami.model_t.gemm)
+            if hasattr(_origami, "model_t"):
+                result = _origami.select_config(problem, self._hardware, self._configs, _origami.model_t.gemm)
+            else:
+                result = _origami.select_config(problem, self._hardware, self._configs)
         except Exception as e:
             raise RuntimeError(
                 f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
