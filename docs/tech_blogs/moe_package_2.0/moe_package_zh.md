@@ -36,7 +36,7 @@ megakernel 属于研究阶段工作，已显式标注为「研究预览」；在
 
 # 基于 Primus 的 MoE 训练优化
 
-_Mixture-of-Experts（MoE）已经成为前沿规模语言模型的默认架构，我们的用户也越来越多地在 AMD Instinct™ GPU 上训练大型 MoE 模型。本文介绍我们为这些真实负载在 Primus 上构建的一系列 MoE 训练优化，并自底向上贯穿整个训练栈：每一次 MoE 训练都会继承的 **Primus + Primus-Turbo** 通用框架优化、kernel 层面的工作（**低精度专家 GEMM** 与融合式 MoE **megakernel**）、最高 1024 GPU 规模下 DeepSeek-V3 的 **time-to-train** 优化、与 **NVIDIA B200** 对比的**小 MoE 模型**这一不同瓶颈区间、我们的 **JAX（MaxText）** 训练路径，以及在开跑前就为训练定规模的**性能预估（projection）**工具。Primus 的 Megatron-LM 与 JAX 两个后端都会涉及。关于这些工作所依赖的基础优化，可参阅我们此前的 [AMD GPU 上的 MoE 训练最佳实践](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)。_
+_Mixture-of-Experts（MoE）已经成为前沿规模语言模型的默认架构，我们的用户也越来越多地在 AMD Instinct™ GPU 上训练大型 MoE 模型。本文介绍我们为这些真实负载在 Primus 上构建的一系列 MoE 训练优化，并自底向上贯穿整个训练栈：每一次 MoE 训练都会继承的 **Primus + Primus-Turbo** 通用框架优化、kernel 层面的工作（**低精度专家 GEMM** 与融合式 MoE **megakernel**）、涵盖最高 1024 GPU 规模 DeepSeek-V3 与 GPT-OSS-20B MLPerf 流程的 **time-to-train** 案例、与 **NVIDIA B200** 对比的**小 MoE 模型**这一不同瓶颈区间、我们的 **JAX（MaxText）** 训练路径，以及在开跑前就为训练定规模的**性能预估（projection）**工具。Primus 的 Megatron-LM 与 JAX 两个后端都会涉及。关于这些工作所依赖的基础优化，可参阅我们此前的 [AMD GPU 上的 MoE 训练最佳实践](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)。_
 
 本文中所有功能演示与 benchmark 结果均基于 Primus。[Primus/Primus-LM](https://github.com/AMD-AGI/Primus) 是一个面向 AMD GPU、用于大规模基础模型训练与推理的灵活、高性能框架。作为 Primus 生态中的训练框架层，Primus-LM 与 [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo)（高性能算子）和 [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)（稳定性与平台基础设施）协同工作，共同提供一套可扩展、可用于生产环境的先进大模型开发方案。
 
@@ -66,16 +66,17 @@ _Mixture-of-Experts（MoE）已经成为前沿规模语言模型的默认架构�
 
 ### 时间都花在哪里，以及本文覆盖什么
 
-这些趋势意味着，MoE 训练效率不再只是「把 GEMM 做快」。一次现代 MoE 迭代同时受制于四类瓶颈，而只针对其中一类的优化，往往只会把下一类暴露出来。下表把每一类瓶颈映射到本文对应的工作，方便你直接跳到当前限制自己训练的那一节。
+这些趋势意味着，MoE 训练效率不再只是「把 GEMM 做快」。一次现代 MoE 迭代同时受制于多类瓶颈，而只针对其中一类的优化，往往只会把下一类暴露出来。下表把每一类瓶颈映射到本文对应的工作，方便你直接跳到当前限制自己训练的那一节。
 
 | 瓶颈 | 我们的应对 | 章节 |
 |---|---|---|
 | **专家 GEMM 吞吐** —— 专家 FFN 主导算力 | FP8/MXFP8 grouped GEMM、FlyDSL kernel、量化权重缓存 | [低精度专家 GEMM](#低精度专家-gemm) |
 | **all-to-all dispatch/combine** —— 随 top-k 与 EP 宽度增长 | DeepEP dispatch、1F1B overlap，以及单 kernel 内的 tile 级融合 | [框架基础](#基础primus--primus-turbo)、[Megakernel](#研究预览moe-megakernel) |
 | **显存上限** —— 决定 micro-batch 大小与 recompute 代价 | precision-aware optimizer、流水线布局、细粒度 recompute、事前 projection | [规模化的 DeepSeek-V3](#time-to-train256-1024-gpu-上的-deepseek-v3)、[Projection](#开跑之前先做预估primus-projection) |
+| **端到端 time-to-quality** —— 吞吐并不能单独决定 TTT | 拓扑修正、减少数据搬运、全路径融合、预热，以及考虑收敛效率的 batch size 选择 | [GPT-OSS-20B time-to-train](#time-to-traingpt-oss-20b) |
 | **Host 与 launch 开销** —— 层规模小时占主导 | sync-free MoE、NUMA 绑定与 launch 调优、流水线预热 | [框架基础](#基础primus--primus-turbo)、[小 MoE 模型](#小-moe-模型另一种瓶颈区间) |
 
-有两节不在上表的框架内：[JAX（MaxText）路径](#超越-megatron-lmjaxmaxtext路径)把同样的 grouped GEMM 与 DeepEP 原语带到第二个后端；[Primus Projection](#开跑之前先做预估primus-projection) 则在花费任何集群时间之前，先回答「装得下吗、能跑多快」。
+[JAX（MaxText）路径](#超越-megatron-lmjaxmaxtext路径)不在上述瓶颈表格中；它把同样的 grouped GEMM 与 DeepEP 原语带到了第二个后端。
 
 ### 结果速览
 
@@ -376,6 +377,71 @@ Primus 把布局以字符串形式暴露出来，因此把那个自由的短 sta
 
 ---
 
+## Time-to-Train：GPT-OSS-20B
+
+DeepSeek-V3 案例展示了显存与流水线调度如何决定大规模训练的吞吐。GPT-OSS-20B 则呈现了另一类 time-to-train 问题：要在单节点上达到固定质量目标，不仅要最大化稳态 token 吞吐，还必须计入初始化与 kernel 预热、训练 step、周期性评估、通信、输入流水线，以及失败或重启的运行。
+
+### GPT-OSS-20B 优化历程
+
+本节仅讨论经过验证的单节点配方，有意排除后续多节点开发。Primus 中公开的入口包括 [GPT-OSS-20B 训练配置](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml)、[MI355X 系统配置](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh)和[外层计时脚本](https://github.com/AMD-AGI/Primus/blob/main/examples/mlperf/gpt_oss_20b/run_and_time.sh)。shell 配置会显式覆盖若干 YAML 默认值，最终生效的配方如下：
+
+| 设置 | 值 |
+|---|---|
+| 硬件 | 1 节点 × 8 AMD Instinct MI355X GPU |
+| 模型 | 总参数量 20B，每 token 激活约 3.6B 参数，24 层、32 个专家、top-4 路由 |
+| Attention | 滑动窗口与全量 attention 交替，序列长度 8192 |
+| 并行策略 | TP1 / PP1 / EP1 / DP8 |
+| Batch | MBS 4 / GBS 32 |
+| 精度 | 线性层使用 E4M3 tensorwise FP8 |
+| Grouped-GEMM 后端 | Triton |
+| 数据 | Tokenized C4 |
+| 质量目标 | validation log perplexity ≤ 3.34 |
+| 评估 | 每 12,288 个训练样本评估一次，共 1024 条验证序列 |
+
+固定质量与评估约束是优化的第一条护栏。评估频率按*样本数*而非 iteration 表达，因此改变 global batch size 不会悄然改变评估频率或完整性。在同一规模的 A/B 测试中，只有保持相同 optimizer schedule 并达到同一质量目标的性能改动才会保留。
+
+配方经历了四个阶段：
+
+| 阶段 | 主要变化 | 为什么能改善 TTT |
+|---|---|---|
+| 初始基线 | EP8、DeepEP/flex dispatch、sync-free MoE stage 2、MBS 2、hybrid/delayed FP8 | 建立可运行的 MoE 基线，但保留了并不适合该单节点模型的通信与同步机制 |
+| 拓扑修正 | EP1、all-to-all dispatcher、grouped GEMM、MBS 4、融合 cross-entropy | 去掉不必要的 expert-parallel 通信，在保持 GBS 32 的同时增加每次 launch 的工作量 |
+| 关键路径缩短 | BF16 梯度规约、8 个 DDP bucket、重叠 reduce/gather、消除 identity sort、tensorwise FP8、调优 RMSNorm | 减少通信字节、tensor 搬运、CPU 同步与高频 kernel 开销 |
+| 最终配方加固 | 融合 residual/RMSNorm、SwiGLU no-cat、融合 router/activation、调优 attention/RoPE、RCCL 参数 gather、离线 GEMM 选型、预热与日志抑制 | 在不改变质量约束的前提下形成可复现的单节点配方 |
+
+**根据负载选择并行策略，而不是根据架构标签。** 初始 EP8 路径将 32 个专家分布在 8 张 GPU 上，因此需要专家 dispatch collective。GPT-OSS-20B 足够小，每张 MI355X 都能容纳完整专家集合，所以最终单节点配方采用 EP1 与 DP8。DeepEP 和 sync-free MoE 被关闭（`use_turbo_deepep: false`、`turbo_sync_free_moe_stage: 0`），本地 grouped GEMM 仍然启用。在 TP1/EP1 下，per-expert index 可以是 identity permutation；`MOE_SKIP_IDENTITY_SORT=1` 会识别该情况并移除两条冗余的 sort/copy 路径。配合显存与 kernel 调优后，MBS 从 2 提升到 4，GBS 保持不变。
+
+**先减少数据搬运，再增加计算 kernel。** 梯度使用 BF16 规约，DDP 使用多个 bucket，并让梯度规约与参数 gather 重叠。
+
+**优化完整 token 路径。** E4M3 tensorwise FP8 取代最初的 hybrid/delayed 配方。专家路径将 grouped GEMM 与融合 router/activation、residual + RMSNorm 融合，以及 SwiGLU no-cat 反向路径结合起来，后者把 gate/up 梯度直接写入最终布局，避免临时 tensor 的拼接与拆分。GPT-OSS 的 attention 层在滑动窗口和全量 attention 之间交替，因此后端选择会分别处理 dense/SWA 与前向/反向 shape。原生 SBHD 执行去掉布局转换 transpose，dataloader 不再每 step 构造并复制稠密的 `(B, 1, S, S)` CPU mask，符合条件的 gfx950、head dimension 64 shape 则使用调优后的前向/反向 kernel。
+
+**按 GBS 调优的配方暴露了统计效率权衡。** 公开的 [MLCommons RCP 日志](https://github.com/mlcommons/training/tree/master/small_llm_moe_pretraining/primus/rcp_logs)分别包含 GBS 16、32、64 各 20 次收敛运行。这些是参考收敛特征，并非上述单节点 FP8 配方的性能日志；它们也会随 GBS 调整 learning rate 和 warm-up，因此不能将比较解读为单变量因果实验。按第一次达到或低于 3.34 目标的评估计算：
+
+| GBS | LR / warm-up updates | 达标样本数中位数 | 样本数均值 ± 标准差 | 20 次运行范围 | optimizer updates 中位数 |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 4e-4 / 128 | 196,608 | 194,765 ± 8,243 | 184,320–208,896 | 12,288 |
+| 32 | 8e-4 / 128 | 233,472 | 234,701 ± 7,873 | 221,184–245,760 | 7,296 |
+| 64 | 1e-3 / 192 | 294,912 | 301,670 ± 15,168 | 282,624–331,776 | 4,608 |
+
+在这些分别调优的 RCP 配方中，从 GBS 16 增至 32 会让达到收敛所需样本数的中位数增加 **18.8%**；从 32 增至 64 又增加 **26.3%**。因此，尽管 GBS 64 用更少的 optimizer update 达标，其样本数中位数仍比 GBS 16 多 **50%**。由于每 12,288 个训练样本评估一次，观测值会量化到该间隔：三种 GBS 的中位运行分别在第 16、19、24 次评估达标。
+
+RCP 文件为 GBS 16、32、64 记录的 `eval_samples` 元数据分别是 1024、2048、4096，而经过验证的单节点配方显式固定为 1024 条验证序列。因此，我们只使用 RCP 日志中的训练 `samples_count` 收敛点，不用它比较评估成本，也不据此声称 FP8 收敛性。GBS 32 配方是一项系统级折中：更大的 micro-batch 提高设备利用率，但增加的训练样本仍要计入 TTT。
+
+这一关系可概括为：
+
+`TTT ≈ 达标所需样本数 / 持续样本吞吐 + 评估次数 × 单次评估时间 + 初始化与预热时间`
+
+**显式计入生命周期成本。** 配方在 MLPerf `RUN_START` 事件之前执行 3 个合成预热 step，为重复出现的 shape 预选 hipBLASLt solution，并抑制高频的非 MLPerf 日志。外层 `run_and_time.sh` 在 `torchrun` 之前开始计时，因此从启动到结束的时间仍包含进程初始化与预热，即使 MLPerf 计时间隔不包含它们。我们据此区分两个指标：
+
+- **用户可见 TTT：** 从进程启动到第一次评估达到 3.34，包含初始化与预热。
+- **MLPerf 计时间隔：** 按 benchmark 规则，从 `RUN_START` 到达标评估。
+
+MLPerf 分数要求连续运行 10 次：去掉最快和最慢各一次，对其余 8 次 `RUN_START` 到 `RUN_STOP` 的时间取平均，并用 RCP checker 验证整组运行。benchmark 配方关闭 checkpoint 与最终保存，因此该分数不包含生产训练任务预期的 checkpoint/recovery 开销。
+
+仓库历史记录了主要配置演进，但不包含发布汇总 TTT 加速所需的重复基线和最终结果日志。因此，我们不会把各组件收益相加，也不会复用图 2 中 GPT-OSS **9.7%** 的吞吐提升：该 A/B 测试使用序列长度 4096、MBS 2、GBS 16 和 FlyDSL 后端，而 MLPerf time-to-quality 配方使用序列长度 8192、MBS 4、GBS 32 以及另一套经过验证的 kernel 栈。正式的 TTT 声明应同时报告上述两个计时边界、8 次运行的分数与离散程度，并确认运行组达到 validation log perplexity 3.34 且通过 RCP checker。
+
+---
+
 ## 小 MoE 模型：另一种瓶颈区间
 
 <!---
@@ -388,7 +454,7 @@ Primus 把布局以字符串形式暴露出来，因此把那个自由的短 sta
 请保持两者口径清晰，避免读者误以为 B200 参照被重复了一遍。
 --->
 
-上文的一切都受制于显存与集合通信。小 MoE 模型恰好相反：每层计算量不大，因此反而是框架开销、梯度规约以及归一化/激活 kernel 占主导。我们以一个 GPT-OSS 级别的 MoE 模型（32 个专家、top-4、8K 序列长度）在单个 8×MI355X 节点上为起点，调优出一组在这一区间内普遍适用的优化：
+上面的 GPT-OSS 案例也说明了小 MoE 模型与万亿参数负载的差异：每层计算量不大，因此反而是框架开销、梯度规约以及归一化/激活 kernel 占主导。我们在同一个 GPT-OSS 级别的 MoE 模型（32 个专家、top-4、8K 序列长度）与单个 8×MI355X 节点上，进一步拆出一组在这一区间内普遍适用的优化：
 
 - **BF16 梯度规约**（`grad_reduce_in_bf16`）—— 这一区间里单项最大的 step 时间收益，降低通信量并释放可观显存。
 - **调优的归一化 kernel** —— 一条快速的 RMSNorm 路径，避免了通用实现在该软件栈上出现的性能回退。
