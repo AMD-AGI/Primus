@@ -41,6 +41,7 @@ Activation (env, no config schema change):
 """
 from __future__ import annotations
 
+import functools
 import inspect
 import logging
 import os
@@ -75,6 +76,8 @@ def _params_are_dtensor(params) -> bool:
 
 def _wrap_in_zero1(base):
     """Return ``base`` re-built as a ZeroRedundancyOptimizer, or ``base`` unchanged."""
+    if type(base).__name__ == "ZeroRedundancyOptimizer":
+        return base  # a subclass build() that chains to super() would otherwise double-wrap
     params = [p for group in base.param_groups for p in group["params"]]
     if _params_are_dtensor(params):
         logger.warning(
@@ -133,24 +136,55 @@ def _wrap_in_zero1(base):
     return zro
 
 
-def _install_zero1_optimizer_patch() -> bool:
-    """Wrap the recipe's optimizers in ZeroRedundancyOptimizer."""
+def _optimizer_config_classes():
+    """Every class in the OptimizerConfig hierarchy that defines its OWN ``build``.
+
+    Patching only the base class is NOT enough, and the way it fails is silent. YAML
+    ``_target_: torch.optim.AdamW`` resolves to a plain torch class, not an
+    OptimizerConfig subclass, so build_optimizer_config() wraps it in
+    ``OptimizerFromFactoryConfig`` -- which overrides ``build`` and never chains to
+    ``super()``. A base-class-only patch is then simply never called: no ZeRO-1, no
+    warning, and a run that looks perfect while the optimizer state stays replicated.
+    ``_DionConfigBase`` overrides ``build`` the same way. Walk the hierarchy instead of
+    naming those two, so a future override cannot re-open the same hole.
+    """
     from nemo_automodel.components.optim.optimizer import OptimizerConfig
 
-    if getattr(OptimizerConfig, "_primus_zero1_patched", False):
-        return True
+    seen, stack, out = set(), [OptimizerConfig], []
+    while stack:
+        cls = stack.pop()
+        if id(cls) in seen:
+            continue
+        seen.add(id(cls))
+        if "build" in vars(cls):
+            out.append(cls)
+        stack.extend(cls.__subclasses__())
+    return out
 
-    _orig_build = OptimizerConfig.build
 
-    def _build_zero1(self, model, *, device_mesh=None, is_peft: bool = False):
-        optimizers = _orig_build(self, model, device_mesh=device_mesh, is_peft=is_peft)
-        if not is_zero1_enabled():
-            return optimizers
-        return [_wrap_in_zero1(opt) for opt in optimizers]
+def _install_zero1_optimizer_patch() -> bool:
+    """Wrap the recipe's optimizers in ZeroRedundancyOptimizer."""
+    patched = []
+    for cls in _optimizer_config_classes():
+        if getattr(vars(cls)["build"], "_primus_zero1_patched", False):
+            patched.append(cls.__name__)
+            continue
 
-    OptimizerConfig.build = _build_zero1
-    OptimizerConfig._primus_zero1_patched = True
-    return True
+        def _make(orig_build):
+            @functools.wraps(orig_build)
+            def _build_zero1(self, *args, **kwargs):
+                optimizers = orig_build(self, *args, **kwargs)
+                if not is_zero1_enabled():
+                    return optimizers
+                return [_wrap_in_zero1(opt) for opt in optimizers]
+
+            _build_zero1._primus_zero1_patched = True
+            return _build_zero1
+
+        cls.build = _make(vars(cls)["build"])
+        patched.append(cls.__name__)
+    logger.info("[PrimusIdeogramZeRO1] ZeRO-1 optimizer patch installed on %s", patched)
+    return bool(patched)
 
 
 def _install_ddp_ac_patch() -> bool:
