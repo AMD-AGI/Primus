@@ -5,7 +5,7 @@ Full forward + backward benchmark of every V4 attention backend, produced by
 
 ## Setup
 
-- **GPU**: AMD Instinct MI355X (gfx950), single GPU (`smci355-ccs-aus-n04-25`)
+- **GPU**: AMD Instinct MI355X (gfx950), single GPU
 - **Container**: `dev_primus_wenx`
 - **Torch**: `2.10.0+git94c6e04`, Triton `3.7.0`, FlyDSL `0.2.2`
 - **Primus-Turbo**: `dev/kyle/flydsl_attn_deepseekv4` @ `350ec3f` (native-FlyDSL sparse-MLA v2)

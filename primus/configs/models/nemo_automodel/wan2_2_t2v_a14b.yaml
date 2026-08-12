@@ -1,0 +1,23 @@
+# NeMo AutoModel model preset: Wan 2.2 T2V A14B (mixture-of-experts DiT).
+#
+# Merged (as the `model:` block) into the nemo_automodel pre_trainer module
+# config by the Primus launcher. `mode: pretrain` builds ONE randomly-initialised
+# A14B expert chosen by `pipeline_spec.subfolder`:
+#   high-noise expert -> transformer        (default; stage: high_noise)
+#   low-noise  expert -> transformer_2      (override stage: low_noise too)
+model:
+  pretrained_model_name_or_path: /models/Wan2.2-T2V-A14B-Diffusers
+  mode: pretrain
+  stage: high_noise
+  # REQUIRED in pretrain mode (the from_config pipeline carries no config to
+  # infer it from). Wan 2.2-A14B ships boundary_ratio = 0.875.
+  boundary_ratio: 0.875
+  # AITER attention backend (gfx950). Falls back to "flash" if needed.
+  attention_backend: aiter
+  # fp32 master + bf16 compute (canonical pretraining precision, GB300-comparable).
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: WanTransformer3DModel
+    subfolder: transformer
+    load_full_pipeline: false

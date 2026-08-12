@@ -46,6 +46,18 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
         self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
         self.moe_router_padding_for_quantization = args.moe_router_padding_for_quantization
+        self.turbo_grouped_gemm_without_padding = getattr(args, "turbo_grouped_gemm_without_padding", False)
+        # PrimusTurbo grouped GEMMs consume the original GPU tokens_per_expert
+        # tensor for every supported quantization recipe. Keep TE's explicit
+        # zero-padding fallback only when the no-padding path is not enabled.
+
+    def _use_explicit_quantization_padding(self) -> bool:
+        """Whether this forward must pad expert groups before quantization."""
+        if not (self.config.fp8 or self.config.fp4):
+            return False
+        if self.moe_router_padding_for_quantization:
+            return False
+        return not self.turbo_grouped_gemm_without_padding
 
     def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
         """
@@ -170,7 +182,8 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+        use_explicit_quantization_padding = self._use_explicit_quantization_padding()
+        if use_explicit_quantization_padding:
             # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
             actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
@@ -218,7 +231,14 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 )
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
+                # Honor use_turbo_fused_act_with_probs independently of activation
+                # recomputation. The helper falls back to bias_act_func when disabled.
+                bias_act_output = self.bias_act_func_with_mask(
+                    fc1_output,
+                    bias_parallel,
+                    permuted_probs,
+                    tokens_per_expert,
+                )
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
@@ -230,7 +250,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+        if use_explicit_quantization_padding:
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None

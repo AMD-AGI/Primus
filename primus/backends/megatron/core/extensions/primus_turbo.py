@@ -1664,6 +1664,129 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         return out, None
 
 
+def _make_primus_turbo_norm_te_column_parallel_linear():
+    """Build a layernorm+linear module that keeps the GEMM on Transformer Engine.
+
+    ``PrimusTurboLayerNormColumnParallelLinear`` above routes both the norm and
+    the GEMM through Turbo. On the GPT-OSS-20B shapes only the norm is worth
+    moving: Turbo's Triton rmsnorm is markedly cheaper than TE's ``general``
+    kernels (measured 21.3 ms/step against 26.9 with the dgamma fix, and 38.5
+    without it), while Turbo's dense FP8 GEMM is slower than hipBLASLt here
+    (69.6 ms/step against 59.7).
+
+    TE fuses norm and GEMM inside one autograd function, so there is no way to
+    substitute just the norm. This composes ``PrimusTurboRMSNorm`` with
+    ``TEColumnParallelLinear`` instead, trading the fused launch for the faster
+    norm. Built in a factory so the TE import stays lazy.
+    """
+    import torch.nn as nn
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        _get_extra_te_kwargs,
+    )
+
+    class PrimusTurboNormTEColumnParallelLinear(nn.Module):
+        """See ``_make_primus_turbo_norm_te_column_parallel_linear``."""
+
+        def __init__(
+            self,
+            input_size: int,
+            output_size: int,
+            *,
+            config: TransformerConfig,
+            init_method: Callable,
+            gather_output: bool,
+            bias: bool,
+            skip_bias_add: bool,
+            is_expert: bool,
+            skip_weight_param_allocation: bool = False,
+            tp_comm_buffer_name: Optional[str] = None,
+            tp_group: Optional[torch.distributed.ProcessGroup] = None,
+            stride: int = 1,
+        ):
+            super().__init__()
+            self.config = config
+            # Mirror the kwargs TELayerNormColumnParallelLinear feeds into
+            # te.pytorch.LayerNormLinear, so the norm behaves identically.
+            extra = _get_extra_te_kwargs(config)
+            self.layernorm = PrimusTurboRMSNorm(
+                normalized_shape=input_size,
+                eps=config.layernorm_epsilon,
+                sequence_parallel=config.sequence_parallel,
+                zero_centered_gamma=config.layernorm_zero_centered_gamma,
+                params_dtype=extra.get("params_dtype", torch.float32),
+                device=extra.get("device", torch.cuda.current_device()),
+            )
+            self.linear = TEColumnParallelLinear(
+                input_size=input_size,
+                output_size=output_size,
+                config=config,
+                init_method=init_method,
+                gather_output=gather_output,
+                bias=bias,
+                skip_bias_add=skip_bias_add,
+                is_expert=is_expert,
+                skip_weight_param_allocation=skip_weight_param_allocation,
+                tp_comm_buffer_name=tp_comm_buffer_name,
+                tp_group=tp_group,
+            )
+
+        # Callers reach for these names on the fused TE module directly
+        # (te_op_fuser, modelopt state-dict hooks, checkpoint conversion), so
+        # expose them rather than forcing every caller to know the layout.
+        @property
+        def layer_norm_weight(self):
+            return self.layernorm.weight
+
+        @property
+        def normalization(self):
+            return self.config.normalization
+
+        @property
+        def weight(self):
+            return self.linear.weight
+
+        @property
+        def bias(self):
+            return getattr(self.linear, "bias", None)
+
+        @property
+        def in_features(self):
+            return self.linear.in_features
+
+        @property
+        def out_features(self):
+            return self.linear.out_features
+
+        def forward(self, x):
+            return self.linear(self.layernorm(x))
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            """Flatten to the names a checkpoint from the fused class carries."""
+            sd = {}
+            sd.update(
+                self.linear.sharded_state_dict(
+                    prefix=prefix, sharded_offsets=sharded_offsets, metadata=metadata
+                )
+            )
+            norm_sd = self.layernorm.state_dict(prefix="", keep_vars=True)
+            sd.update(
+                make_sharded_tensors_for_checkpoint(
+                    {"layer_norm_weight": norm_sd["weight"]}, prefix, {}, sharded_offsets
+                )
+            )
+            return sd
+
+        def __repr__(self):
+            return (
+                f"{type(self).__name__}(in_features={self.in_features}, "
+                f"out_features={self.out_features}, "
+                f"norm={type(self.layernorm).__name__})"
+            )
+
+    return PrimusTurboNormTEColumnParallelLinear
+
+
 def fused_bias_act_with_probs(
     intermediate_parallel: torch.Tensor,
     bias_parallel: torch.Tensor,

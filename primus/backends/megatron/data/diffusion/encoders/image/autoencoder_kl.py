@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Portions copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 # Licensed under the Apache License, Version 2.0.
 #
-# Adapted from NeMo's VAE implementation
+# Adapted from NVIDIA NeMo Flux encoder wrappers (https://github.com/NVIDIA-NeMo/NeMo).
 
 """
 AutoencoderKL implementation for Flux VAE.

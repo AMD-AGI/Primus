@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Modifications Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Ported from Megatron-Bridge (https://github.com/NVIDIA-NeMo/Megatron-Bridge).
+
 """
 Walking utilities for PyTorch module transformation.
 

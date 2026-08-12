@@ -379,7 +379,7 @@ models:
 | `recompute_granularity` | `null` | `full` or `selective` checkpointing. |
 | `recompute_method` | `null` | `uniform` or `block` selective recomputation. |
 | `recompute_num_layers` | `null` | Layers to recompute per block / schedule. |
-| `recompute_layer_ids` | `null` | *Primus:* explicit **global** layer indices to recompute (`0 … num_layers-1`). |
+| `recompute_layer_ids` | `null` | *Primus:* explicit **global** layer indices to recompute. Decoder layers are `0 … num_layers-1`; the MTP depths continue the numbering, so depth *d* is `num_layers + d`. Requires `recompute_granularity: full` and `recompute_method: null`. |
 | `distribute_saved_activations` | `false` | Distribute saved activations across TP/PP for memory balance. |
 | `checkpoint_activations` | `false` | Deprecated alias for activation checkpointing. |
 | `moe_layer_recompute` | `false` | Recompute MoE layer activations (model preset). |
