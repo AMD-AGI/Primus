@@ -38,12 +38,14 @@ subtrees:
         title: Pretraining workflows
       - file: 02-user-guide/end-to-end-training-recipes.md
         title: End-to-end training recipes
-      - file: 02-user-guide/megatron-lm-training.md
-        title: Training a model with Primus and Megatron-LM
-      - file: 02-user-guide/torchtitan-training.md
-        title: Training a model with Primus and PyTorch TorchTitan
-      - file: 02-user-guide/jax-maxtext-training.md
-        title: Training a model with Primus and JAX MaxText
+        subtrees:
+          - entries:
+              - file: 02-user-guide/megatron-lm-training.md
+                title: Training a model with Primus and Megatron-LM
+              - file: 02-user-guide/torchtitan-training.md
+                title: Training a model with Primus and PyTorch TorchTitan
+              - file: 02-user-guide/jax-maxtext-training.md
+                title: Training a model with Primus and JAX MaxText
       - file: 02-user-guide/posttraining.md
         title: Post-training workflows
       - file: 02-user-guide/node-smoke-test-instruction.md
