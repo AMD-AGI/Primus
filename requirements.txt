@@ -14,6 +14,7 @@ datasets>=3.6.0
 mlflow==3.11.1
 pyrsmi
 plotext
+pulp
 hip-python
 mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5
 mlperf-common @ git+https://github.com/NVIDIA/mlperf-common.git
@@ -21,3 +22,4 @@ megatron-energon==7.3.2
 webdataset==1.0.2
 tqdm==4.67.3
 pyarrow==21.0.0
+flash-linear-attention==0.5.2

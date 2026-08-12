@@ -27,11 +27,26 @@ copyright = "Copyright (c) %Y Advanced Micro Devices, Inc. All rights reserved."
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "ai-ecosystem",
-    "link_main_doc": False,
+    "link_main_doc": True,
+    "repository_url": "https://github.com/AMD-AGI/Primus",
+    "use_repository_button": True,
+    "use_issues_button": True,
+    "use_download_button": True,
 }
 html_title = project
 
 # Sphinx extension-related configs
-extensions = ["rocm_docs"]
+extensions = [
+    "rocm_docs",
+    "sphinxcontrib.mermaid",
+]
 external_toc_path = "./sphinx/_toc.yml"
 external_projects_current_project = "primus"
+myst_fence_as_directive = ["mermaid"]
+myst_heading_anchors = 3
+
+# Publish the llms.txt index at the docs site root and let
+# rocm-docs-core generate llms-full.txt after each build (the llms.txt standard,
+# https://llmstxt.org/). See the rocm-docs-core guide:
+# https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/user_guide/llms.html
+rocm_docs_generate_llms = True

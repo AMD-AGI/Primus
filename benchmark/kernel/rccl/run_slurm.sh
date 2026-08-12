@@ -10,7 +10,7 @@
 # Usage:
 #   DOCKER_IMAGE=<image> sbatch run_slurm.sh
 #   DOCKER_IMAGE=<image> NNODES=2 PARTITION=my-gpu sbatch run_slurm.sh
-#   DOCKER_IMAGE=rocm/primus:v26.3 NNODES=2 sbatch -N2 -w smci355-ccs-aus-n04-[25,29] -p Compute-DCPT ./run_slurm.sh
+#   DOCKER_IMAGE=rocm/primus:v26.4 NNODES=2 sbatch -N2 -w node[01-02] -p my-gpu ./run_slurm.sh
 #
 # Environment variables (all optional except DOCKER_IMAGE):
 #   DOCKER_IMAGE        Docker image to use (required)
@@ -89,7 +89,7 @@ NODE_RANK="${SLURM_NODEID}"
 
 # ---- Build short NODE_TAG like: n05-29_n05-33 ----
 short_node() {
-  # input: smci355-ccs-aus-n05-29  -> output: n05-29
+  # keep the last two dash-separated fields, e.g. <prefix>-n05-29 -> n05-29
   local h="$1"
   local n_part id_part
   n_part="$(echo "$h" | awk -F"-" "{print \$(NF-1)}")"  # n05
@@ -179,7 +179,7 @@ docker run --rm \
         MEGATRON_PATH=\"\${PRIMUS_ROOT_PATH}/third_party/Megatron-LM\"
         export PYTHONPATH=\"\${MEGATRON_PATH}:\${PYTHONPATH:-}\"
 
-        # Final CSV names you want (no smci prefix, include both nodes)
+        # Final CSV names (short node tag, no cluster prefix, includes every node)
         FINAL_ALLREDUCE=\"${OUTPUT_DIR}/allreduce_\${NODE_TAG}.csv\"
         FINAL_ALLGATHER=\"${OUTPUT_DIR}/allgather_\${NODE_TAG}.csv\"
         FINAL_REDUCESCATTER=\"${OUTPUT_DIR}/reducescatter_\${NODE_TAG}.csv\"

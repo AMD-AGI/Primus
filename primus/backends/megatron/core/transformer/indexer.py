@@ -34,6 +34,18 @@ main attention's compressed KV pool. It is only used to **select** top-k
 positions; the actual values fetched into main attention come from the
 main Compressor in the surrounding CSA layer.
 
+Both scoring operands are prepared the way the reference prepares them
+before the dot product:
+
+* **Partial RoPE**, at the compressed-branch base -- queries at their own
+  token positions, compressed keys at ``s * compress_ratio`` (the window's
+  first token), so the two live in one coordinate system.
+* **Hadamard rotation** (``rotate_activation``) on top. Orthogonal, so it
+  leaves the inner product alone in exact arithmetic; what it buys is
+  spreading each coordinate's energy across the vector so no single channel
+  dominates the low-precision QK product. Note the reference rotates *only*
+  here -- the main compressed KV pool is built with ``rotate=False``.
+
 Phase 4 contract:
 * Plain ``nn.Linear`` projections (TP integration in P6).
 * Causal masking: positions ``s`` whose start raw-token index exceeds the
@@ -46,7 +58,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -65,6 +77,12 @@ def _is_rank0() -> bool:
 
 
 from primus.backends.megatron.core.transformer.compressor import Compressor
+from primus.backends.megatron.core.transformer.dual_rope import (
+    apply_interleaved_partial_rope,
+)
+from primus.backends.megatron.core.transformer.hadamard_rotation import (
+    rotate_activation,
+)
 
 # E4M3 finite max magnitude (float8_e4m3fn): largest representable value.
 _FP8_E4M3_MAX = 448.0
@@ -153,10 +171,18 @@ def _fp4_qk_gemm(q_i: torch.Tensor, k_icomp: torch.Tensor) -> torch.Tensor:
 def _indexer_fp8_proj_enabled() -> bool:
     """Run the indexer projections (w_dq/w_iuq/w_w) in MXFP8 (default off).
 
-    Reuses the attention-proj flag PRIMUS_V4_FP8_ATTN_PROJ; only fires inside
-    turbo-fp8. The linears are duplicated (no TP shard), so fp8 is safe at any TP.
+    Gated by its own knob, deliberately **not** by the attention-projection flag
+    ``PRIMUS_V4_FP8_ATTN_PROJ``. The open-source reference wraps the indexer's
+    weight projection in an fp8-disabled context so it stays high precision even
+    when the enclosing layer runs FP8: the indexer decides *which* compressed KV
+    entries each query reads, so error there changes the selection instead of
+    perturbing a value. Quantizing the attention projections and quantizing the
+    selector are separate decisions, so one no longer implies the other.
+
+    Only fires inside turbo-fp8. The linears are duplicated (no TP shard), so
+    fp8 is safe at any TP.
     """
-    if os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", "0") != "1":
+    if os.environ.get("PRIMUS_V4_FP8_INDEXER_PROJ", "0") != "1":
         return False
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
@@ -198,6 +224,15 @@ class Indexer(nn.Module):
             Defaults to ``index_head_dim`` (the V4 reference doesn't expose
             a separate setting; ``W^{IUQ}_h`` then projects from ``dq_rank``
             to ``index_head_dim``).
+        rope: the surrounding CSA layer's compressed-branch
+            :class:`~primus.backends.megatron.core.transformer.dual_rope.RoPECache`.
+            Queries and compressed indexer keys are rotated with it before
+            scoring, exactly as in the reference. ``None`` disables the
+            rotation entirely and is only meant for isolated unit tests --
+            :meth:`DeepseekV4Attention._build_indexer` always supplies it.
+        rotary_dim: partial-RoPE width (``qk_pos_emb_head_dim``, V4 = 64),
+            applied to the trailing channels of the ``index_head_dim``-wide
+            queries and keys.
     """
 
     def __init__(
@@ -210,6 +245,8 @@ class Indexer(nn.Module):
         compress_ratio: int = 4,
         dq_rank: int = None,
         use_fp8_qk: bool = False,
+        rope: Optional[nn.Module] = None,
+        rotary_dim: int = 0,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -218,6 +255,21 @@ class Indexer(nn.Module):
         self.index_topk = index_topk
         self.compress_ratio = compress_ratio
         self.dq_rank = dq_rank if dq_rank is not None else index_head_dim
+
+        # Held by reference (list-wrapped) so the shared RoPE cache is not
+        # re-registered as a submodule of every CSA layer's indexer.
+        self._rope = [rope] if rope is not None else []
+        self.rotary_dim = int(rotary_dim) if rope is not None else 0
+        if self.rotary_dim > self.index_head_dim:
+            raise ValueError(
+                f"rotary_dim ({self.rotary_dim}) must be <= index_head_dim ({self.index_head_dim})"
+            )
+        if self.rotary_dim and index_head_dim & (index_head_dim - 1) != 0:
+            # The Hadamard rotation spans the whole head, so fail here with the
+            # config name rather than deep inside the transform.
+            raise ValueError(
+                f"index_head_dim must be a power of two for the Hadamard rotation, got {index_head_dim}"
+            )
         # FP8 (E4M3) fake-quant of the QK scoring inputs (V4 low-precision
         # indexer QK path). See ``fake_quantize_fp8_e4m3`` / config flag
         # ``use_v4_fp8_indexer``.
@@ -244,12 +296,30 @@ class Indexer(nn.Module):
         # W^{IUQ}_h: per-head up-projection from dq_rank → index_head_dim.
         self.w_iuq = nn.Linear(self.dq_rank, index_n_heads * index_head_dim, bias=False)
 
+        # Temperature of the index score I_{t,s}. Folded into the per-head
+        # weights ``w_i`` so the head sum lands on the same scale the reference
+        # uses: it applies ``index_n_heads ** -0.5`` when building the per-head
+        # weights and ``index_head_dim ** -0.5`` (the indexer's own softmax
+        # scale) on the way into the loss.
+        #
+        # top-k is invariant under a positive constant, so this only matters
+        # once the scores enter a softmax -- which is exactly what the indexer
+        # distillation loss does. Without it the indexer distribution is
+        # sqrt(index_n_heads * index_head_dim) times too sharp (~90x at the V4
+        # widths) and the KL gradient is unusable.
+        self.score_scale: float = (index_n_heads**-0.5) * (index_head_dim**-0.5)
+
         # Mini-Compressor producing K^{IComp}.
         self.indexer_compressor = Compressor(
             hidden_size=hidden_size,
             head_dim=index_head_dim,
             ratio=compress_ratio,
         )
+
+    @property
+    def rope(self) -> Optional[nn.Module]:
+        """The compressed-branch RoPE cache, or ``None`` when not supplied."""
+        return self._rope[0] if self._rope else None
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         """Bridge checkpoints across the fused/unfused (w_dq, w_w) projection.
@@ -304,11 +374,56 @@ class Indexer(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward(self, hidden: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _rotate_keys(self, k_icomp: torch.Tensor) -> torch.Tensor:
+        """Partial RoPE + Hadamard on the compressed indexer keys.
+
+        ``k_icomp`` is ``[B, P, Hd]``. Compressed entry ``s`` covers the window
+        starting at original token ``s * compress_ratio``, so it is rotated
+        there -- the same coordinate system the queries use, and the same
+        stride sampling the main compressed pool uses.
+        """
+        rope = self.rope
+        if rope is None or self.rotary_dim == 0:
+            return k_icomp
+
+        P = k_icomp.shape[1]
+        cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
+        # ``apply_interleaved_partial_rope`` inserts a singleton head axis into
+        # cos / sin, so give it a ``[B, P, 1, Hd]`` view to broadcast against.
+        rotated = apply_interleaved_partial_rope(
+            k_icomp.unsqueeze(2),
+            cos.unsqueeze(0).expand(k_icomp.shape[0], -1, -1),
+            sin.unsqueeze(0).expand(k_icomp.shape[0], -1, -1),
+            rotary_dim=self.rotary_dim,
+        )
+        return rotate_activation(rotated.squeeze(2))
+
+    def _rotate_queries(self, q_i: torch.Tensor, position_ids: Optional[torch.Tensor]) -> torch.Tensor:
+        """Partial RoPE + Hadamard on the indexer queries (``[B, S, H, Hd]``)."""
+        rope = self.rope
+        if rope is None or self.rotary_dim == 0:
+            return q_i
+
+        B, S = q_i.shape[0], q_i.shape[1]
+        if position_ids is None:
+            position_ids = torch.arange(S, device=q_i.device)
+        cos, sin = rope(position_ids)
+        if tuple(cos.shape[:-1]) != (B, S):
+            cos = cos.expand(B, S, -1)
+            sin = sin.expand(B, S, -1)
+        return rotate_activation(apply_interleaved_partial_rope(q_i, cos, sin, rotary_dim=self.rotary_dim))
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions for each query.
 
         Args:
             hidden: ``[B, S, D]``.
+            position_ids: ``[B, S]`` or ``[S]`` absolute token positions, used
+                to rotate the indexer queries. Defaults to ``arange(S)``.
 
         Returns:
             ``(topk_idxs, topk_scores)`` where:
@@ -325,15 +440,18 @@ class Indexer(nn.Module):
         H = self.index_n_heads
         Hd = self.index_head_dim
 
-        # 1) K^{IComp}: pool hidden via the mini-Compressor → [B, P, Hd]
-        k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
+        # 1) K^{IComp}: pool hidden via the mini-Compressor → [B, P, Hd], then
+        # rotate. The reference builds the indexer keys with a compressor
+        # configured as ``rotate=True`` (unlike the main one), and applies the
+        # compressed-position RoPE inside it.
+        k_icomp = self._rotate_keys(self.indexer_compressor(hidden))  # [B, P, Hd]
         P = k_icomp.shape[1]
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
         # 2) Per-head query and per-head weight.
-        # Indexer projections: FP8 (paper / NVIDIA backend.linear) when enabled,
-        # else the bf16 nn.Linear. No TP gather/scatter (duplicated linears).
-        # FP8 (paper / NVIDIA backend.linear) when enabled, else the bf16 nn.Linear.
+        # High precision by default, matching the reference: only the opt-in
+        # PRIMUS_V4_FP8_INDEXER_PROJ knob routes these through MXFP8. No TP
+        # gather/scatter (duplicated linears).
         proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
         if self._fuse_qw_proj:
             dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + H] in one GEMM
@@ -343,6 +461,15 @@ class Indexer(nn.Module):
             q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
             w_i = proj(self.w_w, hidden)  # [B, S, H]
         q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
+        # Queries are rotated at their own token positions, then Hadamard-rotated
+        # like the keys, so the ReLU'd dot product sees both operands in the same
+        # basis the reference scores in.
+        q_i = self._rotate_queries(q_i, position_ids)
+
+        # Score temperature (see ``self.score_scale``). Applied on ``w_i``
+        # because every scoring branch below multiplies by it before summing
+        # over heads, so all of them inherit the scale from one place.
+        w_i = w_i * self.score_scale
 
         # 3) Score I_{t,s} = Σ_h w_i[t,h] * ReLU(q_i[t,h] · k_icomp[s])
         #    q_i [B,S,H,Hd] · k_icomp[B,P,Hd] → relu[B,S,H,P]; w_i[B,S,H,1] → sum over H
