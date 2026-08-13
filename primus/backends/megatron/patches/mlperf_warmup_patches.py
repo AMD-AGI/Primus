@@ -20,6 +20,7 @@ Self-removal restores the inner chain intact.
 """
 
 import logging
+import os
 
 import torch
 import torch.distributed
@@ -37,6 +38,12 @@ def _log(msg):
 def _warmup_enabled(ctx: PatchContext) -> bool:
     args = get_args(ctx)
     return args is not None and getattr(args, "warmup_train_steps", 0) > 0
+
+
+def _is_resumed_training(args) -> bool:
+    """Return whether Megatron has restored a positive training iteration."""
+    iteration = getattr(args, "iteration", 0)
+    return isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0
 
 
 def _reset_fp8_te_spec(models):
@@ -283,11 +290,26 @@ def patch_mlperf_warmup(ctx: PatchContext):
                 iteration=iteration,
             )
 
-        _lazy_init()
-
         from megatron.training import get_args as megatron_get_args
 
         megatron_args = megatron_get_args()
+        if _is_resumed_training(megatron_args):
+            _warmup_done[0] = True
+            mt.train_step = _wrapped_chain
+            _log("Skipping synthetic warmup for resumed training at " f"iteration={megatron_args.iteration}")
+            return _wrapped_chain(
+                forward_step_func,
+                data_iterator,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                config,
+                forward_backward_func,
+                iteration=iteration,
+            )
+
+        _lazy_init()
+
         models = model if isinstance(model, (list, tuple)) else [model]
         synthetic_iter = _lazy_state["synthetic_iter"]
 
@@ -313,19 +335,40 @@ def patch_mlperf_warmup(ctx: PatchContext):
         saved_lr_num_steps = opt_param_scheduler.num_steps
 
         # ---- 4. Run warmup steps with synthetic data ----
-        for step_idx in range(warmup_steps):
-            _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
-            _wrapped_chain(
-                forward_step_func,
-                synthetic_iter,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                config,
-                forward_backward_func,
-                iteration=iteration,
-            )
+        previous_warmup_marker = os.environ.get("PRIMUS_SYNTHETIC_WARMUP_ACTIVE")
+        os.environ["PRIMUS_SYNTHETIC_WARMUP_ACTIVE"] = "1"
+        try:
+            for step_idx in range(warmup_steps):
+                _log(f"Warmup step {step_idx + 1}/{warmup_steps}")
+                _wrapped_chain(
+                    forward_step_func,
+                    synthetic_iter,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    config,
+                    forward_backward_func,
+                    iteration=iteration,
+                )
+        finally:
+            if previous_warmup_marker is None:
+                os.environ.pop("PRIMUS_SYNTHETIC_WARMUP_ACTIVE", None)
+            else:
+                os.environ["PRIMUS_SYNTHETIC_WARMUP_ACTIVE"] = previous_warmup_marker
         _log(f"Completed {warmup_steps} warmup steps")
+
+        reset_forward_counter = getattr(
+            forward_step_func,
+            "_primus_reset_forward_step_count",
+            None,
+        )
+        if callable(reset_forward_counter):
+            reset_forward_counter(megatron_args.iteration)
+            _log("Reset diffusion forward-step RNG counter after warmup")
+        elif os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") == "1":
+            raise RuntimeError(
+                "Batch continuity audit requires a forward-step counter reset " "after synthetic warmup"
+            )
 
         # ---- 5. Restore optimizer ----
         _restore_optimizer(optimizer, saved_opt)

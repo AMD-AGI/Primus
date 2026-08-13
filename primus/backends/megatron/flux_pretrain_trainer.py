@@ -13,7 +13,10 @@ This trainer implements Flux-specific training logic including:
     - Custom forward step function
 """
 
+import json
+import logging
 import os
+from collections import Counter
 
 import numpy as np
 import torch
@@ -27,6 +30,42 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
     create_timestep_sampler,
 )
 from primus.core.utils.module_utils import log_rank_0
+
+logger = logging.getLogger(__name__)
+
+PRECISION_LINEAR_CLASSES = (
+    "MXFP4ColumnParallelLinear",
+    "MXFP4RowParallelLinear",
+    "Float8ColumnParallelLinear",
+    "Float8RowParallelLinear",
+)
+
+
+def _precision_linear_class_census(model) -> dict[str, int]:
+    observed = Counter(type(module).__name__ for module in model.modules())
+    return {name: observed.get(name, 0) for name in PRECISION_LINEAR_CLASSES}
+
+
+def _emit_precision_linear_class_census(model) -> None:
+    """Emit the actually instantiated precision-linear classes on every rank."""
+    if os.getenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS") != "1":
+        return
+
+    from megatron.core import parallel_state
+
+    counts = _precision_linear_class_census(model)
+    global_rank = (
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
+    )
+    payload = {
+        "global_rank": global_rank,
+        "data_parallel_rank": parallel_state.get_data_parallel_rank(),
+        "classes": counts,
+    }
+    # Emit through logging, not print: fd 1 does not survive to the run log on
+    # this launch path, so a bare print leaves the audit reporting zero markers
+    # on a healthy run. Logging and fd 2 both survive.
+    logger.info("PRIMUS_LINEAR_CLASS_CENSUS=%s", json.dumps(payload, sort_keys=True))
 
 
 def _restore_chimera_rng_state(args) -> None:
@@ -367,6 +406,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
 
             # Create Flux model (backend=None lets model select based on config.transformer_impl)
             model = Flux(config=config, backend=backend)
+            _emit_precision_linear_class_census(model)
 
             if self.nemo_chimera_init:
                 _restore_chimera_rng_state(args)

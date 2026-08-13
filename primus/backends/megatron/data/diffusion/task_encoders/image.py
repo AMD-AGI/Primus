@@ -12,8 +12,11 @@ Encoding happens in the model, not in the TaskEncoder (following best practices)
 Position IDs are generated in the model code, not here.
 """
 
+import hashlib
 import io
+import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,6 +34,17 @@ from megatron.energon import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sample_key_fingerprint(samples: List["DiffusionSample"]) -> str:
+    keys = []
+    for sample in samples:
+        key = getattr(sample, "__key__", None)
+        if key is None:
+            raise RuntimeError("Cannot audit data continuity: sample has no __key__")
+        keys.append(str(key))
+    payload = json.dumps(keys, ensure_ascii=False, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 # ============================================================================
@@ -304,7 +318,7 @@ class EncodedDiffusionTaskEncoder(DefaultTaskEncoder[DiffusionSample, DiffusionS
         self.worker_config = worker_config
         logger.info("Initialized EncodedDiffusionTaskEncoder (preencoded / preencoded_numpy modes)")
 
-    def batch(self, samples: List[DiffusionSample]) -> Dict[str, torch.Tensor]:
+    def batch(self, samples: List[DiffusionSample]) -> Dict[str, Any]:
         """
         Batch pre-encoded samples.
 
@@ -330,6 +344,10 @@ class EncodedDiffusionTaskEncoder(DefaultTaskEncoder[DiffusionSample, DiffusionS
 
         if samples[0].timestep is not None:
             batch["timestep"] = torch.stack([s.timestep for s in samples])
+
+        if os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") == "1":
+            batch["_audit_sample_key_sha256"] = _sample_key_fingerprint(samples)
+            batch["_audit_sample_count"] = len(samples)
 
         return batch
 

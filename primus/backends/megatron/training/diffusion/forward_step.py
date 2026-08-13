@@ -17,7 +17,9 @@ Supported data formats (framework-standard keys):
 Architecture follows functional composition for clarity and testability.
 """
 
+import json
 import logging
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -36,6 +38,47 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool = True) -> None:
+    """Emit a rank-local sample-key digest for explicit continuity audits."""
+    if os.getenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS") != "1":
+        return
+    if not is_training:
+        return
+    if os.getenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE") == "1":
+        return
+
+    fingerprint = batch.get("_audit_sample_key_sha256")
+    sample_count = batch.get("_audit_sample_count")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+        or not isinstance(sample_count, int)
+        or sample_count <= 0
+    ):
+        raise RuntimeError(
+            "Batch-fingerprint audit was requested but the Energon batch has no "
+            "valid sample-key fingerprint"
+        )
+
+    from megatron.core import parallel_state
+
+    global_rank = (
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
+    )
+    payload = {
+        "global_rank": global_rank,
+        "data_parallel_rank": parallel_state.get_data_parallel_rank(),
+        "step": int(step_count),
+        "sample_count": sample_count,
+        "sample_keys_sha256": fingerprint,
+    }
+    # Emit through logging, not print: fd 1 does not survive to the run log on
+    # this launch path, so a bare print leaves the audit reporting zero markers
+    # on a healthy run. Logging and fd 2 both survive.
+    logger.info("PRIMUS_BATCH_FINGERPRINT=%s", json.dumps(payload, sort_keys=True))
 
 
 def prepare_flux_latents(
@@ -455,6 +498,13 @@ def flux_forward_step_func(
         batch["timestep"] = val_idx
         val_timesteps = val_idx.to(dtype=compute_dtype) / 8.0
         batch["timesteps"] = val_timesteps
+
+    if batch is not None:
+        _emit_batch_fingerprint(
+            batch,
+            step_count,
+            is_training=not is_validation,
+        )
 
     # Matches NeMo's forward_step which wraps prepare_image_latent_like_reference
     # in torch.no_grad() — no gradients needed for position IDs, noise sampling,

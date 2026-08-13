@@ -30,7 +30,10 @@ from megatron.energon import (
     get_val_datasets,
 )
 
-from primus.backends.megatron.data.dataloader import MegatronDataloaderWrapper
+from primus.backends.megatron.data.dataloader import (
+    MegatronDataloaderWrapper,
+    restore_dataloader_state_from_checkpoint,
+)
 from primus.backends.megatron.data.dataset_provider import DatasetProvider
 from primus.core.utils.module_utils import log_rank_0
 
@@ -118,7 +121,12 @@ class EnergonDatasetProvider(DatasetProvider):
         train_dataloader = get_savable_loader(
             train_dataset, worker_config=worker_config, prefetch_factor=prefetch_factor
         )
-        train_dataloader = MegatronDataloaderWrapper(train_dataloader)
+        train_dataloader = MegatronDataloaderWrapper(
+            train_dataloader,
+            data_parallel_rank=parallel_state.get_data_parallel_rank(),
+            data_parallel_world_size=parallel_state.get_data_parallel_world_size(),
+        )
+        self._restore_train_dataloader_state(args, train_dataloader)
         log_rank_0("Created training dataloader")
 
         # Create validation dataloaders if evaluation is enabled
@@ -173,6 +181,71 @@ class EnergonDatasetProvider(DatasetProvider):
         test_dataloader = None
 
         return train_dataloader, valid_dataloaders, test_dataloader
+
+    def _restore_train_dataloader_state(
+        self, args: Any, train_dataloader: MegatronDataloaderWrapper
+    ) -> Optional[str]:
+        """Restore Energon position when resuming from a model checkpoint.
+
+        Megatron saves Energon state separately from the model checkpoint when
+        ``dataloader_save`` is configured. ``require_dataloader_restore`` makes
+        successful rank-local restoration mandatory; this is intended for exact
+        training continuation rather than finetuning or optional weight loads.
+        """
+        require_restore = getattr(args, "require_dataloader_restore", False)
+        if not isinstance(require_restore, bool):
+            raise TypeError("require_dataloader_restore must be a boolean, " f"got {require_restore!r}")
+
+        load_path = getattr(args, "load", None)
+        finetune = bool(getattr(args, "finetune", False))
+        iteration = getattr(args, "iteration", 0)
+        resumed = (
+            bool(load_path)
+            and not finetune
+            and isinstance(iteration, int)
+            and not isinstance(iteration, bool)
+            and iteration > 0
+        )
+
+        if not resumed:
+            if require_restore:
+                raise RuntimeError(
+                    "Exact Energon continuation requires a successfully loaded "
+                    "non-finetune checkpoint with iteration > 0; "
+                    f"got load={load_path!r}, finetune={finetune!r}, "
+                    f"iteration={iteration!r}"
+                )
+            if load_path and not finetune:
+                log_rank_0(
+                    "WARNING: Checkpoint load did not resume a positive iteration; "
+                    "the Energon dataloader position will not be restored"
+                )
+            return None
+
+        if not require_restore:
+            log_rank_0(
+                "WARNING: Resuming without require_dataloader_restore=True; "
+                "the Energon dataloader position will not be restored"
+            )
+            return None
+
+        dataloader_save = getattr(args, "dataloader_save", None)
+        if not dataloader_save:
+            message = (
+                "Resuming an Energon run without dataloader_save; "
+                "the dataloader position cannot be restored"
+            )
+            raise RuntimeError(message)
+
+        data_parallel_rank = parallel_state.get_data_parallel_rank()
+        checkpoint_path = restore_dataloader_state_from_checkpoint(
+            train_dataloader,
+            str(dataloader_save),
+            iteration,
+            data_parallel_rank,
+        )
+        log_rank_0(f"Restored Energon dataloader state from: {checkpoint_path}")
+        return str(checkpoint_path)
 
     @property
     def is_distributed(self) -> bool:
