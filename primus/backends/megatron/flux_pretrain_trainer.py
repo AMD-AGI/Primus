@@ -46,6 +46,21 @@ def _precision_linear_class_census(model) -> dict[str, int]:
     return {name: observed.get(name, 0) for name in PRECISION_LINEAR_CLASSES}
 
 
+def _mxfp4_gemm_mode_census(model) -> dict[str, int]:
+    """Count the effective forward/backward modes of instantiated MXFP4 linears."""
+    observed = Counter()
+    for module in model.modules():
+        if type(module).__name__ not in {
+            "MXFP4ColumnParallelLinear",
+            "MXFP4RowParallelLinear",
+        }:
+            continue
+        forward_precision = getattr(module, "_forward_precision", "mxfp4")
+        backward_precision = "fp8" if getattr(module, "_backward_is_fp8", False) else "mxfp4"
+        observed[f"{forward_precision}_forward_{backward_precision}_backward"] += 1
+    return dict(sorted(observed.items()))
+
+
 def _emit_precision_linear_class_census(model) -> None:
     """Emit the actually instantiated precision-linear classes on every rank."""
     if os.getenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS") != "1":
@@ -66,6 +81,19 @@ def _emit_precision_linear_class_census(model) -> None:
     # this launch path, so a bare print leaves the audit reporting zero markers
     # on a healthy run. Logging and fd 2 both survive.
     logger.info("PRIMUS_LINEAR_CLASS_CENSUS=%s", json.dumps(payload, sort_keys=True))
+    modes = _mxfp4_gemm_mode_census(model)
+    if modes:
+        logger.info(
+            "PRIMUS_MXFP4_GEMM_MODE_CENSUS=%s",
+            json.dumps(
+                {
+                    "global_rank": global_rank,
+                    "data_parallel_rank": parallel_state.get_data_parallel_rank(),
+                    "modes": modes,
+                },
+                sort_keys=True,
+            ),
+        )
 
 
 def _restore_chimera_rng_state(args) -> None:
@@ -544,6 +572,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             {
                 "fp4": fp4_enabled,
                 "fp4_recipe": fp4_recipe,
+                "mxfp4_forward_precision": getattr(params, "mxfp4_forward_precision", "mxfp4"),
                 "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
             }
         )
@@ -741,6 +770,7 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp8_force_nt_layout",
                 "fp4",
                 "fp4_recipe",
+                "mxfp4_forward_precision",
                 "mxfp4_backward_precision",
                 "mxfp4_gradient_stochastic_rounding",
                 "sensitive_layers_enabled",

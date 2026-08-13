@@ -10,6 +10,7 @@ from primus.backends.megatron.data.diffusion.task_encoders.image import (
 from primus.backends.megatron.flux_pretrain_trainer import (
     FluxPretrainTrainer,
     _emit_precision_linear_class_census,
+    _mxfp4_gemm_mode_census,
     _precision_linear_class_census,
 )
 from primus.backends.megatron.patches.mlperf_warmup_patches import _is_resumed_training
@@ -47,6 +48,21 @@ def test_precision_linear_class_census_reports_exact_classes():
         "MXFP4RowParallelLinear": 1,
         "Float8ColumnParallelLinear": 1,
         "Float8RowParallelLinear": 0,
+    }
+
+
+def test_mxfp4_gemm_mode_census_reports_forward_backward_split():
+    mxfp4_column = type("MXFP4ColumnParallelLinear", (nn.Module,), {})()
+    mxfp4_column._forward_precision = "fp8"
+    mxfp4_column._backward_is_fp8 = False
+    mxfp4_row = type("MXFP4RowParallelLinear", (nn.Module,), {})()
+    mxfp4_row._forward_precision = "bf16"
+    mxfp4_row._backward_is_fp8 = False
+    model = nn.ModuleList([mxfp4_column, mxfp4_row, nn.Linear(2, 2)])
+
+    assert _mxfp4_gemm_mode_census(model) == {
+        "bf16_forward_mxfp4_backward": 1,
+        "fp8_forward_mxfp4_backward": 1,
     }
 
 

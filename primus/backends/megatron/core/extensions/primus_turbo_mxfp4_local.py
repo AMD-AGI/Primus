@@ -12,7 +12,8 @@ and call check_mxfp4_support() global state.
 Key properties:
 - Uses setup_context pattern with primitive-only args so torch.compile
   can trace through without graph breaks.
-- Two backward modes: pure MXFP4 or hybrid (FP4 fwd / FP8 bwd).
+- Independently selects MXFP4, FP8, or BF16 forward precision and
+  MXFP4 or FP8 backward precision.
 - gemm_fp4_impl and gemm_fp8_impl are torch.library.custom_op with register_fake.
 - Zero TransformerEngine dependencies.
 - Requires tensor_model_parallel_size=1, no GAF, no sequence_parallel.
@@ -229,6 +230,14 @@ _quantize_mxfp4_dual_op.register_autograd(
 _FP4_DTYPE = torch.float4_e2m1fn_x2
 _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 _DEFAULT_BACKEND = BackendType.HIPBLASLT.value
+_FORWARD_PRECISION_MXFP4 = 0
+_FORWARD_PRECISION_FP8 = 1
+_FORWARD_PRECISION_BF16 = 2
+_FORWARD_PRECISION_VALUES = {
+    "mxfp4": _FORWARD_PRECISION_MXFP4,
+    "fp8": _FORWARD_PRECISION_FP8,
+    "bf16": _FORWARD_PRECISION_BF16,
+}
 
 
 def _quantize_input_dual(input_2d, preshuffle):
@@ -291,9 +300,13 @@ def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
 class MXFP4LinearFunction(torch.autograd.Function):
     """MXFP4 linear (Y = X @ W^T) with MX block-of-32 scaling.
 
-    Two modes via backward_is_fp8 bool primitive:
-    - Pure MXFP4: forward + backward both use FP4 quantization + gemm_fp4_impl
-    - Hybrid: forward uses FP4, backward re-quantizes saved BF16 to FP8 tensorwise
+    Forward and backward precision are independent:
+    - Forward: MXFP4, dynamic tensorwise FP8 E4M3, or BF16.
+    - Backward: MXFP4 or dynamic tensorwise FP8 E5M2.
+
+    MXFP4 backward always uses the transposed MXFP4 tensors prepared during
+    forward. This keeps its memory and compute path identical when only the
+    forward GEMM moves to higher precision.
 
     Uses setup_context pattern with primitive-only args for torch.compile.
     """
@@ -308,6 +321,10 @@ class MXFP4LinearFunction(torch.autograd.Function):
         fp8_gran_value,
         fp8_backend_value,
         use_gradient_sr,
+        forward_precision_value=_FORWARD_PRECISION_MXFP4,
+        fp8_fwd_dtype=None,
+        fp8_fwd_gran_value=0,
+        fp8_fwd_backend_value=0,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
@@ -316,19 +333,39 @@ class MXFP4LinearFunction(torch.autograd.Function):
         a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle)
         b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(weight, preshuffle)
 
-        output = gemm_fp4_impl(
-            a_fp4,
-            a_scale,
-            False,
-            b_fp4,
-            b_scale,
-            True,
-            out_dtype,
-            False,
-            granularity=_GRAN_VALUE,
-            default_backend=_DEFAULT_BACKEND,
-            preshuffled=preshuffle,
-        )
+        if forward_precision_value == _FORWARD_PRECISION_MXFP4:
+            output = gemm_fp4_impl(
+                a_fp4,
+                a_scale,
+                False,
+                b_fp4,
+                b_scale,
+                True,
+                out_dtype,
+                False,
+                granularity=_GRAN_VALUE,
+                default_backend=_DEFAULT_BACKEND,
+                preshuffled=preshuffle,
+            )
+        elif forward_precision_value == _FORWARD_PRECISION_FP8:
+            a_fp8, a_scale_inv = _quantize_fp8_tw(input_2d, fp8_fwd_dtype)
+            b_fp8, b_scale_inv = _quantize_fp8_tw(weight, fp8_fwd_dtype)
+            output = gemm_fp8_impl(
+                a_fp8,
+                a_scale_inv,
+                False,
+                b_fp8,
+                b_scale_inv,
+                True,
+                out_dtype,
+                False,
+                granularity=fp8_fwd_gran_value,
+                default_backend=fp8_fwd_backend_value,
+            )
+        elif forward_precision_value == _FORWARD_PRECISION_BF16:
+            output = torch.nn.functional.linear(input_2d, weight)
+        else:
+            raise ValueError(f"Unsupported MXFP4 forward precision value: {forward_precision_value}")
         output = output.reshape(*orig_shape[:-1], output.shape[-1])
 
         if backward_is_fp8:
@@ -348,6 +385,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
+        ctx.num_inputs = len(inputs)
         (
             _,
             _,
@@ -357,7 +395,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             fp8_gran_value,
             fp8_backend_value,
             use_gradient_sr,
-        ) = inputs
+        ) = inputs[:8]
 
         ctx.preshuffle = preshuffle
         ctx.backward_is_fp8 = backward_is_fp8
@@ -458,7 +496,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 preshuffled=preshuffle,
             )
 
-        return grad_input, grad_weight, None, None, None, None, None, None
+        return (grad_input, grad_weight) + (None,) * (ctx.num_inputs - 2)
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +530,26 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
 
         self._preshuffle = _enable_preshuffle()
         _assert_preshuffle_contract(self.config, self._preshuffle)
+        self._forward_precision = getattr(self.config, "mxfp4_forward_precision", "mxfp4")
+        if self._forward_precision not in _FORWARD_PRECISION_VALUES:
+            raise ValueError(
+                "mxfp4_forward_precision must be one of "
+                f"{tuple(_FORWARD_PRECISION_VALUES)}, got {self._forward_precision!r}"
+            )
+        self._forward_precision_value = _FORWARD_PRECISION_VALUES[self._forward_precision]
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+
+        if self._forward_precision == "fp8":
+            from primus_turbo.pytorch.core.low_precision import float8_e4m3
+
+            self._fp8_fwd_dtype = float8_e4m3
+            self._fp8_fwd_gran_value = ScalingGranularity.TENSORWISE.value
+            self._fp8_fwd_backend_value = BackendType.HIPBLASLT.value
+        else:
+            self._fp8_fwd_dtype = None
+            self._fp8_fwd_gran_value = 0
+            self._fp8_fwd_backend_value = 0
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -518,6 +574,10 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._forward_precision_value,
+            self._fp8_fwd_dtype,
+            self._fp8_fwd_gran_value,
+            self._fp8_fwd_backend_value,
         )
         output = result[0]
 
@@ -552,8 +612,26 @@ class MXFP4RowParallelLinear(RowParallelLinear):
 
         self._preshuffle = _enable_preshuffle()
         _assert_preshuffle_contract(self.config, self._preshuffle)
+        self._forward_precision = getattr(self.config, "mxfp4_forward_precision", "mxfp4")
+        if self._forward_precision not in _FORWARD_PRECISION_VALUES:
+            raise ValueError(
+                "mxfp4_forward_precision must be one of "
+                f"{tuple(_FORWARD_PRECISION_VALUES)}, got {self._forward_precision!r}"
+            )
+        self._forward_precision_value = _FORWARD_PRECISION_VALUES[self._forward_precision]
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+
+        if self._forward_precision == "fp8":
+            from primus_turbo.pytorch.core.low_precision import float8_e4m3
+
+            self._fp8_fwd_dtype = float8_e4m3
+            self._fp8_fwd_gran_value = ScalingGranularity.TENSORWISE.value
+            self._fp8_fwd_backend_value = BackendType.HIPBLASLT.value
+        else:
+            self._fp8_fwd_dtype = None
+            self._fp8_fwd_gran_value = 0
+            self._fp8_fwd_backend_value = 0
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -578,6 +656,10 @@ class MXFP4RowParallelLinear(RowParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._forward_precision_value,
+            self._fp8_fwd_dtype,
+            self._fp8_fwd_gran_value,
+            self._fp8_fwd_backend_value,
         )
         output = result[0]
 

@@ -141,6 +141,7 @@ modules:
 
       fp4: "mxfp4"
       fp4_recipe: "mxfp4"
+      mxfp4_forward_precision: "mxfp4"  # "mxfp4", "fp8", or "bf16"
       mxfp4_backward_precision: "mxfp4"  # "mxfp4" (pure) or "fp8" (hybrid)
 
       empty_unused_memory_level: 0
