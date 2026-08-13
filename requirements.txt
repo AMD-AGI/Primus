@@ -11,7 +11,7 @@ torchao
 blobfile
 torchdata>=0.8.0
 datasets>=3.6.0
-mlflow==3.11.1
+mlflow==3.13.0rc0
 pyrsmi
 plotext
 pulp
