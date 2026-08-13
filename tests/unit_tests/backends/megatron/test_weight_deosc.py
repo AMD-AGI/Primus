@@ -209,9 +209,7 @@ def test_eligibility_collects_dense_and_grouped_fp4_weights():
         quantized_weight_buffer=None,
         _parameters={"weight": torch.zeros(4, 4)},
     )
-    opt = types.SimpleNamespace(
-        model_chunks=[_FakeMultiChunk(dense_module, grouped_module, non_fp4_module)]
-    )
+    opt = types.SimpleNamespace(model_chunks=[_FakeMultiChunk(dense_module, grouped_module, non_fp4_module)])
 
     runner = WeightDeOscRunner(WeightDeOscConfig(enable=True))
     eligible_ids = runner._build_eligible_ids(opt)

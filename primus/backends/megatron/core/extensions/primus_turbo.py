@@ -1044,9 +1044,7 @@ class PrimusTurboLinear(TELinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(
-                            0, device=weight.device, dtype=torch.uint8
-                        )
+                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1240,9 +1238,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(
-                            0, device=weight.device, dtype=torch.uint8
-                        )
+                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1429,9 +1425,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(
-                            0, device=weight.device, dtype=torch.uint8
-                        )
+                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         x,
                         weight,
@@ -1631,9 +1625,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
                 if get_num_microbatches() == 1:
                     if is_first_microbatch:
-                        self.quantized_weight_buffer = torch.empty(
-                            0, device=weight.device, dtype=torch.uint8
-                        )
+                        self.quantized_weight_buffer = torch.empty(0, device=weight.device, dtype=torch.uint8)
                     out = primus_turbo_torch.ops.gemm_fp4(
                         inp,
                         weight,
@@ -2013,9 +2005,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 # no persistent cache. Expose a lightweight runtime marker so
                 # weight de-oscillation can identify the grouped FP4 weight.
                 if is_first_microbatch:
-                    self.quantized_weight_buffer = torch.empty(
-                        0, device=weights.device, dtype=torch.uint8
-                    )
+                    self.quantized_weight_buffer = torch.empty(0, device=weights.device, dtype=torch.uint8)
                 out = primus_turbo_torch.ops.grouped_gemm_fp4(
                     x,
                     weights,
