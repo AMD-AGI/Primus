@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
@@ -81,7 +82,192 @@ class OptimizerProfiler(BaseModuleProfiler):
         hbm_bw_gbps = self._get_hbm_bandwidth_gbps()
         hbm_bw_bytes_per_ms = hbm_bw_gbps * 1e9 / 1e3  # bytes/ms
 
-        return total_bytes / hbm_bw_bytes_per_ms
+        # Effective HBM utilisation of the optimizer step.  The step is NOT a
+        # single streaming pass at peak: it is many small per-parameter-group
+        # elementwise kernels (fp32 master/m/v scattered across buckets), which
+        # sustain only a fraction of peak.  Anchored to the DeepSeek-V4 Pro
+        # MI355X trace (measured Adam step 93.8 ms vs a 100%-peak 19.9 ms
+        # estimate -> ~0.21).  Env-tunable.
+        opt_hbm_eff = float(os.getenv("PRIMUS_OPT_HBM_EFF", "0.21"))
+        step_ms = total_bytes / (hbm_bw_bytes_per_ms * opt_hbm_eff)
+
+        # Muon adds Newton-Schulz orthogonalization (extra bf16 matmuls on every
+        # 2D weight matrix) on top of the memory-bound state update.  This is
+        # pure GEMM compute and is modelled from first principles below: the NS
+        # iteration count and per-matrix matmul shapes are fully determined by
+        # the model geometry and the algorithm, so each matmul is priced with
+        # the GEMM backend (no fitted constant).  On the DeepSeek-V4 Pro trace
+        # this is the single largest per-iteration cost (the fused expert
+        # ``gate_up`` weight ``[2*moe_ffn, hidden]`` dominates), which is why the
+        # old ``PRIMUS_OPT_MUON_NS_MS`` default of 0 grossly under-predicted the
+        # Muon step.  Env override retained only as an escape hatch.
+        if str(getattr(self.config.model_config, "optimizer", "") or "").lower() == "muon":
+            override = os.getenv("PRIMUS_OPT_MUON_NS_MS")
+            if override is not None:
+                step_ms += float(override)
+            else:
+                ns_ms = self._muon_newton_schulz_ms()
+                # Distributed Muon (dist_muon = muon + use_distributed_optimizer):
+                # the momentum is sharded across the data-parallel group and each
+                # rank orthogonalizes only its shard, so the Newton-Schulz compute
+                # scales down by the group over which the (expert-dominated) weights
+                # are replicated.  Expert matrices are replicated across
+                # EDP = DP / EP, which dominates; use it as the sharding factor.
+                if use_distributed_optimizer or use_fsdp:
+                    ep = getattr(mp_config, "expert_model_parallel_size", 1) or 1
+                    edp = max(1, dp_size // max(1, ep))
+                    ns_ms /= edp
+                step_ms += ns_ms
+
+        return step_ms
+
+    # ------------------------------------------------------------------
+    # Muon Newton-Schulz orthogonalization compute (first-principles)
+    # ------------------------------------------------------------------
+
+    def _muon_num_ns_steps(self) -> int:
+        """Number of Newton-Schulz iterations per orthogonalization.
+
+        Read from the config when plumbed; otherwise use the algorithm default
+        (DeepSeek-V4's quintic schedule uses 10 iterations, the generic Muon
+        default is 5).  This is an algorithm hyper-parameter, not a fitted
+        calibration constant.
+        """
+        env = os.getenv("PRIMUS_OPT_MUON_NS_STEPS")
+        if env is not None:
+            return int(env)
+        cfg = self.config.model_config
+        steps = getattr(cfg, "muon_num_ns_steps", 0) or 0
+        if steps:
+            return int(steps)
+        is_v4 = getattr(cfg, "compress_ratios", None) is not None
+        return 10 if is_v4 else 5
+
+    def _muon_weight_shapes(self):
+        """Yield ``(rows, cols, count)`` for every 2D weight Muon orthogonalizes.
+
+        Muon orthogonalizes the 2D linear weight matrices (attention Q/KV/O
+        projections, dense-MLP and MoE-expert gate/up/down); 1D params, norms,
+        embeddings and the output layer are handled by Adam and excluded here.
+        Shapes follow the model geometry (sharding is ignored: with Muon the
+        distributed optimizer is not used, so each rank orthogonalizes the full
+        matrices it owns; on a single-GPU proxy that is all of them).
+        """
+        m = self.config.model_config
+        mp = self.config.model_parallel_config
+
+        hidden = m.hidden_size
+        ffn = m.ffn_hidden_size or (hidden * 4)
+        moe_ffn = m.moe_ffn_hidden_size or ffn
+        heads = m.num_attention_heads
+        hd = m.kv_channels or (hidden // max(heads, 1))
+        n_d = heads * hd
+        q_lora = getattr(m, "q_lora_rank", 0) or 0
+        kv_lora = getattr(m, "kv_lora_rank", 0) or 0
+        o_lora = getattr(m, "o_lora_rank", 0) or 0
+        o_groups = max(1, getattr(m, "o_groups", 1) or 1)
+        swiglu = bool(getattr(m, "swiglu", False))
+        gate_up_mult = 2 if swiglu else 1
+
+        num_layers = m.num_layers
+        moe_pattern = m.moe_pattern or [0] * num_layers
+        num_moe_layers = sum(1 for p in moe_pattern if p == 1)
+        num_dense_layers = num_layers - num_moe_layers
+
+        # --- Pipeline sharding (L1 fix) ---
+        # Muon's Newton-Schulz step runs independently on every PP rank over only
+        # the weights that rank owns; the per-iteration optimizer wall-clock is
+        # therefore the slowest (max-loaded) stage.  Previously these counts used
+        # the FULL model layer count, so the Muon step did not shrink with PP and
+        # dominated the projected iteration time.  Use the critical-
+        # stage layer count ceil(num_layers / pp): for balanced / near-balanced
+        # layouts (e.g. DSv4-Pro 61 layers over PP8=7,7,8,8,8,8,8,7 or
+        # PP16=3,3,4..4,3) this equals the max stage's layer count, and it stays
+        # consistent with _count_params_per_gpu's per-rank (// pp) sharding.
+        pp = getattr(mp, "pipeline_model_parallel_size", 1) or 1
+        if pp > 1 and num_layers > 0:
+            layers_per_rank = (num_layers + pp - 1) // pp  # ceil = critical stage
+            moe_frac = num_moe_layers / num_layers
+            num_moe_layers = moe_frac * layers_per_rank
+            num_dense_layers = layers_per_rank - num_moe_layers
+            num_layers = layers_per_rank  # attention projections are per-layer
+
+        ep = getattr(mp, "expert_model_parallel_size", 1) or 1
+        num_experts = m.num_experts or 0
+        experts_per_gpu = (num_experts // max(ep, 1)) if num_experts else 0
+
+        shapes = []  # (rows, cols, count)
+
+        # ---- Attention projections (per layer) ----
+        # V4 uses LoRA-factored Q/KV and a grouped LoRA O projection; fall back
+        # to dense projections when the LoRA ranks are not configured.
+        if q_lora > 0:
+            shapes.append((q_lora, hidden, num_layers))  # Q down
+            shapes.append((n_d, q_lora, num_layers))  # Q up
+        else:
+            shapes.append((n_d, hidden, num_layers))  # Q
+        if kv_lora > 0:
+            shapes.append((kv_lora, hidden, num_layers))  # KV down
+            shapes.append((n_d, kv_lora, num_layers))  # KV up
+        else:
+            shapes.append((n_d, hidden, num_layers))  # KV
+        if o_lora > 0:
+            shapes.append((o_groups * o_lora, n_d, num_layers))  # O down
+            shapes.append((hidden, o_groups * o_lora, num_layers))  # O up
+        else:
+            shapes.append((hidden, n_d, num_layers))  # O
+
+        # ---- Dense-MLP layers ----
+        if num_dense_layers > 0:
+            shapes.append((gate_up_mult * ffn, hidden, num_dense_layers))  # gate/up
+            shapes.append((hidden, ffn, num_dense_layers))  # down
+
+        # ---- MoE expert layers (routed experts + shared expert) ----
+        if num_moe_layers > 0 and experts_per_gpu > 0:
+            shapes.append((gate_up_mult * moe_ffn, hidden, num_moe_layers * experts_per_gpu))
+            shapes.append((hidden, moe_ffn, num_moe_layers * experts_per_gpu))
+        shared_sz = getattr(m, "moe_shared_expert_intermediate_size", 0) or 0
+        if num_moe_layers > 0 and shared_sz:
+            shapes.append((gate_up_mult * shared_sz, hidden, num_moe_layers))
+            shapes.append((hidden, shared_sz, num_moe_layers))
+
+        return shapes
+
+    def _muon_newton_schulz_ms(self) -> float:
+        """First-principles Muon Newton-Schulz compute time (ms) for one step.
+
+        Each 2D weight ``W`` (reduced to ``[m, n]`` with ``m = min(dim)``,
+        ``n = max(dim)``) is orthogonalized with ``num_ns_steps`` quintic
+        Newton-Schulz iterations.  Each iteration is three bf16 matmuls::
+
+            A = X @ Xᵀ      -> (m, m, k=n)
+            AA = A @ A       -> (m, m, k=m)
+            X  = ... + B @ X -> (m, n, k=m)
+
+        priced individually with the GEMM backend, so the per-matmul efficiency
+        (tile/wave quantization, small-K overheads) comes from the same model
+        used everywhere else — no calibration constant.
+        """
+        if self._gemm_backend is None:
+            return 0.0
+        steps = self._muon_num_ns_steps()
+        if steps <= 0:
+            return 0.0
+
+        total_ms = 0.0
+        for rows, cols, count in self._muon_weight_shapes():
+            if rows <= 0 or cols <= 0 or count <= 0:
+                continue
+            mm = min(rows, cols)
+            nn = max(rows, cols)
+            try:
+                t_xxt = self._gemm_backend.simulate_gemm(mm, mm, nn, "bf16").forward_time_ms
+                t_aa = self._gemm_backend.simulate_gemm(mm, mm, mm, "bf16").forward_time_ms
+                t_bx = self._gemm_backend.simulate_gemm(mm, nn, mm, "bf16").forward_time_ms
+            except Exception:
+                continue
+            total_ms += count * steps * (t_xxt + t_aa + t_bx)
+        return total_ms
 
     # ------------------------------------------------------------------
     # Internal helpers

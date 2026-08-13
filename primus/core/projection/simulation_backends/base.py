@@ -18,7 +18,7 @@ An SDPA simulation backend is provided in ``sdpa_simulator.py``.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 @dataclass
@@ -313,3 +313,44 @@ class SDPASimulationBackend(ABC):
             SimulationResult with forward_time_ms and backward_time_ms.
         """
         ...
+
+
+# =========================================================================
+# GEMM backend registry
+# =========================================================================
+# Backends register themselves here at import time so that neither the factory
+# nor the CLI has to hardcode any backend name.  The open-source tree ships only
+# ``origami`` (registered by ``origami_backend``).  Additional backends can be
+# added purely by being importable/installed — via the ``primus.gemm_backends``
+# entry-point group or the ``PRIMUS_GEMM_BACKEND_PLUGINS`` env var — with no
+# edits to any file in this package.
+#
+# A registered factory is any callable with the signature
+# ``(gpu_arch=None, gpu_clock_mhz=None, n_cu_override=None, **kwargs)`` that
+# returns a :class:`GEMMSimulationBackend`.
+GEMMBackendFactory = Callable[..., "GEMMSimulationBackend"]
+
+_GEMM_BACKEND_REGISTRY: Dict[str, GEMMBackendFactory] = {}
+
+
+def register_gemm_backend(name: str, factory: GEMMBackendFactory) -> None:
+    """Register a GEMM simulation backend factory under *name* (case-insensitive).
+
+    Safe to call multiple times; the last registration for a name wins.  Called
+    at module-import time by each backend module (see ``origami_backend``).
+    """
+    if not name or not isinstance(name, str):
+        raise ValueError(f"GEMM backend name must be a non-empty string, got {name!r}")
+    _GEMM_BACKEND_REGISTRY[name.lower().strip()] = factory
+
+
+def get_gemm_backend_factory(name: str) -> Optional[GEMMBackendFactory]:
+    """Return the registered factory for *name*, or ``None`` if not registered."""
+    if not name:
+        return None
+    return _GEMM_BACKEND_REGISTRY.get(name.lower().strip())
+
+
+def available_gemm_backends() -> Tuple[str, ...]:
+    """Return the sorted names of all currently registered GEMM backends."""
+    return tuple(sorted(_GEMM_BACKEND_REGISTRY))
