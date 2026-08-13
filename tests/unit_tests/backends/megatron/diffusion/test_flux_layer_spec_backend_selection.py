@@ -128,11 +128,7 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
         observed_slots = 0
         for index, layer_spec in enumerate(block_submodules.layer_specs):
             expected_precision = (
-                "bf16"
-                if index in (0, 56)
-                else "fp8"
-                if index in (1, 2, 3, 53, 54, 55)
-                else "mxfp4"
+                "bf16" if index in (0, 56) else "fp8" if index in (1, 2, 3, 53, 54, 55) else "mxfp4"
             )
             column_class, row_class = expected_classes[expected_precision]
             attention = layer_spec.submodules.self_attention.submodules
@@ -151,8 +147,7 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
 
             for slot, (actual_class, expected_class) in slots.items():
                 assert actual_class is expected_class, (
-                    f"block {index} {slot}: expected {expected_class}, "
-                    f"got {actual_class}"
+                    f"block {index} {slot}: expected {expected_class}, " f"got {actual_class}"
                 )
                 precision_counts[expected_precision] += 1
                 observed_slots += 1
@@ -165,9 +160,7 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
             PrimusTurboMXFP4LocalSpecProvider,
         )
 
-        with self.assertRaisesRegex(
-            ValueError, "does not support an explicit backend"
-        ):
+        with self.assertRaisesRegex(ValueError, "does not support an explicit backend"):
             get_flux_layer_spec(
                 graduated_config(),
                 backend=PrimusTurboMXFP4LocalSpecProvider(),
@@ -179,9 +172,7 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
             "PrimusTurboMXFP4LocalSpecProvider",
             None,
         ):
-            with self.assertRaisesRegex(
-                RuntimeError, "requires the MXFP4 local provider"
-            ):
+            with self.assertRaisesRegex(RuntimeError, "requires the MXFP4 local provider"):
                 get_flux_layer_spec(graduated_config(), backend=None)
 
     def test_graduated_routing_rejects_missing_fp8_provider(self):
@@ -190,20 +181,15 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
             "PrimusTurboFloat8LocalSpecProvider",
             None,
         ):
-            with self.assertRaisesRegex(
-                RuntimeError, "requires the FP8 local provider"
-            ):
+            with self.assertRaisesRegex(RuntimeError, "requires the FP8 local provider"):
                 get_flux_layer_spec(graduated_config(), backend=None)
 
     def test_graduated_routing_rejects_missing_native_provider(self):
         with patch(
-            "primus.backends.megatron.core.models.diffusion.flux.layer_spec."
-            "PrimusTurboLocalSpecProvider",
+            "primus.backends.megatron.core.models.diffusion.flux.layer_spec." "PrimusTurboLocalSpecProvider",
             None,
         ):
-            with self.assertRaisesRegex(
-                RuntimeError, "requires the native local provider"
-            ):
+            with self.assertRaisesRegex(RuntimeError, "requires the native local provider"):
                 get_flux_layer_spec(graduated_config(), backend=None)
 
     def test_graduated_routing_revalidates_mutated_config(self):

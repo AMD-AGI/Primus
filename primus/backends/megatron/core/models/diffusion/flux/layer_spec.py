@@ -532,12 +532,8 @@ def get_flux_layer_spec(
     total = config.num_joint_layers + config.num_single_layers
     num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
     num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
-    outer_num_start = (
-        getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
-    )
-    outer_num_end = (
-        getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
-    )
+    outer_num_start = getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
+    outer_num_end = getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
 
     if sensitive_enabled:
         layer_counts = {
@@ -552,22 +548,16 @@ def get_flux_layer_spec(
             if value < 0:
                 raise ValueError(f"{field_name} must be non-negative, got {value}")
         if num_start + num_end <= 0:
-            raise ValueError(
-                "sensitive_layers_enabled=True requires a non-empty boundary"
-            )
+            raise ValueError("sensitive_layers_enabled=True requires a non-empty boundary")
         if num_start + num_end > total:
             raise ValueError(
                 "sensitive layer counts exceed the number of Flux layers: "
                 f"{num_start} + {num_end} > {total}"
             )
         if outer_num_start > num_start:
-            raise ValueError(
-                "outer_sensitive_layers_start cannot exceed sensitive_layers_start"
-            )
+            raise ValueError("outer_sensitive_layers_start cannot exceed sensitive_layers_start")
         if outer_num_end > num_end:
-            raise ValueError(
-                "outer_sensitive_layers_end cannot exceed sensitive_layers_end"
-            )
+            raise ValueError("outer_sensitive_layers_end cannot exceed sensitive_layers_end")
 
     inner_sensitive_count = num_start + num_end - outer_num_start - outer_num_end
     outer_sensitive_count = outer_num_start + outer_num_end
@@ -578,13 +568,9 @@ def get_flux_layer_spec(
     if sensitive_enabled:
         active_precisions = set()
         if inner_sensitive_count > 0:
-            active_precisions.add(
-                getattr(config, "sensitive_layer_precision", "bf16")
-            )
+            active_precisions.add(getattr(config, "sensitive_layer_precision", "bf16"))
         if outer_sensitive_count > 0:
-            active_precisions.add(
-                getattr(config, "outer_sensitive_layer_precision", "bf16")
-            )
+            active_precisions.add(getattr(config, "outer_sensitive_layer_precision", "bf16"))
             collapsed_start = outer_num_start > 0 and outer_num_start == num_start
             collapsed_end = outer_num_end > 0 and outer_num_end == num_end
             if collapsed_start or collapsed_end:
@@ -594,29 +580,21 @@ def get_flux_layer_spec(
                 )
             if (
                 getattr(config, "sensitive_layer_precision", None) != "tw_fp8"
-                or getattr(config, "outer_sensitive_layer_precision", None)
-                != "bf16"
+                or getattr(config, "outer_sensitive_layer_precision", None) != "bf16"
             ):
                 raise ValueError(
                     "graduated sensitive routing requires inner precision "
                     "'tw_fp8' and outer precision 'bf16'"
                 )
-        if "tw_fp8" in active_precisions and (
-            config.fp8 != "e4m3"
-            or config.fp8_recipe != "tensorwise"
-        ):
+        if "tw_fp8" in active_precisions and (config.fp8 != "e4m3" or config.fp8_recipe != "tensorwise"):
             raise ValueError(
-                "tw_fp8 sensitive layers require normalized fp8='e4m3' "
-                "and fp8_recipe='tensorwise'"
+                "tw_fp8 sensitive layers require normalized fp8='e4m3' " "and fp8_recipe='tensorwise'"
             )
         if "bf16" in active_precisions and (
-            not config.bf16
-            or config.fp16
-            or config.params_dtype != torch.bfloat16
+            not config.bf16 or config.fp16 or config.params_dtype != torch.bfloat16
         ):
             raise ValueError(
-                "bf16 sensitive layers require bf16=True, fp16=False, "
-                "and params_dtype=torch.bfloat16"
+                "bf16 sensitive layers require bf16=True, fp16=False, " "and params_dtype=torch.bfloat16"
             )
         if backend is not None:
             raise ValueError(
@@ -639,9 +617,7 @@ def get_flux_layer_spec(
         def resolve_sensitive_backend(precision):
             if precision == "tw_fp8":
                 if PrimusTurboFloat8LocalSpecProvider is None:
-                    raise RuntimeError(
-                        "tw_fp8 sensitive layers require the FP8 local provider"
-                    )
+                    raise RuntimeError("tw_fp8 sensitive layers require the FP8 local provider")
                 return PrimusTurboFloat8LocalSpecProvider()
             if precision == "bf16":
                 if PrimusTurboLocalSpecProvider is None:

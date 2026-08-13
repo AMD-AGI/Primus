@@ -166,9 +166,7 @@ class BaseDiffusionConfig(TransformerConfig):
                 )
 
             inner_sensitive_count = (
-                self.sensitive_layers_start
-                + self.sensitive_layers_end
-                - outer_sensitive_count
+                self.sensitive_layers_start + self.sensitive_layers_end - outer_sensitive_count
             )
             if inner_sensitive_count > 0:
                 active_precisions.add(self.sensitive_layer_precision)
@@ -184,13 +182,11 @@ class BaseDiffusionConfig(TransformerConfig):
             if outer_sensitive_count > 0:
                 collapsed_start = (
                     self.outer_sensitive_layers_start > 0
-                    and self.outer_sensitive_layers_start
-                    == self.sensitive_layers_start
+                    and self.outer_sensitive_layers_start == self.sensitive_layers_start
                 )
                 collapsed_end = (
                     self.outer_sensitive_layers_end > 0
-                    and self.outer_sensitive_layers_end
-                    == self.sensitive_layers_end
+                    and self.outer_sensitive_layers_end == self.sensitive_layers_end
                 )
                 if collapsed_start or collapsed_end:
                     raise ValueError(
@@ -209,8 +205,7 @@ class BaseDiffusionConfig(TransformerConfig):
             if "tw_fp8" in active_precisions:
                 if self.fp8 not in (None, "e4m3"):
                     raise ValueError(
-                        "tw_fp8 sensitive layers require fp8=None or fp8='e4m3'; "
-                        f"got {self.fp8!r}"
+                        "tw_fp8 sensitive layers require fp8=None or fp8='e4m3'; " f"got {self.fp8!r}"
                     )
                 if self.fp8_recipe not in (
                     None,

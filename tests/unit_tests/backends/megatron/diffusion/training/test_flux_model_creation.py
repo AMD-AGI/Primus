@@ -161,9 +161,7 @@ class TestFluxModelCreation:
         assert config.params_dtype == torch.bfloat16
         assert config.transformer_impl == "local"
 
-    def test_build_flux_config_from_yaml_forwards_graduated_routing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_build_flux_config_from_yaml_forwards_graduated_routing(self, monkeypatch: pytest.MonkeyPatch):
         backend_args = SimpleNamespace(
             mock_data=True,
             transformer_impl="local",
@@ -193,9 +191,7 @@ class TestFluxModelCreation:
         assert config.fp8 == "e4m3"
         assert config.fp8_recipe == "tensorwise"
 
-    def test_log_flux_config_includes_graduated_routing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_log_flux_config_includes_graduated_routing(self, monkeypatch: pytest.MonkeyPatch):
         backend_args = SimpleNamespace(
             mock_data=True,
             transformer_impl="local",

@@ -143,15 +143,11 @@ class TestFluxConfig(PrimusUT):
         ]
         for field_name, value in cases:
             with self.subTest(field_name=field_name, value=value):
-                with self.assertRaisesRegex(
-                    ValueError, f"{field_name} must be an integer"
-                ):
+                with self.assertRaisesRegex(ValueError, f"{field_name} must be an integer"):
                     FluxConfig.flux_12b(**{field_name: value})
 
     def test_outer_sensitive_end_must_fit_inside_boundary(self):
-        with self.assertRaisesRegex(
-            ValueError, "outer_sensitive_layers_end .* exceeds sensitive_layers_end"
-        ):
+        with self.assertRaisesRegex(ValueError, "outer_sensitive_layers_end .* exceeds sensitive_layers_end"):
             FluxConfig.flux_12b(
                 sensitive_layers_enabled=True,
                 sensitive_layers_start=4,
@@ -183,12 +179,8 @@ class TestFluxConfig(PrimusUT):
         assert config.fp8_recipe == "tensorwise"
 
     def test_sensitive_routing_requires_local_transformer(self):
-        with self.assertRaisesRegex(
-            ValueError, "sensitive layer routing requires transformer_impl='local'"
-        ):
-            FluxConfig.flux_12b(
-                **graduated_config_kwargs(transformer_impl="transformer_engine")
-            )
+        with self.assertRaisesRegex(ValueError, "sensitive layer routing requires transformer_impl='local'"):
+            FluxConfig.flux_12b(**graduated_config_kwargs(transformer_impl="transformer_engine"))
 
     def test_sensitive_routing_requires_local_mxfp4(self):
         cases = [
@@ -211,14 +203,10 @@ class TestFluxConfig(PrimusUT):
                     ValueError,
                     "tw_fp8 sensitive layers require fp8_recipe='tensorwise'",
                 ):
-                    FluxConfig.flux_12b(
-                        **graduated_config_kwargs(fp8_recipe=fp8_recipe)
-                    )
+                    FluxConfig.flux_12b(**graduated_config_kwargs(fp8_recipe=fp8_recipe))
 
     def test_tw_fp8_sensitive_layers_require_e4m3_format(self):
-        with self.assertRaisesRegex(
-            ValueError, "tw_fp8 sensitive layers require fp8=None or fp8='e4m3'"
-        ):
+        with self.assertRaisesRegex(ValueError, "tw_fp8 sensitive layers require fp8=None or fp8='e4m3'"):
             FluxConfig.flux_12b(**graduated_config_kwargs(fp8="hybrid"))
 
     def test_bf16_sensitive_layers_require_bf16_model_dtype(self):
@@ -229,9 +217,7 @@ class TestFluxConfig(PrimusUT):
         ]
         for overrides in cases:
             with self.subTest(overrides=overrides):
-                with self.assertRaisesRegex(
-                    ValueError, "bf16 sensitive layers require bf16=True"
-                ):
+                with self.assertRaisesRegex(ValueError, "bf16 sensitive layers require bf16=True"):
                     FluxConfig.flux_12b(**graduated_config_kwargs(**overrides))
 
     def test_sensitive_routing_rejects_unknown_precision(self):
@@ -244,9 +230,7 @@ class TestFluxConfig(PrimusUT):
                     ValueError,
                     "sensitive layer precision must be 'bf16' or 'tw_fp8'",
                 ):
-                    FluxConfig.flux_12b(
-                        **graduated_config_kwargs(**{field_name: "mxfp8"})
-                    )
+                    FluxConfig.flux_12b(**graduated_config_kwargs(**{field_name: "mxfp8"}))
 
     def test_graduated_routing_rejects_precision_role_inversion(self):
         with self.assertRaisesRegex(
@@ -271,9 +255,7 @@ class TestFluxConfig(PrimusUT):
                     ValueError,
                     "requires at least one inner sensitive layer on the same side",
                 ):
-                    FluxConfig.flux_12b(
-                        **graduated_config_kwargs(**overrides)
-                    )
+                    FluxConfig.flux_12b(**graduated_config_kwargs(**overrides))
 
 
 if __name__ == "__main__":
