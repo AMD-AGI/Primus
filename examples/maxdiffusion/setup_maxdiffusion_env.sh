@@ -5,18 +5,20 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# Install + patch the MaxDiffusion (JAX) runtime into the current venv so the
-# `maxdiffusion` backend can run from a BARE Primus checkout on the MaxText JAX
-# base image (i.e. without the separate MAD primus_maxdiffusion image).
+# Install + patch the MaxDiffusion (JAX) runtime from the vendored submodule.
 #
-# This makes Primus self-contained for MaxDiffusion: source is the vendored
-# third_party/maxdiffusion submodule; deps come from requirements-maxdiffusion.txt
-# (+ torch from the ROCm wheel index); the historical site-package patches are
-# applied here (tracked + reviewable) instead of being baked into a Dockerfile.
+# When is this needed?
+#   - If the container ALREADY ships maxdiffusion (e.g. the MAD primus_maxdiffusion
+#     image or the unified docker), this script is a NO-OP: it detects the installed
+#     package and exits immediately. Setting PRIMUS_SKIP_PIP=1 skips calling it entirely.
+#   - If the container does NOT have maxdiffusion (e.g. a bare rocm/jax-training
+#     maxtext image), this script installs everything from the Primus checkout:
+#     torch (ROCm wheels), requirements-maxdiffusion.txt, editable submodule install,
+#     and 4 site-package patches. Requires `third_party/maxdiffusion` to be initialized
+#     (git submodule update --init).
 #
-# Idempotent: safe to re-run (guards on already-installed / already-patched).
 # Invoked by examples/run_pretrain.sh when BACKEND=maxdiffusion (unless
-# PRIMUS_SKIP_PIP=1, in which case the image is assumed to already provide this).
+# PRIMUS_SKIP_PIP=1). Idempotent: safe to re-run.
 set -euo pipefail
 
 PRIMUS_PATH="${PRIMUS_PATH:-$(realpath "$(dirname "$0")/../..")}"

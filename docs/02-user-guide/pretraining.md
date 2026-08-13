@@ -232,11 +232,18 @@ The `llama2_7B-bf16-pretrain.yaml` example also sets `dataset_type: "synthetic"`
 
 ## MaxDiffusion (JAX) pretraining
 
-The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). Unlike the other backends, MaxDiffusion needs its own JAX + PyTorch dependency stack plus a few source patches. Primus owns that whole environment definition so you can run it **directly from a Primus checkout** on the MaxText JAX base image — no separate/bespoke image required:
+The MaxDiffusion backend runs JAX diffusion pretraining (WAN 2.1, FLUX.1-dev). Environment setup depends on your image:
+
+| Image has `maxdiffusion` installed? | What happens |
+| --- | --- |
+| **Yes** (e.g. MAD `primus_maxdiffusion` image, unified docker) | `setup_maxdiffusion_env.sh` detects it and is a **no-op**. Set `PRIMUS_SKIP_PIP=1` to skip calling it entirely. |
+| **No** (e.g. bare `rocm/jax-training:maxtext-*` image) | The script installs everything from the Primus checkout: torch (ROCm wheels), deps, editable submodule, and patches. Requires `third_party/maxdiffusion` submodule to be initialized. |
+
+The relevant pieces:
 
 - **Source** is vendored as the `third_party/maxdiffusion` submodule.
 - **Dependencies** live in `requirements-maxdiffusion.txt` (kept separate from `requirements-jax.txt` so the MaxDiffusion pins never affect MaxText runs).
-- **Install + patches** are applied by `examples/maxdiffusion/setup_maxdiffusion_env.sh` (idempotent): torch/torchvision (ROCm wheels), the requirements above, an editable install of the vendored submodule, and four historical patches (Flax-T5 clip rename, TensorFlow-preload-before-TransformerEngine, Shardy-on, and the TransformerEngine empty context-parallel-axis fix).
+- **Install + patches** are applied by `examples/maxdiffusion/setup_maxdiffusion_env.sh` (idempotent): torch/torchvision (ROCm wheels), the requirements above, an editable install of the vendored submodule, and four source patches (Flax-T5 clip rename, TensorFlow-preload-before-TransformerEngine, Shardy-on, and the TransformerEngine empty context-parallel-axis fix).
 
 ### Prerequisites
 
