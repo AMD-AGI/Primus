@@ -32,14 +32,13 @@ class TestBaseDiffusionConfig(PrimusUT):
             config.validate()
         self.assertIn("in_channels must be positive", str(cm.exception))
 
-    @pytest.mark.parametrize("forward_precision", ["mxfp4", "fp8", "bf16"])
-    def test_mxfp4_forward_precision_values(self, forward_precision):
-        config = BaseDiffusionConfig(
-            num_attention_heads=8,
-            num_layers=1,
-            mxfp4_forward_precision=forward_precision,
-        )
-        self.assertEqual(config.mxfp4_forward_precision, forward_precision)
+    def test_mxfp4_forward_precision_values(self):
+        for forward_precision in ("mxfp4", "fp8", "bf16"):
+            with self.subTest(forward_precision=forward_precision):
+                config = FluxConfig.flux_535m(
+                    mxfp4_forward_precision=forward_precision,
+                )
+                self.assertEqual(config.mxfp4_forward_precision, forward_precision)
 
     def test_invalid_mxfp4_forward_precision_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "mxfp4_forward_precision"):

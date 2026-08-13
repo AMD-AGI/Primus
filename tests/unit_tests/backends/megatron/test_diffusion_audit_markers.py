@@ -19,6 +19,7 @@ from primus.backends.megatron.training.diffusion.forward_step import (
 )
 
 _FORWARD_STEP_LOGGER = "primus.backends.megatron.training.diffusion.forward_step"
+_FLUX_TRAINER_LOGGER = "primus.backends.megatron.flux_pretrain_trainer"
 
 
 def test_sample_key_fingerprint_is_order_sensitive():
@@ -66,16 +67,21 @@ def test_mxfp4_gemm_mode_census_reports_forward_backward_split():
     }
 
 
-def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, capsys):
+def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, caplog):
     from megatron.core import parallel_state
 
     monkeypatch.setenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS", "1")
     monkeypatch.setenv("RANK", "3")
     monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 3)
+    caplog.set_level("INFO", logger=_FLUX_TRAINER_LOGGER)
 
     _emit_precision_linear_class_census(nn.Linear(2, 2))
 
-    line = capsys.readouterr().out.strip()
+    line = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("PRIMUS_LINEAR_CLASS_CENSUS=")
+    )
     payload = json.loads(line.split("=", 1)[1])
     assert payload == {
         "data_parallel_rank": 3,

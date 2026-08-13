@@ -183,8 +183,7 @@ class BaseDiffusionConfig(TransformerConfig):
 
         if self.mxfp4_backward_precision not in {"mxfp4", "fp8"}:
             raise ValueError(
-                "mxfp4_backward_precision must be 'mxfp4' or 'fp8', "
-                f"got {self.mxfp4_backward_precision!r}"
+                "mxfp4_backward_precision must be 'mxfp4' or 'fp8', " f"got {self.mxfp4_backward_precision!r}"
             )
 
         if self.in_channels <= 0:

@@ -202,27 +202,28 @@ class TestFluxMXFP4LocalSpec(PrimusUT):
 
         assert has_mxfp4_grad, "No MXFP4 linear has a weight gradient in hybrid mode"
 
-    @pytest.mark.parametrize("forward_precision", ["fp8", "bf16"])
     @requires_mxfp4
-    def test_flux_535m_high_precision_forward_mxfp4_backward(self, forward_precision):
+    def test_flux_535m_high_precision_forward_mxfp4_backward(self):
         """Higher-precision forward retains MXFP4 modules and finite gradients."""
-        config = self._make_mxfp4_config(mxfp4_forward_precision=forward_precision)
-        model = Flux(config).cuda().to(torch.bfloat16)
-        model.train()
+        for forward_precision in ("fp8", "bf16"):
+            with self.subTest(forward_precision=forward_precision):
+                config = self._make_mxfp4_config(mxfp4_forward_precision=forward_precision)
+                model = Flux(config).cuda().to(torch.bfloat16)
+                model.train()
 
-        precision_modules = [
-            module
-            for module in model.modules()
-            if isinstance(module, (MXFP4ColumnParallelLinear, MXFP4RowParallelLinear))
-        ]
-        assert precision_modules
-        assert all(module._forward_precision == forward_precision for module in precision_modules)
-        assert all(not module._backward_is_fp8 for module in precision_modules)
+                precision_modules = [
+                    module
+                    for module in model.modules()
+                    if isinstance(module, (MXFP4ColumnParallelLinear, MXFP4RowParallelLinear))
+                ]
+                assert precision_modules
+                assert all(module._forward_precision == forward_precision for module in precision_modules)
+                assert all(not module._backward_is_fp8 for module in precision_modules)
 
-        output = model(*self._make_inputs(batch_size=2))
-        assert torch.isfinite(output).all()
-        output.sum().backward()
-        assert any(
-            module.weight.grad is not None and torch.isfinite(module.weight.grad).all()
-            for module in precision_modules
-        )
+                output = model(*self._make_inputs(batch_size=2))
+                assert torch.isfinite(output).all()
+                output.sum().backward()
+                assert any(
+                    module.weight.grad is not None and torch.isfinite(module.weight.grad).all()
+                    for module in precision_modules
+                )
