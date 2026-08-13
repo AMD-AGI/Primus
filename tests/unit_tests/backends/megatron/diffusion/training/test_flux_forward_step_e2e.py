@@ -157,7 +157,8 @@ class TestFluxForwardStepE2E:
         )
 
     def test_validation_with_timestep_key(self, model, scheduler):
-        """Batch with 'timestep' key triggers validation mode."""
+        """Evaluation mode marks a pre-sampled timestep batch as validation."""
+        model.eval()
         batch = self._make_presampled_batch()
         batch["timestep"] = torch.arange(2)
         data_iterator = iter([batch])
@@ -176,6 +177,8 @@ class TestFluxForwardStepE2E:
         assert is_validation is True
         # The forward step writes derived timesteps (timestep / 8.0) into the batch.
         assert "timesteps" in batch
+        expected_dtype = torch.bfloat16 if model.config.bf16 else model.config.params_dtype
+        assert batch["timesteps"].dtype == expected_dtype
         assert torch.equal(
             batch["timesteps"].float().cpu(),
             torch.arange(2).float() / 8.0,
