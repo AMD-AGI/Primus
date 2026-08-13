@@ -95,6 +95,31 @@ def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, c
     }
 
 
+def test_precision_linear_class_census_emits_mxfp4_gemm_modes(monkeypatch, caplog):
+    from megatron.core import parallel_state
+
+    monkeypatch.setenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS", "1")
+    monkeypatch.setenv("RANK", "5")
+    monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 5)
+    caplog.set_level("INFO", logger=_FLUX_TRAINER_LOGGER)
+
+    mxfp4_column = type("MXFP4ColumnParallelLinear", (nn.Module,), {})()
+    mxfp4_column._forward_precision = "fp8"
+    mxfp4_column._backward_is_fp8 = False
+    _emit_precision_linear_class_census(nn.ModuleList([mxfp4_column]))
+
+    line = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("PRIMUS_MXFP4_GEMM_MODE_CENSUS=")
+    )
+    assert json.loads(line.split("=", 1)[1]) == {
+        "data_parallel_rank": 5,
+        "global_rank": 5,
+        "modes": {"fp8_forward_mxfp4_backward": 1},
+    }
+
+
 def test_emit_batch_fingerprint_is_fail_closed(monkeypatch):
     monkeypatch.setenv("PRIMUS_AUDIT_BATCH_FINGERPRINTS", "1")
     with pytest.raises(RuntimeError, match="no valid sample-key fingerprint"):
