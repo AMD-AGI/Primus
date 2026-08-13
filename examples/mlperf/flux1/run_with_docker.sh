@@ -66,10 +66,6 @@ docker run --rm --init --privileged \
       sync
       echo 3 > /proc/sys/vm/drop_caches
     fi
-    torchrun \
-      --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-      --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
-      --nproc_per_node="$GPUS_PER_NODE" \
-      -m primus.cli.main train pretrain \
+    ./primus-cli direct -- train pretrain \
       --config "$CONFIG"
   '
