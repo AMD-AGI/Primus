@@ -13,7 +13,7 @@
 # Quick start:
 #   export DATADIR=/data/mlperf_llama2
 #   export LOGDIR=/data/mlperf_llama2/results
-#   export CONT=rocm/primus:v26.4
+#   export CONT=rocm/primus:v26.5
 #   export DGXSYSTEM=MI355X_1x8x1
 #   bash examples/mlperf/llama2_70b/run_with_docker.sh
 #
@@ -30,7 +30,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.4}"
+: "${CONT:=rocm/primus:v26.5}"
 : "${DATADIR:=${HOME}/data/mlperf_llama2}"
 : "${LOGDIR:=${DATADIR}/results}"
 : "${NEXP:=1}"
