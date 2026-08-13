@@ -1,12 +1,7 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:gpt_oss_20b_mxfp4}
-# Container root is squashed to nobody on the NFS repo path; use a writable workspace.
-workspace: ${PRIMUS_WORKSPACE:/tmp/primus_output}
-
-# GPT-OSS-20B MXFP4 pretrain config (Primus-Turbo FP4 autocast path), derived
-# from gpt_oss_20B-FP8-mlperf-pretrain.yaml. FP4 is applied to the MoE/dense
-# GEMMs via Primus-Turbo; sliding-window attention stays BF16 (non-turbo TE).
+exp_name: ${EXP_NAME:gpt_oss_20b}
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:
@@ -17,14 +12,12 @@ modules:
     model: ${PRIMUS_MODEL:gpt_oss_20B}.yaml
     overrides:
 
-      # Standard Megatron pretrain trainer (the mlperf_pretrain stage's
-      # MLPerfMegatronPretrainTrainer.__init__ is incompatible with the current
-      # core-runtime trainer instantiation; mllog not needed for this test).
-      stage: pretrain
+      # Activate the migrated MLPerf pretrain trainer (mllog + MLPerf hooks).
+      stage: ${PRIMUS_STAGE:mlperf_pretrain}
 
-      # tokenizer (local Llama-3.1-8B, matches C4 preprocessing; offline)
+      # tokenizer
       tokenizer_type: Llama3Tokenizer
-      tokenizer_model: ${MODEL:/apps/huangwei/model}
+      tokenizer_model: ${MODEL:meta-llama/Llama-3.1-8B}
 
       # model
       num_layers: 24
@@ -44,27 +37,30 @@ modules:
       grad_reduce_in_bf16: ${PRIMUS_GRAD_REDUCE_IN_BF16:true}
 
       # log
-      wandb_project: "Primus_GPT_OSS_20B_MXFP4"
-      disable_wandb: true
-      disable_tensorboard: true
-      stderr_sink_level: INFO
-      log_interval: ${LOG_INTERVAL:1}
+      wandb_project: "Primus_GPT_OSS_20B"
+      stderr_sink_level: ERROR
+      log_interval: ${LOG_INTERVAL:999999}
 
       # profile
-      profile: false
-      use_pytorch_profiler: false
+      profile: ${PRIMUS_PROFILE:False}
+      use_pytorch_profiler: ${PRIMUS_PROFILE:False}
+      profile_step_end: ${PRIMUS_PROFILE_STEP_END:32}
+      profile_step_start: ${PRIMUS_PROFILE_STEP_START:16}
+      profile_ranks: [0]
 
-      # ==========================================
-      # MXFP4 (Primus-Turbo FP4 autocast path)
-      # ==========================================
+      # MXFP4 training
+      fp8: null
       fp4: e2m1
       fp4_recipe: mxfp4
+      first_last_layers_bf16: true
+      num_layers_at_start_in_bf16: 2
+      num_layers_at_end_in_bf16: 2
+      mxfp4_gradient_stochastic_rounding: false
       clip_grad: 1.0
       check_for_nan_in_loss_and_grad: false
-      check_for_spiky_loss: false
 
-      # hyper parameters (kept close to the FP8 baseline)
-      train_iters: ${PRIMUS_TRAIN_ITERS:30}
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:1200000}
       micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:2}
       global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:16}
       seq_length: ${PRIMUS_SEQ_LENGTH:8192}
@@ -85,11 +81,13 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
       layernorm_epsilon: 1.0e-05
+
+      # Dropout
       hidden_dropout: 0.0
       attention_dropout: 0.0
 
       # parallel
-      tensor_model_parallel_size: ${PRIMUS_TP:1}   # turbo FP4 requires TP=1
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: ${PRIMUS_PP:1}
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
@@ -100,10 +98,9 @@ modules:
       # data
       mock_data: false
       num_workers: ${PRIMUS_NUM_WORKERS:0}
-      train_data_path: "10 /apps/huangwei/data/c4-train.en_6_text_document"
-      valid_data_path: "/apps/huangwei/data/c4-validation-91205-samples.en_text_document"
-      test_data_path: "/apps/huangwei/data/c4-validation-91205-samples.en_text_document"
-      data_cache_path: ${PRIMUS_DATA_CACHE:/tmp/primus_data_cache}
+      train_data_path: "10 /data/c4-train.en_6_text_document"
+      valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
+      test_data_path: "/data/c4-validation-91205-samples.en_text_document"
       create_attention_mask_in_dataloader: ${PRIMUS_CREATE_ATTENTION_MASK_IN_DATALOADER:0}
 
       # fusion
@@ -114,7 +111,8 @@ modules:
       multi_latent_attention: false
       apply_rope_fusion: true
 
-      # sliding window attention (GPT-OSS-20B)
+      # sliding window attention
+      use_turbo_attention: false
       window_size: [128, 0]
       window_attn_skip_freq: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
 
@@ -143,8 +141,8 @@ modules:
       moe_router_group_topk: null
       moe_router_load_balancing_type: none
       moe_router_num_groups: null
-      # FP4 grouped GEMM needs per-expert token counts aligned to 32.
-      moe_router_padding_for_quantization: true
+      moe_router_padding_for_fp8: false
+      moe_router_padding_for_quantization: false
       moe_router_pre_softmax: false
       moe_router_score_function: softmax
       moe_router_topk: 4
@@ -158,34 +156,58 @@ modules:
       moe_token_dropping: false
       moe_z_loss_coeff: null
 
-      # ckpt
+      # checkpoint
       finetune: false
       auto_continue_train: false
       load: null
+      no_load_optim: null
+      no_load_rng: null
       save: null
+      save_interval: 100000
+      no_save_optim: null
+      no_save_rng: null
       disable_last_saving: true
       exit_on_missing_checkpoint: false
       ckpt_format: torch
-      eval_iters: ${EVAL_ITERS:0}
-      eval_interval: 100000
+      eval_iters: ${EVAL_ITERS:64}
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:768}
 
-      # Turbo
+      # Primus-Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false          # sliding window => non-turbo (TE) attention (bf16)
-      use_turbo_gemm: true
       use_turbo_fp4_autocast: true
-      # Route MoE experts through the Turbo grouped_gemm_fp4 kernel.
+      use_turbo_gemm: true
+      weight_deosc: true
+      weight_deosc_start_step: 1500
+      weight_deosc_period: 200
+      weight_deosc_ratio: 3.0
+      weight_deosc_log_freq: 1
       use_turbo_grouped_gemm: true
-      use_turbo_rms_norm: ${USE_TURBO_RMS_NORM:true}
+      turbo_grouped_gemm_without_padding: ${TURBO_GROUPED_GEMM_WITHOUT_PADDING:true}
+      use_turbo_rms_norm: true
+      use_turbo_norm_te_linear: false
       use_turbo_fused_act_with_probs: true
-      use_turbo_permute_padding: true
 
-      # deepep
+      # DeepEP
       use_turbo_deepep: false
       turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
+
+      # Sync-free MoE
       turbo_sync_free_moe_stage: 0
 
-      # Cross entropy flags
+      # Cross entropy
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+
+      # tensorboard
+      disable_tensorboard: ${PRIMUS_DISABLE_TENSORBOARD:true}
+      tensorboard_dir: ${PRIMUS_WORKSPACE:./output}/tensorboard
+      tensorboard_log_interval: 1
+      tensorboard_queue_size: 1000
+      log_timers_to_tensorboard: true
+      log_batch_size_to_tensorboard: true
+      log_learning_rate_to_tensorboard: true
+      log_validation_ppl_to_tensorboard: true
+      log_memory_to_tensorboard: true
+      log_world_size_to_tensorboard: true
+      log_loss_scale_to_tensorboard: true

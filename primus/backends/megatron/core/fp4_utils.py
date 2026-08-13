@@ -48,7 +48,8 @@ def _primus_turbo_enabled() -> bool:
 
         args = get_args()
         enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
-        return enable_primus_turbo
+        use_turbo_fp4_autocast = bool(getattr(args, "use_turbo_fp4_autocast", False))
+        return enable_primus_turbo and use_turbo_fp4_autocast
     except Exception:
         return False
 

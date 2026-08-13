@@ -9,9 +9,10 @@
 When MXFP4 training is driven through the Primus-Turbo FP4 autocast path and
 ``weight_deosc`` is enabled, this patch wraps every
 ``DistributedOptimizer.step_with_ready_grads`` so the de-oscillation detector
-runs right after the optimizer updates the fp32 master and all-gathers the bf16
-model weight. See ``primus.backends.megatron.core.optimizer.weight_deosc`` for
-the algorithm and rationale.
+runs right after the optimizer updates the local fp32 master. It does not force
+the deferred bf16 parameter all-gather. See
+``primus.backends.megatron.core.optimizer.weight_deosc`` for the algorithm and
+rationale.
 """
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
