@@ -14,13 +14,30 @@ ROCm-specific correctness issues.
 
 import torch
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
+# Megatron-Bridge configs carry no ``model_type``, they name models by recipe.
+# Both of these end up in MCoreMambaModel (zebra_llama is a Mamba+MLA hybrid).
+_BRIDGE_MAMBA_RECIPES = ("mamba", "zebra_llama")
 
-def _is_rocm(ctx: PatchContext) -> bool:
-    """Return True when running on an AMD ROCm platform."""
-    return getattr(torch.version, "hip", None) is not None
+
+def _is_rocm_mamba_run(ctx: PatchContext) -> bool:
+    """Return True on ROCm for a run that actually builds Mamba layers.
+
+    Applying the patch imports ``mamba_ssm``, which reaches quack-kernels and
+    CUTLASS DSL, whose MLIR bindings then abort the process on FlyDSL's already
+    in nanobind's registry -- killing runs with no Mamba layer at all (#955).
+    Genuine Mamba runs import ``mamba_ssm`` anyway, so those are protected by
+    ``purge_cutlass_dsl`` in tools/installation/setup.sh, not by this gate.
+    """
+    if getattr(torch.version, "hip", None) is None:
+        return False
+    # Megatron: plain Mamba and the hybrids both set ``model_type: mamba``.
+    if get_param(ctx, "model_type") == "mamba":
+        return True
+    recipe = str(get_param(ctx, "recipe", "") or "")
+    return any(family in recipe for family in _BRIDGE_MAMBA_RECIPES)
 
 
 def _make_triton_wrapper(original_fn):
@@ -42,7 +59,7 @@ def _make_triton_wrapper(original_fn):
         "Disable Triton buffer_ops in Mamba _chunk_state_bwd_db backward pass "
         "to work around ROCm-specific correctness issues."
     ),
-    condition=_is_rocm,
+    condition=_is_rocm_mamba_run,
     tags=["rocm", "mamba"],
 )
 def patch_mamba_rocm_chunk_state_bwd_db(ctx: PatchContext):

@@ -81,6 +81,19 @@ RUN PT_LIB=$(python3 -c "import primus_turbo, os; print(os.path.join(os.path.dir
     cd / && rm -rf /tmp/rocshmem_team_shim
 
 # ---------------------------------------------------------------------------
+# Remove the CUDA-only CUTLASS DSL stack
+# ---------------------------------------------------------------------------
+# The base image's mamba-ssm pins quack-kernels, which pulls nvidia-cutlass-dsl.
+# Its MLIR Python bindings and the FlyDSL ones installed with Primus-Turbo above
+# share one process-wide nanobind type registry, so whichever loads second aborts
+# (AMD-AGI/Primus#955). No ROCm path can run these CUDA-only kernels. Done in
+# this layer because the base image is already published carrying them; names
+# that are not installed are skipped instead of failing the build.
+RUN pip3 uninstall -y quack-kernels nvidia-cutlass-dsl \
+    nvidia-cutlass-dsl-libs-base nvidia-cutlass-dsl-libs-core \
+    nvidia-cutlass-dsl-libs-cu12 nvidia-cutlass-dsl-libs-cu13
+
+# ---------------------------------------------------------------------------
 # Install Triton
 # ---------------------------------------------------------------------------
 RUN cd /opt && \

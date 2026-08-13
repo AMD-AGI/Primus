@@ -102,12 +102,6 @@ CAUSAL_CONV1D_BRANCH="e940ead2fd962c56854455017541384909ca669f"
 MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
-# mamba_ssm pins quack-kernels==0.3.1, which asks for `nvidia-cutlass-dsl>=4.4.1`
-# with no upper bound. 4.6.x restructured the DSL and dropped cute.core.ThrCopy,
-# which quack 0.3.1 imports, so `import mamba_ssm` dies with AttributeError.
-# 4.5.3 is the newest release quack 0.3.1 still works with. Note pip cannot pick
-# it on its own: 4.5.3 was published after 4.6.0 but sorts lower.
-CUTLASS_DSL_VERSION="4.5.3"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
 # Latest commit on `release/v26.5` branch. Committed on 2026-07-22.
 PRIMUS_BRANCH="b511d1b66b0068715308ea9bfe8ba147ea1a3860"
@@ -518,6 +512,31 @@ stage_causal_conv1d() {
     rm -rf "$SRC_DIR/causal-conv1d"
 }
 
+# mamba_ssm pins quack-kernels, which pulls nvidia-cutlass-dsl. Its MLIR Python
+# bindings and FlyDSL's (installed with Primus-Turbo) share one process-wide
+# nanobind type registry, so whichever loads second aborts (AMD-AGI/Primus#955).
+# No ROCm path can run these CUDA-only kernels and mamba's ops/cute/mamba3, their
+# only importer, degrades silently without them: mamba_370M ran 50 iterations to
+# bit-identical loss and grad norm after removal.
+purge_cutlass_dsl() {
+    local pkgs
+    pkgs="$(python - <<'PY'
+import importlib.metadata as md
+
+names = set()
+for dist in md.distributions():
+    name = dist.metadata["Name"] or ""
+    if name.lower().startswith(("quack-kernels", "nvidia-cutlass-dsl")):
+        names.add(name)
+print(" ".join(sorted(names)))
+PY
+)"
+    [ -n "$pkgs" ] || { log "No CUTLASS DSL packages installed; nothing to purge"; return 0; }
+    log "Uninstalling CUDA-only CUTLASS DSL stack: $pkgs"
+    # shellcheck disable=SC2086  # deliberate word splitting: one package per arg
+    $PIP uninstall -y $pkgs || die "failed to uninstall: $pkgs"
+}
+
 stage_mamba() {
     reload_env
     log "Building mamba @ $MAMBA_BRANCH"
@@ -527,18 +546,16 @@ stage_mamba() {
     # of every unpinned dep as .egg files, clobbering our pins (it pulled
     # transformers 5.x, removed accelerate/trl, and dragged in NVIDIA CUDA
     # packages). pip respects already-installed versions.
-    # Install the CUTLASS DSL pin before mamba, not after: quack's `>=4.4.1` is
-    # then already satisfied so pip keeps 4.5.3 instead of pulling 4.6.x and
-    # needing a downgrade, which would strand the 4.6-only libs-core/libs-cu12
-    # packages as orphans that make `pip check` complain.
     ( cd "$SRC_DIR/mamba" \
         && pipi "apache-tvm-ffi==${TVM_FFI_VERSION}" \
-        && pipi "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
         && pipi --no-build-isolation . ) || die "mamba build failed"
     rm -rf "$SRC_DIR/mamba"
+    # Ahead of the check below, which then doubles as proof mamba survives it.
+    purge_cutlass_dsl
     python -c "import mamba_ssm" 2>/dev/null \
-        || die "mamba_ssm cannot be imported. If this is the cute/CUTLASS path,
-  check whether quack-kernels still works with nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}."
+        || die "mamba_ssm cannot be imported after purge_cutlass_dsl removed
+  quack-kernels. Gate the import instead of putting the packages back --
+  restoring nvidia-cutlass-dsl reintroduces Primus#955."
 }
 
 # Megatron's dataset indexing imports a pybind11 extension that has to be
