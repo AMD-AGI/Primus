@@ -17,9 +17,13 @@ Supported data formats (framework-standard keys):
 Architecture follows functional composition for clarity and testability.
 """
 
+import hashlib
 import json
 import logging
 import os
+import stat
+import tempfile
+from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
@@ -38,6 +42,8 @@ from primus.backends.megatron.training.diffusion.timestep_sampling import (
 )
 
 logger = logging.getLogger(__name__)
+_EMITTED_MODEL_WEIGHT_ITERATIONS: set[int] = set()
+_MODEL_WEIGHT_AUDIT_CONTEXT_UNSET = object()
 
 
 def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool = True) -> None:
@@ -79,6 +85,427 @@ def _emit_batch_fingerprint(batch: dict, step_count: int, *, is_training: bool =
     # this launch path, so a bare print leaves the audit reporting zero markers
     # on a healthy run. Logging and fd 2 both survive.
     logger.info("PRIMUS_BATCH_FINGERPRINT=%s", json.dumps(payload, sort_keys=True))
+
+
+def _parse_model_weight_steps(value: str) -> set[int]:
+    """Parse completed training iterations requested for weight auditing."""
+    steps = set()
+    for token in value.split(","):
+        token = token.strip()
+        if not token or not token.isdigit() or int(token) <= 0:
+            raise RuntimeError(
+                "PRIMUS_AUDIT_MODEL_WEIGHT_STEPS must be a comma-separated " "list of positive integers"
+            )
+        step = int(token)
+        if step in steps:
+            raise RuntimeError("PRIMUS_AUDIT_MODEL_WEIGHT_STEPS contains duplicate step " f"{step}")
+        steps.add(step)
+    if not steps:
+        raise RuntimeError("PRIMUS_AUDIT_MODEL_WEIGHT_STEPS is empty")
+    return steps
+
+
+def _sample_model_weights(model, sample_size: int) -> dict:
+    """Return deterministic, low-overhead per-parameter weight samples."""
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+
+    metadata = []
+    sampled_tensors = []
+    for name, parameter in sorted(model.named_parameters(), key=lambda item: item[0]):
+        tensor = parameter.detach().reshape(-1)
+        if tensor.numel() == 0:
+            continue
+        count = min(sample_size, tensor.numel())
+        indices = torch.arange(count, device=tensor.device, dtype=torch.int64) * tensor.numel() // count
+        sampled = tensor.index_select(0, indices).to(dtype=torch.float32)
+        metadata.append(
+            {
+                "name": name,
+                "shape": list(parameter.shape),
+                "dtype": str(parameter.dtype),
+                "numel": parameter.numel(),
+                "sample_count": count,
+                "requires_grad": parameter.requires_grad,
+            }
+        )
+        sampled_tensors.append(sampled)
+
+    if not sampled_tensors:
+        raise RuntimeError("model-weight audit found no parameters")
+    devices = {tensor.device for tensor in sampled_tensors}
+    if len(devices) != 1:
+        raise RuntimeError(
+            "model-weight audit requires all sampled parameters on one device, "
+            f"found {sorted(map(str, devices))}"
+        )
+
+    combined = torch.cat(sampled_tensors).cpu()
+    parameters = []
+    offset = 0
+    total_sum = 0.0
+    total_sum_squares = 0.0
+    total_absmax = 0.0
+    total_nonfinite_count = 0
+    all_finite = True
+    for item in metadata:
+        count = item["sample_count"]
+        sample = combined[offset : offset + count]
+        offset += count
+        finite_mask = torch.isfinite(sample)
+        nonfinite_count = int((~finite_mask).sum().item())
+        finite = nonfinite_count == 0
+        sample_sum = float(sample.double().sum().item()) if finite else None
+        sample_sum_squares = float(sample.double().square().sum().item()) if finite else None
+        sample_absmax = float(sample.abs().max().item()) if finite else None
+        item.update(
+            {
+                "sample_finite": finite,
+                "sample_nonfinite_count": nonfinite_count,
+                "sample_sum": sample_sum,
+                "sample_sum_squares": sample_sum_squares,
+                "sample_absmax": sample_absmax,
+                "sample_sha256": hashlib.sha256(sample.contiguous().numpy().tobytes()).hexdigest(),
+            }
+        )
+        parameters.append(item)
+        all_finite = all_finite and finite
+        total_nonfinite_count += nonfinite_count
+        if finite:
+            total_sum += sample_sum
+            total_sum_squares += sample_sum_squares
+            total_absmax = max(total_absmax, sample_absmax)
+
+    return {
+        "parameter_count": len(parameters),
+        "parameter_numel": sum(item["numel"] for item in parameters),
+        "sample_count": combined.numel(),
+        "sample_finite": all_finite,
+        "sample_nonfinite_count": total_nonfinite_count,
+        "sample_sum": total_sum if all_finite else None,
+        "sample_sum_squares": total_sum_squares if all_finite else None,
+        "sample_absmax": total_absmax if all_finite else None,
+        "parameters": parameters,
+    }
+
+
+def _model_weight_iteration_coordinate() -> tuple[int, int, int, int]:
+    """Return canonical completed/next iterations and current run metadata.
+
+    Megatron restores ``args.iteration`` from the checkpoint before entering
+    the training loop. The pinned Megatron training loop then records its
+    active completed-iteration coordinate in ``args.curr_iteration`` before
+    every ``train_step`` while leaving ``args.iteration`` at the restored
+    baseline. Prefer that active coordinate when present and retain the
+    restored value as the resume-safe fallback.
+
+    Forward-call counts are deliberately excluded: gradient accumulation can
+    change, and Megatron may replay a forward before any optimizer update.
+    Neither event is allowed to shift the Megatron training-loop coordinate.
+    """
+    from megatron.core.num_microbatches_calculator import get_num_microbatches
+    from megatron.training import get_args
+
+    args = get_args()
+    restored_iteration = getattr(args, "iteration", None)
+    if (
+        isinstance(restored_iteration, bool)
+        or not isinstance(restored_iteration, int)
+        or restored_iteration < 0
+    ):
+        raise RuntimeError("model-weight audit requires args.iteration to be a nonnegative integer")
+
+    completed_iteration = getattr(args, "curr_iteration", restored_iteration)
+    if (
+        isinstance(completed_iteration, bool)
+        or not isinstance(completed_iteration, int)
+        or completed_iteration < 0
+    ):
+        raise RuntimeError(
+            "model-weight audit requires args.curr_iteration to be a nonnegative integer when present"
+        )
+    if completed_iteration < restored_iteration:
+        raise RuntimeError(
+            "model-weight audit requires args.curr_iteration to be at least the restored args.iteration"
+        )
+
+    train_iters = getattr(args, "train_iters", None)
+    if isinstance(train_iters, bool) or not isinstance(train_iters, int) or train_iters <= 0:
+        raise RuntimeError("model-weight audit requires args.train_iters to be a positive integer")
+
+    num_microbatches = get_num_microbatches()
+    if isinstance(num_microbatches, bool) or not isinstance(num_microbatches, int) or num_microbatches <= 0:
+        raise RuntimeError(
+            "model-weight audit requires get_num_microbatches() to return a " "positive integer"
+        )
+    return completed_iteration, completed_iteration + 1, num_microbatches, train_iters
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _encode_strict_json(payload: dict) -> bytes:
+    """Encode one deterministic JSON object with no non-finite constants."""
+    if not isinstance(payload, dict):
+        raise TypeError("model-weight audit payload must be a JSON object")
+    return (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+
+
+def _read_strict_json(path: Path) -> dict:
+    """Read a regular, non-symlink JSON object and reject non-finite values."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"model-weight audit output is not a regular file: {path}")
+        handle = os.fdopen(descriptor)
+        descriptor = None
+        with handle:
+            payload = json.load(handle, parse_constant=_reject_json_constant)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"model-weight audit output is not a JSON object: {path}")
+    # json.load(parse_constant=...) rejects NaN/Infinity tokens. Re-encoding
+    # additionally rejects valid JSON numbers that overflow to Python infinity
+    # (for example 1e9999).
+    _encode_strict_json(payload)
+    return payload
+
+
+def _model_weight_summary_identity(payload: dict) -> tuple[dict, bool]:
+    """Return restart identity while validating replay-variant provenance."""
+    provenance_fields = {"forward_step_count", "num_microbatches"}
+    present_fields = provenance_fields.intersection(payload)
+    if present_fields and present_fields != provenance_fields:
+        missing = sorted(provenance_fields - present_fields)
+        raise RuntimeError(
+            "model-weight audit output has incomplete replay provenance; " f"missing fields: {missing}"
+        )
+
+    has_provenance = bool(present_fields)
+    identity = dict(payload)
+    if has_provenance:
+        for field in sorted(provenance_fields):
+            value = identity.pop(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise RuntimeError(f"model-weight audit output field {field} must be a positive integer")
+    return identity, has_provenance
+
+
+def _write_model_weight_summary_once(output: Path, payload: dict) -> None:
+    """Publish one strict JSON record atomically without overwriting."""
+    encoded = _encode_strict_json(payload)
+    identity, has_provenance = _model_weight_summary_identity(payload)
+    encoded_identity = _encode_strict_json(identity)
+    descriptor, temporary_value = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_value)
+    try:
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = None
+        with handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, output, follow_symlinks=False)
+        except FileExistsError:
+            existing = _read_strict_json(output)
+            existing_identity, existing_has_provenance = _model_weight_summary_identity(existing)
+            if (
+                existing_has_provenance != has_provenance
+                or _encode_strict_json(existing_identity) != encoded_identity
+            ):
+                raise RuntimeError(
+                    "model-weight audit output already exists with different " f"content: {output}"
+                )
+        else:
+            directory_flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                directory_flags |= os.O_DIRECTORY
+            directory_descriptor = os.open(output.parent, directory_flags)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _model_weight_audit_context(step_count: int, *, is_training: bool):
+    """Validate audit configuration on every rank before rank-zero selection."""
+    raw_steps = os.getenv("PRIMUS_AUDIT_MODEL_WEIGHT_STEPS")
+    if raw_steps is None:
+        return None
+    if not is_training or os.getenv("PRIMUS_SYNTHETIC_WARMUP_ACTIVE") == "1":
+        return None
+
+    completed_iterations = _parse_model_weight_steps(raw_steps)
+    (
+        completed_training_iteration,
+        next_training_iteration,
+        num_microbatches,
+        train_iters,
+    ) = _model_weight_iteration_coordinate()
+    terminal_iterations = sorted(step for step in completed_iterations if step >= train_iters)
+    if terminal_iterations:
+        first_terminal = terminal_iterations[0]
+        raise RuntimeError(
+            "model-weight audit cannot safely sample completed iteration "
+            f"{first_terminal} with train_iters={train_iters}: overlap-param-gather "
+            "buffers are refreshed by the next model forward, so selected completed "
+            f"iteration {first_terminal} requires training through at least {first_terminal + 1}"
+        )
+
+    raw_sample_size = os.getenv("PRIMUS_AUDIT_MODEL_WEIGHT_SAMPLE_SIZE", "256")
+    if not raw_sample_size.isdigit() or not 1 <= int(raw_sample_size) <= 4096:
+        raise RuntimeError("PRIMUS_AUDIT_MODEL_WEIGHT_SAMPLE_SIZE must be an integer in [1, 4096]")
+    sample_size = int(raw_sample_size)
+
+    output_value = os.getenv("PRIMUS_AUDIT_MODEL_WEIGHT_PATH")
+    if not output_value:
+        raise RuntimeError("PRIMUS_AUDIT_MODEL_WEIGHT_PATH is required when weight auditing is enabled")
+    output_directory = Path(output_value)
+    if not output_directory.is_absolute():
+        raise RuntimeError("PRIMUS_AUDIT_MODEL_WEIGHT_PATH must be absolute")
+
+    if isinstance(step_count, bool) or not isinstance(step_count, int) or step_count <= 0:
+        raise RuntimeError("model-weight audit requires step_count to be a positive integer")
+    forward_step_count = step_count
+
+    # Every deterministic check above runs on every training rank. Branching
+    # earlier can leave peers entering model collectives after rank zero fails.
+    global_rank = (
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else int(os.getenv("RANK", "-1"))
+    )
+    if global_rank != 0:
+        return None
+
+    return {
+        "completed_iterations": completed_iterations,
+        "global_rank": global_rank,
+        "completed_training_iteration": completed_training_iteration,
+        "next_training_iteration": next_training_iteration,
+        "num_microbatches": num_microbatches,
+        "sample_size": sample_size,
+        "output_directory": output_directory,
+        "forward_step_count": forward_step_count,
+    }
+
+
+def _emit_model_weight_summary(
+    model,
+    step_count: int,
+    *,
+    is_training: bool = True,
+    audit_context=_MODEL_WEIGHT_AUDIT_CONTEXT_UNSET,
+) -> None:
+    """Write one rank-0 sampled weight summary at requested training steps."""
+    context = (
+        _model_weight_audit_context(step_count, is_training=is_training)
+        if audit_context is _MODEL_WEIGHT_AUDIT_CONTEXT_UNSET
+        else audit_context
+    )
+    if context is None:
+        return
+    completed_iterations = context["completed_iterations"]
+    global_rank = context["global_rank"]
+    completed_training_iteration = context["completed_training_iteration"]
+    next_training_iteration = context["next_training_iteration"]
+    num_microbatches = context["num_microbatches"]
+    sample_size = context["sample_size"]
+    output_directory = context["output_directory"]
+    forward_step_count = context["forward_step_count"]
+    if (
+        completed_training_iteration not in completed_iterations
+        or completed_training_iteration in _EMITTED_MODEL_WEIGHT_ITERATIONS
+    ):
+        return
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output = output_directory / f"completed_iteration_{completed_training_iteration:07d}.json"
+
+    payload = {
+        "version": 1,
+        "global_rank": global_rank,
+        "completed_training_iteration": completed_training_iteration,
+        "next_training_iteration": next_training_iteration,
+        "forward_step_count": forward_step_count,
+        # Audit convention: zero means the first eligible audit forward for
+        # this completed iteration. It is not arithmetic on cumulative calls.
+        "microbatch_index": 0,
+        "num_microbatches": num_microbatches,
+        "sample_size_per_parameter": sample_size,
+        **_sample_model_weights(model, sample_size),
+    }
+    try:
+        _write_model_weight_summary_once(output, payload)
+    except BaseException:
+        _EMITTED_MODEL_WEIGHT_ITERATIONS.discard(completed_training_iteration)
+        raise
+
+    _EMITTED_MODEL_WEIGHT_ITERATIONS.add(completed_training_iteration)
+    logger.info(
+        "PRIMUS_MODEL_WEIGHT_SUMMARY=%s",
+        json.dumps(
+            {
+                "path": str(output),
+                "sample_count": payload["sample_count"],
+                "sample_finite": payload["sample_finite"],
+                "completed_training_iteration": completed_training_iteration,
+                "next_training_iteration": next_training_iteration,
+                "forward_step_count": forward_step_count,
+            },
+            sort_keys=True,
+            allow_nan=False,
+        ),
+    )
+
+
+def _emit_model_weight_summary_after_forward(
+    model_output,
+    model,
+    step_count: int,
+    *,
+    is_training: bool = True,
+    audit_context=_MODEL_WEIGHT_AUDIT_CONTEXT_UNSET,
+):
+    """Audit an already-evaluated model forward and return its output unchanged.
+
+    Using this helper as a wrapper around ``model(...)`` makes Python finish the
+    model call and all forward pre-hooks before auditing. This is required for
+    current distributed-optimizer buffers when ``overlap_param_gather`` is on.
+    The real call site carries its pre-forward validated context into this
+    wrapper, which still runs before backward and the optimizer update.
+    """
+    _emit_model_weight_summary(
+        model,
+        step_count,
+        is_training=is_training,
+        audit_context=audit_context,
+    )
+    return model_output
 
 
 def prepare_flux_latents(
@@ -198,6 +625,37 @@ def prepare_flux_latents(
 _eager_prepare_flux_latents = prepare_flux_latents
 
 
+def _is_validation_forward(model, _batch=None) -> bool:
+    """Classify from rank-consistent model state, not rank-local batch data."""
+    return not model.training
+
+
+def _pregenerated_diffusion_inputs(
+    batch,
+    *,
+    tp_size,
+    is_validation,
+    compute_dtype,
+    tensor_parallel,
+):
+    """Return deterministic inputs without splitting TP collective participation."""
+    if tp_size == 1:
+        return batch.get("noise"), batch.get("timesteps")
+    if not is_validation:
+        return None, None
+
+    # Evaluation mode is rank-consistent, so every TP rank enters this
+    # collective even though only TP rank zero owns ``batch``.
+    batch_timesteps = tensor_parallel.broadcast_data(
+        ["timesteps"],
+        batch,
+        compute_dtype,
+    ).get("timesteps")
+    if not batch_timesteps.is_cuda:
+        batch_timesteps = batch_timesteps.cuda(non_blocking=True)
+    return None, batch_timesteps
+
+
 def flux_forward_step_func(
     data_iterator,
     model,
@@ -257,9 +715,10 @@ def flux_forward_step_func(
             to isolate training random ops from model forward RNG consumption
             (default: False).
         step_count: Monotonically increasing counter identifying this forward
-            call. Used to derive a unique per-step RNG seed. Managed by the
-            caller (DiffusionPretrainTrainer) and reconstructed from checkpoint
-            state on resume as iteration * num_microbatches.
+            call. Used only to derive a per-step RNG seed and as audit
+            provenance; training-loop coordinates come from Megatron iteration
+            state. Managed by the caller (DiffusionPretrainTrainer) and
+            reconstructed on resume as iteration * num_microbatches.
 
     Returns:
         Tuple of (noise_pred, clean_latents, noise, loss_mask, metrics_dict, is_validation)
@@ -268,7 +727,7 @@ def flux_forward_step_func(
         - noise: Sampled noise [B, C, H, W]
         - loss_mask: Optional mask for variable-length sequences [B] or None
         - metrics_dict: Dictionary with training metrics
-        - is_validation: True when batch contains "timestep" key (MLPerf validation mode)
+        - is_validation: True when the model is in evaluation mode
     """
     # Reseed default CUDA generator per step to isolate training random ops
     # (noise, timesteps, CFG dropout) from model forward RNG consumption.
@@ -486,18 +945,27 @@ def flux_forward_step_func(
     # ~0.015-0.030 (the 10% unconditional samples pay a ~0.15-0.30 MSE
     # penalty), which is enough to materially shift the convergence-crossing
     # step, so we keep it off to match the submission configuration.
-    is_validation = False
-    if batch is not None and "timestep" in batch:
-        is_validation = True
-        val_timesteps = batch["timestep"].float() / 8.0
+    # Evaluation mode is identical on every tensor-parallel rank, including
+    # ranks where ``batch`` is intentionally None. Batch-local classification
+    # can split ranks before model collectives when TP > 1.
+    is_validation = _is_validation_forward(model, batch)
+    if batch is not None and is_validation and "timestep" in batch:
+        val_timesteps = batch["timestep"].to(dtype=compute_dtype) / 8.0
         batch["timesteps"] = val_timesteps
-    elif batch is not None and not model.training:
-        is_validation = True
+    elif batch is not None and is_validation:
         batch_size_val = pooled_prompt_embeds.shape[0]
         val_idx = torch.arange(batch_size_val, device="cuda") % 8
         batch["timestep"] = val_idx
         val_timesteps = val_idx.to(dtype=compute_dtype) / 8.0
         batch["timesteps"] = val_timesteps
+
+    # Validate every rank before noise preparation and the expensive model
+    # forward, then carry rank zero's parsed context through publication.
+    # Direct emitter calls build and validate the same context themselves.
+    model_weight_audit_context = _model_weight_audit_context(
+        step_count,
+        is_training=not is_validation,
+    )
 
     if batch is not None:
         _emit_batch_fingerprint(
@@ -537,23 +1005,13 @@ def flux_forward_step_func(
         )
 
         # Extract pre-generated noise/timesteps from batch (deterministic tests)
-        batch_noise = None
-        batch_timesteps = None
-        if batch is not None:
-            if tp_size == 1:
-                batch_noise = batch.get("noise")
-                batch_timesteps = batch.get("timesteps")
-            else:
-                if "noise" in batch:
-                    batch_noise = tensor_parallel.broadcast_data(["noise"], batch, compute_dtype).get("noise")
-                    if not batch_noise.is_cuda:
-                        batch_noise = batch_noise.cuda(non_blocking=True)
-                if "timesteps" in batch:
-                    batch_timesteps = tensor_parallel.broadcast_data(["timesteps"], batch, compute_dtype).get(
-                        "timesteps"
-                    )
-                    if not batch_timesteps.is_cuda:
-                        batch_timesteps = batch_timesteps.cuda(non_blocking=True)
+        batch_noise, batch_timesteps = _pregenerated_diffusion_inputs(
+            batch,
+            tp_size=tp_size,
+            is_validation=is_validation,
+            compute_dtype=compute_dtype,
+            tensor_parallel=tensor_parallel,
+        )
 
         # Prepare latents (noise, packing, scheduling).
         # Eager wrapper — see _eager_prepare_flux_latents NOTE for why compile
@@ -619,14 +1077,23 @@ def flux_forward_step_func(
     timesteps_norm = sigma_1d.to(dtype=packed_noisy_latents.dtype)
 
     with torch.amp.autocast("cuda", enabled=True, dtype=compute_dtype):
-        noise_pred = model(
-            img=packed_noisy_latents,
-            txt=prompt_embeds,
-            y=pooled_prompt_embeds,
-            timesteps=timesteps_norm,
-            img_ids=img_ids,
-            txt_ids=text_ids,
-            guidance=guidance_vec,
+        # The model call is evaluated before the wrapper. With
+        # overlap_param_gather, this guarantees every forward pre-hook has
+        # refreshed its distributed-optimizer parameter buffer before sampling.
+        noise_pred = _emit_model_weight_summary_after_forward(
+            model(
+                img=packed_noisy_latents,
+                txt=prompt_embeds,
+                y=pooled_prompt_embeds,
+                timesteps=timesteps_norm,
+                img_ids=img_ids,
+                txt_ids=text_ids,
+                guidance=guidance_vec,
+            ),
+            model,
+            step_count,
+            is_training=not is_validation,
+            audit_context=model_weight_audit_context,
         )
 
         # Unpack latents from sequence format
