@@ -163,7 +163,7 @@ From `primus/configs/models/megatron/language_model.yaml`:
 | `recompute_granularity` | `full`, `selective` | `full` recomputes more; max memory savings. |
 | `recompute_method` | `uniform`, `block` | How recomputation is distributed. |
 | `recompute_num_layers` | integer | Layers to recompute when using selective or uniform strategies. |
-| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices from `0` to `num_layers - 1` (the patch resolves block-local indices to global ids via `layer_offset`). Use with `recompute_granularity: full` and supported recompute methods. |
+| `recompute_layer_ids` | list or null | Primus extension: **global** layer indices (the patch resolves block-local indices to global ids via `layer_offset`). Decoder layers are `0` to `num_layers - 1`; the MTP depths continue the numbering, so depth *d* is `num_layers + d`. Use with `recompute_granularity: full` and `recompute_method: null`. |
 
 ### TorchTitan
 

@@ -92,7 +92,10 @@ pp_warmup: false # set to true to decrease iter-1 time when using pp
 dump_pp_data: false
 
 # recompute
-recompute_layer_ids: null # int list; global layer ids, range from 0 to (num_layers - 1)
+# int list; global layer ids. 0..(num_layers-1) are decoder layers and the MTP
+# depths continue the numbering, so MTP depth d is (num_layers + d). Requires
+# recompute_granularity: full and recompute_method: null.
+recompute_layer_ids: null
 
 # dataloader
 dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null

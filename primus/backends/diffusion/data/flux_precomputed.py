@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -50,7 +51,7 @@ class FluxPrecomputedDataset(Dataset):
 
     required_fields = ("t5_encodings", "clip_encodings", "mean", "logvar")
 
-    def __init__(self, dataset_path: str):
+    def __init__(self, dataset_path: str, *, require_timestep: bool = False):
         if not dataset_path:
             raise ValueError("FLUX precomputed dataset requires `dataset_path`.")
         if not os.path.isdir(dataset_path):
@@ -59,6 +60,12 @@ class FluxPrecomputedDataset(Dataset):
 
         self.dataset_path = dataset_path
         self.dataset = load_from_disk(dataset_path)
+        self.require_timestep = require_timestep
+        if require_timestep and "timestep" not in self.dataset.column_names:
+            raise ValueError(
+                "MLPerf FLUX evaluation dataset must contain an integer `timestep` column "
+                "with values in [0, 7]."
+            )
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -68,7 +75,18 @@ class FluxPrecomputedDataset(Dataset):
         missing = [field for field in self.required_fields if field not in sample]
         if missing:
             raise KeyError(f"FLUX precomputed sample missing fields: {missing}")
-        return {field: _to_tensor(sample[field]) for field in self.required_fields}
+        fields = self.required_fields + (("timestep",) if "timestep" in sample else ())
+        result = {field: _to_tensor(sample[field]) for field in fields}
+        if "timestep" in result:
+            timestep = result["timestep"].to(dtype=torch.int64)
+            if timestep.numel() != 1 or not 0 <= int(timestep.item()) <= 7:
+                raise ValueError(
+                    f"MLPerf FLUX evaluation timestep must be a scalar in [0, 7], got {sample['timestep']!r}."
+                )
+            result["timestep"] = timestep
+        elif self.require_timestep:
+            raise KeyError("MLPerf FLUX evaluation sample is missing `timestep`.")
+        return result
 
     def get_collator(self):
         return RawBatchCollator()
@@ -252,6 +270,10 @@ class FluxPrecomputedProcessor:
             raise ValueError(f"FLUX prepare_batch expected non-empty sequence, got {type(batch).__name__}")
 
         keys = ("t5_encodings", "clip_encodings", "mean", "logvar")
+        if "timestep" in batch[0]:
+            if any("timestep" not in sample for sample in batch):
+                raise ValueError("FLUX batch mixes samples with and without MLPerf `timestep` metadata.")
+            keys += ("timestep",)
         collated: dict[str, torch.Tensor] = {}
         for key in keys:
             collated[key] = torch.stack([_to_tensor(sample[key]) for sample in batch], dim=0)
@@ -262,14 +284,23 @@ class FluxPrecomputedProcessor:
     ) -> dict[str, torch.Tensor]:
         tensors = self._collate_raw(batch)
         for key, value in tensors.items():
-            tensors[key] = value.to(device=device, dtype=dtype, non_blocking=True)
+            if key == "timestep":
+                tensors[key] = value.to(device=device, dtype=torch.int64, non_blocking=True)
+            else:
+                tensors[key] = value.to(device=device, dtype=dtype, non_blocking=True)
 
         if self.prompt_dropout_prob > 0.0:
             self._load_empty_encodings()
             assert self._empty_t5 is not None and self._empty_clip is not None
             self._check_empty_encoding_shapes(tensors["t5_encodings"], tensors["clip_encodings"])
             bsz = tensors["t5_encodings"].shape[0]
-            drop_mask = torch.rand((bsz,), device=device) < self.prompt_dropout_prob
+            # TorchTitan draws CFG dropout from Python's rank-distinct RNG.
+            # Do not consume the CUDA RNG used for latent noise/timesteps.
+            drop_mask = torch.tensor(
+                [random.random() < self.prompt_dropout_prob for _ in range(bsz)],
+                device=device,
+                dtype=torch.bool,
+            )
             if drop_mask.any():
                 tensors["t5_encodings"][drop_mask] = self._empty_t5.to(device=device, dtype=dtype)
                 tensors["clip_encodings"][drop_mask] = self._empty_clip.to(device=device, dtype=dtype)
@@ -327,7 +358,7 @@ class FluxRawImageTextProcessor:
             if image is None:
                 continue
             prompt = str(sample.get("prompt", ""))
-            if self.prompt_dropout_prob > 0.0 and torch.rand(1).item() < self.prompt_dropout_prob:
+            if self.prompt_dropout_prob > 0.0 and random.random() < self.prompt_dropout_prob:
                 prompt = ""
             images.append(image)
             prompts.append(prompt)

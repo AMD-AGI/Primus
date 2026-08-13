@@ -23,9 +23,9 @@ beautifulsoup4==4.15.0
     # via pydata-sphinx-theme
 breathe==4.36.0
     # via rocm-docs-core
-certifi==2026.6.17
+certifi==2026.7.22
     # via requests
-cffi==2.1.0
+cffi==2.1.1
     # via
     #   cryptography
     #   pynacl
@@ -37,12 +37,10 @@ click==8.4.2
     #   sphinx-external-toc
 comm==0.2.3
     # via ipykernel
-cryptography==49.0.0
+cryptography==50.0.0
     # via pyjwt
 debugpy==1.8.21
     # via ipykernel
-decorator==5.3.1
-    # via ipython
 docutils==0.22.4
     # via
     #   myst-parser
@@ -51,15 +49,15 @@ docutils==0.22.4
     #   sphinx-markdown-builder
 executing==2.2.1
     # via stack-data
-fastjsonschema==2.21.2
+fastjsonschema==2.22.1
     # via
     #   nbformat
     #   rocm-docs-core
 gitdb==4.0.12
     # via gitpython
-gitpython==3.1.53
+gitpython==3.1.59
     # via rocm-docs-core
-greenlet==3.5.3
+greenlet==3.5.5
     # via sqlalchemy
 idna==3.18
     # via requests
@@ -71,7 +69,7 @@ importlib-metadata==9.0.0
     #   myst-nb
 ipykernel==7.3.0
     # via myst-nb
-ipython==9.15.0
+ipython==9.16.1
     # via
     #   ipykernel
     #   myst-nb
@@ -83,6 +81,7 @@ jinja2==3.1.6
     # via
     #   myst-parser
     #   sphinx
+    #   sphinxcontrib-mermaid
 jsonschema==4.26.0
     # via nbformat
 jsonschema-specifications==2025.9.1
@@ -121,14 +120,14 @@ nbclient==0.11.0
     # via
     #   jupyter-cache
     #   myst-nb
-nbformat==5.10.4
+nbformat==5.11.0
     # via
     #   jupyter-cache
     #   myst-nb
     #   nbclient
 nest-asyncio2==1.7.2
     # via ipykernel
-packaging==26.2
+packaging==26.3
     # via
     #   ipykernel
     #   pydata-sphinx-theme
@@ -137,9 +136,9 @@ parso==0.8.7
     # via jedi
 pexpect==4.9.0
     # via ipython
-platformdirs==4.11.0
+platformdirs==4.11.2
     # via jupyter-core
-prompt-toolkit==3.0.52
+prompt-toolkit==3.0.53
     # via ipython
 psutil==7.2.2
     # via
@@ -177,6 +176,7 @@ pyyaml==6.0.3
     #   myst-parser
     #   rocm-docs-core
     #   sphinx-external-toc
+    #   sphinxcontrib-mermaid
 pyzmq==27.1.0
     # via
     #   ipykernel
@@ -203,7 +203,7 @@ smmap==5.0.3
     # via gitdb
 snowballstemmer==3.1.1
     # via sphinx
-soupsieve==2.9.1
+soupsieve==2.9.2
     # via beautifulsoup4
 sphinx==9.1.0
     # via
@@ -219,6 +219,7 @@ sphinx==9.1.0
     #   sphinx-markdown-builder
     #   sphinx-multitoc-numbering
     #   sphinx-notfound-page
+    #   sphinxcontrib-mermaid
 sphinx-book-theme==1.1.4
     # via rocm-docs-core
 sphinx-copybutton==0.5.2
@@ -241,6 +242,8 @@ sphinxcontrib-htmlhelp==2.1.0
     # via sphinx
 sphinxcontrib-jsmath==1.0.1
     # via sphinx
+sphinxcontrib-mermaid==2.1.0
+    # via -r docs/sphinx/requirements.in
 sphinxcontrib-qthelp==2.0.0
     # via sphinx
 sphinxcontrib-serializinghtml==2.0.0
@@ -253,11 +256,11 @@ tabulate==0.10.0
     # via
     #   jupyter-cache
     #   sphinx-markdown-builder
-tornado==6.5.7
+tornado==6.5.8
     # via
     #   ipykernel
     #   jupyter-client
-traitlets==5.15.1
+traitlets==5.16.1
     # via
     #   ipykernel
     #   ipython

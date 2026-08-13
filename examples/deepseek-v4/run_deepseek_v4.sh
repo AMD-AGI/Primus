@@ -261,6 +261,30 @@ fi
 
 PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
 
+# Two ways to ask for activation recompute, mutually exclusive:
+#
+#   PRIMUS_RECOMPUTE_LAYERS=<n>          the first n layers of each PP stage
+#   PRIMUS_RECOMPUTE_LAYER_IDS="[a,b,c]" exactly these GLOBAL layer ids
+#
+# The id space runs 0..num_layers-1 for the decoder and continues into the MTP
+# depths, so with --num_layers 43 --mtp_num_layers 1 the MTP module is id 43.
+# recompute_layer_ids owns the whole selection, so it also has to switch
+# recompute_method off -- Primus's validator rejects any non-None method.
+PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
+if [ -n "$PRIMUS_RECOMPUTE_LAYER_IDS" ]; then
+  RECOMPUTE_CLI_ARGS=(
+    --recompute_layer_ids "$PRIMUS_RECOMPUTE_LAYER_IDS"
+    --recompute_granularity full
+    --recompute_method None
+  )
+else
+  RECOMPUTE_CLI_ARGS=(
+    --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS"
+    --recompute_granularity full
+    --recompute_method block
+  )
+fi
+
 export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
 export BACKEND_PATH=${BACKEND_PATH:-"$(pwd)/third_party/Megatron-LM"}
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
@@ -377,9 +401,7 @@ fi
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \
   "${FP8_PARAM_GATHER_CLI_ARGS[@]}" \
-  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
-  --recompute_granularity full \
-  --recompute_method block \
+  "${RECOMPUTE_CLI_ARGS[@]}" \
   --overlap_grad_reduce "$PRIMUS_OVERLAP_GRAD_REDUCE" \
   --overlap_param_gather "$PRIMUS_OVERLAP_PARAM_GATHER" \
   --disable_last_saving True \
