@@ -85,6 +85,7 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             (f"{_PKG}.models.ideogram4.context_parallel", "Ideogram-4 context-parallel plan"),
             (f"{_PKG}.models.ideogram4.parallelize", "Ideogram-4 real activation checkpointing"),
             (f"{_PKG}.models.ideogram4.zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
+            (f"{_PKG}.models.ideogram4.megatron_fsdp", "Ideogram-4 Megatron-FSDP (ZeRO-1/2/3)"),
             (f"{_PKG}.models.ideogram4.profile", "Ideogram-4 torch.profiler train-loop wrapper"),
         )
         import importlib

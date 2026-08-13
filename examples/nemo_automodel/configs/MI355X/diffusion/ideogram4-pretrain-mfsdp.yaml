@@ -1,0 +1,68 @@
+# Primus EXP — Ideogram-4 single-stream T2I PRETRAIN on MEGATRON-FSDP (ZeRO-1).
+# =============================================================================
+# Megatron-FSDP sibling of `ideogram4-pretrain.yaml` (FSDP2) and
+# `ideogram4-pretrain-ddp.yaml` (DDP + ZeroRedundancyOptimizer). Everything
+# Ideogram-specific is still a no-fork Primus hook; this one adds
+#   - fsdp.backend: megatron_fsdp + PRIMUS_IDEOGRAM_MFSDP=1 -> MegatronFSDPManager
+#     (primus/backends/nemo_automodel/models/ideogram4/megatron_fsdp.py)
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   PYTHONPATH=<primus>:<primus>/third_party/Automodel \
+#   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PRIMUS_IDEOGRAM_MFSDP=1 \
+#   torchrun --nproc_per_node=8 --nnodes=1 --master_port=29534 \
+#     primus/cli/main.py train pretrain \
+#     --config examples/nemo_automodel/configs/MI355X/diffusion/ideogram4-pretrain-mfsdp.yaml
+#
+# PRIMUS_IDEOGRAM_MFSDP=1 is not optional. Without it the hook does not install,
+# `fsdp.backend` is dropped on the floor by Automodel, and the run silently
+# executes as FSDP2 with an unsharded optimizer — which looks fine and measures
+# nothing this preset exists to measure.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:ideogram4-pretrain-mfsdp}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: ideogram4_mfsdp_pre_trainer.yaml
+    model: ideogram4.yaml
+
+    overrides:
+      # THE ONE THAT SILENTLY INVALIDATES EVERY NUMBER.
+      #
+      # The model preset ships split dtypes (torch_dtype: float32 /
+      # compute_dtype: bfloat16). That is legal on FSDP2 only because FSDP2 casts
+      # parameters to the compute dtype as it all-gathers them. Megatron-FSDP has
+      # no compute-dtype knob, and under zero_dp_strategy=1 parameters are never
+      # gathered, so there is no point at which such a cast could happen: the model
+      # would materialise in fp32 and the whole forward and backward would run in
+      # fp32, at roughly half the throughput, for reasons that have nothing to do
+      # with ZeRO level.
+      #
+      # So the dtype arrangement is inverted relative to the FSDP2 presets. This
+      # LOOKS unmatched and is not — do not "fix" it back. FSDP2 stores fp32 and
+      # casts down on gather; Megatron-FSDP stores bf16 and keeps a separate fp32
+      # main-weight buffer via preserve_fp32_weights when that is asked for.
+      #
+      # The hook raises rather than letting an fp32 run start, so a mistake here is
+      # loud. It is spelled out anyway because the error is the only thing standing
+      # between this preset and a plausible-looking invalid benchmark.
+      model:
+        torch_dtype: bfloat16
+        compute_dtype: bfloat16
+      step_scheduler:
+        max_steps: 60            # overfit-smoke cap; remove for a real pretrain run
+        local_batch_size: 2
+        global_batch_size: 16    # 2 x dp8 (grad_acc = 1)
+        log_remote_every_steps: 1
+      optimizer:
+        lr: 1.0e-4
+      data:
+        dataloader:
+          num_samples: 64
+          grid_h: 16
+          grid_w: 16
+          max_text_tokens: 32
+      checkpoint:
+        enabled: false

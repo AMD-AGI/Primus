@@ -1,0 +1,161 @@
+# NeMo AutoModel pre_trainer module config — Ideogram-4 single-stream
+# rectified-flow T2I pretrain on MEGATRON-FSDP (Primus backend: nemo_automodel).
+#
+# Megatron-FSDP sibling of `ideogram4_pre_trainer.yaml` (FSDP2) and
+# `ideogram4_ddp_pre_trainer.yaml` (DDP / ZeRO-1 via ZeroRedundancyOptimizer):
+# identical recipe, optimizer, data and flow-matching wiring, with the `fsdp:`
+# block rewritten for the Megatron-FSDP backend. A dedicated preset rather than
+# an override of the FSDP2 one so no FSDP2-only key leaks through the deep-merge
+# into MegatronFSDPConfig, whose constructor rejects unknown fields.
+#
+# Requires PRIMUS_IDEOGRAM_MFSDP=1 in the launch env: that installs the hook
+# (primus/backends/nemo_automodel/models/ideogram4/megatron_fsdp.py) that routes
+# `fsdp.backend: megatron_fsdp` to MegatronFSDPManager and shards the optimizer
+# the recipe builds after parallelization. Without it the backend key is dropped
+# and the run silently falls back to FSDP2.
+#
+# Also requires `model.torch_dtype: bfloat16` — see the `fsdp:` block below.
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 1
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.ideogram4.data.synthetic.SyntheticIdeogram4DataloaderConfig
+    num_samples: 64
+    in_channels: 128
+    grid_h: 16
+    grid_w: 16
+    max_text_tokens: 32
+    min_text_tokens: 28
+    llm_features_dim: 53248
+    feature_scale: 0.1
+    latent_scale: 1.0
+    seed: 1234
+    shuffle: true
+    # Keep the batch size constant: cu_seqlens has 2*B+1 entries, so a short final
+    # batch changes its shape (and hidden_states') and recompiles the graph.
+    drop_last: true
+    num_workers: 0
+    pin_memory: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: ideogram4
+  adapter_kwargs:
+    in_channels: 128
+    predict_negative_velocity: true
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  cfg_dropout_prob: 0.0
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  # Routes _build_diffusion_parallel_manager_args to MegatronFSDPConfig instead of
+  # the hardcoded fsdp2 strategy. Only read when PRIMUS_IDEOGRAM_MFSDP=1.
+  backend: megatron_fsdp
+  tp_size: 1
+  cp_size: 1
+  # pp_size and ep_size must be 1 on this backend (mesh_utils enforces it), and
+  # dp_replicate_size has no meaning here. dp_size is derived from world size.
+  pp_size: 1
+  dp_replicate_size: 1
+
+  # 1 == ZeRO-1 (optimizer state sharded, params and grads replicated), which is
+  # the point of this preset: two shard-exchange units per step against three for
+  # ZeRO-3, ring collectives only, and no DTensors in the traced region. Set 2 for
+  # ZeRO-2 or 3 for ZeRO-3 to compare implementations at a matched ZeRO level.
+  #
+  # Expect "Warning: MegatronFSDP zero_dp_strategy is not 3. Parameters will not be
+  # sharded." on rank 0. That is upstream correctly describing ZeRO-1, not a
+  # misconfiguration, and it reads almost exactly like a silent-bypass warning.
+  zero_dp_strategy: 1
+
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+
+  # bf16 gradient reduction, matching the FSDP2 presets' `reduce_dtype: bfloat16`.
+  # With this false the reduce-scatter carries bf16 and the two-unit traffic
+  # advantage is real rather than eaten by fp32 communication.
+  grad_reduce_in_fp32: false
+
+  # bf16 master weights and bf16 Adam moments, matching what the FSDP2 arms do when
+  # they are launched with model.torch_dtype=bfloat16. Flip to true for sharded
+  # fp32 master weights — but then the FSDP2 comparators must use the model
+  # preset's fp32 storage, or the benchmark is comparing two different precisions.
+  # Do not carry false into a convergence claim.
+  preserve_fp32_weights: false
+
+  # Off while measuring throughput: the precise per-parameter NaN check costs real
+  # time. (check_for_nan_in_grad is a no-op on megatron-fsdp 0.5.0; this replaced it.)
+  report_nan_in_param_grad: false
+
+  # Not a MegatronFSDPConfig field: the hook consumes it and calls per-layer compile
+  # on the wrapped module itself. Safe at zero_dp_strategy=1, where parameters stay
+  # replicated and the traced region sees plain stable tensors; expect graph breaks
+  # or worse at stages 2 and 3, which swap parameter storage under the graph.
+  enable_compile: false
+
+  # There is no activation checkpointing on this backend at all: MegatronFSDPManager
+  # logs and skips it. Left explicit so the AC-off comparison is deliberate rather
+  # than inherited, and so nothing later assumes AC is available here.
+  activation_checkpointing: false
+
+  megatron_fsdp_unit_modules:
+    - diffusers.models.transformers.transformer_ideogram4.Ideogram4TransformerBlock
+
+checkpoint:
+  # Unresolved on this path: MegatronFSDP holds the real model as `self.module` and
+  # overrides neither state_dict nor the key prefix, so a saved checkpoint carries
+  # `module.`-prefixed keys that Ideogram4Transformer2DModel.from_pretrained rejects.
+  # The hook stamps _pre_shard_hf_state_dict_keys on the inner module (mirroring the
+  # DDP branch), but that is unvalidated. Keep this false.
+  enabled: false
+  checkpoint_dir: /checkpoints/ideogram4_primus_pretrain_mfsdp
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null
