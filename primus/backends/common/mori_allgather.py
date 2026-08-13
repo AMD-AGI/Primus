@@ -36,6 +36,7 @@ else:
 
 _MORI_SHMEM_INITIALIZED = False
 _MIB = 1 << 20
+_GIB = 1 << 30
 _DEFAULT_SLICE_MIN_BYTES = 8 * _MIB
 
 
@@ -83,6 +84,31 @@ def _compact_workspace_sizes(
     fallback_output_bytes = world_size * fallback_per_rank
     workspace_bytes = max(sliced_ring_bytes, fallback_output_bytes)
     return fallback_per_rank, workspace_bytes
+
+
+def _auto_shmem_heap_bytes(
+    input_buffer_size: int,
+    output_buffer_size: int,
+    world_size: int,
+    ranks_per_node: int,
+    *,
+    host_proxy: bool = False,
+    host_proxy_sdma: bool = False,
+) -> int:
+    """Size MORI's static heap from the collective workspaces it will own."""
+    num_nodes = world_size // ranks_per_node
+    if host_proxy:
+        data_bytes = output_buffer_size + output_buffer_size // max(num_nodes, 1) if host_proxy_sdma else 0
+    elif num_nodes >= 2:
+        intra_bytes = max(ranks_per_node * input_buffer_size, output_buffer_size)
+        data_bytes = intra_bytes + output_buffer_size
+    else:
+        data_bytes = input_buffer_size + output_buffer_size
+
+    margin_bytes = max(512 * _MIB, data_bytes // 4)
+    required_bytes = data_bytes + margin_bytes
+    rounded_bytes = ((required_bytes + _GIB - 1) // _GIB) * _GIB
+    return max(2 * _GIB, rounded_bytes)
 
 
 def _safe_log_rank_0(message: str) -> None:
@@ -155,21 +181,28 @@ class _CudaEventWork:
         return True
 
 
-class _DeviceDeferredHostSyncWork(dist.distributed_c10d.Work):
-    """Defer MORI's reliable host landing fence until FSDP consumes the AG."""
+class _DeviceDeferredEventWork(dist.distributed_c10d.Work):
+    """Insert a device-side dependency when FSDP consumes the MORI result."""
 
-    def __init__(self, stream: torch.cuda.Stream, event: torch.cuda.Event | None = None) -> None:
+    def __init__(
+        self,
+        stream: torch.cuda.Stream,
+        device: torch.device,
+        event: torch.cuda.Event | None = None,
+    ) -> None:
         super().__init__()
         self._stream = stream
+        self._device = device
         self._event = event
         self._done = False
 
     def wait(self, timeout=None) -> bool:  # noqa: ARG002
         if not self._done:
+            consumer_stream = torch.cuda.current_stream(self._device)
             if self._event is not None:
-                self._event.synchronize()
+                consumer_stream.wait_event(self._event)
             else:
-                self._stream.synchronize()
+                consumer_stream.wait_stream(self._stream)
             self._done = True
         return True
 
@@ -210,7 +243,6 @@ class MoriAllGather(_FSDPAllGather):
             ) from _FSDP_ALL_GATHER_IMPORT_ERROR
 
         os.environ.setdefault("MORI_ENABLE_SDMA", "1")
-        os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
         os.environ.setdefault("MORI_HIER_CUDA_GRAPH", "0")
         if "MORI_SOCKET_IFNAME" not in os.environ and "NCCL_SOCKET_IFNAME" in os.environ:
             os.environ["MORI_SOCKET_IFNAME"] = os.environ["NCCL_SOCKET_IFNAME"].lstrip("=")
@@ -316,6 +348,20 @@ class MoriAllGather(_FSDPAllGather):
         self._output_buffer = torch.empty(numel, dtype=dtype, device=device)
         return self._output_buffer
 
+    def _registration_output(self, output_tensor: torch.Tensor) -> torch.Tensor:
+        """Use the persistent backing extent for device-path IPC registration."""
+        backing = self._output_buffer
+        if (
+            self._host_proxy
+            or backing is None
+            or backing.dtype != output_tensor.dtype
+            or backing.device != output_tensor.device
+            or backing.data_ptr() != output_tensor.data_ptr()
+            or backing.numel() < output_tensor.numel()
+        ):
+            return output_tensor
+        return backing
+
     def _ranks_per_node_value(self, world_size: int) -> int:
         if self._ranks_per_node is not None:
             return self._ranks_per_node
@@ -339,36 +385,15 @@ class MoriAllGather(_FSDPAllGather):
         ):
             return self._collective
 
-        ensure_mori_shmem_initialized("default")
-
-        shmem = importlib.import_module("mori.shmem")
-        ccl = importlib.import_module("mori.ccl")
-        my_pe = shmem.shmem_mype()
-        npes = shmem.shmem_npes()
-        if my_pe != rank or npes != world_size:
-            raise RuntimeError(
-                "MORI FSDP HierAllGather requires the FSDP process group to match "
-                f"SHMEM PEs, got rank/world_size={rank}/{world_size} and "
-                f"my_pe/npes={my_pe}/{npes}"
-            )
-
         cap = max(required_cap, self._cap_bytes)
         ranks_per_node = self._ranks_per_node_value(world_size)
+        num_nodes = world_size // ranks_per_node
         if self._host_proxy:
-            if self._collective is not None:
-                raise RuntimeError(
-                    "HostProxyHierAllGather built with cap "
-                    f"{self._cap_bytes} B but requires {required_cap} B; "
-                    "raise MORI_FSDP_HOSTPROXY_CAP_MB"
-                )
-            collective = ccl.HostProxyHierAllGather(
-                rank,
-                world_size,
-                ranks_per_node,
-                output_buffer_size=cap * world_size,
-            )
+            input_buffer_size = cap
+            output_buffer_size = cap * world_size
+            slice_min_bytes = _DEFAULT_SLICE_MIN_BYTES
+            compact = False
         else:
-            num_nodes = world_size // ranks_per_node
             compact = num_nodes >= 2 and _env_flag("MORI_FSDP_COMPACT_WORKSPACE", True)
             if compact:
                 slice_min_bytes = _env_nonnegative_int(
@@ -385,6 +410,47 @@ class MoriAllGather(_FSDPAllGather):
                 input_buffer_size = cap
                 output_buffer_size = cap * world_size
 
+        heap_bytes = _auto_shmem_heap_bytes(
+            input_buffer_size,
+            output_buffer_size,
+            world_size,
+            ranks_per_node,
+            host_proxy=self._host_proxy,
+            host_proxy_sdma=_env_flag("MORI_HOSTPROXY_SDMA_INTRA", False),
+        )
+        if "MORI_SHMEM_HEAP_SIZE" not in os.environ:
+            os.environ["MORI_SHMEM_HEAP_SIZE"] = f"{heap_bytes // _GIB}G"
+            _safe_log_rank_0(
+                f"[MORI:FSDP] auto-sized MORI SHMEM heap to {heap_bytes // _GIB} GiB"
+            )
+
+        ensure_mori_shmem_initialized("default")
+
+        shmem = importlib.import_module("mori.shmem")
+        ccl = importlib.import_module("mori.ccl")
+        my_pe = shmem.shmem_mype()
+        npes = shmem.shmem_npes()
+        if my_pe != rank or npes != world_size:
+            raise RuntimeError(
+                "MORI FSDP HierAllGather requires the FSDP process group to match "
+                f"SHMEM PEs, got rank/world_size={rank}/{world_size} and "
+                f"my_pe/npes={my_pe}/{npes}"
+            )
+
+        if self._host_proxy:
+            if self._collective is not None:
+                raise RuntimeError(
+                    "HostProxyHierAllGather built with cap "
+                    f"{self._cap_bytes} B but requires {required_cap} B; "
+                    "raise MORI_FSDP_HOSTPROXY_CAP_MB"
+                )
+            collective = ccl.HostProxyHierAllGather(
+                rank,
+                world_size,
+                ranks_per_node,
+                output_buffer_size=output_buffer_size,
+            )
+        else:
             _safe_log_rank_0(
                 "[MORI:FSDP] building HierAllGather "
                 f"cap={cap} B input_workspace={input_buffer_size} B "
@@ -454,7 +520,10 @@ class MoriAllGather(_FSDPAllGather):
             collective._pending = work
             return work
 
-        ok = collective(input_tensor, output_tensor, input_tensor.numel(), stream=stream)
+        registration_output = self._registration_output(output_tensor)
+        if registration_output is not output_tensor:
+            registration_output.record_stream(stream)
+        ok = collective(input_tensor, registration_output, input_tensor.numel(), stream=stream)
         if not ok:
             raise RuntimeError("MORI HierAllGather call failed")
 
@@ -463,7 +532,7 @@ class MoriAllGather(_FSDPAllGather):
             if self._event_fence:
                 event = torch.cuda.Event()
                 event.record(stream)
-            return _DeviceDeferredHostSyncWork(stream, event)
+            return _DeviceDeferredEventWork(stream, device, event)
 
         if async_op:
             event = torch.cuda.Event()

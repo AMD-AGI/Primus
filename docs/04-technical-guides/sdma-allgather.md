@@ -171,7 +171,10 @@ The adapter:
 3. Inspects every compatible FSDP parameter group before training, computes the
    largest padded per-rank shard using its effective communication dtype, and
    builds `HierAllGather` once at that capacity.
-4. Launches MORI on the current CUDA stream and returns a Work-like object when
+4. Derives the symmetric-heap size from those same workspaces before MORI SHMEM
+   initializes. The pinned MORI static-heap default is 4 GiB; Primus uses a
+   calculated 2 GiB minimum with at least 512 MiB of workspace headroom.
+5. Launches MORI on the current CUDA stream and returns a Work-like object when
    FSDP requests asynchronous completion.
 
 

@@ -41,7 +41,6 @@ fi
 # MORI all-gather uses SDMA for the intra-node leg. Allow an explicit caller
 # value to win, but default it on for this feature.
 export MORI_ENABLE_SDMA="${MORI_ENABLE_SDMA:-1}"
-export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-8G}"
 
 # MORI's single-node eager path is the correctness-safe default on the ROCm
 # versions used by Primus v26.4. Explicit user settings still win.

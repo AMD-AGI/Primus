@@ -12,6 +12,34 @@ import torch
 from primus.backends.common import mori_allgather
 
 
+def test_deferred_work_waits_on_device_event_without_host_sync(monkeypatch):
+    waited_events = []
+
+    class ConsumerStream:
+        def wait_event(self, event):
+            waited_events.append(event)
+
+        def wait_stream(self, stream):
+            raise AssertionError("event path should not wait on the producer stream")
+
+    class Event:
+        def synchronize(self):
+            raise AssertionError("wait must not synchronize the host")
+
+    event = Event()
+    monkeypatch.setattr(mori_allgather.torch.cuda, "current_stream", lambda _: ConsumerStream())
+    work = mori_allgather._DeviceDeferredEventWork(
+        stream=SimpleNamespace(),
+        device=torch.device("cuda", 0),
+        event=event,
+    )
+
+    assert work.wait()
+    assert work.wait()
+    assert waited_events == [event]
+    assert work.is_completed()
+
+
 def test_dense_node_defaults_to_async_completion(monkeypatch):
     monkeypatch.setenv("WORLD_SIZE", "16")
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
@@ -60,6 +88,34 @@ def test_compact_workspace_sizes_reject_invalid_topology():
         )
 
 
+def test_auto_shmem_heap_uses_two_gib_for_compact_workspace():
+    mib = 1 << 20
+    gib = 1 << 30
+
+    heap_bytes = mori_allgather._auto_shmem_heap_bytes(
+        input_buffer_size=8 * mib,
+        output_buffer_size=762 * mib,
+        world_size=16,
+        ranks_per_node=8,
+    )
+
+    assert heap_bytes == 2 * gib
+
+
+def test_auto_shmem_heap_grows_for_large_workspace():
+    mib = 1 << 20
+    gib = 1 << 30
+
+    heap_bytes = mori_allgather._auto_shmem_heap_bytes(
+        input_buffer_size=8 * mib,
+        output_buffer_size=6 * gib,
+        world_size=16,
+        ranks_per_node=8,
+    )
+
+    assert heap_bytes == 15 * gib
+
+
 def test_observe_fsdp_param_group_uses_effective_dtype_and_rounds_up():
     adapter = mori_allgather.MoriAllGather.__new__(mori_allgather.MoriAllGather)
     adapter._observed_max_shard_bytes = 0
@@ -73,6 +129,31 @@ def test_observe_fsdp_param_group_uses_effective_dtype_and_rounds_up():
 
     assert adapter.observe_fsdp_param_group(group) == 1 << 20
     assert adapter._observed_max_shard_bytes == 1 << 20
+
+
+def test_registration_output_uses_persistent_backing_extent():
+    adapter = mori_allgather.MoriAllGather.__new__(mori_allgather.MoriAllGather)
+    adapter._host_proxy = False
+    adapter._output_buffer = torch.empty(1024)
+    output_view = adapter._output_buffer.narrow(0, 0, 512)
+
+    registration_output = adapter._registration_output(output_view)
+
+    assert registration_output is adapter._output_buffer
+    assert registration_output.numel() == 1024
+
+
+def test_registration_output_rejects_offset_view_and_host_proxy():
+    adapter = mori_allgather.MoriAllGather.__new__(mori_allgather.MoriAllGather)
+    adapter._host_proxy = False
+    adapter._output_buffer = torch.empty(1024)
+    offset_view = adapter._output_buffer.narrow(0, 1, 512)
+
+    assert adapter._registration_output(offset_view) is offset_view
+
+    adapter._host_proxy = True
+    prefix_view = adapter._output_buffer.narrow(0, 0, 512)
+    assert adapter._registration_output(prefix_view) is prefix_view
 
 
 def test_observed_capacity_builds_compact_collective_once(monkeypatch):
@@ -94,8 +175,14 @@ def test_observed_capacity_builds_compact_collective_once(monkeypatch):
             return fake_ccl
         raise AssertionError(f"unexpected import: {name}")
 
+    initialized_heaps = []
     monkeypatch.setenv("MORI_FSDP_COMPACT_WORKSPACE", "1")
-    monkeypatch.setattr(mori_allgather, "ensure_mori_shmem_initialized", lambda _: None)
+    monkeypatch.delenv("MORI_SHMEM_HEAP_SIZE", raising=False)
+    monkeypatch.setattr(
+        mori_allgather,
+        "ensure_mori_shmem_initialized",
+        lambda _: initialized_heaps.append(mori_allgather.os.environ["MORI_SHMEM_HEAP_SIZE"]),
+    )
     monkeypatch.setattr(mori_allgather.importlib, "import_module", import_module)
     monkeypatch.setattr(mori_allgather, "_safe_log_rank_0", lambda _: None)
 
@@ -112,6 +199,7 @@ def test_observed_capacity_builds_compact_collective_once(monkeypatch):
     assert adapter._get_collective(group, 380 * mib) is collective
     assert adapter._get_collective(group, 128 * mib) is collective
     assert len(calls) == 1
+    assert initialized_heaps == ["2G"]
 
     args, kwargs = calls[0]
     assert args == (0, 16)
