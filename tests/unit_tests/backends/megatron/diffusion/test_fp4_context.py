@@ -56,9 +56,7 @@ class TestGetFp4ContextBackendSelection:
         config = _fp4_config(fp4_use_native_te_autocast=True)
         te_sentinel = contextlib.nullcontext()
 
-        with patch.object(
-            fp4_utils, "_primus_turbo_enabled", return_value=True
-        ), patch.object(
+        with patch.object(fp4_utils, "_primus_turbo_enabled", return_value=True), patch.object(
             fp4_utils, "get_fp4_recipe", return_value=(MagicMock(name="recipe"), "")
         ), patch(
             "megatron.core.parallel_state.model_parallel_is_initialized",
@@ -79,13 +77,9 @@ class TestGetFp4ContextBackendSelection:
         config = _fp4_config(fp4_use_native_te_autocast=False)
         turbo_sentinel = contextlib.nullcontext()
 
-        with patch.object(
-            fp4_utils, "_primus_turbo_enabled", return_value=True
-        ), patch.object(
+        with patch.object(fp4_utils, "_primus_turbo_enabled", return_value=True), patch.object(
             fp4_utils, "get_fp4_recipe", return_value=(MagicMock(name="recipe"), "")
-        ), patch.object(
-            fp4_utils, "get_fp4_quant_config", return_value=(MagicMock(name="quant"), "")
-        ), patch(
+        ), patch.object(fp4_utils, "get_fp4_quant_config", return_value=(MagicMock(name="quant"), "")), patch(
             "megatron.core.parallel_state.model_parallel_is_initialized",
             return_value=False,
         ), patch(

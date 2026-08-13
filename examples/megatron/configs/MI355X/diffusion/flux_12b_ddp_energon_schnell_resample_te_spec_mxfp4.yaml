@@ -24,7 +24,7 @@
 #   export TORCH_BLAS_PREFER_HIPBLASLT=1
 #   export NVTE_FP4_USE_TUNED_GEMM=1
 #   export NVTE_FP4_LOG_GEMM_SHAPES=0
-#   unset NVTE_FLASH_ATTN 
+#   unset NVTE_FLASH_ATTN
 #   unset NVTE_UNFUSED_ATTN
 
 work_group: ${PRIMUS_TEAM:amd}
@@ -118,7 +118,7 @@ modules:
       adam_beta2: 0.95
       adam_eps: 1.0e-8
       clip_grad: 1.0
-      
+
       # Learning rate scheduler (warmup-hold, no decay)
       lr_warmup_iters: 1600
       lr_decay_iters: 4000

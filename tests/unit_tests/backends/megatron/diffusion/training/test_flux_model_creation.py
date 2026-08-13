@@ -287,9 +287,7 @@ class TestFluxModelCreation:
         assert mock_args.torch_compile_mode == "reduce-overhead"
         assert mock_args.torch_compile_fullgraph is True
 
-    def test_build_flux_config_from_yaml_attention_backend_string(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_build_flux_config_from_yaml_attention_backend_string(self, monkeypatch: pytest.MonkeyPatch):
         """A YAML string like 'fused' is converted to the AttnBackend enum."""
         from megatron.core.transformer.enums import AttnBackend
 
@@ -300,9 +298,7 @@ class TestFluxModelCreation:
 
         assert config.attention_backend is AttnBackend.fused
 
-    def test_build_flux_config_from_yaml_attention_backend_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_build_flux_config_from_yaml_attention_backend_default(self, monkeypatch: pytest.MonkeyPatch):
         """An omitted attention_backend falls back to AttnBackend.auto."""
         from megatron.core.transformer.enums import AttnBackend
 
@@ -313,9 +309,7 @@ class TestFluxModelCreation:
 
         assert config.attention_backend is AttnBackend.auto
 
-    def test_build_flux_config_from_yaml_attention_backend_null(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_build_flux_config_from_yaml_attention_backend_null(self, monkeypatch: pytest.MonkeyPatch):
         """An explicit `attention_backend: null` (None) is coerced to auto.
 
         Guards against the AttributeError regression where None flowed past the
@@ -357,9 +351,7 @@ class TestFluxModelCreation:
 
         assert config.attention_backend is AttnBackend.fused
 
-    def test_build_flux_config_from_yaml_attention_backend_invalid(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_build_flux_config_from_yaml_attention_backend_invalid(self, monkeypatch: pytest.MonkeyPatch):
         """An unknown attention_backend raises a clear ValueError listing choices."""
         backend_args = SimpleNamespace(mock_data=True, attention_backend="bogus")
         trainer = _build_flux_trainer(monkeypatch, backend_args)
