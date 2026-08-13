@@ -137,8 +137,7 @@ def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, c
     marker_lines = [
         record.message
         for record in caplog.records
-        if record.name == _FLUX_TRAINER_LOGGER
-        and record.message.startswith("PRIMUS_LINEAR_CLASS_CENSUS=")
+        if record.name == _FLUX_TRAINER_LOGGER and record.message.startswith("PRIMUS_LINEAR_CLASS_CENSUS=")
     ]
     assert len(marker_lines) == 1
     payload = json.loads(marker_lines[0].split("=", 1)[1])
