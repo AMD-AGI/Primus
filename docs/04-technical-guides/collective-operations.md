@@ -32,7 +32,7 @@ Not every rank talks to every other rank in every step. **Process groups** defin
 
 ## 2. Core collective operations
 
-Below, \(n\) is the number of ranks in the process group, and \(S\) is the size of the logical tensor being reduced or moved (per-rank message size in ring formulations). **Complexity** expressions are **standard ring-style** approximations for **amount of data moved per rank** relative to \(S\); real implementations pick algorithms based on message size, topology, and environment.
+Below, $n$ is the number of ranks in the process group, and $S$ is the size of the logical tensor being reduced or moved (per-rank message size in ring formulations). **Complexity** expressions are **standard ring-style** approximations for **amount of data moved per rank** relative to $S$; real implementations pick algorithms based on message size, topology, and environment.
 
 ---
 
@@ -49,7 +49,7 @@ Rank 0: [a0]     Rank 1: [a1]     Rank 2: [a2]
         All ranks: [a0+a1+a2]
 ```
 
-**Complexity (ring, per-rank data moved):** about \(\frac{2(n-1)}{n} S\).
+**Complexity (ring, per-rank data moved):** about $\frac{2(n-1)}{n} S$.
 
 **Where used:** **Data-parallel** gradient synchronization; **tensor-parallel** partial sums; any step that needs **identical** tensors on all ranks after a reduction.
 
@@ -67,7 +67,7 @@ Rank 0: [x0]  Rank 1: [x1]  Rank 2: [x2]
 Each rank: [x0 | x1 | x2]
 ```
 
-**Complexity (ring):** about \(\frac{n-1}{n} S\) **if** each rank contributes \(S/n\); more generally scales with gathering \(n-1\) other shards of comparable size.
+**Complexity (ring):** about $\frac{n-1}{n} S$ **if** each rank contributes $S/n$; more generally scales with gathering $n-1$ other shards of comparable size.
 
 **Where used:** **FSDP / ZeRO-3** parameter gather before forward; **TP** weight or activation assembly depending on layout.
 
@@ -85,7 +85,7 @@ Inputs per rank: full-sized chunks (partial sums local)
 Rank i gets shard i of the fully reduced tensor
 ```
 
-**Complexity (ring):** about \(\frac{n-1}{n} S\) for the common balanced case.
+**Complexity (ring):** about $\frac{n-1}{n} S$ for the common balanced case.
 
 **Where used:** **FSDP** gradient **sharding** after backward; **sequence parallelism** with TP (activation distribution); distributed optimizer flows that **scatter** reduced pieces.
 

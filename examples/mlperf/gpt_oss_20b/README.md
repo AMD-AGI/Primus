@@ -1,64 +1,77 @@
-# GPT-OSS-20B Pretraining Benchmark
+# GPT-OSS-20B MLPerf pretraining
 
-GPT-OSS 20B (Mixture of Experts)
+GPT-OSS 20B on one MI355X node with 8 GPUs and global batch size 32.
 
+## Build
 
-## Setup
-
-### Start Docker Image
+The Dockerfile builds the complete runtime, including the GPT-OSS
+Primus-Turbo test branch, TransformerEngine, and the attention ASM kernels.
+The v26.5 image reuses the base image's Triton 3.7 compiler; v26.3 upgrades its
+older base Triton for compatibility with the same Turbo branch.
 
 ```bash
-docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.5
-
-cd /workspace/Primus
+cd examples/mlperf/gpt_oss_20b
+docker build --network host \
+  -f Dockerfile.runtime-v26.5 \
+  -t primus:gpt-oss-20b-mlperf-v26.5 .
 ```
 
+Use `Dockerfile.runtime-v26.3` and a v26.3 tag for the compatibility stack.
+Push a shared tag with `docker push <image>`.
 
-### Configuration
-
-This benchmark trains a 20B parameter GPT model with Mixture of Experts (MoE) architecture using the Primus framework on AMD GPUs.
-
-**Key Features:**
-- 20B parameter MoE model
-- Expert Parallelism (EP=8)
-- FP8 hybrid precision training
-- Primus Turbo optimizations (DeepEP, sync-free MoE)
-
-## Key Files
-
-- `configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml` - Model and training config
-    - Update `train_data_path` and `train_data_path` to your local downloaded location
-- `config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh` - System config and env vars
-   - Update `PRIMUS_PATH` to clone Primus Repo
-   - Update `EXP`to `<PRIMUS_PATH>/examples/mlperf/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml`
-- `run_and_time.sh` - Run script
-
-### Data
-
-Download preprocessed C4 dataset:
+## Data
 
 ```bash
 mkdir -p /data/gpt_oss_20b
 cd /data/gpt_oss_20b
-
-# Download training and validation data
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) \
-    -d data https://training.mlcommons-storage.org/metadata/llama-3-1-8b-preprocessed-c4-dataset.uri
+  -d data \
+  https://training.mlcommons-storage.org/metadata/llama-3-1-8b-preprocessed-c4-dataset.uri
 ```
 
-After download, you should see files with the following naming conventions:
-- Training: `c4-train.en_6_text_document.bin` and `.idx`
-- Validation: `c4-validation-91205-samples.en_text_document.bin` and `.idx`
+Training uses the `c4-train.en_6_text_document` prefix and validation uses
+`c4-validation-91205-samples.en_text_document`.
 
-The data directory is approximately **80 GB** and model directory is approximately **30 GB**.
-
-### How to run
+## Run
 
 ```bash
-export HF_TOKEN=<your_huggingface_token>
-source config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh
-bash run_and_time.sh
+docker run -it --rm \
+  --privileged --network host --ipc host --shm-size 128g \
+  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+  --device /dev/dri --device /dev/kfd --device /dev/infiniband \
+  -v /path/to/Primus:/workspace/Primus \
+  -v /path/to/data:/data \
+  -v /path/to/model:/model \
+  -v /path/to/results:/results \
+  primus:gpt-oss-20b-mlperf-v26.5 bash
 ```
-## Notes
 
-- `log_interval: 99999999` suppresses regular Primus logs
+Inside the container:
+
+```bash
+cd /workspace/Primus/examples/mlperf/gpt_oss_20b
+source config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh
+./run_and_time.sh
+```
+
+That is the complete long-run entry. The config is the single source of
+submission defaults: MLPerf trainer, 1.2M iteration ceiling, 128-step warmup,
+FP8 Triton grouped GEMM, fused wgrad accumulation, and disabled profiling.
+Short diagnostics and backend ablations should override environment variables
+outside the checked-in submission config.
+
+## v26.5 attention prewarm
+
+The v26.5 TE stack lazily compiles two attention variants. Starting eight
+torchrun ranks against an empty cache can race while writing the same blobs.
+`run_and_time.sh` therefore runs `prewarm_attention.py` once before timing; the
+helper only populates the sliding-window and full-attention cache entries.
+The v26.3 TE/AITER stack does not exhibit this cache race, so the prewarm is
+skipped automatically for v26.3.
+
+## Key files
+
+- `Dockerfile.runtime-v26.3`, `Dockerfile.runtime-v26.5`: complete runtime builds
+- `config_MI355X_1x8x1_tp1pp1ep1_gbs32.sh`: submission defaults
+- `run_and_time.sh`: benchmark entry
+- `prewarm_attention.py`: v26.5-only attention cache prewarm

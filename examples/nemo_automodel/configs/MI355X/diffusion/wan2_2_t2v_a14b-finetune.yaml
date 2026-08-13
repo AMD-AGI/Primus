@@ -1,0 +1,71 @@
+# Primus EXP — Wan 2.2 T2V A14B FINETUNE via the NeMo AutoModel backend on MI355X.
+# =============================================================================
+# Full finetune of the pretrained Wan 2.2-A14B weights (loaded from
+# model.pretrained_model_name_or_path via from_pretrained). Differs from the
+# pretrain EXPs by selecting AutoModel's finetune path:
+#   model.mode: finetune        -> build_model_and_optimizer(finetune_mode=True);
+#                                  pipeline_spec is ignored in this path.
+#   model.torch_dtype: bfloat16 -> bf16 master weights (canonical finetune
+#                                  precision; pretrain uses fp32 master).
+#   gentle LR (5e-6) + standard AdamW betas/decay (foreach, not fused).
+#
+# Runs through the SAME diffusion recipe and the SAME launcher as pretrain
+# (AutoModel selects pretrain vs finetune from model.mode), so it launches via
+# `examples/run_pretrain.sh` like the other diffusion EXPs.
+#
+# NOTE: the finetune recipe is AutoModel's original Wan 2.2 path, provided here
+# as a complete, first-class example. The throughput numbers documented in the
+# pretrain EXPs were measured on the pretrain operating points.
+#
+# One-time setup (like any Primus backend): initialize the submodule; the
+# launcher's prepare step installs it editable (ROCm-pinned) on first run.
+#   git submodule update --init third_party/Automodel
+#   # (auto-skipped if the image already ships nemo_automodel)
+#
+# Launch (inside the Primus container, 8 GPUs free):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   EXP=examples/nemo_automodel/configs/MI355X/diffusion/wan2_2_t2v_a14b-finetune.yaml \
+#   bash examples/run_pretrain.sh
+#
+# Run once per expert. The expert is chosen solely by model.stage (finetune loads
+# via from_pretrained with the matching active_transformer; pipeline_spec/subfolder
+# is ignored in this path -- it only applies to pretraining's from_config):
+#   high_noise (default) -> transformer;  model.stage=low_noise -> transformer_2.
+# Remove step_scheduler.max_steps to finetune for full epochs.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_2_t2v_a14b-finetune}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: pre_trainer.yaml
+    model: wan2_2_t2v_a14b.yaml
+
+    overrides:
+      model:
+        mode: finetune
+        torch_dtype: bfloat16    # bf16 master weights for finetuning
+      step_scheduler:
+        max_steps: 25            # cap for a quick test; remove for a real finetune
+        local_batch_size: 8
+        global_batch_size: 64    # 8 x dp8
+      optim:
+        learning_rate: 5e-6      # gentle finetune LR
+        optimizer:
+          weight_decay: 0.01
+          betas: [0.9, 0.999]
+          # finetune uses foreach AdamW (fused is the pretrain throughput knob)
+          foreach: true
+          fused: false
+      fsdp:
+        activation_checkpointing: true
+      data:
+        dataloader:
+          cache_dir: /dataset/pusa_v1_512sq
+      checkpoint:
+        enabled: true
+        checkpoint_dir: /checkpoints/wan22_finetune_high
+        restore_from: null       # null -> finetune the base pretrained weights

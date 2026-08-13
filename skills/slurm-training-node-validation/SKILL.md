@@ -91,7 +91,7 @@ For each group `$i`, first compress the 4 hostnames into SLURM bracket notation,
 
 ```bash
 COMPRESSED_NODELIST=$(scontrol show hostlist "node1,node2,node3,node4")
-# e.g. "uswslocpm2m-106-[1628,1691,1697,1707]"
+# e.g. "node-[1628,1691,1697,1707]"
 
 GROUPDIR="${BASEDIR}/group_${i}"
 mkdir -p "$GROUPDIR"
@@ -100,7 +100,7 @@ mkdir -p "$GROUPDIR"
 echo "${COMPRESSED_NODELIST}" > "${GROUPDIR}/group_${i}_nodelist_${COMPRESSED_NODELIST}"
 ```
 
-**The `$COMPRESSED_NODELIST` must always be in SLURM prefix-compressed format** (e.g. `uswslocpm2m-106-[1628,1691,1697,1707]`), NOT individual hostnames joined by commas. Always use `scontrol show hostlist` to produce it.
+**The `$COMPRESSED_NODELIST` must always be in SLURM prefix-compressed format** (e.g. `node-[1628,1691,1697,1707]`), NOT individual hostnames joined by commas. Always use `scontrol show hostlist` to produce it.
 
 The resulting directory layout looks like:
 
@@ -108,11 +108,11 @@ The resulting directory layout looks like:
 ./output/slurm-training-node-validation-20260316_201333/
 ├── group_1/
 │   ├── log_group_1.txt                                          # training log
-│   ├── group_1_nodelist_uswslocpm2m-106-[1628,1691,1697,1707]  # content: the compressed nodelist
+│   ├── group_1_nodelist_node-[1628,1691,1697,1707]  # content: the compressed nodelist
 │   └── success  OR  failed                                      # result file (created after job finishes)
 ├── group_2/
 │   ├── log_group_2.txt
-│   ├── group_2_nodelist_uswslocpm2m-106-[1711,1713,1719,1723]
+│   ├── group_2_nodelist_node-[1711,1713,1719,1723]
 │   └── success  OR  failed
 └── group_3/
     ├── ...
@@ -156,7 +156,7 @@ For each group (index `$i`, nodelist `$NODELIST`), run:
 - Each group runs in a **subshell** so environment variables don't leak between groups.
 - Capture the PID of each background job: `PIDS[$i]=$!`
 - Log file: `log_group_1.txt`, `log_group_2.txt`, etc. (1-indexed)
-- The nodelist marker file name embeds the **compressed** nodelist (e.g. `group_1_nodelist_uswslocpm2m-106-[1628,1691,1697,1707]`). The file content is the compressed nodelist string itself.
+- The nodelist marker file name embeds the **compressed** nodelist (e.g. `group_1_nodelist_node-[1628,1691,1697,1707]`). The file content is the compressed nodelist string itself.
 
 After launching all groups, print:
 ```
@@ -315,10 +315,10 @@ FAILEOF
 - Output directory: <BASEDIR>
 
 ### Passed Nodelist (training-ready)
-<SLURM-format compressed nodelist, e.g. uswslocpm2m-106-[1628,1691,1697,1707,1711,1713,1719,1723]>
+<SLURM-format compressed nodelist, e.g. node-[1628,1691,1697,1707,1711,1713,1719,1723]>
 
 ### Failed Nodelist
-<SLURM-format compressed nodelist, e.g. uswslocpm2m-106-[1730,1735,1741,1749]>
+<SLURM-format compressed nodelist, e.g. node-[1730,1735,1741,1749]>
 ```
 
 #### Generating SLURM-format Compressed Nodelists
@@ -329,11 +329,11 @@ Collect all individual hostnames for passed (or failed) groups, then compress in
 scontrol show hostlist <comma-separated-hostnames>
 ```
 
-Example: if passed nodes are `uswslocpm2m-106-1628,uswslocpm2m-106-1691,uswslocpm2m-106-1697,uswslocpm2m-106-1707,uswslocpm2m-106-1711,uswslocpm2m-106-1713`, then:
+Example: if passed nodes are `node-1628,node-1691,node-1697,node-1707,node-1711,node-1713`, then:
 
 ```bash
-$ scontrol show hostlist uswslocpm2m-106-1628,uswslocpm2m-106-1691,uswslocpm2m-106-1697,uswslocpm2m-106-1707,uswslocpm2m-106-1711,uswslocpm2m-106-1713
-uswslocpm2m-106-[1628,1691,1697,1707,1711,1713]
+$ scontrol show hostlist node-1628,node-1691,node-1697,node-1707,node-1711,node-1713
+node-[1628,1691,1697,1707,1711,1713]
 ```
 
 Nodes with the **same prefix** are automatically merged into bracket notation by `scontrol show hostlist`. The output is the final SLURM-format nodelist to display in the summary.
@@ -390,6 +390,6 @@ The final directory layout includes:
 - Use `-o StrictHostKeyChecking=no` for any SSH operations.
 - The **exact success pattern** is `iteration        3` (8 spaces). Do not modify the spacing.
 - Output is stored under `./output/slurm-training-node-validation-<TIMESTAMP>/`. Each group has its own subdirectory with log, status file, and nodelist marker.
-- The **nodelist marker file** is an empty file whose name encodes the group's compressed nodelist (e.g. `group_1_nodelist_uswslocpm2m-106-[1628,1691,1697,1707]`). This makes it easy to identify which nodes belong to each group by listing the directory.
+- The **nodelist marker file** is an empty file whose name encodes the group's compressed nodelist (e.g. `group_1_nodelist_node-[1628,1691,1697,1707]`). This makes it easy to identify which nodes belong to each group by listing the directory.
 - The **status file** is either `success` (empty) or `failed` (contains error details and possible cause).
 - If a group has a non-zero exit code but the success pattern is found in the log, still create `success` (training may exit non-zero after completing).

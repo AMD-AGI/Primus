@@ -1,6 +1,9 @@
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
+# Portions of this file are copied and modified from Megatron-LM
+# (https://github.com/NVIDIA/Megatron-LM), megatron/core/fp4_utils.py.
+#
 # See LICENSE for license information.
 ###############################################################################
 
@@ -46,6 +49,29 @@ def _primus_turbo_enabled() -> bool:
         args = get_args()
         enable_primus_turbo = bool(getattr(args, "enable_primus_turbo", False))
         return enable_primus_turbo
+    except Exception:
+        return False
+
+
+_UNSET = object()
+
+
+def _mxfp4_gradient_sr_enabled(config: TransformerConfig) -> bool:
+    """Resolve gradient stochastic rounding from model config or global args.
+
+    Megatron's ``TransformerConfig`` only receives declared dataclass fields,
+    while this Primus option lives on the global args namespace. Diffusion
+    configs declare the field directly, so an explicit config value takes
+    precedence over the args fallback.
+    """
+    value = getattr(config, "mxfp4_gradient_stochastic_rounding", _UNSET)
+    if value is not _UNSET:
+        return bool(value)
+
+    try:
+        from megatron.training.global_vars import get_args
+
+        return bool(getattr(get_args(), "mxfp4_gradient_stochastic_rounding", False))
     except Exception:
         return False
 
@@ -120,7 +146,7 @@ if HAVE_TE and HAVE_TURBO:
             format=Format.E2M1_X2,
             block_size=MXFP4_SCALING_BLOCK_SIZE,
             scale_dtype=ScaleDtype.E8M0,
-            use_gradient_sr=getattr(config, "mxfp4_gradient_stochastic_rounding", False),
+            use_gradient_sr=_mxfp4_gradient_sr_enabled(config),
         )
         return fp4_quant_config, ""
 
@@ -144,7 +170,13 @@ if HAVE_TE and HAVE_TURBO:
                 fp4_context = nullcontext()
             else:
                 fp4_recipe, fp4_recipe_none_reason = get_fp4_recipe(config)
-                turbo_enabled = _primus_turbo_enabled()
+                # fp4_use_native_te_autocast forces the TE-native autocast branch
+                # (TE fp8_autocast + MXFP4BlockScaling -> AITER a4w4), bypassing
+                # Primus-Turbo entirely -- even if the Turbo autocast is otherwise
+                # enabled. This is the pure-TE MXFP4 path (enable_primus_turbo=false).
+                turbo_enabled = _primus_turbo_enabled() and not getattr(
+                    config, "fp4_use_native_te_autocast", False
+                )
 
                 global WARN_ONCE
                 if WARN_ONCE:

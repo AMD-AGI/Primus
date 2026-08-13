@@ -162,6 +162,19 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
+# -------------------- Hybrid model (GDN/KDA/Mamba) FLA Triton patch --------------------
+# The zebra_llama_* hybrid configs under examples/megatron/configs/MI300X (added in
+# PR #676) depend on flash-linear-attention (FLA) Triton kernels that hang during
+# autotuning with num_stages >= 3 on MI300X/ROCm. Auto-apply the workaround whenever
+# one of those configs is used. See tools/hybrid/patch_fla_triton_autotune_hang.sh for details.
+EXP_BASENAME=$(basename "${EXP}")
+if [[ "${EXP_BASENAME}" == zebra_llama_* ]]; then
+    LOG_INFO_RANK0 "Detected hybrid model config (${EXP_BASENAME}); applying FLA Triton autotune-hang patch ..."
+    if ! bash "${PRIMUS_PATH}/tools/hybrid/patch_fla_triton_autotune_hang.sh"; then
+        LOG_ERROR "FLA Triton autotune-hang patch failed; continuing, but training may hang during autotuning."
+    fi
+fi
+
 if [ -z "${TRAIN_LOG:-}" ]; then
     RUN_FOLDER=$(python3 -c "
 import yaml, sys
@@ -191,6 +204,9 @@ export NCCL_CHECKS_DISABLE=1
 
 if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
+    # ROCm 7.2.1+ builds ANP into RCCL; RCCL_AINIC_ROCE=1 enables the built-in ANP
+    # path. An explicitly-set NCCL_NET_PLUGIN below still takes precedence.
+    export RCCL_AINIC_ROCE="${RCCL_AINIC_ROCE:-1}"
     export NCCL_IB_GID_INDEX=1
     export NCCL_IB_TC=${NCCL_IB_TC:-104}
     export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}
@@ -210,7 +226,12 @@ if [ "$USING_AINIC" == "1" ]; then
         "${RCCL_HOME_DIR}/build/release" \
         "${ANP_HOME_DIR}/build" \
         "${MPI_HOME_DIR}/lib"
-    if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+    # With built-in ANP (RCCL_AINIC_ROCE=1) default to "none" so RCCL uses its
+    # built-in ANP transport instead of auto-loading an external plugin. An
+    # explicitly-set NCCL_NET_PLUGIN always wins.
+    if [ "${RCCL_AINIC_ROCE}" = "1" ]; then
+        export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+    elif [ -n "${NCCL_NET_PLUGIN:-}" ]; then
         export NCCL_NET_PLUGIN
     elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
         export NCCL_NET_PLUGIN=librccl-anp.so

@@ -35,6 +35,7 @@ class ModelParallelConfig:
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0
+    recompute_method: str = None  # "uniform" (recompute every layer) or "block" (first N)
     # Megatron selective block recompute: global transformer layer indices (0..num_layers-1)
     recompute_layer_ids: Optional[List[int]] = None
     # Precision-aware optimizer (Megatron `--use-precision-aware-optimizer`).
@@ -66,6 +67,27 @@ class ModelConfig:
     v_head_dim: int = 0
     q_lora_rank: int = 0
     kv_lora_rank: int = 0
+    # DeepSeek-V4 custom attention (compressed/hierarchical/sliding-window)
+    compress_ratios: object = None  # per-layer schedule (list or "[...]" string)
+    hc_mult: int = 1  # multi-hyper-connection stream count
+    index_topk: int = 0  # CSA per-query selected keys
+    index_head_dim: int = 0  # indexer head dim
+    index_n_heads: int = 0  # indexer heads
+    attn_sliding_window: int = 0  # SWA local window
+    o_lora_rank: int = 0  # output-projection LoRA rank
+    o_groups: int = 1  # output-projection groups
+    # DeepSeek-V4 fused-attention kernel flags.  The production run scripts flip
+    # these on (run_deepseek_v4.sh / proj_dsv4.sh: --use_v4_triton_csa_attention),
+    # so the projection MUST see them to know the CSA top-K gather is fused
+    # in-kernel (roofline max(compute, memory)) rather than a separate additive
+    # pre-pass.  update_config_from_args copies them from args by field name;
+    # without these fields the CLI values were silently dropped and csa_fused
+    # was stuck at False -> gather over-counted on every CSA layer.
+    use_v4_triton_attention: bool = False
+    use_v4_triton_csa_attention: bool = False
+    use_v4_tilelang_attention: bool = False
+    use_v4_tilelang_csa_attention: bool = False
+    use_v4_fp8_indexer: bool = False
     # FFN & MoE
     swiglu: bool = False
     num_experts: int = 0
@@ -73,14 +95,25 @@ class ModelConfig:
     moe_pattern: list = None
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
+    # Optimizer (Muon adds Newton-Schulz orthogonalization compute on 2D weights)
+    optimizer: str = ""
+    muon_num_ns_steps: int = 0
     # Misc
     share_embeddings_and_output_weights: bool = False
     # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
     fp8: str = None
+    # FP8 quantization recipe (e.g. "tensorwise", "blockwise", "mxfp8").  The
+    # microscaled recipe ("mxfp8") runs GEMMs in MX8 compute (scale 3/3).
+    fp8_recipe: str = None
 
     # Primus Turbo flags — used to select the grouped-GEMM performance model
     enable_primus_turbo: bool = False
     use_turbo_grouped_gemm: bool = False
+    # Megatron/Primus names the turbo grouped-MLP flag ``use_turbo_grouped_mlp``;
+    # carry it (and the legacy opt-in) so the profiler can pick the batched
+    # (near-ideal) grouped-GEMM model instead of the pessimistic sequential one.
+    use_turbo_grouped_mlp: bool = False
+    moe_use_legacy_grouped_gemm: bool = False
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
 
@@ -97,6 +130,20 @@ class TrainingConfig:
     model_config: ModelConfig
     runtime_config: RuntimeConfig
     model_parallel_config: ModelParallelConfig
+
+
+def gemm_dtype_from_config(config) -> str:
+    """Return the GEMM compute-dtype string for the model's precision recipe.
+
+    Mirrors the reference GEMM path: FP8 with the microscaled recipe ("mxfp8")
+    runs MX8 compute (scale 3/3); other FP8 recipes run FP8; otherwise BF16.
+    Accepts anything exposing ``fp8`` / ``fp8_recipe`` attributes (ModelConfig
+    or raw args).
+    """
+    if not getattr(config, "fp8", None):
+        return "bf16"
+    recipe = (getattr(config, "fp8_recipe", None) or "").lower()
+    return "mx8" if recipe == "mxfp8" else "fp8"
 
 
 def update_config_from_args(config, args):

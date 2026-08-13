@@ -31,6 +31,12 @@
       "commit": "9577b1280eaadd60b9d7b0ce6df09ac80e87e323"
     },
     {
+      "name": "mamba",
+      "path": "third_party/mamba",
+      "url": "https://github.com/AndreasKaratzas/mamba.git",
+      "commit": "4d67c534d10b7299194ede55b36718cc7a1dd472"
+    },
+    {
       "name": "HummingbirdXT",
       "path": "third_party/HummingbirdXT",
       "url": "https://github.com/AMD-AGI/HummingbirdXT.git",
@@ -41,6 +47,12 @@
       "path": "third_party/maxdiffusion",
       "url": "https://github.com/AI-Hypercomputer/maxdiffusion.git",
       "commit": "68e069659f0af80694559e29939a17f879fe7f6a"
+    },
+    {
+      "name": "Automodel",
+      "path": "third_party/Automodel",
+      "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
+      "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
     }
   ]
 }

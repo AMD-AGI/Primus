@@ -6,6 +6,12 @@ enable_primus_turbo: false
 # enable turbo auto-tuning
 use_turbo_autotune: false
 
+# ===== MXFP4 =====
+# Use stochastic rounding when quantizing MXFP4 gradients. This is disabled by
+# default and requires a Primus-Turbo grouped GEMM implementation with matching
+# activation and gradient layouts.
+mxfp4_gradient_stochastic_rounding: false
+
 # ===== Attention =====
 # operator switch
 use_turbo_attention: false
@@ -27,6 +33,9 @@ use_turbo_gemm: false
 # ===== Grouped MLP =====
 # use turbo grouped gemm
 use_turbo_grouped_gemm: false
+# let Turbo grouped GEMMs consume non-aligned expert token counts directly,
+# without TE Fp8Padding/Fp8Unpadding
+turbo_grouped_gemm_without_padding: false
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 
@@ -42,6 +51,14 @@ turbo_deepep_use_comm_stream: false
 # ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0
 
+# ===== Mega MoE =====
+# fused MegaMoE layer replacement (EP-only/TP=1/bf16)
+use_turbo_mega_moe: false
+
 # ===== Layer Norm =====
 # operator switch
 use_turbo_rms_norm: false
+# Route the fused layernorm+QKV site through Turbo's rmsnorm while leaving its
+# GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
+# which costs more than the norm saves on the GPT-OSS-20B shapes.
+use_turbo_norm_te_linear: false

@@ -36,11 +36,7 @@ T5_ENCODER=/models/t5-v1_1-xxl \
 CLIP_ENCODER=/models/clip-vit-large-patch14 \
 VAE_CHECKPOINT=/models/FLUX.1-dev/ae.safetensors \
 MAX_STEPS=10 \
-torchrun \
-  --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-  --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
-  --nproc_per_node="$GPUS_PER_NODE" \
-  -m primus.cli.main train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/diffusion/configs/MI355X/flux.1_schnell_t2i-raw-pretrain.yaml
 ```
 
@@ -89,11 +85,7 @@ DATA_FOLDER=/data/tiny-video-samples/data \
 ATTENTION_BACKEND=flash_attn_aiter \
 SP_SIZE=1 \
 MAX_STEPS=10 \
-torchrun \
-  --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-  --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
-  --nproc_per_node="$GPUS_PER_NODE" \
-  -m primus.cli.main train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-pretrain.yaml
 ```
 
@@ -108,11 +100,7 @@ DATA_FOLDER=/data/tiny-video-samples/data \
 ATTENTION_BACKEND=flash_attn_aiter \
 SP_SIZE=1 \
 MAX_STEPS=10 \
-torchrun \
-  --nnodes="$NNODES" --node_rank="$NODE_RANK" \
-  --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
-  --nproc_per_node="$GPUS_PER_NODE" \
-  -m primus.cli.main train posttrain \
+./primus-cli direct -- train posttrain \
   --config examples/diffusion/configs/MI355X/wan2.2_ti2v_5b-posttrain.yaml
 ```
 

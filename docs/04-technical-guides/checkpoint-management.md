@@ -200,4 +200,4 @@ The tool reports save/load times, bandwidth, and configuration echoes (world siz
 
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)
 - [MaxText parameters](../03-configuration-reference/maxtext-parameters.md)
-- [Benchmark suite](../02-user-guide/benchmarking.md)
+- [Micro-benchmarking suite](../02-user-guide/micro-benchmarking.md)
