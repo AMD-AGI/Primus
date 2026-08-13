@@ -293,7 +293,7 @@ EXP=examples/maxdiffusion/configs/MI355X/flux_dev-pretrain.yaml \
 | --- | --- | --- |
 | `flux_dev-pretrain.yaml` | FLUX.1-dev | ✅ validated |
 | `wan2.1_1.3b-pretrain.yaml` | WAN 2.1 1.3B | ✅ validated |
-| `wan2.1_14b-pretrain.yaml` | WAN 2.1 14B | ⚠️ known cold-init RCCL rendezvous timeout on large-model compile |
+| `wan2.1_14b-pretrain.yaml` | WAN 2.1 14B | ✅ validated (requires `RCCL_WARP_SPEED_AUTO=0`, set in config) |
 
 ---
 
