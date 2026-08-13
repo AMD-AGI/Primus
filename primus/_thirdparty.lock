@@ -46,7 +46,7 @@
       "name": "Automodel",
       "path": "third_party/Automodel",
       "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
-      "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
+      "commit": "c852b16ff97221bd97a408e224f011a817cbc8e9"
     }
   ]
 }
