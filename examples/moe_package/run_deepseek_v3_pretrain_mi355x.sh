@@ -139,6 +139,13 @@ if [ "$PRIMUS_LAUNCHER" = "slurm" ]; then
   : "${DOCKER_IMAGE:?PRIMUS_LAUNCHER=slurm needs DOCKER_IMAGE}"
   export DOCKER_IMAGE
   LAUNCHER_ARGS=(slurm "${SLURM_LAUNCH_CMD:-sbatch}" -N "$NNODES")
+  # Spur hands out GPUs only when they are asked for. --exclusive reserves the
+  # node but leaves TresPerNode empty, and a node with no GPUs assigned fails to
+  # confirm dispatch: the job dies at submit with "dispatch confirmation failed:
+  # N of M nodes confirmed", then requeues until it is held. Single-node runs can
+  # slip through, which makes this look like a flaky cluster rather than a
+  # missing flag.
+  LAUNCHER_ARGS+=(--gpus-per-node="${GPUS_PER_NODE:-8}")
   [ -n "${SLURM_TIME:-}" ] && LAUNCHER_ARGS+=(--time="${SLURM_TIME}")
   [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
   [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
