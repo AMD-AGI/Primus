@@ -31,40 +31,24 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 
 from primus.core.utils.module_utils import log_rank_0
+from primus_turbo.pytorch.kernels.fused_mega_moe import advance_weight_generation
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
     fused_mega_moe_stage1,
     fused_mega_moe_stage2,
 )
-
-try:  # older Primus-Turbo builds ship only the bf16 stage pair
-    from primus_turbo.pytorch.kernels.fused_mega_moe import advance_weight_generation
-    from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
-        fused_mega_moe_fp8_stage1,
-        fused_mega_moe_fp8_stage2,
-    )
-except ImportError:
-    fused_mega_moe_fp8_stage1 = fused_mega_moe_fp8_stage2 = advance_weight_generation = None
-
-
-MEGA_MOE_PRECISIONS = ("bf16", "mxfp8")
+from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
+    fused_mega_moe_fp8_stage1,
+    fused_mega_moe_fp8_stage2,
+)
 
 
 def mega_moe_precision() -> str:
-    """Read ``turbo_mega_moe_precision`` off the Megatron args namespace.
+    """Read ``turbo_mega_moe_precision`` off the Megatron args namespace."""
+    from megatron.training import get_args
 
-    ``get_args`` raises before Megatron is initialized (the CPU unit-test path); that counts as
-    the default, matching how ``v4_moe`` probes ``use_turbo_mega_moe``.
-    """
-    try:
-        from megatron.training import get_args
-
-        args = get_args()
-    except Exception:
-        return "bf16"
-    precision = getattr(args, "turbo_mega_moe_precision", "bf16") or "bf16"
-    assert (
-        precision in MEGA_MOE_PRECISIONS
-    ), f"turbo_mega_moe_precision must be one of {MEGA_MOE_PRECISIONS}, got {precision!r}"
+    supported = ("bf16", "mxfp8")
+    precision = getattr(get_args(), "turbo_mega_moe_precision", "bf16") or "bf16"
+    assert precision in supported, f"turbo_mega_moe_precision must be one of {supported}, got {precision!r}"
     return precision
 
 
@@ -176,9 +160,6 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         fail deep in the kernels. (CUDA-graph capture is rejected by the op itself for the same
         reason.)
         """
-        assert (
-            fused_mega_moe_fp8_stage1 is not None
-        ), "turbo_mega_moe_precision=mxfp8 needs a Primus-Turbo build with the fp8 MegaMoE stages"
         assert not config.moe_layer_recompute, "MegaMoE fp8 does not support moe_layer_recompute"
         assert (
             config.recompute_granularity != "full"
@@ -258,9 +239,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # deduped: every MoE layer builds the same flavour, so one line per run is the useful signal
         if experts_cls not in _LOGGED_EXPERT_CLASSES:
             _LOGGED_EXPERT_CLASSES.add(experts_cls)
-            log_rank_0(
-                f"[MegaMoE] turbo_mega_moe_precision={precision} -> experts={experts_cls.__name__}"
-            )
+            log_rank_0(f"[MegaMoE] turbo_mega_moe_precision={precision} -> experts={experts_cls.__name__}")
         self.experts = experts_cls(
             config,
             self.experts_per_rank,
