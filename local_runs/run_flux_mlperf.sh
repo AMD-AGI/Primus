@@ -61,6 +61,13 @@ export SAVE_STEPS=${SAVE_STEPS:-100}
 export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
 export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
 export RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-latest}
+export DISABLE_CHECKPOINT=${DISABLE_CHECKPOINT:-false}
+if [[ "${DISABLE_CHECKPOINT,,}" == "true" || "$DISABLE_CHECKPOINT" == "1" ]]; then
+  export SAVE_STEPS=0
+  export SAVE_STRATEGY=none
+  export CHECKPOINT_KEEP_LATEST=0
+  export RESUME_FROM_CHECKPOINT=
+fi
 export LOG_FREQ=${LOG_FREQ:-10}
 export MLPERF_ENABLE=${MLPERF_ENABLE:-true}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.586}
@@ -202,6 +209,8 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"lr: {os.environ.get('LR', '')}\n")
     handle.write(f"warmup_steps: {os.environ.get('WARMUP_STEPS', '')}\n")
     handle.write(f"save_steps: {os.environ.get('SAVE_STEPS', '')}\n")
+    handle.write(f"save_strategy: {os.environ.get('SAVE_STRATEGY', '')}\n")
+    handle.write(f"disable_checkpoint: {os.environ.get('DISABLE_CHECKPOINT', '')}\n")
     handle.write(f"resume_from_checkpoint: {os.environ.get('RESUME_FROM_CHECKPOINT', '')}\n")
     handle.write(f"seed: {os.environ.get('SEED', '')}\n")
     handle.write(f"dataset_path: {os.environ.get('DATASET_PATH', '')}\n")
@@ -267,7 +276,7 @@ echo "[run_flux_mlperf] mllog_output_file=$MLLOG_OUTPUT_FILE"
 echo "[run_flux_mlperf] rank_log_dir=$RANK_LOG_DIR"
 echo "[run_flux_mlperf] nnodes=$NNODES node_rank=$NODE_RANK gpus_per_node=$GPUS_PER_NODE"
 echo "[run_flux_mlperf] steps=$MAX_STEPS local_batch_size=$LOCAL_BATCH_SIZE lr=$LR warmup_steps=$WARMUP_STEPS"
-echo "[run_flux_mlperf] save_steps=$SAVE_STEPS keep_latest=$CHECKPOINT_KEEP_LATEST resume=$RESUME_FROM_CHECKPOINT"
+echo "[run_flux_mlperf] checkpoint_disabled=$DISABLE_CHECKPOINT save_steps=$SAVE_STEPS strategy=$SAVE_STRATEGY keep_latest=$CHECKPOINT_KEEP_LATEST resume=${RESUME_FROM_CHECKPOINT:-none}"
 echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_name=$WANDB_RUN_NAME"
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
 echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS strategy=$COMPILE_STRATEGY compile_output_head=$COMPILE_OUTPUT_HEAD reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"

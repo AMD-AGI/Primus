@@ -1081,43 +1081,50 @@ class BaseWanTrainer:
                         self._mlperf_log_eval_start()
                         val_loss = self.validate_loss()
                         self._mlperf_log_eval_stop(val_loss)
+                        samples_count = self.global_step * self._global_batch_size()
+                        elapsed_time = time.time() - self.mlperf_train_start_time
+                        cumulative_throughput = samples_count / elapsed_time
                         if self.rank == 0:
                             logger.info(
                                 f"mlperf_validation step={self.global_step} "
                                 f"loss={val_loss:.6f} target={self.mlperf_target_eval_loss:.6f}"
+                            )
+                            logger.info(
+                                f"Throughput: {cumulative_throughput}, step: {self.global_step}, "
+                                f"samples_count: {samples_count}"
                             )
                             if self.use_wandb:
                                 payload = {
                                     "val/loss": val_loss,
                                     "validation_metrics/loss": val_loss,
                                     "validation_metrics/loss_vs_samples": val_loss,
-                                    "validation_metrics/samples_count": (
-                                        self.global_step * self._global_batch_size()
-                                    ),
+                                    "validation_metrics/samples_count": samples_count,
+                                    "performance/cumulative_throughput": cumulative_throughput,
                                 }
-                                if (
-                                    val_loss <= self.mlperf_target_eval_loss
-                                    and self.mlperf_train_start_time
-                                ):
-                                    payload["time_metrics/time_to_converge(s)"] = (
-                                        time.time() - self.mlperf_train_start_time
-                                    )
+                                if val_loss <= self.mlperf_target_eval_loss:
+                                    payload["time_metrics/time_to_converge(s)"] = elapsed_time
                                 wandb.log(payload, step=self.global_step)
                         if val_loss <= self.mlperf_target_eval_loss:
                             self.mlperf_run_success = True
-                            if self.rank == 0 and self.mlperf_train_start_time:
-                                time_to_converge = (
-                                    time.time() - self.mlperf_train_start_time
-                                )
+                            if self.rank == 0:
                                 logger.info(
                                     "MLPerf target reached: "
                                     f"validation_loss={val_loss:.6f}, "
-                                    f"time_to_converge_s={time_to_converge:.2f}"
+                                    f"time_to_converge_s={elapsed_time:.2f}"
                                 )
                                 if self.mlperf_logger is not None:
                                     self.mlperf_logger.event(
                                         key="time_metrics/time_to_converge(s)",
-                                        value=time_to_converge,
+                                        value=elapsed_time,
+                                    )
+                                    self.mlperf_logger.event(
+                                        key="time_to_train_minutes",
+                                        value=elapsed_time / 60.0,
+                                    )
+                                    self.mlperf_logger.event(
+                                        key="throughput_samples_per_second",
+                                        value=cumulative_throughput,
+                                        metadata={"samples_count": samples_count},
                                     )
                             self._mlperf_log_run_stop()
                             self._stop_profiler()
