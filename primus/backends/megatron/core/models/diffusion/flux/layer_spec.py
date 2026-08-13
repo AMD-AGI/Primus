@@ -527,32 +527,141 @@ def get_flux_layer_spec(
     )
     from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-    # Default backend selection based on config
+    # Resolve heterogeneous routing before selecting a homogeneous fallback.
+    sensitive_enabled = getattr(config, "sensitive_layers_enabled", False)
+    total = config.num_joint_layers + config.num_single_layers
+    num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
+    num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
+    outer_num_start = (
+        getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
+    )
+    outer_num_end = (
+        getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
+    )
+
+    if sensitive_enabled:
+        layer_counts = {
+            "sensitive_layers_start": num_start,
+            "sensitive_layers_end": num_end,
+            "outer_sensitive_layers_start": outer_num_start,
+            "outer_sensitive_layers_end": outer_num_end,
+        }
+        for field_name, value in layer_counts.items():
+            if type(value) is not int:
+                raise ValueError(f"{field_name} must be an integer, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{field_name} must be non-negative, got {value}")
+        if num_start + num_end <= 0:
+            raise ValueError(
+                "sensitive_layers_enabled=True requires a non-empty boundary"
+            )
+        if num_start + num_end > total:
+            raise ValueError(
+                "sensitive layer counts exceed the number of Flux layers: "
+                f"{num_start} + {num_end} > {total}"
+            )
+        if outer_num_start > num_start:
+            raise ValueError(
+                "outer_sensitive_layers_start cannot exceed sensitive_layers_start"
+            )
+        if outer_num_end > num_end:
+            raise ValueError(
+                "outer_sensitive_layers_end cannot exceed sensitive_layers_end"
+            )
+
+    inner_sensitive_count = num_start + num_end - outer_num_start - outer_num_end
+    outer_sensitive_count = outer_num_start + outer_num_end
+
     sensitive_backend = None
     outer_sensitive_backend = None
 
-    if backend is None:
+    if sensitive_enabled:
+        active_precisions = set()
+        if inner_sensitive_count > 0:
+            active_precisions.add(
+                getattr(config, "sensitive_layer_precision", "bf16")
+            )
+        if outer_sensitive_count > 0:
+            active_precisions.add(
+                getattr(config, "outer_sensitive_layer_precision", "bf16")
+            )
+            collapsed_start = outer_num_start > 0 and outer_num_start == num_start
+            collapsed_end = outer_num_end > 0 and outer_num_end == num_end
+            if collapsed_start or collapsed_end:
+                raise ValueError(
+                    "each graduated outer boundary requires at least one "
+                    "inner sensitive layer on the same side"
+                )
+            if (
+                getattr(config, "sensitive_layer_precision", None) != "tw_fp8"
+                or getattr(config, "outer_sensitive_layer_precision", None)
+                != "bf16"
+            ):
+                raise ValueError(
+                    "graduated sensitive routing requires inner precision "
+                    "'tw_fp8' and outer precision 'bf16'"
+                )
+        if "tw_fp8" in active_precisions and (
+            config.fp8 != "e4m3"
+            or config.fp8_recipe != "tensorwise"
+        ):
+            raise ValueError(
+                "tw_fp8 sensitive layers require normalized fp8='e4m3' "
+                "and fp8_recipe='tensorwise'"
+            )
+        if "bf16" in active_precisions and (
+            not config.bf16
+            or config.fp16
+            or config.params_dtype != torch.bfloat16
+        ):
+            raise ValueError(
+                "bf16 sensitive layers require bf16=True, fp16=False, "
+                "and params_dtype=torch.bfloat16"
+            )
+        if backend is not None:
+            raise ValueError(
+                "sensitive layer routing does not support an explicit backend; "
+                "pass backend=None so each precision region is selected explicitly"
+            )
+        if config.transformer_impl != "local":
+            raise ValueError(
+                "sensitive layer routing requires transformer_impl='local'; "
+                f"got {config.transformer_impl!r}"
+            )
+        if config.fp4 != "mxfp4" or config.fp4_recipe != "mxfp4":
+            raise ValueError(
+                "sensitive layer routing requires the local MXFP4 backend; "
+                f"got fp4={config.fp4!r}, fp4_recipe={config.fp4_recipe!r}"
+            )
+        if PrimusTurboMXFP4LocalSpecProvider is None:
+            raise RuntimeError("sensitive layer routing requires the MXFP4 local provider")
+
+        def resolve_sensitive_backend(precision):
+            if precision == "tw_fp8":
+                if PrimusTurboFloat8LocalSpecProvider is None:
+                    raise RuntimeError(
+                        "tw_fp8 sensitive layers require the FP8 local provider"
+                    )
+                return PrimusTurboFloat8LocalSpecProvider()
+            if precision == "bf16":
+                if PrimusTurboLocalSpecProvider is None:
+                    raise RuntimeError("bf16 sensitive layers require the native local provider")
+                return PrimusTurboLocalSpecProvider()
+            raise ValueError(f"unsupported sensitive layer precision: {precision!r}")
+
+        backend = PrimusTurboMXFP4LocalSpecProvider()
+        if inner_sensitive_count > 0:
+            sensitive_backend = resolve_sensitive_backend(
+                getattr(config, "sensitive_layer_precision", "bf16")
+            )
+        if outer_sensitive_count > 0:
+            outer_sensitive_backend = resolve_sensitive_backend(
+                getattr(config, "outer_sensitive_layer_precision", "bf16")
+            )
+    elif backend is None:
         if config.transformer_impl == "local":
             if config.fp4 is not None and PrimusTurboMXFP4LocalSpecProvider is not None:
                 backend = PrimusTurboMXFP4LocalSpecProvider()
-
-                def resolve_sensitive_backend(precision):
-                    if precision == "tw_fp8":
-                        return PrimusTurboFloat8LocalSpecProvider()
-                    if precision == "bf16":
-                        return PrimusTurboLocalSpecProvider()
-                    raise ValueError(f"unsupported sensitive layer precision: {precision!r}")
-
-                sensitive_backend = resolve_sensitive_backend(
-                    getattr(config, "sensitive_layer_precision", "bf16")
-                )
-                if (
-                    getattr(config, "outer_sensitive_layers_start", 0) > 0
-                    or getattr(config, "outer_sensitive_layers_end", 0) > 0
-                ):
-                    outer_sensitive_backend = resolve_sensitive_backend(
-                        getattr(config, "outer_sensitive_layer_precision", "bf16")
-                    )
             elif (
                 config.fp8 is not None
                 and HAVE_PRIMUS_TURBO_LOCAL
@@ -574,14 +683,7 @@ def get_flux_layer_spec(
 
             backend = LocalSpecProvider()
 
-    # Build per-layer specs with optional sensitive-layer heterogeneity
-    sensitive_enabled = getattr(config, "sensitive_layers_enabled", False)
-    num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
-    num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
-    outer_num_start = getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
-    outer_num_end = getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
-    total = config.num_joint_layers + config.num_single_layers
-
+    # Build per-layer specs with optional sensitive-layer heterogeneity.
     layer_specs = []
     for i in range(total):
         is_outer_sensitive = outer_sensitive_backend is not None and (
