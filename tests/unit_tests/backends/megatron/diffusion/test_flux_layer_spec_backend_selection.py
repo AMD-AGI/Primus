@@ -195,6 +195,11 @@ class TestFluxLayerSpecBackendSelection(PrimusUT):
     def test_graduated_routing_revalidates_mutated_config(self):
         cases = [
             (
+                "sensitive_layers_enabled",
+                False,
+                "sensitive layer counts require sensitive_layers_enabled=True",
+            ),
+            (
                 "fp8_recipe",
                 "blockwise",
                 "require normalized fp8='e4m3'",

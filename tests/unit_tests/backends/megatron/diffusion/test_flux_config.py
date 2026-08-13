@@ -111,12 +111,15 @@ class TestFluxConfig(PrimusUT):
             config.validate()
         self.assertIn("All axes_dim values must be positive", str(cm.exception))
 
-    def test_outer_sensitive_layers_require_sensitive_routing(self):
-        """An outer override is meaningless without the enclosing boundary."""
-        with self.assertRaisesRegex(
-            ValueError, "outer sensitive layers require sensitive_layers_enabled=True"
-        ):
-            FluxConfig.flux_12b(outer_sensitive_layers_start=1)
+    def test_sensitive_layer_counts_require_sensitive_routing(self):
+        """Boundary counts are invalid when heterogeneous routing is disabled."""
+        for field_name in ("sensitive_layers_start", "outer_sensitive_layers_start"):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "sensitive layer counts require sensitive_layers_enabled=True",
+                ):
+                    FluxConfig.flux_12b(**{field_name: 1})
 
     def test_outer_sensitive_layers_must_fit_inside_boundary(self):
         """The outer override cannot extend into the MXFP4 middle."""

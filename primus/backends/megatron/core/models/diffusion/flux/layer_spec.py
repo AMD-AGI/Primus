@@ -530,23 +530,26 @@ def get_flux_layer_spec(
     # Resolve heterogeneous routing before selecting a homogeneous fallback.
     sensitive_enabled = getattr(config, "sensitive_layers_enabled", False)
     total = config.num_joint_layers + config.num_single_layers
-    num_start = getattr(config, "sensitive_layers_start", 0) if sensitive_enabled else 0
-    num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
-    outer_num_start = getattr(config, "outer_sensitive_layers_start", 0) if sensitive_enabled else 0
-    outer_num_end = getattr(config, "outer_sensitive_layers_end", 0) if sensitive_enabled else 0
+    layer_counts = {
+        "sensitive_layers_start": getattr(config, "sensitive_layers_start", 0),
+        "sensitive_layers_end": getattr(config, "sensitive_layers_end", 0),
+        "outer_sensitive_layers_start": getattr(config, "outer_sensitive_layers_start", 0),
+        "outer_sensitive_layers_end": getattr(config, "outer_sensitive_layers_end", 0),
+    }
+    for field_name, value in layer_counts.items():
+        if type(value) is not int:
+            raise ValueError(f"{field_name} must be an integer, got {value!r}")
+        if value < 0:
+            raise ValueError(f"{field_name} must be non-negative, got {value}")
+    if not sensitive_enabled and any(layer_counts.values()):
+        raise ValueError("sensitive layer counts require sensitive_layers_enabled=True")
+
+    num_start = layer_counts["sensitive_layers_start"] if sensitive_enabled else 0
+    num_end = layer_counts["sensitive_layers_end"] if sensitive_enabled else 0
+    outer_num_start = layer_counts["outer_sensitive_layers_start"] if sensitive_enabled else 0
+    outer_num_end = layer_counts["outer_sensitive_layers_end"] if sensitive_enabled else 0
 
     if sensitive_enabled:
-        layer_counts = {
-            "sensitive_layers_start": num_start,
-            "sensitive_layers_end": num_end,
-            "outer_sensitive_layers_start": outer_num_start,
-            "outer_sensitive_layers_end": outer_num_end,
-        }
-        for field_name, value in layer_counts.items():
-            if type(value) is not int:
-                raise ValueError(f"{field_name} must be an integer, got {value!r}")
-            if value < 0:
-                raise ValueError(f"{field_name} must be non-negative, got {value}")
         if num_start + num_end <= 0:
             raise ValueError("sensitive_layers_enabled=True requires a non-empty boundary")
         if num_start + num_end > total:

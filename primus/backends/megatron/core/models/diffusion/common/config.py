@@ -120,9 +120,10 @@ class BaseDiffusionConfig(TransformerConfig):
             if value < 0:
                 raise ValueError(f"{field_name} must be non-negative, got {value}")
 
+        sensitive_count = self.sensitive_layers_start + self.sensitive_layers_end
         outer_sensitive_count = self.outer_sensitive_layers_start + self.outer_sensitive_layers_end
-        if outer_sensitive_count and not self.sensitive_layers_enabled:
-            raise ValueError("outer sensitive layers require sensitive_layers_enabled=True")
+        if (sensitive_count or outer_sensitive_count) and not self.sensitive_layers_enabled:
+            raise ValueError("sensitive layer counts require sensitive_layers_enabled=True")
 
         active_precisions = set()
         if self.sensitive_layers_enabled:
