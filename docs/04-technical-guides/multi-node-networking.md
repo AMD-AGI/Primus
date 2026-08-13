@@ -157,7 +157,7 @@ Set **`PRIMUS_EXPECT_IB=1`** when InfiniBand is **required** for validation; pre
 primus-cli slurm srun -N 4 -- benchmark rccl --op all_reduce --min-bytes 1M --max-bytes 128M
 ```
 
-This exercises collective bandwidth and latency across a message-size sweep. See `docs/02-user-guide/benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
+This exercises collective bandwidth and latency across a message-size sweep. See `docs/02-user-guide/micro-benchmarking.md` and `primus/tools/benchmark/rccl_bench_args.py` for options (dtypes, operations, output files).
 
 ### Verbose RCCL logs
 
@@ -198,6 +198,6 @@ For a consolidated list of `NCCL_*` / `RCCL_*` variables, see `docs/03-configura
 ## Related documentation
 
 - [Preflight diagnostics](../02-user-guide/preflight.md)
-- [Benchmark suite](../02-user-guide/benchmarking.md)
+- [Micro-benchmarking suite](../02-user-guide/micro-benchmarking.md)
 - [NCCL/RCCL collective operations](./collective-operations.md)
 - [Environment variables](../03-configuration-reference/environment-variables.md)

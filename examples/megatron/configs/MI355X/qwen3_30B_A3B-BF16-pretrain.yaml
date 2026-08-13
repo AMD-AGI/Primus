@@ -21,7 +21,7 @@ modules:
       log_avg_reset_interval: 50
 
       # hyper parameters
-      train_iters: 10
+      train_iters: 50
       micro_batch_size: 8
       global_batch_size: 512
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}

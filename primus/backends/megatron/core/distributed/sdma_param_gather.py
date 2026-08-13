@@ -22,7 +22,7 @@ optimizer path to dispatch per-bucket all-gathers through
 
 Activation:
     ``ENABLE_SDMA_ALLGATHER=1`` (gated by the patch). When the required
-    Primus-Turbo / ``hip`` primitives are unavailable, every call falls back to
+    Primus-Turbo primitives are unavailable, every call falls back to
     ``torch.distributed.all_gather_into_tensor`` so behaviour is preserved.
 """
 
@@ -166,11 +166,11 @@ def all_gather_into_tensor_sdma(
     assert input_tensor.is_contiguous(), "SDMA all_gather_into_tensor requires contiguous input_tensor"
 
     try:
-        hip = importlib.import_module("hip").hip
-        get_amd_symm_mem_workspace = importlib.import_module(
-            "primus_turbo.pytorch.kernels.async_tp.amd_symmetric_memory"
-        ).get_amd_symm_mem_workspace
-        hip_check = importlib.import_module("primus_turbo.pytorch.kernels.async_tp.common_ops").hip_check
+        symm_mem_module = importlib.import_module("primus_turbo.pytorch.core.symm_mem")
+        hip_runtime_module = importlib.import_module("primus_turbo.pytorch.core.pyhip_runtime_wrapper")
+        get_symm_mem_workspace = symm_mem_module.get_symm_mem_workspace
+        hip_runtime = hip_runtime_module.get_hip_runtime_lib()
+        memcpy_comm_kind = hip_runtime_module.hipMemcpyKindEnum.hipMemcpyDeviceToDeviceNoCU
     except Exception:
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
@@ -185,12 +185,11 @@ def all_gather_into_tensor_sdma(
     input_nbytes = input_tensor.nbytes
     output_flat = output_tensor.view(-1)
 
-    memcpy_comm_kind = getattr(
-        hip.hipMemcpyKind, "hipMemcpyDeviceToDeviceNoCU", hip.hipMemcpyKind.hipMemcpyDeviceToDevice
-    )
-
     # Allocate/reuse symmetric workspace and expose each rank's local shard buffer.
-    symm_mem = get_amd_symm_mem_workspace(group_name, min_size=max(input_nbytes, _SDMA_SYMM_MEM_MIN_BYTES))
+    symm_mem = get_symm_mem_workspace(
+        group,
+        min_size=max(input_nbytes, _SDMA_SYMM_MEM_MIN_BYTES),
+    )
     gather_buffers = [
         symm_mem.get_buffer(r, input_tensor.shape, input_tensor.dtype) for r in range(world_size)
     ]
@@ -211,14 +210,12 @@ def all_gather_into_tensor_sdma(
         # Peer copies may start after the publish barrier completes.
         barrier_event.record(runtime.comm_stream)
         # Copy local shard into its slot in the output.
-        hip_check(
-            hip.hipMemcpyAsync(
-                output_flat.data_ptr() + rank * input_nbytes,
-                input_tensor.data_ptr(),
-                input_nbytes,
-                memcpy_comm_kind,
-                runtime.comm_stream.cuda_stream,
-            )
+        hip_runtime.hipMemcpyAsync(
+            output_flat.data_ptr() + rank * input_nbytes,
+            input_tensor.data_ptr(),
+            input_nbytes,
+            memcpy_comm_kind,
+            runtime.comm_stream.cuda_stream,
         )
 
     for peer_idx, src_rank in enumerate(r for r in range(world_size) if r != rank):
@@ -226,14 +223,12 @@ def all_gather_into_tensor_sdma(
         copy_stream = runtime.peer_copy_streams[peer_idx % len(runtime.peer_copy_streams)]
         with torch.cuda.stream(copy_stream):
             copy_stream.wait_event(barrier_event)
-            hip_check(
-                hip.hipMemcpyAsync(
-                    output_flat.data_ptr() + src_rank * input_nbytes,
-                    src_buf.data_ptr(),
-                    input_nbytes,
-                    memcpy_comm_kind,
-                    copy_stream.cuda_stream,
-                )
+            hip_runtime.hipMemcpyAsync(
+                output_flat.data_ptr() + src_rank * input_nbytes,
+                src_buf.data_ptr(),
+                input_nbytes,
+                memcpy_comm_kind,
+                copy_stream.cuda_stream,
             )
 
     def _wait_impl():

@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import torch
 
-from primus.backends.diffusion.trainers.base import BaseWanTrainer, ContiguousDistributedSampler
+from primus.backends.diffusion.trainers.base import (
+    BaseWanTrainer,
+    ContiguousDistributedSampler,
+)
 
 
 class RecordingLogger:
@@ -101,6 +104,19 @@ def test_mlperf_logs_configured_base_lr_before_warmup():
     ]
     assert base_lr == [2.0e-4]
     assert trainer.mlperf_logger.records[-1] == ("start", {"key": "init_start"})
+
+
+def test_mlperf_cache_clear_matches_launcher(monkeypatch):
+    monkeypatch.setenv("MLPERF_CLEAR_CACHES", "false")
+    trainer = _trainer()
+    trainer._mlperf_log_run_start()
+
+    cache_clear = next(
+        record
+        for kind, record in trainer.mlperf_logger.records
+        if kind == "event" and record["key"] == "cache_clear"
+    )
+    assert cache_clear["value"] is False
 
 
 def test_mlperf_eval_events_bracket_validation():

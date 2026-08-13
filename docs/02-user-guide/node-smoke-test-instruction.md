@@ -43,7 +43,7 @@ No `MASTER_ADDR`, no `MASTER_PORT`, no global rendezvous required.
 **Git clone the Primus repository to a shared filesystem that all nodes can read.**
 
 ```bash
-git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 ```
 
@@ -448,5 +448,5 @@ Use `node_smoke` to **screen** a cluster fast and exclude bad nodes. Use the ful
 
 - [`preflight.md`](./preflight.md) — the heavier `preflight` tool with a global rendezvous and inter-node bandwidth tests.
 - [`preflight-without-container.md`](./preflight-without-container.md) — running `preflight` directly on the host (no container), including the shared venv + NCCL setup.
-- [`primus/cli/subcommands/node_smoke.py`](../../primus/cli/subcommands/node_smoke.py) — the primus-cli subcommand wiring (two-phase dispatch: per-rank run + rank-0 aggregate).
-- [`primus/tools/preflight/node_smoke/cli.py`](../../primus/tools/preflight/node_smoke/cli.py) — canonical flag definitions and per-node / aggregate phase bodies.
+- [`primus/cli/subcommands/node_smoke.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/cli/subcommands/node_smoke.py) — the primus-cli subcommand wiring (two-phase dispatch: per-rank run + rank-0 aggregate).
+- [`primus/tools/preflight/node_smoke/cli.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/tools/preflight/node_smoke/cli.py) — canonical flag definitions and per-node / aggregate phase bodies.

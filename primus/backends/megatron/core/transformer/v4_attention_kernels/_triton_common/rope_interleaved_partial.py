@@ -478,6 +478,7 @@ def _rope_gen_fwd_kernel(
     BLOCK_NOPE: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
     DTYPE: tl.constexpr,
+    INVERSE: tl.constexpr,
 ):
     pid_n = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -492,6 +493,10 @@ def _rope_gen_fwd_kernel(
     pos = tl.load(POS_PTR + pid_n).to(tl.float32)
     inv_freq = tl.load(INVFREQ_PTR + rd_half_offs, mask=rd_half_mask, other=0.0).to(tl.float32)
     angle = pos * inv_freq
+    # ``R(-pos) == R(pos)^T``, i.e. the same rotation with a negated sine, so
+    # the inverse costs a sign flip rather than a second kernel.
+    if INVERSE:
+        angle = -angle
     cos = tl.cos(angle).to(DTYPE)
     sin = tl.sin(angle).to(DTYPE)
 
@@ -529,6 +534,7 @@ def _rope_gen_bwd_kernel(
     BLOCK_NOPE: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
     DTYPE: tl.constexpr,
+    INVERSE: tl.constexpr,
 ):
     pid_n = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -542,6 +548,10 @@ def _rope_gen_bwd_kernel(
     pos = tl.load(POS_PTR + pid_n).to(tl.float32)
     inv_freq = tl.load(INVFREQ_PTR + rd_half_offs, mask=rd_half_mask, other=0.0).to(tl.float32)
     angle = pos * inv_freq
+    # Must mirror the forward's sign so the transposed rotation below is the
+    # actual adjoint of what was applied.
+    if INVERSE:
+        angle = -angle
     cos = tl.cos(angle).to(DTYPE)
     sin = tl.sin(angle).to(DTYPE)
 
@@ -571,10 +581,15 @@ class RoPEFromPositionsFn(torch.autograd.Function):
     tensors.  ``position_ids`` / ``inv_freq`` are non-differentiable
     (positions are integer, inv_freq is a buffer), so the backward returns
     ``None`` for both and recomputes cos/sin in-kernel.
+
+    ``inverse=True`` rotates by ``-position`` instead, which is what the V4
+    attention output needs before the O projection. It is the same kernel with
+    a negated angle, so the de-rotation gets the same single-pass, no-cos/sin-in-
+    HBM treatment as Q / KV instead of paying for a separate cos/sin build.
     """
 
     @staticmethod
-    def forward(ctx, x, pos_flat, inv_freq, rotary_dim):  # type: ignore[override]
+    def forward(ctx, x, pos_flat, inv_freq, rotary_dim, inverse=False):  # type: ignore[override]
         head_dim = x.shape[-1]
         if rotary_dim % 2 != 0:
             raise ValueError(f"rotary_dim must be even, got {rotary_dim}")
@@ -616,6 +631,7 @@ class RoPEFromPositionsFn(torch.autograd.Function):
             BLOCK_NOPE=block_nope,
             BLOCK_RD_HALF=block_rd_half,
             DTYPE=_triton_dtype(x.dtype),
+            INVERSE=bool(inverse),
         )
 
         ctx.save_for_backward(pos_c, inv_c)
@@ -623,6 +639,7 @@ class RoPEFromPositionsFn(torch.autograd.Function):
         ctx.head_dim = head_dim
         ctx.H = H
         ctx.N = N
+        ctx.inverse = bool(inverse)
         return out
 
     @staticmethod
@@ -654,8 +671,9 @@ class RoPEFromPositionsFn(torch.autograd.Function):
             BLOCK_NOPE=block_nope,
             BLOCK_RD_HALF=block_rd_half,
             DTYPE=_triton_dtype(dout.dtype),
+            INVERSE=ctx.inverse,
         )
-        return dx, None, None, None
+        return dx, None, None, None, None
 
 
 def apply_rope_from_positions(
@@ -664,6 +682,7 @@ def apply_rope_from_positions(
     inv_freq: torch.Tensor,
     *,
     rotary_dim: int,
+    inverse: bool = False,
 ) -> torch.Tensor:
     """Fused interleaved partial RoPE that generates cos/sin in-kernel.
 
@@ -671,15 +690,20 @@ def apply_rope_from_positions(
     ``x.shape[:-2]``; ``inv_freq``: ``[rotary_dim // 2]`` (YaRN pre-applied).
     Dispatches to the Triton kernel when enabled + CUDA, else falls back to
     the eager ``cos = pos*inv_freq -> cos/sin -> rotate`` path.
+
+    ``inverse=True`` applies ``R(-position)``, which the V4 attention output
+    needs before the O projection. Both paths are out-of-place.
     """
     if rotary_dim == 0:
         return x
     if is_triton_path_enabled() and x.is_cuda:
         leading = x.shape[:-2]
         pos_flat = position_ids.broadcast_to(leading).reshape(-1)
-        return RoPEFromPositionsFn.apply(x, pos_flat, inv_freq, rotary_dim)
+        return RoPEFromPositionsFn.apply(x, pos_flat, inv_freq, rotary_dim, inverse)
     # Eager fallback: build cos/sin then apply.
     freqs = position_ids.float().unsqueeze(-1) * inv_freq
+    if inverse:
+        freqs = -freqs
     return eager_apply_interleaved_partial_rope(x, freqs.cos(), freqs.sin(), rotary_dim=rotary_dim)
 
 
@@ -691,8 +715,7 @@ def apply_rope_from_positions(
 def is_triton_path_enabled() -> bool:
     """Return True iff the ``PRIMUS_ROPE_TRITON`` env knob is not ``"0"``.
 
-    Mirrors :func:`primus.backends.megatron.core.extensions._triton.stack_grouped_weight.is_triton_path_enabled`
-    (plan-6 P34).  Default-on, A/B toggle via ``PRIMUS_ROPE_TRITON=0``.
+    Default-on, A/B toggle via ``PRIMUS_ROPE_TRITON=0``.
     """
 
     return os.environ.get("PRIMUS_ROPE_TRITON", "1") != "0"

@@ -26,6 +26,7 @@ Start here if you are new to Primus.
 - [Project overview](./01-getting-started/overview.md): what Primus does, who it is for, key capabilities
 - [Installation guide](./01-getting-started/installation.md): prerequisites, Docker/bare-metal/Slurm setup
 - [Quickstart](./01-getting-started/quickstart.md): first training run in 5 minutes
+- [Release notes](./01-getting-started/release-notes.md): published training image tags and their full software stacks (single source of truth)
 - [Glossary](./01-getting-started/glossary.md): terms, acronyms, and domain concepts
 
 ### [User guide](./02-user-guide/)
@@ -35,9 +36,12 @@ Core workflows and day-to-day usage.
 - [CLI reference](./02-user-guide/cli-reference.md): `primus-cli` modes, flags, and subcommands
 - [Configuration system](./02-user-guide/configuration-system.md): YAML configuration model, presets, overrides, inheritance
 - [Pretraining](./02-user-guide/pretraining.md): pretraining **concepts**: backends, YAML structure, parallelism, configuration inventory
-- [Backend training recipes](./02-user-guide/training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md): pretraining **commands**: copy-paste, GPU-arch-specific run commands
+- [Megatron-LM training performance validation](./02-user-guide/megatron-lm-training.md): reproduce the published Megatron backend benchmarks on the `rocm/primus` image
+- [TorchTitan training performance validation](./02-user-guide/torchtitan-training.md): reproduce the published TorchTitan backend benchmarks on the `rocm/primus` image
+- [JAX MaxText training performance validation](./02-user-guide/jax-maxtext-training.md): reproduce the AMD-published MaxText benchmarks via Primus, MAD, or the standalone scripts
 - [Post-training](./02-user-guide/posttraining.md): SFT and LoRA fine-tuning via Megatron Bridge
-- [Benchmarking](./02-user-guide/benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
+- [Micro-benchmarking](./02-user-guide/micro-benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md): memory and performance projection tools
 - [Tuning agent](./02-user-guide/tuning-agent.md): LLM-driven search for an optimal training configuration (uses projection as an oracle)
@@ -62,6 +66,7 @@ Deep technical topics for advanced users.
 - [Collective operations](./04-technical-guides/collective-operations.md): NCCL/RCCL operations and their role in each parallelism strategy
 - [Performance tuning](./04-technical-guides/performance-tuning.md): HipBLASLt, Primus-Turbo, FP8, MoE optimization
 - [MoE training deep-dive](./04-technical-guides/moe-training.md): bottlenecks and Primus-Turbo optimizations for Mixture-of-Experts models
+- [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md): FlyDSL-based fused MoE layer for EP-only bf16 training, setup and reproduction
 - [Data preparation](./04-technical-guides/data-preparation.md): tokenization, data formats, mock data
 - [Checkpoint management](./04-technical-guides/checkpoint-management.md): formats, save/load, distributed checkpointing
 - [Multi-node networking](./04-technical-guides/multi-node-networking.md): InfiniBand, RoCE, AINIC configuration
@@ -107,7 +112,8 @@ For contributors and maintainers.
 | Browse all Primus tools | [Primus tools](./02-user-guide/primus-tools.md) |
 | Install Primus | [Installation](./01-getting-started/installation.md) |
 | Run my first training | [Quickstart](./01-getting-started/quickstart.md) |
-| Get an exact run command for my model/GPU | [Backend training recipes](./02-user-guide/training-recipes.md) |
+| Find out what is inside a training image | [Release notes](./01-getting-started/release-notes.md) |
+| Get an exact run command for my model/GPU | [End-to-end training recipes](./02-user-guide/end-to-end-training-recipes.md) |
 | Write a training YAML configuration | [Configuration system](./02-user-guide/configuration-system.md) |
 | Look up a Megatron parameter | [Megatron parameters](./03-configuration-reference/megatron-parameters.md) |
 | Look up a TorchTitan parameter | [TorchTitan parameters](./03-configuration-reference/torchtitan-parameters.md) |
@@ -116,6 +122,7 @@ For contributors and maintainers.
 | Configure parallelism for my model | [Parallelism configuration](./04-technical-guides/parallelism-configuration.md) |
 | Tune training performance | [Performance tuning](./04-technical-guides/performance-tuning.md) |
 | Train a Mixture-of-Experts model | [MoE training deep-dive](./04-technical-guides/moe-training.md) |
+| Use the fused MegaMoE layer | [MegaMoE fused MoE layer](./04-technical-guides/mega-moe.md) |
 | Train a diffusion (Flux) model | [Diffusion models](./04-technical-guides/diffusion-models/README.md) |
 | Fine-tune with native SFT / LoRA | [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md) |
 | Auto-tune my training configuration | [Tuning agent](./02-user-guide/tuning-agent.md) |

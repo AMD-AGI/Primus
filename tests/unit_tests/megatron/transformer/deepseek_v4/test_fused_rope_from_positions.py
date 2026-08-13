@@ -43,8 +43,10 @@ def _inv_freq(rotary_dim, theta=10000.0):
     return 1.0 / (theta ** (i / rotary_dim))
 
 
-def _eager(x, position_ids, inv_freq, rotary_dim):
+def _eager(x, position_ids, inv_freq, rotary_dim, inverse=False):
     freqs = position_ids.float().unsqueeze(-1) * inv_freq
+    if inverse:
+        freqs = -freqs
     return eager_apply_interleaved_partial_rope(x, freqs.cos(), freqs.sin(), rotary_dim=rotary_dim)
 
 
@@ -71,6 +73,84 @@ class TestFwd:
         got = apply_rope_from_positions(x, pos1d, inv, rotary_dim=rd)
         ref = _eager(x, pos1d.unsqueeze(0).expand(B, S), inv, rd)
         torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
+
+
+class TestInverse:
+    """``inverse=True`` is the de-rotation the V4 attention output needs.
+
+    It exists so the ``R(-t)`` before the O projection reuses this fused path
+    (cos/sin generated in-kernel) instead of building cos/sin eagerly on all 43
+    layers.
+    """
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("rotary_dim", [64, 128])
+    def test_matches_eager_negated_angle(self, dtype, rotary_dim):
+        B, S, H, D = 2, 128, 8, 512
+        gen = torch.Generator(device="cuda").manual_seed(3)
+        x = torch.randn((B, S, H, D), dtype=dtype, device="cuda", generator=gen)
+        pos = torch.arange(S, device="cuda").unsqueeze(0).expand(B, S)
+        inv = _inv_freq(rotary_dim)
+
+        got = apply_rope_from_positions(x, pos, inv, rotary_dim=rotary_dim, inverse=True)
+        ref = _eager(x, pos, inv, rotary_dim, inverse=True)
+        atol, rtol = _tol(dtype)
+        torch.testing.assert_close(got, ref, atol=atol, rtol=rtol)
+
+    def test_round_trips_with_the_forward_rotation(self):
+        B, S, H, D, rd = 2, 64, 4, 512, 64
+        x = torch.randn((B, S, H, D), dtype=torch.float32, device="cuda")
+        pos = torch.arange(S, device="cuda")
+        inv = _inv_freq(rd)
+
+        rotated = apply_rope_from_positions(x, pos, inv, rotary_dim=rd)
+        back = apply_rope_from_positions(rotated, pos, inv, rotary_dim=rd, inverse=True)
+        torch.testing.assert_close(back, x, atol=1e-5, rtol=1e-5)
+
+        # Guard against a vacuous round trip.
+        assert not torch.allclose(rotated, x, atol=1e-3, rtol=1e-3)
+
+    def test_is_out_of_place(self):
+        """The attention backward retains the raw output, so it must not be mutated."""
+        B, S, H, D, rd = 1, 32, 4, 512, 64
+        x = torch.randn((B, S, H, D), dtype=torch.float32, device="cuda")
+        before = x.detach().clone()
+        out = apply_rope_from_positions(
+            x, torch.arange(S, device="cuda"), _inv_freq(rd), rotary_dim=rd, inverse=True
+        )
+
+        assert out.data_ptr() != x.data_ptr()
+        torch.testing.assert_close(x, before, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_bwd_matches_eager(self, dtype):
+        B, S, H, D, rd = 2, 64, 8, 512, 64
+        gen = torch.Generator(device="cuda").manual_seed(4)
+        xb = torch.randn((B, S, H, D), dtype=dtype, device="cuda", generator=gen)
+        pos = torch.arange(S, device="cuda").unsqueeze(0).expand(B, S)
+        inv = _inv_freq(rd)
+
+        xt = xb.detach().clone().requires_grad_(True)
+        xe = xb.detach().clone().requires_grad_(True)
+        out_t = apply_rope_from_positions(xt, pos, inv, rotary_dim=rd, inverse=True)
+        out_e = _eager(xe, pos, inv, rd, inverse=True)
+        g = torch.randn_like(out_t)
+        out_t.backward(g)
+        out_e.backward(g.detach().clone())
+
+        atol, rtol = _tol(dtype)
+        torch.testing.assert_close(xt.grad, xe.grad, atol=atol, rtol=rtol)
+
+    def test_inverse_differs_from_forward(self):
+        """Sanity: the flag actually changes the result."""
+        B, S, H, D, rd = 1, 32, 4, 512, 64
+        x = torch.randn((B, S, H, D), dtype=torch.float32, device="cuda")
+        pos = torch.arange(1, S + 1, device="cuda")  # avoid position 0 (identity)
+        inv = _inv_freq(rd)
+
+        fwd = apply_rope_from_positions(x, pos, inv, rotary_dim=rd)
+        inv_out = apply_rope_from_positions(x, pos, inv, rotary_dim=rd, inverse=True)
+        assert not torch.allclose(fwd, inv_out, atol=1e-4, rtol=1e-4)
 
 
 class TestBwd:

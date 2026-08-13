@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """V4 SWA attention forward FlyDSL launcher with MQA stride-trick (Round 3 Stage C).
 
 Eliminates the K/V .expand().clone() broadcast that allocates H_Q copies of

@@ -16,7 +16,7 @@
       "name": "maxtext",
       "path": "third_party/maxtext",
       "url": "https://github.com/ROCm/maxtext.git",
-      "commit": "80f431d0ebbf6465257e2a5d931046dfb0b465b0"
+      "commit": "a7c6c7e5377cce39be51cbe2a48fe0f86fbab8dc"
     },
     {
       "name": "Emerging-Optimizers",
@@ -31,10 +31,22 @@
       "commit": "9577b1280eaadd60b9d7b0ce6df09ac80e87e323"
     },
     {
+      "name": "mamba",
+      "path": "third_party/mamba",
+      "url": "https://github.com/AndreasKaratzas/mamba.git",
+      "commit": "4d67c534d10b7299194ede55b36718cc7a1dd472"
+    },
+    {
       "name": "HummingbirdXT",
       "path": "third_party/HummingbirdXT",
       "url": "https://github.com/AMD-AGI/HummingbirdXT.git",
       "commit": "ed7b7bd0dd03ed084f645c5dda1bc7b333f326f0"
+    },
+    {
+      "name": "Automodel",
+      "path": "third_party/Automodel",
+      "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
+      "commit": "44f2acdee1628b8a5a5acb35ada6ed8c539a22e4"
     }
   ]
 }

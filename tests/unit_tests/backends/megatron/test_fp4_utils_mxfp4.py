@@ -4,7 +4,7 @@
 """
 Unit tests for fp4_utils.py MXFP4 recipe and context manager changes.
 
-Tests get_fp4_recipe error handling for an unsupported recipe.
+Tests recipe error handling and gradient stochastic-rounding configuration.
 """
 
 from types import SimpleNamespace
@@ -12,6 +12,45 @@ from types import SimpleNamespace
 import pytest
 
 from tests.utils import PrimusUT
+
+
+class TestMXFP4GradientStochasticRounding:
+    """Verify Megatron and diffusion configs resolve the SR option correctly."""
+
+    def test_explicit_config_value_takes_precedence(self, monkeypatch):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core.fp4_utils import _mxfp4_gradient_sr_enabled
+
+        def unexpected_get_args():
+            raise AssertionError("global args should not be read for an explicit config value")
+
+        monkeypatch.setattr(global_vars, "get_args", unexpected_get_args)
+
+        assert _mxfp4_gradient_sr_enabled(SimpleNamespace(mxfp4_gradient_stochastic_rounding=True))
+        assert not _mxfp4_gradient_sr_enabled(SimpleNamespace(mxfp4_gradient_stochastic_rounding=False))
+
+    def test_megatron_config_falls_back_to_global_args(self, monkeypatch):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core.fp4_utils import _mxfp4_gradient_sr_enabled
+
+        args = SimpleNamespace(mxfp4_gradient_stochastic_rounding=True)
+        monkeypatch.setattr(global_vars, "get_args", lambda: args)
+
+        assert _mxfp4_gradient_sr_enabled(SimpleNamespace())
+
+    def test_unavailable_global_args_default_to_disabled(self, monkeypatch):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core.fp4_utils import _mxfp4_gradient_sr_enabled
+
+        def unavailable_get_args():
+            raise RuntimeError("global args are not initialized")
+
+        monkeypatch.setattr(global_vars, "get_args", unavailable_get_args)
+
+        assert not _mxfp4_gradient_sr_enabled(SimpleNamespace())
 
 
 class TestGetFp4RecipeMXFP4(PrimusUT):

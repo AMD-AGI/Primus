@@ -64,10 +64,8 @@ modules:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `training.mock_data` | `true` | Primus preset extension: use synthetic data instead of reading `dataset_path`. |
-| `training.debug_moe_force_load_balance` | `false` | Primus preset extension/debug helper to force MoE load balancing behavior. |
 | `training.dataset` | `c4` | Dataset name key for TorchTitan dataset loaders. |
 | `training.dataset_path` | `null` | Filesystem or remote path to dataset assets. |
-| `training.deterministic` | `false` | Prefer deterministic algorithms (often slower). |
 | `training.enable_cpu_offload` | `false` | Offload optimizer or activations to CPU when supported. |
 | `training.gc_debug` | `false` | Extra garbage-collection diagnostics. |
 | `training.gc_freq` | `50` | Run Python GC every N steps when enabled. |
@@ -76,7 +74,6 @@ modules:
 | `training.max_norm` | `1.0` | Gradient clipping max norm (global). |
 | `training.mixed_precision_param` | `bfloat16` | Parameter dtype for mixed precision (`bfloat16`, `float16`, etc.). |
 | `training.mixed_precision_reduce` | `float32` | Dtype for reduction / gradient accumulation. |
-| `training.seed` | `null` | RNG seed; `null` lets the framework choose. |
 | `training.seq_len` | `2048` | Sequence length per sample. |
 | `training.steps` | `10000` | Total optimizer steps. |
 
@@ -123,7 +120,6 @@ modules:
 | `parallelism.pipeline_parallel_microbatch_size` | `1` | Microbatches per pipeline round. |
 | `parallelism.pipeline_parallel_schedule` | `1F1B` | Pipeline schedule name (`1F1B`, `GPipe`, …). |
 | `parallelism.pipeline_parallel_schedule_csv` | `''` | Optional CSV schedule definition. |
-| `parallelism.pipeline_parallel_split_points` | `[]` | Layer indices for manual PP splits. |
 | `parallelism.pipeline_parallel_layers_per_stage` | `null` | Layers per stage when auto-balanced. |
 | `parallelism.pipeline_parallel_first_stage_less_layers` | `1` | Fewer layers on first PP stage (for imbalance). |
 | `parallelism.pipeline_parallel_last_stage_less_layers` | `1` | Fewer layers on last PP stage. |
@@ -135,7 +131,6 @@ modules:
 | `parallelism.context_parallel_rotate_method` | `allgather` | Communication pattern for context parallel. |
 | `parallelism.disable_loss_parallel` | `false` | Disable loss parallel layout when TP is used. |
 | `parallelism.enable_async_tensor_parallel` | `false` | Overlap TP collectives with compute. |
-| `parallelism.enable_compiled_autograd` | `false` | Use `torch.compile` on autograd regions. |
 | `parallelism.fsdp_reshard_after_forward` | `default` | FSDP reshard policy (`default`, `always`, `never`). |
 | `parallelism.module_fqns_per_model_part` | `null` | Map of pipeline stage → module FQNs for multi-part models. |
 
@@ -352,6 +347,19 @@ modules:
 | `validation.seq_len` | `2048` | Validation sequence length. |
 | `validation.freq` | `10` | Run validation every N training steps. |
 | `validation.steps` | `-1` | Max validation steps (`-1` = full pass / framework default). |
+
+---
+
+## 15. Debug (`debug.*`)
+
+*Source: `pre_trainer.yaml`. Upstream added this section in TorchTitan v0.2.2; the keys previously lived under `training.*`.*
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `debug.deterministic` | `false` | Prefer deterministic algorithms (often slower). |
+| `debug.deterministic_warn_only` | `false` | Warn instead of erroring when an op has no deterministic implementation. |
+| `debug.moe_force_load_balance` | `false` | Round-robin tokens across MoE experts so every expert gets the same amount; debugging only. |
+| `debug.seed` | `null` | RNG seed; `null` lets the framework choose. |
 
 ---
 

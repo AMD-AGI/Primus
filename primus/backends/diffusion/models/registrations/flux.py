@@ -167,9 +167,7 @@ def build_flux_model(model_config: dict[str, Any]):
     cfg_dict: dict[str, Any] = dict(model_config.get("config", {}) or {})
     float8_recipe = str(cfg_dict.get("float8_recipe") or "").strip().lower()
     if float8_recipe not in {"", "tensorwise"}:
-        raise ValueError(
-            f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'"
-        )
+        raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
     preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
     preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
@@ -248,12 +246,8 @@ def build_flux_model(model_config: dict[str, Any]):
             dit,
             module_filter_fn=high_precision_wgrad_filter,
             config=Float8LinearConfig(
-                cast_config_input_for_grad_weight=CastConfig(
-                    scaling_type=ScalingType.DISABLED
-                ),
-                cast_config_grad_output_for_grad_weight=CastConfig(
-                    scaling_type=ScalingType.DISABLED
-                ),
+                cast_config_input_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
+                cast_config_grad_output_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 pad_inner_dim=False,
                 enable_fsdp_float8_all_gather=False,
             ),

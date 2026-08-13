@@ -1,0 +1,68 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:flux.1_schnell_t2i-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  pre_trainer:
+    framework: diffusion
+    config: pre_trainer.yaml
+
+    model: flux.1_schnell_t2i.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      metrics:
+        log_freq: ${LOG_FREQ:1}
+        enable_wandb: ${ENABLE_WANDB_LOGGER:false}
+
+      training:
+        local_batch_size: ${LOCAL_BATCH_SIZE:1}
+        steps: ${MAX_STEPS:50}
+        num_train_epochs: 1000
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
+        save_steps: ${SAVE_STEPS:100}
+        save_strategy: ${SAVE_STRATEGY:dtcp_full}
+        save_total_limit: ${CHECKPOINT_KEEP_LATEST:3}
+        resume_from_checkpoint: ${RESUME_FROM_CHECKPOINT:latest}
+        run_name: flux.1_schnell_t2i-pretrain
+
+      data:
+        dataset_path: ${DATASET_PATH:}
+        eval_dataset_path: ${EVAL_DATASET_PATH:}
+        empty_encodings_path: ${EMPTY_ENCODINGS_PATH:}
+        prompt_dropout_prob: ${PROMPT_DROPOUT_PROB:0.1}
+        img_size: ${IMG_SIZE:256}
+
+      parallelism:
+        sp_size: 1
+        dp_replicate: ${DP_REPLICATE:1}
+
+      optimizer:
+        lr: ${LR:2.0e-4}
+        weight_decay: ${WEIGHT_DECAY:0.1}
+        adam_beta2: ${ADAM_BETA2:0.95}
+
+      lr_scheduler:
+        lr_scheduler_type: constant_with_warmup
+        warmup_steps: ${WARMUP_STEPS:1600}
+
+      runtime:
+        seed: ${SEED:10007}
+        attention_backend: ${ATTENTION_BACKEND:sdpa}
+        gradient_checkpointing: ${GRADIENT_CHECKPOINTING:true}
+        gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO:1.0}
+        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:false}
+        fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
+
+      mlperf:
+        enable: ${MLPERF_ENABLE:false}
+        target_eval_loss: ${TARGET_ACCURACY:0.586}
+        eval_samples: ${VAL_CHECK_INTERVAL:262144}
+        output_file: ${MLLOG_OUTPUT_FILE:}
