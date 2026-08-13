@@ -7,7 +7,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Qwen3-235B-A22B LoRA SFT (FP8 hybrid) — SCROLLS GovReport (native Megatron)
 # =============================================================================
 # Single-node MoE stack: EP=8 + distributed optimizer + legacy grouped GEMM
-# (torch_dist checkpoint) + DeepEP @ seq=4096 default.
+# (torch_dist checkpoint) + DeepEP @ seq=8192 default.
 #
 # Hardware: 1 node × 8× MI355X — TP=1, PP=1, EP=8.
 #
@@ -26,11 +26,11 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # MoE checkpoint: use_turbo_grouped_gemm=false + moe_use_legacy_grouped_gemm=true
 # required for torch_dist expert ShardedTensor layout.
 #
-# Throughput / memory (@ 4096 default):
+# Throughput / memory (@ 8192 default):
 #   Stable defaults: MBS=1 GBS=8, recompute=3, overlap collectives off.
 #   Perf mode: export PRIMUS_MBS=2 PRIMUS_GBS=16 PRIMUS_RECOMPUTE_LAYERS=1
 #   Still OOM: export PRIMUS_RECOMPUTE_LAYERS=16   # then 47 → 94
-#   Longer seq: export PRIMUS_SEQ_LENGTH=8192 PRIMUS_MAX_POSITION_EMBEDDINGS=8192
+#   Shorter smoke: export PRIMUS_SEQ_LENGTH=4096 PRIMUS_MAX_POSITION_EMBEDDINGS=4096
 #
 # Required before launch:
 #   export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
@@ -86,8 +86,8 @@ modules:
       eval_iters: 0
       eval_interval: 1000000
 
-      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
-      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      seq_length: ${PRIMUS_SEQ_LENGTH:8192}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:8192}
 
       lr: 1.0e-4
       min_lr: 1.0e-5
