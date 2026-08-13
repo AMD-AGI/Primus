@@ -350,6 +350,61 @@ class TestMXFP4Compile(PrimusUT):
                 )
 
     @requires_mxfp4
+    def test_compiled_backward_matches_eager_high_precision_forward(self):
+        from primus_turbo.pytorch.core.backend import BackendType
+        from primus_turbo.pytorch.core.low_precision import (
+            ScalingGranularity,
+            float8_e4m3,
+        )
+
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            _FORWARD_PRECISION_VALUES,
+            MXFP4LinearFunction,
+            _enable_preshuffle,
+        )
+
+        for forward_precision in ("fp8", "bf16"):
+            with self.subTest(forward_precision=forward_precision):
+                torch._dynamo.reset()
+                torch.manual_seed(42)
+                x_eager = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+                w_eager = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+                x_compiled = x_eager.detach().clone().requires_grad_(True)
+                w_compiled = w_eager.detach().clone().requires_grad_(True)
+                upstream = torch.randn(128, 512, dtype=torch.bfloat16, device="cuda")
+                preshuffle = _enable_preshuffle()
+                forward_precision_value = _FORWARD_PRECISION_VALUES[forward_precision]
+                fp8_dtype = float8_e4m3 if forward_precision == "fp8" else None
+                fp8_granularity = ScalingGranularity.TENSORWISE.value if forward_precision == "fp8" else 0
+                fp8_backend = BackendType.HIPBLASLT.value if forward_precision == "fp8" else 0
+
+                def forward(x, weight):
+                    return MXFP4LinearFunction.apply(
+                        x,
+                        weight,
+                        preshuffle,
+                        False,
+                        None,
+                        0,
+                        0,
+                        False,
+                        forward_precision_value,
+                        fp8_dtype,
+                        fp8_granularity,
+                        fp8_backend,
+                    )[0]
+
+                eager_output = forward(x_eager, w_eager)
+                eager_output.backward(upstream)
+
+                compiled_output = torch.compile(forward, fullgraph=True)(x_compiled, w_compiled)
+                compiled_output.backward(upstream)
+
+                assert torch.equal(compiled_output, eager_output)
+                assert torch.equal(x_compiled.grad, x_eager.grad)
+                assert torch.equal(w_compiled.grad, w_eager.grad)
+
+    @requires_mxfp4
     def test_compiled_forward_matches_eager(self):
         from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
             MXFP4LinearFunction,

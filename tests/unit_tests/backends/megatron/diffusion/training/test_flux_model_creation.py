@@ -245,6 +245,23 @@ class TestFluxModelCreation:
         assert config.fp8_dot_product_attention is False
         assert config.fp8_multi_head_attention is False
 
+    def test_build_flux_config_from_yaml_mxfp4_precision_settings(self, monkeypatch: pytest.MonkeyPatch):
+        backend_args = SimpleNamespace(
+            mock_data=True,
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            mxfp4_forward_precision="bf16",
+            mxfp4_backward_precision="mxfp4",
+        )
+
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.fp4 == "mxfp4"
+        assert config.fp4_recipe == "mxfp4"
+        assert config.mxfp4_forward_precision == "bf16"
+        assert config.mxfp4_backward_precision == "mxfp4"
+
     def test_create_model_does_not_overwrite_existing_torch_compile_attrs(
         self, monkeypatch: pytest.MonkeyPatch
     ):
