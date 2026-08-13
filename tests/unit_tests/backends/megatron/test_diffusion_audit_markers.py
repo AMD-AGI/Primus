@@ -10,6 +10,7 @@ from primus.backends.megatron.data.diffusion.task_encoders.image import (
 from primus.backends.megatron.flux_pretrain_trainer import (
     FluxPretrainTrainer,
     _emit_precision_linear_class_census,
+    _mxfp4_gemm_mode_census,
     _precision_linear_class_census,
 )
 from primus.backends.megatron.patches.mlperf_warmup_patches import _is_resumed_training
@@ -18,6 +19,7 @@ from primus.backends.megatron.training.diffusion.forward_step import (
 )
 
 _FORWARD_STEP_LOGGER = "primus.backends.megatron.training.diffusion.forward_step"
+_FLUX_TRAINER_LOGGER = "primus.backends.megatron.flux_pretrain_trainer"
 
 
 def test_sample_key_fingerprint_is_order_sensitive():
@@ -50,16 +52,36 @@ def test_precision_linear_class_census_reports_exact_classes():
     }
 
 
-def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, capsys):
+def test_mxfp4_gemm_mode_census_reports_forward_backward_split():
+    mxfp4_column = type("MXFP4ColumnParallelLinear", (nn.Module,), {})()
+    mxfp4_column._forward_precision = "fp8"
+    mxfp4_column._backward_is_fp8 = False
+    mxfp4_row = type("MXFP4RowParallelLinear", (nn.Module,), {})()
+    mxfp4_row._forward_precision = "bf16"
+    mxfp4_row._backward_is_fp8 = False
+    model = nn.ModuleList([mxfp4_column, mxfp4_row, nn.Linear(2, 2)])
+
+    assert _mxfp4_gemm_mode_census(model) == {
+        "bf16_forward_mxfp4_backward": 1,
+        "fp8_forward_mxfp4_backward": 1,
+    }
+
+
+def test_precision_linear_class_census_emits_zero_counts_for_bf16(monkeypatch, caplog):
     from megatron.core import parallel_state
 
     monkeypatch.setenv("PRIMUS_AUDIT_LINEAR_CLASS_CENSUS", "1")
     monkeypatch.setenv("RANK", "3")
     monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda: 3)
+    caplog.set_level("INFO", logger=_FLUX_TRAINER_LOGGER)
 
     _emit_precision_linear_class_census(nn.Linear(2, 2))
 
-    line = capsys.readouterr().out.strip()
+    line = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("PRIMUS_LINEAR_CLASS_CENSUS=")
+    )
     payload = json.loads(line.split("=", 1)[1])
     assert payload == {
         "data_parallel_rank": 3,

@@ -6,7 +6,7 @@ Unit tests for compile-friendly MXFP4 linear layers (primus_turbo_mxfp4_local).
 
 Tests cross-validation against Primus-Turbo's FP4GemmMXFunction reference,
 torch.compile graph-break validation, Megatron linear backward flow,
-2-step training loop, hybrid (FP4 fwd / FP8 bwd) mode, and init guards.
+2-step training loop, independent forward/backward precision, and init guards.
 """
 
 import functools
@@ -188,6 +188,55 @@ class TestMXFP4CrossValidation(PrimusUT):
             f"(max abs diff vs Primus-Turbo PR #383 reference: {(x.grad - x_ref.grad).abs().max().item():.6e})"
         )
 
+    @requires_mxfp4
+    def test_high_precision_forward_with_mxfp4_backward(self):
+        from primus_turbo.pytorch.core.backend import BackendType
+        from primus_turbo.pytorch.core.low_precision import (
+            ScalingGranularity,
+            float8_e4m3,
+        )
+
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            _FORWARD_PRECISION_VALUES,
+            MXFP4LinearFunction,
+            _enable_preshuffle,
+        )
+
+        for forward_precision in ("fp8", "bf16"):
+            with self.subTest(forward_precision=forward_precision):
+                torch.manual_seed(42)
+                x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+                w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+                preshuffle = _enable_preshuffle()
+
+                output = MXFP4LinearFunction.apply(
+                    x,
+                    w,
+                    preshuffle,
+                    False,
+                    None,
+                    0,
+                    0,
+                    False,
+                    _FORWARD_PRECISION_VALUES[forward_precision],
+                    float8_e4m3 if forward_precision == "fp8" else None,
+                    ScalingGranularity.TENSORWISE.value if forward_precision == "fp8" else 0,
+                    BackendType.HIPBLASLT.value if forward_precision == "fp8" else 0,
+                )[0]
+                output.square().mean().backward()
+
+                reference = torch.nn.functional.linear(x.detach(), w.detach())
+                signal = (reference.float() ** 2).mean()
+                noise = ((output.float() - reference.float()) ** 2).mean()
+                if forward_precision == "bf16":
+                    assert torch.equal(output, reference)
+                else:
+                    snr_db = 10 * torch.log10(signal / noise).item()
+                    assert snr_db > 10, f"FP8 forward SNR {snr_db:.1f} dB is below 10 dB"
+
+                assert torch.isfinite(x.grad).all()
+                assert torch.isfinite(w.grad).all()
+
 
 # ---------------------------------------------------------------------------
 # torch.compile graph-break validation
@@ -259,6 +308,46 @@ class TestMXFP4Compile(PrimusUT):
             f"Expected 0 graph breaks, got {explanation.graph_break_count}. "
             f"Reasons: {explanation.break_reasons}"
         )
+
+    @requires_mxfp4
+    def test_no_graph_break_high_precision_forward(self):
+        from primus_turbo.pytorch.core.backend import BackendType
+        from primus_turbo.pytorch.core.low_precision import (
+            ScalingGranularity,
+            float8_e4m3,
+        )
+
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            _FORWARD_PRECISION_VALUES,
+            MXFP4LinearFunction,
+            _enable_preshuffle,
+        )
+
+        for forward_precision in ("fp8", "bf16"):
+            with self.subTest(forward_precision=forward_precision):
+                torch._dynamo.reset()
+                x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+                w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
+
+                explanation = torch._dynamo.explain(MXFP4LinearFunction.apply)(
+                    x,
+                    w,
+                    _enable_preshuffle(),
+                    False,
+                    None,
+                    0,
+                    0,
+                    False,
+                    _FORWARD_PRECISION_VALUES[forward_precision],
+                    float8_e4m3 if forward_precision == "fp8" else None,
+                    ScalingGranularity.TENSORWISE.value if forward_precision == "fp8" else 0,
+                    BackendType.HIPBLASLT.value if forward_precision == "fp8" else 0,
+                )
+
+                assert explanation.graph_break_count == 0, (
+                    f"Expected 0 graph breaks, got {explanation.graph_break_count}. "
+                    f"Reasons: {explanation.break_reasons}"
+                )
 
     @requires_mxfp4
     def test_compiled_forward_matches_eager(self):

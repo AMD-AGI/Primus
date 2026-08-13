@@ -32,6 +32,8 @@ class BaseDiffusionConfig(TransformerConfig):
         fp8_scaling_strategy: FP8 scaling strategy for local spec provider (default: 'dynamic')
         fp8_force_nt_layout: FP8 backward GEMM layout (default: False)
         fp8_reduce_amax: Whether to allreduce amax across ranks (default: False)
+        mxfp4_forward_precision: MXFP4 forward precision, 'mxfp4', 'fp8', or 'bf16'
+            (default: 'mxfp4')
         mxfp4_backward_precision: MXFP4 backward precision, 'mxfp4' or 'fp8' (default: 'mxfp4')
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
@@ -70,6 +72,11 @@ class BaseDiffusionConfig(TransformerConfig):
 
     # Whether to allreduce amax across DP/TP ranks for delayed FP8 scaling
     fp8_reduce_amax: bool = False
+
+    # MXFP4 forward precision: "mxfp4" (pure), "fp8", or "bf16".
+    # The latter two retain MXFP4 backward unless the backward knob below is
+    # independently changed.
+    mxfp4_forward_precision: str = "mxfp4"
 
     # MXFP4 backward precision: "mxfp4" (pure) or "fp8" (hybrid)
     mxfp4_backward_precision: str = "mxfp4"
@@ -168,6 +175,17 @@ class BaseDiffusionConfig(TransformerConfig):
         Raises:
             ValueError: If configuration is invalid
         """
+        if self.mxfp4_forward_precision not in {"mxfp4", "fp8", "bf16"}:
+            raise ValueError(
+                "mxfp4_forward_precision must be 'mxfp4', 'fp8', or 'bf16', "
+                f"got {self.mxfp4_forward_precision!r}"
+            )
+
+        if self.mxfp4_backward_precision not in {"mxfp4", "fp8"}:
+            raise ValueError(
+                "mxfp4_backward_precision must be 'mxfp4' or 'fp8', " f"got {self.mxfp4_backward_precision!r}"
+            )
+
         if self.in_channels <= 0:
             raise ValueError(f"in_channels must be positive, got {self.in_channels}")
 

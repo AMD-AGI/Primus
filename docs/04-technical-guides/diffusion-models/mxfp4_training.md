@@ -8,7 +8,10 @@ MXFP4 stores activations and weights in 4-bit microscale floating-point with one
 
 - Uses a **local spec** (`PrimusTurboMXFP4LocalSpecProvider`) with **no Transformer Engine dependency**—MXFP4 linear layers are self-contained autograd `Function`s that call Primus-Turbo's `gemm_fp4_impl` directly, so the path is `torch.compile`-friendly with minimal graph breaks.
 - Keeps **attention, optimizer state / main params, and inter-rank communication in BF16**. Only the MMA inputs of the column- and row-parallel linears are quantized.
-- Supports two backward modes via `mxfp4_backward_precision`: pure **MXFP4** (default) or **FP8** hybrid (E5M2 backward with tensorwise scaling on HipBLASLt).
+- Selects forward and backward precision independently. Forward supports
+  **MXFP4** (default), tensorwise **FP8 E4M3**, or **BF16** through
+  `mxfp4_forward_precision`; backward supports MXFP4 or tensorwise FP8 E5M2
+  through `mxfp4_backward_precision`.
 - Dispatches the FP4 GEMM through Primus-Turbo's pluggable backend layer, which can route to either AITER (recommended for MI355X) or HipBLASLt.
 
 ## Table of contents
@@ -67,6 +70,7 @@ The relevant overrides in [`examples/megatron/configs/MI355X/diffusion/flux_12b_
 # MXFP4 precision
 fp4: "mxfp4"
 fp4_recipe: "mxfp4"              # default is "nvfp4" in trainer_base.yaml; must override
+mxfp4_forward_precision: "mxfp4"  # "mxfp4", "fp8", or "bf16"
 mxfp4_backward_precision: "mxfp4"  # "mxfp4" (pure) or "fp8" (hybrid)
 
 # Local spec + Primus-Turbo
@@ -86,6 +90,7 @@ gradient_accumulation_fusion: false
 |------|--------|-------|
 | `fp4` | `"mxfp4"` | Top-level switch to enable FP4. |
 | `fp4_recipe` | `"mxfp4"` for this guide | Default in [`primus/configs/modules/megatron/trainer_base.yaml`](../../../primus/configs/modules/megatron/trainer_base.yaml) is `nvfp4`; the MXFP4 config overrides it. |
+| `mxfp4_forward_precision` | `"mxfp4"`, `"fp8"`, or `"bf16"` | Selects only the forward linear GEMMs. FP8 uses dynamic tensorwise E4M3 on HipBLASLt; BF16 uses the native linear operation. MXFP4 tensors are still prepared for backward when `mxfp4_backward_precision: "mxfp4"`. |
 | `mxfp4_backward_precision` | `"mxfp4"` or `"fp8"` | Exhaustive set (checked by branch in [`primus_turbo_mxfp4_local.py`](../../../primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py)). `"fp8"` uses E5M2 with tensorwise HipBLASLt for backward. |
 | `mxfp4_gradient_stochastic_rounding` | `true` / `false` | Optional. Enables SR on FP4 gradient quantization. |
 
@@ -198,7 +203,7 @@ Formal A/B benchmarks vs BF16 and FP8 (delayed and tensorwise) are pending and w
 - MXFP4 spec provider: [`primus/backends/megatron/core/extensions/primus_turbo_local_spec.py`](../../../primus/backends/megatron/core/extensions/primus_turbo_local_spec.py) (`PrimusTurboMXFP4LocalSpecProvider`).
 - MXFP4 linear-layer autograd / fwd-bwd: [`primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py`](../../../primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py).
 - Config schema defaults: [`primus/configs/modules/megatron/trainer_base.yaml`](../../../primus/configs/modules/megatron/trainer_base.yaml).
-- Dataclass field `mxfp4_backward_precision`: [`primus/backends/megatron/core/models/diffusion/common/config.py`](../../../primus/backends/megatron/core/models/diffusion/common/config.py).
+- Dataclass fields `mxfp4_forward_precision` and `mxfp4_backward_precision`: [`primus/backends/megatron/core/models/diffusion/common/config.py`](../../../primus/backends/megatron/core/models/diffusion/common/config.py).
 - FP4 backend selection (Primus-Turbo): `primus_turbo/common/constants.py`, `primus_turbo/pytorch/core/backend.py`, `primus_turbo/pytorch/kernels/gemm/gemm_fp4_impl.py`.
 - AITER tuned-config loader: `aiter/jit/core.py` (`AITER_CONFIG_GEMM_A4W4`).
 - AITER A4W4 dispatch + hit/miss logging: `aiter/ops/gemm_op_a4w4.py`.
