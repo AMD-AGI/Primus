@@ -111,7 +111,7 @@ These are Primus overlay defaults. MaxText also loads upstream `base.yml` at run
 | `checkpoint_is_quantized` | `false`           | Set `true` when loading an AQT-quantized checkpoint.                  |
 | `logits_dot_in_fp32`      | `false`           | Compute logits matmul in `float32` for numerical stability.           |
 
-> **fp8 + MoE (v26.6):** fp8 Mixture-of-Experts configs (e.g. `deepseek_v2_16B-fp8`, `mixtral_8x7B-fp8`, `qwen3_30B_A3B-fp8`) must set `pure_nnx_decoder: false` (see [Advanced](#9-advanced)). v26.6 flipped the base default to `pure_nnx_decoder: true`, which runs the decoder in pure NNX and invokes the legacy Linen `Fp8Einsum` (the MoE sparse-matmul quant path) without a Linen binding scope, crashing at step 1. Pinning the decoder back to the bridged path restores the working v26.5 behavior. Dense fp8 configs are unaffected.
+**fp8 + MoE (v26.6):** MoE fp8 configs (e.g. `mixtral_8x7B-fp8`, `qwen3_30B_A3B-fp8`) must set `pure_nnx_decoder: false`. v26.6 defaults to `true`, which invokes the legacy Linen `Fp8Einsum` without a binding scope. See [Advanced](#9-advanced). Dense fp8 configs are unaffected.
 
 ---
 
@@ -124,7 +124,7 @@ From `model_base.yaml` and per-model files such as `llama3_8B.yaml`.
 | ----------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `model_name`            | `"default"` in `model_base`; e.g. `"llama3-8b"` in `llama3_8B.yaml` | Selects MaxText’s bundled model YAML when present.                      |
 | `override_model_config` | `true`                                                              | When `true`, CLI / kwargs override values from the loaded model config. |
-| `attention`             | `"autoselected"`                                                    | Attention implementation. **gemma4 must pin this**: its local layers are sliding-window, and only `cudnn_flash_te` passes the window to the kernel (as `window_size`) — `autoselected` reaches a pallas kernel that builds a plain causal mask. All gemma4 configs on both MI300X and MI355X use `cudnn_flash_te`; the earlier `dot_product` pin worked around a maxtext bug that routed synthetic batches through the context-parallelism branch, fixed in `release/v26.6` at `2ec83add`. |
+| `attention`             | `"autoselected"`                                                    | Attention implementation. **gemma4 requires `cudnn_flash_te`**: its local layers use sliding-window attention, and only `cudnn_flash_te` passes the window to the kernel (as `window_size`). `autoselected` resolves to a pallas kernel that builds a plain causal mask and silently drops the window. |
 | `use_iota_embed`        | `true`                                                              | Use iota-based embedding for performance on accelerator backends.       |
 | `tokenizer_path`        | e.g. `"meta-llama/Meta-Llama-3-8B"`                                 | Hugging Face tokenizer id or local path.                                |
 

@@ -1,19 +1,9 @@
 extends:
   - model_base.yaml
 
-# Gemma 4 31B (Dense). Architecture comes from MaxText's
-# configs/models/gemma4-31b.yml (selected via model_name).
-#
-# ATTENTION LIMITATION (validated on gfx950 / jax_the_rock_ci_45156b7 + jaxlib 0.10.0):
-# The efficient attention kernels crash natively during XLA compile for gemma4's
-# head_dim=256 + bidirectional sliding-window attention ('cudnn_flash_te' and
-# 'flash' both abort at the first forward pass -- even at per_device_batch_size=1,
-# so it is not a memory/batch-size issue). The reference 'dot_product' attention
-# works: on maxtext release/v26.6 gemma4-31b trains cleanly (validated in the MAD
-# sweep at ~395 TFLOP/s/gpu, seq 4096). gemma4 does NOT run on maxtext v26.5.
-# The MI355X pretrain example config therefore sets attention=dot_product and a
-# reduced seq length; switch back to fused attention once the ROCm stack supports
-# head_dim=256 + sliding-window.
+# Gemma 4 31B (Dense). Architecture from MaxText's configs/models/gemma4-31b.yml.
+# Requires maxtext release/v26.6+.
+# Attention: use cudnn_flash_te (passes sliding-window to kernel as window_size).
 model_name: "gemma4-31b"
 
 # Gemma 4 is not published on HF; synthetic pretraining generates data from

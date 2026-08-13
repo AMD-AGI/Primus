@@ -3,25 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_31B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI300X / gfx942, maxtext release/v26.6): DOES NOT RUN.
-# The attention setting below clears the sliding-window assertion and the model then
-# compiles for ~10 min, but the run aborts in collective init:
-#   F rendezvous.cc:161] Termination timeout for `[0] first call before collective
-#   operation: kind=kAllGather` of 40 seconds exceeded   -> SIGABRT (signal 6)
-# Unlike gemma4_26B-fp8 this is not the MoE fp8 tracer leak (31B is Dense). The
-# signature matches the watchdog analysis in
-# examples/maxdiffusion/configs/MI300X/flux_dev-pretrain.yaml: a long step-1
-# compile/autotune makes the 8 device threads reach the first kAllGather minutes
-# apart, and XLA's 20s/40s first-collective-call defaults abort a process that is
-# still making progress. An earlier note here blamed the MI355X NCCL/HSA env block,
-# but maxtext already applies GPU_MAX_HW_QUEUES / HIP_FORCE_DEV_KERNARG /
-# HSA_FORCE_FINE_GRAIN_PCIE on every arch (plus HSA_NO_SCRATCH_RECLAIM on gfx942)
-# from primus/backends/maxtext/env_spec.py, so only NCCL_PROTO=Simple and
-# RCCL_MSCCL_ENABLE=0 are actually absent. The untested next step is instead to raise
-#   --xla_gpu_first_collective_call_warn_stuck_timeout_seconds=300
-#   --xla_gpu_first_collective_call_terminate_timeout_seconds=2400
-# which is what fixed the identical abort in the MI300X flux_dev run.
-# The bf16 gemma4_31B config trains normally (245 TFLOP/s/device).
+# STATUS (MI300X / gfx942): DOES NOT RUN.
+# Compiles ~10 min, then aborts with kAllGather rendezvous timeout (40s default).
+# Fix: raise first_collective_call timeouts in XLA_FLAGS (see flux_dev MI300X config).
+# bf16 gemma4_31B trains normally.
 
 modules:
   pre_trainer:
@@ -54,20 +39,10 @@ modules:
       ici_tensor_sequence_parallelism: -1
 
       remat_policy: "full"
-      # Same attention choice as the bf16 gemma4 configs: cudnn_flash_te is the only
-      # setting that passes the local layers' sliding window to the kernel (as
-      # window_size). The synthetic-data assertion that used to force dot_product was a
-      # maxtext bug, fixed in the pinned release/v26.6 at 2ec83add, and the fix is not
-      # arch-specific. gemma4_31B is Dense, so the fp8-MoE pure_nnx_decoder pin does not
-      # apply.
       attention: "cudnn_flash_te"
       max_target_length: 8192
       # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
       per_device_batch_size: 1
 
-      # quantization (nanoo_fp8)
-      # Vendor-specific in MaxText (see layers/quantizations.py): "fp8" selects
-      # Fp8Quantization, documented "for NVIDIA GPUs"; "nanoo_fp8" selects
-      # NANOOFp8Quantization, "for AMD MI300/MI325 GPUs", using the e4m3fnuz/e5m2fnuz
-      # types gfx942 implements. Matches every other MI300X fp8 config.
+      # nanoo_fp8 for AMD MI300X/MI325X (uses e4m3fnuz/e5m2fnuz types)
       quantization: "nanoo_fp8"
