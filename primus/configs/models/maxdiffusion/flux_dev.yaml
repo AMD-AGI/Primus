@@ -20,7 +20,7 @@ metrics_file: "" # for testing, local file that stores scalar metrics. If empty,
 write_metrics: True
 
 timing_metrics_file: "" # for testing, local file that stores function timing metrics such as state creation, compilation. If empty, no metrics are written.
-write_timing_metrics: True 
+write_timing_metrics: True
 
 gcs_metrics: False
 # If true save config to GCS in {base_output_directory}/{run_name}/
@@ -66,12 +66,12 @@ attention: 'cudnn_flash_te' # Supported attention: dot_product, flash, cudnn_fla
 # If mask_padding_tokens is True, we pass in segment ids to splash attention to avoid attending to padding tokens.
 # Else we do not pass in segment ids and on vpu bound hardware like trillium this is faster.
 # However, when padding tokens are significant, this will lead to worse quality and should be set to True.
-mask_padding_tokens: True 
+mask_padding_tokens: True
 # Maxdiffusion has 2 types of attention sharding strategies:
 # 1. attention_sharding_uniform = True : same sequence sharding rules applied for q in both (self and cross attention)
 # 2. attention_sharding_uniform = False : Heads are sharded uniformly across devices for self attention while sequence is sharded
 #    in cross attention q.
-attention_sharding_uniform: True 
+attention_sharding_uniform: True
 
 flash_block_sizes: {}
 # Use the following flash_block_sizes on v6e (Trillium) due to larger vmem.
@@ -299,6 +299,5 @@ controlnet_image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Goo
 quantization: ''
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
-use_qwix_quantization: False 
+use_qwix_quantization: False
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
-
