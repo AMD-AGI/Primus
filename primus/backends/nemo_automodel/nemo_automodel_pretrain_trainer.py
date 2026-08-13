@@ -75,6 +75,7 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             # shared, model-agnostic sharding. Not env-gated: it repairs a dropped
             # config value and is a no-op when the YAML omits it.
             (f"{_PKG}.distributed.fsdp2_reshard", "FSDP2 reshard_after_forward repair"),
+            (f"{_PKG}.distributed.gradnorm_check", "global gradient-norm verification"),
             # FLUX
             (f"{_PKG}.models.flux.parallelize", "FLUX real activation checkpointing"),
             # Ideogram-4
