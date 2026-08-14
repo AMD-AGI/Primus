@@ -2,7 +2,7 @@
 
 Primus is a YAML-driven training stack for AMD GPUs. You select a **backend** (Megatron-LM, TorchTitan, JAX MaxText, Megatron Bridge), point `train pretrain` at a **configuration YAML**, and launch Primus with the unified CLI (`runner/primus-cli`) in **direct**, **container**, or **Slurm** mode. See [CLI reference](cli-reference.md) and [Configuration system](configuration-system.md).
 
-This section helps you understand concepts related to the Primus workflow: how backends work, YAML structure and inheritance, parallelism vocabulary, the full per-backend configuration inventory, and so on. If you already understand the concepts and just need the specific commands to run your training with Primus, see [Backend training recipes](training-recipes.md).
+This section helps you understand concepts related to the Primus workflow: how backends work, YAML structure and inheritance, parallelism vocabulary, the full per-backend configuration inventory, and so on. If you already understand the concepts and just need the specific commands to run your training with Primus, see [End-to-end training recipes](end-to-end-training-recipes.md).
 
 ---
 
@@ -32,7 +32,7 @@ From the root of the clone of the [Primus repository](https://github.com/AMD-AGI
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
-This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.4` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
+This uses the default image from `runner/.primus.yaml` (`rocm/primus:v26.5` unless overridden). The project tree is mounted into the container automatically by `runner/primus-cli-container.sh`.
 
 ### Example configurations under `examples/megatron/configs/MI300X/`
 

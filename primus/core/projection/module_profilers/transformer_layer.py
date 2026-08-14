@@ -20,7 +20,12 @@ from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
-from .utils import benchmark_layer, v4_module_inputs
+from .utils import (
+    _install_balanced_routing_patches,
+    _kernel_pad_enabled,
+    benchmark_layer,
+    v4_module_inputs,
+)
 
 # ── Fallback HBM bandwidth for elementwise overhead estimation ──
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
@@ -154,10 +159,15 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int, gemm_backen
     hidden_size = config.model_config.hidden_size
     moe_router_topk = getattr(config.model_config, "moe_router_topk", 2)
 
-    # A2A message size: each rank sends/receives all routed tokens
-    # Shape: [batch_size * seq_len * topk, hidden_size], BF16 (2 bytes)
+    # A2A message size: each rank sends/receives all routed tokens.
+    # #11: dispatch moves FP8 tokens (quantized expert inputs) under FP8
+    # training; combine moves BF16 (reduced expert outputs).  The two directions
+    # therefore use different element sizes -- matching the permute model, which
+    # already dispatches fp8 -- so the old flat BF16 (*2) over-counted dispatch.
     tokens_per_batch = batch_size * seq_len
-    dispatch_size_bytes = tokens_per_batch * hidden_size * moe_router_topk * 2
+    disp_bpe = 1 if getattr(config.model_config, "fp8", None) else 2
+    dispatch_size_bytes = tokens_per_batch * hidden_size * moe_router_topk * disp_bpe
+    combine_size_bytes = tokens_per_batch * hidden_size * moe_router_topk * 2
 
     # Setup collective communication args
     gpus_per_node = int(os.environ.get("GPUS_PER_NODE", "8"))
@@ -174,10 +184,50 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int, gemm_backen
 
     # Analytical A2A communication time (base model only)
     a2a_dispatch_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])
-    a2a_combine_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])
+    a2a_combine_us = cm.alltoall(coll_args, combine_size_bytes, ep, groups=["ep"])
     a2a_ms = (a2a_dispatch_us + a2a_combine_us) / 1000.0
 
     return a2a_ms
+
+
+def _deepep_overlap_efficiency(config) -> float:
+    """A2A-compute overlap efficiency for DeepEP / SyncFree (simulation).
+
+    Thin wrapper over the single source of truth,
+    ``_get_deepep_overlap_efficiency`` in the performance projection (DeepEP
+    alone hides ~65% of the dispatch/combine A2A behind compute; SyncFree
+    staging pushes the async overlap to 75/80/85%).  This adds only the
+    ``use_turbo_deepep`` off-guard so the ladder itself is not duplicated.
+    """
+    from primus.core.projection.performance_projection.projection import (
+        _get_deepep_overlap_efficiency,
+    )
+
+    model_config = getattr(config, "model_config", config)
+    if not getattr(model_config, "use_turbo_deepep", False):
+        return 0.0
+    return _get_deepep_overlap_efficiency(model_config)
+
+
+def _deepep_exposed_a2a_ms(a2a_ms: float, overlap_window_ms: float, efficiency: float) -> float:
+    """Exposed (non-overlapped) A2A after DeepEP hides part behind compute.
+
+    DeepEP pipelines dispatch/combine across micro-batch chunks so the A2A of
+    one chunk overlaps with the compute of adjacent chunks.  The amount that
+    can be hidden is therefore bounded by *both*:
+
+      1. the overlap efficiency of the async transport (``efficiency``), and
+      2. the compute available to overlap against (``overlap_window_ms``).
+
+    A naive ``a2a × (1 - eff)`` model ignores (2) and would "hide" more
+    communication than there is compute to hide it behind — physically
+    impossible when the A2A dwarfs the per-layer compute (e.g. EP16 on a
+    scale-out-bound node).  We cap the hidden amount by the compute window.
+    """
+    if efficiency <= 0.0 or a2a_ms <= 0.0:
+        return a2a_ms
+    hidden = min(a2a_ms * efficiency, max(overlap_window_ms, 0.0))
+    return max(a2a_ms - hidden, 0.0)
 
 
 # Transformer Layer Data Flow
@@ -275,12 +325,17 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return (
+        total = (
             self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
             + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
+        # Selective recompute (core_attn): self-attention activations are recomputed
+        # in backward, so they are NOT retained -> subtract the attention activation.
+        if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
+            total -= self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+        return total
 
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Aggregate simulated results from sub-profilers, including TP AllReduce."""
@@ -304,6 +359,9 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
 
         fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
         bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        # Selective recompute (core_attn): re-run attention forward during backward.
+        if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
+            bwd_time += attn_fwd
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
@@ -405,13 +463,18 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return (
+        total = (
             self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
             + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
+        # Selective recompute (core_attn): self-attention activations are recomputed
+        # in backward, so they are NOT retained -> subtract the attention activation.
+        if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
+            total -= self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+        return total
 
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Aggregate simulated results from sub-profilers.
@@ -440,14 +503,26 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         # so we must add it here.
         moe_a2a_ms = _estimate_moe_a2a_time_ms(self.config, batch_size, seq_len, self._gemm_backend)
 
+        # DeepEP / SyncFree: overlap the dispatch/combine A2A with the layer's
+        # compute stream.  The hidden fraction is bounded by the async overlap
+        # efficiency AND by the compute available to overlap against (attention
+        # + MoE-MLP of the same layer).  When the A2A exceeds the compute window
+        # (scale-out-bound high-EP nodes) the residual stays exposed.
+        deepep_eff = _deepep_overlap_efficiency(self.config)
+        moe_a2a_fwd_ms = _deepep_exposed_a2a_ms(moe_a2a_ms, attn_fwd + mlp_fwd, deepep_eff)
+        moe_a2a_bwd_ms = _deepep_exposed_a2a_ms(moe_a2a_ms, attn_bwd + mlp_bwd, deepep_eff)
+
         # Add LayerNorm + Residual Add overhead (simulation only).
         # These element-wise ops are missing from GEMM/SDPA simulation.
         ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_bwd_ms
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
+        # Selective recompute (core_attn): re-run attention forward during backward.
+        if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
+            bwd_time += attn_fwd
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
@@ -470,6 +545,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         # Decomposed MoE MLP benchmark already includes measured dispatch/combine A2A.
         fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
         bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        # Selective recompute (core_attn): re-run attention forward during backward.
+        if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
+            bwd_time += attn_fwd
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
@@ -494,20 +572,33 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
                 # (mHC + V4 attention) is benchmarked. Non-V4 layers use the stock
                 # [S,B,D] input.
                 v4 = v4_module_inputs(self.layer_module, batch_size, seq_len, hidden, hc_mult, "layer")
-                if v4 is not None:
-                    ishapes, fkwargs = v4
-                    self._cached_results = benchmark_layer(
-                        self.layer_module,
-                        ishapes,
-                        transformer_config=transformer_config,
-                        forward_kwargs=fkwargs,
-                    )
-                else:
-                    self._cached_results = benchmark_layer(
-                        self.layer_module,
-                        [(seq_len, batch_size, hidden)],
-                        transformer_config=transformer_config,
-                    )
+                routing_restores = []
+                if _kernel_pad_enabled():
+                    routing_restores, _ = _install_balanced_routing_patches(self.layer_module)
+                try:
+                    if v4 is not None:
+                        ishapes, fkwargs = v4
+                        self._cached_results = benchmark_layer(
+                            self.layer_module,
+                            ishapes,
+                            transformer_config=transformer_config,
+                            forward_kwargs=fkwargs,
+                        )
+                    else:
+                        self._cached_results = benchmark_layer(
+                            self.layer_module,
+                            [(seq_len, batch_size, hidden)],
+                            transformer_config=transformer_config,
+                        )
+                finally:
+                    for restore in routing_restores:
+                        try:
+                            restore()
+                        except Exception:
+                            # Best-effort cleanup: restore failures should not fail benchmarking.
+                            _LOGGER.debug("Failed to restore routing patch during cleanup.", exc_info=True)
+            else:
+                self._cached_results = self._get_benchmark_composite_results(batch_size, seq_len)
             self._cache_key = cache_key
         return self._cached_results
 

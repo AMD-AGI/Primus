@@ -111,6 +111,7 @@ class FluxFlowMatchTrainPipeline:
         dit: torch.nn.Module,
         batch: dict[str, Any],
         model_config: Any,
+        compute_dtype: torch.dtype | None = None,
         autoencoder: torch.nn.Module | None = None,
         t5_encoder: torch.nn.Module | None = None,
         clip_encoder: torch.nn.Module | None = None,
@@ -119,7 +120,7 @@ class FluxFlowMatchTrainPipeline:
             raise ValueError("FLUX diffusion training currently requires `parallelism.sp_size: 1`.")
 
         device = next(dit.parameters()).device
-        dtype = next(dit.parameters()).dtype
+        dtype = compute_dtype or next(dit.parameters()).dtype
         if "image" in batch:
             labels, t5_encodings, clip_encodings = self._prepare_raw(
                 batch=batch,
@@ -143,25 +144,39 @@ class FluxFlowMatchTrainPipeline:
 
         bsz = labels.shape[0]
         noise = torch.randn_like(labels)
-        timesteps = torch.rand((bsz,), device=device, dtype=dtype)
+        if dit.training:
+            # Match the MLPerf TorchTitan reference exactly: draw FP32 timesteps
+            # from the CPU generator, then cast/move them to the latent tensor.
+            # Drawing BF16 values directly on the GPU changes both the values and
+            # the CPU/CUDA RNG streams.
+            timesteps = torch.rand((bsz,), device="cpu", dtype=torch.float32).to(device=device, dtype=dtype)
+        else:
+            if "timestep" not in batch:
+                raise ValueError("MLPerf FLUX evaluation requires per-sample integer `timestep` metadata.")
+            timestep_ids = batch["timestep"].to(device=device, dtype=torch.int64).reshape(-1)
+            if timestep_ids.shape[0] != bsz or bool(((timestep_ids < 0) | (timestep_ids > 7)).any()):
+                raise ValueError(
+                    "MLPerf FLUX evaluation timesteps must have one integer value in [0, 7] per sample."
+                )
+            timesteps = (timestep_ids.to(torch.float32) / 8.0).to(dtype=dtype)
         sigmas = timesteps.view(-1, 1, 1, 1)
         noisy_latents = (1 - sigmas) * labels + sigmas * noise
         target = noise - labels
 
         _, _, latent_height, latent_width = noisy_latents.shape
-        # Position ids are integer grid indices consumed by RoPE; build them in
-        # float32 (independent of the model compute dtype) so that indices remain
-        # exactly representable. bf16 only represents integers up to 256 exactly,
-        # which would silently corrupt positions for larger latent grids.
+        # TorchTitan creates FP32 position ids on CPU and casts them with
+        # `.to(latents)` before RoPE. Constructing them directly in the compute
+        # dtype is value-equivalent for this 256px recipe and preserves the
+        # reference BF16 RoPE frequency calculation.
         img_ids = create_position_encoding_for_latents(
             bsz,
             latent_height,
             latent_width,
             position_dim=3,
             device=device,
-            dtype=torch.float32,
+            dtype=dtype,
         )
-        txt_ids = torch.zeros(bsz, t5_encodings.shape[1], 3, device=device, dtype=torch.float32)
+        txt_ids = torch.zeros(bsz, t5_encodings.shape[1], 3, device=device, dtype=dtype)
         noisy_latents = pack_latents(noisy_latents)
         target = pack_latents(target)
 

@@ -182,7 +182,7 @@ to match your home directory).
 KDA uses the **same six patches** as GDN — no KDA-specific Megatron patch
 is required. They're implemented as runtime monkey-patches using Primus's
 own patch system (`primus/core/patches`), living under
-`[primus/backends/megatron/patches/](../../primus/backends/megatron/patches/)`.
+`[primus/backends/megatron/patches/](https://github.com/AMD-AGI/Primus/tree/main/primus/backends/megatron/patches)`.
 Each patch registers unconditionally but is gated behind a `condition=` on
 the relevant config flag, so nothing needs to be run by hand.
 
@@ -224,7 +224,7 @@ own random init — final loss is identical, only iter-1 drifts by `~5e-3`.
 ### 5.1 Inspect the config
 
 The training config lives at
-[`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`](../../examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml).
+[`examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml`](https://github.com/AMD-AGI/Primus/blob/main/examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml).
 Key parameters (matched to FLA):
 
 ```yaml
@@ -257,7 +257,7 @@ no_load_rng: true
 ```
 
 The architecture-only YAML it extends from is
-[`primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml`](../../primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml).
+[`primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/zebra_llama_300M_kda_pure.yaml).
 
 ### 5.2 Launch
 
@@ -362,7 +362,7 @@ Primus 126 s faster.
 
 ## Step 7: Convert checkpoint to HuggingFace format
 
-Use [`tools/hybrid/convert_kda_to_fla_hf.py`](../../tools/hybrid/convert_kda_to_fla_hf.py)
+Use [`tools/hybrid/convert_kda_to_fla_hf.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/convert_kda_to_fla_hf.py)
 to translate the Megatron checkpoint into FLA's native
 `KDAForCausalLM` HF format:
 
@@ -446,7 +446,7 @@ auto-registration in `fla/models/kda/__init__.py` fires on import.
 
 ## Step 9: Run lm-eval-harness benchmarks
 
-Use [`tools/hybrid/eval_kda_lm_eval.py`](../../tools/hybrid/eval_kda_lm_eval.py), which
+Use [`tools/hybrid/eval_kda_lm_eval.py`](https://github.com/AMD-AGI/Primus/blob/main/tools/hybrid/eval_kda_lm_eval.py), which
 imports `fla` first (so `AutoConfig` recognizes the `kda` model type) and
 patches `KDAForCausalLM.__init__` / `KDAModel.__init__` to accept the
 `dtype` kwarg that `transformers ≥ 4.55` passes internally.

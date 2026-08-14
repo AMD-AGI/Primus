@@ -1,0 +1,140 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:kimi_k3-curve}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Kimi K3 "curve" (24L / hidden 2048 / 32 experts) single-node BF16 real-data
+# convergence experiment for MI355X (8 GPUs, EP=8). Point the data/tokenizer
+# env-var defaults below at a tokenized corpus + tokenizer dir, or set
+# mock_data: true for a synthetic smoke.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # kimi_k3_curve = the 24-layer, hidden-2048 shape for this experiment.
+    model: ${PRIMUS_MODEL:kimi_k3_curve}.yaml
+    overrides:
+      # ---------- log ----------
+      wandb_project: "Primus_Kimi_K3_Curve"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+      # The first two iterations include the Triton autotune of chunk_kda and the
+      # allocator warm-up, so they are excluded from the running averages.
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: ${PRIMUS_LOG_INTERVAL:1}
+
+      # ---------- token budget ----------
+      # gbs 128 x seq 2048 = 262144 tokens per iteration. Size TRAIN_ITERS to your
+      # corpus so no training document is seen twice (keeps the held-out eval honest).
+      train_iters: ${TRAIN_ITERS:450}
+      micro_batch_size: ${MBS:2}
+      global_batch_size: ${GBS:128}
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:2048}
+
+      # ---------- hyper parameters ----------
+      # Restated (not inherited) because this file does not extend
+      # kimi_k3-BF16-8L-official.yaml. lr_warmup_iters is nonzero here (~1% linear
+      # warmup, per the Kimi K3 tech report) so the first/largest gradient does not
+      # land on a random init.
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: ${LR_WARMUP_ITERS:5}
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      layernorm_epsilon: 1.0e-5
+
+      # ---------- parallel ----------
+      # EP=8 over the 8 GPUs of one node, TP=1, PP=1. num_experts is 32, so each
+      # GPU holds exactly 4 local experts. PP must stay 1: KimiK3TransformerBlock
+      # refuses PP>1 while attention residuals are live (the block residual would
+      # have to cross the pipeline seam).
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # ---------- data: REAL ----------
+      mock_data: false
+      tokenizer_type: HuggingFaceTokenizer
+      # A local snapshot directory or a Hub id: HuggingFaceTokenizer passes this
+      # straight to AutoTokenizer.from_pretrained (huggingface_tokenizer.py:70-74),
+      # which accepts a directory containing tokenizer_config.json + tokenizer.json.
+      tokenizer_model: ${PRIMUS_TOKENIZER_MODEL:/path/to/qwen2.5-tokenizer-dir}
+      # Weightless single-prefix form. The `.bin`/`.idx` suffix is NOT part of
+      # the path.
+      train_data_path: ["${PRIMUS_TRAIN_DATA:/path/to/train_text_document}"]
+      valid_data_path: ["${PRIMUS_VALID_DATA:/path/to/valid_text_document}"]
+      # Pointed at the same index as valid, not left null: Megatron builds all
+      # three splits from `blend_per_split` and asks each for
+      # `train_valid_test_num_samples`, so a None test entry with a non-zero
+      # `eval_iters` is a needless failure surface. The final test evaluation
+      # is therefore a duplicate of the validation number and is ignored.
+      test_data_path: ["${PRIMUS_VALID_DATA:/path/to/valid_text_document}"]
+      # MUST be null with per-split paths. `trainer_base.yaml:264` defaults it
+      # to "99,1,0", and `arguments.py:510-514` only auto-fills it for the
+      # `data_path` form; leaving a ratio set alongside explicit per-split
+      # indexes would ask Megatron to slice an already-split corpus again.
+      split: null
+      data_cache_path: ${PRIMUS_DATA_CACHE:/path/to/data_cache}
+
+      # ---------- validation loss ----------
+      # 20 eval iterations at gbs 128 = 5.24 M tokens per evaluation, a
+      # low-variance estimate over the held-out set (the sampler wraps if the
+      # held-out split is smaller than that).
+      eval_iters: ${EVAL_ITERS:20}
+      eval_interval: ${EVAL_INTERVAL:50}
+
+      # ---------- Kimi K3 specific ----------
+      kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      moe_router_dtype: fp32
+
+      # ---------- optimizer ----------
+      optimizer: adam
+      use_distributed_optimizer: false
+      use_precision_aware_optimizer: false
+
+      # ---------- recompute ----------
+      # Off. This shape fits comfortably on 8 x 288 GB, and recompute would
+      # double-count the forward in any FLOPs-per-second figure.
+      recompute_granularity: null
+      recompute_method: null
+      recompute_num_layers: null
+
+      # ---------- ckpt ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # ---------- Turbo / DeepEP: OFF ----------
+      # This is the convergence control run, not a perf run: each Turbo path is an
+      # independent failure surface and would change the measured ms/iter. (The
+      # perf launcher enables grouped_gemm / rms_norm / permute via CLI overrides.)
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+      use_turbo_rms_norm: false
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_use_fused_router_with_aux_score: false
+      moe_permute_fusion: false
+
+      enable_experimental: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

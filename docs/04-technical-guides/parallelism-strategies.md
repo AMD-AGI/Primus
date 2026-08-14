@@ -62,9 +62,9 @@ In **classic data parallelism**, every GPU holds a **full copy** of the model. E
 
 For a single update that aggregates over data-parallel ranks and gradient accumulation:
 
-\[
+$$
 \text{effective\_batch\_size} = \text{micro\_batch\_size} \times \text{num\_GPUs}_{\text{DP}} \times \text{gradient\_accumulation\_steps}
-\]
+$$
 
 Here `num_GPUs_DP` is the **data-parallel group size** (not always the same as `world_size` when TP/PP/EP are also used).
 
@@ -76,9 +76,9 @@ Here `num_GPUs_DP` is the **data-parallel group size** (not always the same as `
 
 | ZeRO stage | Sharded | Idea |
 |------------|---------|------|
-| **Stage 1** | Optimizer states | Each rank keeps only \(1/N\) of optimizer tensors |
+| **Stage 1** | Optimizer states | Each rank keeps only $1/N$ of optimizer tensors |
 | **Stage 2** | + Gradients | Gradients are sharded; reduced where needed |
-| **Stage 3** | + Parameters | Each rank holds \(1/N\) of parameters; gather before use |
+| **Stage 3** | + Parameters | Each rank holds $1/N$ of parameters; gather before use |
 
 **FSDP** (Fully Sharded Data Parallel) in PyTorch is the common **implementation** of sharded data parallel training; in the Megatron ecosystem, **ZeRO-3-style** behavior is often discussed alongside **FSDP** for full parameter sharding.
 
@@ -89,7 +89,7 @@ Here `num_GPUs_DP` is the **data-parallel group size** (not always the same as `
 
 **Memory intuition**
 
-If replicated training used \(M\) memory per rank for parameters+gradients+optimizer, **ideal** full sharding across \(N\) ranks approaches **\(M/N\)** for the sharded pieces (plus buffers and fragmentation). Moving from **full replication** to **\(1/N\)** sharding for those tensors saves roughly **\((N-1)/N\)** of that component—for **8 GPUs**, about **87.5%** of the replicated footprint for the sharded tensors.
+If replicated training used $M$ memory per rank for parameters+gradients+optimizer, **ideal** full sharding across $N$ ranks approaches **$M/N$** for the sharded pieces (plus buffers and fragmentation). Moving from **full replication** to **$1/N$** sharding for those tensors saves roughly **$(N-1)/N$** of that component—for **8 GPUs**, about **87.5%** of the replicated footprint for the sharded tensors.
 
 ### In Primus
 
@@ -108,9 +108,9 @@ Exact interactions with checkpoint formats and DDP are documented in [Megatron p
 
 ### Column-parallel vs row-parallel
 
-Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel** splits \(W\) **along the output dimension** (columns). **Row-parallel** splits \(W\) **along the input dimension** (rows) and **splits \(X\)** so each rank’s matmul dimensions match.
+Consider a linear layer $Y = X W$ with weight matrix $W$. **Column-parallel** splits $W$ **along the output dimension** (columns). **Row-parallel** splits $W$ **along the input dimension** (rows) and **splits $X$** so each rank’s matmul dimensions match.
 
-**Column-parallel linear**—each rank holds **disjoint columns** of \(W\); each rank's output is a **disjoint column shard** (half the width for 2-way TP). To recover the full-width tensor the shards are **concatenated (All-Gather along the output dim)**—this is only done when the full tensor is actually needed:
+**Column-parallel linear**—each rank holds **disjoint columns** of $W$; each rank's output is a **disjoint column shard** (half the width for 2-way TP). To recover the full-width tensor the shards are **concatenated (All-Gather along the output dim)**—this is only done when the full tensor is actually needed:
 
 ```
                     SAME full X replicated on each TP rank
@@ -135,7 +135,7 @@ Consider a linear layer \(Y = X W\) with weight matrix \(W\). **Column-parallel*
               full-width Y (concatenation of shards)
 ```
 
-**Row-parallel linear**—each rank holds **disjoint rows** of \(W\); **input \(X\)** is **split** along the **input feature** dimension so each rank computes part of the reduction:
+**Row-parallel linear**—each rank holds **disjoint rows** of $W$; **input $X$** is **split** along the **input feature** dimension so each rank computes part of the reduction:
 
 ```
       Rank 0: X_0 @ W[0:r/2,:] ----+
@@ -209,9 +209,9 @@ If a stage waits for input while other stages compute, **idle time** appears (**
 
 **Bubble rate**
 
-\[
+$$
 \text{bubble\_rate} = \frac{\text{idle time}}{\text{total time}}
-\]
+$$
 
 Lower is better; large **microbatch counts** and better schedules reduce bubble overhead.
 
@@ -285,15 +285,15 @@ See `primus/configs/modules/megatron/primus_pipeline.yaml` and `zero_bubble.yaml
 
 For dense models (ignoring CP and detailed MoE layout):
 
-\[
+$$
 \text{world\_size} \approx \text{TP} \times \text{PP} \times \text{DP}
-\]
+$$
 
 For MoE-heavy setups, you often see:
 
-\[
+$$
 \text{world\_size} \approx \text{TP} \times \text{PP} \times \text{EP} \times \text{DP}
-\]
+$$
 
 **Context parallelism** introduces another multiplicative factor in layouts where CP ranks are part of the global mesh (exact rank ordering is implementation-specific).
 
@@ -319,36 +319,36 @@ Always validate against **memory profiling**, **checkpoint sharding**, and **net
 
 Let:
 
-- \(B_{\text{micro}}\) = micro-batch size per forward/backward **per data-parallel rank** (per step inside accumulation),
-- \(D\) = **data parallel size** (ranks that share the same model split for DP),
-- \(G\) = **gradient accumulation** steps,
-- \(B_{\text{global}}\) = **global batch size** across all DP ranks for one optimizer update.
+- $B_{\text{micro}}$ = micro-batch size per forward/backward **per data-parallel rank** (per step inside accumulation),
+- $D$ = **data parallel size** (ranks that share the same model split for DP),
+- $G$ = **gradient accumulation** steps,
+- $B_{\text{global}}$ = **global batch size** across all DP ranks for one optimizer update.
 
 Then:
 
-\[
+$$
 B_{\text{global}} = B_{\text{micro}} \times D \times G
-\]
+$$
 
 **Data parallel size** from world size (when using TP, PP, EP):
 
-\[
+$$
 D = \frac{\text{world\_size}}{\text{TP} \times \text{PP} \times \text{EP}}
-\]
+$$
 
 (If **context parallelism** is present, the denominator must include **CP** in the same way your trainer defines the mesh.)
 
 Solve for accumulation:
 
-\[
+$$
 G = \frac{B_{\text{global}}}{B_{\text{micro}} \times D}
-\]
+$$
 
 **Practical notes**
 
 - **Micro batch** drives **per-GPU activation memory** (often linearly in sequence length for attention).
 - **Global batch** affects **convergence** and learning dynamics; scaling laws often refer to global batch.
-- **Gradient accumulation** increases **time per optimizer step** but **reduces memory** by using smaller \(B_{\text{micro}}\).
+- **Gradient accumulation** increases **time per optimizer step** but **reduces memory** by using smaller $B_{\text{micro}}$.
 
 Megatron-specific names for batch arguments appear in [Megatron parameters](../03-configuration-reference/megatron-parameters.md).
 
