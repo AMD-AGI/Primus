@@ -6,13 +6,13 @@
 
 """MegaMoE layer, drop-in for Megatron MoELayer (EP-only, bf16 params).
 
-``turbo_mega_moe_precision`` selects the expert class out of ``EXPERTS_BY_PRECISION``; the flavours
-differ only in which stage pair they call, so precision is decided once when the layer is built and
-nowhere else. ``mxfp8`` is an op-internal change: w1/w2 stay bf16 parameters and the op maintains
-their mxfp8 quant in an internal cache. Because the precision-aware optimizer may not bump
-``w._version``, the fp8 path advances a separate generation counter (``advance_weight_generation()``)
-at the optimizer-step boundary to invalidate that cache, so initialization, checkpointing and the
-optimizer remain unchanged.
+``turbo_mega_moe_precision`` selects the expert class; the flavours differ only in which stage pair
+they call, so precision is decided once when the layer is built and nowhere else. ``mxfp8`` is an
+op-internal change: w1/w2 stay bf16 parameters and the op maintains their mxfp8 quant in an
+internal cache. Because the precision-aware optimizer may not bump ``w._version``, the fp8 path
+advances a separate generation counter (``advance_weight_generation()``) at the optimizer-step
+boundary to invalidate that cache, so initialization, checkpointing and the optimizer remain
+unchanged.
 """
 
 import contextlib
@@ -31,8 +31,6 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
-
-from primus.core.utils.module_utils import log_rank_0
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
     fused_mega_moe_stage1,
     fused_mega_moe_stage2,
@@ -159,10 +157,6 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         )
 
 
-EXPERTS_BY_PRECISION = {"bf16": MegaMoEExperts, "mxfp8": MegaMoEFP8Experts}
-_LOGGED_EXPERT_CLASSES: set = set()
-
-
 class PrimusTurboMegaMoELayer(MegatronModule):
     """EP MoE layer: Megatron router -> two-stage experts -> shared expert."""
 
@@ -200,12 +194,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
 
         # separate w1/w2 modules give DDP overlap boundaries
-        precision = mega_moe_precision()
-        experts_cls = EXPERTS_BY_PRECISION[precision]
-        # deduped: every MoE layer builds the same flavour, so one line per run is the useful signal
-        if experts_cls not in _LOGGED_EXPERT_CLASSES:
-            _LOGGED_EXPERT_CLASSES.add(experts_cls)
-            log_rank_0(f"[MegaMoE] turbo_mega_moe_precision={precision} -> experts={experts_cls.__name__}")
+        experts_cls = MegaMoEFP8Experts if mega_moe_precision() == "mxfp8" else MegaMoEExperts
         self.experts = experts_cls(
             config,
             self.experts_per_rank,
