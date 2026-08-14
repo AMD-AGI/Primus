@@ -4,7 +4,8 @@ extends:
 # Gemma 4 26B (MoE, 128 experts / 8 active). Architecture from MaxText's
 # configs/models/gemma4-26b.yml. Requires maxtext release/v26.6+.
 # Attention: use cudnn_flash_te (passes sliding-window to kernel as window_size).
-# fp8 MoE is blocked upstream by a Flax tracer leak in RoutedMoE.dense_matmul.
+# fp8: MoE expert matmuls fall back to bf16 when scan_layers is true (patched in
+# moe.py get_einsum) to avoid Flax Fp8Einsum variable leak inside jax.lax.scan.
 model_name: "gemma4-26b"
 
 # Gemma 4 is not published on HF; synthetic pretraining generates data from

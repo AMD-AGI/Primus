@@ -3,12 +3,9 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI300X / gfx942): DOES NOT RUN — blocked upstream.
-# MoE fp8 path hits UnexpectedTracerError: RoutedMoE.dense_matmul creates fp8
-# einsum variables inside a traced call, leaking amax-history tensors.
-# Specific to gemma4 (its internal layer scan adds another transform).
-# Other MoE fp8 configs (mixtral, qwen3) train fine. bf16 works; use that.
-# Potential fix: try scan_layers: false, or wait for upstream maxtext fix.
+# STATUS (MI300X / gfx942): RUNS with MoE FP8 patch.
+# MoE expert matmuls run in bf16 (bypassing Fp8Einsum variable leak inside scan).
+# Dense layers still use nanoo_fp8 via dot_general_cls.
 
 modules:
   pre_trainer:
