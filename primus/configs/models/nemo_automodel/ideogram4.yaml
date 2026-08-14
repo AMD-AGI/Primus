@@ -23,6 +23,17 @@ model:
   mode: pretrain
   # Explicit model family (used by the recipe only for PEFT/cache paths; unused here).
   model_type: ideogram4
+  # Kernel family for the var-len flash path (PRIMUS_IDEOGRAM_VARLEN_ATTN=1); ignored by
+  # AutoModel, read by Primus's attention hook. `triton` = aiter's Triton kernels under
+  # Primus's head-dim-256 block sizes: 2.1x faster than CK-tile on the production packing
+  # (44.6 -> 21.3 ms fwd+bwd on one MI355X), exact to CK element-wise, and measured at
+  # 8 ranks / mbs=8 / 1024px / compile=true: step 3.125 -> 2.499 s on ZeRO-2 (-20.0%) and
+  # 3.274 -> 2.625 s on ZeRO-3 (-19.8%), with identical peak memory and identical loss.
+  # Safe under per-layer torch.compile (fullgraph, zero graph breaks, zero recompiles --
+  # same as `ck`), because the kernels are wrapped as torch.library custom ops.
+  # `ck` = aiter CK-tile, the previous default; also what a GPU with no tuned block sizes
+  # falls back to automatically, since untuned Triton would be slower than CK.
+  varlen_attn_impl: triton
   # NOTE: attention_backend intentionally unset -> the recipe skips
   # set_attention_backend, so the model keeps its default dispatch (torch SDPA),
   # which honours the Ideogram block-diagonal segment mask. This is the path

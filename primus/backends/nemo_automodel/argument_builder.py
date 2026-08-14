@@ -86,6 +86,38 @@ def strip_primus_keys(params_dict: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in params_dict.items() if k not in PRIMUS_ONLY_TOP_KEYS}
 
 
+_PUBLISHED_PARAMS: Dict[str, Any] = {}
+
+
+def publish_params(params_dict: Dict[str, Any]) -> None:
+    """Make the resolved YAML params readable by the optional install hooks.
+
+    ``_install_optional_hooks`` runs before the recipe (and therefore its config object)
+    exists, and every hook is a bare ``install()`` with no config argument — so a hook that
+    wants to be driven by a YAML key rather than an env var has nothing to read. The
+    trainer publishes the merged params here first; :func:`get_param` is the read side.
+    Keys read this way must be ones AutoModel ignores: the recipe pulls ``model.*`` fields
+    it knows by name and never splats the block into a constructor, so an extra flag there
+    is inert to it.
+    """
+    global _PUBLISHED_PARAMS
+    _PUBLISHED_PARAMS = params_dict
+
+
+def get_param(dotted_key: str, default: Any = None) -> Any:
+    """Read ``a.b.c`` from the published params; ``default`` if absent or never published.
+
+    Absent-means-default is deliberate: a hook must behave identically when it is imported
+    outside a run (unit tests, ``python -c`` checks), where nothing was ever published.
+    """
+    node: Any = _PUBLISHED_PARAMS
+    for part in dotted_key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
 def export_params_to_yaml(params_dict: Dict[str, Any]) -> str:
     """
     Write the (cleaned) config dict to a temporary YAML so AutoModel's own

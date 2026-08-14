@@ -109,10 +109,13 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
         from primus.backends.nemo_automodel.argument_builder import (
             export_params_to_yaml,
             namespace_to_dict,
+            publish_params,
             strip_primus_keys,
         )
 
         params_dict = strip_primus_keys(namespace_to_dict(self.backend_args))
+        # Readable by the install hooks below, which get no config argument of their own.
+        publish_params(params_dict)
 
         # Delegate config materialization to AutoModel's own loader (argv=[] so
         # Primus's process argv is never re-parsed).
