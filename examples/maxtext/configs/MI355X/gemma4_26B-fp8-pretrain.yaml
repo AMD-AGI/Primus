@@ -3,6 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
+# STATUS (MI355X / gfx950): DOES NOT RUN — blocked upstream.
+# Flax Fp8Einsum.setup() creates variables inside jax.lax.scan (gemma4's scanned
+# local layers), causing UnexpectedTracerError. Use gemma4_26B-bf16 instead.
+
 modules:
   pre_trainer:
     framework: maxtext
