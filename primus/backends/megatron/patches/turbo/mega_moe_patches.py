@@ -16,6 +16,7 @@ the dense layers and has no path to this fused op, so the MoE stays switchable o
 runs.
 """
 
+import functools
 
 from primus.backends.megatron.patches.turbo.utils import is_primus_turbo_can_patch
 from primus.core.patches import PatchContext, get_args, register_patch
@@ -31,13 +32,21 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
       - tensor_model_parallel_size == 1
       - enable_primus_turbo == True
       - use_turbo_mega_moe == True
+      - 1 < expert_model_parallel_size <= 8
     """
     args = get_args(ctx)
     use_turbo_mega_moe = bool(getattr(args, "use_turbo_mega_moe", False))
     bf16 = bool(getattr(args, "bf16", False))
+    # The fused all-to-all rides intra-node peer transfers, so the EP group has to fit in one node.
     ep_size = int(getattr(args, "expert_model_parallel_size", 1))
 
-    return use_turbo_mega_moe and bf16 and ep_size > 1 and is_primus_turbo_can_patch(ctx)
+    return use_turbo_mega_moe and bf16 and 1 < ep_size <= 8 and is_primus_turbo_can_patch(ctx)
+
+
+def _is_turbo_mega_moe_mxfp8(ctx: PatchContext) -> bool:
+    """MegaMoE with mxfp8 experts -- the only flavour that caches quantized weights."""
+    precision = getattr(get_args(ctx), "turbo_mega_moe_precision", "bf16")
+    return precision == "mxfp8" and _is_turbo_mega_moe_can_patch(ctx)
 
 
 @register_patch(
@@ -64,8 +73,7 @@ def patch_mega_moe(ctx: PatchContext):
     # read off ctx, not the layer's helper: megatron's get_args is not up yet in this phase
     precision = getattr(get_args(ctx), "turbo_mega_moe_precision", "bf16")
     log_rank_0(
-        "[Patch:megatron.turbo.mega_moe] Patching MoELayer with fused MegaMoE "
-        f"({precision} experts)..."
+        f"[Patch:megatron.turbo.mega_moe] Patching MoELayer with fused MegaMoE ({precision} experts)..."
     )
 
     moe_layer.MoELayer = PrimusTurboMegaMoELayer
@@ -78,4 +86,38 @@ def patch_mega_moe(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.turbo.mega_moe]   Patched "
         f"megatron.core.models.gpt.moe_module_specs.MoELayer -> {PrimusTurboMegaMoELayer.__name__}"
+    )
+
+
+@register_patch(
+    "megatron.turbo.mega_moe_weight_generation",
+    backend="megatron",
+    phase="before_train",
+    description="Drop the MegaMoE mxfp8 weight-quant cache after every optimizer step",
+    condition=_is_turbo_mega_moe_mxfp8,
+)
+def patch_mega_moe_weight_generation(ctx: PatchContext):
+    """Tie the mxfp8 expert weight-quant cache to the optimizer step.
+
+    The op keys that cache on ``w._version``, which the precision-aware optimizer never bumps, so
+    left alone the experts train the whole run against the weights they started with. Taking the
+    signal from the step itself keeps it honest: counting the layer's own forwards is thrown off by
+    anything that forwards without stepping (recompute, warm-up, eval). Megatron's
+    ``set_is_first_microbatch()`` cannot carry it -- it no-ops unless Megatron's own fp8 recipe is on.
+    """
+    import megatron.training.training as megatron_training
+    from primus_turbo.pytorch.kernels.fused_mega_moe import advance_weight_generation
+
+    _original_train_step = megatron_training.train_step
+
+    @functools.wraps(_original_train_step)
+    def _patched_train_step(*args, **kwargs):
+        result = _original_train_step(*args, **kwargs)
+        advance_weight_generation()
+        return result
+
+    megatron_training.train_step = _patched_train_step
+    log_rank_0(
+        "[Patch:megatron.turbo.mega_moe_weight_generation] "
+        "Patched train_step to advance the MegaMoE mxfp8 weight generation after optimizer.step()"
     )

@@ -102,9 +102,11 @@ wgrads). This is deliberately **not** wired to Megatron's `--fp8`, which selects
 the dense layers and has no path to this fused op — keeping them separate lets the MoE be A/B'd on
 its own, and avoids a TE recipe change silently altering MoE behaviour it does not describe.
 
-Parameters stay bf16. The op maintains the mxfp8 weight quant in an internal cache keyed on
-`w._version`, so it is re-quantized only on an optimizer step and initialization, checkpointing and
-the optimizer see nothing new.
+Parameters stay bf16, so initialization, checkpointing and the optimizer see nothing new. The op
+maintains the mxfp8 weight quant in an internal cache keyed on `w._version`, and the
+`megatron.turbo.mega_moe_weight_generation` patch drops that cache once per optimizer step — the
+key alone is not enough, because the precision-aware optimizer updates the weights without ever
+bumping `_version`.
 
 Not supported on the fp8 path: activation recompute (`moe_layer_recompute`,
 `recompute_granularity=full`) and CUDA-graph capture. Both replay the forward while the op still

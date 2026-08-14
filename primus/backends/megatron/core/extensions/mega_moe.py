@@ -31,7 +31,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 
 from primus.core.utils.module_utils import log_rank_0
-from primus_turbo.pytorch.kernels.fused_mega_moe import advance_weight_generation
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
     fused_mega_moe_stage1,
     fused_mega_moe_stage2,
@@ -152,39 +151,21 @@ class MegaMoEFP8Experts(MegaMoEExperts):
 
     @staticmethod
     def _assert_supported_config(config: TransformerConfig) -> None:
-        """Constraints that only the MXFP8 path has.
+        """Reject activation recompute, which only the MXFP8 path cannot take.
 
-        Activation recompute re-runs the expert forward, but the fp8 path holds a live symmetric
-        buffer and does a cross-rank spin-wait handshake, so a replayed forward races the backward
-        consuming the same pool. Untested and expected to hang -- refuse it up front rather than
-        fail deep in the kernels. (CUDA-graph capture is rejected by the op itself for the same
-        reason.)
+        A replayed forward races the backward over the same live symmetric buffer and cross-rank
+        handshake, so it hangs; refuse it here rather than deep in the kernels.
         """
         assert not config.moe_layer_recompute, "MegaMoE fp8 does not support moe_layer_recompute"
         assert (
             config.recompute_granularity != "full"
         ), "MegaMoE fp8 does not support recompute_granularity=full"
 
-    # Count microbatches to find the step boundary, which is when the fp8 weight caches have to be
-    # dropped. Nothing they can see tells them a weight moved: `_version` never moves under the
-    # precision-aware optimizer, and the quantized / flattened / preshuffled copies keep their
-    # addresses (the allocator hands back the block it just freed), so left alone the experts
-    # contract the weights training started with for the whole run.
-    #
-    # Megatron's own signal for this, set_is_first_microbatch(), is not usable here: it returns early
-    # unless config.fp8/fp4/kitchen is set, and MegaMoE selects mxfp8 through
-    # turbo_mega_moe_precision while Megatron's own recipe stays off.
-    _microbatch_in_step = 0
-
+    # The mxfp8 weight-quant cache is dropped by the megatron.turbo.mega_moe_weight_generation
+    # patch, which advances the generation once per optimizer step. Doing it there rather than
+    # here keeps the refresh tied to the weights actually moving, not to how often this layer
+    # happens to run a forward.
     def forward(self, x, topk_idx, topk_weights):
-        # Only count real training forwards: eval runs no optimizer step, and counting those would
-        # slide the phase so the refresh stops landing on the step boundary.
-        if self.training and torch.is_grad_enabled():
-            from megatron.core.num_microbatches_calculator import get_num_microbatches
-
-            if self._microbatch_in_step == 0:
-                advance_weight_generation()
-            self._microbatch_in_step = (self._microbatch_in_step + 1) % max(1, get_num_microbatches())
         w1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2 = self.fc2_weight()
