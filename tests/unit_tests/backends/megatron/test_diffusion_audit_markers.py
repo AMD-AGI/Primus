@@ -701,7 +701,7 @@ def test_model_weight_summary_observes_forward_pre_hook_weight(monkeypatch, tmp_
 def _publish_and_capture(output, payload):
     try:
         _write_model_weight_summary_once(output, payload)
-    except BaseException as error:
+    except Exception as error:
         return error
     return None
 
