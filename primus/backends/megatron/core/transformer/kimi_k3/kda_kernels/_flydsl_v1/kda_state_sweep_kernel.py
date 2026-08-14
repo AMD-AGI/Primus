@@ -147,7 +147,13 @@ MODES = ("mfma", "valu")
 #           recurrence still runs). Prices the loop's write traffic.
 # ``noy``    the Yc load is replaced by a constant. Prices the loop's read traffic
 #           on the one operand that is neither an MFMA operand nor the state.
-PROBES = ("full", "lds1", "areuse", "nobar", "nostore", "noy")
+# ``ocontig`` the fused output goes to a V-block-major `[NB, NVB, C, BV]` layout
+#           instead of `[NB, C, V]`. The values are identical, only permuted, so
+#           this variant is *legal*: it measures whether the 64-byte fragments a
+#           BV=16 workgroup writes into a 512-byte row stride are what costs,
+#           independently of `block_v`. `_lay_back` already makes a full pass over
+#           this tensor and could absorb the permutation for nothing.
+PROBES = ("full", "lds1", "areuse", "nobar", "nostore", "noy", "ocontig")
 
 __all__ = ["build_kda_state_sweep", "BLOCK_SIZE", "MODES", "supports_sweep_geometry"]
 
@@ -487,7 +493,7 @@ def build_kda_state_sweep(
             one = arith.trunc_f(op_t, lds_get(lds_src, k0 * I_BV + v_lds))
             return vector.from_elements(frag_t, [one for _ in range_constexpr(LANE_K)])
 
-        _BUILD_B = {"full": _b_full, "lds1": _b_one_read, "areuse": _b_full, "nobar": _b_full, "nostore": _b_full, "noy": _b_full}[probe]
+        _BUILD_B = {"full": _b_full, "lds1": _b_one_read, "areuse": _b_full, "nobar": _b_full, "nostore": _b_full, "noy": _b_full, "ocontig": _b_full}[probe]
         # `areuse` makes the A fragment's address loop-invariant so LICM hoists it.
         _A_K = {
             "full": lambda k0: k0,
@@ -496,6 +502,7 @@ def build_kda_state_sweep(
             "nobar": lambda k0: k0,
             "nostore": lambda k0: k0,
             "noy": lambda k0: k0,
+            "ocontig": lambda k0: k0,
         }[probe]
 
         # ------------------------------ contraction ----------------------------
@@ -612,8 +619,16 @@ def build_kda_state_sweep(
                         store_f32(
                             arith.MulFOp(tot, c_scale, fastmath=fm).result,
                             o_ptr,
-                            (nb * I_C + rows[sx]) * I_VD + v0 + v_lds,
+                            _O_OFF(nb, rows[sx], v_lds),
                         )
+
+        # `[NB, C, V]` gives a workgroup 16 consecutive floats (64 B) inside a 512 B
+        # row stride, i.e. half a cache line per store; `[NB, NVB, C, BV]` gives it
+        # the whole C x BV tile contiguous.
+        _O_OFF = {
+            False: lambda nb, row, v_lds: (nb * I_C + row) * I_VD + v0 + v_lds,
+            True: lambda nb, row, v_lds: ((nb * arith.index(NVB) + vb) * I_C + row) * I_BV + v_lds,
+        }[probe == "ocontig"]
 
         _FILL_AQK = {True: fill_aqk, False: lambda nb: None}[bool(fuse_out)]
         _GROUP_OUT = {True: group_out, False: lambda nb: None}[bool(fuse_out)]
