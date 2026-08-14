@@ -16,6 +16,31 @@ dgrad. Wgrad also uses FP8 except for the image and text QKV projections, which
 remain high precision for numerical stability. Exact Transformer Engine (TE)
 or NeMo delayed-scaling behavior is not required.
 
+### 1.1 Optimization objective and acceptance contract
+
+NeMo `delayed_short` is the performance reference, not an implementation
+contract. Primus may use different scaling, module boundaries, compilation,
+parallelism, communication, and optimizer scheduling when all of the following
+remain true:
+
+- every promoted configuration reaches MLPerf validation loss `<= 0.586`;
+- its convergence distribution passes the applicable `flux_ref_512` RCP check;
+- the model, data, optimizer hyperparameters, global batch, validation metric,
+  and sample accounting retain their qualified MLPerf semantics;
+- short performance comparisons use matched 8 x MI355X nodes, MBS/GBS
+  `64/512`, seed, step window, validation/checkpoint/logging policy, and report
+  median steady-state global samples/s;
+- the final performance goal is to exceed the current NeMo FP8
+  `delayed_short` reference of `525.5 global samples/s`, then confirm that the
+  gain survives validation-inclusive time-to-quality runs.
+
+Exact scale values, amax histories, TE autocast state, DDP/FSDP topology, and
+step-by-step numerical equivalence are explicitly out of scope. A change that
+improves steady throughput but materially regresses convergence steps or RCP is
+rejected. Delayed scaling, a different quantization granularity, or a different
+parallel topology is considered only when profiling shows a concrete
+performance opportunity and the full convergence funnel can be rerun.
+
 The follow-on ROCm kernel assessment and measurement-first optimization design
 are documented in [`fp8-kernel-opt.md`](fp8-kernel-opt.md). That design keeps
 this TorchAO numerical and integration policy unchanged and evaluates replacing
@@ -464,6 +489,86 @@ and kernel capability are qualified by the single-GPU compiled smoke and
 profiler gate rather than by adding a probe GEMM to every model startup.
 
 BF16 runs must remain independent of TorchAO availability.
+
+### 9.1 Reproducible ROCm dependency images
+
+The native FP8 dependency images are defined in
+`docker/flux-fp8/Dockerfile.v26.3` and
+`docker/flux-fp8/Dockerfile.v26.5`. Each file pins one published image by
+digest and verifies its exact PyTorch, TorchAO, AITER, Primus-Turbo, FlyDSL,
+Triton, and ROCm/HIP versions during the build. Neither image installs or
+upgrades Python packages. The parameterized `docker/flux-fp8/Dockerfile`
+remains available for the earlier v26.4 qualification record.
+
+The image intentionally does not contain the Primus source under test. Clone
+the required Primus revision on the host and use `run_with_docker.sh`, which
+mounts that checkout read-write at `/workspace/code`. Training data and output
+also remain external to the image.
+
+The pinned bases contain:
+
+| Component | v26.3 | v26.4 | v26.5 |
+|---|---|---|---|
+| Base digest | `sha256:1a02b74a94d82131f3f119a94ccbed45bb5b4cd77a0616cb4e6a29e64a048482` | `sha256:8c8ecc6fe14b5061423cc82517831e3515f6eb15647ee6d746fd6a0c1963da24` | `sha256:3040bf42974d791dd42de2e36b3c919a00869a5754cfc57a06b96d004c55eed1` |
+| PyTorch | `2.10.0+git94c6e04` | `2.12.0+rocm7.14.0a20260608` | `2.12.0+rocm7.15.0a20260720` |
+| ROCm/HIP | `7.2.53211` | `7.14.60850` | `7.15.0` |
+| TorchAO | `0.15.0+gite9c7bead9` | `0.15.0+gite9c7bead9` | `0.15.0+gite9c7bead9` |
+| AITER | `0.1.1.dev1611+gf299f579a.d20260512` | `0.1.12.post2.dev214+gb5e03ed19` | `0.1.14.post1` |
+| Primus-Turbo | `0.2.0+3cd482d` | `0.3.0+3c39ef2` | `0.3.2.dev48` |
+| FlyDSL | `0.1.1.dev409` | `0.1.6` | `0.2.4` |
+| Triton | `3.6.0` | `3.7.0+gitb4e20bbe.rocm7.14.0a20260608` | `3.7.1+git0263a6a6.rocm7.15.0a20260720` |
+
+AITER supplies the qualified `flash_attn_aiter` attention path. Primus-Turbo
+and FlyDSL are available in the image but are not used by the accepted FLUX
+FP8 path: the raw-GEMM screen retained TorchAO/PyTorch `_scaled_mm`.
+
+Build the v26.3 dependency image from the repository root:
+
+```bash
+docker build \
+  --build-arg RECIPE_REVISION="$(git rev-parse HEAD)" \
+  -f docker/flux-fp8/Dockerfile.v26.3 \
+  -t primus-flux-fp8:v26.3-local \
+  docker/flux-fp8
+```
+
+Build the v26.5 comparison image:
+
+```bash
+docker build \
+  --build-arg RECIPE_REVISION="$(git rev-parse HEAD)" \
+  -f docker/flux-fp8/Dockerfile.v26.5 \
+  -t primus-flux-fp8:v26.5-local \
+  docker/flux-fp8
+```
+
+After local qualification, prepare the images for a manual Docker Hub login
+and push:
+
+```bash
+docker tag primus-flux-fp8:v26.3-local zirui3/primus-flux-fp8:v26.3
+docker tag primus-flux-fp8:v26.5-local zirui3/primus-flux-fp8:v26.5
+```
+
+Run from the cloned baseline checkout. The image provides the qualified FP8
+defaults; every value remains overrideable through the existing launcher:
+
+```bash
+OUTPUT_DIR=/shared_nfs/zirui/runs/flux_native_fp8_v26_3 \
+SEED=10007 \
+./run_with_docker.sh
+```
+
+`run_with_docker.sh` defaults to the convergence-qualified
+`primus-flux-fp8:v26.3-local`. Select v26.4 explicitly with
+`DOCKER_IMAGE=primus-flux-fp8:v26.4-local` for regression work or v26.5 with
+`DOCKER_IMAGE=primus-flux-fp8:v26.5-local` for qualification experiments.
+
+The host must provide the preprocessed datasets at
+`/shared_nfs/zirui/data/{cc12m_preprocessed,coco_preprocessed,empty_encodings}`
+or override `DATASET_PATH`, `EVAL_DATASET_PATH`, and
+`EMPTY_ENCODINGS_PATH`. Checkpoints, MLPerf logs, rank logs, and W&B artifacts
+must be written to the externally mounted `OUTPUT_DIR`.
 
 ## 10. Implementation Phases
 
@@ -1040,6 +1145,17 @@ The earlier AITER failure used the wrong backend name. The explicit
 The two-node AITER average was `450.9 samples/s`, approximately `10.2%` above
 the SDPA winner and `14.2%` below NeMo `delayed_short`.
 
+This number uses a performance-only protocol: MLPerf validation, periodic
+checkpoints, and W&B were disabled, and statistics cover steps 101-500 after
+warmup. It must not be compared directly with logged windows from a full
+convergence run. After excluding windows that absorb validation or checkpoint
+time, the three no-W&B convergence seeds average approximately
+`419.7-422.3 global samples/s`; the later online W&B seed-10007 control averages
+`415.9 global samples/s` under the same filtering. Conversely, the exact
+published v26.3 image reproduces `455.8-460.9 global samples/s` when rerun under
+the 500-step performance-only protocol, so the image is not the source of the
+apparent `450.9` versus `416` gap.
+
 AITER then completed three independent convergence seeds with complete final
 DTCP checkpoints:
 
@@ -1111,15 +1227,385 @@ Artifacts are under:
 ```
 
 Together, the results establish functional, 500-step numerical, compile,
-FSDP2, checkpoint, one-seed full-convergence viability, and a reproducible
-NeMo throughput gap. They do not replace the remaining three-seed
-time-to-quality qualification or the profiler attribution needed to close that
-gap. Compile/reduction gains alone were absorbed by convergence variance, but
+FSDP2, checkpoint, three-seed full-convergence viability, and a reproducible
+NeMo throughput gap. They do not replace the profiler attribution and RCP
+qualification needed to close that gap. Compile/reduction gains alone were
+absorbed by convergence variance, but
 AITER improved three-seed median time-to-quality by `9.6%`. Generic raw FP8
 GEMM replacement did not pass K0, including on the larger fused native shapes.
 The next step is to profile the exact AITER winner and then target measured
 norm/pointwise fusion or host/GPU scheduling overhead; FP8 GEMM work is deferred
 until a new kernel shows a repeatable shape-level win.
+
+### 17.7 Execution plan to exceed the NeMo reference
+
+The remaining work is ordered by measured opportunity rather than NeMo
+implementation parity:
+
+1. Profile the exact qualified AITER configuration on a matched node and split
+   the remaining step into GPU kernels, CPU launch gaps, synchronization, and
+   exposed communication. This trace supersedes all pre-AITER attribution.
+2. In parallel, screen only low-risk changes that preserve the numerical
+   recipe: remove measured host synchronizations, recover missed Inductor
+   fusion in norm/modulation/GELU/gate/residual chains, and eliminate measured
+   layout materialization around attention.
+3. Require a reproducible 500-step gain on at least three nodes before
+   promotion. Use steps 101-500, no validation, no periodic checkpoint, and no
+   W&B for the steady-state gate. The immediate target is greater than
+   `525.5 global samples/s` under that matched protocol.
+4. Run fixed-seed loss-curve checks, then three full convergence seeds for the
+   accumulated winner. Compare median convergence step and validation-inclusive
+   time-to-quality, not throughput alone.
+5. Run the required independent seeds and RCP checker before declaring MLPerf
+   convergence qualification complete.
+
+Do not reopen raw FP8 GEMM replacement, FP8 all-gather, HSDP/root-only FSDP, or
+no-activation-checkpoint defaults without new evidence. Those paths already
+failed the performance, memory, or convergence gate. Dynamic weight-cast reuse
+and alternate scaling recipes remain later options because they add mutable
+state or change numerics; neither is justified before the final AITER profile.
+
+### 17.8 First execution against the updated objective
+
+The first optimization wave used the pinned v26.4 image on three 8 x MI355X
+nodes. All runs used seed `10007`, MBS/GBS `64/512`, AITER attention,
+`max-autotune-no-cudagraphs`, BF16 reduction, checkpoint ratio `0.25`, no
+validation, no periodic checkpoint, and steps 101-500 for steady statistics.
+
+The v26.4 control exposed a stack regression before any new optimization:
+
+| Node | Control step time | Control global samples/s |
+|---|---:|---:|
+| `009` | `1.4372 s` | `356.4` |
+| `118` | `1.4397 s` | `355.6` |
+| `119` | `1.4427 s` | `355.2` |
+| **Median** | **`1.4397 s`** | **`355.6`** |
+
+This is below the qualified v26.3 AITER result of `450.9 samples/s`. Cold
+v26.4 compilation also made the first ten-step window take approximately
+28-33 minutes. The launcher now passes through `TORCHINDUCTOR_CACHE_DIR` and
+`TRITON_CACHE_DIR` so experimental runs can persist node-local compile outputs,
+but cache persistence does not resolve the steady-state regression.
+
+Static inspection found a real per-step synchronization in prompt dropout:
+the GPU boolean mask was consumed by Python through `drop_mask.any()` before
+the masked assignments. MBS 64 and dropout probability `0.1` make the branch
+almost always true. Removing only that condition preserves the Python RNG
+draws and masked-assignment semantics while avoiding the device-to-host scalar
+dependency. The matched result was:
+
+| Node | Control global samples/s | Without `drop_mask.any()` | Gain |
+|---|---:|---:|---:|
+| `009` | `356.4` | `377.5` | `5.9%` |
+| `118` | `355.6` | `382.4` | `7.6%` |
+| `119` | `355.2` | `387.0` | `9.0%` |
+| **Median** | **`355.6`** | **`382.4`** | **`7.6%`** |
+
+All three 500-step runs remained finite. Peak memory stayed `174.29 GiB` and
+the step-500 losses were `0.6356/0.6359/0.6357`. The change passes all 24 Flux
+backend unit tests. It is retained, but the v26.4 candidate remains `27.2%`
+below the NeMo `525.5 samples/s` reference and has not received full
+convergence qualification.
+
+A new five-step rank-0 profile of the optimized v26.4 path confirmed that the
+removed synchronization is absent: no `aten::any`, `aten::item`, or
+`aten::_local_scalar_dense` occurs in the active steps. Raw GPU-event sums,
+which overlap across streams and are not additive wall time, averaged:
+
+| Kernel group | Time per step | Events per step |
+|---|---:|---:|
+| FP8 GEMM | `495.6 ms` | `758` |
+| FP8 cast/amax/scale/epilogue | `135.7 ms` | `2,868` |
+| Norm/pointwise/RoPE/layout | `319.9 ms` | `3,276` |
+| AITER attention core | `75.2 ms` | `242` |
+| Communication | `125.3 ms` | `124` |
+| BF16/other GEMM + optimizer/norm | `48.5 ms` | `612` |
+
+AITER consistently dispatched the expected BF16 head-dimension-128 forward
+and backward kernels. The trace instead showed approximately `7,994` GPU
+kernel launches, `129` asynchronous copies, and `18,975` pointer-attribute
+queries per step, plus a repeatable roughly `60 ms` host launch gap before the
+fused Adam kernels. The profiler itself inflated the step marker, so these
+counts and category ordering are attribution evidence rather than unprofiled
+wall-clock measurements.
+
+Compiler modes intended to reduce launch overhead did not pass the screen.
+`default` reached only `371.5 global samples/s`; `max-autotune` and
+`reduce-overhead` remained at approximately `16-17 s/step` through step 100
+and were stopped. The production candidate therefore keeps
+`max-autotune-no-cudagraphs`.
+
+Moving precomputed stacking into DataLoader workers so the final batch could be
+pinned was also screened. A complete 500-step run reached
+`381.9 global samples/s`, `1.3%` below the matched `387.0 samples/s` control.
+The change was rejected and precomputed batches continue to use the original
+collator.
+
+Keeping the empty T5/CLIP encodings resident on the GPU was rejected as well.
+Its post-cluster-reallocation run regressed to `2.066 s/step` and
+`248.0 global samples/s` with unchanged peak memory. A same-node control after
+reverting the change reached `1.756 s/step` and `291.9 samples/s`, so the
+candidate was approximately `15%` slower and was rejected.
+
+The cluster allocation was then replaced after a cluster failure. Short
+v26.4 controls on the replacement nodes reached only `291.9-342.0 global
+samples/s`: nodes `118/208/051/057` measured approximately
+`291.9/341.2/342.0/336.6 samples/s`. Even the fastest replacement node remained
+well below the pre-failure `382.4 samples/s` median. These runs establish an
+environment regression, not a new code baseline. No further candidate should
+be promoted and no full convergence run should start until a matched control
+recovers the qualified performance range.
+
+A fresh v26.3 control on replacement node `147` subsequently recovered the
+expected range. Steps 101-200 averaged `1.121 s/step` and
+`456.9 global samples/s`, with `185.64 GiB` peak memory. This short run is not
+a new convergence qualification, but it confirms that the earlier v26.3 IPC
+failure was allocation-specific and restores v26.3 as the performance
+development baseline. Its steady throughput remains approximately `13.1%`
+below the NeMo `525.5 samples/s` reference.
+
+The next implementation priorities are now:
+
+1. capture a matched low-overhead v26.3 trace and compare FP8 Tensile solution
+   selection, cast count, launch count, and optimizer scheduling with v26.4;
+2. reduce the measured FP8 cast/scale launch chain without changing tensor-wise
+   numerics, preferably in TorchAO/Inductor rather than a second Linear class;
+3. target the largest compiled norm/modulation/GELU/gate/residual fusion misses;
+4. isolate the optimizer/gradient-norm host gap and batch-transfer bubbles;
+5. return to three-node 500-step and full-convergence gates only after a short
+   candidate beats both the v26.4 result and the qualified v26.3 baseline.
+
+### 17.9 Reproducible image qualification
+
+The dependency-only images from Section 9.1 were built and tested with the
+Primus source mounted at `/workspace/code`. Both runs used source commit
+`a4c03d6c224ec3f605d9a8ff2a335c974d17b888`, seed `10007`, MBS/GBS
+`64/512`, AITER attention, `max-autotune-no-cudagraphs`, BF16 reduction,
+checkpoint ratio `0.25`, block FSDP, and no reshard.
+
+The v26.4 image passed unit, single-GPU compiled FP8, five-step FSDP2, DTCP
+save, and fresh-container resume gates. Its full run trained normally through
+step 510, but the first step-512 validation did not complete: rank 6 timed out
+after 3600 seconds in an FSDP `_ALLGATHER_BASE`, while rank 0 had not entered
+the same collective sequence. The partial summary averaged `2.0722 s/step`
+and `37.5323 samples/GPU/s`, including checkpoint effects, with `174.29 GiB`
+peak memory. This stack is not convergence-qualified.
+
+The v26.3 fallback completed every validation interval and reached the MLPerf
+target:
+
+| Metric | v26.3 result |
+|---|---:|
+| Convergence step | `14848` |
+| Samples | `7,602,176` |
+| Validation loss | `0.585429` |
+| Time to quality | `25,296.45 s` |
+| Logged-window mean step time | `1.6703 s` |
+| Logged-window mean throughput | `46.9841 samples/GPU/s` |
+| Typical steady step | `1.22-1.27 s` |
+| Peak memory | `185.64 GiB` |
+
+The v26.3 run emitted `run_stop` with `status=success` and saved a complete
+final DTCP checkpoint. Until the v26.4 validation collective mismatch and
+performance regression are resolved, v26.3 remains the reproducible native
+FP8 MLPerf environment.
+
+Artifacts are under:
+
+```text
+/shared_nfs/zirui/runs/flux_native_fp8_v26_4_mlperf_seed10007_20260804T095110Z/
+/shared_nfs/zirui/runs/flux_native_fp8_v26_3_mlperf_seed10007_20260804T114847Z/
+```
+
+### 17.10 v26.3 and v26.5 image smoke
+
+The explicit v26.3 and v26.5 Dockerfiles passed their exact package, PyTorch
+commit, HIP version, and TorchAO API assertions. Single-GPU MI355X tests loaded
+the mounted Primus source, imported AITER attention, and completed a fullgraph
+TorchAO `Float8Linear` forward/backward with finite outputs and gradients.
+
+Matched five-step, 8-GPU Schnell smokes then confirmed for both images:
+
+- 228 converted block Linear modules;
+- FP8 wgrad for 190 modules and high-precision wgrad for 38 QKV modules;
+- 57 compiled transformer blocks;
+- native `_scaled_mm` and AITER gfx950 attention kernels;
+- finite loss and gradient norm through step 5;
+- clean training completion without a final checkpoint.
+
+| Metric | v26.3 | v26.5 |
+|---|---:|---:|
+| Local image ID | `sha256:d9f3cffbbd9b9953239dbe62d90dbb862e57deee5e8c62d55d021de1d71cb4b3` | `sha256:efc09f467e68d8f5df375447a4fb20299048c67c116d0df857ad53f74cdac19a` |
+| Step-5 loss | `1.8652` | `1.8652` |
+| Step-5 gradient norm | `2.8155` | `2.8156` |
+| Peak memory | `185.64 GiB` | `174.29 GiB` |
+| Cold time to five steps | `8.47 min` | `8.51 min` |
+
+The five-step timing is a compatibility signal only. In particular, v26.5
+continued compiling during steps 2-3, so these runs do not establish a steady
+performance ordering or convergence qualification.
+
+Artifacts are under:
+
+```text
+/shared_nfs/zirui/runs/flux_fp8_image_smoke_v263_20260805/
+/shared_nfs/zirui/runs/flux_fp8_image_smoke_v265_20260805/
+```
+
+### 17.11 Published v26.3 baseline and grad-output cast reuse screen
+
+The published `zirui3/primus-v26.3-flux:v0.1` image resolved to digest
+`sha256:d9f3cffbbd9b9953239dbe62d90dbb862e57deee5e8c62d55d021de1d71cb4b3`
+on every test node. Matched 500-step baselines used seed `10007`, MBS/GBS
+`64/512`, AITER attention, `max-autotune-no-cudagraphs`, BF16 reduction,
+checkpoint ratio `0.25`, no validation, no periodic checkpoint, and steps
+101-500 for steady statistics:
+
+| Node | Step time | Global samples/s | Peak memory |
+|---|---:|---:|---:|
+| `147` | `1.1233 s` | `455.8` | `185.64 GiB` |
+| `227` | `1.1100 s` | `460.9` | `185.64 GiB` |
+
+Node `053` was invalidated because another training container began consuming
+the node after the idle check; the baseline then OOMed on its first compiled
+forward. It is not included in the baseline.
+
+TorchAO computes separate grad-output casts for dgrad and wgrad in eager
+tensor-wise `Float8Linear`. A version-gated experimental patch reused the first
+E5M2 cast when both cast configurations were identical and tensor-wise. The
+eager gate reduced grad-output cast calls from two to one while preserving the
+exact loss and weight-gradient norm; QKV high-precision wgrad behavior was
+unchanged.
+
+The production compiled gate rejected the patch. For a real
+`(16384, 3072, 3072)` forward/backward, baseline and candidate both emitted:
+
+- 22 GPU kernels;
+- three FP8 GEMM dispatches;
+- ten dynamic cast/amax/scale kernels;
+- identical exact kernel-name multisets.
+
+Inductor had already eliminated the duplicate work in the compiled graph.
+Because the candidate produced no structural kernel reduction, no 500-step
+model A/B was run and the experimental TorchAO patch was removed.
+
+Compiling the native fused AdamW `optimizer.step` with
+`torch.compile(fullgraph=False)` was screened next because the prior trace
+showed an approximately `60 ms` host launch gap before optimizer kernels. The
+full FLUX trainer failed before completing its first step in both 8-GPU and
+1-GPU smokes, while a small ordinary fused AdamW example compiled and stepped
+successfully. This indicates coupling to the full model parameter/FSDP
+structure rather than a generic compiler failure. The experimental switch was
+removed instead of adding fallback or special-case optimizer code.
+
+### 17.12 v26.3 profile and final-stack pinning screen
+
+A five-step rank-0 profile of the exact published v26.3 baseline superseded the
+earlier v26.4 host attribution. Raw overlapping GPU-event sums averaged:
+
+| Kernel group | Time per step | Events per step |
+|---|---:|---:|
+| FP8 GEMM | `525.2 ms` | `758` |
+| FP8 cast/amax/scale | `133.4 ms` | `2,634` |
+| Norm/pointwise/RoPE/layout | `281.4 ms` | `2,738` |
+| AITER attention core | `70.6 ms` | `228` |
+| Communication | `188.6 ms` | `125` |
+| BF16/other GEMM + optimizer/norm | `67.4 ms` | `976` |
+
+The active steps had no `aten::any`, `aten::item`, or
+`aten::_local_scalar_dense`. Unlike v26.4, the v26.3 optimizer launch gap was
+only about `16 ms`, so optimizer compilation was not pursued further. The
+main controlled host-side candidate was the final pageable 128 MiB T5 stack:
+the original collator stacks it in the training process after DataLoader
+pinning, then requests a nonblocking H2D copy.
+
+An experimental default-off path pinned only this final T5 stack immediately
+before the existing copy. A three-node matched test then used the same v26.3
+image, seed `10007`, steps 101-500, compile cache, and training configuration:
+
+| Node | Baseline samples/s | Pinned T5 samples/s | Paired gain |
+|---|---:|---:|---:|
+| `176` | `460.0` | `467.8` | `1.68%` |
+| `221` | `460.2` | `467.3` | `1.55%` |
+| `227` | `463.6` | `468.4` | `1.04%` |
+| **Median** | **`460.2`** | **`467.8`** | **`1.55%`** |
+
+Median step time decreased from `1.1128 s` to `1.0955 s`. All runs completed
+500 finite steps and peak memory remained `185.64 GiB`. The candidate narrowly
+passes the `1.5%` steady-state gate and reduces the remaining gap to the NeMo
+`525.5 samples/s` reference to about `11.0%`.
+
+The three-seed convergence gate completed successfully with seeds `10007`,
+`10008`, and `10009` on nodes `176`, `221`, and `227`:
+
+| Seed | Convergence step | Validation loss | Time to quality |
+|---|---:|---:|---:|
+| `10007` | `14336` | `0.585980` | `23142.27 s` |
+| `10008` | `14336` | `0.585720` | `23179.50 s` |
+| `10009` | `14336` | `0.585734` | `22955.62 s` |
+| **Median** | **`14336`** | **`0.585734`** | **`23142.27 s`** |
+
+All three runs emitted successful `run_stop` records and wrote complete final
+DTCP checkpoints with unchanged `185.64 GiB` peak memory. Outputs are under
+`/shared_nfs/zirui/runs/flux_fp8_v263_t5_pin_convergence_20260806/`.
+The median convergence step matches the earlier three-seed AITER control while
+median validation-inclusive time to quality improves from `24275.36 s` to
+`23142.27 s`, or `4.7%`.
+
+The final ten independent seeds completed with successful `run_stop` records
+at `7,077,888-7,864,320` samples. All ten logs pass the MLPerf Logging v6.0
+compliance checker with warnings treated as errors. The checker-reported
+trimmed mean is `7,503,872` samples, and the v6.0 ten-run checker passes
+`flux_ref_512` (minimum allowed mean `7,112,400.32` samples). Outputs and
+checker reports are under
+`/shared_nfs/zirui/runs/flux_fp8_v263_t5_pin_rcp_final_20260808/`.
+
+T5 stack pinning is therefore enabled by default. Set
+`PIN_FLUX_T5_STACK=0` only for debugging or matched baseline comparisons.
+
+### 17.13 v26.5 full-run failure and W&B convergence control
+
+The published `zirui3/primus-v26.5-flux:v0.1` image resolved to digest
+`sha256:efc09f467e68d8f5df375447a4fb20299048c67c116d0df857ad53f74cdac19a`.
+It was run on node `009` with a clean detached
+`a4c03d6c224ec3f605d9a8ff2a335c974d17b888` worktree and the same seed,
+batch, FP8, AITER, compile, reduction, checkpoint, and validation settings as
+the qualified v26.3 run.
+
+The v26.5 stack compiled and completed validation collectives, but it was
+numerically invalid: loss and gradient norm were already NaN at the first
+logged step 10, and validation remained NaN through step 4096. Typical
+post-compile windows were approximately `1.10-1.12 s/step` and
+`57.5-58.1 samples/GPU/s`, with `174.29 GiB` peak memory, but this throughput
+is not a valid training result. The run was stopped after step 4250 and its
+logs and periodic checkpoints were retained.
+
+A separate online W&B control used the convergence-qualified v26.3 image,
+the same clean worktree, and project `torchtitan-flux`. It completed
+successfully:
+
+| Metric | v26.3 W&B control |
+|---|---:|
+| Convergence step | `14336` |
+| Samples | `7,340,032` |
+| Validation loss | `0.585894` |
+| Time to quality | `24,225.25 s` |
+| Logged-window mean step time | `1.6546 s` |
+| Logged-window mean throughput | `47.6225 samples/GPU/s` |
+| Peak memory | `185.64 GiB` |
+
+The v26.3 control emitted `run_stop` with `status=success`, saved a complete
+final DTCP checkpoint, and finished W&B upload with exit code 0. The online run
+is available at:
+
+<https://wandb.ai/zirui-dream/torchtitan-flux/runs/native-dynamic-fp8-v263-seed10007-20260805T082453Z>
+
+Artifacts are under:
+
+```text
+/shared_nfs/zirui/runs/flux_native_fp8_v26_5_mlperf_seed10007_20260805T071746Z/
+/shared_nfs/zirui/runs/flux_native_fp8_v26_3_mlperf_wandb_seed10007_20260805T082453Z/
+```
 
 ## 18. Final Decision
 
@@ -1135,17 +1621,22 @@ freeze the BF16 reference
 -> run one full convergence seed
 -> run three independent seeds
 -> compare validation-inclusive time-to-quality
+-> pass ten-run MLPerf compliance and RCP checks
 ```
 
-The first delivery remains intentionally narrow: native TorchAO dynamic
+The production path remains intentionally narrow: native TorchAO dynamic
 tensor-wise FP8 forward/dgrad for the 228 repeated Schnell block Linears, FP8
 wgrad for the 190 non-QKV Linears, and high-precision wgrad for the 38
 image/text QKV Linears, with the rest of the validated Primus BF16 training
 stack unchanged. For the local MLPerf FP8 recipe, the best qualified
 performance combination is deferred scalar synchronization, block compile with
 `max-autotune-no-cudagraphs`, BF16 gradient reduction, AITER attention,
-checkpoint ratio `0.25`, block FSDP, and no reshard. It averages
-`450.9 samples/s`, remains `14.2%` below the NeMo steady throughput reference,
-and improves three-seed median TTQ by `9.6%` versus the SDPA candidate. The raw
-GEMM remains `_scaled_mm` because every screened ROCm replacement failed the
-performance gate.
+checkpoint ratio `0.25`, block FSDP, no reshard, and final T5-stack pinning.
+The qualified v26.3 path reaches a three-node median `467.8 samples/s`, remains
+about `11.0%` below the NeMo steady-throughput reference, preserves the
+three-seed median convergence step, and improves median TTQ by `4.7%` over the
+unpinned AITER control. Ten independent runs pass both MLPerf v6.0 compliance
+and `flux_ref_512` RCP checks. The raw GEMM remains `_scaled_mm` because every
+screened ROCm replacement failed the performance gate. Further work should
+continue from this qualified v26.3 baseline; the v26.4 image does not replace
+it until that stack's performance regression is closed.
