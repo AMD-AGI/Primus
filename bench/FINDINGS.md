@@ -684,6 +684,70 @@ does not survive its own test either. This is a gap in understanding, not a
 candidate, and it is the honest reason not to claim the door is provably shut:
 1.85× exists in `fla` and we cannot yet say why.
 
+## 5f. Round 6 — the fused chunk output: the last live candidate, landed
+
+Round 5's only surviving candidate, implemented. The sweep kernel now emits
+`O = scale·(Aqk @ T + Rq)` itself, so neither `Rq` nor `T` makes a round trip
+through HBM and the 214 µs output `baddbmm` disappears.
+
+How the three pieces fit:
+
+- **`Rq` never leaves registers.** Group 1 and the new output phase share the MFMA
+  accumulator layout, so a value produced at accumulator slot `(mi, nt, s)` in
+  group 1 is the same `(row, v)` the output phase needs at that slot. Four fp32
+  per thread stay live across the barrier; no transpose, no LDS.
+- **`T` only reaches memory when the backward wants it** (`emit_t`), which on the
+  no-grad forward is never.
+- **`Aqk` is staged in LDS**, 16 KB at `C = 64`, carrying the same
+  cross-workgroup redundancy the A operand already has and which L2 absorbs the
+  same way.
+
+The output contraction is **fp32 VALU, not MFMA**, on purpose: `Aqk` is the one
+operand this kernel has never rounded — keeping it fp32 is what holds the bf16
+output error at 2.6e-3 — and this flydsl build has no usable fp32 MFMA. Fusion is
+gated to `mode="mfma"`, because `group_valu` indexes accumulators by
+`(block, row, v)` and the register handoff key would not match.
+
+### Measured, `prod_T4096`
+
+| | before | after |
+| --- | --- | --- |
+| `fused_chunk_sweep` region (kernel + output) | 799 | **642** |
+| whole forward | 1861 | **1684** |
+| forward vs `fla` | 0.70× | **0.77×** |
+
+**−177 µs, against the −354 round 5 estimated.** The estimate was gross: it
+credited removing the stores and the `baddbmm` but charged nothing for the
+in-kernel VALU contraction (~140 µs) or for staging `Aqk` (~96 µs). Both are now
+measured, and the net is the difference. Recording the shortfall rather than the
+headline is the same discipline that caught the 440 µs layout and the 234 µs
+comparison in §5c.
+
+### Per shape, forward
+
+| shape | `main` | round 4 | **round 6** | `fla` | `main`/fla | r4/fla | **r6/fla** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `prod_T2048` | 1244 | 979 | **905** | 700 | 0.58× | 0.70× | **0.77×** |
+| `prod_T4096` | 2365 | 1858 | **1705** | 1313 | 0.58× | 0.70× | **0.77×** |
+| `off8L_mbs2` | 7450 | 6131 | **5612** | 4282 | 0.59× | 0.68× | **0.76×** |
+| `curve_mbs8` | 1530 | 1307 | **1191** | 839 | 0.57× | 0.64× | **0.70×** |
+| `curve_mbs16` | 2882 | 2410 | **2189** | 1536 | 0.54× | 0.64× | **0.70×** |
+
+Every shape improved; none regressed. fwd+bwd is 0.41–0.46×. Parity against the
+fp32 eager oracle is **unchanged to the digit** — `2.67e-03` output and
+`5.22e-07` fp32 at production geometry — and 87/88 tests pass, the exception being
+the fla-0.5.2 one from §2.
+
+Why the single-stage delta (−157 µs on the sweep region) and the whole-forward
+delta (−177 µs) differ: the region timing excludes the `baddbmm`'s output
+allocation and the launch it no longer pays, and the ledger's stages are timed
+standalone so each carries its own launch overhead. The integrated number is the
+one to quote.
+
+**The forward is now 0.77× and the remaining items from §5d (`~100 µs` for
+in-place bf16 reads, `~140` for fusing the `W`/`U` GEMMs, `~40` for the `KG`
+transpose) would take it to about 0.88×.** 1.0× still does not close.
+
 ## 6. What any of this is worth end to end — the honest ceiling
 
 From the real 8L-official run (`/home/botahu/primus_output/8L_1318_r%t.out`,
