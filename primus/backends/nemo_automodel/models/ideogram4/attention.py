@@ -60,6 +60,17 @@ COMPILE:
   dead parameter for this model in diffusers 0.39.0). That path is exact on ragged batches,
   needs no host sync, and stops recomputing the same packing once per layer.
 
+KERNEL FAMILY:
+  The var-len call goes to aiter's **Triton** kernels under Primus's own head-dim-256 block
+  sizes (``triton_varlen_attn.py``): 2.1x faster than CK-tile on the production packing,
+  exact to CK element-wise, and worth -20% end-to-end step time at 8 ranks / mbs=8 / 1024px
+  / compile (3.125 s -> 2.499 s on ZeRO-2, 3.274 -> 2.625 on ZeRO-3, same peak memory and
+  loss). ``model.varlen_attn_impl: ck`` in the model preset returns to the CK-tile kernels.
+  The choice covers the var-len route only -- the dense fallbacks stay on CK, the shape they
+  were measured on. On a GPU or head dim nobody swept, ``triton`` degrades to ``ck`` at
+  install time (see :func:`resolve_varlen_impl`), because there the Triton path would run
+  aiter's head-dim-blind config and LOSE to CK.
+
 Activation (env, no config schema change):
     PRIMUS_IDEOGRAM_VARLEN_ATTN=1          swap Ideogram-4 attention to the var-len flash path
     PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS  default 1; set 0 to stop the adapter precomputing
@@ -71,7 +82,10 @@ Activation (env, no config schema change):
                                            equal-length / unpadded batches, e.g. fixed-text).
                                            Never fires while a precomputed cu_seqlens is
                                            provided, which now takes precedence.
+    PRIMUS_IDEOGRAM_VARLEN_ATTN_IMPL       override model.varlen_attn_impl (ck | triton) for
+                                           an A/B run without editing the preset.
 """
+
 from __future__ import annotations
 
 import logging
@@ -81,7 +95,9 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import resolve_packing
+from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import (
+    resolve_packing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +139,66 @@ def precompute_cu_seqlens_enabled() -> bool:
     for A/B measurement and rollback, not as a routine knob.
     """
     return os.getenv("PRIMUS_IDEOGRAM_PRECOMPUTE_CU_SEQLENS", "1") in _TRUTHY
+
+
+_VALID_IMPLS = ("ck", "triton")
+
+
+def varlen_attn_impl() -> str:
+    """Which kernel family the var-len path asks for: ``triton`` (default) or ``ck``.
+
+    Selected by ``model.varlen_attn_impl`` in the Ideogram-4 model preset, because this is
+    a per-model kernel choice that belongs with the model config rather than in the
+    environment. ``PRIMUS_IDEOGRAM_VARLEN_ATTN_IMPL`` overrides it for A/B runs without
+    editing the YAML.
+
+    This is the REQUEST; :func:`resolve_varlen_impl` is what the run actually gets.
+    """
+    from primus.backends.nemo_automodel.argument_builder import get_param
+
+    impl = os.getenv("PRIMUS_IDEOGRAM_VARLEN_ATTN_IMPL") or get_param("model.varlen_attn_impl", "triton")
+    impl = str(impl).strip().lower()
+    if impl not in _VALID_IMPLS:
+        raise ValueError(
+            f"model.varlen_attn_impl={impl!r} is not one of {_VALID_IMPLS}. "
+            "Set it in the Ideogram-4 model preset (or PRIMUS_IDEOGRAM_VARLEN_ATTN_IMPL)."
+        )
+    return impl
+
+
+def resolve_varlen_impl() -> str:
+    """The kernel family the run will really use, after the tuned-shape guard.
+
+    ``triton`` only beats CK where Primus has measured block sizes for this
+    ``(arch, head_dim)``. Everywhere else the Triton kernels fall back to aiter's
+    head-dim-blind config, which at hd=256 is 2.0x SLOWER than CK -- so an unswept GPU
+    degrades to ``ck`` rather than to a silent regression. That is what makes ``triton``
+    defensible as the shipped default instead of an opt-in.
+
+    Resolved ONCE, by :func:`install`, and stored on the processor: the answer is fixed for
+    the process, and asking per call would put a branch and a logging side effect inside the
+    compiled graph -- exactly what this file's COMPILE section exists to avoid.
+    """
+    impl = varlen_attn_impl()
+    if impl != "triton":
+        return impl
+
+    from primus.backends.nemo_automodel.models.ideogram4.triton_varlen_attn import (
+        IDEOGRAM4_HEAD_DIM,
+        is_tuned,
+    )
+
+    if not is_tuned(IDEOGRAM4_HEAD_DIM):
+        _warn_once(
+            "untuned_triton",
+            "[PrimusIdeogramVarlen] varlen_attn_impl=triton, but this GPU has no tuned "
+            f"head-dim-{IDEOGRAM4_HEAD_DIM} block sizes in triton_varlen_attn._TUNED_DELTAS; "
+            "aiter's head-dim-blind config would be slower than CK-tile here. Falling back "
+            "to impl=ck. Sweep this arch (scripts/bench_hd256_varlen_attn.py) and add its "
+            "row to enable Triton.",
+        )
+        return "ck"
+    return impl
 
 
 def precompute_cu_seqlens_active() -> bool:
@@ -211,26 +287,50 @@ def dense_flash_attention(q: Tensor, k: Tensor, v: Tensor, *, deterministic: boo
     """
     import aiter
 
-    return _unwrap(
-        aiter.flash_attn_func(q, k, v, causal=False, deterministic=deterministic, return_lse=True)
-    )
+    return _unwrap(aiter.flash_attn_func(q, k, v, causal=False, deterministic=deterministic, return_lse=True))
 
 
 def varlen_flash_attention(
-    q: Tensor, k: Tensor, v: Tensor, cu_seqlens: Tensor, max_seqlen: int, *, deterministic: bool = False
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    cu_seqlens: Tensor,
+    max_seqlen: int,
+    *,
+    deterministic: bool = False,
+    impl: str = "ck",
 ) -> Tensor:
     """Variable-length bf16 flash attention over a packed sequence.
 
     q/k/v: ``(total_tokens, H, D)`` (packed, no padding between segments). ``cu_seqlens``
     and ``max_seqlen`` come from :func:`blockdiag_bool_mask_to_cu_seqlens`. Returns
     ``(total_tokens, H, D)``.
+
+    ``impl`` picks the kernel family (see :func:`varlen_attn_impl`). ``deterministic`` is
+    read only by ``ck``; the Triton one-kernel backward computes dq/dk/dv in separate
+    passes with no atomics, so it is deterministic either way.
     """
+    if impl == "triton":
+        from primus.backends.nemo_automodel.models.ideogram4.triton_varlen_attn import (
+            triton_varlen_flash_attention,
+        )
+
+        return triton_varlen_flash_attention(q, k, v, cu_seqlens, max_seqlen)
+
     import aiter
 
     return _unwrap(
         aiter.flash_attn_varlen_func(
-            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen,
-            causal=False, deterministic=deterministic, return_lse=True,
+            q,
+            k,
+            v,
+            cu_seqlens,
+            cu_seqlens,
+            max_seqlen,
+            max_seqlen,
+            causal=False,
+            deterministic=deterministic,
+            return_lse=True,
         )
     )
 
@@ -279,6 +379,13 @@ class Ideogram4VarlenAttnProcessor:
     # Read once at class-definition time (torchrun sets env before import). Keeps the check a
     # constant attribute lookup inside the compiled graph (no data-dependent branch / break).
     assume_dense: bool = assume_dense_enabled()
+    # Kernel family for the var-len path; the preset's default is ``triton``. Resolved by
+    # ``install()`` rather than here, because the YAML is only published once the trainer has
+    # merged it (still before the model is built) and because the tuned-shape guard needs a
+    # GPU to inspect. This class default is only what a processor built WITHOUT install()
+    # gets, so it stays the conservative kernel. Either way it is a constant attribute
+    # lookup inside the graph, not a branch on run state.
+    varlen_impl: str = "ck"
 
     def __call__(
         self,
@@ -338,8 +445,12 @@ class Ideogram4VarlenAttnProcessor:
             from diffusers.models.attention_dispatch import dispatch_attention_fn
 
             return dispatch_attention_fn(
-                query, key, value, attn_mask=attention_mask,
-                backend=self._attention_backend, parallel_config=self._parallel_config,
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                backend=self._attention_backend,
+                parallel_config=self._parallel_config,
             )
 
         # MRoPE multiplies q/k by the float32 cos/sin, promoting them to float32. Torch
@@ -394,6 +505,7 @@ class Ideogram4VarlenAttnProcessor:
                 cu_seqlens.clone(),
                 L if max_seqlen is None else max_seqlen,
                 deterministic=self.deterministic,
+                impl=self.varlen_impl,
             )
             return out.reshape(B, L, H, D)
 
@@ -417,7 +529,15 @@ class Ideogram4VarlenAttnProcessor:
         q = query.reshape(B * L, H, D)
         k = key.reshape(B * L, H, D)
         v = value.reshape(B * L, H, D)
-        out = varlen_flash_attention(q, k, v, cu_from_mask, max_from_mask, deterministic=self.deterministic)
+        out = varlen_flash_attention(
+            q,
+            k,
+            v,
+            cu_from_mask,
+            max_from_mask,
+            deterministic=self.deterministic,
+            impl=self.varlen_impl,
+        )
         return out.reshape(B, L, H, D)
 
 
@@ -438,8 +558,10 @@ def install(model=None) -> bool:
     # Fail fast if aiter's flash-attention is unavailable, so the run errors clearly
     # rather than silently keeping the SDPA path.
     import aiter  # noqa: F401
-
     from diffusers.models.transformers.transformer_ideogram4 import Ideogram4Attention
+
+    impl = resolve_varlen_impl()
+    Ideogram4VarlenAttnProcessor.varlen_impl = impl
 
     already = getattr(Ideogram4Attention, "_primus_varlen_installed", False)
     if not already:
@@ -465,7 +587,15 @@ def install(model=None) -> bool:
 
     logger.info(
         "[PrimusIdeogramVarlen] Installed var-len flash-attention processor for "
-        "Ideogram4Attention (deterministic=False)%s.",
+        "Ideogram4Attention (impl=%s, deterministic=False)%s.",
+        impl,
         f"; swapped {swapped} existing module(s)" if swapped else "",
     )
+    if impl == "triton":
+        from primus.backends.nemo_automodel.models.ideogram4.triton_varlen_attn import (
+            IDEOGRAM4_HEAD_DIM,
+            describe_config,
+        )
+
+        logger.info("[PrimusIdeogramVarlen] Triton %s", describe_config(IDEOGRAM4_HEAD_DIM))
     return True

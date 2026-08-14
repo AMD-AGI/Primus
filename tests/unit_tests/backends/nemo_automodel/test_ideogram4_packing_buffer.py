@@ -34,8 +34,9 @@ except ImportError:  # pragma: no cover - CPU-less lint environments
     pytest.skip("Ideogram-4 packing buffer tests require torch", allow_module_level=True)
 
 from primus.backends.nemo_automodel.models.ideogram4 import attention as varlen_mod
-from primus.backends.nemo_automodel.models.ideogram4 import (
-    packing_buffer as transport,
+from primus.backends.nemo_automodel.models.ideogram4 import packing_buffer as transport
+from primus.backends.nemo_automodel.models.ideogram4.attention import (
+    Ideogram4VarlenAttnProcessor,
 )
 from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import (
     BOUND_ATTR,
@@ -44,9 +45,6 @@ from primus.backends.nemo_automodel.models.ideogram4.packing_buffer import (
     clear_packing,
     publish_packing,
     resolve_packing,
-)
-from primus.backends.nemo_automodel.models.ideogram4.attention import (
-    Ideogram4VarlenAttnProcessor,
 )
 
 
@@ -289,7 +287,7 @@ class TestStalePackingGuard:
         """
         seen = {}
 
-        def _fake_varlen(q, k, v, cu_seqlens, max_seqlen, deterministic=False):
+        def _fake_varlen(q, k, v, cu_seqlens, max_seqlen, **kwargs):
             seen["cu_seqlens"] = cu_seqlens
             seen["max_seqlen"] = max_seqlen
             return torch.zeros_like(q)
@@ -320,7 +318,7 @@ class TestKernelNeverSeesTheSharedBuffer:
 
     @staticmethod
     def _kernel(seen, monkeypatch):
-        def _fake_varlen(q, k, v, cu_seqlens, max_seqlen, deterministic=False):
+        def _fake_varlen(q, k, v, cu_seqlens, max_seqlen, **kwargs):
             seen.append(cu_seqlens)
             cu_seqlens.add_(0)  # aiter's in-place write, which bumps the version counter
             return torch.zeros_like(q)
