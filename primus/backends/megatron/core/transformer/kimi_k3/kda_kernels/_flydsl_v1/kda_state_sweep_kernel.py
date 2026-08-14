@@ -339,33 +339,52 @@ def build_kda_state_sweep(
         # ------------------------------- sinks --------------------------------
         # Called once per accumulator element, so both arithmetic modes share
         # every store. `row` is an output row; `v_lds` a column within the block.
-        def sink_rq(nb, row, v_lds, val):
+        #
+        # Each sink comes with a `prefetch` that issues the **global loads it will
+        # need** and returns them. The group functions call every prefetch before
+        # entering the accumulation loop, which is the whole point: `T` needs
+        # `Yc[nb, row, v]` and the state needs `Dec[nb, kk]`, neither depends on
+        # the accumulator, and issuing them at the point of use put a full HBM
+        # latency on the critical path *twice per chunk* — on a 64-step serial
+        # recurrence with only three workgroups per CU, with nothing to hide it.
+        # `fla` reaches 234 µs here against our 542 with **four times fewer**
+        # workgroups, so the gap was never parallelism.
+        def pre_none(nb, row, v_lds):
+            return None
+
+        def pre_y(nb, row, v_lds):
+            return load_f32(y_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
+
+        def pre_dec(nb, kk, v_lds):
+            return load_f32(d_ptr, nb * I_KD + kk)
+
+        def sink_rq(nb, row, v_lds, val, pre):
             store_f32(val, rq_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
 
-        def sink_t(nb, row, v_lds, val):
+        def sink_t(nb, row, v_lds, val, pre):
             off = (nb * I_C + row) * I_VD + v0 + v_lds
-            tv = math_dialect.fma(c_sgn_t, val, load_f32(y_ptr, off))
+            tv = math_dialect.fma(c_sgn_t, val, pre)
             store_f32(tv, t_ptr, off)
             lds_put(lds_t, row * I_BV + v_lds, tv)
 
-        def _state_core(nb, kk, v_lds, val):
+        def _state_core(nb, kk, v_lds, val, dec):
             li = kk * I_BV + v_lds
-            dec = load_f32(d_ptr, nb * I_KD + kk)
             return li, math_dialect.fma(
                 dec, lds_get(lds_s, li), arith.MulFOp(c_sgn_x, val, fastmath=fm).result
             )
 
-        def _sink_state_plain(nb, kk, v_lds, val):
-            li, upd = _state_core(nb, kk, v_lds, val)
+        def _sink_state_plain(nb, kk, v_lds, val, pre):
+            li, upd = _state_core(nb, kk, v_lds, val, pre)
             lds_put(lds_s, li, upd)
 
-        def _sink_state_with_e(nb, kk, v_lds, val):
-            li, upd = _state_core(nb, kk, v_lds, val)
+        def _sink_state_with_e(nb, kk, v_lds, val, pre):
+            li, upd = _state_core(nb, kk, v_lds, val, pre)
             e = load_f32(e_ptr, (nb * I_KD + kk) * I_VD + v0 + v_lds)
             lds_put(lds_s, li, arith.AddFOp(upd, e, fastmath=fm).result)
 
         sink_state = {True: _sink_state_with_e, False: _sink_state_plain}[has_e]
-        G1_BLOCKS = [(r0, {"rq": sink_rq, "t": sink_t}[w]) for r0, w in G1_PHASES]
+        _SINKS = {"rq": (sink_rq, pre_none), "t": (sink_t, pre_y)}
+        G1_BLOCKS = [(r0, *_SINKS[w]) for r0, w in G1_PHASES]
 
         # ------------------------------ contraction ----------------------------
         # `blocks` is a list of (row offset into the A operand, sink); they share
@@ -377,9 +396,18 @@ def build_kda_state_sweep(
             for mi in range_constexpr(nrow_units // NWAVES):
                 mt = wave + arith.index(mi * NWAVES)
                 row_f = mt * I_MI + frag_row
-                a_base = [(nb * a_rows + arith.index(r0) + row_f) * a_inner for r0, _ in blocks]
+                a_base = [(nb * a_rows + arith.index(r0) + row_f) * a_inner for r0, _, _ in blocks]
                 for nt in range_constexpr(NNT):
                     v_lds = arith.index(nt * MI_TILE) + frag_row  # acc column = lane % 16
+                    # every global load the sinks will need, issued *before* the
+                    # accumulation so its latency hides behind the MFMAs
+                    pre = [
+                        [
+                            blocks[b][2](nb, mt * I_MI + acc_m0 + arith.index(s), v_lds)
+                            for s in range_constexpr(ACC)
+                        ]
+                        for b in range_constexpr(nblk)
+                    ]
                     acc = [arith.constant_vector(0.0, acc_t) for _ in range_constexpr(nblk)]
                     for ks in range_constexpr(klen):
                         k0 = arith.index(ks * MI_K) + kgrp * arith.index(LANE_K)
@@ -399,6 +427,7 @@ def build_kda_state_sweep(
                                 mt * I_MI + acc_m0 + arith.index(s),
                                 v_lds,
                                 vector.extract(acc[b], static_position=[s], dynamic_position=[]),
+                                pre[b][s],
                             )
 
         def group_valu(nb, ap, a_rows, a_inner, nrow_units, klen, lds_src, blocks):
@@ -413,6 +442,13 @@ def build_kda_state_sweep(
             for bi, ri in keys:
                 row_of[(bi, ri)] = lg + arith.index(ri * NG)
                 a_base[(bi, ri)] = (nb * a_rows + arith.index(blocks[bi][0]) + row_of[(bi, ri)]) * a_inner
+            # as in `group_mfma`: the sinks' global loads go out before the
+            # accumulation, not at the point of use
+            pre = {
+                (bi, ri, j): blocks[bi][2](nb, row_of[(bi, ri)], v_lo + arith.index(j))
+                for bi, ri in keys
+                for j in range(VPT)
+            }
             acc = {key: [arith.constant(0.0, type=f32) for _ in range(VPT)] for key in keys}
             for k4 in range_constexpr(klen // VPT):
                 a4 = {key: load_vec4(ap, a_base[key] + arith.index(k4 * VPT)) for key in keys}
@@ -425,7 +461,13 @@ def build_kda_state_sweep(
                             acc[key][j] = math_dialect.fma(a_v, sv[j], acc[key][j])
             for bi, ri in keys:
                 for j in range_constexpr(VPT):
-                    blocks[bi][1](nb, row_of[(bi, ri)], v_lo + arith.index(j), acc[(bi, ri)][j])
+                    blocks[bi][1](
+                        nb,
+                        row_of[(bi, ri)],
+                        v_lo + arith.index(j),
+                        acc[(bi, ri)][j],
+                        pre[(bi, ri, j)],
+                    )
 
         group = {"mfma": group_mfma, "valu": group_valu}[mode]
 
@@ -460,7 +502,7 @@ def build_kda_state_sweep(
             store_states(nb)
             group(nb, a_ptr, I_MOA, I_KD, G1_ROWS, G1_LEN, lds_s, G1_BLOCKS)
             gpu.barrier()
-            group(nb, x_ptr, I_KD, I_C, G2_ROWS, G2_LEN, lds_t, [(0, sink_state)])
+            group(nb, x_ptr, I_KD, I_C, G2_ROWS, G2_LEN, lds_t, [(0, sink_state, pre_dec)])
 
         gpu.barrier()
         copy_state(sf_ptr, bh, I_KD, _out)

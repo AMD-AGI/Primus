@@ -1,0 +1,17 @@
+{
+  "WHOLE flydsl forward": 1908.8250398635864,
+  "WHOLE fla forward": 1318.7780380249023,
+  "prepare_operands (q,k,v,cg,beta)": 248.48300218582153,
+  "  one [B,T,H,D] -> [NB,C,D] fp32 cast+transpose": 97.88099676370621,
+  "  cg = lay_out(g).cumsum": 212.56299316883087,
+  "decay_scores kernel": 345.56400775909424,
+  "beta products (low, scale_ut)": 82.00100064277649,
+  "ut_inverse kernel": 78.40099930763245,
+  "chunk_prep kernel": 230.40300607681274,
+  "W GEMM (ut @ kgam)": 114.40199613571167,
+  "  store_w (fp32 -> bf16 into qw[:, C:])": 63.00099939107895,
+  "U GEMM (ut @ vf)": 113.84200304746628,
+  "KG transpose (_transposed_operand)": 46.51999846100807,
+  "fused_chunk_sweep (kernel + output baddbmm)": 780.2500128746033,
+  "lay_back (output [NB,C,V] -> [B,T,H,V])": 65.67999720573425
+}

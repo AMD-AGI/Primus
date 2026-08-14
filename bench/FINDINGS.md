@@ -316,6 +316,127 @@ fwd+bwd is not, without hand-writing the backward adjoint** — the forward is
 19 % of our fwd+bwd and 28 % of `fla`'s, so even taking it to zero leaves the
 ratio at 0.55×.
 
+## 5c. Round 3: forward only. A measured ledger, one win, and a corrected target
+
+Round 2 projected that the forward could reach **1.06×** of `fla` from two
+changes. Round 3 measured the stages instead of attributing them from a
+kernel-name profile, and **that projection was wrong on two counts**. The
+corrected answer is below; the ledger is the durable artifact.
+
+### The ledger — every forward stage on the tensors the assembly hands it
+
+`bench/probe_fwd_ablation.py`, `[1,4096,96,128,128]` bf16, median of 20. Stages
+are timed standalone, so they sum to ~110 % of the whole (each pays its own
+launch); "ratio if free" is the forward ratio against `fla` with that stage's
+entire cost deleted, i.e. a hard upper bound on optimising it.
+
+| stage | µs | % of forward | ratio if free |
+| --- | --- | --- | --- |
+| **`fused_chunk_sweep` (sweep kernel + output `baddbmm`)** | **845** | **43 %** | **1.18×** |
+| `decay_scores` kernel | 347 | 18 % | 0.82× |
+| `prepare_operands` — all five `[NB,C,*]` operands + cumsum | 250 | 13 % | 0.77× |
+| ↳ one `[B,T,H,D]` → `[NB,C,D]` fp32 cast+transpose | 97 | 5 % | 0.71× |
+| `chunk_prep` kernel | 227 | 12 % | 0.76× |
+| `W` GEMM (`ut @ kgam`) | 114 | 6 % | 0.71× |
+| `U` GEMM (`ut @ vf`) | 113 | 6 % | 0.71× |
+| β products (`low`, `scale_ut`) | 81 | 4 % | 0.70× |
+| `ut_inverse` kernel | 79 | 4 % | 0.70× |
+| `lay_back` (output → `[B,T,H,V]`) | 65 | 3 % | 0.70× |
+| ↳ `store_w` (fp32 → bf16 into `qw[:, C:]`) | 64 | 3 % | 0.69× |
+| `KG` transpose | 46 | 2 % | 0.69× |
+| whole flydsl forward / `fla` forward | 1967 / 1322 | | 0.67× |
+
+**Correction 1.** Round 2 put "the `[NB,C,D]` fp32 layout" at 440 µs. Measured,
+*all five* operands plus the cumsum cost **250 µs**, and the part `q`/`k` account
+for is ~90–100 µs. The 440 came from a kernel-name profile in which
+`triton_poi_fused_copy_transpose_0` covers four unrelated copies; I attributed
+the whole name to the layout. So work item 1 — teaching the kernels to read bf16
+`[B,T,H,D]` in place — is worth **~90 µs, 0.67 → 0.71×**, not 0.84×. It is scoped
+and still worth doing, but it cannot carry the round, so it was not implemented
+here.
+
+**Correction 2.** Round 2 compared our sweep against `fla`'s
+`chunk_gated_delta_rule_fwd_kernel_h` at 234 µs. That is not the counterpart.
+**`fla` uses a different decomposition**: its sequential kernel computes *only*
+the `[K,V]` state history (234 µs), and the per-chunk output — our `Rq` and `T` —
+happens afterwards in `chunk_gla_fwd_kernel_o` (193 µs), which is **fully
+parallel over chunks**. We fuse both into the sequential loop. So the honest
+comparison is our 845 against `fla`'s 427, and "sweep at `fla`'s 234" was
+comparing 845 against a kernel that does a third of its work.
+
+### Attempt 1: get the exposed HBM latency off the chunk loop's critical path
+
+The diagnosis that made this worth trying: **`fla` reaches 234 µs with four times
+*fewer* workgroups than we use (192 against 768), so the gap was never
+parallelism** — it is what each chunk's iteration costs. Reading the loop, two
+global loads sat *after* the MFMA accumulation and before the barrier that ends
+the step: `sink_t` loaded `Yc[nb, row, v]` and `_state_core` loaded
+`Dec[nb, kk]`. Neither depends on the accumulator. At BV=16 there are three
+workgroups per CU, so there is nothing to hide an HBM latency behind, twice per
+chunk, 64 chunks deep.
+
+Each sink now carries a `prefetch` that the group functions call **before**
+entering the accumulation, so both latencies overlap the MFMAs
+(`kda_state_sweep_kernel.py`). Bit-exactness is not claimed — the arithmetic is
+unchanged but the emission order is — and the numbers are unchanged to the digit
+against the fp32 eager oracle (output `2.67e-03` at production geometry, exactly
+as before); **41/41 FlyDSL kernel tests pass.**
+
+| | before | after |
+| --- | --- | --- |
+| `fused_chunk_sweep` region | 845 µs | **780 µs** |
+| forward, `prod_T4096` | 1967 | **1917** |
+
+Real, evidence-backed, and small: **−65 µs, 7.7 % of the stage, ~2 % of the
+forward.** The two exposed latencies were worth 65 µs, not the several hundred the
+serial-chain argument suggested, which says the chain's cost is spread across the
+LDS→fragment→MFMA dependency rather than concentrated in those two loads.
+
+### Forward, per shape, four states of the branch
+
+| shape | `main` | round 1 | round 2 | **round 3** | `fla` | `main`/fla | **r3/fla** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `prod_T2048` | 1244 | 1131 | 1039 | **1024** | 709 | 0.58× | **0.69×** |
+| `prod_T4096` | 2365 | 1979 | 1963 | **1917** | 1340 | 0.58× | **0.70×** |
+| `off8L_mbs2` | 7450 | 6473 | 6485 | **6337** | 4348 | 0.59× | **0.69×** |
+| `curve_mbs8` | 1530 | 1334 | 1351 | **1343** | 856 | 0.57× | **0.64×** |
+| `curve_mbs16` | 2882 | 2527 | 2515 | **2490** | 1516 | 0.54× | **0.61×** |
+
+Launches unchanged at 19/67 against `fla`'s 8/13; fwd+bwd 0.39–0.45×.
+
+### Did the forward cross 1.0×? No — and here is what it would take
+
+**No. Best is 0.70× at production geometry, 0.61–0.70× across the five shapes.**
+The corrected arithmetic, grouped by what each side computes:
+
+| | ours µs | `fla` µs | |
+| --- | --- | --- | --- |
+| intra scores + triangular solve | 387 | 597 | **we win by 210** |
+| operand prep + `W`, `U` | 413 | 177 | we lose 236 |
+| state sweep + chunk output + output layout | 767 | 427 | we lose 340 |
+| `[NB,C,D]` layout + cumsum + β + `KG` transpose | 343 | 52 | we lose 291 |
+| total | 1910 | 1253 | 0.66× |
+
+Crossing 1.0× means finding **657 µs**, and the three losing buckets hold 867. All
+three are kernel-fusion projects, none is a tuning knob:
+
+1. **~200 µs** — fold the two β products into the score and UT kernels (they
+   already touch `akk` and write `P`), have `chunk_prep` write `KG` transposed
+   from LDS, and read `q`/`k` from the bf16 `[B,T,H,D]` input in place.
+2. **~150 µs** — fuse `ut @ kgam` and `ut @ vf` into one kernel; `fla` does both
+   in `recompute_w_u_fwd_kda_kernel` at 177 µs where we spend 413 in a kernel
+   plus two fp32 Tensile GEMMs.
+3. **~250 µs** — split the sweep the way `fla` does: a sequential kernel for the
+   `[K,V]` state history only, then a **fully parallel** kernel for `Rq`/`T`, so
+   the per-chunk output work stops inheriting the serial chain's latency
+   tolerance. This is also what would let `block_v` rise to 64 and cut the A
+   operand's `V/BV`-fold re-reads.
+
+Together ~600 of the 657, i.e. **1.0× is reachable but only if all three land** —
+three separate kernels, each comparable in size to a full pass of this work
+package. Round 3's bounded budget bought item 1 of nine, and honestly reports the
+other eight rather than starting one it could not finish.
+
 ## 6. What any of this is worth end to end — the honest ceiling
 
 From the real 8L-official run (`/home/botahu/primus_output/8L_1318_r%t.out`,
