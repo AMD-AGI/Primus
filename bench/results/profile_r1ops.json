@@ -1,0 +1,433 @@
+{
+  "tag": "r1ops",
+  "torch": "2.12.0+rocm7.14.0a20260608",
+  "prod_T4096_bf16_flydsl": {
+    "fwd_evt_us": 2092.223882675171,
+    "fwd_host_us": 536.4438984543085,
+    "fwd": {
+      "n_kernels": 19.0,
+      "busy_us": 2017.1619999999998,
+      "span_us": 2031.9734,
+      "top": [
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 1.0,
+          "us": 522.2692
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 340.6488000000002
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 295.18639999999976
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 210.7214000000002
+        },
+        {
+          "name": "triton_poi_fused__to_copy_clone_transpose_0.kd",
+          "count": 3.0,
+          "us": 176.71120000000042
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 110.76019999999986
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 1.0,
+          "us": 72.77580000000034
+        },
+        {
+          "name": "triton_per_fused__to_copy__unsafe_view_clone_cumsum_transpose_1.kd",
+          "count": 1.0,
+          "us": 62.03959999999991
+        },
+        {
+          "name": "kda_ut_inverse_C64.kd",
+          "count": 1.0,
+          "us": 53.43159999999996
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 50.863800000000175
+        },
+        {
+          "name": "triton_poi_fused__to_copy_clone_transpose_view_0.kd",
+          "count": 1.0,
+          "us": 49.92780000000012
+        },
+        {
+          "name": "triton_poi_fused_mul_unsqueeze_0.kd",
+          "count": 1.0,
+          "us": 31.719400000000043
+        },
+        {
+          "name": "triton_poi_fused_mul_neg_unsqueeze_0.kd",
+          "count": 1.0,
+          "us": 31.28740000000016
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<floa",
+          "count": 1.0,
+          "us": 4.8149999999996
+        },
+        {
+          "name": "triton_poi_fused__to_copy_clone_transpose_2.kd",
+          "count": 1.0,
+          "us": 4.20699999999988
+        }
+      ],
+      "by_op": [
+        {
+          "op": "_KDAChunkFn",
+          "count": 1.0,
+          "us": 2017.3646000000003
+        },
+        {
+          "op": "_FusedSweep",
+          "count": 1.0,
+          "us": 846.5246
+        },
+        {
+          "op": "kda_state_sweep_mfma.kd",
+          "count": 1.0,
+          "us": 522.2692
+        },
+        {
+          "op": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x1",
+          "count": 3.0,
+          "us": 340.6488000000002
+        },
+        {
+          "op": "_DecayScores",
+          "count": 1.0,
+          "us": 295.18639999999976
+        },
+        {
+          "op": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 295.18639999999976
+        },
+        {
+          "op": "Torch-Compiled Region: 0/0",
+          "count": 1.0,
+          "us": 242.9578000000002
+        },
+        {
+          "op": "## Call CompiledFxGraph fbd5ofco3dzgu6zm6c3vhzmp7isvqyipe3tj",
+          "count": 1.0,
+          "us": 242.9578000000002
+        },
+        {
+          "op": "aten::copy_",
+          "count": 3.0,
+          "us": 234.39980000000037
+        },
+        {
+          "op": "_ChunkPrep",
+          "count": 1.0,
+          "us": 210.7214000000002
+        },
+        {
+          "op": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 210.7214000000002
+        },
+        {
+          "op": "aten::baddbmm",
+          "count": 1.0,
+          "us": 208.6802000000006
+        },
+        {
+          "op": "aten::matmul",
+          "count": 2.0,
+          "us": 204.74439999999996
+        },
+        {
+          "op": "aten::bmm",
+          "count": 2.0,
+          "us": 204.74439999999996
+        },
+        {
+          "op": "triton_poi_fused__to_copy_clone_transpose_0",
+          "count": 3.0,
+          "us": 176.71120000000042
+        },
+        {
+          "op": "triton_poi_fused__to_copy_clone_transpose_0.kd",
+          "count": 3.0,
+          "us": 176.71120000000042
+        },
+        {
+          "op": "void at::native::elementwise_kernel_manual_unroll<128, 8, at",
+          "count": 1.0,
+          "us": 110.76019999999986
+        },
+        {
+          "op": "__amd_rocclr_copyBuffer.kd",
+          "count": 1.0,
+          "us": 72.77580000000034
+        },
+        {
+          "op": "triton_per_fused__to_copy__unsafe_view_clone_cumsum_transpos",
+          "count": 1.0,
+          "us": 62.03959999999991
+        },
+        {
+          "op": "triton_per_fused__to_copy__unsafe_view_clone_cumsum_transpos",
+          "count": 1.0,
+          "us": 62.03959999999991
+        },
+        {
+          "op": "_UTInverse",
+          "count": 1.0,
+          "us": 53.43159999999996
+        },
+        {
+          "op": "kda_ut_inverse_C64.kd",
+          "count": 1.0,
+          "us": 53.43159999999996
+        }
+      ]
+    },
+    "bwd_evt_us": 8279.937744140625,
+    "bwd_host_us": 1742.3470970243216,
+    "bwd": {
+      "n_kernels": 67.0,
+      "busy_us": 8174.004399999995,
+      "span_us": 8175.0001999999995,
+      "top": [
+        {
+          "name": "kda_scores_bwd_C64_K128_0123.kd",
+          "count": 1.0,
+          "us": 1738.9074
+        },
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 2.0,
+          "us": 1225.036600000003
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 9.0,
+          "us": 630.4946000000011
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x16x1_SN_LDSB1_AFC0_",
+          "count": 3.0,
+          "us": 493.35479999999905
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB1_AFC0_A",
+          "count": 4.0,
+          "us": 371.7287999999968
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<",
+          "count": 5.0,
+          "us": 344.6629999999983
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 338.1367999999991
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 319.8969999999975
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 297.10619999999994
+        },
+        {
+          "name": "triton_poi_fused_add_addcmul_exp_mul_slice_sub_0.kd",
+          "count": 1.0,
+          "us": 264.18619999999845
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 202.6333999999998
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x160x16_MI16x16x1_SN_LDSB1_AFC0",
+          "count": 1.0,
+          "us": 190.75320000000048
+        },
+        {
+          "name": "triton_poi_fused__to_copy_view_0.kd",
+          "count": 3.0,
+          "us": 171.35900000000112
+        },
+        {
+          "name": "triton_poi_fused__to_copy_clone_transpose_2.kd",
+          "count": 3.0,
+          "us": 171.18320000000043
+        },
+        {
+          "name": "triton_per_fused_mul_sum_0.kd",
+          "count": 1.0,
+          "us": 146.1047999999988
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_ke",
+          "count": 2.0,
+          "us": 141.42339999999876
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 2.0,
+          "us": 139.76740000000117
+        },
+        {
+          "name": "triton_per_fused_add_cat_exp_mul_select_slice_sub_sum_unsqueeze_view_1.kd",
+          "count": 1.0,
+          "us": 113.96039999999994
+        },
+        {
+          "name": "triton_per_fused_cumsum_flip_2.kd",
+          "count": 1.0,
+          "us": 64.61559999999972
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x16_MI16x16x1_SN_LDSB0_AFC0_A",
+          "count": 1.0,
+          "us": 60.9358000000002
+        },
+        {
+          "name": "triton_per_fused__to_copy__unsafe_view_clone_cumsum_transpose_0.kd",
+          "count": 1.0,
+          "us": 60.7595999999995
+        },
+        {
+          "name": "triton_per_fused_mul_sum_unsqueeze_0.kd",
+          "count": 1.0,
+          "us": 58.79959999999901
+        }
+      ],
+      "by_op": [
+        {
+          "op": "autograd::engine::evaluate_function: _KDAChunkFnBackward",
+          "count": 1.0,
+          "us": 7845.398399999991
+        },
+        {
+          "op": "_KDAChunkFnBackward",
+          "count": 1.0,
+          "us": 7845.398399999991
+        },
+        {
+          "op": "autograd::engine::evaluate_function: _DecayScoresBackward",
+          "count": 1.0,
+          "us": 2033.8039999999978
+        },
+        {
+          "op": "autograd::engine::evaluate_function: _FusedSweepBackward",
+          "count": 1.0,
+          "us": 1881.3609999999958
+        },
+        {
+          "op": "_FusedSweepBackward",
+          "count": 1.0,
+          "us": 1739.9375999999968
+        },
+        {
+          "op": "_DecayScoresBackward",
+          "count": 1.0,
+          "us": 1738.9074
+        },
+        {
+          "op": "kda_scores_bwd_C64_K128_0123.kd",
+          "count": 1.0,
+          "us": 1738.9074
+        },
+        {
+          "op": "kda_state_sweep_mfma.kd",
+          "count": 2.0,
+          "us": 1225.036600000003
+        },
+        {
+          "op": "aten::copy_",
+          "count": 16.0,
+          "us": 1076.3326000000009
+        },
+        {
+          "op": "_FusedSweep",
+          "count": 1.0,
+          "us": 1015.4310000000045
+        },
+        {
+          "op": "aten::baddbmm",
+          "count": 6.0,
+          "us": 931.3159999999992
+        },
+        {
+          "op": "aten::bmm",
+          "count": 9.0,
+          "us": 913.5861999999948
+        },
+        {
+          "op": "void at::native::elementwise_kernel_manual_unroll<128, 8, at",
+          "count": 9.0,
+          "us": 630.4946000000011
+        },
+        {
+          "op": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x1",
+          "count": 3.0,
+          "us": 493.35479999999905
+        },
+        {
+          "op": "aten::matmul",
+          "count": 5.0,
+          "us": 490.23279999999704
+        },
+        {
+          "op": "autograd::engine::evaluate_function: CompiledFunctionBackwar",
+          "count": 4.0,
+          "us": 456.7711999999991
+        },
+        {
+          "op": "CompiledFunctionBackward",
+          "count": 4.0,
+          "us": 452.436199999998
+        },
+        {
+          "op": "autograd::engine::evaluate_function: _ChunkPrepBackward",
+          "count": 1.0,
+          "us": 434.7141999999991
+        },
+        {
+          "op": "_ChunkPrepBackward",
+          "count": 1.0,
+          "us": 434.7141999999991
+        },
+        {
+          "op": "Torch-Compiled Region: 5/0",
+          "count": 1.0,
+          "us": 434.7141999999991
+        },
+        {
+          "op": "## Call CompiledFxGraph fkedeyuy6zyvqiyplnpbi2cftklitl7ywgbf",
+          "count": 1.0,
+          "us": 434.7141999999991
+        },
+        {
+          "op": "autograd::engine::evaluate_function: BmmBackward0",
+          "count": 2.0,
+          "us": 423.3533999999978
+        }
+      ]
+    }
+  }
+}

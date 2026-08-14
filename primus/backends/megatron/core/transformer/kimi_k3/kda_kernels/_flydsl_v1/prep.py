@@ -48,6 +48,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._compile import (
+    compiled,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.kda_chunk_prep_kernel import (  # noqa: E501
     build_kda_chunk_prep,
     supports_prep_geometry,
@@ -102,6 +105,45 @@ def chunk_prep_torch(
     )
 
 
+@compiled
+def _chunk_prep_bwd(qf, kf, cg, d_qw, d_kgam, d_kg, d_dec, chunk: int, want_cg: bool):
+    """The adjoint of :func:`chunk_prep`, as one Inductor-fused region.
+
+    Fourteen elementwise ops on ``[NB, C, K]``, which is 200 MB at production
+    geometry — measured at **17 launches and ~7.4 GB of HBM traffic** as an eager
+    chain, the single largest block of glue in the whole backward. Inductor fuses
+    it to **3 launches** (`bench/probe_torch_tricks.py`), because every line is
+    elementwise in the same index space and only ``d_ct`` reduces.
+
+    ``d_qw`` and ``d_kg`` arrive at the operand dtype (bf16 in production) while
+    ``gamma``/``e_fac`` are fp32, so the multiplies promote and the ``.float()``
+    an earlier version spelled out is dead weight. ``d_kgam`` is fp32 already.
+    """
+    gamma = cg.exp()
+    chunk_total = cg[:, -1:, :]
+    e_fac = (chunk_total - cg).exp()
+
+    d_qf = d_qw[:, :chunk] * gamma
+    a = d_kgam * gamma
+    b = d_kg * e_fac
+    d_kf = a + b
+
+    if not want_cg:
+        return d_qf, d_kf, None
+
+    d_cg = torch.addcmul(qf * d_qf, kf, a - b)
+    # `ct` is a *row* of `cg`, not an input of its own, so everything that flows
+    # through it lands back on the last row.
+    d_ct = (kf * b).sum(dim=-2)
+    if d_dec is not None:
+        d_ct = d_ct + d_dec * chunk_total.reshape(d_ct.shape).exp()
+    # `index_copy` on the last row rather than an in-place `+=`: the in-place
+    # write on a freshly produced tensor is correct but forces Inductor to
+    # materialise `d_cg` before mutating it, which costs the fusion.
+    d_cg = torch.cat((d_cg[:, : chunk - 1], (d_cg[:, chunk - 1] + d_ct).unsqueeze(1)), dim=1)
+    return d_qf, d_kf, d_cg
+
+
 class _ChunkPrep(torch.autograd.Function):
     """The decay chain and its analytic adjoint.
 
@@ -148,28 +190,10 @@ class _ChunkPrep(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_qw, d_kgam, d_kg, d_dec):  # type: ignore[override]
         qf, kf, cg = ctx.saved_tensors
-        chunk = ctx.chunk
         needs = ctx.needs_input_grad
-
-        gamma = cg.exp()
-        chunk_total = cg[:, -1:, :]
-        e_fac = (chunk_total - cg).exp()
-
-        d_qg = d_qw[:, :chunk].float()
-        d_qf = d_qg * gamma
-        a = d_kgam.float() * gamma
-        b = d_kg.float() * e_fac
-
-        d_kf = (a + b) if needs[1] else None
-        d_cg = None
-        if needs[2]:
-            d_cg = qf * d_qf + kf * (a - b)
-            # ct is a row of cg, not an input of its own, so everything that
-            # flows through it lands on the last row.
-            d_ct = (kf * b).sum(dim=-2)
-            if d_dec is not None:
-                d_ct = d_ct + d_dec * chunk_total.reshape(d_ct.shape).exp()
-            d_cg[:, chunk - 1] += d_ct
+        d_qf, d_kf, d_cg = _chunk_prep_bwd(
+            qf, kf, cg, d_qw, d_kgam, d_kg, d_dec, ctx.chunk, bool(needs[2])
+        )
         return (
             d_qf if needs[0] else None,
             d_kf if needs[1] else None,

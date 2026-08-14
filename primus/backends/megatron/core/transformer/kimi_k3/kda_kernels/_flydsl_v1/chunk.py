@@ -53,6 +53,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._compile import (
+    compiled,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.ops import (
     SUB_BLOCK,
     decay_scores,
@@ -115,11 +118,84 @@ def _lay_out_beta(beta: torch.Tensor, chunk_size: int, pad: int) -> torch.Tensor
     return out.view(batch * num_heads * (padded_len // chunk_size), chunk_size)
 
 
+@compiled
+def _prepare_operands(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``[B, T, H, *]`` -> ``[B*H*NC, C, *]`` fp32 for all five inputs, plus ``cg``.
+
+    One Inductor region instead of five transposed casts and a ``cumsum``. Eager
+    that is 6 launches and ~1.6 GB of HBM traffic at production geometry, of
+    which the whole of ``gf`` — 200 MB written and 200 MB read — exists only to
+    be scanned into ``cg`` and is never looked at again; fused, ``gf`` never
+    reaches memory.
+
+    The body is :func:`_lay_out` verbatim rather than a functional rewrite, so
+    that **a fallback to eager is exactly the pre-existing code and never a
+    regression**. That is not hypothetical: the first version spelled this as
+    ``.transpose().to().reshape().contiguous()``, which Inductor fuses to one
+    kernel but ATen runs as two passes per tensor — and when Dynamo fell back in
+    a long multi-shape run the forward went from 21 launches to 26 and got
+    *slower than the baseline*. Inductor traces ``empty`` + ``copy_`` perfectly
+    well (it functionalises it), so the one-pass eager spelling costs the fusion
+    nothing.
+
+    Only the unpadded case comes here; :func:`_assemble` keeps the padded path on
+    plain :func:`_lay_out`.
+    """
+    cg = _lay_out(g, chunk_size, 0).cumsum(dim=-2)
+    return (
+        _lay_out(q, chunk_size, 0),
+        _lay_out(k, chunk_size, 0),
+        _lay_out(v, chunk_size, 0),
+        cg,
+        _lay_out_beta(beta, chunk_size, 0),
+    )
+
+
+@compiled
+def _low_from_scores(akk: torch.Tensor, betaf: torch.Tensor) -> torch.Tensor:
+    """``L[r, c] = -beta_r * Akk[r, c]``, strictly lower because ``Akk`` is.
+
+    The sign goes on ``beta``, which is ``[NB, C]`` where the product is
+    ``[NB, C, C]``: 1.6 MB of traffic instead of 200 MB, and the adjoint's
+    negation lands on the small tensor too.
+    """
+    return akk * (-betaf).unsqueeze(-1)
+
+
+@compiled
+def _scale_ut(p: torch.Tensor, betaf: torch.Tensor) -> torch.Tensor:
+    """``M = (I - L)^{-1} Diag(beta)`` — the UT transform's columns scaled by beta."""
+    return p * betaf.unsqueeze(-2)
+
+
+@compiled
+def _store_w(qw: torch.Tensor, w: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    """``qw[:, C:] = W`` at ``qw``'s dtype, returning ``qw``.
+
+    ``_ChunkPrep`` hands back the whole ``[NB, 2C, K]`` MFMA operand with only
+    the ``QG`` half written, so the ``W`` GEMM's result lands straight into the
+    other half and the sweep needs no concatenate. The store itself is a
+    fp32 -> bf16 narrowing of a 200 MB tensor, which ATen's strided ``copy_``
+    ran at 2.7 TB/s; Inductor tiles it. One launch either way.
+    """
+    qw[:, chunk_size:].copy_(w)
+    return qw
+
+
+@compiled
 def _lay_back(o: torch.Tensor, batch: int, num_heads: int, seq_len: int, dtype: torch.dtype) -> torch.Tensor:
     """``[NB, C, V]`` fp32 -> ``[B, T, H, V]`` at ``dtype``, in **one** pass.
 
     Mirror of :func:`_lay_out`: the transpose back and the cast to the caller's
-    dtype are the same copy.
+    dtype are the same copy. Compiled so that its *adjoint* — a transposed cast
+    in the other direction — fuses with whatever Inductor puts next to it.
     """
     v_dim = o.shape[-1]
     src = o.view(batch, num_heads, -1, v_dim)[:, :, :seq_len].transpose(1, 2)
@@ -160,10 +236,14 @@ def _assemble(
     num_chunks = padded_len // chunk_size
 
     # [B, T, H, *] -> [NB, C, *] with NB = B * H * NC: every chunk is an
-    # independent workgroup as far as the kernel is concerned.
-    qf, kf, vf, gf = (_lay_out(x, chunk_size, pad) for x in (q, k, v, g))
-    betaf = _lay_out_beta(beta, chunk_size, pad)
-    cg = gf.cumsum(dim=-2)
+    # independent workgroup as far as the kernel is concerned. `cg` comes back
+    # from the same region, so the intermediate `gf` never reaches memory.
+    if pad:
+        qf, kf, vf, gf = (_lay_out(x, chunk_size, pad) for x in (q, k, v, g))
+        betaf = _lay_out_beta(beta, chunk_size, pad)
+        cg = gf.cumsum(dim=-2)
+    else:
+        qf, kf, vf, cg, betaf = _prepare_operands(q, k, v, g, beta, chunk_size)
 
     # `q` is deliberately *not* scaled here. `softmax_scale` multiplies both
     # terms of the chunk output -- `Aqk @ T` and `QG @ S` -- and nothing else
@@ -173,9 +253,9 @@ def _assemble(
     aqk, akk = decay_scores(qf, kf, cg)
 
     # L[r, c] = -beta_r * <k_r . Gamma, k_c>, strictly lower (akk already is)
-    low = -(akk * betaf.unsqueeze(-1))
+    low = _low_from_scores(akk, betaf)
     # M = (I - L)^{-1} @ Diag(beta): the UT transform, columns scaled by beta
-    ut = ut_inverse(low) * betaf.unsqueeze(-2)
+    ut = _scale_ut(ut_inverse(low), betaf)
 
     # Everything the sweep needs that does not depend on the running state, in
     # one kernel: `Gamma = exp(cg)`, `QGamma`, `KGamma`, `KG = K exp(ct - cg)`
@@ -188,8 +268,11 @@ def _assemble(
     # Running this GEMM at the operand dtype was measured 1.5x faster *and*
     # pushed the bf16 output error from 2.6e-3 to 5.7e-3: `ut` is
     # (I-L)^-1 Diag(beta), whose entries span a wide range, so rounding it
-    # before the GEMM rather than after costs real accuracy.
-    qw[:, chunk_size:].copy_(ut @ kgam)
+    # before the GEMM rather than after costs real accuracy. That margin is
+    # what keeps this backend's output error at 2.7e-3 against `fla`'s 6.7e-3,
+    # so it is not for sale; the fp32->bf16 store that pays for it goes through
+    # Inductor instead, where it runs at bandwidth rather than ATen's 2.7 TB/s.
+    qw = _store_w(qw, ut @ kgam, chunk_size)
     u = ut @ vf
 
     # The sequential half goes to one fused kernel launch; every per-chunk term

@@ -50,6 +50,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._compile import (
+    compiled,
+)
+
 __all__ = [
     "state_sweep_torch",
     "fused_chunk_sweep",
@@ -279,6 +283,27 @@ def _sweep_kernel(
     return (rq if emit_rq else None), t_all, (states if emit_states else None), s_final
 
 
+def _gemm_scaled(
+    a: torch.Tensor, b: torch.Tensor, alpha: float, out: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """``alpha * (a @ b)`` in one launch, optionally into an existing buffer.
+
+    ``baddbmm`` with ``beta=0`` documents that ``input`` is ignored — nan and inf
+    in it are not propagated — so an uninitialised buffer is a legal accumulator
+    and the scale rides on the GEMM instead of costing a separate pass over the
+    result. ``out`` may be a batched-strided slice of a larger tensor.
+    """
+    if out is None:
+        out = torch.empty((a.shape[0], a.shape[-2], b.shape[-1]), dtype=torch.float32, device=a.device)
+    return torch.baddbmm(out, a, b, beta=0.0, alpha=alpha, out=out)
+
+
+@compiled
+def _row_dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """``sum_v a[.., v] * b[.., v]`` — the sweep adjoint's ``ddec``, in one region."""
+    return (a * b).sum(-1)
+
+
 def _as_operand(x: torch.Tensor, op_dtype: torch.dtype) -> torch.Tensor:
     """``x`` as a contiguous operand-dtype tensor, without a needless copy."""
     if x.dtype is op_dtype and x.is_contiguous():
@@ -286,21 +311,41 @@ def _as_operand(x: torch.Tensor, op_dtype: torch.dtype) -> torch.Tensor:
     return x.to(op_dtype).contiguous()
 
 
+@compiled
 def _transposed_operand(x: torch.Tensor, op_dtype: torch.dtype) -> torch.Tensor:
     """``x.transpose(-1, -2)`` contiguous at ``op_dtype``, in **one** pass.
 
     The MFMA A operand has to have the contraction index contiguous, so ``KG``
-    and ``W`` are handed to the kernel transposed. Spelling that as
-    ``.transpose().to().contiguous()`` costs two passes over ~100 MB because
-    ``.to()`` preserves strides; a strided ``copy_`` into a fresh contiguous
-    buffer converts and transposes at the same time. Safe here because
-    ``autograd.Function`` bodies run with grad disabled and the adjoint is
-    hand-written.
+    and ``W`` are handed to the kernel transposed. As ``empty`` + a strided
+    ``copy_`` this ran at 2.7 TB/s — ATen's strided copy has no tiling, and
+    ``W`` is itself a slice of the ``[NB, 2C, K]`` buffer, so the source is
+    doubly strided. Inductor tiles it, and the ``empty`` + strided ``copy_``
+    spelling is kept rather than ``.transpose().to().contiguous()`` so that a
+    fallback to eager stays **one** pass: ``.to()`` preserves strides, so the
+    ``.contiguous()`` after it copies a second time.
     """
     src = x.transpose(-1, -2)
     out = torch.empty(src.shape, dtype=op_dtype, device=x.device)
     out.copy_(src)
     return out
+
+
+@compiled
+def _sweep_bwd_operands(
+    qw: torch.Tensor, chunk: int, op_dtype: torch.dtype
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """``(QG at fp32, Wᵀ at op_dtype)`` from the stacked ``[NB, 2C, K]`` buffer.
+
+    Both halves of ``qw`` are needed in a different form in the backward, and
+    doing them in one region reads ``qw`` once instead of twice. ``QG`` is left
+    un-transposed: ``matmul`` takes the transpose as a flag, so materialising it
+    would be a copy for nothing. ``W`` is a genuine transposed copy because the
+    kernel's MFMA A operand needs the contraction index contiguous.
+    """
+    src = qw[:, chunk:].transpose(-1, -2)
+    wt = torch.empty(src.shape, dtype=op_dtype, device=qw.device)
+    wt.copy_(src)
+    return qw[:, :chunk].to(torch.float32), wt
 
 
 def _run_sweep(use_kernel: bool, mode: str, op_dtype: torch.dtype, *, emit_states: bool, **kw):
@@ -387,17 +432,16 @@ class _FusedSweep(torch.autograd.Function):
         nb, _, k_dim = qw.shape
         v_dim = t_all.shape[-1]
         nbh = nb // num_chunks
-        # `o = scale * (Rq + Aqk @ T)`, and `do` reaches every one of this
-        # function's five outputs only through those two terms, so folding the
-        # scale in once here is the whole adjoint of the forward's alpha/beta.
         do = do.float().contiguous()
-        if scale != 1.0:
-            do = do * scale
-        qg, w = qw[:, :chunk], qw[:, chunk:]
+        qg32, wt = _sweep_bwd_operands(qw, chunk, op_dtype)
 
-        # the two state-independent adjoint sources, batched over every chunk
-        y = aqk.float().transpose(-1, -2) @ do  # [NB, C, V]
-        e_in = qg.float().transpose(-1, -2) @ do  # [NB, K, V]
+        # `o = scale * (Rq + Aqk @ T)`, and `do` reaches every one of this
+        # function's five outputs only through those two terms, so the whole
+        # adjoint of the forward's alpha/beta is one `scale` folded into each
+        # GEMM `do` enters. `do * scale` as its own op was a 400 MB pass for a
+        # multiply the GEMM does for free.
+        y = _gemm_scaled(aqk.transpose(-1, -2), do, scale)  # [NB, C, V]
+        e_in = _gemm_scaled(qg32.transpose(-1, -2), do, scale)  # [NB, K, V]
         p0 = (
             dsf.float().contiguous()
             if dsf is not None
@@ -411,7 +455,7 @@ class _FusedSweep(torch.autograd.Function):
             emit_states=True,
             amat=_as_operand(kg, op_dtype),
             yc=_as_operand(y, torch.float32),
-            xt=_transposed_operand(w, op_dtype),
+            xt=wt,
             dec=dec.float().contiguous(),
             s0=p0,
             num_chunks=num_chunks,
@@ -424,13 +468,22 @@ class _FusedSweep(torch.autograd.Function):
         st = states.transpose(-1, -2)  # [NB, V, K]
 
         needs = ctx.needs_input_grad
-        d_aqk = do @ t_all.transpose(-1, -2) if needs[2] else None
+        d_aqk = _gemm_scaled(do, t_all.transpose(-1, -2), scale) if needs[2] else None
         d_kg = t_all @ p_all.transpose(-1, -2) if needs[3] else None
         d_qw = None
         if needs[0]:
-            d_qw = torch.cat((do @ st, -(dvt @ st)), dim=-2)
+            # `[dQG; dW]` stacked, written straight into the halves of one
+            # buffer. `torch.cat((do @ st, -(dvt @ st)))` was four launches and
+            # ~1.4 GB: two GEMMs into temporaries, a negation, and a copy of
+            # both into the result. `baddbmm` with `beta=0` writes the scale and
+            # the sign as part of the GEMM, and a batched-strided slice is a
+            # layout hipBLAS already takes (verified bit-equal to the `cat` in
+            # `bench/probe_torch_tricks.py`).
+            d_qw = torch.empty((nb, 2 * chunk, k_dim), dtype=torch.float32, device=do.device)
+            _gemm_scaled(do, st, scale, out=d_qw[:, :chunk])
+            _gemm_scaled(dvt, st, -1.0, out=d_qw[:, chunk:])
         d_u = dvt if needs[1] else None
-        d_dec = (states * p_all).sum(-1) if needs[4] else None
+        d_dec = _row_dot(states, p_all) if needs[4] else None
         d_s0 = ds0 if (needs[5] and not zero_state) else None
         return d_qw, d_u, d_aqk, d_kg, d_dec, d_s0, None, None, None, None, None
 

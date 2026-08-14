@@ -1,0 +1,684 @@
+{
+  "tag": "base",
+  "torch": "2.12.0+rocm7.14.0a20260608",
+  "prod_T4096_bf16_flydsl": {
+    "fwd_evt_us": 2368.227958679199,
+    "fwd_host_us": 398.9647142589092,
+    "fwd": {
+      "n_kernels": 21.0,
+      "busy_us": 2324.3626000000013,
+      "span_us": 2324.8588,
+      "top": [
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 1.0,
+          "us": 524.0852000000003
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 5.0,
+          "us": 367.4954000000004
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 337.7526000000001
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 294.4264000000001
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 206.80960000000005
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 132.6716000000004
+        },
+        {
+          "name": "void at::native::tensor_kernel_scan_outer_dim<float, unsigned int, std::plus<f",
+          "count": 1.0,
+          "us": 116.1364000000003
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 110.32819999999997
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 75.4310000000002
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 1.0,
+          "us": 71.95200000000004
+        },
+        {
+          "name": "kda_ut_inverse_C64.kd",
+          "count": 1.0,
+          "us": 54.09580000000001
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::neg_kernel_cuda(",
+          "count": 1.0,
+          "us": 29.17520000000036
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<floa",
+          "count": 1.0,
+          "us": 4.518999999999733
+        }
+      ]
+    },
+    "bwd_evt_us": 10517.206192016602,
+    "bwd_host_us": 1567.321503534913,
+    "bwd": {
+      "n_kernels": 97.0,
+      "busy_us": 10434.091600000012,
+      "span_us": 10439.308,
+      "top": [
+        {
+          "name": "kda_scores_bwd_C64_K128_0123.kd",
+          "count": 1.0,
+          "us": 1738.6997999999978
+        },
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 2.0,
+          "us": 1225.2367999999992
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<fl",
+          "count": 10.0,
+          "us": 935.8655999999994
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<",
+          "count": 9.0,
+          "us": 649.4549999999972
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 9.0,
+          "us": 628.0226000000027
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x16x1_SN_LDSB1_AFC0_",
+          "count": 3.0,
+          "us": 484.6826000000019
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 7.0,
+          "us": 479.2146000000037
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB1_AFC0_A",
+          "count": 4.0,
+          "us": 367.3923999999997
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_ke",
+          "count": 7.0,
+          "us": 354.81320000000017
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 337.3935999999986
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 317.1206
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 294.4666000000008
+        },
+        {
+          "name": "void at::native::index_elementwise_kernel<128, 4, at::native::flip_kernel_impl",
+          "count": 2.0,
+          "us": 250.5687999999991
+        },
+        {
+          "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native:",
+          "count": 2.0,
+          "us": 240.99260000000103
+        },
+        {
+          "name": "void at::native::tensor_kernel_scan_outer_dim<float, unsigned int, std::plus<f",
+          "count": 2.0,
+          "us": 224.7926000000004
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 204.3690000000006
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x160x16_MI16x16x1_SN_LDSB1_AFC0",
+          "count": 1.0,
+          "us": 185.69720000000189
+        },
+        {
+          "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native:",
+          "count": 1.0,
+          "us": 171.07299999999867
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 4.0,
+          "us": 153.35780000000332
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat3",
+          "count": 3.0,
+          "us": 148.93459999999914
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 2.0,
+          "us": 140.1996000000002
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 134.35140000000143
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::exp_kernel_cuda(",
+          "count": 2.0,
+          "us": 128.46360000000223
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::neg_kernel_cuda(",
+          "count": 3.0,
+          "us": 118.16619999999894
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 97.68020000000033
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 84.4950000000028
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<fl",
+          "count": 1.0,
+          "us": 74.74379999999856
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native:",
+          "count": 2.0,
+          "us": 67.2707999999986
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x16_MI16x16x1_SN_LDSB0_AFC0_A",
+          "count": 1.0,
+          "us": 66.83979999999956
+        },
+        {
+          "name": "kda_ut_inverse_C64.kd",
+          "count": 1.0,
+          "us": 55.159800000000544
+        }
+      ]
+    }
+  },
+  "prod_T4096_bf16_fla": {
+    "fwd_evt_us": 1385.4559659957886,
+    "fwd_host_us": 252.8756856918335,
+    "fwd": {
+      "n_kernels": 8.0,
+      "busy_us": 1299.9628000000007,
+      "span_us": 1308.2632,
+      "top": [
+        {
+          "name": "chunk_kda_fwd_kernel_intra_token_parallel.kd",
+          "count": 1.0,
+          "us": 416.26000000000005
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64.kd",
+          "count": 1.0,
+          "us": 241.18580000000028
+        },
+        {
+          "name": "chunk_kda_fwd_kernel_inter_solve_fused.kd",
+          "count": 1.0,
+          "us": 196.5934000000001
+        },
+        {
+          "name": "chunk_gla_fwd_kernel_o.kd",
+          "count": 1.0,
+          "us": 192.8094
+        },
+        {
+          "name": "recompute_w_u_fwd_kda_kernel.kd",
+          "count": 1.0,
+          "us": 176.84100000000015
+        },
+        {
+          "name": "chunk_local_cumsum_vector_kernel.kd",
+          "count": 1.0,
+          "us": 52.535399999999946
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::FillFunctor<c10:",
+          "count": 2.0,
+          "us": 23.80620000000015
+        }
+      ]
+    },
+    "bwd_evt_us": 3209.7980976104736,
+    "bwd_host_us": 438.26126493513584,
+    "bwd": {
+      "n_kernels": 13.0,
+      "busy_us": 3102.1140000000005,
+      "span_us": 3102.3892,
+      "top": [
+        {
+          "name": "chunk_kda_bwd_kernel_intra.kd",
+          "count": 1.0,
+          "us": 1250.4137999999998
+        },
+        {
+          "name": "chunk_kda_bwd_kernel_wy_dqkg_fused.kd",
+          "count": 1.0,
+          "us": 607.3181999999999
+        },
+        {
+          "name": "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64.kd",
+          "count": 1.0,
+          "us": 431.58860000000004
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64.kd",
+          "count": 1.0,
+          "us": 245.5532000000003
+        },
+        {
+          "name": "recompute_w_u_fwd_kda_kernel.kd",
+          "count": 1.0,
+          "us": 230.33779999999985
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_ke",
+          "count": 4.0,
+          "us": 168.83799999999974
+        },
+        {
+          "name": "chunk_kda_bwd_kernel_dAv.kd",
+          "count": 1.0,
+          "us": 85.2642000000001
+        },
+        {
+          "name": "chunk_local_cumsum_vector_kernel.kd",
+          "count": 1.0,
+          "us": 72.53599999999933
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native:",
+          "count": 1.0,
+          "us": 6.159000000000015
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<",
+          "count": 1.0,
+          "us": 4.375000000000637
+        }
+      ]
+    }
+  },
+  "curve_mbs16_bf16_flydsl": {
+    "fwd_evt_us": 2850.7940769195557,
+    "fwd_host_us": 389.1328815370798,
+    "fwd": {
+      "n_kernels": 21.0,
+      "busy_us": 2797.0717999999997,
+      "span_us": 2799.4174,
+      "top": [
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 1.0,
+          "us": 620.2386000000006
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 441.1541999999998
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 390.29959999999954
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 5.0,
+          "us": 353.343200000001
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 245.6098000000001
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 155.75179999999992
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 148.61679999999987
+        },
+        {
+          "name": "void at::native::tensor_kernel_scan_outer_dim<float, unsigned int, std::plus<f",
+          "count": 1.0,
+          "us": 147.16879999999964
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 97.19879999999989
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 1.0,
+          "us": 86.63200000000015
+        },
+        {
+          "name": "kda_ut_inverse_C64.kd",
+          "count": 1.0,
+          "us": 68.15200000000027
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::neg_kernel_cuda(",
+          "count": 1.0,
+          "us": 38.61559999999954
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<floa",
+          "count": 1.0,
+          "us": 5.615199999999822
+        }
+      ]
+    },
+    "bwd_evt_us": 13452.040672302246,
+    "bwd_host_us": 1530.9200156480074,
+    "bwd": {
+      "n_kernels": 97.0,
+      "busy_us": 13384.794599999994,
+      "span_us": 13388.771400000001,
+      "top": [
+        {
+          "name": "kda_scores_bwd_C64_K128_0123.kd",
+          "count": 1.0,
+          "us": 2308.1546000000008
+        },
+        {
+          "name": "kda_state_sweep_mfma.kd",
+          "count": 2.0,
+          "us": 1520.248000000001
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<fl",
+          "count": 10.0,
+          "us": 1251.2774000000004
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<",
+          "count": 9.0,
+          "us": 877.1932000000045
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 9.0,
+          "us": 681.4955999999987
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x16x1_SN_LDSB1_AFC0_",
+          "count": 3.0,
+          "us": 640.9087999999981
+        },
+        {
+          "name": "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB1_AFC0_A",
+          "count": 4.0,
+          "us": 509.13059999999933
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 7.0,
+          "us": 498.56639999999754
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_ke",
+          "count": 7.0,
+          "us": 472.3267999999991
+        },
+        {
+          "name": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 443.8981999999993
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_",
+          "count": 3.0,
+          "us": 409.53779999999915
+        },
+        {
+          "name": "kda_decay_scores_kernel_0.kd",
+          "count": 1.0,
+          "us": 386.76359999999937
+        },
+        {
+          "name": "void at::native::index_elementwise_kernel<128, 4, at::native::flip_kernel_impl",
+          "count": 2.0,
+          "us": 326.99380000000235
+        },
+        {
+          "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native:",
+          "count": 2.0,
+          "us": 320.27380000000085
+        },
+        {
+          "name": "void at::native::tensor_kernel_scan_outer_dim<float, unsigned int, std::plus<f",
+          "count": 2.0,
+          "us": 287.44120000000174
+        },
+        {
+          "name": "kda_chunk_prep_bf16.kd",
+          "count": 1.0,
+          "us": 261.9382000000008
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x160x16_MI16x16x1_SN_LDSB1_AFC0",
+          "count": 1.0,
+          "us": 246.68199999999905
+        },
+        {
+          "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native:",
+          "count": 1.0,
+          "us": 237.0658000000003
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 4.0,
+          "us": 200.35040000000487
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat3",
+          "count": 3.0,
+          "us": 194.26320000000095
+        },
+        {
+          "name": "__amd_rocclr_copyBuffer.kd",
+          "count": 2.0,
+          "us": 182.91999999999962
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::exp_kernel_cuda(",
+          "count": 2.0,
+          "us": 170.48799999999883
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::neg_kernel_cuda(",
+          "count": 3.0,
+          "us": 158.5908000000013
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 153.56780000000032
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 2.0,
+          "us": 107.25519999999833
+        },
+        {
+          "name": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kern",
+          "count": 1.0,
+          "us": 97.82420000000039
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native:",
+          "count": 2.0,
+          "us": 93.60700000000398
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<fl",
+          "count": 1.0,
+          "us": 88.74399999999896
+        },
+        {
+          "name": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT64x64x16_MI16x16x1_SN_LDSB0_AFC0_A",
+          "count": 1.0,
+          "us": 84.03199999999815
+        },
+        {
+          "name": "void at::native::triu_tril_kernel<float, int, false, 2, false>(at::cuda::detai",
+          "count": 1.0,
+          "us": 71.39180000000015
+        }
+      ]
+    }
+  },
+  "curve_mbs16_bf16_fla": {
+    "fwd_evt_us": 1547.4989414215088,
+    "fwd_host_us": 262.28660717606544,
+    "fwd": {
+      "n_kernels": 8.0,
+      "busy_us": 1436.2372,
+      "span_us": 1443.1529999999998,
+      "top": [
+        {
+          "name": "chunk_kda_fwd_kernel_intra_token_parallel.kd",
+          "count": 1.0,
+          "us": 545.261
+        },
+        {
+          "name": "chunk_kda_fwd_kernel_inter_solve_fused.kd",
+          "count": 1.0,
+          "us": 215.56200000000004
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64.kd",
+          "count": 1.0,
+          "us": 204.2012000000002
+        },
+        {
+          "name": "chunk_gla_fwd_kernel_o.kd",
+          "count": 1.0,
+          "us": 199.7612000000002
+        },
+        {
+          "name": "recompute_w_u_fwd_kda_kernel.kd",
+          "count": 1.0,
+          "us": 176.52099999999987
+        },
+        {
+          "name": "chunk_local_cumsum_vector_kernel.kd",
+          "count": 1.0,
+          "us": 66.16000000000008
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::FillFunctor<c10:",
+          "count": 2.0,
+          "us": 28.82259999999984
+        }
+      ]
+    },
+    "bwd_evt_us": 3615.523099899292,
+    "bwd_host_us": 426.5843890607357,
+    "bwd": {
+      "n_kernels": 13.0,
+      "busy_us": 3515.565400000001,
+      "span_us": 3515.5856,
+      "top": [
+        {
+          "name": "chunk_kda_bwd_kernel_intra.kd",
+          "count": 1.0,
+          "us": 1580.4497999999999
+        },
+        {
+          "name": "chunk_kda_bwd_kernel_wy_dqkg_fused.kd",
+          "count": 1.0,
+          "us": 736.9197999999998
+        },
+        {
+          "name": "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64.kd",
+          "count": 1.0,
+          "us": 297.8824000000002
+        },
+        {
+          "name": "recompute_w_u_fwd_kda_kernel.kd",
+          "count": 1.0,
+          "us": 267.22600000000057
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_ke",
+          "count": 4.0,
+          "us": 218.91079999999982
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64.kd",
+          "count": 1.0,
+          "us": 200.4734000000003
+        },
+        {
+          "name": "chunk_kda_bwd_kernel_dAv.kd",
+          "count": 1.0,
+          "us": 105.3604000000004
+        },
+        {
+          "name": "chunk_local_cumsum_vector_kernel.kd",
+          "count": 1.0,
+          "us": 97.30399999999963
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native:",
+          "count": 1.0,
+          "us": 6.7590000000000146
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<",
+          "count": 1.0,
+          "us": 4.287200000000394
+        }
+      ]
+    }
+  }
+}
