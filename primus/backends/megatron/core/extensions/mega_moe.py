@@ -9,8 +9,10 @@
 ``turbo_mega_moe_precision`` selects the expert class out of ``EXPERTS_BY_PRECISION``; the flavours
 differ only in which stage pair they call, so precision is decided once when the layer is built and
 nowhere else. ``mxfp8`` is an op-internal change: w1/w2 stay bf16 parameters and the op maintains
-their mxfp8 quant in a cache keyed on ``w._version``, so initialization, checkpointing and the
-optimizer are untouched.
+their mxfp8 quant in an internal cache. Because the precision-aware optimizer may not bump
+``w._version``, the fp8 path advances a separate generation counter (``advance_weight_generation()``)
+at the optimizer-step boundary to invalidate that cache, so initialization, checkpointing and the
+optimizer remain unchanged.
 """
 
 import contextlib
