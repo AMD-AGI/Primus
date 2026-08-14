@@ -2,6 +2,11 @@ name: Primus-CI-TAS
 
 on:
   workflow_dispatch:
+    inputs:
+      full_tests:
+        description: "Run the full test matrix (every model E2E, including @pytest.mark.weekly siblings, slow unit tests and the MaxText models)"
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -11,9 +16,16 @@ on:
     # Re-list the implicit defaults (opened/synchronize/reopened) and add
     # ready_for_review so flipping a Draft PR to Ready triggers its first run.
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # Saturday 18:00 UTC (Sunday 02:00 UTC+8) — the weekend full run. Kept far
+    # from Primus-Benchmark's daily 16:00 UTC cron; it also uses other runners.
+    - cron: "0 18 * * 6"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
+  # Scheduled runs get their own group: they share `github.ref` (refs/heads/main)
+  # with pushes to main, and cancel-in-progress would otherwise let any merge
+  # kill a multi-hour weekend run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'weekly' || github.head_ref || github.event.merge_group.head_ref || github.ref }}
   cancel-in-progress: true
 
 # Default to read-only. No job uses GITHUB_TOKEN for writes (Docker Hub push
@@ -23,7 +35,12 @@ permissions:
   contents: read
 
 env:
-  PRIMUS_TURBO_COMMIT: 9b5d3092efcbc087657b233d8e9ae662cee6ec6b # fix: megakernel nondeterministic and accuracy issues in gfx950. (#429)
+  # Test tier, the single switch every test step derives its pytest args from.
+  # "0" (PR/push) keeps one model E2E per architecture and feature path; "1"
+  # (weekend cron, or a manual run with full_tests=true) adds the
+  # @pytest.mark.weekly siblings and the slow unit tests.
+  PRIMUS_CI_FULL: ${{ (github.event_name == 'schedule' || github.event.inputs.full_tests == 'true') && '1' || '0' }}
+  PRIMUS_TURBO_COMMIT: 2f622de6a29ab711925e8fe6bcc763be76ac2699 # fix: loss NaN issue (Primus-Turbo bump); fix: fixed flydsl version (#446)
   PRIMUS_TURBO_AITER_COMMIT: 0f3c58e6edb6754940bcf9fd5f09ccb6f389f52e # AITER v0.1.14.post1 (tag commit) — required by Primus-Turbo main aiter_utils.py
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
@@ -55,6 +72,24 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Check version/commit pin consistency
         run: python tools/ci/check_version_consistency.py
+      # The three submodules the drift check reads a schema from; `submodules:
+      # recursive` on the checkout would also clone Megatron-Bridge & friends
+      # for nothing. A fetch failure is deliberately left to the check step,
+      # which names the backend it could not check instead of dropping a bare
+      # git error; drift stays warn-only, but a backend it could not check
+      # fails the job, since a check that did not run must not read as a pass.
+      - name: Fetch backend schema sources
+        continue-on-error: true
+        run: >-
+          git submodule update --init --depth 1
+          third_party/torchtitan third_party/maxtext third_party/Megatron-LM
+      - name: Check backend config schema drift
+        # `pipefail` is not on by default, and without it `tee` would report
+        # success for a check that failed -- the same silent pass this step
+        # exists to stop.
+        run: |
+          set -o pipefail
+          python tools/ci/check_config_schema.py --warn-only | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Flag PRs that introduce known-vulnerable dependencies. Warn-only during
   # burn-in; drop warn-only to turn it into a hard gate once the team is ready.
@@ -99,6 +134,11 @@ jobs:
             echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            # Own tag so the weekend run cannot race a concurrent main push over
+            # ":latest" (both would build the same commit, but not necessarily
+            # at the same time).
+            echo "IMAGE_TAG=weekly" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
@@ -296,6 +336,8 @@ jobs:
             echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "IMAGE_TAG=weekly" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
@@ -347,6 +389,8 @@ jobs:
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/weekly-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
@@ -370,12 +414,16 @@ jobs:
           #       diffusion TE-vs-local spec attention parity check.
           # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
           docker exec -i \
-            -e GITHUB_WORKSPACE="${CWS}" -e HSA_NO_SCRATCH_RECLAIM=1 \
+            -e GITHUB_WORKSPACE="${CWS}" -e HSA_NO_SCRATCH_RECLAIM=1 -e PRIMUS_CI_FULL \
             -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus Core tests..."
           mkdir -p "${GITHUB_WORKSPACE}/test-reports"
-          pytest --maxfail=1 -s ./tests/unit_tests/ \
+          # Weekend full run also takes the @pytest.mark.slow release-tier shape
+          # gates (they self-skip off MI355X).
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
+          pytest --maxfail=1 -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
             --cov=primus --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
@@ -442,6 +490,11 @@ jobs:
           read RM RT < "${GITHUB_WORKSPACE}/.e2e_scope"
           echo "RUN_MEGATRON_E2E=${RM:-1}" >> "$GITHUB_ENV"
           echo "RUN_TORCHTITAN_E2E=${RT:-1}" >> "$GITHUB_ENV"
+          if [[ "${PRIMUS_CI_FULL:-0}" == "1" ]]; then
+            echo "**Test tier:** full — every model E2E plus the slow unit tests." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Test tier:** slim — one model E2E per architecture (\`-m 'not weekly'\`); the siblings run in the weekend scheduled build." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
@@ -449,7 +502,7 @@ jobs:
           if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
           docker exec -i \
             -e GITHUB_WORKSPACE="${CWS}" -e UT_LOG_PATH -e HF_TOKEN \
-            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE -e PRIMUS_CI_FULL \
             -e MASTER_PORT=10009 -e DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
             -e HSA_NO_SCRATCH_RECLAIM=1 \
             -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
@@ -466,7 +519,9 @@ jobs:
           # crashes (SIGABRT) while compiling the mamba_ssm SSD backward kernel with an
           # LLVM assertion (Sequence.h: `Begin <= End`) in make_amdgcn. Re-enable once
           # the Triton/LLVM toolchain is fixed for this kernel.
-          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py \
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_llama_1B_hybrid \
@@ -479,7 +534,7 @@ jobs:
           if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
           docker exec -i \
             -e GITHUB_WORKSPACE="${CWS}" -e UT_LOG_PATH -e HF_TOKEN \
-            -e COVERAGE_PROCESS_START -e COVERAGE_FILE \
+            -e COVERAGE_PROCESS_START -e COVERAGE_FILE -e PRIMUS_CI_FULL \
             -e MASTER_PORT=10009 -e DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
             -e HSA_NO_SCRATCH_RECLAIM=1 \
             -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
@@ -496,7 +551,9 @@ jobs:
           # attention v3 backward kernel raises "RuntimeError: invalid argument for
           # fmha_v3_bwd" during loss.backward() on the fp8 path (all ranks).
           # Re-enable once the primus_turbo/aiter fp8 attention backward is fixed.
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py \
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
@@ -677,6 +734,8 @@ jobs:
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/weekly-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
@@ -731,6 +790,8 @@ jobs:
           # run_unit_tests.py shells out to pytest; PYTEST_ADDOPTS injects the
           # JUnit report without having to touch the wrapper script.
           export PYTEST_ADDOPTS="--junitxml=${GITHUB_WORKSPACE}/test-reports/maxtext-e2e.xml"
+          # JAX_SKIP_UT=1 in both tiers: the MaxText models it hides stay hidden
+          # even in the weekend full run, like the --deselect'ed cases.
           # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data \
           JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax

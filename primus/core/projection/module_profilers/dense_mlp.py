@@ -8,7 +8,10 @@ from typing import Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
+from primus.core.projection.training_config import (
+    TrainingConfig,
+    gemm_dtype_from_config,
+)
 
 from .utils import benchmark_layer
 
@@ -72,8 +75,8 @@ class DenseMLPProfiler(BaseModuleProfiler):
         cp_size = self.config.model_parallel_config.context_model_parallel_size
         batch_tokens = batch_size * seq_len // tp_size // cp_size
 
-        # FP8-hybrid: MLP projections (gate, up, down) run in FP8
-        gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
+        # FP8-hybrid: MLP projections (gate, up, down) run in FP8 (MX8 for mxfp8)
+        gemm_dtype = gemm_dtype_from_config(self.config.model_config)
         sim_result = self._gemm_backend.simulate_mlp_gemms(
             batch_tokens=batch_tokens,
             hidden_size=self.config.model_config.hidden_size,

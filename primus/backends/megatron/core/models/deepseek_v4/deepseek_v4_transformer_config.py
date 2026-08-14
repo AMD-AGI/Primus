@@ -111,6 +111,21 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # ``PRIMUS_USE_V4_FP8_INDEXER`` (see run_deepseek_v4.sh / flash yaml).
     use_v4_fp8_indexer: bool = False
 
+    # ---- DeepSeek-V4 indexer distillation loss (CSA selector training) ----
+    # ``topk`` is not differentiable, so the CSA lightning indexer only learns
+    # through an auxiliary objective: KL between the indexer's score
+    # distribution and the distribution the real attention places over the same
+    # compressed entries (DeepSeek-V3.2 section 2.1). ``1e-2`` is a reasonable
+    # starting value.
+    #
+    # ``0.0`` (the default) disables the loss AND keeps the indexer parameters
+    # frozen, which is the right setting when loading an already-trained
+    # indexer: frozen params stay out of the distributed-optimizer grad buckets
+    # so ``overlap_grad_reduce`` keeps working. Set > 0 to unfreeze the indexer
+    # and train it -- required for a from-scratch pretrain, where a frozen
+    # randomly-initialised indexer selects essentially at random.
+    v4_indexer_distill_loss_coeff: float = 0.0
+
     # ---- DeepSeek-V4 attention backend selection (unified string selectors) ----
     # ``use_v4_attention_backend`` selects the dense (cr=0) / HCA (cr=128) kernel;
     # ``use_v4_csa_attention_backend`` selects the CSA (cr=4) kernel:

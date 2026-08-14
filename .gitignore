@@ -27,5 +27,13 @@ pp_simulation_result
 *.log
 *.nohup
 *.zip
+
+# Local run artifacts dropped at the repo root. These capture node FQDNs and
+# absolute paths from whichever cluster the run happened on, so keep them out
+# of the history.
+/log
+/log.*
+/nohup.*
+/core.*.gpu
 .triton_cache_shared/
 .cursor/

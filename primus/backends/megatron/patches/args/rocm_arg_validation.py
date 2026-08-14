@@ -97,6 +97,17 @@ def validate_fsdp2_optimizer_exclusivity(args) -> None:
         )
 
 
+def validate_turbo_grouped_gemm_without_padding(args) -> None:
+    """Validate the no-padding PrimusTurbo grouped-GEMM path."""
+    option = "turbo_grouped_gemm_without_padding"
+    if not getattr(args, option, False):
+        return
+    if not getattr(args, "enable_primus_turbo", False) or not getattr(args, "use_turbo_grouped_gemm", False):
+        raise ValueError(f"{option}=True requires enable_primus_turbo=True and use_turbo_grouped_gemm=True.")
+    if getattr(args, "moe_router_padding_for_quantization", False):
+        raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
+
+
 def validate_args_on_rocm(args):
     # Primus-Turbo auto-tuning
     use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
@@ -143,6 +154,23 @@ def validate_args_on_rocm(args):
             args.fp4_recipe in support_fp4_recipe
         ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_gemm`."
 
+    # Turbo FP4 autocast check: PrimusTurboLinear quantizes only under the Turbo
+    # autocast, which the TE-native path never enters. Local specs quantize
+    # in-module rather than off that state, so they are exempt.
+    if (
+        args.fp4
+        and use_turbo_gemm
+        and getattr(args, "fp4_use_native_te_autocast", False)
+        and getattr(args, "transformer_impl", "transformer_engine") != "local"
+    ):
+        raise ValueError(
+            "fp4_use_native_te_autocast=True is incompatible with use_turbo_gemm=True. "
+            "Native TE FP4 autocast does not set the Primus-Turbo FP4 state that "
+            "PrimusTurboLinear reads, so Turbo GEMM linears would silently run BF16 "
+            "instead of FP4. Set use_turbo_gemm=false to use native TE MXFP4 linears, "
+            "or set fp4_use_native_te_autocast=false to use the Primus-Turbo FP4 path."
+        )
+
     # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
     if args.fp8_recipe == "mxfp8":
         assert (
@@ -186,6 +214,8 @@ def validate_args_on_rocm(args):
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )
+
+    validate_turbo_grouped_gemm_without_padding(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

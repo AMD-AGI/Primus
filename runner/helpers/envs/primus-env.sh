@@ -42,9 +42,9 @@ detect_gpu_model() {
 
     # Check if rocm-smi is available
     if ! command -v rocm-smi &> /dev/null; then
-        echo "Error: rocm-smi not found. Is ROCm installed?" >&2
+        echo "Warning: rocm-smi not found; set PRIMUS_GPU_MODEL (e.g. MI355X) for GPU env overrides." >&2
         echo "unknown"
-        return 1
+        return 0
     fi
 
     # Get product name from rocm-smi
@@ -64,7 +64,10 @@ detect_gpu_model() {
     echo "$gpu_model"
 }
 
-GPU_MODEL=$(detect_gpu_model)
+GPU_MODEL="${PRIMUS_GPU_MODEL:-}"
+if [[ -z "${GPU_MODEL}" ]]; then
+    GPU_MODEL=$(detect_gpu_model)
+fi
 if [[ "$GPU_MODEL" == "unknown" ]]; then
     LOG_WARN "Unable to detect GPU model. Using default configuration."
 fi
