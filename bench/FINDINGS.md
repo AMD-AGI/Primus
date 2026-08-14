@@ -293,14 +293,28 @@ traffic for a one-line change per kernel plus a load-type change.
 The second is a genuine kernel investigation and the one place where "make the
 kernel faster" is still the right instruction.
 
-The **backward** is not reachable the same way. Its 8233 µs against `fla`'s 3183
-is: our score adjoint 1738 (against `fla`'s entire intra-backward at 1250), two
-sweeps 1256, the recompute's forward kernels 550, **1715 µs in fifteen Tensile
-batched GEMMs `fla` never issues at all**, and ~1750 of remaining glue and
-gradient accumulation. Closing it means fusing those GEMMs into the kernels, i.e.
-hand-writing the backward the way `fla` does — which is the piece of work every
-earlier pass also concluded was the price, and it is larger than everything in
-rounds 1 and 2 together.
+The **backward** is not reachable the same way, and it is the one that decides the
+headline number. Its 8233 µs against `fla`'s 3183 is: our score adjoint 1738
+(against `fla`'s entire intra-backward at 1250), two sweeps 1256, the recompute's
+forward kernels 550, **1715 µs in fifteen Tensile batched GEMMs `fla` never
+issues at all**, and ~1750 of remaining glue and gradient accumulation. Closing
+it means fusing those GEMMs into the kernels, i.e. hand-writing the backward the
+way `fla` does — the piece of work every earlier pass also concluded was the
+price, and larger than everything in rounds 1 and 2 together.
+
+So the two must be stated separately, because they have different answers:
+
+| | ours | `fla` | ratio |
+| --- | --- | --- | --- |
+| **forward**, today | 1925 | 1253 | 0.65× |
+| **forward**, with the layout contract and the sweep fixed | 1177 | 1253 | **1.06×** |
+| **fwd+bwd**, today | 10158 | 4436 | 0.44× |
+| **fwd+bwd**, with a *perfect* forward and the backward untouched | 9410 | 4436 | 0.47× |
+
+**Beating `fla` on the forward is reachable and quantified. Beating it on
+fwd+bwd is not, without hand-writing the backward adjoint** — the forward is
+19 % of our fwd+bwd and 28 % of `fla`'s, so even taking it to zero leaves the
+ratio at 0.55×.
 
 ## 6. What any of this is worth end to end — the honest ceiling
 
