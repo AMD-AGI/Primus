@@ -3,9 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
 workspace: ./output
 
-# STATUS (MI300X / gfx942): RUNS with MoE FP8 patch.
-# MoE expert matmuls run in bf16 (bypassing Fp8Einsum variable leak inside scan).
-# Dense layers still use nanoo_fp8 via dot_general_cls.
+# STATUS (MI300X / gfx942): RUNS with MoE FP8 patch (moe_fp8_patches.py).
+# gemma4 uses scan_layers=true (default) unlike mixtral/qwen3 which set scan_layers=false.
+# Fp8Einsum.setup() leaks tracers inside gemma4's scanned local layers; patch bypasses it
+# for MoE expert matmuls (bf16). Dense layers still use nanoo_fp8 via dot_general_cls.
 
 modules:
   pre_trainer:
