@@ -81,7 +81,6 @@ class MegaMoEExperts(MegatronModule):
         ep_group,
     ) -> None:
         super().__init__(config)
-        self._assert_supported_config(config)
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
@@ -92,10 +91,6 @@ class MegaMoEExperts(MegatronModule):
         expert_parallel = config.expert_model_parallel_size > 1
         for p in (self.fc1_weight.weight, self.fc2_weight.weight):
             setattr(p, "allreduce", not expert_parallel)
-
-    @staticmethod
-    def _assert_supported_config(config: TransformerConfig) -> None:
-        """Constraints of this expert flavour; the layer checks the ones common to both."""
 
     def reset_parameters(self, ep_rank: int) -> None:
         """Init expert weights exactly like Megatron TEGroupedLinear."""
@@ -150,18 +145,6 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     The fp8 stages thread an extra opaque ``state`` from stage1 to stage2, which carries the
     quantized operands that cannot ride autograd's gradient slots.
     """
-
-    @staticmethod
-    def _assert_supported_config(config: TransformerConfig) -> None:
-        """Reject activation recompute, which only the MXFP8 path cannot take.
-
-        A replayed forward races the backward over the same live symmetric buffer and cross-rank
-        handshake, so it hangs; refuse it here rather than deep in the kernels.
-        """
-        assert not config.moe_layer_recompute, "MegaMoE fp8 does not support moe_layer_recompute"
-        assert (
-            config.recompute_granularity != "full"
-        ), "MegaMoE fp8 does not support recompute_granularity=full"
 
     # The mxfp8 weight-quant cache is dropped by the megatron.turbo.mega_moe_weight_generation
     # patch, which advances the generation once per optimizer step. Doing it there rather than

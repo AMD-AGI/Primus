@@ -108,10 +108,8 @@ maintains the mxfp8 weight quant in an internal cache keyed on `w._version`, and
 key alone is not enough, because the precision-aware optimizer updates the weights without ever
 bumping `_version`.
 
-Not supported on the fp8 path: activation recompute (`moe_layer_recompute`,
-`recompute_granularity=full`) and CUDA-graph capture. Both replay the forward while the op still
-holds a live symmetric buffer and a cross-rank spin-wait handshake; the layer asserts on the
-recompute settings up front.
+Not supported on the fp8 path: CUDA-graph capture, which the op itself rejects — the replayed
+forward runs while the op still holds a live symmetric buffer and a cross-rank spin-wait handshake.
 
 The following model settings are **required** — MegaMoE asserts on anything else:
 
