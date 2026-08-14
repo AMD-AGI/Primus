@@ -75,6 +75,9 @@ modules:
 
       mlperf:
         enable: ${MLPERF_ENABLE:false}
+        performance_mode: ${FLUX_PERFORMANCE_MODE:null}
+        warmup_train_steps: ${MLPERF_WARMUP_TRAIN_STEPS:2}
+        warmup_validation_steps: ${MLPERF_WARMUP_VALIDATION_STEPS:2}
         target_eval_loss: ${TARGET_ACCURACY:0.586}
         eval_samples: ${VAL_CHECK_INTERVAL:262144}
         output_file: ${MLLOG_OUTPUT_FILE:}

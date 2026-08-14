@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import time
 from contextlib import contextmanager
 
@@ -252,7 +253,17 @@ class BaseWanTrainer:
             )
         )
 
-        mlperf_mode = bool(self.args.get("mlperf_enable", False))
+        performance_mode = self.args.get("performance_mode")
+        if performance_mode is None:
+            performance_mode = (
+                "nemo_mlperf"
+                if self.args.get("mlperf_enable", False)
+                else "performance_only"
+            )
+        if performance_mode not in {"performance_only", "nemo_mlperf"}:
+            raise ValueError(f"Unsupported performance_mode={performance_mode!r}")
+        self.performance_mode = performance_mode
+        mlperf_mode = performance_mode == "nemo_mlperf"
         if mlperf_mode:
             self.sampler = ContiguousDistributedSampler(
                 train_dataset,
@@ -304,7 +315,14 @@ class BaseWanTrainer:
                 prefetch_factor=2 if num_workers > 0 else None,
             )
 
-        self.mlperf_enabled = bool(self.args.get("mlperf_enable", False))
+        self.mlperf_enabled = mlperf_mode
+        self.mlperf_warmup_train_steps = int(
+            self.args.get("mlperf_warmup_train_steps", 0)
+        )
+        self.mlperf_warmup_validation_steps = int(
+            self.args.get("mlperf_warmup_validation_steps", 0)
+        )
+        self._mlperf_block_open = False
         self.mlperf_target_eval_loss = float(
             self.args.get("mlperf_target_eval_loss", 0.586)
         )
@@ -625,6 +643,44 @@ class BaseWanTrainer:
         )
         self.mlperf_logger.start(key=c.INIT_START)
 
+    def _mlperf_warmup(self, train_batch) -> None:
+        if not (self.mlperf_warmup_train_steps or self.mlperf_warmup_validation_steps):
+            return
+
+        python_rng = random.getstate()
+        cpu_rng = torch.random.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        was_training = self.model.training
+        try:
+            self.model.train()
+            for _ in range(self.mlperf_warmup_train_steps):
+                self.optimizer.zero_grad(set_to_none=True)
+                self.compute_loss(train_batch).backward()
+                self._clip_grad_norm()
+
+            if self.mlperf_warmup_validation_steps:
+                self.model.eval()
+                eval_batches = iter(self.eval_dataloader)
+                with torch.no_grad():
+                    for _ in range(self.mlperf_warmup_validation_steps):
+                        self.compute_loss(
+                            next(eval_batches), processor=self.eval_processor
+                        )
+
+            for module in self.model.modules():
+                reset = getattr(module, "reset_fp8_meta_tensors", None)
+                if callable(reset):
+                    reset()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        finally:
+            self.optimizer.zero_grad(set_to_none=True)
+            self.model.train(was_training)
+            random.setstate(python_rng)
+            torch.random.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+
     def _mlperf_log_train_start(self):
         if not self.mlperf_enabled:
             return
@@ -637,28 +693,26 @@ class BaseWanTrainer:
             self.mlperf_logger.start(key=c.RUN_START)
 
     def _mlperf_log_block_start(self, step: int):
-        if not self.mlperf_enabled or self.rank != 0:
-            return
-        if (step - 1) % self.logging_steps != 0:
+        if not self.mlperf_enabled or self.rank != 0 or self._mlperf_block_open:
             return
         c = self.mlperf_constants
         self.mlperf_logger.start(
             key=c.BLOCK_START,
             value="training_step",
-            metadata={c.SAMPLES_COUNT: (step - 1) * self._global_batch_size()},
+            metadata={c.SAMPLES_COUNT: step * self._global_batch_size()},
         )
+        self._mlperf_block_open = True
 
     def _mlperf_log_block_stop(self, step: int):
-        if not self.mlperf_enabled or self.rank != 0:
-            return
-        if (step - 1) % self.logging_steps != 0:
+        if not self.mlperf_enabled or self.rank != 0 or not self._mlperf_block_open:
             return
         c = self.mlperf_constants
         self.mlperf_logger.end(
             key=c.BLOCK_STOP,
             value="training_step",
-            metadata={c.SAMPLES_COUNT: (step - 1) * self._global_batch_size()},
+            metadata={c.SAMPLES_COUNT: step * self._global_batch_size()},
         )
+        self._mlperf_block_open = False
 
     def _mlperf_log_eval_start(self):
         if not self.mlperf_enabled or self.rank != 0:
@@ -679,6 +733,7 @@ class BaseWanTrainer:
     def _mlperf_log_run_stop(self):
         if not self.mlperf_enabled or self.rank != 0:
             return
+        self._mlperf_log_block_stop(self.global_step)
         c = self.mlperf_constants
         samples = self.global_step * self._global_batch_size()
         status = c.SUCCESS if self.mlperf_run_success else c.ABORTED
@@ -999,12 +1054,13 @@ class BaseWanTrainer:
                 if self.rank == 0 and self.global_step == 0 and batch_idx == 0:
                     logger.info("First training batch loaded; entering forward pass")
                 if self.mlperf_enabled and not mlperf_train_started:
+                    self._mlperf_warmup(batch)
+                    start_time = last_log_time = time.time()
                     self._mlperf_log_train_start()
+                    self._mlperf_log_block_start(self.global_step)
                     mlperf_train_started = True
                 is_update_step = ((batch_idx + 1) % max(1, self.grad_accum_steps)) == 0
                 local_samples_in_update += self._infer_local_batch_size(batch)
-                if is_update_step:
-                    self._mlperf_log_block_start(self.global_step + 1)
 
                 with self._grad_sync_context(is_update_step):
                     try:
@@ -1039,7 +1095,6 @@ class BaseWanTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
                     self._step_profiler()
-                    self._mlperf_log_block_stop(self.global_step)
                     update_steps_since_log += 1
                     local_samples_since_log += local_samples_in_update
                     local_samples_in_update = 0
@@ -1078,6 +1133,7 @@ class BaseWanTrainer:
                         self.mlperf_enabled
                         and self.global_step % self.mlperf_eval_freq_steps == 0
                     ):
+                        self._mlperf_log_block_stop(self.global_step)
                         self._mlperf_log_eval_start()
                         val_loss = self.validate_loss()
                         self._mlperf_log_eval_stop(val_loss)
@@ -1129,6 +1185,7 @@ class BaseWanTrainer:
                             self._mlperf_log_run_stop()
                             self._stop_profiler()
                             return
+                        self._mlperf_log_block_start(self.global_step)
 
                     # Early termination
                     if self.max_steps > 0 and self.global_step >= self.max_steps:

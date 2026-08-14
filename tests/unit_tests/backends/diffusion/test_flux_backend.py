@@ -50,6 +50,11 @@ def test_flux_argument_builder_selects_flux_defaults():
                 "lr_scheduler_type": "constant_with_warmup",
                 "warmup_steps": 11,
             },
+            "mlperf": {
+                "performance_mode": "nemo_mlperf",
+                "warmup_train_steps": 2,
+                "warmup_validation_steps": 2,
+            },
             "runtime": {
                 "gradient_checkpointing_ratio": 0.25,
                 "compile_strategy": "per_block",
@@ -69,6 +74,9 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.trainer["args"]["per_device_train_batch_size"] == 3
     assert args.trainer["args"]["lr_scheduler_type"] == "constant_with_warmup"
     assert args.trainer["args"]["warmup_steps"] == 11
+    assert args.trainer["args"]["performance_mode"] == "nemo_mlperf"
+    assert args.trainer["args"]["mlperf_warmup_train_steps"] == 2
+    assert args.trainer["args"]["mlperf_warmup_validation_steps"] == 2
     assert args.trainer["args"]["gradient_checkpointing_ratio"] == 0.25
     assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"

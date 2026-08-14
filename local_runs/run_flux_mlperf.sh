@@ -57,34 +57,52 @@ export PROFILE_WARMUP_STEPS=${PROFILE_WARMUP_STEPS:-2}
 export PROFILE_ACTIVE_STEPS=${PROFILE_ACTIVE_STEPS:-10}
 export PROFILE_OUTPUT_DIR=${PROFILE_OUTPUT_DIR:-}
 export PROFILE_WITH_STACK=${PROFILE_WITH_STACK:-false}
-export SAVE_STEPS=${SAVE_STEPS:-100}
-export SAVE_STRATEGY=${SAVE_STRATEGY:-dtcp_full}
-export CHECKPOINT_KEEP_LATEST=${CHECKPOINT_KEEP_LATEST:-3}
-export RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-latest}
-export DISABLE_CHECKPOINT=${DISABLE_CHECKPOINT:-false}
-if [[ "${DISABLE_CHECKPOINT,,}" == "true" || "$DISABLE_CHECKPOINT" == "1" ]]; then
-  export SAVE_STEPS=0
-  export SAVE_STRATEGY=none
-  export CHECKPOINT_KEEP_LATEST=0
-  export RESUME_FROM_CHECKPOINT=
-fi
+# performance_only isolates steady training; nemo_mlperf prewarms and times
+# train/eval blocks with MLPerf semantics.
+export FLUX_PERFORMANCE_MODE=${FLUX_PERFORMANCE_MODE:-nemo_mlperf}
+case "$FLUX_PERFORMANCE_MODE" in
+  performance_only)
+    export MLPERF_ENABLE=false
+    export MLPERF_WARMUP_TRAIN_STEPS=0
+    export MLPERF_WARMUP_VALIDATION_STEPS=0
+    : "${BENCH_SKIP_STEPS:=10}"
+    ;;
+  nemo_mlperf)
+    export MLPERF_ENABLE=true
+    export MLPERF_WARMUP_TRAIN_STEPS=${MLPERF_WARMUP_TRAIN_STEPS:-2}
+    export MLPERF_WARMUP_VALIDATION_STEPS=${MLPERF_WARMUP_VALIDATION_STEPS:-2}
+    : "${BENCH_SKIP_STEPS:=1}"
+    ;;
+  *)
+    echo "[run_flux_mlperf] unsupported FLUX_PERFORMANCE_MODE=$FLUX_PERFORMANCE_MODE" >&2
+    exit 2
+    ;;
+esac
+export BENCH_SKIP_STEPS
+export DISABLE_CHECKPOINT=true
+export SAVE_STEPS=0
+export SAVE_STRATEGY=none
+export CHECKPOINT_KEEP_LATEST=0
+export RESUME_FROM_CHECKPOINT=
 export LOG_FREQ=${LOG_FREQ:-10}
-export MLPERF_ENABLE=${MLPERF_ENABLE:-true}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.586}
 export VAL_CHECK_INTERVAL=${VAL_CHECK_INTERVAL:-262144}
 export SEED=${SEED:-10007}
 export MLPERF_CLEAR_CACHES=${MLPERF_CLEAR_CACHES:-true}
 export RUN_TAG=${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}
-export BENCH_SKIP_STEPS=${BENCH_SKIP_STEPS:-1}
 export TORCHRUN_TEE=${TORCHRUN_TEE:-true}
 
 LOG_FILE=${LOG_FILE:-local_runs/flux_mlperf_${RUN_TAG}.log}
 SUMMARY_FILE=${SUMMARY_FILE:-local_runs/flux_mlperf_${RUN_TAG}_summary.txt}
 OUTPUT_DIR=${OUTPUT_DIR:-local_runs/flux_mlperf_output}
-MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-local_runs/flux_mlperf_${RUN_TAG}_mllog.txt}
+FINAL_MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-local_runs/flux_mlperf_${RUN_TAG}_mllog.txt}
+if [[ "$FLUX_PERFORMANCE_MODE" == "nemo_mlperf" ]]; then
+  export MLLOG_OUTPUT_FILE="/tmp/primus-${RUN_TAG}-mllog.txt"
+else
+  export MLLOG_OUTPUT_FILE="$FINAL_MLLOG_OUTPUT_FILE"
+fi
 RANK_LOG_DIR=${RANK_LOG_DIR:-local_runs/flux_mlperf_${RUN_TAG}_ranklogs}
 export OUTPUT_DIR
-export MLLOG_OUTPUT_FILE
 export ENABLE_WANDB_LOGGER=${ENABLE_WANDB_LOGGER:-false}
 export WANDB_PROJECT=${WANDB_PROJECT:-mlperf-flux1}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-flux-mlperf}
@@ -208,6 +226,9 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"max_steps: {os.environ.get('MAX_STEPS', '')}\n")
     handle.write(f"lr: {os.environ.get('LR', '')}\n")
     handle.write(f"warmup_steps: {os.environ.get('WARMUP_STEPS', '')}\n")
+    handle.write(f"performance_mode: {os.environ.get('FLUX_PERFORMANCE_MODE', '')}\n")
+    handle.write(f"mlperf_warmup_train_steps: {os.environ.get('MLPERF_WARMUP_TRAIN_STEPS', '')}\n")
+    handle.write(f"mlperf_warmup_validation_steps: {os.environ.get('MLPERF_WARMUP_VALIDATION_STEPS', '')}\n")
     handle.write(f"save_steps: {os.environ.get('SAVE_STEPS', '')}\n")
     handle.write(f"save_strategy: {os.environ.get('SAVE_STRATEGY', '')}\n")
     handle.write(f"disable_checkpoint: {os.environ.get('DISABLE_CHECKPOINT', '')}\n")
@@ -272,7 +293,9 @@ echo "[run_flux_mlperf] empty_encodings_path=$EMPTY_ENCODINGS_PATH"
 echo "[run_flux_mlperf] output_dir=$OUTPUT_DIR"
 echo "[run_flux_mlperf] log_file=$LOG_FILE"
 echo "[run_flux_mlperf] summary_file=$SUMMARY_FILE"
-echo "[run_flux_mlperf] mllog_output_file=$MLLOG_OUTPUT_FILE"
+echo "[run_flux_mlperf] performance_mode=$FLUX_PERFORMANCE_MODE"
+echo "[run_flux_mlperf] mllog_output_file=$FINAL_MLLOG_OUTPUT_FILE local=$MLLOG_OUTPUT_FILE"
+echo "[run_flux_mlperf] mlperf_warmup=train:$MLPERF_WARMUP_TRAIN_STEPS validation:$MLPERF_WARMUP_VALIDATION_STEPS"
 echo "[run_flux_mlperf] rank_log_dir=$RANK_LOG_DIR"
 echo "[run_flux_mlperf] nnodes=$NNODES node_rank=$NODE_RANK gpus_per_node=$GPUS_PER_NODE"
 echo "[run_flux_mlperf] steps=$MAX_STEPS local_batch_size=$LOCAL_BATCH_SIZE lr=$LR warmup_steps=$WARMUP_STEPS"
@@ -301,6 +324,11 @@ torchrun \
 train_status=${PIPESTATUS[0]}
 set -e
 trap - INT TERM
+
+if [[ "$MLLOG_OUTPUT_FILE" != "$FINAL_MLLOG_OUTPUT_FILE" && -f "$MLLOG_OUTPUT_FILE" ]]; then
+  mkdir -p "$(dirname "$FINAL_MLLOG_OUTPUT_FILE")"
+  cp "$MLLOG_OUTPUT_FILE" "$FINAL_MLLOG_OUTPUT_FILE"
+fi
 
 summary_status=0
 summarize_metrics || summary_status=$?

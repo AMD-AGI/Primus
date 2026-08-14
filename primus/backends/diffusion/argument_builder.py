@@ -418,6 +418,9 @@ class DiffusionArgBuilder:
         mlperf = params.get("mlperf") or {}
         mlperf_map = {
             ("enable",): ("mlperf_enable",),
+            ("performance_mode",): ("performance_mode",),
+            ("warmup_train_steps",): ("mlperf_warmup_train_steps",),
+            ("warmup_validation_steps",): ("mlperf_warmup_validation_steps",),
             ("target_eval_loss",): ("mlperf_target_eval_loss",),
             ("eval_samples",): ("mlperf_eval_samples",),
             ("eval_steps",): ("mlperf_eval_steps",),
