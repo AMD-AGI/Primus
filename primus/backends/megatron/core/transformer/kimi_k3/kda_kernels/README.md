@@ -41,7 +41,7 @@ which asserts agreement with Megatron's own
 | `eager` | `_eager/` | `eager_chunk_kda` | **The reference.** Pure-PyTorch chunkwise-parallel form; always importable, differentiable, device-agnostic. What every other backend is validated against. |
 | `eager_recurrent` | `_eager/` | `eager_recurrent_kda` | Literal `O(T)` transcription of the recurrence. Correct by inspection; the oracle for the chunked form. Far too slow for training. |
 | `fla` | `_fla/` | `fla_chunk_kda` | `flash-linear-attention`'s fused Triton `chunk_kda`. Lazily imported — `fla` is an optional dependency. **The production backend today**, and the speed baseline. |
-| `flydsl` | `_flydsl_v1/` | `flydsl_chunk_kda` | Native FlyDSL kernel, **gfx950 / CDNA4 only**. Forward and backward both work; a `@flyc.kernel` computes the intra-chunk score matrices, the rest is batched torch GEMMs. Currently **slower than `fla`** — see "What the FlyDSL backend does and does not accelerate". |
+| `flydsl` | `_flydsl_v1/` | `flydsl_chunk_kda` | Native FlyDSL kernel, **gfx950 / CDNA4 only**. Forward and backward both work; four `@flyc.kernel`s do the intra-chunk scores, the operand prep, the triangular solve and the state sweep, the glue between them goes through Inductor, and the batched GEMMs stay on hipBLAS. **More accurate than `fla`** but still **0.39–0.44× of it on fwd+bwd** — see "What the FlyDSL backend does and does not accelerate" and `bench/FINDINGS.md`. |
 
 `fla` and `flydsl` are loaded on demand (`load_fla_kda_backend`,
 `load_flydsl_kda_backend`) so that `import ...kda_kernels` never fails
@@ -116,23 +116,39 @@ Removing both costs is the job of the FlyDSL backend below.
 
 ## What the FlyDSL backend does and does not accelerate
 
-`_flydsl_v1/` replaces the two stages the eager form is deliberately slow at,
-and leaves the rest to hipBLAS. Read this table before assuming a measurement
-says something about the kernel.
+`_flydsl_v1/` runs four stages in FlyDSL kernels, routes the elementwise glue
+between them through Inductor, and leaves the batched GEMMs to hipBLAS. Read
+this table before assuming a measurement says something about the kernel.
 
-| Stage | Where it runs | Cost at `B=1, T=4096, H=96, K=V=128`, bf16 |
+Forward at `B=1, T=4096, H=96, K=V=128` bf16, on-device, **19 launches**
+(`fla`: 1300 µs in 8):
+
+| Stage | Where it runs | µs |
 | --- | --- | --- |
-| within-chunk cumsum of `g` | torch | 111 µs |
-| **`Aqk`, `Akk` — the two `[C, C]` score matrices** | **`@flyc.kernel`** | **338 µs** |
-| `(I − L)^{-1}` UT transform | torch, Neumann doubling | 748 µs |
-| `W = M(Γ⊙K)`, `U = MV` | torch batched GEMM | 218 µs |
-| inter-chunk state sweep | torch, `NC`-step Python loop | dominant |
+| inter-chunk state sweep | `kda_state_sweep_kernel` | 524 |
+| **`Aqk`, `Akk` — the two `[C, C]` score matrices** | `kda_decay_scores_kernel` | 294 |
+| `Γ`, `QΓ`, `KΓ`, `KG`, `dec` operand prep | `kda_chunk_prep_kernel` | 207 |
+| `(I − L)^{-1}` UT transform | `kda_ut_inverse_kernel` | 54 |
+| `W = M(Γ⊙K)`, `U = MV`, the output `baddbmm` | torch batched GEMM | 338 |
+| transposed casts, the β products, the within-chunk cumsum | Inductor | ~430 |
 
-The kernel itself is *not* the bottleneck; the serial state sweep is. It is
-`NC = 64` iterations of GEMMs far too small to fill an MI355X, so its cost is
-launch latency, not arithmetic. `fla` avoids this by running the whole sweep
-inside one Triton kernel, and a fused FlyDSL sweep kernel is the next thing to
-write.
+Backward, same shape: 8208 µs in **67** launches (`fla`: 3126 µs in 13). It
+recomputes the assembly and differentiates it, so the forward's cost is paid
+twice; `kda_decay_scores_bwd_kernel` (1739 µs) and the two sweeps (1225 µs) are
+its largest items.
+
+The current gap to `fla` is **0.61–0.71× on the forward and 0.34–0.38× on the
+backward** across the real 8L-official and curve geometries. It is roughly half
+remaining glue and batched GEMMs that `fla` performs inside its kernels, and half
+the score and sweep kernels themselves — the forward score kernel is exactly
+LDS-bandwidth bound at its one-output-per-thread mapping. `bench/FINDINGS.md`
+has the full decomposition, the per-shape tables, and the arithmetic for why
+fusing alone lands at ~0.9× and cannot overtake `fla` on its own.
+
+`flydsl` is also the **more accurate** of the two fused backends against a fp32
+`eager` oracle — 2.5× closer on the output and 1.6× closer on the gradients at
+production geometry — which is why two otherwise-attractive bf16 speedups are
+rejected in `bench/FINDINGS.md` §5.
 
 ### How the `1/Γ` overflow is avoided in the tiled form
 

@@ -1,0 +1,117 @@
+{
+  "device": "AMD Instinct MI355X",
+  "arch": "gfx950:sramecc+:xnack-",
+  "torch": "2.12.0+rocm7.14.0a20260608",
+  "fla": "0.5.2",
+  "iters": 12,
+  "tag": "eager3way",
+  "backends": [
+    "fla",
+    "flydsl"
+  ],
+  "prod_T2048_bf16": {
+    "shape": [
+      1,
+      2048,
+      96,
+      128,
+      128
+    ],
+    "gflop_fwd": 35.433480192,
+    "tokens": 2048,
+    "fla": {
+      "fwd_us": 714.3290042877197,
+      "fwd_launches": 8.0,
+      "bwd_launches": 13.0,
+      "fwd_bwd_us": 2310.467004776001,
+      "bwd_us": 1596.1380004882812,
+      "peak_mem_gb": 1.31689453125
+    },
+    "flydsl": {
+      "fwd_us": 1048.2529401779175,
+      "fwd_launches": 19.0,
+      "bwd_launches": 67.0,
+      "fwd_bwd_us": 5414.585113525391,
+      "bwd_us": 4366.332173347473,
+      "peak_mem_gb": 2.318603515625
+    },
+    "eager": {
+      "fwd_us": 91062.72888183594,
+      "fwd_launches": 13690.0,
+      "bwd_launches": 38515.0,
+      "fwd_bwd_us": 362042.9992675781,
+      "bwd_us": 270980.2703857422,
+      "peak_mem_gb": 27.188438415527344
+    }
+  },
+  "curve_mbs8_bf16": {
+    "shape": [
+      8,
+      2048,
+      16,
+      128,
+      128
+    ],
+    "gflop_fwd": 47.244640256,
+    "tokens": 16384,
+    "fla": {
+      "fwd_us": 856.689989566803,
+      "fwd_launches": 8.0,
+      "bwd_launches": 13.0,
+      "fwd_bwd_us": 2853.353977203369,
+      "bwd_us": 1996.6639876365662,
+      "peak_mem_gb": 1.755859375
+    },
+    "flydsl": {
+      "fwd_us": 1331.6160440444946,
+      "fwd_launches": 19.0,
+      "bwd_launches": 67.0,
+      "fwd_bwd_us": 6819.6821212768555,
+      "bwd_us": 5488.066077232361,
+      "peak_mem_gb": 3.0908203125
+    },
+    "eager": {
+      "fwd_us": 87241.40930175781,
+      "fwd_launches": 13754.0,
+      "bwd_launches": 38579.0,
+      "fwd_bwd_us": 386313.2019042969,
+      "bwd_us": 299071.79260253906,
+      "peak_mem_gb": 36.224422454833984
+    }
+  },
+  "curve_mbs16_bf16": {
+    "shape": [
+      16,
+      2048,
+      16,
+      128,
+      128
+    ],
+    "gflop_fwd": 94.489280512,
+    "tokens": 32768,
+    "fla": {
+      "fwd_us": 1529.858946800232,
+      "fwd_launches": 8.0,
+      "bwd_launches": 13.0,
+      "fwd_bwd_us": 5054.300785064697,
+      "bwd_us": 3524.4418382644653,
+      "peak_mem_gb": 3.51171875
+    },
+    "flydsl": {
+      "fwd_us": 2524.1899490356445,
+      "fwd_launches": 19.0,
+      "bwd_launches": 67.0,
+      "fwd_bwd_us": 13216.639518737793,
+      "bwd_us": 10692.449569702148,
+      "peak_mem_gb": 6.181640625
+    },
+    "eager": {
+      "fwd_us": 136796.84448242188,
+      "fwd_launches": 13754.0,
+      "bwd_launches": 38579.0,
+      "fwd_bwd_us": 525477.783203125,
+      "bwd_us": 388680.9387207031,
+      "peak_mem_gb": 72.44366073608398
+    }
+  }
+}
