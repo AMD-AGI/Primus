@@ -60,7 +60,9 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.op
     SUB_BLOCK,
     decay_scores,
     supports_geometry,
+    supports_ut_beta,
     ut_inverse,
+    ut_inverse_beta,
 )
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.prep import (
     chunk_prep,
@@ -252,10 +254,14 @@ def _assemble(
     # 400 MB pass over `q` here and another one in the backward's recompute.
     aqk, akk = decay_scores(qf, kf, cg)
 
-    # L[r, c] = -beta_r * <k_r . Gamma, k_c>, strictly lower (akk already is)
-    low = _low_from_scores(akk, betaf)
-    # M = (I - L)^{-1} @ Diag(beta): the UT transform, columns scaled by beta
-    ut = _scale_ut(ut_inverse(low), betaf)
+    # M = (I - L)^{-1} @ Diag(beta) with L[r, c] = -beta_r * Akk[r, c], strictly
+    # lower because `akk` already is. Both beta products are folded into the UT
+    # kernel where the geometry allows: as torch ops they were two elementwise
+    # passes over a 200 MB tensor (82 µs measured) for one multiply each.
+    if supports_ut_beta(chunk_size, aqk.dtype) is None:
+        ut = ut_inverse_beta(akk, betaf)
+    else:
+        ut = _scale_ut(ut_inverse(_low_from_scores(akk, betaf)), betaf)
 
     # Everything the sweep needs that does not depend on the running state, in
     # one kernel: `Gamma = exp(cg)`, `QGamma`, `KGamma`, `KG = K exp(ct - cg)`

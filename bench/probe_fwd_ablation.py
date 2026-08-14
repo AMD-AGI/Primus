@@ -49,6 +49,7 @@ def main():
     from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.ops import (
         decay_scores,
         ut_inverse,
+        ut_inverse_beta,
     )
     from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.prep import (
         chunk_prep,
@@ -91,12 +92,20 @@ def main():
         # ---- the kernels ----
         led["decay_scores kernel"] = timed(lambda: decay_scores(qf, kf, cg), args.iters, args.warmup)
         aqk, akk = decay_scores(qf, kf, cg)
-        led["beta products (low, scale_ut)"] = timed(
+        low = ch._low_from_scores(akk, betaf)
+        led["UT unfused: beta products + ut_inverse"] = timed(
+            lambda: ch._scale_ut(ut_inverse(ch._low_from_scores(akk, betaf)), betaf),
+            args.iters,
+            args.warmup,
+        )
+        led["  of which the two beta products"] = timed(
             lambda: ch._scale_ut(ch._low_from_scores(akk, betaf), betaf), args.iters, args.warmup
         )
-        low = ch._low_from_scores(akk, betaf)
-        led["ut_inverse kernel"] = timed(lambda: ut_inverse(low), args.iters, args.warmup)
-        ut = ch._scale_ut(ut_inverse(low), betaf)
+        led["  of which ut_inverse alone"] = timed(lambda: ut_inverse(low), args.iters, args.warmup)
+        led["UT fused (ut_inverse_beta, one launch)"] = timed(
+            lambda: ut_inverse_beta(akk, betaf), args.iters, args.warmup
+        )
+        ut = ut_inverse_beta(akk, betaf)
         led["chunk_prep kernel"] = timed(
             lambda: chunk_prep(qf, kf, cg, torch.bfloat16, use_kernel=True), args.iters, args.warmup
         )

@@ -1,0 +1,15 @@
+{
+  "bv16  A today (rq=1, states=0)": 504.28301095962524,
+  "bv16  B split seq (rq=0, states=1)": 433.92300605773926,
+  "bv16  C floor  (rq=0, states=0)": 348.28299283981323,
+  "bv32  A today (rq=1, states=0)": 615.8850193023682,
+  "bv32  B split seq (rq=0, states=1)": 523.6039757728577,
+  "bv32  C floor  (rq=0, states=0)": 320.16199827194214,
+  "bv64  A today (rq=1, states=0)": 714.9249911308289,
+  "bv64  B split seq (rq=0, states=1)": 495.604008436203,
+  "bv64  C floor  (rq=0, states=0)": 381.96298480033875,
+  "OWED Rq = QG @ S, fp32 batched GEMM": 190.40200114250183,
+  "OWED Rq = QG @ S, bf16 batched GEMM": 114.40099775791168,
+  "  (cast S to bf16, part of the bf16 line)": 104.68100011348724,
+  "REF output baddbmm (Aqk @ T + Rq), as today": 213.56099843978882
+}

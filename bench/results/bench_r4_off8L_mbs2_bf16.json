@@ -1,0 +1,39 @@
+{
+  "device": "AMD Instinct MI355X",
+  "arch": "gfx950:sramecc+:xnack-",
+  "torch": "2.12.0+rocm7.14.0a20260608",
+  "fla": "0.5.2",
+  "iters": 20,
+  "tag": "r4_off8L_mbs2_bf16",
+  "backends": [
+    "fla",
+    "flydsl"
+  ],
+  "off8L_mbs2_bf16": {
+    "shape": [
+      2,
+      7168,
+      96,
+      128,
+      128
+    ],
+    "gflop_fwd": 248.034361344,
+    "tokens": 14336,
+    "fla": {
+      "fwd_us": 4177.395820617676,
+      "fwd_launches": 8.0,
+      "bwd_launches": 13.0,
+      "fwd_bwd_us": 14029.722213745117,
+      "bwd_us": 9852.326393127441,
+      "peak_mem_gb": 9.21826171875
+    },
+    "flydsl": {
+      "fwd_us": 6131.214141845703,
+      "fwd_launches": 17.0,
+      "bwd_launches": 63.0,
+      "fwd_bwd_us": 33025.047302246094,
+      "bwd_us": 26893.83316040039,
+      "peak_mem_gb": 16.138916015625
+    }
+  }
+}

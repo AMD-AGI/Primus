@@ -47,6 +47,9 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
+from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1._compile import (
+    compiled,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.kda_decay_scores_bwd_kernel import (
     build_kda_decay_scores_bwd,
     supports_bwd_geometry,
@@ -69,6 +72,8 @@ __all__ = [
     "decay_scores_bwd",
     "decay_scores_bwd_torch",
     "ut_inverse",
+    "ut_inverse_beta",
+    "supports_ut_beta",
     "supports_geometry",
     "supports_bwd_geometry",
     "supports_ut_geometry",
@@ -326,12 +331,12 @@ def _ut_inverse_doubling(low: torch.Tensor) -> torch.Tensor:
     return partial.reshape(low.shape)
 
 
-def _get_ut_kernel(chunk_size: int):
-    key = int(chunk_size)
+def _get_ut_kernel(chunk_size: int, fuse_beta: bool = False, emit_p: bool = False):
+    key = (int(chunk_size), bool(fuse_beta), bool(emit_p))
     with _KERNEL_LOCK:
         launch = _UT_KERNEL_CACHE.get(key)
         if launch is None:
-            launch = build_kda_ut_inverse(chunk_size=key)
+            launch = build_kda_ut_inverse(chunk_size=key[0], fuse_beta=key[1], emit_p=key[2])
             _UT_KERNEL_CACHE[key] = launch
         return launch
 
@@ -347,7 +352,8 @@ def _ut_inverse_flydsl(low: torch.Tensor) -> torch.Tensor:
     c = low.shape[-1]
     flat = low.reshape(-1, c, c).contiguous()
     out = torch.empty_like(flat)
-    _get_ut_kernel(c)(flat.reshape(-1), out.reshape(-1), int(flat.shape[0]))
+    dummy = torch.empty(1, dtype=torch.float32, device=low.device)
+    _get_ut_kernel(c)(flat.reshape(-1), dummy, out.reshape(-1), dummy, int(flat.shape[0]))
     return out.reshape(low.shape)
 
 
@@ -395,3 +401,74 @@ class _UTInverse(torch.autograd.Function):
 def ut_inverse(low: torch.Tensor) -> torch.Tensor:
     """``(I − L)^{-1}`` for strictly-lower-triangular ``L`` of shape ``[..., C, C]``."""
     return _UTInverse.apply(low)
+
+
+# ---------------------------------------------------------------------------
+# UT transform with both beta products folded in
+# ---------------------------------------------------------------------------
+
+
+def _ut_inverse_beta_flydsl(akk: torch.Tensor, betaf: torch.Tensor, want_p: bool):
+    """``M = (I − Akk·(−β_r))^{-1} · Diag(β_c)`` in one launch, plus ``P`` if asked."""
+    nb, c, _ = akk.shape
+    out = torch.empty_like(akk)
+    dummy = torch.empty(1, dtype=torch.float32, device=akk.device)
+    pu = torch.empty_like(akk) if want_p else dummy
+    _get_ut_kernel(c, True, want_p)(
+        akk.reshape(-1), betaf.reshape(-1), out.reshape(-1), pu.reshape(-1), int(nb)
+    )
+    return out, (pu if want_p else None)
+
+
+@compiled
+def _ut_beta_bwd(p, akk, betaf, d_m):
+    """The adjoint of :func:`ut_inverse_beta`, as one Inductor region.
+
+    With ``L = Akk ⊙ (−β_r)``, ``P = (I − L)^{-1}`` and ``M = P ⊙ β_c``::
+
+        dP   = dM ⊙ β_c                    dβ_c = Σ_r (dM ⊙ P)
+        dL   = tril(Pᵀ dP Pᵀ, −1)          dAkk = dL ⊙ (−β_r)
+                                           dβ_r = −Σ_c (dL ⊙ Akk)
+
+    the first line by the column scale, the second by the same
+    ``dL = tril(Pᵀ dP Pᵀ, −1)`` the unfused Function uses. ``β`` collects both
+    contributions because it enters on the rows *and* the columns.
+    """
+    d_p = d_m * betaf.unsqueeze(-2)
+    d_beta_c = (d_m * p).sum(-2)
+    pt = p.transpose(-1, -2)
+    d_low = torch.tril(pt @ d_p @ pt, diagonal=-1)
+    d_akk = d_low * (-betaf).unsqueeze(-1)
+    d_beta_r = -(d_low * akk).sum(-1)
+    return d_akk, d_beta_r + d_beta_c
+
+
+class _UTInverseBeta(torch.autograd.Function):
+    """``(I − Akk⊙(−β_r))^{-1} ⊙ β_c``, and its adjoint."""
+
+    @staticmethod
+    def forward(ctx, akk, betaf):  # type: ignore[override]
+        want_grad = any(ctx.needs_input_grad[:2])
+        m, p = _ut_inverse_beta_flydsl(akk, betaf, want_grad)
+        if want_grad:
+            ctx.save_for_backward(p, akk, betaf)
+        return m
+
+    @staticmethod
+    def backward(ctx, d_m):  # type: ignore[override]
+        p, akk, betaf = ctx.saved_tensors
+        needs = ctx.needs_input_grad
+        d_akk, d_beta = _ut_beta_bwd(p, akk, betaf, d_m.contiguous())
+        return (d_akk if needs[0] else None), (d_beta if needs[1] else None)
+
+
+def supports_ut_beta(chunk_size: int, dtype: torch.dtype) -> Optional[str]:
+    """``None`` when the fused UT-plus-beta kernel can run this configuration."""
+    if dtype is not torch.float32:
+        return f"dtype {dtype} is not fp32"
+    return supports_ut_geometry(int(chunk_size))
+
+
+def ut_inverse_beta(akk: torch.Tensor, betaf: torch.Tensor) -> torch.Tensor:
+    """``M = (I − L)^{-1} Diag(β)`` with ``L = Akk ⊙ (−β_r)``, in one launch."""
+    return _UTInverseBeta.apply(akk.contiguous(), betaf.contiguous())

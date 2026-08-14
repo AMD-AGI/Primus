@@ -90,7 +90,9 @@ def _llvm_ptr_ty():
     return ir.Type.parse("!llvm.ptr")
 
 
-def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
+def build_kda_ut_inverse(
+    chunk_size: int, waves_per_eu: int = 2, fuse_beta: bool = False, emit_p: bool = False
+):
     """Build the launcher for one width.
 
     Returns ``launch(Low, P, nb)`` over flat fp32 tensors, both ``[nb, C, C]``
@@ -99,6 +101,23 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
     ``Akk``'s own mask guarantees (verified to be exactly ``0.0``). The
     diagonal and upper triangle of the result are ``I``
     and ``0`` respectively, both written.
+
+    With ``fuse_beta`` the signature becomes ``launch(Akk, Beta, M, nb)`` and the
+    kernel does the whole UT transform the caller used to spell as three ops::
+
+        L = Akk * (-beta_r)        M = (I - L)^-1 * beta_c
+
+    Both β products are ``[nb, C, C]`` elementwise passes over a 200 MB tensor at
+    production geometry — 82 µs measured, against this kernel's own 80 — for one
+    multiply each. Folded in they cost a row scale during the LDS fill and a
+    column scale at the store, both already on data in registers.     ``Beta`` is
+    ``[nb, C]``; the row scale needs ``beta`` at a row every lane reads, so it is
+    staged in LDS (one extra barrier, 256 B) rather than re-loaded per row.
+
+    ``emit_p`` additionally writes the **unscaled** ``P``, which the adjoint needs
+    and cannot recover from ``M`` (dividing by ``beta`` is not safe — it is a
+    sigmoid and underflows). It is a second store of a value already in a
+    register, ~19 µs at production geometry, and it is off in the no-grad forward.
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
@@ -111,20 +130,25 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
     C = int(chunk_size)
     BLOCK = C  # one thread per column of P
 
-    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_ut_smem_C{C}")
+    tag = f"C{C}" + ("_beta" if fuse_beta else "") + ("_p" if emit_p else "")
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_ut_smem_{tag}")
     lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_off + C * C * 4
+    lds_b_off = allocator._align(lds_off + C * C * 4, 16)
+    allocator.ptr = lds_b_off + (C * 4 if fuse_beta else 0)
 
-    @flyc.kernel(known_block_size=[BLOCK, 1, 1], name=f"kda_ut_inverse_C{C}")
-    def kda_ut_inverse_kernel(Low: fx.Tensor, P: fx.Tensor):
+    @flyc.kernel(known_block_size=[BLOCK, 1, 1], name=f"kda_ut_inverse_{tag}")
+    def kda_ut_inverse_kernel(Low: fx.Tensor, Beta: fx.Tensor, P: fx.Tensor, Pu: fx.Tensor):
         f32 = T.f32
         vec1_f32 = T.vec(1, f32)
 
         l_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Low)
+        b_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Beta)
         p_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), P)
+        pu_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Pu)
 
         base = allocator.get_base()
         lds = SmemPtr(base, lds_off, f32, shape=(C * C,)).get()
+        lds_b = SmemPtr(base, lds_b_off, f32, shape=(max(C, 1),)).get()
 
         def gep(bptr, elem_idx):
             return _llvm.GEPOp(
@@ -153,30 +177,72 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
         tid = arith.index_cast(T.index, gpu.thread_idx.x)
         chunk0 = bid * arith.index(C * C)
 
+        fm_fast = arith.FastMathFlags.fast
+        c_neg_one = arith.constant(-1.0, type=f32)
+
+        # Build-time choices go through a dict of closures, never an `if`: the AST
+        # rewriter routes every `if` in a traced body through `scf_if_dispatch`,
+        # so a value assigned inside one does not escape it (it comes back None
+        # and the next `arith.mulf` rejects it).
+        def _load_beta():
+            # `beta` at the lane's own column, for the store; and the whole row
+            # vector in LDS, because the fill's row scale is indexed by the row.
+            b = load_f32(b_ptr, bid * arith.index(C) + tid)
+            vector.store(vector.from_elements(vec1_f32, [b]), lds_b, [tid])
+            gpu.barrier()
+            return b
+
+        bt = {True: _load_beta, False: lambda: None}[fuse_beta]()
+
+        def neg_beta_row(i):
+            v = vector.load_op(vec1_f32, lds_b, [arith.index(i)])
+            b = vector.extract(v, static_position=[0], dynamic_position=[])
+            return arith.MulFOp(b, c_neg_one, fastmath=fm_fast).result
+
+        _SCALE_ROW = {
+            True: lambda v, i: arith.MulFOp(v, neg_beta_row(i), fastmath=fm_fast).result,
+            False: lambda v, i: v,
+        }[fuse_beta]
+        _SCALE_COL = {
+            True: lambda a: arith.MulFOp(a, bt, fastmath=fm_fast).result,
+            False: lambda a: a,
+        }[fuse_beta]
+        _STORE_P = {
+            True: lambda a, e: store_f32(a, pu_ptr, e),
+            False: lambda a, e: None,
+        }[emit_p]
+
         # Cooperative fill: thread `c` takes column `c` of every row, so each
-        # row is one coalesced 4C-byte transaction.
+        # row is one coalesced 4C-byte transaction. With `fuse_beta` the row
+        # scale `-beta_i` is applied here, on the value already in a register.
         for i in range_constexpr(C):
             off = arith.index(i * C) + tid
-            lds_put(off, load_f32(l_ptr, chunk0 + off))
+            lds_put(off, _SCALE_ROW(load_f32(l_ptr, chunk0 + off), i))
         gpu.barrier()
 
         c_one = arith.constant(1.0, type=f32)
         c_zero = arith.constant(0.0, type=f32)
 
         # P[i, c] = delta(i, c) + sum_{j<i} L[i, j] P[j, c].
-        # `preg[j]` is lane `c`'s own P[j, c]; nothing crosses lanes.
+        # `preg[j]` is lane `c`'s own P[j, c]; nothing crosses lanes. `preg` keeps
+        # the *unscaled* P, because the substitution is defined on it; the column
+        # scale goes on the way out.
         preg = []
         for i in range_constexpr(C):
             acc = arith.select(arith.cmpi(arith.CmpIPredicate.eq, tid, arith.index(i)), c_one, c_zero)
             for j in range_constexpr(i):
                 acc = math_dialect.fma(lds_get(arith.index(i * C + j)), preg[j], acc)
             preg.append(acc)
-            store_f32(acc, p_ptr, chunk0 + arith.index(i * C) + tid)
+            elem = chunk0 + arith.index(i * C) + tid
+            store_f32(_SCALE_COL(acc), p_ptr, elem)
+            _STORE_P(acc, elem)
 
     @flyc.jit
     def launch_kda_ut_inverse(
         Low: fx.Tensor,
+        Beta: fx.Tensor,
         P: fx.Tensor,
+        Pu: fx.Tensor,
         nb: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
@@ -186,7 +252,7 @@ def build_kda_ut_inverse(chunk_size: int, waves_per_eu: int = 2):
             allocator.finalize()
 
         grid_x = arith.index_cast(T.index, nb)
-        launcher = kda_ut_inverse_kernel(Low, P)
+        launcher = kda_ut_inverse_kernel(Low, Beta, P, Pu)
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))

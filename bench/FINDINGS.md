@@ -437,6 +437,116 @@ three separate kernels, each comparable in size to a full pass of this work
 package. Round 3's bounded budget bought item 1 of nine, and honestly reports the
 other eight rather than starting one it could not finish.
 
+## 5d. Round 4: item 3 is negative, and with it the 1.0× arithmetic stops closing
+
+Round 3 costed three fusion projects at ~200 / ~150 / ~250 µs against a 657 µs
+target. Round 4 measured the largest one **before** writing it, and it is not
+worth +250 µs — it is worth **−120 µs**. That is decisive, so this section reports
+it, delivers the one item that did land, and recomputes the account rather than
+spending the round on items that cannot reach the goal.
+
+Node note: `crsuse2-m2m-088`, all eight GPUs idle (the previous node had a tenant
+holding 89 % of GPU 0's VRAM). Absolute µs therefore differ slightly from §5c;
+every comparison below is re-measured on this node.
+
+### Item 3 — split the sweep like `fla`: measured, and it costs
+
+The kernel already has the two build flags the split needs, so
+`bench/probe_sweep_split.py` measures the sequential half without writing an
+output kernel. `A` is what the forward runs today; `B` is the split's sequential
+half (drop `Rq` from the loop, write the `[NB,K,V]` history); `C` is `B` without
+the history write, the floor the split could ever reach. `prod_T4096`, µs:
+
+| `block_v` | A today | B split's sequential half | C floor | owed `Rq = QG @ S` | split total | vs A |
+| --- | --- | --- | --- | --- | --- | --- |
+| **16** (shipped) | **504** | 434 | 348 | 190 (fp32) | 624 | **costs 120** |
+| 32 | 616 | 524 | 320 | 190 | 714 | costs 98 |
+| 64 | 715 | 496 | 382 | 190 | 686 | saves 29 |
+
+Three things follow, and they close the item:
+
+- **Dropping `Rq` from the loop saves only 70 µs** (504 → 434). It is nearly free
+  where it is, and the kernel's own design comment says why: the `rq` and `t`
+  phases *share every MFMA B fragment*, because both contract the same state
+  against two stacked row blocks of the same operand. Removing one halves the
+  MFMAs but not the LDS traffic that dominates.
+- **The split then owes more than it saves**: +86 µs to write the state history
+  (348 → 434) and +190 µs for `Rq = QG @ S` as a batched GEMM. bf16 is worse
+  (114 µs for the GEMM but 105 to cast `S`), and would spend accuracy besides.
+- **"The split unlocks `block_v` → 64" was wrong.** `block_v = 64` is slower
+  *because of parallelism* — 192 workgroups on 256 CUs — which the split does not
+  change. At 64 the split roughly breaks even, on a baseline already 211 µs worse
+  than 16.
+
+### Item 1a — fold both β products into the UT kernel: landed, −66 µs
+
+`L = Akk ⊙ (−β_r)` and `M = P ⊙ β_c` were two elementwise passes over a 200 MB
+`[NB,C,C]` tensor for one multiply each. They are now a row scale during the UT
+kernel's LDS fill and a column scale at its store, both on values already in
+registers (`kda_ut_inverse_kernel.py`, `fuse_beta`). The adjoint needs the
+*unscaled* `P`, which cannot be recovered from `M` (dividing by a sigmoid
+underflows), so the kernel writes it as a second output under `emit_p` — off in
+the no-grad forward, so the forward pays nothing for it.
+
+| | µs |
+| --- | --- |
+| unfused: two β products + `ut_inverse` | 147 |
+| **fused `ut_inverse_beta`, one launch** | **80** |
+| `ut_inverse` alone, for reference | 82 |
+
+**The two multiplies are genuinely free** — the fused kernel costs what the
+inverse cost by itself. Forward 1961 → 1865 µs on the same run.
+
+One DSL trap worth recording, since it cost a debug cycle: a build-time `if` in a
+traced kernel body is rewritten into an `scf.if`, so a value assigned inside it
+does not escape — it arrives as `None` at the next `arith.mulf`. Build-time
+choices go through a dict of closures selected at build scope, which is the
+convention the score-adjoint kernel already documents.
+
+### Where round 4 leaves the forward
+
+| shape | `main` | round 3 | **round 4** | `fla` | `main`/fla | r3/fla | **r4/fla** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `prod_T2048` | 1244 | 1024 | **979** | 685 | 0.58× | 0.69× | **0.70×** |
+| `prod_T4096` | 2365 | 1917 | **1858** | 1303 | 0.58× | 0.70× | **0.70×** |
+| `off8L_mbs2` | 7450 | 6337 | **6131** | 4177 | 0.59× | 0.69× | **0.68×** |
+| `curve_mbs8` | 1530 | 1343 | **1307** | 842 | 0.57× | 0.64× | **0.64×** |
+| `curve_mbs16` | 2882 | 2490 | **2410** | 1547 | 0.54× | 0.61× | **0.64×** |
+
+No shape regressed. Parity against the fp32 eager oracle is **unchanged to the
+digit** — output `2.67e-03` at production geometry against `fla`'s `6.69e-03` —
+and 87/88 unit tests pass, the exception being the pre-existing fla-0.5.2 one
+from §2.
+
+### The recomputed account: 1.0× does not close
+
+Needed at `prod_T4096`: 1858 − 1303 = **555 µs**. What is left, with item 3 at
+zero:
+
+| item | measured stage cost | plausibly recoverable | status |
+| --- | --- | --- | --- |
+| 3. split the sweep | 799 (whole region) | **0** | **measured −120 µs; closed** |
+| 1c. kernels read bf16 `[B,T,H,D]` in place | 254 (`prepare_operands`) | ~100 | not attempted |
+| 2. fuse the `W` and `U` GEMMs into one kernel | 288 (2 GEMMs + `store_w`) | ~140 | not attempted |
+| 1b. `chunk_prep` writes `KG` transposed | 46 | ~40 | not attempted |
+| | | **~280 of 555** | |
+
+Landing all three remaining items at full value puts the forward at ~1578 against
+`fla`'s 1303 — **0.83×**. **So the forward cannot cross 1.0× either.** The reason
+is specifically item 3: it was 38 % of the budget and it is negative, and there is
+no other lever on the sweep — the split costs, `block_v` and `waves_per_eu` are at
+their optimum (§5b), and round 3's prefetch already took the 65 µs of exposed HBM
+latency. The sweep region is 43 % of our forward and the only stage whose removal
+would cross 1.0× ("ratio if free" 1.12×), and it is now the one with no remaining
+plan.
+
+What would still be true after items 1b, 1c and 2: the forward at ~0.83×, and we
+would remain **faster than `fla` on the two hardest stages** (intra-chunk score
+matrices and the triangular solve, now 427 µs against `fla`'s 597) and **more
+accurate on every output**. What it would take to actually pass `fla` is a sweep
+that is 300 µs faster with the state recurrence still sequential, and this round
+found no candidate for it.
+
 ## 6. What any of this is worth end to end — the honest ceiling
 
 From the real 8L-official run (`/home/botahu/primus_output/8L_1318_r%t.out`,
