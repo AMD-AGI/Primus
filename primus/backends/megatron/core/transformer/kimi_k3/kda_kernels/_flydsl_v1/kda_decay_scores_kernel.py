@@ -101,12 +101,34 @@ _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
 BLOCK_SIZE = 256
 SUB_BLOCK = 16
 SUPPORTED_K = (32, 64, 128, 256)
+# Channels per LDS access in the contraction. 4 is one `ds_read_b128`, the widest
+# the ISA has; every supported `K_DIM` is a multiple of it, and the summation
+# order is unchanged (the FMAs are still emitted in ascending `d`), so the output
+# is bit-identical to reading one channel at a time.
+LDS_RUN = 4
 
 __all__ = ["build_kda_decay_scores", "BLOCK_SIZE", "SUB_BLOCK", "SUPPORTED_K"]
 
 
 def _llvm_ptr_ty():
     return ir.Type.parse("!llvm.ptr")
+
+
+def lds_runs(count: int):
+    """``[(offset, width), ...]`` covering ``count`` fp32 with the widest accesses.
+
+    Resolved here, at **build** scope. The AST rewriter turns a ``while`` in a
+    traced body into an ``scf.while`` whose condition is a Python ``bool``
+    (``AttributeError: 'bool' object has no attribute 'owner'``), and a plain
+    ``range`` into a traced loop whose induction variable cannot index a Python
+    list — so the body may only walk a ready-made list with ``range_constexpr``.
+    """
+    out, i = [], 0
+    while i < count:
+        width = 4 if count - i >= 4 else (2 if count - i >= 2 else 1)
+        out.append((i, width))
+        i += width
+    return out
 
 
 def _nat_exp(x, log2e_const, fastmath):
@@ -162,6 +184,7 @@ def build_kda_decay_scores(chunk_size: int, k_dim: int, waves_per_eu: int = 2):
     # 128 % 32 == 0 would put all 16 in the same bank. +4 keeps every row start
     # 4-element aligned, so a later vectorised read stays legal.
     STRIDE = KD + 4
+    RUNS = lds_runs(LDS_RUN)
     # (row-block, col-block) pairs of the lower triangle, in the order emitted.
     PAIRS = [(i, j) for i in range(NSB) for j in range(i + 1)]
     ZERO_PAIRS = [(i, j) for i in range(NSB) for j in range(i + 1, NSB)]
@@ -223,6 +246,26 @@ def build_kda_decay_scores(chunk_size: int, k_dim: int, waves_per_eu: int = 2):
         def lds_read(lds, elem_idx):
             vec = vector.load_op(vec1_f32, lds, [elem_idx])
             return vector.extract(vec, static_position=[0], dynamic_position=[])
+
+        def lds_read_run(lds, base_idx, runs):
+            """Consecutive fp32 from as few LDS accesses as possible.
+
+            This kernel is LDS-bandwidth bound: its one-output-element-per-thread
+            mapping reads three LDS words per two FMAs, which is 24 GB of LDS
+            traffic per call at production geometry and 310 µs at the hardware's
+            78 TB/s — against 294 µs measured. Issuing the contraction four
+            channels at a time turns twelve ``ds_read_b32`` into three
+            ``ds_read_b128``. ``STRIDE = KD + 4`` keeps every row start 16-byte
+            aligned and the base steps by the run width, so the wide access is
+            legal. ``runs`` comes from :func:`lds_runs` at build scope.
+            """
+            out = []
+            for ri in range_constexpr(len(runs)):
+                off, width = runs[ri]
+                vec = vector.load_op(T.vec(width, f32), lds, [base_idx + arith.index(off)])
+                for j in range_constexpr(width):
+                    out.append(vector.extract(vec, static_position=[j], dynamic_position=[]))
+            return out
 
         def lds_write(lds, elem_idx, val):
             vector.store(vector.from_elements(vec1_f32, [val]), lds, [elem_idx])
@@ -289,11 +332,14 @@ def build_kda_decay_scores(chunk_size: int, k_dim: int, waves_per_eu: int = 2):
             r_off = out_c * arith.index(STRIDE)
             val_qk = c_zero_f
             val_kk = c_zero_f
-            for d_i in range_constexpr(KD):
-                d_idx = arith.index(d_i)
-                rg = lds_read(lds_rg, r_off + d_idx)
-                val_qk = math_dialect.fma(lds_read(lds_lq, l_off + d_idx), rg, val_qk)
-                val_kk = math_dialect.fma(lds_read(lds_lk, l_off + d_idx), rg, val_kk)
+            for d_i in range_constexpr(KD // LDS_RUN):
+                d_idx = arith.index(d_i * LDS_RUN)
+                rg = lds_read_run(lds_rg, r_off + d_idx, RUNS)
+                lq = lds_read_run(lds_lq, l_off + d_idx, RUNS)
+                lk = lds_read_run(lds_lk, l_off + d_idx, RUNS)
+                for w in range_constexpr(LDS_RUN):
+                    val_qk = math_dialect.fma(lq[w], rg[w], val_qk)
+                    val_kk = math_dialect.fma(lk[w], rg[w], val_kk)
 
             if is_diag:
                 # o_t reads the POST-update state, so Aqk keeps its diagonal;

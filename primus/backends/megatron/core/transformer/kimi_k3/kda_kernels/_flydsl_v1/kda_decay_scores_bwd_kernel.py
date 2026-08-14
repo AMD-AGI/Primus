@@ -133,12 +133,23 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._flydsl_v1.kd
     SUPPORTED_K,
     _llvm_ptr_ty,
     _nat_exp,
+    lds_runs,
 )
 
-# `d` threads per row group. 32 is the largest that keeps `MR = SB/TR = 2`, i.e.
-# two accumulator rows per thread, which is what makes the inner loop read
-# `NR + 2*MR` LDS words per `2*MR*NR` FMAs (ratio 2.0 at K_DIM = 128) instead of
-# the 0.67 the forward kernel's one-output-element-per-thread mapping gets.
+# `d` threads per row group, which fixes the accumulator tile: `TR = 256/TD`
+# threads down the rows, `MR = SB/TR` rows and `NR = KD/TD` channels per thread.
+# Swept at production geometry over `TD in {16, 32, 64, 128}` x
+# `waves_per_eu in {1, 2, 4}` (`bench/tune_kernels.py`, every setting bit-equal):
+#
+#     TD          16     32     64    128
+#     best us   1705   1698   1801   2992
+#
+# 32 wins, so the shipped value does not change; every setting is bit-equal.
+# What the sweep rules out is worth as much as what it picks: 16 through 64 land
+# within 6 % of each other, so **register pressure and occupancy are not this
+# kernel's problem** — the one large effect is 128, which collapses to `NR = 1`
+# and loses the wide LDS access below entirely (1.8x). `waves_per_eu` moved from
+# 2 to 4 for 2 %.
 THREADS_D = 32
 
 __all__ = ["build_kda_decay_scores_bwd", "supports_bwd_geometry", "BLOCK_SIZE", "SUB_BLOCK"]
@@ -164,7 +175,7 @@ def supports_bwd_geometry(chunk_size: int, k_dim: int):
 def build_kda_decay_scores_bwd(
     chunk_size: int,
     k_dim: int,
-    waves_per_eu: int = 2,
+    waves_per_eu: int = 4,  # swept with THREADS_D; see the note above it
     owned_blocks=None,
 ):
     """Build the launcher for one ``(chunk_size, k_dim)`` geometry.
@@ -203,6 +214,10 @@ def build_kda_decay_scores_bwd(
     # staging mapping: thread -> (one channel, FRPT rows)
     FROW = BLOCK_SIZE // KD
     FRPT = SB // FROW
+    # How to cover the thread's NR consecutive channels with the widest legal LDS
+    # accesses. Resolved here because the traced body may only walk a ready-made
+    # list; see :func:`..kda_decay_scores_kernel.lds_runs`.
+    NR_RUNS = lds_runs(NR)
 
     # +4: the contraction reads channel `d` of 16 rows at once, and a bare K_DIM
     # stride would put all 16 in one LDS bank for any K_DIM divisible by 32.
@@ -285,6 +300,24 @@ def build_kda_decay_scores_bwd(
             v = vector.load_op(vec1_f32, lds, [elem_idx])
             return vector.extract(v, static_position=[0], dynamic_position=[])
 
+        def lds_read_run(lds, base_idx):
+            """The thread's ``NR`` **consecutive** channels, in as few accesses as possible.
+
+            The contraction's ``NR`` channel reads are what this kernel spends
+            most of its LDS instructions on, and with ``my_d`` contiguous (see
+            below) they are adjacent, so they go out as ``ds_read_b128`` instead
+            of ``NR`` separate ``ds_read_b32``. Alignment holds because
+            ``STRIDE = KD + 4`` makes every row start 16-byte aligned and
+            ``my_d[0] = acc_d · NR`` is a multiple of ``NR``.
+            """
+            out = []
+            for ri in range_constexpr(len(NR_RUNS)):
+                off, width = NR_RUNS[ri]
+                vec = vector.load_op(T.vec(width, f32), lds, [base_idx + arith.index(off)])
+                for j in range_constexpr(width):
+                    out.append(vector.extract(vec, static_position=[j], dynamic_position=[]))
+            return out
+
         def lds_write(lds, elem_idx, val):
             vector.store(vector.from_elements(vec1_f32, [val]), lds, [elem_idx])
 
@@ -316,7 +349,16 @@ def build_kda_decay_scores_bwd(
         acc_d = tid % arith.index(TD)
         acc_r = tid // arith.index(TD)
         my_row = [acc_r + arith.index(m * TR) for m in range_constexpr(MR)]
-        my_d = [acc_d + arith.index(n * TD) for n in range_constexpr(NR)]
+        # Thread `acc_d` owns `NR` **consecutive** channels, not `NR` channels
+        # strided by `TD`. Both mappings cover the same channels and produce the
+        # same sums in the same order, so the output is bit-identical -- but only
+        # this one makes the `NR` reads of each contraction adjacent, so they
+        # become one `ds_read_b128` (see `lds_read_run`), and makes the `cg`
+        # loads and the three output stores `global_*_dwordx4`. The strided
+        # mapping is the natural one to write and it is why this kernel spent 5.9x
+        # the forward kernel's time for 2x its arithmetic.
+        my_d = [acc_d * arith.index(NR) + arith.index(n) for n in range_constexpr(NR)]
+        my_d0 = acc_d * arith.index(NR)
 
         def zeros():
             return [[zero_f for _ in range_constexpr(NR)] for _ in range_constexpr(MR)]
@@ -389,7 +431,7 @@ def build_kda_decay_scores_bwd(
             """``t[r,d] += Σ_c dA[r,c] · lds_r[c,d]`` — the row owner's direction."""
             for c in range_constexpr(SB):
                 ci = arith.index(c)
-                bv = [lds_read(lds_r, ci * I_STRIDE + my_d[n]) for n in range_constexpr(NR)]
+                bv = lds_read_run(lds_r, ci * I_STRIDE + my_d0)
                 for m in range_constexpr(MR):
                     ga = lds_read(lds_ga, my_row[m] * I_DSTRIDE + ci)
                     gk = lds_read(lds_gk, my_row[m] * I_DSTRIDE + ci)
@@ -409,8 +451,8 @@ def build_kda_decay_scores_bwd(
             """
             for ro in range_constexpr(SB):
                 ri = arith.index(R_ORDER[ro])
-                qv = [lds_read(lds_q, ri * I_STRIDE + my_d[n]) for n in range_constexpr(NR)]
-                kv = [lds_read(lds_k, ri * I_STRIDE + my_d[n]) for n in range_constexpr(NR)]
+                qv = lds_read_run(lds_q, ri * I_STRIDE + my_d0)
+                kv = lds_read_run(lds_k, ri * I_STRIDE + my_d0)
                 for m in range_constexpr(MR):
                     ga = lds_read(lds_ga, ri * I_DSTRIDE + my_row[m])
                     gk = lds_read(lds_gk, ri * I_DSTRIDE + my_row[m])

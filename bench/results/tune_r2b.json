@@ -1,0 +1,106 @@
+{
+  "shape": [
+    1,
+    4096,
+    96,
+    128,
+    128
+  ],
+  "chunk": 64,
+  "scores_fwd": [
+    {
+      "waves_per_eu": 1,
+      "us": 382.4850022792816,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 2,
+      "us": 370.0050115585327,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 4,
+      "us": 372.763991355896,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 8,
+      "us": 373.20399284362793,
+      "max_abs_vs_ref": 0.0
+    }
+  ],
+  "scores_bwd": [
+    {
+      "threads_d": 16,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1950.9450197219849
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1951.8250226974487
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1678.7810325622559
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1748.2620477676392
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1745.542049407959
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1733.8229417800903
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1813.4629726409912
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1814.663052558899
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 2705.7950496673584
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 3225.0421047210693
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 3024.678945541382
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 4563.21907043457
+    }
+  ]
+}

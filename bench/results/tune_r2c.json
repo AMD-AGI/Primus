@@ -1,0 +1,106 @@
+{
+  "shape": [
+    1,
+    4096,
+    96,
+    128,
+    128
+  ],
+  "chunk": 64,
+  "scores_fwd": [
+    {
+      "waves_per_eu": 1,
+      "us": 369.5650100708008,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 2,
+      "us": 367.76500940322876,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 4,
+      "us": 373.1650114059448,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 8,
+      "us": 364.64500427246094,
+      "max_abs_vs_ref": 0.0
+    }
+  ],
+  "scores_bwd": [
+    {
+      "threads_d": 16,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1952.4630308151245
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1952.7039527893066
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1681.5799474716187
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1745.0610399246216
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1745.6209659576416
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1730.0610542297363
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1815.302014350891
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1814.3819570541382
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 2703.874111175537
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 3229.99906539917
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 3025.676965713501
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 4559.135913848877
+    }
+  ]
+}

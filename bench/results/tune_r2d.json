@@ -1,0 +1,106 @@
+{
+  "shape": [
+    1,
+    4096,
+    96,
+    128,
+    128
+  ],
+  "chunk": 64,
+  "scores_fwd": [
+    {
+      "waves_per_eu": 1,
+      "us": 358.04399847984314,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 2,
+      "us": 365.16401171684265,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 4,
+      "us": 367.3250079154968,
+      "max_abs_vs_ref": 0.0
+    },
+    {
+      "waves_per_eu": 8,
+      "us": 359.60400104522705,
+      "max_abs_vs_ref": 0.0
+    }
+  ],
+  "scores_bwd": [
+    {
+      "threads_d": 16,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1941.264033317566
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1943.984031677246
+    },
+    {
+      "threads_d": 16,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1704.6610116958618
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1732.0619821548462
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1730.700969696045
+    },
+    {
+      "threads_d": 32,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 1698.0609893798828
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 1800.6229400634766
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 1800.6629943847656
+    },
+    {
+      "threads_d": 64,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 2700.793981552124
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 1,
+      "max_rel_vs_ref": 0.0,
+      "us": 3235.2399826049805
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 2,
+      "max_rel_vs_ref": 0.0,
+      "us": 2991.7171001434326
+    },
+    {
+      "threads_d": 128,
+      "waves_per_eu": 4,
+      "max_rel_vs_ref": 0.0,
+      "us": 4471.6949462890625
+    }
+  ]
+}

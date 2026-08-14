@@ -200,6 +200,108 @@ but not implemented here:
   `operation not permitted when stream is capturing` in the backward on this
   image, and a failed capture does not unwind — it wedged a node for 34 minutes.
 
+## 5b. Round 2: the kernel bodies. Two negative results, and where the gap really is
+
+Round 1 removed the glue; §5 said the only way past ~0.9× is faster kernels. Round
+2 went after them and **did not move the end-to-end number**. What it produced
+instead is a decomposition that says exactly why, and it is worth more than the
+2 % it bought.
+
+### What was tried
+
+**A build-parameter sweep** (`bench/tune_kernels.py`), every configuration timed
+on the operands the real assembly hands the kernel and checked **bit-equal**
+against the shipped one — these are scheduling parameters, so anything but
+bit-equality is a bug, not a tradeoff.
+
+| kernel | swept | result |
+| --- | --- | --- |
+| `kda_decay_scores` | `waves_per_eu ∈ {1,2,4,8}` | 358–367 µs, no consistent winner across four runs. Left at 2. |
+| `kda_decay_scores_bwd` | `THREADS_D ∈ {16,32,64,128}` × `waves_per_eu ∈ {1,2,4}` | 1698 (32, 4) / 1705 (16, 4) / 1801 (64) / **2992 (128)**. Took `waves_per_eu = 4`: **2 %**. |
+| `kda_state_sweep` | `block_v ∈ {16,32,64}` × `waves_per_eu ∈ {1,2,4}` | `block_v = 16` confirmed, 737 µs against 912 (32) and 956 (64); `waves_per_eu` under 1 %. No change. |
+
+**Negative result 1: register pressure and occupancy are not these kernels'
+problem.** `THREADS_D` sets the score adjoint's whole accumulator tile — 16
+through 64 give it 1, 2 or 4 rows and 8, 4 or 2 channels per thread, i.e. 8 to 32
+accumulator registers before temporaries — and every one of them lands within
+6 %. The single large effect is 128, which collapses the tile to one channel and
+loses the wide LDS access below (1.8×).
+
+**Explicit LDS vectorisation** of both score kernels' contractions: read four
+consecutive channels per access (`ds_read_b128`) instead of one, which required
+the thread→channel mapping in the adjoint to become **contiguous** rather than
+strided by `THREADS_D`. Bit-identical at every geometry, 49/50 unit tests pass
+(the 50th is the fla-0.5.2 one from §2). Worth 2–4 % on each kernel.
+
+**Negative result 2: the compiler was already doing it.** The forward score
+kernel is exactly LDS-bandwidth bound — 3 LDS words per 2 FMAs, 24 GB per call,
+310 µs predicted at 78 TB/s against 294 µs measured — so §5 expected ~30 % from
+this. It gave 2–4 %, because LLVM was already merging the adjacent
+`ds_read_b32`. The prediction was right about the *bound* and wrong about the
+*headroom*.
+
+Net at the end-to-end level: **nothing measurable.** ~75 µs of kernel time on a
+10200 µs fwd+bwd is below this benchmark's run-to-run spread; the per-shape
+fwd+bwd ratios after round 2 are 0.43 / 0.44 / 0.42 / 0.41 / 0.39 against round
+1's 0.41 / 0.44 / 0.42 / 0.42 / 0.39.
+
+### Where the forward gap actually is, stage by stage
+
+This is the useful output. `[1,4096,96,128,128]` bf16, on-device, both backends
+in the same run, our 19 launches grouped against fla's 8 by what they compute:
+
+| stage | ours µs | `fla` µs | |
+| --- | --- | --- | --- |
+| intra-chunk scores `Aqk`, `Akk` | 295 | 407 | **we are 1.4× faster** |
+| `(I − L)^{-1}` triangular solve | 54 | 190 | **we are 3.5× faster** |
+| operand prep + `W`, `U`, output GEMMs | 542 | 370 | 1.5× slower |
+| inter-chunk state sweep | 542 | 234 | **2.3× slower** |
+| **`[NB,C,D]` fp32 layout + within-chunk cumsum + β products** | **492** | **52** | **9.5× slower** |
+| total | 1925 | 1253 | 0.65× |
+
+**We already beat `fla` on the two stages that are actually hard** — the
+block-referenced decay-weighted score matrices and the on-chip triangular solve,
+349 µs against 597 — and lose the forward on two things that are not kernel
+arithmetic at all:
+
+- **440 µs of the 672 µs gap is a layout contract.** Our kernels require fp32
+  contiguous `[NB, C, D]` operands, so `q`, `k`, `v` are transposed and widened
+  into 200 MB tensors and `cg` is materialised; `fla`'s kernels read the bf16
+  `[B, T, H, D]` input in place and its cumsum kernel costs 52 µs. Nothing about
+  this is FlyDSL's doing — it is what the four kernels ask for.
+- **308 µs is one kernel**, the state sweep, at 2.3× `fla`'s.
+
+### So: is >1.0× reachable, and what would it take
+
+On the arithmetic above, yes, and only these two things:
+
+| | forward µs | vs `fla` 1253 |
+| --- | --- | --- |
+| today | 1925 | 0.65× |
+| + kernels read bf16 `[B,T,H,D]` in place (removes ~440) | 1485 | 0.84× |
+| + state sweep at `fla`'s 234 µs (removes 308) | 1177 | **1.06×** |
+
+The first is a contained but real change: teach `kda_decay_scores`,
+`kda_chunk_prep` and `kda_decay_scores_bwd` to take a bf16 base pointer with the
+`[B, T, H, D]` stride and convert on load, which is an address-arithmetic and
+load-type change in their fill phases, not a new algorithm. It also pays twice,
+because the backward recomputes the assembly. A cheaper half-measure with **zero
+accuracy cost** is to keep the `[NB, C, D]` layout but store `q`/`k` in bf16
+— they arrive bf16, so the fp32 copy adds no information — which halves that
+traffic for a one-line change per kernel plus a load-type change.
+
+The second is a genuine kernel investigation and the one place where "make the
+kernel faster" is still the right instruction.
+
+The **backward** is not reachable the same way. Its 8233 µs against `fla`'s 3183
+is: our score adjoint 1738 (against `fla`'s entire intra-backward at 1250), two
+sweeps 1256, the recompute's forward kernels 550, **1715 µs in fifteen Tensile
+batched GEMMs `fla` never issues at all**, and ~1750 of remaining glue and
+gradient accumulation. Closing it means fusing those GEMMs into the kernels, i.e.
+hand-writing the backward the way `fla` does — which is the piece of work every
+earlier pass also concluded was the price, and it is larger than everything in
+rounds 1 and 2 together.
+
 ## 6. What any of this is worth end to end — the honest ceiling
 
 From the real 8L-official run (`/home/botahu/primus_output/8L_1318_r%t.out`,
