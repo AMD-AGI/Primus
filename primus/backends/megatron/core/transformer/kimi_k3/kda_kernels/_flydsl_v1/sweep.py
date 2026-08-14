@@ -233,6 +233,9 @@ def _sweep_kernel(
     emit_rq: bool,
     emit_states: bool,
     mode: str,
+    aqk: Optional[torch.Tensor] = None,
+    scale: float = 1.0,
+    emit_t: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Launch the fused sweep. Shapes and dtypes as in :func:`state_sweep_torch`."""
     nb, _, k_dim = amat.shape
@@ -240,6 +243,7 @@ def _sweep_kernel(
     nbh = nb // num_chunks
     dev, op_dtype = amat.device, amat.dtype
 
+    fuse_out = aqk is not None
     launch = _get_kernel(
         chunk_size=chunk,
         k_dim=k_dim,
@@ -252,13 +256,34 @@ def _sweep_kernel(
         sgn_t=float(sgn_t),
         sgn_x=float(sgn_x),
         reverse=bool(reverse),
+        fuse_out=fuse_out,
+        emit_t=bool(emit_t),
+        scale=float(scale) if fuse_out else 1.0,
     )
 
     def _dummy(dtype):
         return torch.empty(1, dtype=dtype, device=dev)
 
-    rq = torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev) if emit_rq else _dummy(torch.float32)
-    t_all = torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
+    # With the output fused in, `Rq` stays in registers and `O` is what comes
+    # out; `T` still has to be written when a gradient wants it.
+    want_rq_buf = emit_rq and not fuse_out
+    rq = (
+        torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
+        if want_rq_buf
+        else _dummy(torch.float32)
+    )
+    o_out = (
+        torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
+        if fuse_out
+        else _dummy(torch.float32)
+    )
+    # `T` only reaches memory when the backward wants it; on the fused-output
+    # forward it stays in LDS and never leaves the kernel.
+    t_all = (
+        torch.empty(nb, chunk, v_dim, dtype=torch.float32, device=dev)
+        if emit_t
+        else _dummy(torch.float32)
+    )
     states = (
         torch.empty(nb, k_dim, v_dim, dtype=torch.float32, device=dev)
         if emit_states
@@ -277,10 +302,15 @@ def _sweep_kernel(
         t_all.reshape(-1),
         states.reshape(-1),
         s_final.reshape(-1),
+        (aqk if fuse_out else _dummy(torch.float32)).reshape(-1),
+        o_out.reshape(-1),
         int(nbh),
         int(num_chunks),
     )
-    return (rq if emit_rq else None), t_all, (states if emit_states else None), s_final
+    # `rq` is the first slot of the return tuple in both modes: unfused it is the
+    # Rq the caller still has to combine, fused it is already the chunk output.
+    first = o_out if fuse_out else (rq if emit_rq else None)
+    return first, t_all, (states if emit_states else None), s_final
 
 
 def _gemm_scaled(
@@ -349,9 +379,14 @@ def _sweep_bwd_operands(
 
 
 def _run_sweep(use_kernel: bool, mode: str, op_dtype: torch.dtype, *, emit_states: bool, **kw):
-    """Kernel when available, twin otherwise, with one calling convention."""
+    """Kernel when available, twin otherwise, with one calling convention.
+
+    The fused-output arguments are kernel-only; the torch twin never sees them and
+    the caller combines `Rq` and `T` itself on that path.
+    """
+    fused = {k: kw.pop(k) for k in ("aqk", "scale", "emit_t") if k in kw}
     if use_kernel:
-        return _sweep_kernel(mode=mode, emit_states=emit_states, **kw)
+        return _sweep_kernel(mode=mode, emit_states=emit_states, **kw, **fused)
     rq, t_all, states, s_final = state_sweep_torch(op_dtype=op_dtype, **kw)
     return rq, t_all, (states if emit_states else None), s_final
 
@@ -392,6 +427,12 @@ class _FusedSweep(torch.autograd.Function):
             if zero_state
             else s0.float().contiguous()
         )
+        # The chunk output is computed inside the kernel when it can be: `Rq`
+        # then never leaves registers and `T` only reaches memory if the backward
+        # wants it, which `bench/probe_sweep_bound.py` priced at 179 µs of the
+        # loop's 502 plus the 214 µs `baddbmm` this replaces. The torch twin has no
+        # fused path, so it keeps the two-step form.
+        fuse = bool(use_kernel) and mode == "mfma"
         rq, t_all, states, s_final = _run_sweep(
             use_kernel,
             mode,
@@ -408,6 +449,11 @@ class _FusedSweep(torch.autograd.Function):
             e_in=None,
             reverse=False,
             emit_rq=True,
+            **(
+                {"aqk": aqk.contiguous(), "scale": scale, "emit_t": want_grad}
+                if fuse
+                else {}
+            ),
         )
         # O_n = scale * (Aqk_n @ T_n + Rq_n) -- per chunk, so one batched GEMM
         # over all NC. In fp32: `aqk` carries the intra-chunk term and is the one
@@ -419,7 +465,8 @@ class _FusedSweep(torch.autograd.Function):
         # carried state is not a function of `q` at all, so scaling here is
         # exactly equivalent -- and free, where scaling `q` cost a 400 MB pass
         # in the forward and another in the backward's recompute.
-        o = torch.baddbmm(rq, aqk.float(), t_all, beta=scale, alpha=scale)
+        # `rq` *is* the output on the fused path.
+        o = rq if fuse else torch.baddbmm(rq, aqk.float(), t_all, beta=scale, alpha=scale)
 
         ctx.save_for_backward(qw, aqk, kg, dec, t_all, states)
         ctx.cfg = (num_chunks, use_kernel, mode, op_dtype, chunk, zero_state, scale)

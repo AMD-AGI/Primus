@@ -200,6 +200,9 @@ def build_kda_state_sweep(
     reverse: bool = False,
     waves_per_eu: int = 1,
     probe: str = "full",
+    fuse_out: bool = False,
+    emit_t: bool = True,
+    scale: float = 1.0,
 ):
     """Build the launcher for one sweep configuration.
 
@@ -226,6 +229,27 @@ def build_kda_state_sweep(
     ``Sout``    ``[NB, K, V]``        1 element when ``emit_states`` is false
     ``Sf``      ``[B*H, K, V]``
     ==========  ====================  ==========================================
+
+    ``fuse_out`` adds ``Aqk`` ``[NB, C, C]`` and ``Oout`` ``[NB, C, V]`` and makes
+    the kernel emit the chunk output itself::
+
+        O = scale * (Aqk @ T + Rq)
+
+    which is what the caller otherwise spends a separate 214 µs `baddbmm` on,
+    after ``Rq`` and ``T`` have each made a 200 MB round trip through HBM.
+    `bench/probe_sweep_bound.py` priced those two stores at **179 µs of the
+    loop's 502**, the largest single item in it. Fused, ``Rq`` never leaves
+    registers — group 1 and the output phase share an accumulator layout, so its
+    four values per thread simply stay live across the barrier — and ``T`` only
+    reaches memory when ``emit_t`` says a gradient wants it.
+
+    The output contraction is **fp32 VALU, not MFMA**, because ``Aqk`` is the one
+    operand this kernel has never rounded (`state_sweep`'s docstring: keeping it
+    fp32 is what took the bf16 output error from 4.5e-3 back to 2.6e-3) and there
+    is no usable fp32 MFMA in this flydsl build. At ``C=64, BV=16`` it is 256 FMAs
+    per thread per chunk against a VALU peak of ~78 TFLOP/s, i.e. ~80 µs of the
+    whole sweep — cheaper than the 214 µs library GEMM it replaces, because ``T``
+    is already in LDS.
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
@@ -235,6 +259,11 @@ def build_kda_state_sweep(
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}")
     if probe not in PROBES:
         raise ValueError(f"probe must be one of {PROBES}; got {probe!r}")
+    if fuse_out and mode != "mfma":
+        # `group_out` reads group 1's Rq out of registers by accumulator key, and
+        # only the MFMA mapping shares that key between the two phases; `group_valu`
+        # indexes its accumulators by (block, row, v) instead.
+        raise ValueError("fuse_out requires mode='mfma'")
 
     C, KD, VD, BV = int(chunk_size), int(k_dim), int(v_dim), int(block_v)
     reason = supports_sweep_geometry(C, KD, VD, BV)
@@ -248,6 +277,7 @@ def build_kda_state_sweep(
     NVL = BV // VPT  # VALU: threads spanning one V block
     NG = BLOCK_SIZE // NVL  # VALU: concurrent output rows
     SPILL = (KD * BV) // BLOCK_SIZE  # LDS<->global state copy steps
+    AQ_SPILL = (C * C) // BLOCK_SIZE  # global->LDS Aqk staging steps
 
     # Per-mode loop extents: how many "row units" a group covers and how long
     # its contraction is. Resolved here, at build scope, so the traced body needs
@@ -263,12 +293,16 @@ def build_kda_state_sweep(
 
     # LDS: the state and T, both with V contiguous so a 16-lane group covers one
     # whole [*, BV] row without a bank conflict.
-    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}_{probe}")
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}_{probe}_{int(fuse_out)}")
     lds_s_off = allocator._align(allocator.ptr, 16)
     lds_t_off = allocator._align(lds_s_off + KD * BV * 4, 16)
-    allocator.ptr = lds_t_off + C * BV * 4
+    lds_a_off = allocator._align(lds_t_off + C * BV * 4, 16)
+    # 16 KB at C = 64. Every V-block workgroup of a (b, h) stages the same tile,
+    # which is the same 8x redundancy the A operand already has and which L2
+    # absorbs the same way (measured: 112 us for the A operand's 201 MB).
+    allocator.ptr = lds_a_off + (C * C * 4 if fuse_out else 0)
 
-    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1], name=f"kda_state_sweep_{mode}_{probe}")
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1], name=f"kda_state_sweep_{mode}_{probe}{"_o" if fuse_out else ""}")
     def kda_state_sweep_kernel(
         Amat: fx.Tensor,
         Yc: fx.Tensor,
@@ -280,6 +314,8 @@ def build_kda_state_sweep(
         Tout: fx.Tensor,
         Sout: fx.Tensor,
         Sf: fx.Tensor,
+        Aqk: fx.Tensor,
+        Oout: fx.Tensor,
         nc: fx.Int32,
     ):
         f32 = T.f32
@@ -300,10 +336,13 @@ def build_kda_state_sweep(
         t_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Tout)
         so_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Sout)
         sf_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Sf)
+        aq_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Aqk)
+        o_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), Oout)
 
         base = allocator.get_base()
         lds_s = SmemPtr(base, lds_s_off, f32, shape=(KD * BV,)).get()
         lds_t = SmemPtr(base, lds_t_off, f32, shape=(C * BV,)).get()
+        lds_aqk = SmemPtr(base, lds_a_off, f32, shape=(max(C * C, 1),)).get()
 
         # ------------------------------- memory -------------------------------
         def gep(bptr, elem_idx, elem_ty):
@@ -391,13 +430,24 @@ def build_kda_state_sweep(
 
         _ST = {True: lambda v, p, e: None, False: store_f32}[probe == "nostore"]
 
-        def sink_rq(nb, row, v_lds, val, pre):
+        c_scale = arith.constant(float(scale), type=f32)
+        # (mi, nt, s) -> group 1's Rq accumulator, kept live across the barrier.
+        # Group 1 and the output phase share the accumulator layout, so the key
+        # identifies the same (row, v) in both and no transpose is needed.
+        _RQ_REG = {}
+
+        def sink_rq(nb, row, v_lds, val, pre, key):
             _ST(val, rq_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
 
-        def sink_t(nb, row, v_lds, val, pre):
+        def sink_rq_reg(nb, row, v_lds, val, pre, key):
+            _RQ_REG[key] = val
+
+        _ST_T = {True: _ST, False: lambda v, p, e: None}[bool(emit_t)]
+
+        def sink_t(nb, row, v_lds, val, pre, key):
             off = (nb * I_C + row) * I_VD + v0 + v_lds
             tv = math_dialect.fma(c_sgn_t, val, pre)
-            _ST(tv, t_ptr, off)
+            _ST_T(tv, t_ptr, off)
             lds_put(lds_t, row * I_BV + v_lds, tv)
 
         def _state_core(nb, kk, v_lds, val, dec):
@@ -406,17 +456,20 @@ def build_kda_state_sweep(
                 dec, lds_get(lds_s, li), arith.MulFOp(c_sgn_x, val, fastmath=fm).result
             )
 
-        def _sink_state_plain(nb, kk, v_lds, val, pre):
+        def _sink_state_plain(nb, kk, v_lds, val, pre, key):
             li, upd = _state_core(nb, kk, v_lds, val, pre)
             lds_put(lds_s, li, upd)
 
-        def _sink_state_with_e(nb, kk, v_lds, val, pre):
+        def _sink_state_with_e(nb, kk, v_lds, val, pre, key):
             li, upd = _state_core(nb, kk, v_lds, val, pre)
             e = load_f32(e_ptr, (nb * I_KD + kk) * I_VD + v0 + v_lds)
             lds_put(lds_s, li, arith.AddFOp(upd, e, fastmath=fm).result)
 
         sink_state = {True: _sink_state_with_e, False: _sink_state_plain}[has_e]
-        _SINKS = {"rq": (sink_rq, pre_none), "t": (sink_t, pre_y)}
+        _SINKS = {
+            "rq": ({True: sink_rq_reg, False: sink_rq}[bool(fuse_out)], pre_none),
+            "t": (sink_t, pre_y),
+        }
         G1_BLOCKS = [(r0, *_SINKS[w]) for r0, w in G1_PHASES]
 
         # ------------------- operand builds, and the probe variants -------------
@@ -481,6 +534,7 @@ def build_kda_state_sweep(
                                 v_lds,
                                 vector.extract(acc[b], static_position=[s], dynamic_position=[]),
                                 pre[b][s],
+                                (mi, nt, s),
                             )
 
         def group_valu(nb, ap, a_rows, a_inner, nrow_units, klen, lds_src, blocks):
@@ -520,9 +574,49 @@ def build_kda_state_sweep(
                         v_lo + arith.index(j),
                         acc[(bi, ri)][j],
                         pre[(bi, ri, j)],
+                        (bi, ri, j),
                     )
 
         group = {"mfma": group_mfma, "valu": group_valu}[mode]
+
+        # --------------------- the fused output phase -------------------------
+        def fill_aqk(nb):
+            for i in range_constexpr(AQ_SPILL):
+                off = tid + arith.index(i * BLOCK_SIZE)
+                lds_put(lds_aqk, off, load_f32(aq_ptr, nb * arith.index(C * C) + off))
+
+        def group_out(nb):
+            """``O = scale * (Aqk @ T + Rq)`` in fp32, on the MFMA accumulator map.
+
+            ``Aqk`` stays fp32 — it is the operand this kernel has never rounded —
+            so the contraction is plain FMA. Lanes 0-15 of a wave share a row (the
+            row depends on ``lane // 16``), so the ``Aqk`` read is an LDS
+            broadcast; the ``T`` read is 16 consecutive words, which is
+            conflict-free, and it is reused across the four accumulator rows.
+            """
+            for mi in range_constexpr(G1_ROWS // NWAVES):
+                mt = wave + arith.index(mi * NWAVES)
+                for nt in range_constexpr(NNT):
+                    v_lds = arith.index(nt * MI_TILE) + frag_row
+                    rows = [mt * I_MI + acc_m0 + arith.index(sx) for sx in range_constexpr(ACC)]
+                    acc = [arith.constant(0.0, type=f32) for _ in range_constexpr(ACC)]
+                    for cc in range_constexpr(C):
+                        ci = arith.index(cc)
+                        tv = lds_get(lds_t, ci * I_BV + v_lds)
+                        for sx in range_constexpr(ACC):
+                            acc[sx] = math_dialect.fma(
+                                lds_get(lds_aqk, rows[sx] * I_C + ci), tv, acc[sx]
+                            )
+                    for sx in range_constexpr(ACC):
+                        tot = arith.AddFOp(acc[sx], _RQ_REG[(mi, nt, sx)], fastmath=fm).result
+                        store_f32(
+                            arith.MulFOp(tot, c_scale, fastmath=fm).result,
+                            o_ptr,
+                            (nb * I_C + rows[sx]) * I_VD + v0 + v_lds,
+                        )
+
+        _FILL_AQK = {True: fill_aqk, False: lambda nb: None}[bool(fuse_out)]
+        _GROUP_OUT = {True: group_out, False: lambda nb: None}[bool(fuse_out)]
 
         # ------------------------- state <-> global ---------------------------
         def copy_state(bptr, row_base, scale, to_lds):
@@ -554,8 +648,12 @@ def build_kda_state_sweep(
             nb = nb0 + chunk_of(it)
             _BAR()
             store_states(nb)
+            # `Aqk` does not depend on this chunk's LDS, so it is staged alongside
+            # group 1 and the barrier below covers both.
+            _FILL_AQK(nb)
             group(nb, a_ptr, I_MOA, I_KD, G1_ROWS, G1_LEN, lds_s, G1_BLOCKS)
             _BAR()
+            _GROUP_OUT(nb)
             group(nb, x_ptr, I_KD, I_C, G2_ROWS, G2_LEN, lds_t, [(0, sink_state, pre_dec)])
 
         gpu.barrier()
@@ -573,6 +671,8 @@ def build_kda_state_sweep(
         Tout: fx.Tensor,
         Sout: fx.Tensor,
         Sf: fx.Tensor,
+        Aqk: fx.Tensor,
+        Oout: fx.Tensor,
         nbh: fx.Int32,
         nc: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -583,7 +683,7 @@ def build_kda_state_sweep(
             allocator.finalize()
 
         grid_x = arith.index_cast(T.index, nbh) * arith.index(NVB)
-        launcher = kda_state_sweep_kernel(Amat, Yc, Xt, Dec, Ein, S0, Rq, Tout, Sout, Sf, nc)
+        launcher = kda_state_sweep_kernel(Amat, Yc, Xt, Dec, Ein, S0, Rq, Tout, Sout, Sf, Aqk, Oout, nc)
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, int(waves_per_eu))

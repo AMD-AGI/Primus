@@ -939,6 +939,9 @@ def test_kda_flydsl_state_sweep_block_v_choice_does_not_change_the_answer():
         launch(
             amat.reshape(-1), yc.reshape(-1), xt.reshape(-1), dec.reshape(-1), dummy,
             s0.reshape(-1), rq.reshape(-1), t_all.reshape(-1), dummy, sf.reshape(-1),
+            # Aqk and Oout: unused with fuse_out off, which is what this test wants
+            # -- it is pinning that block_v does not change the recurrence.
+            dummy, dummy,
             int(nbh), int(nc),
         )
         if ref is None:
