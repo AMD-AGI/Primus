@@ -14,6 +14,38 @@ import pytest
 from tests.utils import PrimusUT
 
 
+class TestPrimusTurboFP4Selection:
+    """Verify TE FP4 is bypassed only for explicit Turbo FP4 autocast."""
+
+    def test_requires_turbo_fp4_autocast(self, monkeypatch):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core import fp4_utils
+
+        monkeypatch.setattr(fp4_utils, "HAVE_TURBO", True)
+        monkeypatch.setattr(
+            global_vars,
+            "get_args",
+            lambda: SimpleNamespace(enable_primus_turbo=True, use_turbo_fp4_autocast=False),
+        )
+
+        assert not fp4_utils._primus_turbo_enabled()
+
+    def test_enabled_when_both_flags_are_set(self, monkeypatch):
+        import megatron.training.global_vars as global_vars
+
+        from primus.backends.megatron.core import fp4_utils
+
+        monkeypatch.setattr(fp4_utils, "HAVE_TURBO", True)
+        monkeypatch.setattr(
+            global_vars,
+            "get_args",
+            lambda: SimpleNamespace(enable_primus_turbo=True, use_turbo_fp4_autocast=True),
+        )
+
+        assert fp4_utils._primus_turbo_enabled()
+
+
 class TestMXFP4GradientStochasticRounding:
     """Verify Megatron and diffusion configs resolve the SR option correctly."""
 
