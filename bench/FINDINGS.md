@@ -547,6 +547,143 @@ accurate on every output**. What it would take to actually pass `fla` is a sweep
 that is 300 µs faster with the state recurrence still sequential, and this round
 found no candidate for it.
 
+## 5e. Round 5 — exploration: what the sweep is bound by, and every candidate priced
+
+An exploration round, no implementation. The sweep region is 43 % of the forward
+and the only stage whose removal would pass `fla` ("ratio if free" 1.12×), so it
+got the whole budget. Deliverable: an attribution by **deletion** and a verdict on
+each candidate. `bench/probe_sweep_bound.py` and `bench/probe_sweep_conc.py` are
+the probes; the kernel gained a `probe=` build parameter whose variants
+**deliberately compute the wrong answer** and are unreachable from any production
+path.
+
+### 1. Is the loop LDS-bound? No — and neither is it latency-bound
+
+Round 4 inferred "the loop is LDS-bound, not MFMA-bound" from `emit_rq=False`
+buying only 14 %. **Both halves of that inference are wrong.** Each row below
+deletes exactly one cost from the real kernel (`prod_T4096`, `block_v=16`):
+
+| variant | what it deletes | µs | saved | share |
+| --- | --- | --- | --- | --- |
+| `full` | — | 502 | — | — |
+| `lds1` | 7 of the 8 b-fragment LDS reads per MFMA | 499 | **2.9** | **0.6 %** |
+| `nobar` | both barriers in the chunk loop | 497 | 4.7 | 0.9 % |
+| `noy` | the `Yc` global load | 447 | 55 | 11 % |
+| `areuse` | ~3/4 of the A operand's global loads | 390 | 112 | 22 % |
+| `nostore` | the `Rq` and `T` global stores | **323** | **179** | **36 %** |
+
+**The LDS traffic is 0.6 % of this loop.** An 8× reduction in it — which is what a
+transposed or bf16 LDS layout would buy — is worth 3 µs. MFMA issue accounts for
+~8 µs by calculation (2.4e6 wave-MFMAs at one per 8 cycles). Barriers are 1 %.
+
+**It is global memory traffic: stores 36 %, A operand 22 %, `Yc` 11 % — 69 % of the
+loop between them**, and 70 % of it is attributed once MFMA is included.
+
+And it is *throughput*, not latency. `bench/probe_sweep_conc.py` holds the
+arithmetic fixed and varies only how many workgroups it is spread over:
+
+| workgroups | per CU | µs | ns per chunk-step |
+| --- | --- | --- | --- |
+| 768 (production, 96 × 64) | 3.0 | 502 | 10.22 |
+| 1536 | 6.0 | 496 | 10.08 |
+| 3072 | 12.0 | 494 | **10.06** |
+| 6144 | 24.0 | 497 | 10.11 |
+| 49152 | 192.0 | 614 | 12.50 |
+
+**An eight-fold increase in occupancy moves the cost per chunk-step by 1.6 %.** So
+"three workgroups per CU on a 64-step serial chain" — the story rounds 3 and 4
+worked from, and the reason the prefetch was tried — is not what limits this
+kernel either. That also kills the premise behind every "more parallelism"
+candidate, including the scan.
+
+### 2. Each candidate, priced
+
+**Candidate 1 — carry the state in registers instead of LDS. Falsified.** This was
+the most promising one on paper, and `fla` really does do it: its
+`chunk_gated_delta_rule_fwd_kernel_h_blockdim64` holds `h` as `b_h1..b_h4`,
+`[BV, 64]` fp32 register tiles carried across the whole chunk loop, with no LDS
+round trip and no barrier. But the measurement says the entire LDS exchange —
+reads *and* barriers — is **1.5 % of our loop**. There is nothing to win.
+Implementation cost would have been high (our group-2 accumulator layout and
+group-1 B-operand layout differ, so removing LDS needs cross-lane permutes), for
+7 µs.
+
+**Candidate 2 — larger chunk. Measured, 2.6× worse.** `chunk_size` is already a
+runtime argument, so this needed no code:
+
+| | forward µs |
+| --- | --- |
+| C = 64 | **1861** |
+| C = 128 | 4853 |
+
+Exactly what the arithmetic predicts: the serial chain halves, but the score
+matrices are `[C, C]` per chunk over `T/C` chunks so they grow as `T·C`, and the
+triangular solve as `T·C²`. Dismissed.
+
+**Candidate 3 — log-depth parallel scan. Dismissed by arithmetic.** Substituting
+`T_n = U_n − W_n S_n` makes the transition `S_{n+1} = A_n S_n + B_n` with
+`A_n = Diag(dec_n) − KG_nᵀ W_n` a **full `[K, K]` matrix**, so composition is
+`2K³ + 2K²V` against a direct step's three `C`-sized products:
+
+| | |
+| --- | --- |
+| direct | 38.7 GFLOP |
+| Blelloch scan (~2·NC compositions) | 103.1 GFLOP, **2.67×** |
+| new `[K,K]` `A` residency | 0.38 GB |
+| scan floor from `A` traffic alone | **228 µs** |
+| scan at an optimistic 300 TFLOP/s | **344 µs** |
+
+So its floor is 344–570 µs against today's 502 and `fla`'s 234. It buys
+parallelism, and §1 shows parallelism is worth 1.6 %. Dismissed.
+
+**Candidate 4 (mine) — fuse the output into the sweep so `Rq` and `T` never reach
+HBM.** The one candidate the measurements *support*. The stores are 36 % of the
+loop, and the output `baddbmm` that consumes them is a further 214 µs measured
+standalone. If the sweep kernel carried `Aqk` in LDS (a `[C, C]` fp32 tile, 16 KB)
+and emitted `O = scale·(Aqk @ T + Rq)` directly:
+
+| | µs |
+| --- | --- |
+| drop the `Rq` store | −90 |
+| drop the output `baddbmm` | −214 |
+| drop the `T` store (no-grad forward only; the backward needs it) | −90 |
+| add: read `Aqk` into the kernel | +40 |
+| **net** | **−354** |
+
+That is the forward at 1861 − 354 = **1507 against `fla`'s 1303 — 0.86×**. Real,
+measurement-backed, and **still short of 1.0×**. Implementation is a substantial
+extension of the sweep kernel (an `Aqk` LDS tile, an output phase, and the
+`emit_states`/grad-mode split), comparable to one of the earlier rounds.
+
+### 3. Verdict: no path to a 300 µs saving, so no path past `fla`
+
+The sweep must lose ~300 µs for the forward to pass `fla`. After this round:
+
+| candidate | value | basis |
+| --- | --- | --- |
+| state in registers | ~7 µs | measured (LDS is 1.5 % of the loop) |
+| larger chunk | −2990 µs | measured |
+| parallel scan | ≥ 0, floor above today's | arithmetic |
+| **fuse the output in** | **−354 µs of the forward** | measured components |
+| everything from rounds 2–4 | already taken or negative | — |
+
+Candidate 4 is the best available and it lands the forward at **0.86×**. Nothing
+found in this round closes the remaining 0.14, and the three ideas that could have
+been step changes are each closed by a measurement rather than by an opinion.
+
+**One honest gap.** At *identical* workload — `emit_rq=False`, which is exactly
+`fla`'s two products — we measure 434 µs against `fla`'s 234. So `fla` is 1.85×
+faster doing the same arithmetic on the same data, and **none of the six deletion
+probes locates that difference**: LDS, barriers, occupancy and MFMA are all ~1 %,
+and the traffic we can attribute is traffic `fla` also moves (it writes `h` and
+`v_new`, 603 MB, where we write 402). The remaining suspicion is the store
+*pattern* — at `block_v = 16` a wave's store covers four discontiguous 64-byte
+fragments of a 512-byte row stride, where `fla` at `BV = 64` writes 256-byte runs —
+but `block_v = 64` measures *worse* for us overall (715 µs), so that explanation
+does not survive its own test either. This is a gap in understanding, not a
+candidate, and it is the honest reason not to claim the door is provably shut:
+1.85× exists in `fla` and we cannot yet say why.
+
 ## 6. What any of this is worth end to end — the honest ceiling
 
 From the real 8L-official run (`/home/botahu/primus_output/8L_1318_r%t.out`,

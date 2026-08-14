@@ -126,6 +126,29 @@ VPT = 4  # "valu" mode: V columns per thread
 
 MODES = ("mfma", "valu")
 
+# Measurement-only variants of the chunk loop's inner contraction. **Every one of
+# them computes the wrong answer** — they exist so the loop's cost can be
+# attributed by deletion instead of by argument, which is how the two errors in
+# `bench/FINDINGS.md` §5c were found. Only `"full"` is reachable from any
+# production path; `bench/probe_sweep_bound.py` is the sole caller of the others.
+#
+# ``lds1``  the MFMA B fragment is built from **one** LDS read replicated
+#           ``LANE_K`` times instead of ``LANE_K`` strided reads. MFMA count,
+#           global loads and loop structure are untouched, so the delta is the
+#           b-fragment LDS traffic and nothing else.
+# ``areuse`` every ``ks`` step loads the **same** A fragment, so LICM collapses
+#           ``klen`` global loads into one. The delta is the A operand's global
+#           traffic.
+# ``nobar``  the two barriers are removed from the chunk loop. This races (the
+#           state and T are exchanged through LDS), so the answer is wrong -- but
+#           `fla` carries its state in *registers* across the whole loop and so
+#           has no barrier in it at all, and this is what that difference is worth.
+# ``nostore`` the Rq and T global stores are dropped (T still reaches LDS, so the
+#           recurrence still runs). Prices the loop's write traffic.
+# ``noy``    the Yc load is replaced by a constant. Prices the loop's read traffic
+#           on the one operand that is neither an MFMA operand nor the state.
+PROBES = ("full", "lds1", "areuse", "nobar", "nostore", "noy")
+
 __all__ = ["build_kda_state_sweep", "BLOCK_SIZE", "MODES", "supports_sweep_geometry"]
 
 
@@ -176,6 +199,7 @@ def build_kda_state_sweep(
     sgn_x: float = 1.0,
     reverse: bool = False,
     waves_per_eu: int = 1,
+    probe: str = "full",
 ):
     """Build the launcher for one sweep configuration.
 
@@ -209,6 +233,8 @@ def build_kda_state_sweep(
         raise RuntimeError(f"kda_state_sweep targets gfx950 (CDNA4); got {arch!r}")
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}")
+    if probe not in PROBES:
+        raise ValueError(f"probe must be one of {PROBES}; got {probe!r}")
 
     C, KD, VD, BV = int(chunk_size), int(k_dim), int(v_dim), int(block_v)
     reason = supports_sweep_geometry(C, KD, VD, BV)
@@ -237,12 +263,12 @@ def build_kda_state_sweep(
 
     # LDS: the state and T, both with V contiguous so a 16-lane group covers one
     # whole [*, BV] row without a bank conflict.
-    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}")
+    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"kda_sweep_smem_C{C}_K{KD}_V{BV}_{mode}_{probe}")
     lds_s_off = allocator._align(allocator.ptr, 16)
     lds_t_off = allocator._align(lds_s_off + KD * BV * 4, 16)
     allocator.ptr = lds_t_off + C * BV * 4
 
-    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1], name=f"kda_state_sweep_{mode}")
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1], name=f"kda_state_sweep_{mode}_{probe}")
     def kda_state_sweep_kernel(
         Amat: fx.Tensor,
         Yc: fx.Tensor,
@@ -352,19 +378,26 @@ def build_kda_state_sweep(
         def pre_none(nb, row, v_lds):
             return None
 
+        _c_one_f = arith.constant(1.0, type=f32)
+
         def pre_y(nb, row, v_lds):
-            return load_f32(y_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
+            return {
+                True: lambda: _c_one_f,
+                False: lambda: load_f32(y_ptr, (nb * I_C + row) * I_VD + v0 + v_lds),
+            }[probe == "noy"]()
 
         def pre_dec(nb, kk, v_lds):
             return load_f32(d_ptr, nb * I_KD + kk)
 
+        _ST = {True: lambda v, p, e: None, False: store_f32}[probe == "nostore"]
+
         def sink_rq(nb, row, v_lds, val, pre):
-            store_f32(val, rq_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
+            _ST(val, rq_ptr, (nb * I_C + row) * I_VD + v0 + v_lds)
 
         def sink_t(nb, row, v_lds, val, pre):
             off = (nb * I_C + row) * I_VD + v0 + v_lds
             tv = math_dialect.fma(c_sgn_t, val, pre)
-            store_f32(tv, t_ptr, off)
+            _ST(tv, t_ptr, off)
             lds_put(lds_t, row * I_BV + v_lds, tv)
 
         def _state_core(nb, kk, v_lds, val, dec):
@@ -385,6 +418,32 @@ def build_kda_state_sweep(
         sink_state = {True: _sink_state_with_e, False: _sink_state_plain}[has_e]
         _SINKS = {"rq": (sink_rq, pre_none), "t": (sink_t, pre_y)}
         G1_BLOCKS = [(r0, *_SINKS[w]) for r0, w in G1_PHASES]
+
+        # ------------------- operand builds, and the probe variants -------------
+        def _b_full(lds_src, k0, v_lds):
+            return vector.from_elements(
+                frag_t,
+                [
+                    arith.trunc_f(op_t, lds_get(lds_src, (k0 + arith.index(j)) * I_BV + v_lds))
+                    for j in range_constexpr(LANE_K)
+                ],
+            )
+
+        def _b_one_read(lds_src, k0, v_lds):
+            """MEASUREMENT ONLY — wrong answer. One LDS read, replicated."""
+            one = arith.trunc_f(op_t, lds_get(lds_src, k0 * I_BV + v_lds))
+            return vector.from_elements(frag_t, [one for _ in range_constexpr(LANE_K)])
+
+        _BUILD_B = {"full": _b_full, "lds1": _b_one_read, "areuse": _b_full, "nobar": _b_full, "nostore": _b_full, "noy": _b_full}[probe]
+        # `areuse` makes the A fragment's address loop-invariant so LICM hoists it.
+        _A_K = {
+            "full": lambda k0: k0,
+            "lds1": lambda k0: k0,
+            "areuse": lambda k0: kgrp * arith.index(LANE_K),
+            "nobar": lambda k0: k0,
+            "nostore": lambda k0: k0,
+            "noy": lambda k0: k0,
+        }[probe]
 
         # ------------------------------ contraction ----------------------------
         # `blocks` is a list of (row offset into the A operand, sink); they share
@@ -411,15 +470,9 @@ def build_kda_state_sweep(
                     acc = [arith.constant_vector(0.0, acc_t) for _ in range_constexpr(nblk)]
                     for ks in range_constexpr(klen):
                         k0 = arith.index(ks * MI_K) + kgrp * arith.index(LANE_K)
-                        b_frag = vector.from_elements(
-                            frag_t,
-                            [
-                                arith.trunc_f(op_t, lds_get(lds_src, (k0 + arith.index(j)) * I_BV + v_lds))
-                                for j in range_constexpr(LANE_K)
-                            ],
-                        )
+                        b_frag = _BUILD_B(lds_src, k0, v_lds)
                         for b in range_constexpr(nblk):
-                            acc[b] = _mfma(acc_t, load_frag(ap, a_base[b] + k0), b_frag, acc[b])
+                            acc[b] = _mfma(acc_t, load_frag(ap, a_base[b] + _A_K(k0)), b_frag, acc[b])
                     for b in range_constexpr(nblk):
                         for s in range_constexpr(ACC):
                             blocks[b][1](
@@ -496,12 +549,13 @@ def build_kda_state_sweep(
         copy_state(s0_ptr, bh, I_KD, _in)
 
         # ==================== the sequential chunk loop ======================
+        _BAR = {True: lambda: None, False: gpu.barrier}[probe == "nobar"]
         for it in scf.for_(arith.index(0), nc_i, I_ONE):
             nb = nb0 + chunk_of(it)
-            gpu.barrier()
+            _BAR()
             store_states(nb)
             group(nb, a_ptr, I_MOA, I_KD, G1_ROWS, G1_LEN, lds_s, G1_BLOCKS)
-            gpu.barrier()
+            _BAR()
             group(nb, x_ptr, I_KD, I_C, G2_ROWS, G2_LEN, lds_t, [(0, sink_state, pre_dec)])
 
         gpu.barrier()

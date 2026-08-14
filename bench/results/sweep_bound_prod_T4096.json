@@ -1,0 +1,22 @@
+{
+  "loop": {
+    "full": 502.04402208328247,
+    "lds1": 499.0839958190918,
+    "areuse": 390.12300968170166,
+    "nobar": 497.2839951515198,
+    "nostore": 323.00299406051636,
+    "noy": 446.8039870262146
+  },
+  "chunk_size": {
+    "forward C=64": 1858.1769466400146,
+    "forward C=128": 4828.042030334473
+  },
+  "scan": {
+    "direct GFLOP": 38.654705664,
+    "scan GFLOP": 103.079215104,
+    "scan / direct FLOP ratio": 2.6666666666666665,
+    "new [K,K] A-matrix residency GB": 0.375,
+    "scan \u00b5s at an optimistic 300 TFLOP/s": 343.59738368,
+    "scan \u00b5s floor from A-matrix traffic alone at 5.3 TB/s": 227.91689660377358
+  }
+}
