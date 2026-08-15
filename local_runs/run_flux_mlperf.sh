@@ -218,6 +218,7 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
     handle.write(f"float8_recipe: {os.environ.get('FLUX_FLOAT8_RECIPE', '')}\n")
+    handle.write(f"float8_gemm_backend: {os.environ.get('FLUX_FP8_GEMM_BACKEND', '')}\n")
     handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
     handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
     handle.write(f"compile_strategy: {os.environ.get('COMPILE_STRATEGY', '')}\n")
@@ -281,7 +282,7 @@ echo "[run_flux_mlperf] wandb=$ENABLE_WANDB_LOGGER project=$WANDB_PROJECT run_na
 echo "[run_flux_mlperf] seed=$SEED mlperf_enable=$MLPERF_ENABLE target_accuracy=$TARGET_ACCURACY val_check_interval=$VAL_CHECK_INTERVAL"
 echo "[run_flux_mlperf] checkpoint_ratio=$GRADIENT_CHECKPOINTING_RATIO compile=$COMPILE_TRANSFORMER_BLOCKS strategy=$COMPILE_STRATEGY compile_output_head=$COMPILE_OUTPUT_HEAD reshard_after_forward=$FSDP2_RESHARD_AFTER_FORWARD"
 echo "[run_flux_mlperf] compile_backend=$COMPILE_BACKEND fullgraph=$COMPILE_FULLGRAPH dynamic=$COMPILE_DYNAMIC mode=$TORCH_COMPILE_MODE fsdp2_reduce_dtype=$FSDP2_REDUCE_DTYPE"
-echo "[run_flux_mlperf] float8_recipe=${FLUX_FLOAT8_RECIPE:-bf16}"
+echo "[run_flux_mlperf] float8_recipe=${FLUX_FLOAT8_RECIPE:-bf16} fp8_gemm_backend=${FLUX_FP8_GEMM_BACKEND:-default}"
 
 trap terminate_training INT TERM
 torchrun_log_args=()
