@@ -40,13 +40,24 @@ class ThroughputTimer:
         self.eval_cumulative_secs: float = 0.0
         self._eval_enter_time: float | None = None
         self.consumed_samples: int = 0
+        # Global iteration this process started from. On a resumed run the
+        # iteration counter continues from the checkpoint, so it has to be
+        # subtracted before dividing by this process's clock.
+        self.baseline_iteration: int | None = None
 
     def mark_training_start(self):
         if self.training_start_time is None:
             self.training_start_time = time.time()
 
     def update_samples(self, iteration: int):
-        self.consumed_samples = iteration * self.gbs
+        # Count only what this process produced. Dividing the cumulative count by
+        # this process's elapsed time credits a resumed leg with everything the
+        # previous leg did: the Issue 220 BF16 healing leg reported 4,078 imgs/s
+        # at its first evaluation while actually sustaining about 350, decaying
+        # toward the truth as the inherited offset amortised.
+        if self.baseline_iteration is None:
+            self.baseline_iteration = max(iteration - 1, 0)
+        self.consumed_samples = max(iteration - self.baseline_iteration, 0) * self.gbs
 
     def pause_for_eval(self):
         self._eval_enter_time = time.time()
@@ -94,6 +105,8 @@ class FluxMLPerfLogger:
         self.log_every_n_steps = log_every_n_steps
         self.timer = ThroughputTimer(global_batch_size)
         self._converged = False
+        # A run has exactly one run_stop, whichever path emits it.
+        self._run_stopped = False
 
         self.profiler = os.getenv("PROFILER", "")
         self.profiler_warmup_steps = int(os.getenv("PROF_WARMUP_STEPS", "0"))
@@ -268,6 +281,9 @@ class FluxMLPerfLogger:
     def log_run_stop(self, success: bool, global_step: int):
         if success:
             self._converged = True
+        if self._run_stopped:
+            return
+        self._run_stopped = True
         if int(os.environ.get("RANK", "0")) == 0:
             status = "success" if success else "aborted"
             self._end(
@@ -331,6 +347,12 @@ def patch_mlperf_logging(ctx: PatchContext):
         log_every_n_steps=log_interval,
     )
 
+    # On a resumed run `args.iteration` is the checkpoint's step, and the sample
+    # count this process is responsible for starts there. Anchoring explicitly is
+    # exact; ThroughputTimer's own fallback anchors on the first step it sees,
+    # which is only exact when it is called every iteration.
+    mlperf_logger.timer.baseline_iteration = int(getattr(args, "iteration", 0) or 0)
+
     mlperf_logger.log_init(seed=seed)
     mlperf_logger.log_hyperparams(args)
 
@@ -344,6 +366,9 @@ def patch_mlperf_logging(ctx: PatchContext):
     # --- Wrap training_log ---
     _orig_training_log = megatron_training.training_log
     _first_training_log_call = [True]
+    # Last iteration seen by training_log, so a run that ends without converging
+    # can still report where it stopped.
+    _last_iteration = [0]
 
     def _mlperf_training_log(*args_tl, **kwargs_tl):
         if _first_training_log_call[0]:
@@ -357,6 +382,7 @@ def patch_mlperf_logging(ctx: PatchContext):
             learning_rate = args_tl[2] if len(args_tl) > 2 else kwargs_tl.get("learning_rate", 0.0)
             # Upstream Megatron: training_log(loss_dict, total_loss_dict, learning_rate, iteration, ...)
             iteration = args_tl[3] if len(args_tl) > 3 else kwargs_tl.get("iteration", 0)
+            _last_iteration[0] = iteration or _last_iteration[0]
 
             if loss_dict:
                 loss_val = next(iter(loss_dict.values()))
@@ -378,6 +404,38 @@ def patch_mlperf_logging(ctx: PatchContext):
 
     _mlperf_training_log._primus_mlperf_logging_wrapper = True
     megatron_training.training_log = _mlperf_training_log
+
+    # --- Wrap train() so every run terminates its log ---
+    # log_run_stop is otherwise only reachable from the convergence branch of the
+    # eval wrapper below. A run that exhausts train_iters without crossing the
+    # target exits cleanly with rc=0 and leaves a log with a run_start and no
+    # run_stop, which the MLPerf package checker rejects even for the one
+    # non-converging run a 10-run set is allowed to drop. Observed on the Issue
+    # 220 MXFP4 control leg: 1,720 events ending on block_start.
+    _orig_train = megatron_training.train
+
+    def _mlperf_train(*train_args, **train_kwargs):
+        try:
+            result = _orig_train(*train_args, **train_kwargs)
+        except BaseException:
+            # A crashed run needs a terminated log too, and "aborted" is the
+            # honest status for it.
+            if not mlperf_logger.converged:
+                mlperf_logger.log_run_stop(success=False, global_step=_last_iteration[0])
+            raise
+
+        if not mlperf_logger.converged:
+            iteration = result[0] if isinstance(result, tuple) and result else _last_iteration[0]
+            iteration = iteration or _last_iteration[0]
+            log_rank_0(
+                f"[MLPerf] Training ended at step {iteration} without reaching "
+                f"target={target_val_loss:.6f}; closing the run with status=aborted"
+            )
+            mlperf_logger.log_run_stop(success=False, global_step=iteration)
+        return result
+
+    _mlperf_train._primus_mlperf_train_wrapper = True
+    megatron_training.train = _mlperf_train
 
     # --- Wrap evaluate_and_print_results ---
     _orig_eval = megatron_training.evaluate_and_print_results
