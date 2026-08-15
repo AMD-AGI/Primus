@@ -24,15 +24,15 @@ export WANDB_API_KEY="${WANDB_API_KEY:-your_wandb_api_key}"
 export NNODES=${NNODES:-1}
 export TRAIN_ITERS=${TRAIN_ITERS:-20}
 
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-882-ainic"}
-export SLURM_PARTITION=${SLURM_PARTITION:-Compute-DCPT}
-export SLURM_NODELIST="${SLURM_NODELIST-smci355-ccs-aus-n01-21,smci355-ccs-aus-n01-33,smci355-ccs-aus-n02-21,smci355-ccs-aus-n02-25,smci355-ccs-aus-n02-29,smci355-ccs-aus-n02-33,smci355-ccs-aus-n03-33,smci355-ccs-aus-n04-21,smci355-ccs-aus-n04-25,smci355-ccs-aus-n04-29,smci355-ccs-aus-n04-33,smci355-ccs-aus-n05-21,smci355-ccs-aus-n05-29,smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25,smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29}"
+export DOCKER_IMAGE=${DOCKER_IMAGE:?set DOCKER_IMAGE to a Primus container image}
+export SLURM_PARTITION=${SLURM_PARTITION:-}
+export SLURM_NODELIST=${SLURM_NODELIST:-}
 export MASTER_PORT=${MASTER_PORT:-29500}
 
 export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0:1,ionic_1:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_6:1,ionic_7:1"
 # Default socket interface to loopback (single-node fallback). Override with
-# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME for multi-node (e.g. ens3 on amd-spur).
+# GLOO_SOCKET_IFNAME / NCCL_SOCKET_IFNAME for multi-node (e.g. ens3).
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-lo}
 export NCCL_IB_GID_INDEX=1
@@ -61,11 +61,21 @@ export PROFILE=${PROFILE:-False}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
 export LEGACY_GG=${LEGACY_GG:-False}
+# MegaMoE: FlyDSL-based fused MoE layer replacing Megatron's MoELayer (see
+# docs/04-technical-guides/mega-moe.md). It owns the whole expert path --
+# dispatch/combine all-to-all is fused into the grouped GEMMs -- so it is
+# mutually exclusive with turbo DeepEP; force DeepEP off rather than letting
+# both patch the MoE layer. Requires EP-only (TP=1) + bf16 + EP>1.
+export USE_TURBO_MEGA_MOE=${USE_TURBO_MEGA_MOE:-False}
+if [ "$USE_TURBO_MEGA_MOE" = "True" ]; then
+  export USE_TURBO_DEEPEP=False
+fi
 # Plan-3 P22 / P23: PrimusTurbo gate (must be on for turbo attention /
 # turbo deepep to take effect; enable_primus_turbo gates the
 # `before_train` patches that re-bind the spec provider).
 export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-False}
-if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True" ]; then
+if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True" ] ||
+  [ "$USE_TURBO_MEGA_MOE" = "True" ]; then
   ENABLE_PRIMUS_TURBO=True
 fi
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
@@ -100,6 +110,20 @@ if [ "$USE_TURBO_DEEPEP" = "True" ]; then
     --turbo_deepep_use_comm_stream "$TURBO_DEEPEP_USE_COMM_STREAM"
     --moe_router_dtype "$MOE_ROUTER_DTYPE"
     --moe_shared_expert_overlap "$MOE_SHARED_EXPERT_OVERLAP"
+  )
+fi
+
+# TransformerEngine full-scope CUDA graph capture. `--external_cuda_graph True`
+# maps to cuda_graph_impl="transformer_engine"; scope `full` is normalized to []
+# by Megatron, i.e. capture the whole layer. Pairs well with MegaMoE, which is
+# sync-free (no device-to-host sync in the expert path) and captures cleanly.
+export ENABLE_CUDA_GRAPH=${ENABLE_CUDA_GRAPH:-False}
+CUDA_GRAPH_CLI_ARGS=()
+if [ "$ENABLE_CUDA_GRAPH" = "True" ]; then
+  CUDA_GRAPH_CLI_ARGS=(
+    --external_cuda_graph True
+    --cuda_graph_scope "${CUDA_GRAPH_SCOPE:-full}"
+    --cuda_graph_warmup_steps "${CUDA_GRAPH_WARMUP_STEPS:-3}"
   )
 fi
 
@@ -156,13 +180,19 @@ fi
 #   USE_V4_CSA_ATTENTION_BACKEND (CSA cr=4): eager|triton_v0|triton_v1|triton_v2|gluon|flydsl_v0
 # gluon is gfx950/CDNA4-only (lazily imported; asserts arch when selected).
 # use_turbo_attention (when core_attention is built) still wins for the dense path.
-export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-triton_v2}
-export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-triton_v2}
+export USE_V4_ATTENTION_BACKEND=${USE_V4_ATTENTION_BACKEND:-turbo}
+export USE_V4_CSA_ATTENTION_BACKEND=${USE_V4_CSA_ATTENTION_BACKEND:-turbo}
 
 # Plan-9: FP8 (E4M3) Indexer QK path (CSA selector). Default OFF; flip with
 # USE_V4_FP8_INDEXER=True. Passed as a CLI override so it reliably reaches the
 # in-container config regardless of env propagation.
 export USE_V4_FP8_INDEXER=${USE_V4_FP8_INDEXER:-False}
+
+# Indexer distillation loss coefficient (CSA selector training). 0 keeps the
+# loss off and the indexer frozen -- correct when loading an already-trained
+# indexer. A from-scratch pretrain needs it ON (1e-2 is a reasonable starting
+# value), which also unfreezes the indexer params.
+export PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF=${PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF:-0.0}
 
 # Plan-5 P29 (RESCOPED): wrap sinkhorn_normalize in HyperMixer with a
 # cached torch.compile build. Default OFF here; the proxy script
@@ -210,12 +240,50 @@ if [ "$FP8_PARAM_GATHER" = "True" ]; then
   fi
 fi
 
+# Force load balancing discards the real router decision so every expert receives
+# a similar number of tokens, removing run-to-run imbalance noise. This selects
+# *how*: `even` (Primus default) gives exactly equal, step-invariant per-expert
+# counts, so grouped-GEMM shapes never change; `uniform` balances only
+# statistically and keeps the step-to-step shape variation of real routing.
+# docs/04-technical-guides/mega-moe.md recommends `uniform` for benchmarking,
+# because `even` disproportionately favours the non-fused grouped-GEMM path.
+# Empty (default) leaves the config value alone.
+export MOE_FORCE_LB_TYPE=${MOE_FORCE_LB_TYPE:-}
+MOE_FORCE_LB_ARGS=()
+if [ -n "$MOE_FORCE_LB_TYPE" ]; then
+  MOE_FORCE_LB_ARGS=(--moe_router_force_load_balancing_type "$MOE_FORCE_LB_TYPE")
+fi
+
 PP_LAYOUT_ARGS=()
 if [ -n "${PRIMUS_PP_LAYOUT:-}" ]; then
   PP_LAYOUT_ARGS=(--pipeline_model_parallel_layout "$PRIMUS_PP_LAYOUT")
 fi
 
 PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
+
+# Two ways to ask for activation recompute, mutually exclusive:
+#
+#   PRIMUS_RECOMPUTE_LAYERS=<n>          the first n layers of each PP stage
+#   PRIMUS_RECOMPUTE_LAYER_IDS="[a,b,c]" exactly these GLOBAL layer ids
+#
+# The id space runs 0..num_layers-1 for the decoder and continues into the MTP
+# depths, so with --num_layers 43 --mtp_num_layers 1 the MTP module is id 43.
+# recompute_layer_ids owns the whole selection, so it also has to switch
+# recompute_method off -- Primus's validator rejects any non-None method.
+PRIMUS_RECOMPUTE_LAYER_IDS=${PRIMUS_RECOMPUTE_LAYER_IDS:-}
+if [ -n "$PRIMUS_RECOMPUTE_LAYER_IDS" ]; then
+  RECOMPUTE_CLI_ARGS=(
+    --recompute_layer_ids "$PRIMUS_RECOMPUTE_LAYER_IDS"
+    --recompute_granularity full
+    --recompute_method None
+  )
+else
+  RECOMPUTE_CLI_ARGS=(
+    --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS"
+    --recompute_granularity full
+    --recompute_method block
+  )
+fi
 
 export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
 export BACKEND_PATH=${BACKEND_PATH:-"$(pwd)/third_party/Megatron-LM"}
@@ -251,16 +319,38 @@ export PRIMUS_EXIT_FAST=1
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-slurm}
 if [ "$PRIMUS_LAUNCHER" = "direct" ]; then
   LAUNCHER_ARGS=(direct)
+  if [ "${PRIMUS_NUMA_BIND:-1}" = "1" ]; then
+    LAUNCHER_ARGS+=(--numa)
+  fi
 else
   LAUNCHER_ARGS=(slurm "${SLURM_LAUNCH_CMD:-srun}" -N "$NNODES")
-  [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
-  [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
-  [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
-  [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
-  # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
-  # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
-  [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ] && LAUNCHER_ARGS+=(--exclusive)
-  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean -- --numa --patch runner/helpers/patches/10_fix_libionic_abi4.sh)
+  if [ -n "${SLURM_ATTACH_JOBID:-}" ]; then
+    # Run as a step inside an allocation that is already held (e.g. a long-lived
+    # `sbatch --exclusive --wrap "sleep ..."` holder), so a sweep of runs lands on
+    # the same nodes without re-queueing per run. partition / qos / account /
+    # nodelist / exclusive belong to the holder job -- passing them again on an
+    # attached step is redundant and spur rejects some of them.
+    LAUNCHER_ARGS+=(--jobid="${SLURM_ATTACH_JOBID}" --overlap)
+  else
+    [ -n "${SLURM_PARTITION:-}" ] && LAUNCHER_ARGS+=(--partition="${SLURM_PARTITION}")
+    [ -n "${SLURM_NODELIST:-}" ] && LAUNCHER_ARGS+=(--nodelist="${SLURM_NODELIST}")
+    [ -n "${SLURM_QOS:-}" ] && LAUNCHER_ARGS+=(--qos="${SLURM_QOS}")
+    [ -n "${SLURM_ACCOUNT:-}" ] && LAUNCHER_ARGS+=(--account="${SLURM_ACCOUNT}")
+    # --exclusive = whole-node allocation. On spur only sbatch accepts it (srun does
+    # not), so add it only in sbatch mode. Set SLURM_EXCLUSIVE=0 to disable.
+    # Spelled as an `if` rather than an `&&` chain because this is the last command
+    # of the else branch: under `set -e` a false `&&` chain there would make the
+    # whole compound command fail and abort the script.
+    if [ "${SLURM_LAUNCH_CMD:-srun}" = "sbatch" ] && [ "${SLURM_EXCLUSIVE:-1}" != "0" ]; then
+      LAUNCHER_ARGS+=(--exclusive)
+    fi
+  fi
+  # Each patch self-skips (exit 2) when its PRIMUS_* env gate is unset, so both
+  # can be passed unconditionally.
+  LAUNCHER_ARGS+=(-- --image "${DOCKER_IMAGE}" --clean --
+    --numa
+    --patch runner/helpers/patches/10_fix_libionic_abi4.sh
+    --patch runner/helpers/patches/11_fix_lld_stub.sh)
 fi
 
 ./primus-cli "${LAUNCHER_ARGS[@]}" \
@@ -270,6 +360,7 @@ fi
   --pp_warmup "${PP_WARMUP:-True}" \
   "${PP_LAYOUT_ARGS[@]}" \
   --moe_router_force_load_balancing True \
+  "${MOE_FORCE_LB_ARGS[@]}" \
   --log_avg_skip_iterations 3 \
   --backend_path "$BACKEND_PATH" \
   --num_layers "$PRIMUS_TOTAL_LAYERS" \
@@ -298,18 +389,19 @@ fi
   --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
   --use_v4_csa_attention_backend "$USE_V4_CSA_ATTENTION_BACKEND" \
   --use_v4_fp8_indexer "$USE_V4_FP8_INDEXER" \
+  --v4_indexer_distill_loss_coeff "$PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF" \
   --use_v4_compiled_sinkhorn "$USE_V4_COMPILED_SINKHORN" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
   "${TURBO_DEEPEP_CLI_ARGS[@]}" \
+  --use_turbo_mega_moe "$USE_TURBO_MEGA_MOE" \
+  "${CUDA_GRAPH_CLI_ARGS[@]}" \
   --use_turbo_grouped_gemm "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   "${OPTIMIZER_CLI_ARGS[@]}" \
   --fp8 "$FP8" \
   --fp8_recipe "$FP8_RECIPE" \
   "${FP8_PARAM_GATHER_CLI_ARGS[@]}" \
-  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
-  --recompute_granularity full \
-  --recompute_method block \
+  "${RECOMPUTE_CLI_ARGS[@]}" \
   --overlap_grad_reduce "$PRIMUS_OVERLAP_GRAD_REDUCE" \
   --overlap_param_gather "$PRIMUS_OVERLAP_PARAM_GATHER" \
   --disable_last_saving True \

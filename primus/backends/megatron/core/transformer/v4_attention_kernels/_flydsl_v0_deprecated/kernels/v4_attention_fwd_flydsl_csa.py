@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """V4 CSA attention forward FlyDSL launcher (Round 3 Step 2b).
 
 Stage A: correctness only. Per-row design forked from Triton monolithic CSA.

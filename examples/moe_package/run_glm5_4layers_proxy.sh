@@ -18,7 +18,7 @@ export NNODES=${NNODES:-1}
 export TRAIN_ITERS=10
 export SLURM_TIME=01:00:00
 export SLURM_PARTITION=amd-aig
-# export SLURM_NODELIST="uswslocpm2m-106-079"
+# export SLURM_NODELIST="<node>"  # pin the run to specific nodes
 
 # export NCCL_DEBUG=INFO
 export USING_AINIC=1

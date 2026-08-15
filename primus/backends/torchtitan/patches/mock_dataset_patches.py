@@ -89,6 +89,13 @@ def patch_mock_hf_dataset(ctx: PatchContext) -> None:  # noqa: ARG001
                 return _create_mock_token_dataset(seq_len=8192, vocab_size=32000, num_samples=256)
 
         datasets.load_dataset = mock_load_dataset
+
+        import sys
+
+        text_datasets_mod = sys.modules.get("torchtitan.hf_datasets.text_datasets")
+        if text_datasets_mod is not None:
+            text_datasets_mod.load_dataset = mock_load_dataset
+
         log_rank_0(
             "[Patch:torchtitan.training.mock_hf_dataset] " "Patched datasets.load_dataset successfully.",
         )

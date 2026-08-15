@@ -39,6 +39,9 @@ mtp_use_separate_hc_head: true
 hybrid_attention_enabled: true
 compress_ratios: null            # provided by the per-variant yaml (Flash / Pro);
                                  # entries: 0 = dense+SWA, 4 = CSA, 128 = HCA
+# RoPE base for the CSA / HCA (compressed) branches. 160000 is the V4-Pro
+# value; V4-Flash overrides this to 40000 in deepseek_v4_flash.yaml to match
+# the released DeepSeek-V4-Flash inference/model.py.
 compress_rope_theta: 160000.0
 index_topk: 512
 index_head_dim: 128
@@ -61,6 +64,27 @@ use_v4_csa_attention_backend: triton_v1
 # top-k path is preserved). Surface via PRIMUS_USE_V4_FP8_INDEXER.
 use_v4_fp8_indexer: false
 
+# Indexer distillation loss (CSA selector training). argTopK is not
+# differentiable, so the lightning indexer only learns through this auxiliary
+# KL against the real attention distribution. 0.0 keeps the loss off AND the
+# indexer frozen, which keeps the params out of the grad buckets so
+# overlap_grad_reduce stays usable.
+#
+# 0.0 is an engineering default (it makes enabling the feature an explicit
+# decision), NOT a claim that the loss is usually unnecessary. The paper keeps
+# it on for the whole sparse training run: sparse attention is introduced after
+# a dense phase, starting with a short stage that warms up the CSA indexer, and
+# the KL alignment continues once the rest of the model is unfrozen -- the main
+# attention keeps moving, so the indexer has to keep tracking it. Turn this on
+# for any training that runs sparse attention; it is only irrelevant for
+# inference. 1e-2 is a starting point.
+#
+# Note this shares the main optimizer and learning rate, whereas the reference
+# trains the indexer with its own optimizer and a much larger LR during warm-up,
+# so the coefficient here is standing in for that LR ratio.
+# Surface via PRIMUS_V4_INDEXER_DISTILL_LOSS_COEFF (see run_deepseek_v4.sh).
+v4_indexer_distill_loss_coeff: 0.0
+
 # Plan-5 P29 (RESCOPED): wrap ``sinkhorn_normalize`` (the doubly-stochastic
 # projection inside HyperMixer.compute_weights) with a cached
 # ``torch.compile(fullgraph=True, dynamic=False)`` build. Collapses the
@@ -78,12 +102,17 @@ o_lora_rank: 1024
 moe_layer_freq: 1
 moe_router_topk: 6
 moe_router_score_function: sqrtsoftplus    # V4 default
+# Balancing follows the paper: the aux-loss-free expert bias (noaux_tc) plus a
+# slight sequence-wise balance loss. The learned router implements the latter
+# itself (moe/v4_seq_balance_loss.py) rather than inheriting the framework's,
+# whose aux-loss scores helper rejects sqrtsoftplus. Any other balancing type
+# here leaves the loss off, so the pair below is what turns it on.
 moe_router_load_balancing_type: seq_aux_loss
 moe_router_enable_expert_bias: true        # noaux_tc
 moe_router_bias_update_rate: 1.0e-3
 moe_router_topk_scaling_factor: 1.5        # routed_scaling_factor (Flash 1.5 / Pro 2.5)
 moe_token_dispatcher_type: alltoall
-moe_aux_loss_coeff: 0.001
+moe_aux_loss_coeff: 0.001                  # alpha of the sequence-wise balance loss
 moe_router_dtype: null                     # fp32 recommended at training time
 moe_router_pre_softmax: false
 moe_grouped_gemm: true
@@ -99,7 +128,12 @@ mtp_loss_scaling_factor: 0.1
 # ---------- RoPE (main path; compressed layers also use compress_rope_theta) ----------
 rotary_base: 10000
 rope_type: yarn
-rotary_scaling_factor: 16.0                # YaRN factor (only enabled on compress layers in code)
+# YaRN factor, applied only on the compressed (CSA / HCA) branches -- the dense
+# layers use the main base with no YaRN. Paired with compress_rope_theta: both
+# parameterise the same inv_freq, so a variant that overrides one must override
+# the other. 16.0 goes with compress_rope_theta 160000 (V4-Pro);
+# deepseek_v4_flash.yaml overrides both to 4.0 / 40000.
+rotary_scaling_factor: 16.0
 original_max_position_embeddings: 65536
 mscale: 1.0
 mscale_all_dim: 1.0

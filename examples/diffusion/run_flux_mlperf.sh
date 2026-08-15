@@ -34,6 +34,5 @@ if [[ "${MLPERF_CLEAR_CACHES:-true}" == "true" ]]; then
   echo 3 > /proc/sys/vm/drop_caches
 fi
 
-torchrun --standalone --nproc_per_node="${GPUS_PER_NODE:-8}" \
-  -m primus.cli.main train pretrain \
+./primus-cli direct -- train pretrain \
   --config "$CONFIG"

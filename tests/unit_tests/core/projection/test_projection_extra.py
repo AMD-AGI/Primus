@@ -126,7 +126,14 @@ def test_optimizer_num_params_includes_embedding_and_output():
     assert _opt().estimated_num_params() == _EXPECTED_DENSE_PARAMS
 
 
-def test_optimizer_step_time_follows_bandwidth_formula():
+def test_optimizer_step_time_follows_bandwidth_formula(monkeypatch):
+    # The optimizer step is memory-bound: step time = param-state bytes /
+    # (HBM bandwidth * HBM efficiency). The efficiency factor (env-tunable via
+    # PRIMUS_OPT_HBM_EFF) models the fact that the step is many small elementwise
+    # kernels that sustain only a fraction of peak. Pin it to 1.0 here to
+    # validate the underlying bandwidth-proportionality independent of the
+    # calibrated default.
+    monkeypatch.setenv("PRIMUS_OPT_HBM_EFF", "1.0")
     bw = 5300.0
     total_bytes = _EXPECTED_DENSE_PARAMS * _ADAM_BYTES_PER_PARAM
     assert _opt(bw=bw).estimated_step_time_ms() == pytest.approx(total_bytes / (bw * 1e9 / 1e3))

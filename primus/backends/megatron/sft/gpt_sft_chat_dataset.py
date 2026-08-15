@@ -1,4 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Modification Copyright© 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Adapted from Megatron-Bridge (https://github.com/NVIDIA-NeMo/Megatron-Bridge).
 """
 GPT SFT Chat Dataset - Adapted from Megatron-Bridge
 

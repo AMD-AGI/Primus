@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=rocm/primus:v26.3@sha256:1a02b74a94d82131f3f119a94ccbed45bb5b4cd77a0616cb4e6a29e64a048482
+FROM ${BASE_IMAGE}
+
+ARG TRITON_REF=09500db9f0fe66fd176d1f080e2017b37e7e995d
+ARG PRIMUS_TURBO_REF=e160182d6a7967592579be2640e85106bc8f421e
+ARG TE_REF=5235bae2cc683a0ad4bf15221c746ab3c1e229e7
+ARG AITER_REF=c4b33df03faae1c4e470420d950f8a9589e9634d
+ARG FWD_ATTN_ASM_REF=53d3dadc3f3b0ac35ae536f2d1d7864a3e07ba22
+ARG BWD_ATTN_ASM_REF=9b9fb6444f3fee388617f62432c3faea74079377
+ARG BWD_ATTN_SYMBOL=_ZN5aiter43fmha_bwd_hd64_bf16_causal_a16_rtz_recompileE
+ARG BWD_ATTN_SLOT=bwd_hd64_bf16_causal_a16_rtz.co
+ARG MAX_JOBS=96
+
+ENV MLPERF_RUNTIME_SERIES=v26.3 \
+    MLPERF_ENABLE_FWD_ATTN_ASM=1 \
+    FMHA_HD64_ASM_CO=/opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_fwd_d64_opt128.co \
+    FMHA_HD64_ASM_LOG=0
+
+WORKDIR /workspace/deps
+
+# The v26.3 base ships Triton 3.6, while this Turbo branch requires the 3.7 API.
+RUN python3 -m pip install --upgrade --force-reinstall --no-deps flydsl==0.2.4 && \
+    git clone https://github.com/triton-lang/triton.git && \
+    cd triton && git checkout "${TRITON_REF}" && \
+    python3 -m pip install ninja cmake && \
+    MAX_JOBS="${MAX_JOBS}" python3 -m pip install \
+      --no-build-isolation --no-deps -v . && \
+    cd .. && rm -rf triton
+
+RUN git clone --recursive https://github.com/AMD-AGI/Primus-Turbo.git && \
+    cd Primus-Turbo && git checkout "${PRIMUS_TURBO_REF}" && \
+    git submodule update --init --recursive && \
+    python3 -m pip install -r requirements.txt && \
+    PRIMUS_TURBO_FRAMEWORK=PYTORCH \
+    GPU_ARCHS=gfx950 \
+    MAX_JOBS="${MAX_JOBS}" \
+      python3 -m pip install --no-build-isolation --no-deps -v . && \
+    cd .. && rm -rf Primus-Turbo
+
+RUN git clone https://github.com/mawad-amd/fwd-attn-asm.git && \
+    cd fwd-attn-asm && git checkout "${FWD_ATTN_ASM_REF}" && \
+    amdclang -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx950 \
+      -o /tmp/fwd_attn.co kernels/fwd_d64_opt128.s && \
+    cd .. && \
+    git clone https://github.com/mawad-amd/bwd-attn-asm.git && \
+    cd bwd-attn-asm && git checkout "${BWD_ATTN_ASM_REF}" && \
+    amdclang -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx950 \
+      -o /tmp/bwd_attn.co kernels/bwd_d64_v3_causal_opt_16x32.s && \
+    cd .. && rm -rf fwd-attn-asm bwd-attn-asm
+
+RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
+    cd TransformerEngine && git checkout "${TE_REF}" && \
+    git submodule update --init --recursive && \
+    AITER_DIR=3rdparty/QoLA/3rdparty/aiter && \
+    git -C "${AITER_DIR}" fetch origin "${AITER_REF}" && \
+    git -C "${AITER_DIR}" checkout "${AITER_REF}" && \
+    git -C "${AITER_DIR}" submodule update --init --recursive && \
+    sed -i "s|^aiter_commit = .*|aiter_commit = \"${AITER_REF}\"|" \
+      transformer_engine/common/ck_fused_attn/qola_manifest.toml && \
+    install -m 0644 /tmp/bwd_attn.co \
+      "${AITER_DIR}/hsa/gfx950/fmha_v3_bwd/${BWD_ATTN_SLOT}" && \
+    python3 -m pip uninstall -y \
+      transformer_engine transformer_engine_rocm7 transformer_engine_rocm_torch && \
+    NVTE_FUSED_ATTN_AOTRITON=0 \
+    NVTE_CK_FUSED_ATTN_PATH="" \
+    NVTE_BUILD_MAX_JOBS="${MAX_JOBS}" \
+    NVTE_FRAMEWORK=pytorch \
+    NVTE_ROCM_ARCH=gfx950 \
+    NVTE_USE_HIPBLASLT=1 \
+    PYTORCH_ROCM_ARCH=gfx950 \
+    CU_NUM=304 \
+    NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
+    MAX_JOBS="${MAX_JOBS}" \
+      python3 -m pip install --no-build-isolation --no-deps -v . && \
+    cd .. && rm -rf TransformerEngine
+
+COPY aiter_hd64_asm_override.py \
+     /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_override.py
+COPY prewarm_attention.py /opt/mlperf-gpt-oss-20b/prewarm_attention.py
+RUN printf 'import aiter_hd64_asm_override\n' \
+      > /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_override.pth && \
+    install -m 0644 /tmp/fwd_attn.co \
+      /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_fwd_d64_opt128.co && \
+    rm -f /tmp/fwd_attn.co /tmp/bwd_attn.co
+
+WORKDIR /workspace

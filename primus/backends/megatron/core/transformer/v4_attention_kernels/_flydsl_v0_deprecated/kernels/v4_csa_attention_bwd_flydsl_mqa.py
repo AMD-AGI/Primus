@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """V4 CSA attention backward FlyDSL launcher (Phase B STEP 3a + 3b).
 
 Env knobs:

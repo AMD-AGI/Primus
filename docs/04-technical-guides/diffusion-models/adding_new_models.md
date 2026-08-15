@@ -470,6 +470,7 @@ class TestDiTModel:
         output = model(latents, timesteps, class_labels=class_labels)
 
         assert output.shape == latents.shape
+```
 
 ### Loss Computation
 
