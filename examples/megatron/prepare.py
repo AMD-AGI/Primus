@@ -175,6 +175,16 @@ def prepare_dataset_if_needed(
             "(SFT dataset is loaded inside the trainer)."
         )
         return
+    # Diffusion/Energon runs (e.g. Flux) provide their own dataset through the
+    # external Energon dataloader and have no Megatron text tokenizer, so the
+    # bookcorpus tokenisation flow below (which needs tokenizer_model) doesn't
+    # apply.
+    if getattr(pre_trainer_cfg, "dataloader_type", None) == "external":
+        log_info(
+            "dataloader_type=external detected, skipping bookcorpus tokenisation "
+            "(dataset is provided via the Energon dataloader)."
+        )
+        return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
     if (

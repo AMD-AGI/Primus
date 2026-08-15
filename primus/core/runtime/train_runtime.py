@@ -106,6 +106,16 @@ class PrimusRuntime:
             log_rank_0("Interrupted by user (Ctrl+C)")
             self._safe_cleanup(error=e)
             raise
+        except SystemExit as e:
+            # Megatron ends the process itself when an exit condition is reached
+            # (--exit-interval, --exit-duration-in-mins, a signal handler, or a
+            # phase transition). SystemExit(0) after a completed save is a normal
+            # end of run, so preserve the status instead of reporting a failure.
+            code = e.code if e.code is not None else 0
+            clean = code == 0
+            log_rank_0(f"Training exited via SystemExit(code={code}); clean={clean}")
+            self._safe_cleanup(error=None if clean else e)
+            raise
         except BaseException as e:
             # Best-effort cleanup; wrap into RuntimeError for caller.
             self._safe_cleanup(error=e)

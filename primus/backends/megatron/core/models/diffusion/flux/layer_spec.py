@@ -568,6 +568,17 @@ def get_flux_layer_spec(
     num_end = getattr(config, "sensitive_layers_end", 0) if sensitive_enabled else 0
     total = config.num_joint_layers + config.num_single_layers
 
+    from primus.core.utils.module_utils import log_rank_0
+
+    log_rank_0(
+        f"[Primus:FluxLayerSpec] transformer_impl={config.transformer_impl} "
+        f"fp4={config.fp4} fp8={config.fp8} "
+        f"backend={type(backend).__name__} "
+        f"sensitive_backend={type(sensitive_backend).__name__ if sensitive_backend is not None else None} "
+        f"sensitive_enabled={sensitive_enabled} sensitive_start={num_start} sensitive_end={num_end} "
+        f"num_layers={total}"
+    )
+
     layer_specs = []
     for i in range(total):
         is_sensitive = sensitive_backend is not None and ((i < num_start) or (i >= total - num_end))
