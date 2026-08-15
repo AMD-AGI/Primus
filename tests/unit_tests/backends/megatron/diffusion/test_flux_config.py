@@ -40,6 +40,19 @@ class TestBaseDiffusionConfig(PrimusUT):
 class TestFluxConfig(PrimusUT):
     """Tests for FluxConfig class."""
 
+    def test_distributed_checkpoint_is_non_homogeneous(self):
+        """Flux must use per-layer checkpoint keys for its two block families."""
+        config = FluxConfig.flux_535m()
+        self.assertTrue(config.hetereogenous_dist_checkpoint)
+
+    def test_homogeneous_distributed_checkpoint_is_rejected(self):
+        """A homogeneous layer stack cannot represent Flux's parameter schemas."""
+        with self.assertRaisesRegex(
+            ValueError,
+            "Flux requires hetereogenous_dist_checkpoint=True",
+        ):
+            FluxConfig.flux_535m(hetereogenous_dist_checkpoint=False)
+
     def test_validation_positive_joint_layers(self):
         """Test validation fails for non-positive num_joint_layers."""
         with self.assertRaises(ValueError) as cm:

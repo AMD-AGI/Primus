@@ -78,6 +78,8 @@ class FluxConfig(BaseDiffusionConfig):
         apply_rope_fusion: Whether to apply RoPE fusion optimization (default: False)
         add_qkv_bias: Whether to add bias to QKV projections (default: True)
         single_block_bias: Whether to add bias to single block linear layers (default: True)
+        hetereogenous_dist_checkpoint: Keep joint and single blocks in distinct
+            per-layer distributed-checkpoint namespaces (required, always True)
         activation_func: Activation function (default: openai_gelu_no_jit)
         use_te_rng_tracker: Whether to use Transformer Engine RNG tracker (default: False)
     """
@@ -91,6 +93,10 @@ class FluxConfig(BaseDiffusionConfig):
     # Architecture: Number of layers
     num_joint_layers: int = 19  # Default: Flux 12B
     num_single_layers: int = 38  # Default: Flux 12B
+    # Megatron preserves this misspelling in its public TransformerConfig API.
+    # Flux's joint and single blocks have different parameter sets and shapes,
+    # so they cannot share the homogeneous layer-stacked checkpoint namespace.
+    hetereogenous_dist_checkpoint: bool = True
 
     # Architecture: Dimensions (Flux standard: 3072)
     hidden_size: int = 3072
@@ -213,6 +219,12 @@ class FluxConfig(BaseDiffusionConfig):
         self.num_layers = self.num_joint_layers + self.num_single_layers
 
         super().__post_init__()  # BaseDiffusionConfig (mapping) -> TransformerConfig (validation)
+
+        if not self.hetereogenous_dist_checkpoint:
+            raise ValueError(
+                "Flux requires hetereogenous_dist_checkpoint=True because its joint "
+                "and single transformer blocks have different checkpoint schemas"
+            )
 
         # Xavier uniform for Megatron parallel linear layers (common Flux reference default).
         self.init_method = nn.init.xavier_uniform_
