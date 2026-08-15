@@ -1,0 +1,48 @@
+FROM rocm/primus:v26.3@sha256:1a02b74a94d82131f3f119a94ccbed45bb5b4cd77a0616cb4e6a29e64a048482
+
+ARG PRIMUS_TURBO_REVISION=56c789e58f72aaf733b7715f1536be1ed33b69a1
+
+# Keep the v26.3 Primus-Turbo package, adding only its newer FlyDSL kernels.
+RUN pip install --no-cache-dir --upgrade flydsl==0.2.3 && \
+    git clone --filter=blob:none --no-checkout https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    cp -a /tmp/Primus-Turbo/primus_turbo/flydsl /opt/venv/lib/python3.12/site-packages/primus_turbo/ && \
+    rm -rf /tmp/Primus-Turbo
+
+# Make the ATen choice filter runtime-selectable instead of baking in one policy.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torch/_inductor/kernel/mm.py")
+source = path.read_text()
+source = source.replace("import logging\n", "import logging\nimport os\n", 1)
+old = """    if use_aten_gemm_kernels():
+        templates_to_use.append(aten__fp8_mm)
+"""
+new = """    selective_triton = os.environ.get("PRIMUS_FLUX_FP8_GEMM_BACKEND") == "selective_triton"
+    if use_aten_gemm_kernels() and not (
+        selective_triton and (m, n, k) in {(8192, 3072, 12288), (16384, 3072, 15360)}
+    ):
+        templates_to_use.append(aten__fp8_mm)
+"""
+assert source.count(old) == 1, "unexpected torch/_inductor/kernel/mm.py"
+source = source.replace(old, new)
+source += "\n_PRIMUS_FLUX_SELECTIVE_TRITON = True\n"
+path.write_text(source)
+PY
+
+RUN python - <<'PY'
+from importlib.metadata import version
+
+import torch
+import torch._inductor.kernel.mm as mm
+from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+assert torch.__version__ == "2.10.0+git94c6e04", torch.__version__
+assert torch.version.hip == "7.2.53211", torch.version.hip
+assert version("flydsl") == "0.2.3", version("flydsl")
+assert mm._PRIMUS_FLUX_SELECTIVE_TRITON
+assert gemm_fp8_tensorwise_flydsl_kernel
+PY
+
+CMD ["/usr/bin/bash"]

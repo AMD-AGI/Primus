@@ -43,3 +43,14 @@ docker run --rm --init --privileged \
 
 Override launcher defaults such as `MAX_STEPS`, `LOCAL_BATCH_SIZE`, or `SEED`
 with `docker run --env NAME=value`.
+
+For MBS32 comparison runs, build
+`docker/flux-fp8/Dockerfile.v26.3-selective-gemm` and select one backend:
+
+```bash
+-e FLUX_FP8_GEMM_BACKEND=selective_triton
+-e FLUX_FP8_GEMM_BACKEND=selective_flydsl
+```
+
+Both policies replace only the two affected contraction forward shapes. An
+empty value retains the normal TorchAO/Inductor autotuning policy.

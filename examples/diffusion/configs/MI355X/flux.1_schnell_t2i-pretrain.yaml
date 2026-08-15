@@ -25,7 +25,7 @@ modules:
         local_batch_size: ${LOCAL_BATCH_SIZE:1}
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
-        gradient_accumulation_steps: 1
+        gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS:1}
         output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
         save_steps: ${SAVE_STEPS:100}
         save_strategy: ${SAVE_STRATEGY:dtcp_full}
