@@ -17,6 +17,7 @@ Uses mlperf_logging.mllog library for structured event output.
 
 import logging
 import os
+import signal
 import sys
 import time
 
@@ -436,6 +437,29 @@ def patch_mlperf_logging(ctx: PatchContext):
 
     _mlperf_train._primus_mlperf_train_wrapper = True
     megatron_training.train = _mlperf_train
+
+    # Wrapping train() only covers a failure that raises on THIS rank. When one
+    # rank dies, torchrun SIGTERMs its siblings, so rank 0 - the only rank that
+    # writes the log - usually dies by signal with no Python exception to catch.
+    # The FP8 baseline lost its log to exactly that: rank 4 raised on a bucket-0
+    # gradient NaN and rank 0 was terminated mid-step. Close the log on the way
+    # out, then let the signal take its normal course.
+    _prev_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _mlperf_sigterm(signum, frame):
+        if not mlperf_logger.converged:
+            mlperf_logger.log_run_stop(success=False, global_step=_last_iteration[0])
+        if callable(_prev_sigterm):
+            _prev_sigterm(signum, frame)
+        else:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _mlperf_sigterm)
+    except ValueError:
+        # Signal handlers can only be installed from the main thread.
+        logger.debug("MLPerf SIGTERM hook not installed: not the main thread")
 
     # --- Wrap evaluate_and_print_results ---
     _orig_eval = megatron_training.evaluate_and_print_results
