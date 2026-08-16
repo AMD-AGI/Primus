@@ -32,6 +32,7 @@ if [[ "$FLUX_LOW_PRECISION_PROVIDER" == "primus_turbo" ]]; then
   export PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS=${PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS:-1}
 fi
 export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
+export DATALOADER_NUM_WORKERS=${DATALOADER_NUM_WORKERS:-4}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
 export WARMUP_STEPS=${WARMUP_STEPS:-1600}
@@ -180,6 +181,7 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"nnodes: {os.environ.get('NNODES', '')}\n")
     handle.write(f"gpus_per_node: {os.environ.get('GPUS_PER_NODE', '')}\n")
     handle.write(f"local_batch_size: {os.environ.get('LOCAL_BATCH_SIZE', '')}\n")
+    handle.write(f"dataloader_num_workers: {os.environ.get('DATALOADER_NUM_WORKERS', '')}\n")
     handle.write(f"max_steps: {os.environ.get('MAX_STEPS', '')}\n")
     handle.write(f"lr: {os.environ.get('LR', '')}\n")
     handle.write(f"warmup_steps: {os.environ.get('WARMUP_STEPS', '')}\n")

@@ -26,6 +26,7 @@ modules:
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
         gradient_accumulation_steps: 1
+        dataloader_num_workers: ${DATALOADER_NUM_WORKERS:4}
         output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
         save_steps: ${SAVE_STEPS:100}
         save_strategy: ${SAVE_STRATEGY:dtcp_full}
