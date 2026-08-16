@@ -108,7 +108,7 @@ modules:
 
       # fusion
       moe_permute_fusion: true
-      gradient_accumulation_fusion: true
+      gradient_accumulation_fusion: ${PRIMUS_GRADIENT_ACCUMULATION_FUSION:true}
       moe_use_legacy_grouped_gemm: false # Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True
       moe_use_fused_router_with_aux_score: true
       multi_latent_attention: false # Flag config.ENABLE_EXPERIMENTAL not enabled
