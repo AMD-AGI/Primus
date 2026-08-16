@@ -235,6 +235,14 @@ step 1 loss/grad norm 两边相同为 `1.8657/4.0168`；到 step 5 BF16/MXFP8 lo
 
 若误差类似 ALTO，先做 layer-selective fallback/per-depth gradient 对比，不更换 GEMM backend掩盖问题。
 
+#### P3 100-step 与 DTCP 结果
+
+8 GPU、local batch 64、AITER attention、block compile、AC ratio `0.25` 下运行到 step 50，保存完整 DTCP；新进程明确从 `checkpoint-50` 恢复 model、optimizer、scheduler 和 global step，并完成 step 51-100及 `checkpoint-100`，same-provider resume 通过。
+
+matched BF16/MXFP8 每 10 step 对比显示 MXFP8 全程 finite，loss 趋势相关系数 `0.991`、MAE `0.0772`、平均相对差 `6.27%`；grad norm 相关系数 `0.974`、MAE `0.3648`、平均相对差 `27.6%`。step 100 BF16/MXFP8 loss 为 `0.8531/0.8111`，grad norm 为 `0.7166/0.5948`。MXFP8 当前比 BF16下降更快但已形成可见数值轨迹差，不能把较低 training loss直接解释为更好 convergence。
+
+稳态 logged-window throughput 为 BF16 `41.52`、MXFP8约 `50.3 samples/GPU/s`，MXFP8提高约 `21%`；checkpoint/resume后的 first logged window包含重新 compile，不计入稳态。下一 gate 是至少 500 step并启用 validation，而不是直接跑完整 30k step。
+
 ### P4：QKV 与 MXFP4
 
 整体 MXFP8 通过后才测试 QKV MXFP8 wgrad。要求 500 step finite、validation 不回退、端到端至少提升 `1%`。
