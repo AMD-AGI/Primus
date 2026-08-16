@@ -12,6 +12,8 @@ from Megatron's training.train(). Logic mirrors trainer.py L1277-1298.
 """
 
 import inspect
+import os
+from pathlib import Path
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
@@ -28,7 +30,7 @@ def _is_called_from_training_train() -> bool:
     return False
 
 
-def _create_primus_prof(args, exp_name: str, original_profile):
+def _create_primus_prof(args, original_profile):
     """
     Create torch profiler with Primus options.
     """
@@ -39,7 +41,18 @@ def _create_primus_prof(args, exp_name: str, original_profile):
         activities.append(torch.profiler.ProfilerActivity.CPU)
 
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    worker_name = f"primus-megatron-exp[{exp_name}]-rank[{rank}]"
+    trace_dir = Path(
+        os.environ.get(
+            "PRIMUS_PROFILE_OUTPUT_DIR",
+            str(Path(args.tensorboard_dir).parent / "torch_profile"),
+        )
+    )
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    use_gzip = getattr(args, "torch_profiler_use_gzip", False)
+
+    def export_trace(prof):
+        suffix = ".json.gz" if use_gzip else ".json"
+        prof.export_chrome_trace(str(trace_dir / f"rank-{rank}{suffix}"))
 
     return original_profile(
         activities=activities,
@@ -49,11 +62,7 @@ def _create_primus_prof(args, exp_name: str, original_profile):
             active=getattr(args, "profile_step_end", 12) - getattr(args, "profile_step_start", 10),
             repeat=1,
         ),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(
-            args.tensorboard_dir,
-            worker_name=worker_name,
-            use_gzip=getattr(args, "torch_profiler_use_gzip", False),
-        ),
+        on_trace_ready=export_trace,
         record_shapes=getattr(args, "torch_profiler_record_shapes", True),
         with_stack=getattr(args, "torch_profiler_with_stack", True),
     )
@@ -79,13 +88,6 @@ def patch_torch_profiler(ctx: PatchContext) -> None:
     if getattr(torch.profiler.profile, "_primus_torch_profiler_patched", False):
         return
 
-    exp_name = "default"
-    primus_config = ctx.extra.get("primus_config")
-    if primus_config and getattr(primus_config, "exp_meta_info", None):
-        exp_meta = primus_config.exp_meta_info
-        if isinstance(exp_meta, dict):
-            exp_name = exp_meta.get("exp_name", "default")
-
     original_profile = torch.profiler.profile
 
     def _patched_profile(*args, **kwargs):
@@ -94,7 +96,7 @@ def patch_torch_profiler(ctx: PatchContext) -> None:
                 from megatron.training.global_vars import get_args
 
                 megatron_args = get_args()
-                return _create_primus_prof(megatron_args, exp_name, original_profile)
+                return _create_primus_prof(megatron_args, original_profile)
             except Exception as e:
                 log_rank_0(f"[Patch:megatron.torch_profiler] Fallback to original: {e}")
                 return original_profile(*args, **kwargs)
