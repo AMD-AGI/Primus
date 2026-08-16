@@ -241,7 +241,20 @@ step 1 loss/grad norm 两边相同为 `1.8657/4.0168`；到 step 5 BF16/MXFP8 lo
 
 matched BF16/MXFP8 每 10 step 对比显示 MXFP8 全程 finite，loss 趋势相关系数 `0.991`、MAE `0.0772`、平均相对差 `6.27%`；grad norm 相关系数 `0.974`、MAE `0.3648`、平均相对差 `27.6%`。step 100 BF16/MXFP8 loss 为 `0.8531/0.8111`，grad norm 为 `0.7166/0.5948`。MXFP8 当前比 BF16下降更快但已形成可见数值轨迹差，不能把较低 training loss直接解释为更好 convergence。
 
-稳态 logged-window throughput 为 BF16 `41.52`、MXFP8约 `50.3 samples/GPU/s`，MXFP8提高约 `21%`；checkpoint/resume后的 first logged window包含重新 compile，不计入稳态。下一 gate 是至少 500 step并启用 validation，而不是直接跑完整 30k step。
+稳态 logged-window throughput 为 BF16 `41.52`、MXFP8约 `50.3 samples/GPU/s`，MXFP8提高约 `21%`；checkpoint/resume后的 first logged window包含重新 compile，不计入稳态。
+
+#### P3 512-step validation 结果
+
+matched BF16/MXFP8 从头运行 512 step，使用 GBS `512`、warmup `512`、AITER attention、block compile、AC ratio `0.25`，并在 samples `262,144` 做第一次完整 validation。precomputed DataLoader 使用 4 workers 时两边都会在约 step 500 耗尽文件描述符；将新暴露的 `DATALOADER_NUM_WORKERS=0` 后两边都完成，因此这是公共 dataloader问题，不是 MXFP8 kernel问题。
+
+| 指标 | BF16 | MXFP8 | 差异 |
+|---|---:|---:|---:|
+| step 500 training loss | `0.6118` | `0.6166` | `+0.0048` |
+| step 512 validation loss | `0.689553` | `0.690048` | `+0.000495` (`+0.072%`) |
+| mean logged-window throughput | `41.2407` | `49.3235 samples/GPU/s` | `+19.6%` |
+| peak memory | `206.57 GB` | `187.99 GB` | `-18.58 GB` |
+
+第一次 validation 几乎重合，500-step validation gate 通过。该短跑为便于 gate 将 warmup 设为 512，不等价于正式 1600-step warmup recipe；下一步应使用正式 warmup 跑到至少第二/第三个 validation点，再决定是否启动完整 convergence。
 
 ### P4：QKV 与 MXFP4
 
