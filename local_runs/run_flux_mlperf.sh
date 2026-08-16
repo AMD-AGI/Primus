@@ -28,6 +28,9 @@ export PROMPT_DROPOUT_PROB=${PROMPT_DROPOUT_PROB:-0.1}
 export ATTENTION_BACKEND=${ATTENTION_BACKEND:-sdpa}
 export FLUX_LOW_PRECISION_PROVIDER=${FLUX_LOW_PRECISION_PROVIDER:-}
 export FLUX_LOW_PRECISION_RECIPE=${FLUX_LOW_PRECISION_RECIPE:-}
+if [[ "$FLUX_LOW_PRECISION_PROVIDER" == "primus_turbo" ]]; then
+  export PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS=${PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS:-1}
+fi
 export LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-64}
 export MAX_STEPS=${MAX_STEPS:-30000}
 export LR=${LR:-2e-4}
@@ -189,6 +192,7 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
     handle.write(f"low_precision_provider: {os.environ.get('FLUX_LOW_PRECISION_PROVIDER', '')}\n")
     handle.write(f"low_precision_recipe: {os.environ.get('FLUX_LOW_PRECISION_RECIPE', '')}\n")
+    handle.write(f"turbo_mxfp8_flux_configs: {os.environ.get('PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS', '')}\n")
     handle.write(f"gradient_checkpointing_ratio: {os.environ.get('GRADIENT_CHECKPOINTING_RATIO', '')}\n")
     handle.write(f"compile_transformer_blocks: {os.environ.get('COMPILE_TRANSFORMER_BLOCKS', '')}\n")
     handle.write(f"fsdp2_reshard_after_forward: {os.environ.get('FSDP2_RESHARD_AFTER_FORWARD', '')}\n")

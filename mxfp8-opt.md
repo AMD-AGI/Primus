@@ -214,7 +214,15 @@ Primus 实验 provider 已转换 228 层并保持 190 MXFP8 wgrad + 38 QKV HP wg
 
 小 M 端到端没有收益且多约 `5.1 GB` peak memory，符合 double projection 小 shape 无收益的信号。
 
-8 GPU、local batch 64 首轮在 first backward 的多 rank FlyDSL JIT/autotune 阶段超过 50 分钟仍未完成，已停止；这不是稳态性能结果，但构成启动时延 blocker。下一步先让 MXFP8 kernel 使用离线固定的 FLUX shape config或可共享的 AOT cache，再重跑 8 GPU。该 gate 通过前不进入完整 convergence。
+8 GPU、local batch 64 首轮在 first backward 的多 rank FlyDSL JIT/autotune 阶段超过 50 分钟仍未完成。随后把单 rank autotune 得到的 15 个 E4M3 F/D/W config 固定为 opt-in 表（Primus-Turbo commit `b0bcdc25`），由 `PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS=1` 启用。首次 compile step 降至约 `366 s`，并完成 matched 5-step A/B：
+
+| 指标，steps 2-5 | BF16 | Primus-Turbo MXFP8 | 结果 |
+|---|---:|---:|---:|
+| mean step | `1.5550 s` | `1.2325 s` | `20.7%` lower |
+| throughput | `41.3865` | `51.9083 samples/GPU/s` | `25.4%` higher |
+| peak memory | `206.57 GB` | `187.99 GB` | `18.58 GB` lower |
+
+step 1 loss/grad norm 两边相同为 `1.8657/4.0168`；到 step 5 BF16/MXFP8 loss 为 `1.8655/1.8631`，短程 finite且接近。P2 的大 batch性能 gate 已通过，但 MXFP8 首次启动仍比 BF16 的约 `94 s` 慢约 4 倍；后续应生成可复用 AOT cache/image。下一步进入 100/500-step 数值对照和 DTCP save/resume，不直接开始完整 convergence。
 
 ### P3：数值与 convergence
 
