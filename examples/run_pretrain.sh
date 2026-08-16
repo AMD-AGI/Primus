@@ -197,7 +197,13 @@ LOG_INFO_RANK0 ""
 
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
-ensure_rocm_ld_library_path
+
+# Skip LD_LIBRARY_PATH injection for JAX backends (MaxText/MaxDiffusion): the
+# image-installed JAX already links against the correct ROCm libs; prepending
+# _rocm_sdk_devel/lib pulls in TE 2.17's broken hipblaslt Tensile kernels on gfx950.
+if [[ "${BACKEND:-}" != "MaxText" && "${BACKEND:-}" != "MaxDiffusion" ]]; then
+    ensure_rocm_ld_library_path
+fi
 
 export NCCL_DEBUG=${NCCL_DEBUG:-}
 export NCCL_CHECKS_DISABLE=1
