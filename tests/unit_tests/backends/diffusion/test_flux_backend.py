@@ -443,10 +443,14 @@ def test_flux_rejects_invalid_low_precision_configuration():
         )
 
 
-def test_flux_mxfp8_converts_only_block_linears(monkeypatch):
-    mxfp8_module = pytest.importorskip(
-        "torchao.prototype.moe_training.mxfp8_linear"
-    )
+@pytest.mark.parametrize("provider", ["torchao", "primus_turbo"])
+def test_flux_mxfp8_converts_only_block_linears(monkeypatch, provider):
+    if provider == "torchao":
+        module_type = pytest.importorskip(
+            "torchao.prototype.moe_training.mxfp8_linear"
+        ).MXFP8Linear
+    else:
+        module_type = pytest.importorskip("primus_turbo.pytorch.modules").Float8Linear
     original_values = {}
     original_keys = set()
 
@@ -465,7 +469,7 @@ def test_flux_mxfp8_converts_only_block_linears(monkeypatch):
             "pretrained_path": "unused",
             "config": {
                 "model_preset": "flux.1-schnell",
-                "low_precision_provider": "torchao",
+                "low_precision_provider": provider,
                 "low_precision_recipe": "mxfp8",
                 "params": {
                     "in_channels": 16,
@@ -485,7 +489,7 @@ def test_flux_mxfp8_converts_only_block_linears(monkeypatch):
     converted = {
         fqn: module
         for fqn, module in model.dit.named_modules()
-        if type(module) is mxfp8_module.MXFP8Linear
+        if type(module) is module_type
     }
     assert set(converted) == {
         "double_blocks.0.img_attn.qkv",

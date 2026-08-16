@@ -159,6 +159,7 @@ def build_flux_model(model_config: dict[str, Any]):
     if (low_precision_provider, low_precision_recipe) not in {
         ("", ""),
         ("torchao", "mxfp8"),
+        ("primus_turbo", "mxfp8"),
     }:
         raise ValueError(
             "Unsupported FLUX low-precision configuration: "
@@ -186,10 +187,28 @@ def build_flux_model(model_config: dict[str, Any]):
         _load_flux_weights(dit, pretrained_path, default_filename=default_filename)
 
     if low_precision_recipe == "mxfp8":
-        try:
-            from torchao.prototype.moe_training.mxfp8_linear import MXFP8Linear
-        except ImportError as exc:
-            raise ImportError("TorchAO MXFP8 training support is required") from exc
+        if low_precision_provider == "torchao":
+            try:
+                from torchao.prototype.moe_training.mxfp8_linear import MXFP8Linear
+            except ImportError as exc:
+                raise ImportError("TorchAO MXFP8 training support is required") from exc
+        else:
+            try:
+                from primus_turbo.pytorch.core.low_precision import (
+                    Float8QuantConfig,
+                    Format,
+                    ScaleDtype,
+                    ScalingGranularity,
+                )
+                from primus_turbo.pytorch.modules import Float8Linear
+            except ImportError as exc:
+                raise ImportError("Primus-Turbo MXFP8 training support is required") from exc
+            turbo_config = Float8QuantConfig(
+                format=Format.E4M3,
+                granularity=ScalingGranularity.MX_BLOCKWISE,
+                scale_dtype=ScaleDtype.E8M0,
+                block_size=32,
+            )
 
         replacements = []
         for fqn, module in dit.named_modules():
@@ -221,14 +240,18 @@ def build_flux_model(model_config: dict[str, Any]):
         for fqn, module, high_precision_wgrad in replacements:
             devices = [module.weight.device] if module.weight.is_cuda else []
             with torch.random.fork_rng(devices=devices):
-                replacement = MXFP8Linear(
-                    module.in_features,
-                    module.out_features,
-                    bias=module.bias is not None,
-                    device=module.weight.device,
-                    dtype=module.weight.dtype,
-                    wgrad_with_hp=high_precision_wgrad,
-                )
+                common = {
+                    "bias": module.bias is not None,
+                    "device": module.weight.device,
+                    "dtype": module.weight.dtype,
+                    "wgrad_with_hp": high_precision_wgrad,
+                }
+                if low_precision_provider == "torchao":
+                    replacement = MXFP8Linear(module.in_features, module.out_features, **common)
+                else:
+                    replacement = Float8Linear(
+                        module.in_features, module.out_features, config=turbo_config, **common
+                    )
             with torch.no_grad():
                 replacement.weight.copy_(module.weight)
                 if module.bias is not None:
@@ -245,7 +268,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 f"{expected} ({expected_high_precision} high-precision wgrad)"
             )
         logger.info(
-            f"Enabled TorchAO MXFP8 for {len(replacements)} FLUX block Linear modules; "
+            f"Enabled {low_precision_provider} MXFP8 for {len(replacements)} FLUX block Linear modules; "
             f"wgrad=MXFP8 for {len(replacements) - high_precision_wgrad_count} and "
             f"high precision for {high_precision_wgrad_count} QKV modules"
         )

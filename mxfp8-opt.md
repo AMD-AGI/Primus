@@ -175,6 +175,19 @@ P0 通过后，在 Primus-Turbo 提供最小 raw custom-op/autograd contract：
 
 Gate：真实 shape单层 fullgraph FWD+BWD、非零 bias、连续/非连续 grad output，且 compile 后性能仍优于 BF16/TorchAO。
 
+#### P1 结果
+
+在独立 Primus-Turbo worktree `/shared_nfs/zirui/code/Primus-Turbo-flux-mxfp8-compile`、分支 `experiment/flux-mxfp8-compile`、commit `ebe2614e` 增加了最小 `torch.library.custom_op`：
+
+- fake/meta 和 autograd 显式注册；
+- forward 保存 columnwise MXFP8 operand供 backward复用；
+- 支持 E4M3/hybrid；
+- 支持 QKV high-precision wgrad；
+- `Float8Linear` 的 MX_BLOCKWISE 路径绕开 graph-disabled 通用 wrapper；
+- 非 MXFP8 路径不变。
+
+E4M3/hybrid、MXFP8/HP wgrad、非连续 grad output 的 `fullgraph=True` 测试为 `4 passed`。真实 shape compiled FWD+BWD 相对 compiled BF16：double QKV `1.23x`、double projection `0.86x`、double MLP up `1.34x`、double MLP down `1.26x`、single up/down `1.32x/1.33x`；六 shape 等权合计约 `1.29x`。double projection 应保留按 shape fallback 候选。
+
 ### P2：228-layer FLUX 实验 provider
 
 只在 P0/P1 通过后增加 `provider=primus_turbo, recipe=mxfp8`：
@@ -186,6 +199,22 @@ Gate：真实 shape单层 fullgraph FWD+BWD、非零 bias、连续/非连续 gra
 - block compile 和 MLPerf AC 配置必须与 control 相同。
 
 端到端 gate：相同节点重复测试至少快 `3%`，否则不进入 convergence。
+
+#### P2 首轮结果
+
+Primus 实验 provider 已转换 228 层并保持 190 MXFP8 wgrad + 38 QKV HP wgrad。单元测试通过；2 GPU、block fullgraph、FSDP2、AC ratio `0.25`、AITER attention 完成 12 个 finite step，step 1 loss/grad norm 与 BF16 都为 `1.6148/3.3907`。
+
+2 GPU local batch 1 的 steps 2-12：
+
+| 指标 | BF16 | Primus-Turbo MXFP8 |
+|---|---:|---:|
+| mean step | `0.6991 s` | `0.7000 s` |
+| throughput | `1.4357` | `1.4324 samples/GPU/s` |
+| peak memory | `98.57 GB` | `103.63 GB` |
+
+小 M 端到端没有收益且多约 `5.1 GB` peak memory，符合 double projection 小 shape 无收益的信号。
+
+8 GPU、local batch 64 首轮在 first backward 的多 rank FlyDSL JIT/autotune 阶段超过 50 分钟仍未完成，已停止；这不是稳态性能结果，但构成启动时延 blocker。下一步先让 MXFP8 kernel 使用离线固定的 FLUX shape config或可共享的 AOT cache，再重跑 8 GPU。该 gate 通过前不进入完整 convergence。
 
 ### P3：数值与 convergence
 
