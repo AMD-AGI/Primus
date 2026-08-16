@@ -3,7 +3,7 @@
 ARG BASE_IMAGE=rocm/primus:v26.5@sha256:3040bf42974d791dd42de2e36b3c919a00869a5754cfc57a06b96d004c55eed1
 FROM ${BASE_IMAGE}
 
-ARG PRIMUS_TURBO_REF=e160182d6a7967592579be2640e85106bc8f421e
+ARG PRIMUS_TURBO_REF=723547e5390eec22fa12017ffd2f07a9ed8c5dfb
 ARG TE_REF=a07e607f14a5330807ffdafeeb6224f2d7dffacc
 ARG AITER_REF=d32b0cb62ecc32bb1a858e8437d58eb9b3856af6
 ARG FWD_ATTN_ASM_REF=53d3dadc3f3b0ac35ae536f2d1d7864a3e07ba22
@@ -30,6 +30,11 @@ RUN git clone --recursive https://github.com/AMD-AGI/Primus-Turbo.git && \
     MAX_JOBS="${MAX_JOBS}" \
       python3 -m pip install --no-build-isolation --no-deps -v . && \
     cd .. && rm -rf Primus-Turbo
+
+# Primus main delegates MLPerf lifecycle logging to the external package.
+ARG MLPERF_COMMON_REF=56d8ca70f60f866312add84adfea66f5447a4c86
+RUN python3 -m pip install --no-cache-dir \
+      "git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}"
 
 # Compile the hand-tuned forward and numerically validated backward payloads.
 RUN git clone https://github.com/mawad-amd/fwd-attn-asm.git && \
@@ -77,13 +82,20 @@ RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
       python3 -m pip install --no-build-isolation --no-deps -v . && \
     cd .. && rm -rf TransformerEngine te-aiter
 
-COPY aiter_hd64_asm_override.py \
+COPY examples/mlperf/gpt_oss_20b/aiter_hd64_asm_override.py \
      /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_override.py
-COPY prewarm_attention.py /opt/mlperf-gpt-oss-20b/prewarm_attention.py
+COPY examples/mlperf/gpt_oss_20b/prewarm_attention.py \
+     /opt/mlperf-gpt-oss-20b/prewarm_attention.py
 RUN printf 'import aiter_hd64_asm_override\n' \
       > /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_override.pth && \
     install -m 0644 /tmp/fwd_attn.co \
       /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_fwd_d64_opt128.co && \
     rm -f /tmp/fwd_attn.co /tmp/bwd_attn.co
 
-WORKDIR /workspace
+# Keep the complete runnable Primus tree in the image. This includes the
+# Megatron-LM submodule and the GPT-OSS launch/config files, so runtime jobs do
+# not depend on a host bind mount.
+COPY . /workspace/Primus
+ENV PYTHONPATH=/workspace/Primus:/workspace/Primus/third_party/Megatron-LM:${PYTHONPATH}
+
+WORKDIR /workspace/Primus
