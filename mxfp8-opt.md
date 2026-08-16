@@ -254,7 +254,22 @@ matched BF16/MXFP8 从头运行 512 step，使用 GBS `512`、warmup `512`、AIT
 | mean logged-window throughput | `41.2407` | `49.3235 samples/GPU/s` | `+19.6%` |
 | peak memory | `206.57 GB` | `187.99 GB` | `-18.58 GB` |
 
-第一次 validation 几乎重合，500-step validation gate 通过。该短跑为便于 gate 将 warmup 设为 512，不等价于正式 1600-step warmup recipe；下一步应使用正式 warmup 跑到至少第二/第三个 validation点，再决定是否启动完整 convergence。
+第一次 validation 几乎重合，500-step validation gate 通过。
+
+#### P3 正式 warmup 到 2048 step
+
+随后使用正式 `warmup_steps=1600` 从头跑到 step 2048，得到四个 matched validation点：
+
+| Step / samples | BF16 | MXFP8 | MXFP8 - BF16 |
+|---:|---:|---:|---:|
+| 512 / `262,144` | `0.713264` | `0.717329` | `+0.004065` |
+| 1024 / `524,288` | `0.659750` | `0.658402` | `-0.001348` |
+| 1536 / `786,432` | `0.635366` | `0.635705` | `+0.000339` |
+| 2048 / `1,048,576` | `0.621658` | `0.621796` | `+0.000138` |
+
+step 512 的早期差异随后收敛；step 1024-2048 的 validation差异绝对值不超过 `0.00135`，step 2048 只差 `0.000138`，数值趋势与 BF16 对齐。包含周期 validation和部分 post-validation慢窗口的 matched summary throughput 为 BF16 `40.1860`、MXFP8 `48.1165 samples/GPU/s`，MXFP8高 `19.7%`；peak memory仍少 `18.58 GB`。
+
+正式 warmup多点 validation gate 通过，已具备启动单 seed完整 MLPerf convergence的依据。完整运行前仍建议把约 6-8 分钟的 MXFP8首次 JIT固化到 image/AOT cache，否则 TTQ 会包含较大的固定启动成本。
 
 ### P4：QKV 与 MXFP4
 
