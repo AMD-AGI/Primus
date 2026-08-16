@@ -518,6 +518,13 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "mxfp4_gradient_stochastic_rounding": getattr(
                     params, "mxfp4_gradient_stochastic_rounding", False
                 ),
+                "mxfp4_input_stochastic_rounding": getattr(
+                    params, "mxfp4_input_stochastic_rounding", False
+                ),
+                "mxfp4_weight_stochastic_rounding": getattr(
+                    params, "mxfp4_weight_stochastic_rounding", False
+                ),
+                "mxfp4_dgrad_hadamard": getattr(params, "mxfp4_dgrad_hadamard", False),
             }
         )
 
@@ -703,6 +710,9 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4_recipe",
                 "mxfp4_backward_precision",
                 "mxfp4_gradient_stochastic_rounding",
+                "mxfp4_input_stochastic_rounding",
+                "mxfp4_weight_stochastic_rounding",
+                "mxfp4_dgrad_hadamard",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
                 "sensitive_layers_end",

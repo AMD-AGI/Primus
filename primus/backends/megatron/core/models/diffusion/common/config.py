@@ -34,6 +34,9 @@ class BaseDiffusionConfig(TransformerConfig):
         fp8_reduce_amax: Whether to allreduce amax across ranks (default: False)
         mxfp4_backward_precision: MXFP4 backward precision, 'mxfp4' or 'fp8' (default: 'mxfp4')
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
+        mxfp4_input_stochastic_rounding: Stochastic rounding on forward activations (default: False)
+        mxfp4_weight_stochastic_rounding: Stochastic rounding on forward weights (default: False)
+        mxfp4_dgrad_hadamard: Random Hadamard transform on both dgrad operands (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -76,6 +79,22 @@ class BaseDiffusionConfig(TransformerConfig):
 
     # Stochastic rounding on MXFP4 gradients (paper Section 4.4)
     mxfp4_gradient_stochastic_rounding: bool = False
+
+    # Stochastic rounding on the MXFP4 forward path, which the quantizer supports
+    # but nothing has ever enabled. Gradient SR alone was measured null on Flux 12B
+    # (Issue 220 Task 3), while the residual convergence gap tracks the forward
+    # GEMMs, so these are separate knobs: activations and weights are quantized by
+    # different recipes and there is no reason to assume they contribute equally.
+    mxfp4_input_stochastic_rounding: bool = False
+    mxfp4_weight_stochastic_rounding: bool = False
+
+    # Random Hadamard transform on the dgrad GEMM's two operands. The local spec
+    # applies the RHT only to the wgrad pair (activation and gradient, both
+    # colwise), while Primus-Turbo's own FP4GemmMXFunction also applies it to the
+    # dgrad pair (rowwise gradient against colwise weight). The transform cancels
+    # in exact arithmetic because it is applied along the contracted axis of both
+    # operands, so it must be switched on for both together or not at all.
+    mxfp4_dgrad_hadamard: bool = False
 
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False

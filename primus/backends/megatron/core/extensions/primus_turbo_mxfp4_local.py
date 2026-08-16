@@ -231,18 +231,18 @@ _GRAN_VALUE = ScalingGranularity.MX_BLOCKWISE.value
 _DEFAULT_BACKEND = BackendType.HIPBLASLT.value
 
 
-def _quantize_input_dual(input_2d, preshuffle):
+def _quantize_input_dual(input_2d, preshuffle, use_sr=False):
     """Quantize input (activation) with dual rowwise + colwise."""
     return _quantize_mxfp4_dual_op(
         input_2d,
         _FP4_DTYPE,
         MXFP4_PADDING_ALIGN_SIZE,
         False,
+        use_sr,
+        False,  # rowwise: no 2d_block, SR configurable, no rht
         False,
-        False,  # rowwise: no 2d_block, no sr, no rht
-        False,
-        False,
-        True,  # colwise: no 2d_block, no sr, yes rht
+        use_sr,
+        True,  # colwise: no 2d_block, SR configurable, yes rht
         preshuffle,
         False,  # shuffle_rowwise_scale, shuffle_rowwise
         preshuffle,
@@ -250,18 +250,25 @@ def _quantize_input_dual(input_2d, preshuffle):
     )
 
 
-def _quantize_weight_dual(weight, preshuffle):
-    """Quantize weight with dual rowwise + colwise."""
+def _quantize_weight_dual(weight, preshuffle, use_sr=False, use_dgrad_rht=False):
+    """Quantize weight with dual rowwise + colwise.
+
+    The rowwise copy feeds the forward GEMM against a rowwise activation that is
+    never Hadamard-transformed, so its rht stays off. The colwise copy feeds the
+    dgrad GEMM against the rowwise gradient, and `use_dgrad_rht` has to match
+    the flag `_quantize_grad_dual` is called with or the transform will not
+    cancel.
+    """
     return _quantize_mxfp4_dual_op(
         weight,
         _FP4_DTYPE,
         MXFP4_PADDING_ALIGN_SIZE,
         True,
-        False,
-        False,  # rowwise: 2d_block, no sr, no rht
+        use_sr,
+        False,  # rowwise: 2d_block, SR configurable, no rht
         True,
-        False,
-        False,  # colwise: 2d_block, no sr, no rht
+        use_sr,
+        use_dgrad_rht,  # colwise: 2d_block, SR configurable, rht pairs with dgrad
         preshuffle,
         preshuffle,  # shuffle_rowwise_scale, shuffle_rowwise
         preshuffle,
@@ -269,15 +276,20 @@ def _quantize_weight_dual(weight, preshuffle):
     )
 
 
-def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
-    """Quantize gradient (activation recipe) with dual rowwise + colwise."""
+def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True, use_dgrad_rht=False):
+    """Quantize gradient (activation recipe) with dual rowwise + colwise.
+
+    The colwise copy feeds the wgrad GEMM against the colwise activation, which
+    is always Hadamard-transformed, so its rht stays on. The rowwise copy feeds
+    dgrad and pairs with the weight's colwise copy.
+    """
     return _quantize_mxfp4_dual_op(
         grad_2d,
         _FP4_DTYPE,
         MXFP4_PADDING_ALIGN_SIZE,
         False,
         use_sr,
-        False,  # rowwise: no 2d_block, SR configurable, no rht
+        use_dgrad_rht,  # rowwise: no 2d_block, SR configurable, rht pairs with the weight
         False,
         use_sr,
         True,  # colwise: no 2d_block, SR configurable, yes rht
@@ -308,13 +320,18 @@ class MXFP4LinearFunction(torch.autograd.Function):
         fp8_gran_value,
         fp8_backend_value,
         use_gradient_sr,
+        use_input_sr,
+        use_weight_sr,
+        use_dgrad_rht,
     ):
         out_dtype = input.dtype
         orig_shape = input.shape
         input_2d = input.reshape(-1, input.shape[-1])
 
-        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle)
-        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(weight, preshuffle)
+        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle, use_sr=use_input_sr)
+        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(
+            weight, preshuffle, use_sr=use_weight_sr, use_dgrad_rht=use_dgrad_rht
+        )
 
         output = gemm_fp4_impl(
             a_fp4,
@@ -357,11 +374,15 @@ class MXFP4LinearFunction(torch.autograd.Function):
             fp8_gran_value,
             fp8_backend_value,
             use_gradient_sr,
+            _use_input_sr,
+            _use_weight_sr,
+            use_dgrad_rht,
         ) = inputs
 
         ctx.preshuffle = preshuffle
         ctx.backward_is_fp8 = backward_is_fp8
         ctx.use_gradient_sr = use_gradient_sr
+        ctx.use_dgrad_rht = use_dgrad_rht
         ctx.out_dtype = inputs[0].dtype
         ctx.orig_shape = inputs[0].shape
 
@@ -426,7 +447,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             preshuffle = ctx.preshuffle
 
             g_fp4, g_scale, g_t_fp4, g_t_scale = _quantize_grad_dual(
-                grad_2d, preshuffle, use_sr=ctx.use_gradient_sr
+                grad_2d, preshuffle, use_sr=ctx.use_gradient_sr, use_dgrad_rht=ctx.use_dgrad_rht
             )
 
             grad_input = gemm_fp4_impl(
@@ -458,7 +479,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 preshuffled=preshuffle,
             )
 
-        return grad_input, grad_weight, None, None, None, None, None, None
+        return grad_input, grad_weight, None, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +515,9 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._use_input_sr = getattr(self.config, "mxfp4_input_stochastic_rounding", False)
+        self._use_weight_sr = getattr(self.config, "mxfp4_weight_stochastic_rounding", False)
+        self._use_dgrad_rht = getattr(self.config, "mxfp4_dgrad_hadamard", False)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -518,6 +542,9 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._use_input_sr,
+            self._use_weight_sr,
+            self._use_dgrad_rht,
         )
         output = result[0]
 
@@ -554,6 +581,9 @@ class MXFP4RowParallelLinear(RowParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._use_input_sr = getattr(self.config, "mxfp4_input_stochastic_rounding", False)
+        self._use_weight_sr = getattr(self.config, "mxfp4_weight_stochastic_rounding", False)
+        self._use_dgrad_rht = getattr(self.config, "mxfp4_dgrad_hadamard", False)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -578,6 +608,9 @@ class MXFP4RowParallelLinear(RowParallelLinear):
             self._fp8_gran_value,
             self._fp8_backend_value,
             self._use_gradient_sr,
+            self._use_input_sr,
+            self._use_weight_sr,
+            self._use_dgrad_rht,
         )
         output = result[0]
 

@@ -103,6 +103,9 @@ class TestMXFP4CrossValidation(PrimusUT):
             0,
             0,
             False,
+            False,
+            False,
+            False,
         )
         our_output = result[0]
 
@@ -139,7 +142,7 @@ class TestMXFP4CrossValidation(PrimusUT):
         w_ref = w.detach().clone().requires_grad_(True)
         preshuffle = _enable_preshuffle()
 
-        result = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False)
+        result = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False, False, False, False)
         our_output = result[0]
         grad_out = torch.ones_like(our_output)
         our_output.backward(grad_out)
@@ -168,9 +171,11 @@ class TestMXFP4CrossValidation(PrimusUT):
 
         # grad_input is NOT bit-identical, and that is expected post Primus-Turbo
         # PR #383. The grad_input GEMM pair is (grad rowwise) x (weight colwise b_t).
-        # Our production deliberately quantizes this pair without RHT
-        # (_quantize_grad_dual rowwise use_rht=False + _quantize_weight_dual
-        # colwise use_rht=False -- an internally consistent no-RHT pair), whereas
+        # Our production defaults to quantizing this pair without RHT
+        # (mxfp4_dgrad_hadamard=False: _quantize_grad_dual rowwise use_rht=False +
+        # _quantize_weight_dual colwise use_rht=False, an internally consistent
+        # no-RHT pair; test_dgrad_hadamard_matches_reference_fp4gemm covers the
+        # flag that turns both on and recovers bit-identity), whereas
         # Primus-Turbo PR #383's FP4GemmMXFunction.backward unconditionally quantizes the grad
         # with use_rht=True and derives b_t with use_rht=True. Both compute a
         # valid grad_input (RHT cancels within each consistent pair); they only
@@ -186,6 +191,49 @@ class TestMXFP4CrossValidation(PrimusUT):
         assert snr_db > 10, (
             f"grad_input SNR {snr_db:.1f} dB vs BF16 is below the 10 dB threshold "
             f"(max abs diff vs Primus-Turbo PR #383 reference: {(x.grad - x_ref.grad).abs().max().item():.6e})"
+        )
+
+    @requires_mxfp4
+    def test_dgrad_hadamard_matches_reference_fp4gemm(self):
+        """mxfp4_dgrad_hadamard=True must reproduce the reference bit-for-bit.
+
+        With the flag on, both operands of the dgrad GEMM carry the RHT exactly
+        as FP4GemmMXFunction.backward quantizes them, so grad_input becomes
+        bit-identical rather than merely close. That is the strongest available
+        check that the flag reaches both call sites and that they still pair: a
+        flag that reached only one of them would leave a Hadamard-transformed
+        tensor multiplying an untransformed one, which is silently wrong maths
+        rather than a different rounding.
+        """
+        from primus_turbo.pytorch.core.low_precision import Float4QuantConfig
+        from primus_turbo.pytorch.ops.gemm_fp4 import FP4GemmMXFunction
+
+        from primus.backends.megatron.core.extensions.primus_turbo_mxfp4_local import (
+            MXFP4LinearFunction,
+            _enable_preshuffle,
+        )
+
+        torch.manual_seed(42)
+        x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_(True)
+        w_ref = w.detach().clone().requires_grad_(True)
+        preshuffle = _enable_preshuffle()
+
+        result = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False, False, False, True)
+        result[0].backward(torch.ones_like(result[0]))
+
+        config = Float4QuantConfig(use_preshuffle=preshuffle)
+        ref_output = FP4GemmMXFunction.apply(x_ref, w_ref, None, None, False, True, x_ref.dtype, config)
+        ref_output.backward(torch.ones_like(ref_output))
+
+        assert torch.equal(x.grad, x_ref.grad), (
+            "grad_input differs from the reference with mxfp4_dgrad_hadamard=True. Max abs diff: "
+            f"{(x.grad - x_ref.grad).abs().max().item():.6e}"
+        )
+        assert torch.equal(w.grad, w_ref.grad), (
+            "grad_weight must not change when only the dgrad pair is transformed. Max abs diff: "
+            f"{(w.grad - w_ref.grad).abs().max().item():.6e}"
         )
 
 
@@ -216,7 +264,7 @@ class TestMXFP4Compile(PrimusUT):
 
         explanation = torch._dynamo.explain(
             MXFP4LinearFunction.apply,
-        )(x, w, preshuffle, False, None, 0, 0, False)
+        )(x, w, preshuffle, False, None, 0, 0, False, False, False, False)
 
         assert explanation.graph_break_count == 0, (
             f"Expected 0 graph breaks, got {explanation.graph_break_count}. "
@@ -253,6 +301,9 @@ class TestMXFP4Compile(PrimusUT):
             ScalingGranularity.TENSORWISE.value,
             BackendType.HIPBLASLT.value,
             False,
+            False,
+            False,
+            False,
         )
 
         assert explanation.graph_break_count == 0, (
@@ -274,11 +325,11 @@ class TestMXFP4Compile(PrimusUT):
         w = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
         preshuffle = _enable_preshuffle()
 
-        eager_result = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False)
+        eager_result = MXFP4LinearFunction.apply(x, w, preshuffle, False, None, 0, 0, False, False, False, False)
         eager_out = eager_result[0]
 
         compiled_fn = torch.compile(MXFP4LinearFunction.apply)
-        compiled_result = compiled_fn(x, w, preshuffle, False, None, 0, 0, False)
+        compiled_result = compiled_fn(x, w, preshuffle, False, None, 0, 0, False, False, False, False)
         compiled_out = compiled_result[0]
 
         assert torch.equal(eager_out, compiled_out), (
