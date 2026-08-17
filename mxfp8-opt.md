@@ -285,13 +285,20 @@ seed `10007` 的完整 MLPerf run 已在 `crsuse2-m2m-119` 成功完成。配置
 
 相对历史同 seed BF16/selective tensor-wise FP8 结果：MXFP8 比二者晚 `1024` step、samples-to-convergence增加 `7.41%`；但 TTQ 比 BF16 的 `33,742.858 s` 降低 `27.9%`，比 selective FP8 的 `26,535.193 s` 降低 `8.31%`。这说明当前 MXFP8 用额外约 7.4% samples换取更高训练吞吐，最终仍改善 wall-clock TTQ。历史对照来自不同实验提交/软件环境，生产结论还需 matched rerun和更多 seed qualification。
 
-#### P3 多 seed qualification（运行中）
+#### P3 多 seed qualification：通过
 
-已并行启动两条额外 MXFP8 seed 和一条 matched-code BF16：MXFP8 seed `11239` 在 node037、MXFP8 seed `12763` 在 node119、BF16 seed `11239` 在 node192。三条均使用同一 Primus commit/image、GBS/MBS `512/64`、warmup `1600`、AITER、compile、AC `0.25`、workers `0`，并关闭周期 checkpoint以隔离 convergence samples和训练吞吐。seed11239 的 BF16/MXFP8 运行在不同节点，因此可比较数值曲线和 samples，性能结论仍需后续同节点顺序复测。
+两条额外 MXFP8 seed和 matched-code BF16均已完成。三条使用同一 Primus commit/image、GBS/MBS `512/64`、warmup `1600`、AITER、compile、AC `0.25`、workers `0`，并关闭周期 checkpoint。
 
-两条额外 MXFP8 seed 已成功完成：seed11239 在 step `14848`、samples `7,602,176` 达到 loss `0.585636`，无 checkpoint TTQ `21,061.443 s`；seed12763 在 step `15360`、samples `7,864,320` 达到 `0.585853`，TTQ `21,037.296 s`。连同 seed10007，三个 MXFP8 convergence step 为 `[14848,14848,15360]`，mean/median `15018.7/14848`，population std `241.4 step`；三 seed 全部成功，samples-to-convergence qualification初步通过。两条 no-checkpoint TTQ 几乎相同，mean `21,049.370 s`，但来自不同节点，不能解释为严格性能重复性。
+| Precision | Seed | Step | Samples | Final loss | TTQ |
+|---|---:|---:|---:|---:|---:|
+| MXFP8 | 10007 | `14848` | `7,602,176` | `0.585282` | `24,330.134 s`（含 checkpoint） |
+| MXFP8 | 11239 | `14848` | `7,602,176` | `0.585636` | `21,061.443 s` |
+| MXFP8 | 12763 | `15360` | `7,864,320` | `0.585853` | `21,037.296 s` |
+| BF16 | 11239 | `14848` | `7,602,176` | `0.585230` | `25,282.810 s` |
 
-matched BF16 seed11239仍在运行。其与 MXFP8 seed11239 在 step 512-6144 的 validation曲线高度对齐：step 1024以后最大绝对差 `0.00070`，step 6144 差 `+0.000187`。无周期 checkpoint的 MXFP8/BF16 稳态约 `49.3/41.8 samples/GPU/s`，跨节点观测提升约 `18%`；待 BF16完成后再比较同 seed samples和 TTQ。
+三个 MXFP8 convergence step 为 `[14848,14848,15360]`，mean/median `15018.7/14848`，population std `241.4 step`，成功率 `3/3`。matched seed11239 的 BF16/MXFP8 在完全相同 step和 samples达到目标，因此该 seed没有 samples regression；MXFP8 TTQ降低 `16.70%`（`1.200x` speedup），节省 `4,221.367 s`。summary mean throughput 为 MXFP8/BF16 `46.0314/38.6469 samples/GPU/s`（`+19.1%`），mean step time `1.4111/1.6863 s`（`-16.3%`），peak memory少 `18.58 GB/GPU`。
+
+BF16 seed11239在 node192、MXFP8 seed11239在 node037，节点差异会影响严格性能归因；但两者 validation曲线高度对齐并在同一 samples收敛。进入默认 recipe前仍应做同节点顺序性能复测，并按 MLPerf RCP要求补足最终 seed数量。
 
 ### P4：QKV 与 MXFP4
 
