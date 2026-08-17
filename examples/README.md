@@ -50,7 +50,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v26.4
+docker pull docker.io/rocm/primus:v26.5
 
 ```
 
@@ -127,7 +127,7 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.4"
+export DOCKER_IMAGE="docker.io/rocm/primus:v26.5"
 export NNODES=8
 
 # Example for megatron llama3.1_8B
@@ -293,7 +293,7 @@ When using the `create` command to start a new training workload, the following 
 | `--gpu`        | Number of GPUs                                       | 8                                        |
 | `--exp`        | Path to experiment (training config) file (required) | —                                        |
 | `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.4` |
+| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.5` |
 | `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
 | `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
 | `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |
