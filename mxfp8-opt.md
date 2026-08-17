@@ -281,7 +281,7 @@ step 512 的早期差异随后收敛；step 1024-2048 的 validation差异绝对
 
 已在 `crsuse2-m2m-119` 启动 seed `10007` 的完整 MLPerf run，容器名 `flux-mxfp8-full-seed10007`，产物目录 `/shared_nfs/zirui/runs/mxfp8_turbo_opt/p4-turbo-full-seed10007/`。配置为 8 GPU、GBS/MBS `512/64`、warmup `1600`、AITER attention、block compile、AC ratio `0.25`、每 512 step validation、DTCP interval `100`，并使用预热 persistent cache。首次 forward+backward约 `91 s`，明显低于 cold-cache run。
 
-运行当前到 step 3900，所有 loss/grad norm finite。step `512/1024/1536/2048/2560/3072/3584` 的 validation loss 依次为 `0.712966/0.657130/0.637598/0.621142/0.614344/0.609181/0.605928`，持续单调下降；滚动 checkpoint已到 checkpoint-3900。带每 100 step DTCP 的 logged window约 `40-42 samples/GPU/s`，低于无 checkpoint的 `49 samples/GPU/s`，因此最终 TTQ会同时反映训练加速和当前高频 checkpoint开销。该运行尚未形成 convergence结论，最终以首次 validation loss `<=0.586` 的 samples和 `run_stop=success` 为准。
+运行当前到 step 8400，所有 loss/grad norm finite。早期 step `512/1024/1536/2048/2560/3072/3584` 的 validation loss 为 `0.712966/0.657130/0.637598/0.621142/0.614344/0.609181/0.605928`；后续 step `4096/4608/5120/5632/6144/6656/7168/7680/8192` 为 `0.602364/0.600026/0.598017/0.597019/0.595935/0.594938/0.593209/0.592412/0.592165`。曲线仍下降但已进入接近目标前的慢速区间；滚动 checkpoint已到 checkpoint-8400。带每 100 step DTCP 的 logged window约 `40-42 samples/GPU/s`，低于无 checkpoint的 `49 samples/GPU/s`，因此最终 TTQ会同时反映训练加速和当前高频 checkpoint开销。该运行尚未形成 convergence结论，最终以首次 validation loss `<=0.586` 的 samples和 `run_stop=success` 为准。
 
 ### P4：QKV 与 MXFP4
 
