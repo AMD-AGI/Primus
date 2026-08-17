@@ -45,7 +45,7 @@ dependencies = [
     "blobfile",
     "torchdata>=0.8.0",
     "datasets>=3.6.0",
-    "mlflow==3.11.1",
+    "mlflow==3.15.0",
     "pyrsmi",
     "plotext",
     "mlperf-logging @ git+https://github.com/mlcommons/logging.git@6.0.0-rc5",
