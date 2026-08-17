@@ -287,7 +287,9 @@ seed `10007` 的完整 MLPerf run 已在 `crsuse2-m2m-119` 成功完成。配置
 
 #### P3 多 seed qualification（运行中）
 
-已并行启动两条额外 MXFP8 seed 和一条 matched-code BF16：MXFP8 seed `11239` 在 node037、MXFP8 seed `12763` 在 node119、BF16 seed `11239` 在 node192。三条均使用同一 Primus commit/image、GBS/MBS `512/64`、warmup `1600`、AITER、compile、AC `0.25`、workers `0`，并关闭周期 checkpoint以隔离 convergence samples和训练吞吐。seed11239 的 BF16/MXFP8 运行在不同节点，因此可比较数值曲线和 samples，性能结论仍需后续同节点顺序复测。三条运行已完成首个 forward/backward且 finite。
+已并行启动两条额外 MXFP8 seed 和一条 matched-code BF16：MXFP8 seed `11239` 在 node037、MXFP8 seed `12763` 在 node119、BF16 seed `11239` 在 node192。三条均使用同一 Primus commit/image、GBS/MBS `512/64`、warmup `1600`、AITER、compile、AC `0.25`、workers `0`，并关闭周期 checkpoint以隔离 convergence samples和训练吞吐。seed11239 的 BF16/MXFP8 运行在不同节点，因此可比较数值曲线和 samples，性能结论仍需后续同节点顺序复测。
+
+当前 MXFP8 seed11239/12763 分别运行到约 step `7700/8000`，BF16 seed11239 到约 step `6300`，三条均 finite。seed11239 在 step 512-6144 的 12 个 matched validation点中，MXFP8-BF16 绝对差最大 `0.00354`（step 512），step 1024以后最大 `0.00070`，step 6144 为 `+0.000187`；数值曲线继续高度对齐。无周期 checkpoint的 MXFP8/BF16 稳态约 `49.3/41.8 samples/GPU/s`，跨节点观测提升约 `18%`。
 
 ### P4：QKV 与 MXFP4
 
