@@ -277,11 +277,13 @@ step 512 的早期差异随后收敛；step 1024-2048 的 validation差异绝对
 
 热 cache 已显著降低 TTQ 固定成本。
 
-#### P3 单 seed完整 convergence（运行中）
+#### P3 单 seed完整 convergence：通过
 
-已在 `crsuse2-m2m-119` 启动 seed `10007` 的完整 MLPerf run，容器名 `flux-mxfp8-full-seed10007`，产物目录 `/shared_nfs/zirui/runs/mxfp8_turbo_opt/p4-turbo-full-seed10007/`。配置为 8 GPU、GBS/MBS `512/64`、warmup `1600`、AITER attention、block compile、AC ratio `0.25`、每 512 step validation、DTCP interval `100`，并使用预热 persistent cache。首次 forward+backward约 `91 s`，明显低于 cold-cache run。
+seed `10007` 的完整 MLPerf run 已在 `crsuse2-m2m-119` 成功完成。配置为 8 GPU、GBS/MBS `512/64`、warmup `1600`、AITER attention、block compile、AC ratio `0.25`、每 512 step validation、DTCP interval `100`，并使用预热 persistent cache。首次 forward+backward约 `91 s`。
 
-运行当前到 step 8400，所有 loss/grad norm finite。早期 step `512/1024/1536/2048/2560/3072/3584` 的 validation loss 为 `0.712966/0.657130/0.637598/0.621142/0.614344/0.609181/0.605928`；后续 step `4096/4608/5120/5632/6144/6656/7168/7680/8192` 为 `0.602364/0.600026/0.598017/0.597019/0.595935/0.594938/0.593209/0.592412/0.592165`。曲线仍下降但已进入接近目标前的慢速区间；滚动 checkpoint已到 checkpoint-8400。带每 100 step DTCP 的 logged window约 `40-42 samples/GPU/s`，低于无 checkpoint的 `49 samples/GPU/s`，因此最终 TTQ会同时反映训练加速和当前高频 checkpoint开销。该运行尚未形成 convergence结论，最终以首次 validation loss `<=0.586` 的 samples和 `run_stop=success` 为准。
+首次达到 validation loss `<=0.586` 的位置为 step `14848`、samples `7,602,176`，loss `0.585282`，MLPerf `run_stop` 为 `success`。从 `run_start` 到 success 为 `24,330.134 s`（`6h45m30.134s`）；有效端到端吞吐为 `312.46 global samples/s`。summary mean step time `1.6337 s`，包含 29 次 validation和每 100 step DTCP；peak memory `187.99 GB/GPU`。最终 checkpoint正常保存，进程 exit code为 0。
+
+相对历史同 seed BF16/selective tensor-wise FP8 结果：MXFP8 比二者晚 `1024` step、samples-to-convergence增加 `7.41%`；但 TTQ 比 BF16 的 `33,742.858 s` 降低 `27.9%`，比 selective FP8 的 `26,535.193 s` 降低 `8.31%`。这说明当前 MXFP8 用额外约 7.4% samples换取更高训练吞吐，最终仍改善 wall-clock TTQ。历史对照来自不同实验提交/软件环境，生产结论还需 matched rerun和更多 seed qualification。
 
 ### P4：QKV 与 MXFP4
 
@@ -291,4 +293,4 @@ MXFP4 最后验证：先单阶段短程，再研究 `MXFP8 -> MXFP4` switch step
 
 ## 6. 当前改动边界
 
-当前 worktree 只增加分析文档和 P0 benchmark，不修改生产 provider。原因是 Primus-Turbo 高层接口目前明确会 graph break；在真实性能 gate 前接入 228-layer 只会增加无法验收的分支。
+当前 worktree 已包含实验性 `provider=primus_turbo, recipe=mxfp8`、228-layer转换、190/38 wgrad策略、persistent cache launcher和对应单元/GPU验证。该 provider仍是实验入口，不是默认 recipe；进入生产前还需要 matched BF16/selective-FP8 rerun、多 seed qualification、固定依赖镜像，以及将 Primus-Turbo实验分支提交上游。
