@@ -52,5 +52,15 @@ For MBS32 comparison runs, build
 -e FLUX_FP8_GEMM_BACKEND=selective_flydsl
 ```
 
-Both policies replace only the two affected contraction forward shapes. An
-empty value retains the normal TorchAO/Inductor autotuning policy.
+Both policies replace the two affected contraction forward shapes. The
+selective FlyDSL path also handles the MBS32 single-down wgrad directly from
+natural-layout operands, avoiding TorchAO's runtime canonical transpose/copy.
+An empty value retains the normal TorchAO/Inductor autotuning policy.
+
+`local_runs/run_flux_mlperf.sh` disables activation checkpointing by default
+when `LOCAL_BATCH_SIZE=32`; this removes recompute kernels and fits in 151.78 GB
+per MI355X in the one-node GA4 proxy. MBS64 retains checkpoint ratio `0.25`.
+Set `GRADIENT_CHECKPOINTING_RATIO` explicitly to override either default. The
+selective-gemm image also enables MBS32-only Inductor fusion benchmarking and
+the faster AITER hd128 backward conversion path; MBS64 retains the prior AITER
+accumulation policy.

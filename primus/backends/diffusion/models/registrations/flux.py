@@ -52,6 +52,7 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.2",
 }
 _FP8_SELECTIVE_GEMM_SHAPES = {
+    (3072, 15360, 16384),
     (8192, 3072, 12288),
     (16384, 3072, 15360),
 }
@@ -80,6 +81,35 @@ def _flux_flydsl_scaled_mm(
 @_flux_flydsl_scaled_mm.register_fake
 def _(a, b, a_scale, b_scale):
     return torch.empty((a.shape[0], b.shape[1]), device=a.device, dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("primus::flux_flydsl_natural_wgrad", mutates_args=())
+def _flux_flydsl_natural_wgrad(
+    grad_output: torch.Tensor,
+    input: torch.Tensor,
+    grad_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+) -> torch.Tensor:
+    from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+    return gemm_fp8_tensorwise_flydsl_kernel(
+        grad_output,
+        grad_scale,
+        input,
+        input_scale,
+        trans_a=True,
+        trans_b=False,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@_flux_flydsl_natural_wgrad.register_fake
+def _(grad_output, input, grad_scale, input_scale):
+    return torch.empty(
+        (grad_output.shape[1], input.shape[1]),
+        device=input.device,
+        dtype=torch.bfloat16,
+    )
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
