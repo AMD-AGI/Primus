@@ -285,6 +285,10 @@ seed `10007` 的完整 MLPerf run 已在 `crsuse2-m2m-119` 成功完成。配置
 
 相对历史同 seed BF16/selective tensor-wise FP8 结果：MXFP8 比二者晚 `1024` step、samples-to-convergence增加 `7.41%`；但 TTQ 比 BF16 的 `33,742.858 s` 降低 `27.9%`，比 selective FP8 的 `26,535.193 s` 降低 `8.31%`。这说明当前 MXFP8 用额外约 7.4% samples换取更高训练吞吐，最终仍改善 wall-clock TTQ。历史对照来自不同实验提交/软件环境，生产结论还需 matched rerun和更多 seed qualification。
 
+#### P3 多 seed qualification（运行中）
+
+已并行启动两条额外 MXFP8 seed 和一条 matched-code BF16：MXFP8 seed `11239` 在 node037、MXFP8 seed `12763` 在 node119、BF16 seed `11239` 在 node192。三条均使用同一 Primus commit/image、GBS/MBS `512/64`、warmup `1600`、AITER、compile、AC `0.25`、workers `0`，并关闭周期 checkpoint以隔离 convergence samples和训练吞吐。seed11239 的 BF16/MXFP8 运行在不同节点，因此可比较数值曲线和 samples，性能结论仍需后续同节点顺序复测。三条运行已完成首个 forward/backward且 finite。
+
 ### P4：QKV 与 MXFP4
 
 整体 MXFP8 通过后才测试 QKV MXFP8 wgrad。要求 500 step finite、validation 不回退、端到端至少提升 `1%`。
