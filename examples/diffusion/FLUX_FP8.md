@@ -64,3 +64,10 @@ Set `GRADIENT_CHECKPOINTING_RATIO` explicitly to override either default. The
 selective-gemm image also enables MBS32-only Inductor fusion benchmarking and
 the faster AITER hd128 backward conversion path; MBS64 retains the prior AITER
 accumulation policy.
+
+For the qualified MBS64 PR #453 experiment, build
+`docker/flux-fp8/Dockerfile.v26.3-pr453-tn-wgrad` and set
+`FLUX_FP8_GEMM_BACKEND=selective_flydsl`. This image pins FlyDSL 0.2.4 and
+Primus-Turbo commit `a14521b8`, and replaces only the two natural-layout TN
+wgrads qualified at MBS64. Keep it separate from the MBS32 image until the
+combined stack passes the same-node MBS32 performance and convergence gates.
