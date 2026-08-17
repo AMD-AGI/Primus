@@ -198,6 +198,7 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
+    handle.write(f"dependency_image: {os.environ.get('PRIMUS_DEPENDENCY_IMAGE', '')}\n")
     handle.write(f"flux_cache_root: {os.environ.get('PRIMUS_FLUX_CACHE_ROOT', '')}\n")
     handle.write(f"low_precision_provider: {os.environ.get('FLUX_LOW_PRECISION_PROVIDER', '')}\n")
     handle.write(f"low_precision_recipe: {os.environ.get('FLUX_LOW_PRECISION_RECIPE', '')}\n")

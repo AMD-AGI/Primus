@@ -19,6 +19,12 @@
 - branch：`dev/zirui/flux-mxfp8-opt`
 - Primus-Turbo 检查基线：`56c789e58f72aaf733b7715f1536be1ed33b69a1`
 
+### 1.1 固定依赖镜像与 remote
+
+固定镜像为 `zirui3/primus-flux-mxfp8@sha256:0b2ca53f3d74371e254033187792cb8057ad832191422dba5ac65079719c0a69`，tag 为 `rocm7.16-turbo-b0bcdc25`。它基于 UTD digest `sha256:bb44383965e4cab227b06348e2f5044290542424252c97f476625920cf0f849f`，内置 gfx950 构建的 Primus-Turbo `0.3.2.dev43` 和 MXFP8 commits `ebe2614e/b0bcdc25`。镜像已通过不挂载 Primus-Turbo source 的 fullgraph FWD/BWD smoke；`run_with_docker.sh` 默认按 digest使用并将 identity写入 summary。
+
+代码 remote：Primus 分支 `dev/zirui/flux-mxfp8-opt` 推送到 `AMD-AGI/Primus`；Primus-Turbo 上游无直接写权限，分支 `experiment/flux-mxfp8-compile` 推送到 fork `https://github.com/zirui/Primus-Turbo`，镜像构建文件 commit 为 `297e31ca`。
+
 ## 2. 已有实验结论
 
 ### 2.1 Qualified tensor-wise FP8 基线
