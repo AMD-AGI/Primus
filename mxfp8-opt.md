@@ -269,7 +269,13 @@ matched BF16/MXFP8 从头运行 512 step，使用 GBS `512`、warmup `512`、AIT
 
 step 512 的早期差异随后收敛；step 1024-2048 的 validation差异绝对值不超过 `0.00135`，step 2048 只差 `0.000138`，数值趋势与 BF16 对齐。包含周期 validation和部分 post-validation慢窗口的 matched summary throughput 为 BF16 `40.1860`、MXFP8 `48.1165 samples/GPU/s`，MXFP8高 `19.7%`；peak memory仍少 `18.58 GB`。
 
-正式 warmup多点 validation gate 通过，已具备启动单 seed完整 MLPerf convergence的依据。完整运行前仍建议把约 6-8 分钟的 MXFP8首次 JIT固化到 image/AOT cache，否则 TTQ 会包含较大的固定启动成本。
+正式 warmup多点 validation gate 通过，已具备启动单 seed完整 MLPerf convergence的依据。
+
+#### P3 persistent compile cache
+
+将 FlyDSL、Triton 和 TorchInductor cache 挂到持久目录后，同一 8 GPU fullgraph step 的首次启动从冷 cache `444.70 s` 降到热 cache `100.83 s`，减少 `77.3%`，已接近 BF16 的约 `94 s`。launcher 现在默认使用 worktree 下 `.cache/flux_mlperf/{flydsl,triton,torchinductor}`，可通过 `PRIMUS_FLUX_CACHE_ROOT` 覆盖。cache 必须与固定 image、PyTorch、FlyDSL、Primus-Turbo 和 Primus commit 一起管理；依赖变化后允许自然产生新 key，不能跨不兼容软件栈复制未知 cache。
+
+热 cache 已显著降低 TTQ 固定成本。下一步可启动单 seed完整 MLPerf convergence，同时保留 cold/warm compile 时间和训练起止时间，分别报告 kernel cache收益与稳态 TTQ。
 
 ### P4：QKV 与 MXFP4
 

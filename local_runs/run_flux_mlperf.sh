@@ -5,6 +5,12 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
+export PRIMUS_FLUX_CACHE_ROOT=${PRIMUS_FLUX_CACHE_ROOT:-$REPO_ROOT/.cache/flux_mlperf}
+export FLYDSL_RUNTIME_CACHE_DIR=${FLYDSL_RUNTIME_CACHE_DIR:-$PRIMUS_FLUX_CACHE_ROOT/flydsl}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-$PRIMUS_FLUX_CACHE_ROOT/triton}
+export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$PRIMUS_FLUX_CACHE_ROOT/torchinductor}
+mkdir -p "$FLYDSL_RUNTIME_CACHE_DIR" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
@@ -192,6 +198,7 @@ with summary_path.open("w", encoding="utf-8") as handle:
     handle.write(f"eval_dataset_path: {os.environ.get('EVAL_DATASET_PATH', '')}\n")
     handle.write(f"empty_encodings_path: {os.environ.get('EMPTY_ENCODINGS_PATH', '')}\n")
     handle.write(f"attention_backend: {os.environ.get('ATTENTION_BACKEND', '')}\n")
+    handle.write(f"flux_cache_root: {os.environ.get('PRIMUS_FLUX_CACHE_ROOT', '')}\n")
     handle.write(f"low_precision_provider: {os.environ.get('FLUX_LOW_PRECISION_PROVIDER', '')}\n")
     handle.write(f"low_precision_recipe: {os.environ.get('FLUX_LOW_PRECISION_RECIPE', '')}\n")
     handle.write(f"turbo_mxfp8_flux_configs: {os.environ.get('PRIMUS_TURBO_MXFP8_USE_FLUX_CONFIGS', '')}\n")
