@@ -906,7 +906,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
         if use_sink_attn:
-            sink_tensor = self.sinks
+            # Module-wide BF16 conversion may cast the Parameter after init;
+            # FlyDSL requires an FP32 sink and autograd propagates through this cast.
+            sink_tensor = self.sinks.float()
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
             # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
