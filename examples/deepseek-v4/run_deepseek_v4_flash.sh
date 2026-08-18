@@ -179,6 +179,73 @@ export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-512}
 export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-'[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]'}
 export MTP_NUM_LAYERS=${MTP_NUM_LAYERS:-1}
 export NNODES=${NNODES:-4}
+
+if [ "$NNODES" -ge 8 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-8}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=0
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4mL'
+    else
+      export PRIMUS_PP_LAYOUT='Et*4|t*5|(t*6|)*5,t*4L'
+    fi
+elif [ "$NNODES" -eq 4 ]; then
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-4}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=3
+    if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
+    else
+      export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
+    fi
+elif [ "$NNODES" -eq 3 ]; then
+    # 3 nodes = 24 GPUs. PP=3/EP=8: experts sharded EP*PP=24 ways -> 12B experts/card,
+    # optimizer 171 GB/card (too big for GPU) -> offload to host (CPU side ~1.7 TB/node,
+    # comfortably under 3 TB, unlike 2-node's 2.6 TB which OOM'd). 43 decoder layers + MTP
+    # across 3 PP stages.
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-3}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-43}
+    if [ -z "${PRIMUS_PP_LAYOUT:-}" ]; then
+      if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+        export PRIMUS_PP_LAYOUT='Et*14|t*14|t*15mL'
+      else
+        export PRIMUS_PP_LAYOUT='Et*14|t*14|t*15L'
+      fi
+    fi
+elif [ "$NNODES" -eq 2 ]; then
+    # Single-pair 2-node (16 GPUs). Params (42.8B/card at EP=8/PP=1, measured) do not fit
+    # on one card, and CP does not shard params -- only PP (layers) and EP (experts) do.
+    # PP=2 halves per-card params to ~21B; EP=8 shards the 256 experts. Full recompute
+    # keeps activations small. 43 decoder layers + 1 MTP split across 2 PP stages.
+    export PRIMUS_TP=${PRIMUS_TP:-1}
+    export PRIMUS_PP=${PRIMUS_PP:-2}
+    export PRIMUS_EP=${PRIMUS_EP:-8}
+    export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-43}
+    # Layout follows PRIMUS_PP: PP=4 on 16 GPUs shards experts 32-way (EP*PP), same as the
+    # 4-node config, so the full model fits in bf16. Honor a caller-provided layout.
+    if [ -z "${PRIMUS_PP_LAYOUT:-}" ]; then
+      if [ "${PRIMUS_PP}" -eq 4 ]; then
+        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+          export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11mL'
+        else
+          export PRIMUS_PP_LAYOUT='Et*10|t*11|t*11|t*11L'
+        fi
+      else
+        if [ "$MTP_NUM_LAYERS" -eq 1 ]; then
+          export PRIMUS_PP_LAYOUT='Et*21|t*22mL'
+        else
+          export PRIMUS_PP_LAYOUT='Et*21|t*22L'
+        fi
+      fi
+    fi
+fi
+
+# Fallback for node counts the branches above do not cover (single node). The
+# branches assign with `${VAR:-N}` and export, so these are no-ops once one fired.
 export PRIMUS_TP=${PRIMUS_TP:-1}
 export PRIMUS_PP=${PRIMUS_PP:-4}
 export PRIMUS_EP=${PRIMUS_EP:-8}
