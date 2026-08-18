@@ -31,7 +31,7 @@ Input reuse alone measured `2.160 s`; natural MLP wgrad alone measured about `2.
 | 236 mounted candidate | `2.111 s` |
 | 236 built image `primus-flux-natural-bwd:v0.1` | `2.115 s` |
 
-The built candidate remained finite through step 520 (`loss=0.6609`, `gnorm=0.4762`); step 500 was also finite (`loss=0.6206`, `gnorm=0.3724`). Steady time was `2.1132 s`. Peak memory increased from `151.81 GB` to `159.57 GB`. The reuse is runtime-gated and enabled only by the MBS32 selective-FlyDSL launch policy, leaving MBS64 defaults unchanged. An MBS64 smoke run with the gate off completed 30 finite steps.
+The built candidate remained finite through step 520 (`loss=0.6609`, `gnorm=0.4762`); step 500 was also finite (`loss=0.6206`, `gnorm=0.3724`). Steady time was `2.1132 s`. A stateful run produced validation loss `0.685480` at step 512 and saved DTCP checkpoint 500/final. Resuming checkpoint 500 completed finite step 530 (`loss=0.6481`, `gnorm=0.3546`) and validation `0.681209`. Peak memory increased from `151.81 GB` to `159.57 GB`. The reuse is runtime-gated and enabled only by the MBS32 selective-FlyDSL launch policy, leaving MBS64 defaults unchanged. An MBS64 smoke run with the gate off completed 30 finite steps.
 
 Relative to the matched unified baseline, this is about `1.03x`; relative to the original ratio-0.25 baseline near `2.42 s`, total speedup is about `1.144x`.
 
