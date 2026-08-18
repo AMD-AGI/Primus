@@ -361,6 +361,16 @@ if [[ -f "$PRIMUS_PATCH_ARGS_FILE" ]]; then
     fi
 fi
 
+# A caller cannot reach TORCHRUN_EXTRA_ARGS through PRIMUS_PATCH_ARGS_FILE:
+# run_prepare_experiment() reassigns that variable to its own mktemp file, so an
+# exported path is discarded before it is read. This hook is the supported way in
+# for launcher-level flags such as torchrun's per-rank --log-dir/--redirects,
+# which is how a single-rank exit gets a traceback instead of a bare exit code.
+if [[ -n "${PRIMUS_EXTRA_TORCHRUN_ARGS:-}" ]]; then
+    TORCHRUN_EXTRA_ARGS="${TORCHRUN_EXTRA_ARGS} ${PRIMUS_EXTRA_TORCHRUN_ARGS}"
+    LOG_INFO_RANK0 "Appended TORCHRUN args from PRIMUS_EXTRA_TORCHRUN_ARGS: $PRIMUS_EXTRA_TORCHRUN_ARGS"
+fi
+
 
 # -------------------- Launch Training --------------------
 if [ "${BACKEND:-}" == "MaxText" ]; then
