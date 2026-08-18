@@ -518,6 +518,9 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
         self._use_input_sr = getattr(self.config, "mxfp4_input_stochastic_rounding", False)
         self._use_weight_sr = getattr(self.config, "mxfp4_weight_stochastic_rounding", False)
         self._use_dgrad_rht = getattr(self.config, "mxfp4_dgrad_hadamard", False)
+        # Flipped to False mid-run by mxfp4_inline_switch at mxfp4_switch_iter; see
+        # that module for why a plain bool attribute is the right carrier here.
+        self._mxfp4_enabled = True
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -531,6 +534,9 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
             self._fp8_backend_value = 0
 
     def _forward_impl(self, input, weight, *args, **kwargs):
+        if not self._mxfp4_enabled:
+            return super()._forward_impl(input, weight, *args, **kwargs)
+
         bias = kwargs.get("bias", None)
 
         result = MXFP4LinearFunction.apply(
@@ -584,6 +590,7 @@ class MXFP4RowParallelLinear(RowParallelLinear):
         self._use_input_sr = getattr(self.config, "mxfp4_input_stochastic_rounding", False)
         self._use_weight_sr = getattr(self.config, "mxfp4_weight_stochastic_rounding", False)
         self._use_dgrad_rht = getattr(self.config, "mxfp4_dgrad_hadamard", False)
+        self._mxfp4_enabled = True
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -597,6 +604,9 @@ class MXFP4RowParallelLinear(RowParallelLinear):
             self._fp8_backend_value = 0
 
     def _forward_impl(self, input, weight, *args, **kwargs):
+        if not self._mxfp4_enabled:
+            return super()._forward_impl(input, weight, *args, **kwargs)
+
         bias = kwargs.get("bias", None)
 
         result = MXFP4LinearFunction.apply(

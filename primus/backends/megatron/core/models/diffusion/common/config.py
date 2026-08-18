@@ -37,6 +37,8 @@ class BaseDiffusionConfig(TransformerConfig):
         mxfp4_input_stochastic_rounding: Stochastic rounding on forward activations (default: False)
         mxfp4_weight_stochastic_rounding: Stochastic rounding on forward weights (default: False)
         mxfp4_dgrad_hadamard: Random Hadamard transform on both dgrad operands (default: False)
+        mxfp4_switch_iter: Iteration at which MXFP4 linears stop quantizing (0 = never)
+        mxfp4_switch_precision: Precision the switch lands in, currently only 'bf16'
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
         sensitive_layers_end: Number of sensitive layers at end (default: 0)
@@ -96,6 +98,21 @@ class BaseDiffusionConfig(TransformerConfig):
     # operands, so it must be switched on for both together or not at all.
     mxfp4_dgrad_hadamard: bool = False
 
+    # Iteration at which every MXFP4 linear stops quantizing and falls back to its
+    # BF16 parent path, with 0 meaning never. This exists because the fastest known
+    # route to the Flux 12B convergence gate trains MXFP4 for 12,288 iterations and
+    # then heals in BF16, and measuring that as two processes (save, then resume
+    # under a BF16 recipe) is not a submittable run: MLPerf wants one contiguous
+    # clock, one MLLOG stream and an unbroken data order. Switching in place inside
+    # a single launch produces the same arithmetic with none of that.
+    #
+    # Cheap here only because Flux MXFP4 keeps BF16 master weights and quantizes
+    # inside forward, so the switch is "stop quantizing" rather than a weight
+    # conversion. The llama2-70b healing path has to restage quantized weights from
+    # a CPU stash precisely because it does not hold that property.
+    mxfp4_switch_iter: int = 0
+    mxfp4_switch_precision: str = "bf16"
+
     # Sensitive layer configuration (clean naming, maps to Megatron internals)
     sensitive_layers_enabled: bool = False
     sensitive_layers_start: int = 0
@@ -114,6 +131,15 @@ class BaseDiffusionConfig(TransformerConfig):
                 "Diffusion models do not support pipeline parallelism; "
                 f"got pipeline_model_parallel_size={self.pipeline_model_parallel_size}. "
                 "Set pipeline_model_parallel_size=1."
+            )
+
+        if self.mxfp4_switch_iter < 0:
+            raise ValueError(f"mxfp4_switch_iter must be >= 0 (0 disables); got {self.mxfp4_switch_iter}")
+        if self.mxfp4_switch_precision != "bf16":
+            raise ValueError(
+                "mxfp4_switch_precision only supports 'bf16'; got "
+                f"{self.mxfp4_switch_precision!r}. An FP8 landing needs its own "
+                "quantizer state, not the BF16 parent path this switch falls back to."
             )
 
         if self.sensitive_layers_enabled:

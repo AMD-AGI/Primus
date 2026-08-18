@@ -505,6 +505,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "fp4": fp4_enabled,
                 "fp4_recipe": fp4_recipe,
                 "mxfp4_backward_precision": getattr(params, "mxfp4_backward_precision", "mxfp4"),
+                "mxfp4_switch_iter": getattr(params, "mxfp4_switch_iter", 0),
+                "mxfp4_switch_precision": getattr(params, "mxfp4_switch_precision", "bf16"),
             }
         )
 
@@ -713,6 +715,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
                 "mxfp4_input_stochastic_rounding",
                 "mxfp4_weight_stochastic_rounding",
                 "mxfp4_dgrad_hadamard",
+                "mxfp4_switch_iter",
+                "mxfp4_switch_precision",
                 "sensitive_layers_enabled",
                 "sensitive_layers_start",
                 "sensitive_layers_end",
