@@ -25,8 +25,8 @@ Scope:
     FSDP default.
 
 Activation:
-    Export ``SDMA_ALL_GATHER=1`` AND run with ``use_torch_fsdp2: true``.
-    No-op otherwise. The companion hook
+    Export ``FSDP_ALL_GATHER_BACKEND=rccl_sdma`` AND run with
+    ``use_torch_fsdp2: true``. No-op otherwise. The companion hook
     ``runner/helpers/hooks/06_enable_sdma_all_gather.sh`` exports the
     zero-CTA env (``NCCL_CTA_POLICY=2``, ...) and the LD_PRELOAD interposer
     so no YAML changes are required to opt in.
@@ -45,8 +45,8 @@ from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
-    """Gate on SDMA_ALL_GATHER=1 AND the use_torch_fsdp2 path."""
-    if os.environ.get("SDMA_ALL_GATHER", "0") != "1":
+    """Gate on the RCCL SDMA backend and the use_torch_fsdp2 path."""
+    if os.environ.get("FSDP_ALL_GATHER_BACKEND", "") != "rccl_sdma":
         return False
     return getattr(get_args(ctx), "use_torch_fsdp2", False)
 
@@ -59,7 +59,8 @@ def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
         "Attach SymmMemAllGather to FSDP2 transformer-layer modules in "
         "Megatron's TorchFullyShardedDataParallel so their all-gather uses "
         "the SDMA (copy-engine) dispatch path; other units stay on FSDP's "
-        "default all-gather. Gated on SDMA_ALL_GATHER=1 and use_torch_fsdp2."
+        "default all-gather. Gated on FSDP_ALL_GATHER_BACKEND=rccl_sdma "
+        "and use_torch_fsdp2."
     ),
     condition=_sdma_all_gather_enabled,
 )

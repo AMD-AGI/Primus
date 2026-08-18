@@ -441,7 +441,18 @@ test_auto_single_for_node_smoke() {
     assert_contains "$out_preflight" "Run Mode        : torchrun" "preflight defaults to torchrun"
     assert_contains "$out_preflight" "torchrun --nproc_per_node" "preflight uses torchrun command"
 
-    # Sub-test 13b: node_smoke auto-selects single mode.
+    # Sub-test 13b: MORI preflight auto-selects single mode because it
+    # launches its own temporary-container torchrun workload.
+    local out_mori
+    out_mori=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- preflight --mori 2>&1 || true)
+    assert_contains "$out_mori" "Auto-selected run_mode=single for 'preflight --mori'" \
+        "MORI preflight auto-detect fires"
+    assert_contains "$out_mori" "Run Mode        : single" "MORI preflight uses single mode"
+    assert_contains "$out_mori" "python3" "MORI preflight uses python3 launcher"
+    assert_not_contains "$out_mori" "torchrun --nproc_per_node" \
+        "MORI preflight does NOT use launcher torchrun"
+
+    # Sub-test 13c: node_smoke auto-selects single mode.
     local out_smoke
     out_smoke=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run -- node_smoke --tier2-perf 2>&1 || true)
     assert_contains "$out_smoke" "Auto-selected run_mode=single for subcommand 'node_smoke'" \
@@ -450,7 +461,7 @@ test_auto_single_for_node_smoke() {
     assert_contains "$out_smoke" "python3" "node_smoke uses python3 launcher"
     assert_not_contains "$out_smoke" "torchrun --nproc_per_node" "node_smoke does NOT use torchrun"
 
-    # Sub-test 13c: explicit --single on a non-node_smoke subcommand still
+    # Sub-test 13d: explicit --single on a non-node_smoke subcommand still
     # works (regression guard).
     local out_explicit
     out_explicit=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --single --dry-run -- benchmark gemm 2>&1 || true)
