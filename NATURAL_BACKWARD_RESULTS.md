@@ -23,7 +23,7 @@ The public FlyDSL TN kernel was screened against `_scaled_mm` for all repeated-b
 
 TorchAO normally quantizes the same activation once for forward and again for wgrad. For tensorwise configs with matching forward/wgrad cast policy, saving the forward FP8 input and reusing it in wgrad reduced FP8 cast/scale exposed time from about `97.5 ms` to `53.9 ms` per optimizer step.
 
-Combined with natural MLP wgrad:
+Input reuse alone measured `2.160 s`; natural MLP wgrad alone measured about `2.151 s`. Combined, the changes interact favorably:
 
 | Node/run | Step time |
 |---|---:|
