@@ -1,0 +1,63 @@
+# Primus EXP — FLUX.1-dev T2I PRETRAIN (from scratch, random init) on SYNTHETIC data.
+# =============================================================================
+# The anchor config for the FLUX perf ladder
+# (GIT_ISSUES/plans/ttt_l2_02_FLUXPROXY/). It mirrors
+# `ideogram4-pretrain.yaml` so that the two studies differ in the model and not in the
+# harness: same protocol, same precision, same measured quantities.
+#
+# Everything the ladder varies (mbs, AC mode, sharding, compile, resolution) arrives as a
+# command-line override from `scripts/perf_ladder_flux.py`; the values here are the anchor
+# and a runnable default at 1024**2.
+#
+# `model.pretrained_model_name_or_path` must point at a local FLUX.1-dev snapshot. Only
+# the encoders and `transformer/config.json` are needed — `mode: pretrain` builds the DiT
+# from config with RANDOM weights, so the ~23 GB of transformer weights are never read.
+# The config must come from the real repo rather than being synthesized from the diffusers
+# defaults, because the default has guidance_embeds=False while this path requires True.
+#
+# Launch (inside the container, 8 GPUs free):
+#   PYTHONPATH=<primus>:<primus>/third_party/Automodel \
+#   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PRIMUS_FLUX_REAL_AC=1 \
+#   torchrun --nproc_per_node=8 --nnodes=1 --master_port=29561 \
+#     primus/cli/main.py train pretrain \
+#     --config examples/nemo_automodel/configs/MI355X/diffusion/flux_1_dev-perfladder.yaml
+#
+# PRIMUS_FLUX_REAL_AC=1 is NOT optional: without it `fsdp.activation_checkpointing` is a
+# documented silent no-op for FLUX, so an AC arm would measure nothing and look healthy.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_dev-perfladder}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_synth_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      model:
+        # Node-local FLUX.1-dev snapshot; the ladder overrides this per node.
+        pretrained_model_name_or_path: /mnt/m2m_nobackup/mvonstra/hf_cache/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21
+        # fp32 master weights, bf16 compute — the Ideogram study's precision on every run
+        # (LADDER_DTYPE=float32). The ladder sets this explicitly too, because the DDP and
+        # FSDP2 presets disagree by default and that would make the sharding arm meaningless.
+        torch_dtype: float32
+        compute_dtype: bfloat16
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 4
+        global_batch_size: 32
+        log_remote_every_steps: 1
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: true
+        reshard_after_forward: false
+      data:
+        dataloader:
+          # 1024**2: latent 128 (res/8) -> 64x64 token grid -> 4,096 image tokens.
+          latent_h: 128
+          latent_w: 128
+          num_samples: 2048
+      checkpoint:
+        enabled: false

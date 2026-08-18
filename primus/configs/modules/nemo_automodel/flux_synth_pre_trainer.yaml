@@ -1,0 +1,135 @@
+# NeMo AutoModel pre_trainer module config — FLUX.1 T2I pretrain on SYNTHETIC data
+# (Primus backend: nemo_automodel).
+#
+# Sibling of `flux_pre_trainer.yaml`, which reads the pre-encoded cache. This one swaps
+# `data.dataloader` for the in-process generator used by the perf ladder, where
+# throughput / peak memory / MFU are measured on synthetic data precisely to isolate the
+# GPU from the input pipeline. Everything else is held identical to the real-data config
+# on purpose: the synthetic-vs-real control is only meaningful if the two arms differ in
+# the loader and nothing else.
+#
+# WHY THIS IS A SEPARATE FILE rather than an EXP-level override of flux_pre_trainer.yaml.
+# The launcher DEEP-MERGES the EXP `overrides:` onto the module config, so overriding
+# `data.dataloader._target_` alone would leave the real loader's keys (cache_dir,
+# base_resolution, train_text_encoder, dynamic_batch_size) sitting in the block. The
+# recipe validates the merged keys against the target dataclass's fields and raises
+# TypeError on an unknown one, so the run would die at dataloader construction. Ideogram
+# solves it the same way, with `ideogram4_pre_trainer.yaml` (synthetic) alongside
+# `ideogram4_pre_trainer_pcam.yaml` (real).
+#
+# NOTE: do not declare a `model:` block here — it comes from the model preset.
+extends:
+  - ../module_base.yaml
+
+seed: 42
+
+wandb:
+  enable: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 4
+  ckpt_every_steps: 1000
+  num_epochs: 1000
+  log_remote_every_steps: 2
+  save_checkpoint_every_epoch: false
+
+data:
+  dataloader:
+    _target_: primus.backends.nemo_automodel.models.flux.data.synthetic.SyntheticFluxDataloaderConfig
+    # Defaults are the 1024**2 rung. The ladder overrides latent_h/latent_w per resolution.
+    # latent_h/latent_w are res/8 (the VAE latent), NOT the res/16 token grid: the model
+    # packs 2x2, so 128 here means a 64x64 grid and 4,096 image tokens.
+    num_samples: 2048
+    in_channels: 16
+    latent_h: 128
+    latent_w: 128
+    # FLUX.1-dev's T5 cap. The real cache pads EVERY caption to exactly this and
+    # truncates over-long ones, so the synthetic arm must match it or the two are not
+    # comparable. Unlike Ideogram there is no ragged text region to model: FLUX's joint
+    # attention is dense and the processor encodes pad positions without a mask, so the
+    # caption-length distribution does not change the work done.
+    text_seq_len: 512
+    t5_features_dim: 4096
+    pooled_dim: 768
+    feature_scale: 0.1
+    latent_scale: 1.0
+    seed: 1234
+    # Match the dtypes the upstream FLUX processor writes, so the control compares the
+    # model rather than a cast.
+    latent_dtype: float16
+    text_dtype: bfloat16
+    shuffle: true
+    # Keep the batch size constant so torch.compile sees one shape and does not recompile
+    # on a short final batch.
+    drop_last: true
+    num_workers: 2
+    pin_memory: true
+    # PERF ONLY. Generates the [512, 4096] T5 buffer once instead of per sample; at 4 MB
+    # each that generation otherwise dominates the micro-batch on the CPU and the run
+    # measures the dataloader. Never set for a convergence run.
+    share_text_features: true
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 2e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  foreach: false
+  fused: true
+
+performance:
+  check_loss: false
+  grad_clip_foreach: true
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 0
+  min_lr: 1e-6
+
+flow_matching:
+  adapter_type: flux
+  adapter_kwargs:
+    # guidance_scale 1 for pretraining. The FluxAdapter ALWAYS passes a guidance tensor,
+    # so FLUX.1-dev's transformer (guidance_embeds=true) is required.
+    guidance_scale: 1
+    use_guidance_embeds: true
+  timestep_sampling: uniform
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 1.0
+  mix_uniform_ratio: 0.1
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  i2v_prob: 0.0
+  use_loss_weighting: false
+  log_interval: 100
+  summary_log_interval: 10
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  defer_fsdp_grad_sync: true
+  # ZeRO-2. `true` for ZeRO-3; the ladder sets this per arm.
+  reshard_after_forward: false
+  enable_fsdp2_prefetch: true
+  fsdp2_backward_prefetch_depth: 3
+  fsdp2_forward_prefetch_depth: 2
+  reduce_dtype: bfloat16
+  enable_compile: true
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: /checkpoints/flux_primus_pretrain
+  model_save_format: safetensors
+  save_consolidated: final
+  diffusers_compatible: true
+  restore_from: null

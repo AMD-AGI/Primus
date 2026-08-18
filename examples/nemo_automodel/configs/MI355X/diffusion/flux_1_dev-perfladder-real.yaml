@@ -1,0 +1,58 @@
+# Primus EXP — FLUX.1-dev T2I PRETRAIN (from scratch, random init) on the REAL cache.
+# =============================================================================
+# The real-data arm of the FLUX perf ladder: the synthetic-vs-real control and the
+# convergence runs. Counterpart of `ideogram4-pretrain-pcam.yaml`.
+#
+# Uses the stock `flux_pre_trainer.yaml` module config, which already wires
+# `build_text_to_image_multiresolution_dataloader` at the upstream cache. The synthetic arm
+# uses `flux_synth_pre_trainer.yaml` instead; the two are identical apart from the loader,
+# which is what makes the control a comparison of pipelines rather than of configs.
+#
+# The cache is built by `scripts/flux_build_caches.sh` from the same staged PusaV1 frames
+# the Ideogram study used, so the two reports share a dataset. Two properties of that cache
+# are worth knowing before reading any number from this arm:
+#
+#   - Every caption is padded to a FIXED 512 T5 tokens (the tokenizer's model_max_length)
+#     and over-long ones are TRUNCATED, not skipped. Measured on our 1,230 staged captions:
+#     45..404 tokens, median 161, none truncated, so ~67% of the text axis is padding.
+#     FLUX's joint attention is dense and the processor encodes without an attention mask,
+#     so that padding is genuinely computed and attended to.
+#   - `base_resolution` does NOT select among cached resolutions; it only scales the batch
+#     size when `dynamic_batch_size: true`. Each cache dir holds exactly one bucket, so the
+#     resolution comes from `cache_dir`. Setting base_resolution alone would silently keep
+#     whatever bucket the cache contains.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_dev-perfladder-real}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: nemo_automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_dev.yaml
+
+    overrides:
+      model:
+        pretrained_model_name_or_path: /mnt/m2m_nobackup/mvonstra/hf_cache/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21
+        torch_dtype: float32
+        compute_dtype: bfloat16
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 4
+        global_batch_size: 32
+        log_remote_every_steps: 1
+      fsdp:
+        activation_checkpointing: true
+        enable_compile: true
+        reshard_after_forward: false
+      data:
+        dataloader:
+          cache_dir: /mnt/m2m_nobackup/mvonstra/datasets/pusa_flux_1024
+          base_resolution: [1024, 1024]
+          num_workers: 2
+          # One bucket per cache dir, so a short final batch is the only shape risk; drop it
+          # so compile sees a single shape.
+          drop_last: true
+      checkpoint:
+        enabled: false
