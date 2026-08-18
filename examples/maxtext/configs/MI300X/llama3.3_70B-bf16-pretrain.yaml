@@ -41,3 +41,4 @@ modules:
       remat_policy: "full"
       max_target_length: 8192
       per_device_batch_size: 7
+      XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
