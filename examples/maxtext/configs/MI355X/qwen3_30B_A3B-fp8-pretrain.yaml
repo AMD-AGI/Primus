@@ -1,3 +1,7 @@
+# STATUS (MI355X / gfx950): May produce NaN around step ~9. FP8 dynamic range
+# overflow in MoE expert layers (many small experts + random init).
+# Use bf16 variant if NaN occurs.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-fp8-pretrain}

@@ -3,6 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama2_70B-pretrain}
 workspace: ./output
 
+# 70B under Shardy needs more HBM than the base image default (.9 = 173 GB).
+env:
+  XLA_PYTHON_CLIENT_MEM_FRACTION: ".97"
+
 modules:
   pre_trainer:
     framework: maxtext
@@ -41,4 +45,3 @@ modules:
       remat_policy: "full"
       max_target_length: 4096
       per_device_batch_size: 15
-      XLA_PYTHON_CLIENT_MEM_FRACTION: "0.96"
