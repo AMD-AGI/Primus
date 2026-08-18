@@ -307,7 +307,7 @@ class TestTEvsLocalSpecAttention(PrimusUT):
     # Part C/D: Compiled local spec (in-process)
     #
     # An earlier revision ran the compiled training in a subprocess because
-    # ``torch.compile`` + ``allow_in_graph(AiterFlashAttnFunc)`` could corrupt
+    # ``torch.compile`` + ``allow_in_graph(FlashAttnFunc)`` could corrupt
     # AOT-autograd view-replay metadata when sharing a process with the rest of
     # the pytest/Megatron harness. That is avoided here by resetting Dynamo
     # (``torch._dynamo.reset()``) immediately before each compiled build, so the
@@ -321,18 +321,18 @@ class TestTEvsLocalSpecAttention(PrimusUT):
     def _run_compiled_local(n_steps: int = 100, init_state=None):
         """Compile + train the production local-spec attention in-process.
 
-        Resets Dynamo and allows ``AiterFlashAttnFunc`` into the graph, then
+        Resets Dynamo and allows ``FlashAttnFunc`` into the graph, then
         compiles a fresh ``_local_module`` and runs the training loop. When
         ``init_state`` is given the model is seeded with it so a comparison run
         shares identical norm/qkv/proj weights; otherwise the freshly
         initialized weights are captured. Returns ``(losses, init_state)``.
         """
         from primus_turbo.pytorch.ops.attention.flash_attn_interface import (
-            AiterFlashAttnFunc,
+            FlashAttnFunc,
         )
 
         torch._dynamo.reset()
-        torch._dynamo.allow_in_graph(AiterFlashAttnFunc)
+        torch._dynamo.allow_in_graph(FlashAttnFunc)
 
         model = _local_module().to(dtype=torch.bfloat16, device="cuda")
         if init_state is not None:
