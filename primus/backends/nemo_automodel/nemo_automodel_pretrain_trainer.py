@@ -85,7 +85,10 @@ class NemoAutomodelPretrainTrainer(BaseTrainer):
             (f"{_PKG}.models.ideogram4.context_parallel", "Ideogram-4 context-parallel plan"),
             (f"{_PKG}.models.ideogram4.parallelize", "Ideogram-4 real activation checkpointing"),
             (f"{_PKG}.models.ideogram4.zero1", "Ideogram-4 DDP + ZeRO-1 distributed optimizer"),
-            (f"{_PKG}.models.ideogram4.profile", "Ideogram-4 torch.profiler train-loop wrapper"),
+            # Model-agnostic despite living under ideogram4: it wraps the shared
+            # TrainDiffusionRecipe loop and also serves FLUX. Kept in place rather than
+            # moved so the published Ideogram-4 runbook's paths stay valid.
+            (f"{_PKG}.models.ideogram4.profile", "torch.profiler train-loop wrapper"),
         )
         import importlib
 
