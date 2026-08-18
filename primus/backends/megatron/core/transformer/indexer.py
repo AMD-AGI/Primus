@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -110,6 +110,20 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     is_triton_path_enabled as _indexer_tail_triton_enabled,
 )
+
+
+def _indexer_topk_chunk() -> int:
+    """Pool-column chunk width for the streaming top-K; 0 (default) = one-shot.
+
+    Off by default so existing recipes keep the exact one-shot ``torch.topk`` numerics.
+    Set ``PRIMUS_INDEXER_TOPK_CHUNK=32768`` (or smaller) for long context, where the
+    full ``[B, S, P]`` score row is what does not fit.
+    """
+    try:
+        return max(0, int(os.environ.get("PRIMUS_INDEXER_TOPK_CHUNK", "0")))
+    except ValueError:
+        return 0
+
 
 # MXFP4 block size (E2M1 data + E8M0 per-32 block scales).
 _MXFP4_BLOCK = 32
@@ -210,10 +224,27 @@ class Indexer(nn.Module):
         compress_ratio: int = 4,
         dq_rank: int = None,
         use_fp8_qk: bool = False,
+        tp_group=None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.index_head_dim = index_head_dim
+        # ---- P14: shard indexer heads across TP --------------------------------
+        # The score is a SUM over heads, so heads can be split across TP ranks and the
+        # partial sums all-reduced. Two things follow:
+        #   * each rank's local head count is index_n_heads / tp, which for V4-Flash at
+        #     tp=8 is 8 -- inside `_SUPPORTED_H` of the fused Triton scoring kernel, so
+        #     the fused path becomes usable without touching that kernel; and
+        #   * the [B, S, H, P] einsum intermediate shrinks by tp on every rank.
+        self.tp_group = tp_group
+        self.tp_size = tp_group.size() if tp_group is not None else 1
+        if self.tp_size > 1 and index_n_heads % self.tp_size != 0:
+            raise ValueError(
+                f"indexer head sharding requires index_n_heads ({index_n_heads}) divisible "
+                f"by tensor_model_parallel_size ({self.tp_size})."
+            )
+        self.index_n_heads_global = index_n_heads
+        index_n_heads = index_n_heads // self.tp_size
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.compress_ratio = compress_ratio
@@ -268,12 +299,27 @@ class Indexer(nn.Module):
 
     # ------------------------------------------------------------------
 
+    def _cp_query_offset(self, s_local: int) -> int:
+        """This rank's first GLOBAL query row.
+
+        Under context parallel the pool is all-gathered (global) while the queries are a
+        contiguous local slice, so every causal test has to be made against the query's
+        global position. 0 when CP is off.
+        """
+        from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+            get_cp_group,
+        )
+
+        g = get_cp_group()
+        return 0 if g is None else g.rank() * int(s_local)
+
     def _causal_mask(
         self,
         n_queries: int,
         n_pool: int,
         device: torch.device,
         dtype: torch.dtype,
+        q_offset: Optional[int] = None,
     ) -> torch.Tensor:
         """Return ``[n_queries, n_pool]`` mask: 0.0 if pool position ``s``
         is allowed for query ``t``, ``-inf`` otherwise.
@@ -281,7 +327,12 @@ class Indexer(nn.Module):
         A compressed position ``s`` covers raw tokens ``[s*ratio, (s+1)*ratio)``;
         a query at raw token ``t`` may attend to ``s`` iff its window
         end ``(s+1)*ratio - 1 <= t``.
+
+        ``q_offset`` defaults to this rank's CP query offset. The streaming top-K path
+        overrides it to fold in a pool-column offset -- see :meth:`forward`.
         """
+        if q_offset is None:
+            q_offset = self._cp_query_offset(n_queries)
         # The mask depends only on (n_queries, n_pool, compress_ratio, dtype) — all
         # fixed per run — so cache it instead of rebuilding arange + where every
         # call. PRIMUS_INDEXER_MASK_CACHE=0 forces the eager rebuild.
@@ -290,11 +341,13 @@ class Indexer(nn.Module):
             cache = getattr(self, "_causal_mask_cache", None)
             if cache is None:
                 cache = self._causal_mask_cache = {}
-            key = (n_queries, n_pool, device, dtype)
+            key = (n_queries, n_pool, device, dtype, q_offset)
             cached = cache.get(key)
             if cached is not None:
                 return cached
-        t_idx = torch.arange(n_queries, device=device).unsqueeze(1)  # [t, 1]
+        # + CP offset: under context parallel the pool is global but these queries are
+        # this rank's slice, so causality is judged on the GLOBAL query position.
+        t_idx = torch.arange(n_queries, device=device).unsqueeze(1) + q_offset  # [t, 1]
         s_end = (torch.arange(n_pool, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1  # [1, s]
         allowed = s_end <= t_idx  # [t, s] bool
         mask = torch.where(allowed, 0.0, float("-inf")).to(dtype)
@@ -326,7 +379,35 @@ class Indexer(nn.Module):
         Hd = self.index_head_dim
 
         # 1) K^{IComp}: pool hidden via the mini-Compressor → [B, P, Hd]
-        k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
+        #
+        # Under context parallelism this pool MUST be all-gathered to the global P, for
+        # two reasons: the top-K indices it produces are used to address the attention's
+        # own (already global) pool, so a local-P index would name the wrong column; and
+        # a query could otherwise never select compressed history owned by an earlier
+        # rank. Mirrors DeepseekV4Attention._build_compressed_pool -- same boundary-row
+        # rule (overlap mode stitches window i with window i-1, which at a shard edge
+        # lives on the left neighbour), same rank-order == sequence-order argument.
+        from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+            get_cp_group,
+        )
+
+        cp_group = get_cp_group()
+        if cp_group is None:
+            k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
+        else:
+            from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
+                build_global_pool,
+                compressor_boundary_rows,
+                exchange_boundary_kv,
+            )
+
+            nb = compressor_boundary_rows(self.compress_ratio, bool(self.indexer_compressor.overlap))
+            if nb > 0:
+                bnd = exchange_boundary_kv(hidden.reshape(B, S, 1, D), nb, cp_group).reshape(B, nb, D)
+                k_local = self.indexer_compressor(torch.cat([bnd, hidden], dim=1))[:, 1:]
+            else:
+                k_local = self.indexer_compressor(hidden)
+            k_icomp = build_global_pool(k_local, cp_group)
         P = k_icomp.shape[1]
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
@@ -336,7 +417,7 @@ class Indexer(nn.Module):
         # FP8 (paper / NVIDIA backend.linear) when enabled, else the bf16 nn.Linear.
         proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
         if self._fuse_qw_proj:
-            dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + H] in one GEMM
+            dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + local H] in one GEMM
             q_q = dqw[..., : self.dq_rank]  # [B, S, dq_rank]
             w_i = dqw[..., self.dq_rank :]  # [B, S, H]
         else:
@@ -365,9 +446,76 @@ class Indexer(nn.Module):
             q_i = fake_quantize_fp8_e4m3(q_i)
             k_icomp_2d = fake_quantize_fp8_e4m3(k_icomp_2d)
 
+        def _scores_for(k2d: torch.Tensor, p_off: int) -> torch.Tensor:
+            """Masked scores ``[B, S, Pc]`` for pool columns ``[p_off, p_off + Pc)``.
+
+            The causal test is ``(p_global + 1) * ratio - 1 <= t_global``. Substituting
+            ``p_global = p_local + p_off`` turns it into
+            ``(p_local + 1) * ratio - 1 <= t_global - p_off * ratio``, so a pool-column
+            offset is EXACTLY a shift of the query offset. That is why the streaming path
+            needs no chunk-awareness inside the Triton kernels -- it reuses ``q_offset``.
+            """
+            q_off = self._cp_query_offset(S) - int(p_off) * self.compress_ratio
+            Pc = k2d.shape[1]
+            if _indexer_fp4_enabled():
+                dot_c = _fp4_qk_gemm(q_i, k2d)
+                sc = (F.relu(dot_c) * w_i.unsqueeze(-1)).sum(dim=2)
+                return sc + self._causal_mask(S, Pc, sc.device, sc.dtype, q_offset=q_off).unsqueeze(0)
+            if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k2d, w_i):
+                return indexer_score_triton(
+                    q_i,
+                    k2d,
+                    w_i,
+                    compress_ratio=self.compress_ratio,
+                    out_dtype=hidden.dtype,
+                    q_offset=q_off,
+                )
+            dot_c = torch.einsum("bshd,bpd->bshp", q_i, k2d)
+            sc = (F.relu(dot_c) * w_i.unsqueeze(-1)).sum(dim=2)
+            return sc + self._causal_mask(S, Pc, sc.device, sc.dtype, q_offset=q_off).unsqueeze(0)
+
         # Phase 5: FP4 CSA-indexer QK. Real MXFP4 GEMM for the QK product (paper
         # §2.3.4/§5.2.1: "QK multiplied entirely in FP4"), then the eager
         # ReLU/weight/sum tail (w_i + tail stay BF16/FP32 — only the QK is FP4).
+        # Streaming (chunked) top-K. `scores` is [B, S, P] and P grows with the GLOBAL
+        # sequence even under CP (the pool is all-gathered), so it is the 1M wall: at
+        # S_local=131072 / P=262144 it is 64 GiB per rank, while torch.topk's own extra
+        # peak is only 0.75 GiB -- the tensor, not the selection, is the problem.
+        # Chunking over P keeps a running top-K and never materialises the full row:
+        # peak drops to [B, S, chunk] + [B, S, K].
+        chunk = _indexer_topk_chunk()
+        if chunk > 0 and P > chunk:
+            if _indexer_tail_triton_enabled() and not _indexer_triton_full_enabled():
+                raise NotImplementedError(
+                    "Streaming indexer top-K does not support the tail-fused path "
+                    "(PRIMUS_INDEXER_TRITON): indexer_score_post applies the causal mask "
+                    "itself with no pool-column offset hook. Use "
+                    "PRIMUS_INDEXER_TRITON_FULL=1 instead."
+                )
+            run_v = run_i = None
+            for lo in range(0, P, chunk):
+                hi = min(lo + chunk, P)
+                sc = _scores_for(k_icomp_2d[:, lo:hi], lo)
+                # Same P14 reduction as below, just per chunk: every element is still
+                # reduced exactly once, so the result is unchanged.
+                if self.tp_size > 1:
+                    import torch.distributed as _dist
+
+                    _dist.all_reduce(sc, group=self.tp_group)
+                v, i = sc.topk(min(K, hi - lo), dim=-1)
+                del sc
+                i = i + lo  # chunk-local column -> GLOBAL pool column
+                if run_v is None:
+                    run_v, run_i = v, i
+                else:
+                    cv = torch.cat([run_v, v], dim=-1)
+                    ci = torch.cat([run_i, i], dim=-1)
+                    run_v, sel = cv.topk(min(K, cv.shape[-1]), dim=-1)
+                    run_i = torch.gather(ci, -1, sel)
+            topk_scores, topk_idxs = run_v, run_i
+            topk_eff = topk_scores.shape[-1]
+            return self._finalize_topk(topk_idxs, topk_scores, topk_eff, K, B, S)
+
         if _indexer_fp4_enabled():
             dot = _fp4_qk_gemm(q_i, k_icomp_2d)  # [B, S, H, P], real FP4 matmul
             relu = F.relu(dot)
@@ -381,6 +529,7 @@ class Indexer(nn.Module):
                 w_i,
                 compress_ratio=self.compress_ratio,
                 out_dtype=hidden.dtype,
+                q_offset=self._cp_query_offset(S),
             )
         else:
             dot = torch.einsum("bshd,bpd->bshp", q_i, k_icomp_2d)
@@ -397,9 +546,21 @@ class Indexer(nn.Module):
                 mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
                 scores = scores + mask.unsqueeze(0)  # [B, S, P]
 
+        # P14: with heads sharded, `scores` holds only this rank's partial head sum, so
+        # reduce before the top-k -- the selection must see the full-head score. The
+        # causal mask is 0 / -inf and survives the sum unchanged (-inf + finite = -inf),
+        # so it does not need to be re-applied or divided out.
+        if self.tp_size > 1:
+            import torch.distributed as _dist
+
+            _dist.all_reduce(scores, group=self.tp_group)
+
         topk_eff = min(K, P)
         topk_scores, topk_idxs = scores.topk(topk_eff, dim=-1)  # [B, S, topk_eff]
+        return self._finalize_topk(topk_idxs, topk_scores, topk_eff, K, B, S)
 
+    def _finalize_topk(self, topk_idxs, topk_scores, topk_eff, K, B, S):
+        """Sentinel + pad, shared by the one-shot and streaming top-K paths."""
         # 5) Replace selections that are still -inf (i.e. fewer than K valid
         #    pool positions for very early queries) with sentinel ``-1`` so
         #    callers can drop them.

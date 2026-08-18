@@ -263,6 +263,39 @@ def _build_linear_projection_spec(
     )
 
 
+def v4_shard_heads(config) -> bool:
+    """P14: shard attention heads across TP instead of gathering them back.
+
+    Off by default, so every existing recipe keeps the byte-identical
+    ``gather_output=True`` behaviour. When on, each TP rank owns
+    ``num_attention_heads / tp`` heads end to end -- q-up stays sharded, the
+    attention kernels run on the local head slice, and the grouped-O down
+    projection holds only this rank's ``o_groups / tp`` groups, whose partial
+    results the row-parallel ``linear_o_b`` all-reduces.
+
+    Requires ``num_attention_heads % tp == 0`` and ``o_groups % tp == 0``: the
+    grouped-O split is defined over ``o_groups``, so a rank must own whole groups.
+    """
+    if not bool(getattr(config, "v4_shard_attention_heads", False)):
+        return False
+    tp = int(getattr(config, "tensor_model_parallel_size", 1) or 1)
+    if tp <= 1:
+        return False
+    heads = int(config.num_attention_heads)
+    groups = int(getattr(config, "o_groups", 1) or 1)
+    if heads % tp != 0:
+        raise ValueError(
+            f"v4_shard_attention_heads requires num_attention_heads ({heads}) "
+            f"divisible by tensor_model_parallel_size ({tp})."
+        )
+    if groups % tp != 0:
+        raise ValueError(
+            f"v4_shard_attention_heads requires o_groups ({groups}) divisible by "
+            f"tensor_model_parallel_size ({tp}); a rank must own whole grouped-O groups."
+        )
+    return True
+
+
 def _build_column_parallel_spec(
     *,
     config: DeepSeekV4TransformerConfig,
@@ -431,6 +464,10 @@ def _build_v4_attention_submodules(
             provider=provider,
             in_features=q_lora_rank,
             out_features=q_out,
+            # P14: keep the head slice local instead of all-gathering it back to full
+            # width. This is the change that makes TP shard attention ACTIVATIONS, not
+            # just weights -- see v4_shard_heads().
+            gather_output=not v4_shard_heads(config),
         ),
         linear_kv=_build_linear_projection_spec(
             config=config,
@@ -444,18 +481,38 @@ def _build_v4_attention_submodules(
 
     if o_lora_rank > 0:
         n_per_group = q_out // o_groups
-        submods.linear_o_a = _build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=n_per_group,
-            out_features=o_groups * o_lora_rank,
-        )
-        submods.linear_o_b = _build_row_parallel_spec(
-            config=config,
-            provider=provider,
-            in_features=o_groups * o_lora_rank,
-            out_features=hidden_size,
-        )
+        if v4_shard_heads(config):
+            # Each rank owns o_groups/tp whole groups. Sharding the o_a OUTPUT dim
+            # (o_groups * o_lora_rank) by TP hands each rank exactly those groups'
+            # rows, and linear_o_b -- already row-parallel over the same axis --
+            # all-reduces the per-group partial sums into the full output.
+            submods.linear_o_a = _build_column_parallel_spec(
+                config=config,
+                provider=provider,
+                in_features=n_per_group,
+                out_features=o_groups * o_lora_rank,
+                gather_output=False,
+            )
+            submods.linear_o_b = _build_row_parallel_spec(
+                config=config,
+                provider=provider,
+                in_features=o_groups * o_lora_rank,
+                out_features=hidden_size,
+                input_is_parallel=True,
+            )
+        else:
+            submods.linear_o_a = _build_linear_projection_spec(
+                config=config,
+                provider=provider,
+                in_features=n_per_group,
+                out_features=o_groups * o_lora_rank,
+            )
+            submods.linear_o_b = _build_row_parallel_spec(
+                config=config,
+                provider=provider,
+                in_features=o_groups * o_lora_rank,
+                out_features=hidden_size,
+            )
     else:
         submods.linear_proj = _build_row_parallel_spec(
             config=config,

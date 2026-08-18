@@ -154,6 +154,13 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     o_lora_rank: int = 0
 
     # ---- DeepSeek-V4 MoE routing / expert extras ----
+    # P14: shard attention heads across tensor parallel instead of gathering them.
+    # Off by default so existing recipes are byte-identical. When on, TP shards the
+    # [B, S, H, head_dim] query ACTIVATION (not just weights), which is what limits
+    # long-context training on V4. Requires num_attention_heads % tp == 0 and
+    # o_groups % tp == 0.
+    v4_shard_attention_heads: bool = False
+
     num_hash_layers: int = 0
     hash_routing_seed: int = 0
 

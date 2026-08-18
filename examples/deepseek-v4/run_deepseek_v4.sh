@@ -340,7 +340,7 @@ fi
   --v4_grouped_experts_support_clamped_swiglu "$PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU" \
   --compress_ratios "$PRIMUS_COMPRESS_RATIOS" \
   --mtp_num_layers "${MTP_NUM_LAYERS:-0}" \
-  --mock_data True \
+  --mock_data "${MOCK_DATA:-True}" \
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_v4_attention_backend "$USE_V4_ATTENTION_BACKEND" \
