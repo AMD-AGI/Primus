@@ -229,6 +229,61 @@ def _build_packed_seq_params(
     )
 
 
+def _shard_batch_on_cp_rank(
+    tokens: torch.Tensor,
+    labels: torch.Tensor,
+    loss_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    *,
+    cp_size: int,
+    use_packed_attention: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split an SFT batch along the sequence dimension across the CP group.
+
+    Megatron's pretrain path shards inside ``get_batch``; SFT assembles its own
+    batch, so the split has to happen here. Without it every CP rank runs the
+    full sequence -- CP costs communication while saving no activation memory,
+    and ``get_rotary_seq_len`` (which multiplies by ``context_parallel_size``)
+    builds RoPE for a sequence CP times longer than the tokens actually are.
+
+    The sampler is CP-agnostic (``get_data_parallel_rank()`` excludes CP), so
+    every rank in a CP group starts from the same micro-batch. Megatron's
+    striped ``2 * cp_size`` chunk assignment is reused here so the shards match
+    ``get_pos_emb_on_this_cp_rank``, which slices RoPE the same way.
+    """
+    if cp_size <= 1:
+        return tokens, labels, loss_mask, position_ids
+
+    if use_packed_attention:
+        raise NotImplementedError(
+            "context_parallel_size > 1 is not supported with use_packed_attention=True: "
+            "the thd path needs per-segment sharding (get_thd_batch_on_this_cp_rank) so "
+            "cu_seqlens stay consistent. Set use_packed_attention: false to combine "
+            "context parallelism with implicit packing."
+        )
+
+    seq_len = tokens.size(1)
+    if seq_len % (2 * cp_size) != 0:
+        raise ValueError(
+            f"seq_length ({seq_len}) must be divisible by 2 * context_parallel_size "
+            f"({2 * cp_size}) to shard a batch across the context-parallel group."
+        )
+
+    from megatron.training.utils import get_batch_on_this_cp_rank
+
+    batch = get_batch_on_this_cp_rank(
+        {
+            "input_ids": tokens,
+            "labels": labels,
+            "loss_mask": loss_mask,
+            # position_ids is an expanded view; the sharder reshapes with view().
+            "position_ids": position_ids.contiguous(),
+        }
+    )
+
+    return batch["input_ids"], batch["labels"], batch["loss_mask"], batch["position_ids"]
+
+
 def create_sft_forward_step() -> Callable:
     """
     Create and return the forward_step function for SFT training.
@@ -335,6 +390,19 @@ def create_sft_forward_step() -> Callable:
         else:
             position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+
+        # Context parallelism: keep only this rank's slice of the sequence. The
+        # loss below is computed on the shard; Megatron all-reduces
+        # [loss_sum, num_tokens] over the data-parallel-with-CP group, so the
+        # reported average stays correct.
+        tokens, labels, loss_mask, position_ids = _shard_batch_on_cp_rank(
+            tokens,
+            labels,
+            loss_mask,
+            position_ids,
+            cp_size=int(getattr(args, "context_parallel_size", 1) or 1),
+            use_packed_attention=use_packed_attention,
+        )
 
         # attention_mask: None for causal mask (standard GPT autoregressive)
         attention_mask = None
