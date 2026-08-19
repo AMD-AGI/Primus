@@ -68,6 +68,12 @@ turbo_sync_free_moe_stage: 0
 # ===== Mega MoE =====
 # fused MegaMoE layer replacement (EP-only/TP=1/bf16)
 use_turbo_mega_moe: false
+# precision of the MegaMoE experts: bf16 | mxfp8. Only read when use_turbo_mega_moe is on.
+# Independent of Megatron's --fp8, which drives the TE fp8 recipe for the dense layers and has no
+# path to this fused op, so the MoE can be A/B'd on its own. Parameters stay bf16 either way.
+# The op keeps an internal mxfp8 weight cache and the fp8 path advances a separate generation counter
+# at the optimizer-step boundary to invalidate it (the optimizer may not bump w._version).
+turbo_mega_moe_precision: bf16
 
 # ===== Layer Norm =====
 # operator switch
