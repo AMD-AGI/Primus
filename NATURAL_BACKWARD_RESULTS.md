@@ -33,7 +33,7 @@ Input reuse alone measured `2.160 s`; natural MLP wgrad alone measured about `2.
 
 The built candidate remained finite through step 520 (`loss=0.6609`, `gnorm=0.4762`); step 500 was also finite (`loss=0.6206`, `gnorm=0.3724`). Steady time was `2.1132 s`. A stateful run produced validation loss `0.685480` at step 512 and saved DTCP checkpoint 500/final. Resuming checkpoint 500 completed finite step 530 (`loss=0.6481`, `gnorm=0.3546`) and validation `0.681209`. Peak memory increased from `151.81 GB` to `159.57 GB`. The reuse is runtime-gated and enabled only by the MBS32 selective-FlyDSL launch policy, leaving MBS64 defaults unchanged. An MBS64 smoke run with the gate off completed 30 finite steps.
 
-Relative to the matched unified baseline, this is about `1.03x`; relative to the original ratio-0.25 baseline near `2.42 s`, total speedup is about `1.144x`. The steady global throughput is about `484.5 samples/s`, within `0.3%` of the recorded NeMo MBS32 steady result (`485.89 samples/s`). A strict validation-inclusive comparison still requires fresh full convergence; applying the measured 3.1% training-path gain to the old Primus E2E result projects about `468.3 samples/s`, or a remaining `3.6%` gap to NeMo.
+Relative to the matched unified baseline, this is about `1.03x`; relative to the original ratio-0.25 baseline near `2.42 s`, total speedup is about `1.144x`. The steady global throughput is about `484.5 samples/s`, within `0.3%` of the recorded NeMo MBS32 steady result (`485.89 samples/s`). A fresh checkpoint-disabled full run converged at step 8448 with validation `0.585847`, TTQ `18,526.607 s`, and E2E throughput `466.937 samples/s`. Against the matched old Primus seed-10007 result (step 8704, `19,622.90 s`, `454.21 samples/s`), throughput improved `2.80%`, TTQ improved `5.59%`, and convergence occurred one 256-step validation interval earlier. The validation-inclusive throughput gap to NeMo is now `3.90%` using NeMo as denominator.
 
 ### Rejected screens
 
@@ -48,4 +48,4 @@ Files changed:
 - `docker/flux-fp8/Dockerfile.v26.3-combined`
 - `local_runs/run_flux_mlperf.sh`
 
-The remaining path to 1.20x depends on the separate selective-contraction kernel campaign and/or a larger complete backward-region fusion. The candidate has passed 520-step stateful validation, checkpoint/resume, an MBS64 smoke test, and 54 unit tests. Fresh full MBS32 convergence and final multi-node qualification remain before promotion.
+The remaining path to 1.20x depends on the separate selective-contraction kernel campaign and/or a larger complete backward-region fusion. The candidate has passed full MBS32 convergence both with stateful periodic checkpoints and in the checkpoint-disabled matched E2E setup, plus checkpoint/resume, an MBS64 smoke test, and 54 unit tests. Final multi-node qualification remains before promotion.
