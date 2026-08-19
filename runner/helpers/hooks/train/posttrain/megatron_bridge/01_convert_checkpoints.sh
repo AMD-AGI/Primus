@@ -166,6 +166,65 @@ resolve_pretrained_checkpoint() {
     printf '%s' "${base}"
 }
 
+find_free_tcp_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+# convert_checkpoints.py initializes torch.distributed and binds MASTER_PORT.
+# MLPerf configs export MASTER_PORT=29502 for training; reusing it here causes
+# EADDRINUSE when that port is already taken (another job, stale process, etc.).
+run_checkpoint_conversion() {
+    local saved_master_addr saved_master_port saved_rank saved_world_size saved_local_rank
+    local convert_port training_port_label
+
+    saved_master_addr="${MASTER_ADDR:-}"
+    saved_master_port="${MASTER_PORT:-}"
+    saved_rank="${RANK:-}"
+    saved_world_size="${WORLD_SIZE:-}"
+    saved_local_rank="${LOCAL_RANK:-}"
+
+    convert_port="${PRIMUS_CKPT_CONVERT_MASTER_PORT:-$(find_free_tcp_port)}"
+    training_port_label="${saved_master_port:-<unset>}"
+
+    export MASTER_ADDR="127.0.0.1"
+    export MASTER_PORT="${convert_port}"
+    export RANK=0
+    export WORLD_SIZE=1
+    export LOCAL_RANK=0
+
+    LOG_INFO_RANK0 "Checkpoint conversion rendezvous: ${MASTER_ADDR}:${MASTER_PORT} (training will use port ${training_port_label})"
+
+    python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
+      --hf-model "${HF_PATH}" \
+      --megatron-path "${MEGATRON_PATH}"
+
+    if [[ -n "$saved_master_addr" ]]; then
+        export MASTER_ADDR="$saved_master_addr"
+    else
+        unset MASTER_ADDR
+    fi
+    if [[ -n "$saved_master_port" ]]; then
+        export MASTER_PORT="$saved_master_port"
+    else
+        unset MASTER_PORT
+    fi
+    if [[ -n "$saved_rank" ]]; then
+        export RANK="$saved_rank"
+    else
+        unset RANK
+    fi
+    if [[ -n "$saved_world_size" ]]; then
+        export WORLD_SIZE="$saved_world_size"
+    else
+        unset WORLD_SIZE
+    fi
+    if [[ -n "$saved_local_rank" ]]; then
+        export LOCAL_RANK="$saved_local_rank"
+    else
+        unset LOCAL_RANK
+    fi
+}
+
 # Check if Megatron checkpoint already exists
 if [[ -d "$MEGATRON_PATH" ]]; then
     LOG_INFO_RANK0 "Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
@@ -198,9 +257,7 @@ if [[ "$NODE_RANK" == "0" ]]; then
     # can configure them for the conversion pass.
     unset NVTE_FLASH_ATTN NVTE_FUSED_ATTN NVTE_UNFUSED_ATTN
 
-    python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
-      --hf-model "${HF_PATH}" \
-      --megatron-path "${MEGATRON_PATH}"
+    run_checkpoint_conversion
 
     # Restore MLPerf fused-attention env for the training run.
     export NVTE_FLASH_ATTN=0

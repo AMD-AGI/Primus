@@ -32,14 +32,15 @@ INFO="${CYAN}ℹ${RESET}"
 # ------------------------------------------
 PRIMUS_ROOT="/workspace/Primus"
 MEGATRON_BASE_DIR="${PRIMUS_ROOT}/examples/megatron/configs"
+MEGATRON_BRIDGE_BASE_DIR="${PRIMUS_ROOT}/examples/megatron_bridge/configs"
 TORCHTITAN_BASE_DIR="${PRIMUS_ROOT}/examples/torchtitan/configs"
-RUN_SCRIPT="${PRIMUS_ROOT}/examples/run_pretrain.sh"
+MLPERF_BASE_DIR="${PRIMUS_ROOT}/examples/mlperf"
+PRIMUS_CLI="${PRIMUS_ROOT}/primus-cli"
 VALID_DEVICES=(MI300X MI325X MI355X)
+MLPERF_MODELS=(llama3.1_8b llama2_70b)
 
-# Check if run_pretrain.sh exists, otherwise try run_pretrain_1.sh
-if [[ ! -f "$RUN_SCRIPT" && -f "${PRIMUS_ROOT}/examples/run_pretrain_1.sh" ]]; then
-    RUN_SCRIPT="${PRIMUS_ROOT}/examples/run_pretrain_1.sh"
-    echo "[DEBUG] Using run_pretrain_1.sh instead"
+if [[ ! -f "$PRIMUS_CLI" && -f "${PRIMUS_ROOT}/runner/primus-cli" ]]; then
+    PRIMUS_CLI="${PRIMUS_ROOT}/runner/primus-cli"
 fi
 
 # ------------------------------------------
@@ -57,6 +58,25 @@ install_vim_editor() {
         echo -e "   ${DOT} Install vim manually, then re-run config editing:"
         echo -e "   ${CYAN}apt-get update && apt-get install -y vim${RESET}"
         return 1
+    fi
+}
+
+configure_git_safe_directories() {
+    local repo_dir git_dir
+
+    if ! command -v git &>/dev/null; then
+        return 0
+    fi
+
+    if [[ -d "$PRIMUS_ROOT/.git" || -f "$PRIMUS_ROOT/.git" ]]; then
+        git config --global --add safe.directory "$PRIMUS_ROOT" 2>/dev/null || true
+    fi
+
+    if [[ -d "$PRIMUS_ROOT/third_party" ]]; then
+        while IFS= read -r -d '' git_dir; do
+            repo_dir=$(dirname "$git_dir")
+            git config --global --add safe.directory "$repo_dir" 2>/dev/null || true
+        done < <(find "$PRIMUS_ROOT/third_party" -name .git -print0 2>/dev/null)
     fi
 }
 
@@ -100,6 +120,51 @@ open_config_editor() {
     return 1
 }
 
+edit_config_interactively() {
+    local cfg="$1"
+    local model_name temp_edit_config
+
+    model_name=$(basename "$cfg" .yaml)
+
+    if [[ -n "${EDITED_CONFIGS[$cfg]:-}" && -f "${EDITED_CONFIGS[$cfg]}" ]]; then
+        temp_edit_config="${EDITED_CONFIGS[$cfg]}"
+    else
+        temp_edit_config="/tmp/primus_edit_${model_name}_$$.yaml"
+        cp "$cfg" "$temp_edit_config"
+        EDITED_CONFIGS["$cfg"]="$temp_edit_config"
+    fi
+
+    echo -e "\n${STAR} ${BOLD}Opening config for editing: ${CYAN}$model_name${RESET}"
+    echo -e "   ${DOT} Editing working copy: ${CYAN}$temp_edit_config${RESET}"
+    echo -e "   ${DOT} Original config is unchanged: ${DIM}$cfg${RESET}"
+    echo -e "   ${DOT} Edit the file, save, and close the editor to continue\n"
+
+    open_config_editor "$temp_edit_config"
+
+    echo -e " ${CHECK} ${GREEN}Working copy saved (original unchanged)${RESET}\n"
+}
+
+detect_train_suite() {
+    local config_file="$1"
+    local base_name
+
+    if grep -qE '^[[:space:]]*post_trainer:' "$config_file" 2>/dev/null; then
+        echo "posttrain"
+        return
+    fi
+    if grep -qE '^[[:space:]]*pre_trainer:' "$config_file" 2>/dev/null; then
+        echo "pretrain"
+        return
+    fi
+
+    base_name=$(basename "$config_file" .yaml)
+    if [[ "$base_name" == *posttrain* || "$base_name" == *-sft* || "$base_name" == *sft_* ]]; then
+        echo "posttrain"
+    else
+        echo "pretrain"
+    fi
+}
+
 next_run_number() {
     local model_name="$1"
     local prefix="${model_name}_${BACKEND}_${DEVICE}"
@@ -141,22 +206,12 @@ prepare_benchmark_artifacts() {
     artifact_prefix="${model_name}_${BACKEND}_${DEVICE}_${PREP_RUN_LABEL}"
 
     PREP_LOG_FILE="$LOG_DIR/${artifact_prefix}.log"
+    PREP_WORKING_CONFIG="$LOG_DIR/${artifact_prefix}_working.yaml"
 
     if [[ -n "${EDITED_CONFIGS[$cfg_file]:-}" ]]; then
-        PREP_WORKING_CONFIG="${EDITED_CONFIGS[$cfg_file]}"
-    else
-        PREP_WORKING_CONFIG="$cfg_file"
-    fi
-
-    if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
-        PREP_WORKING_CONFIG="$LOG_DIR/${artifact_prefix}_override.yaml"
-        cp "${EDITED_CONFIGS[$cfg_file]:-$cfg_file}" "$PREP_WORKING_CONFIG"
-        for KEY in "${!PARAM_OVERRIDES[@]}"; do
-            sed -i "s|^\([[:space:]]*${KEY}:[[:space:]]*\).*|\1${PARAM_OVERRIDES[$KEY]}|g" "$PREP_WORKING_CONFIG"
-        done
-    elif [[ -n "${EDITED_CONFIGS[$cfg_file]:-}" ]]; then
-        PREP_WORKING_CONFIG="$LOG_DIR/${artifact_prefix}_edited.yaml"
         cp "${EDITED_CONFIGS[$cfg_file]}" "$PREP_WORKING_CONFIG"
+    else
+        cp "$cfg_file" "$PREP_WORKING_CONFIG"
     fi
 }
 
@@ -168,41 +223,38 @@ execute_benchmark_run() {
     local current="$5"
     local total="$6"
 
-    local original_config_backup=""
     local run_exit_code=0
+    local train_suite
+
+    train_suite=$(detect_train_suite "$working_config")
 
     echo -e "${STAR} ${BOLD}Starting Benchmark ${current}/${total}...${RESET}"
     echo -e "   ${DOT} Model: ${CYAN}$model_name${RESET}"
     echo -e "   ${DOT} Backend: ${CYAN}$BACKEND${RESET}"
+    echo -e "   ${DOT} Train suite: ${CYAN}$train_suite${RESET}"
     echo -e "   ${DOT} Device: ${CYAN}$DEVICE${RESET}"
-    echo -e "   ${DOT} Config: ${YELLOW}$working_config${RESET}"
+    echo -e "   ${DOT} Config (working copy): ${YELLOW}$working_config${RESET}"
+    echo -e "   ${DOT} Original (unchanged): ${DIM}$cfg_file${RESET}"
     echo -e "   ${DOT} Log: ${YELLOW}$log_file${RESET}\n"
 
-    if [[ "$working_config" != "$cfg_file" ]]; then
-        original_config_backup="${cfg_file}.backup_$$"
-        cp "$cfg_file" "$original_config_backup"
-        cp "$working_config" "$cfg_file"
-        echo -e " ${CHECK} Copied edited/overridden config to: ${CYAN}$cfg_file${RESET}"
+    if [[ ! -f "$PRIMUS_CLI" ]]; then
+        echo -e "${RED}✗ primus-cli not found at:${RESET} ${CYAN}$PRIMUS_CLI${RESET}"
+        return 1
     fi
 
-    EXP="${BACKEND_BASE_DIR}/${DEVICE}/$(basename "$cfg_file")"
-    export EXP
-    echo -e " ${CHECK} EXP set to: ${CYAN}$EXP${RESET}\n"
+    export EXP="$working_config" BACKEND HF_TOKEN
+    echo -e " ${CHECK} Launching via primus-cli direct"
+    echo -e "   ${DOT} ${CYAN}primus-cli direct --log_file $log_file -- train $train_suite --config $working_config${RESET}\n"
 
     echo -e " ${DOT} Changing to Primus root directory: ${CYAN}$PRIMUS_ROOT${RESET}"
     cd "$PRIMUS_ROOT" || return 1
 
     set +e
-    bash "$RUN_SCRIPT" 2>&1 | tee "$log_file" || true
+    bash "$PRIMUS_CLI" direct --log_file "$log_file" -- train "$train_suite" --config "$working_config"
     run_exit_code=$?
     set +e
 
     cd "$SCRIPT_DIR" || return 1
-
-    if [[ -n "$original_config_backup" && -f "$original_config_backup" ]]; then
-        mv "$original_config_backup" "$cfg_file"
-        echo -e " ${CHECK} Restored original config file"
-    fi
 
     echo
     echo -e "${GREEN}==========================================${RESET}"
@@ -213,10 +265,122 @@ execute_benchmark_run() {
     fi
     echo -e " Log saved at:"
     echo -e "   ${CYAN}$log_file${RESET}"
-    if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
-        echo -e " Override config saved at:"
-        echo -e "   ${CYAN}$working_config${RESET}"
+    echo -e "${GREEN}==========================================${RESET}"
+    echo
+
+    return "$run_exit_code"
+}
+
+resolve_mlperf_config_script() {
+    local model_dir="$1"
+    local candidate
+
+    for candidate in \
+        "${model_dir}/config_${DEVICE}_1x8x1.sh" \
+        "${model_dir}/config_MI355X_1x8x1.sh"; do
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+prepare_mlperf_artifacts() {
+    local model_id="$1"
+    local run_num artifact_prefix
+
+    PREP_MLPERF_MODEL="$model_id"
+    PREP_MLPERF_MODEL_DIR="${MLPERF_BASE_DIR}/${model_id}"
+    PREP_MODEL_NAME="$model_id"
+    run_num=$(next_run_number "$model_id")
+    PREP_RUN_LABEL="run${run_num}"
+    artifact_prefix="${model_id}_${BACKEND}_${DEVICE}_${PREP_RUN_LABEL}"
+    PREP_LOG_FILE="$LOG_DIR/${artifact_prefix}.log"
+}
+
+execute_mlperf_benchmark_run() {
+    local model_id="$1"
+    local log_file="$2"
+    local current="$3"
+    local total="$4"
+
+    local model_dir="$PREP_MLPERF_MODEL_DIR"
+    local config_script run_exit_code=0
+
+    echo -e "${STAR} ${BOLD}Starting MLPerf Benchmark ${current}/${total}...${RESET}"
+    echo -e "   ${DOT} Model: ${CYAN}$model_id${RESET}"
+    echo -e "   ${DOT} Backend: ${CYAN}$BACKEND${RESET}"
+    echo -e "   ${DOT} Device: ${CYAN}$DEVICE${RESET}"
+    echo -e "   ${DOT} Model dir: ${YELLOW}$model_dir${RESET}"
+    echo -e "   ${DOT} Log: ${YELLOW}$log_file${RESET}\n"
+
+    if [[ ! -d "$model_dir" ]]; then
+        echo -e "${RED}✗ MLPerf model directory not found:${RESET} ${CYAN}$model_dir${RESET}"
+        return 1
     fi
+
+    if ! config_script=$(resolve_mlperf_config_script "$model_dir"); then
+        echo -e "${RED}✗ MLPerf config script not found for ${DEVICE} under:${RESET} ${CYAN}$model_dir${RESET}"
+        return 1
+    fi
+
+    if [[ ! -f "${model_dir}/run_and_time.sh" ]]; then
+        echo -e "${RED}✗ run_and_time.sh not found in:${RESET} ${CYAN}$model_dir${RESET}"
+        return 1
+    fi
+
+    export PRIMUS_PATH="$PRIMUS_ROOT"
+    export HF_TOKEN
+
+    case "$model_id" in
+        llama3.1_8b)
+            export DATA_PATH="${MLPERF_DATA_PATH:-/data/mlperf_llama31_8b/data}"
+            ;;
+        llama2_70b)
+            export PACKED_DATA_DIR="${MLPERF_PACKED_DATA_DIR:-/data}"
+            export DATA_PATH="${MLPERF_PACKED_DATA_DIR:-/data}"
+            export PRETRAINED_CHECKPOINT="${MLPERF_PRETRAINED_CHECKPOINT:-/data/megatron_checkpoints/Llama-2-70b-hf}"
+            ;;
+    esac
+
+    mkdir -p /results 2>/dev/null || true
+
+    echo -e " ${CHECK} Sourcing MLPerf config: ${CYAN}$config_script${RESET}"
+    # shellcheck disable=SC1090
+    source "$config_script"
+
+    echo -e " ${CHECK} Launching: ${CYAN}bash run_and_time.sh${RESET}"
+    echo -e "   ${DOT} EXP=${CYAN}${EXP:-<unset>}${RESET}"
+    echo -e "   ${DOT} DATA_PATH=${CYAN}${DATA_PATH:-<unset>}${RESET}\n"
+
+    cd "$model_dir" || return 1
+
+    set +e
+    bash run_and_time.sh 2>&1 | tee "$log_file"
+    run_exit_code=${PIPESTATUS[0]}
+    set +e
+
+    if [[ -f /results/mlperf_logging.out ]]; then
+        {
+            echo
+            echo "===== MLLOG OUTPUT (/results/mlperf_logging.out) ====="
+            cat /results/mlperf_logging.out
+        } >> "$log_file"
+    fi
+
+    cd "$SCRIPT_DIR" || return 1
+
+    echo
+    echo -e "${GREEN}==========================================${RESET}"
+    if [[ $run_exit_code -eq 0 ]]; then
+        echo -e " ${BOLD}${GREEN}✓ MLPerf Benchmark ${current}/${total} Completed Successfully!${RESET}"
+    else
+        echo -e " ${BOLD}${YELLOW}⚠ MLPerf Benchmark ${current}/${total} Completed with Exit Code: $run_exit_code${RESET}"
+    fi
+    echo -e " Log saved at:"
+    echo -e "   ${CYAN}$log_file${RESET}"
     echo -e "${GREEN}==========================================${RESET}"
     echo
 
@@ -229,7 +393,7 @@ generate_metrics_table() {
     echo
     echo -e "${STAR} ${BOLD}Generating Metrics Table...${RESET}\n"
 
-    if [[ -f "$SCRIPT_DIR/$metrics_script" && ( "$BACKEND" == "megatron" || "$BACKEND" == "torchtitan" ) ]]; then
+    if [[ -f "$SCRIPT_DIR/$metrics_script" && ( "$BACKEND" == "megatron" || "$BACKEND" == "megatron_bridge" || "$BACKEND" == "torchtitan" || "$BACKEND" == "mlperf" ) ]]; then
         echo -e " ${CHECK} Running: ${CYAN}python $metrics_script $BACKEND${RESET}\n"
         metrics_output=$(cd "$SCRIPT_DIR" && python "$metrics_script" "$BACKEND")
         metrics_status=$?
@@ -271,6 +435,8 @@ sleep 0.2
 echo -e "${STAR} ${BOLD}Choose Backend:${RESET}"
 echo -e "  ${DOT} 1) megatron"
 echo -e "  ${DOT} 2) torchtitan"
+echo -e "  ${DOT} 3) megatron_bridge"
+echo -e "  ${DOT} 4) mlperf"
 
 echo -en " ${ARROW} Enter number or name: "
 read -r BACKEND_IN
@@ -283,6 +449,14 @@ case "$BACKEND_IN" in
     2|torchtitan|TorchTitan|TORCHTITAN)
         BACKEND="torchtitan"
         BACKEND_BASE_DIR="$TORCHTITAN_BASE_DIR"
+        ;;
+    3|megatron_bridge|MegatronBridge|MEGATRON_BRIDGE|megatron-bridge)
+        BACKEND="megatron_bridge"
+        BACKEND_BASE_DIR="$MEGATRON_BRIDGE_BASE_DIR"
+        ;;
+    4|mlperf|MLPerf|MLPERF)
+        BACKEND="mlperf"
+        BACKEND_BASE_DIR="$MLPERF_BASE_DIR"
         ;;
     *)
         echo -e "${RED}✗ Invalid backend: $BACKEND_IN${RESET}"
@@ -376,99 +550,165 @@ echo -e " ${CHECK} GPU Device: ${GREEN}$DEVICE${RESET}\n"
 sleep 0.2
 
 # ------------------------------------------
-# 2.5. SET DEVICE-SPECIFIC CONFIG DIRECTORY
+# 2.5. SET CONFIG DIRECTORY / MLPerf MODELS
 # ------------------------------------------
-CONFIG_DIR="${BACKEND_BASE_DIR}/${DEVICE}"
-echo -e " ${CHECK} Config directory set to: ${CYAN}$CONFIG_DIR${RESET}\n"
+if [[ "$BACKEND" == "mlperf" ]]; then
+    echo -e " ${CHECK} MLPerf examples directory: ${CYAN}$MLPERF_BASE_DIR${RESET}"
+    if [[ "$DEVICE" != "MI355X" ]]; then
+        echo -e " ${YELLOW}⚠ MLPerf configs are primarily tested on MI355X; using best available config for ${DEVICE}.${RESET}"
+    fi
+else
+    CONFIG_DIR="${BACKEND_BASE_DIR}/${DEVICE}"
+    echo -e " ${CHECK} Config directory set to: ${CYAN}$CONFIG_DIR${RESET}\n"
+fi
 sleep 0.2
 
 # ------------------------------------------
-# 3. MODEL CONFIG SELECTION
+# 3. MODEL SELECTION
 # ------------------------------------------
-echo -e "${STAR} ${BOLD}Available Model Configs:${RESET} (${CYAN}$BACKEND${RESET} / ${CYAN}$DEVICE${RESET})"
-
-# Use find and sort -u to get unique files
-mapfile -t CONFIG_LIST < <(find "$CONFIG_DIR" -name "*.yaml" -type f | sort -u)
-
-if [[ ${#CONFIG_LIST[@]} -eq 0 ]]; then
-    echo -e "${RED}No configs found in $CONFIG_DIR${RESET}"
-    exit 1
-fi
-
-# Store unique model names to avoid duplicates
-declare -A SEEN_MODELS
-UNIQUE_CONFIGS=()
-
-for cfg in "${CONFIG_LIST[@]}"; do
-    model_name=$(basename "$cfg" .yaml)
-    if [[ -z "${SEEN_MODELS[$model_name]}" ]]; then
-        SEEN_MODELS[$model_name]=1
-        UNIQUE_CONFIGS+=("$cfg")
-    fi
-done
-
-i=1
-for cfg in "${UNIQUE_CONFIGS[@]}"; do
-    echo -e "  ${DOT} ${i}) $(basename "$cfg")"
-    ((i++))
-done
-echo
-
-CONFIG_LIST=("${UNIQUE_CONFIGS[@]}")
-
-echo -en " ${ARROW} Select config number(s) (comma-separated, range, or 'all'): "
-echo -e "${DIM}(Examples: 1,3,5 or 4-8 or all)${RESET}"
-echo -en " ${ARROW} "
-read -r CFG_NUM
-
-# Parse input into array
 SELECTED_CONFIGS=()
+SELECTED_MLPERF_MODELS=()
 
-if [[ "$CFG_NUM" == "all" ]]; then
-    # Select all configs
-    SELECTED_CONFIGS=("${CONFIG_LIST[@]}")
-elif [[ "$CFG_NUM" =~ ^[0-9]+-[0-9]+$ ]]; then
-    # Handle range input like 4-8
-    START="${CFG_NUM%%-*}"
-    END="${CFG_NUM##*-}"
+if [[ "$BACKEND" == "mlperf" ]]; then
+    echo -e "${STAR} ${BOLD}Available MLPerf Models:${RESET} (${CYAN}$BACKEND${RESET} / ${CYAN}$DEVICE${RESET})"
+    i=1
+    for model in "${MLPERF_MODELS[@]}"; do
+        if [[ -d "${MLPERF_BASE_DIR}/${model}" ]]; then
+            echo -e "  ${DOT} ${i}) ${model}"
+            ((i++))
+        fi
+    done
+    echo
 
-    if [[ $START -lt 1 || $END -gt ${#CONFIG_LIST[@]} || $START -gt $END ]]; then
-        echo -e "${RED}✗ Invalid range: $START-$END${RESET}"
+    mapfile -t AVAILABLE_MLPERF_MODELS < <(
+        for model in "${MLPERF_MODELS[@]}"; do
+            if [[ -d "${MLPERF_BASE_DIR}/${model}" ]]; then
+                echo "$model"
+            fi
+        done
+    )
+
+    if [[ ${#AVAILABLE_MLPERF_MODELS[@]} -eq 0 ]]; then
+        echo -e "${RED}No MLPerf models found in $MLPERF_BASE_DIR${RESET}"
         exit 1
     fi
 
-    for ((i=START; i<=END; i++)); do
-        SELECTED_CONFIGS+=("${CONFIG_LIST[$i-1]}")
-    done
-else
-    # Handle comma-separated input
-    _saved_ifs=$IFS
-    IFS=',' read -ra CFG_NUMS <<< "$CFG_NUM"
-    IFS=$_saved_ifs
+    echo -en " ${ARROW} Select model number(s) (comma-separated, range, or 'all'): "
+    echo -e "${DIM}(Examples: 1 or 1,2 or all)${RESET}"
+    echo -en " ${ARROW} "
+    read -r CFG_NUM
 
-    for num in "${CFG_NUMS[@]}"; do
-        # Trim whitespace
-        num=$(echo "$num" | xargs)
-
-        if [[ $num -ge 1 && $num -le ${#CONFIG_LIST[@]} ]]; then
-            SELECTED_CONFIGS+=("${CONFIG_LIST[$num-1]}")
-        else
-            echo -e "${RED}✗ Invalid config number: $num${RESET}"
+    if [[ "$CFG_NUM" == "all" ]]; then
+        SELECTED_MLPERF_MODELS=("${AVAILABLE_MLPERF_MODELS[@]}")
+    elif [[ "$CFG_NUM" =~ ^[0-9]+-[0-9]+$ ]]; then
+        START="${CFG_NUM%%-*}"
+        END="${CFG_NUM##*-}"
+        if [[ $START -lt 1 || $END -gt ${#AVAILABLE_MLPERF_MODELS[@]} || $START -gt $END ]]; then
+            echo -e "${RED}✗ Invalid range: $START-$END${RESET}"
             exit 1
         fi
-    done
-fi
+        for ((i=START; i<=END; i++)); do
+            SELECTED_MLPERF_MODELS+=("${AVAILABLE_MLPERF_MODELS[$i-1]}")
+        done
+    else
+        _saved_ifs=$IFS
+        IFS=',' read -ra CFG_NUMS <<< "$CFG_NUM"
+        IFS=$_saved_ifs
+        for num in "${CFG_NUMS[@]}"; do
+            num=$(echo "$num" | xargs)
+            if [[ $num -ge 1 && $num -le ${#AVAILABLE_MLPERF_MODELS[@]} ]]; then
+                SELECTED_MLPERF_MODELS+=("${AVAILABLE_MLPERF_MODELS[$num-1]}")
+            else
+                echo -e "${RED}✗ Invalid model number: $num${RESET}"
+                exit 1
+            fi
+        done
+    fi
 
-SELECTED_CONFIG_COUNT=${#SELECTED_CONFIGS[@]}
-echo -e " ${CHECK} Selected ${GREEN}${SELECTED_CONFIG_COUNT}${RESET} configs:"
-for cfg in "${SELECTED_CONFIGS[@]}"; do
-    echo -e "    ${DOT} $(basename "$cfg")"
-done
-echo
+    SELECTED_CONFIG_COUNT=${#SELECTED_MLPERF_MODELS[@]}
+    echo -e " ${CHECK} Selected ${GREEN}${SELECTED_CONFIG_COUNT}${RESET} MLPerf model(s):"
+    for model in "${SELECTED_MLPERF_MODELS[@]}"; do
+        echo -e "    ${DOT} ${model}"
+    done
+    echo
+else
+    echo -e "${STAR} ${BOLD}Available Model Configs:${RESET} (${CYAN}$BACKEND${RESET} / ${CYAN}$DEVICE${RESET})"
+
+    mapfile -t CONFIG_LIST < <(find "$CONFIG_DIR" -name "*.yaml" -type f | sort -u)
+
+    if [[ ${#CONFIG_LIST[@]} -eq 0 ]]; then
+        echo -e "${RED}No configs found in $CONFIG_DIR${RESET}"
+        exit 1
+    fi
+
+    declare -A SEEN_MODELS
+    UNIQUE_CONFIGS=()
+
+    for cfg in "${CONFIG_LIST[@]}"; do
+        model_name=$(basename "$cfg" .yaml)
+        if [[ -z "${SEEN_MODELS[$model_name]}" ]]; then
+            SEEN_MODELS[$model_name]=1
+            UNIQUE_CONFIGS+=("$cfg")
+        fi
+    done
+
+    i=1
+    for cfg in "${UNIQUE_CONFIGS[@]}"; do
+        echo -e "  ${DOT} ${i}) $(basename "$cfg")"
+        ((i++))
+    done
+    echo
+
+    CONFIG_LIST=("${UNIQUE_CONFIGS[@]}")
+
+    echo -en " ${ARROW} Select config number(s) (comma-separated, range, or 'all'): "
+    echo -e "${DIM}(Examples: 1,3,5 or 4-8 or all)${RESET}"
+    echo -en " ${ARROW} "
+    read -r CFG_NUM
+
+    if [[ "$CFG_NUM" == "all" ]]; then
+        SELECTED_CONFIGS=("${CONFIG_LIST[@]}")
+    elif [[ "$CFG_NUM" =~ ^[0-9]+-[0-9]+$ ]]; then
+        START="${CFG_NUM%%-*}"
+        END="${CFG_NUM##*-}"
+
+        if [[ $START -lt 1 || $END -gt ${#CONFIG_LIST[@]} || $START -gt $END ]]; then
+            echo -e "${RED}✗ Invalid range: $START-$END${RESET}"
+            exit 1
+        fi
+
+        for ((i=START; i<=END; i++)); do
+            SELECTED_CONFIGS+=("${CONFIG_LIST[$i-1]}")
+        done
+    else
+        _saved_ifs=$IFS
+        IFS=',' read -ra CFG_NUMS <<< "$CFG_NUM"
+        IFS=$_saved_ifs
+
+        for num in "${CFG_NUMS[@]}"; do
+            num=$(echo "$num" | xargs)
+
+            if [[ $num -ge 1 && $num -le ${#CONFIG_LIST[@]} ]]; then
+                SELECTED_CONFIGS+=("${CONFIG_LIST[$num-1]}")
+            else
+                echo -e "${RED}✗ Invalid config number: $num${RESET}"
+                exit 1
+            fi
+        done
+    fi
+
+    SELECTED_CONFIG_COUNT=${#SELECTED_CONFIGS[@]}
+    echo -e " ${CHECK} Selected ${GREEN}${SELECTED_CONFIG_COUNT}${RESET} configs:"
+    for cfg in "${SELECTED_CONFIGS[@]}"; do
+        echo -e "    ${DOT} $(basename "$cfg")"
+    done
+    echo
+fi
 sleep 0.2
 
+if [[ "$BACKEND" != "mlperf" ]]; then
 # ------------------------------------------
-# 2.5. VIEW & OVERRIDE PARAMETERS
+# 2.5. VIEW CONFIGURATION PARAMETERS
 # ------------------------------------------
 echo -e "${STAR} ${BOLD}View Configuration Parameters?${RESET}"
 echo -en " ${ARROW} (y/n): "
@@ -485,16 +725,17 @@ if [[ "$VIEW_PARAMS" == "y" || "$VIEW_PARAMS" == "Y" ]]; then
 fi
 
 # ------------------------------------------
-# 2.6. EDIT CONFIG FILES
+# 2.6. EDIT CONFIG FILES (once, before all runs)
 # ------------------------------------------
 declare -A EDITED_CONFIGS
 
-if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
-    echo -e "${STAR} ${BOLD}Edit any configuration files before running?${RESET}"
-    echo -en " ${ARROW} (y/n): "
-    read -r EDIT_CONFIGS
+echo -e "${STAR} ${BOLD}Edit configuration files before running?${RESET}"
+echo -e "   ${DOT} ${DIM}Edits use working copies; original repo configs are never modified.${RESET}"
+echo -en " ${ARROW} (y/n): "
+read -r EDIT_CONFIGS
 
-    if [[ "$EDIT_CONFIGS" == "y" || "$EDIT_CONFIGS" == "Y" ]]; then
+if [[ "$EDIT_CONFIGS" == "y" || "$EDIT_CONFIGS" == "Y" ]]; then
+    if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
         echo -e "\n${CYAN}${BOLD}Selected models:${RESET}"
         i=1
         for cfg in "${SELECTED_CONFIGS[@]}"; do
@@ -522,141 +763,22 @@ if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
             done
         fi
 
-        # Edit selected files one by one
         for idx in "${MODELS_TO_EDIT[@]}"; do
-            cfg="${SELECTED_CONFIGS[$idx]}"
-            model_name=$(basename "$cfg" .yaml)
-
-            echo -e "\n${STAR} ${BOLD}Opening config for editing: ${CYAN}$model_name${RESET}"
-            echo -e "   ${DOT} Edit the file, save, and close the editor to continue\n"
-
-            # Create a temporary working copy
-            TEMP_EDIT_CONFIG="/tmp/primus_edit_${model_name}_$$.yaml"
-            cp "$cfg" "$TEMP_EDIT_CONFIG"
-
-            open_config_editor "$TEMP_EDIT_CONFIG"
-
-            # Store the edited config
-            EDITED_CONFIGS["$cfg"]="$TEMP_EDIT_CONFIG"
-            echo -e " ${CHECK} ${GREEN}Config edited and saved${RESET}\n"
+            edit_config_interactively "${SELECTED_CONFIGS[$idx]}"
         done
-    fi
-elif [[ ${#SELECTED_CONFIGS[@]} -eq 1 ]]; then
-    echo -e "\n${STAR} ${BOLD}Edit configuration file before running?${RESET}"
-    echo -en " ${ARROW} (y/n): "
-    read -r EDIT_SINGLE
-
-    if [[ "$EDIT_SINGLE" == "y" || "$EDIT_SINGLE" == "Y" ]]; then
-        cfg="${SELECTED_CONFIGS[0]}"
-        model_name=$(basename "$cfg" .yaml)
-
-        echo -e "\n${STAR} ${BOLD}Opening config for editing: ${CYAN}$model_name${RESET}"
-        echo -e "   ${DOT} Edit the file, save, and close the editor to continue\n"
-
-        # Create a temporary working copy
-        TEMP_EDIT_CONFIG="/tmp/primus_edit_${model_name}_$$.yaml"
-        cp "$cfg" "$TEMP_EDIT_CONFIG"
-
-        open_config_editor "$TEMP_EDIT_CONFIG"
-
-        # Store the edited config
-        EDITED_CONFIGS["$cfg"]="$TEMP_EDIT_CONFIG"
-        echo -e " ${CHECK} ${GREEN}Config edited and saved${RESET}\n"
+    else
+        edit_config_interactively "${SELECTED_CONFIGS[0]}"
     fi
 fi
-
-# Initialize associative array for parameter overrides
-declare -A PARAM_OVERRIDES
-
-echo -e "\n${STAR} ${BOLD}Override any parameters?${RESET}"
-echo -e "  ${DIM}(Format: key=value, e.g., batch_size=32)${RESET}"
-echo -en " ${ARROW} (y/n): "
-read -r OVERRIDE_PARAMS
-
-if [[ "$OVERRIDE_PARAMS" == "y" || "$OVERRIDE_PARAMS" == "Y" ]]; then
-    echo -e " ${DOT} Enter overrides one per line. Press Enter on empty line to finish."
-    while true; do
-        echo -en " ${ARROW} Override (or press Enter to finish): "
-        read -r OVERRIDE_LINE
-
-        if [[ -z "$OVERRIDE_LINE" ]]; then
-            break
-        fi
-
-        # Parse key=value
-        if [[ "$OVERRIDE_LINE" =~ ^([^=]+)=(.+)$ ]]; then
-            KEY="${BASH_REMATCH[1]}"
-            VALUE="${BASH_REMATCH[2]}"
-            PARAM_OVERRIDES["$KEY"]="$VALUE"
-            echo -e " ${CHECK} Will override: ${CYAN}$KEY${RESET} = ${GREEN}$VALUE${RESET}"
-        else
-            echo -e " ${RED}Invalid format. Use: key=value${RESET}"
-        fi
-    done
-
-    if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
-        PARAM_OVERRIDE_COUNT=${#PARAM_OVERRIDES[@]}
-        echo -e "\n ${CHECK} ${GREEN}${PARAM_OVERRIDE_COUNT}${RESET} parameters will be overridden\n"
-    fi
 fi
 
-sleep 0.2
-
 # ------------------------------------------
-# 4. DEVICE-SPECIFIC ENVIRONMENT VARIABLES
-# ------------------------------------------
-declare -a DEVICE_ENV_VARS
-
-echo -e "${STAR} ${BOLD}Add device-specific environment variables for ${DEVICE}?${RESET}"
-echo -e "  ${DIM}(e.g., HSA_OVERRIDE_GFX_VERSION=11.0.0)${RESET}"
-echo -en " ${ARROW} (y/n): "
-read -r ADD_ENV_VARS
-
-if [[ "$ADD_ENV_VARS" == "y" || "$ADD_ENV_VARS" == "Y" ]]; then
-    echo -e " ${DOT} Enter environment variables one per line. Press Enter on empty line to finish."
-    while true; do
-        echo -en " ${ARROW} Variable (or press Enter to finish): "
-        read -r ENV_LINE
-
-        if [[ -z "$ENV_LINE" ]]; then
-            break
-        fi
-
-        # Parse VAR=value
-        if [[ "$ENV_LINE" =~ ^([^=]+)=(.*)$ ]]; then
-            VAR_NAME="${BASH_REMATCH[1]}"
-            VAR_VALUE="${BASH_REMATCH[2]}"
-            DEVICE_ENV_VARS+=("$VAR_NAME=$VAR_VALUE")
-            echo -e " ${CHECK} Will set: ${CYAN}${VAR_NAME}${RESET}=${GREEN}${VAR_VALUE}${RESET}"
-        else
-            echo -e " ${RED}Invalid format. Use: VAR_NAME=value${RESET}"
-        fi
-    done
-
-    if [[ ${#DEVICE_ENV_VARS[@]} -gt 0 ]]; then
-        DEVICE_ENV_VAR_COUNT=${#DEVICE_ENV_VARS[@]}
-        echo -e "\n ${CHECK} ${GREEN}${DEVICE_ENV_VAR_COUNT}${RESET} environment variables will be set\n"
-    fi
-fi
-
-sleep 0.2
-
-# ------------------------------------------
-# 5. ENVIRONMENT SETUP
+# 4. ENVIRONMENT SETUP
 # ------------------------------------------
 echo -e "${STAR} ${BOLD}Setting up environment...${RESET}"
 
-# Set HSA environment variable
-export HSA_NO_SCRATCH_RECLAIM=1
-echo -e " ${CHECK} Set ${CYAN}HSA_NO_SCRATCH_RECLAIM=1${RESET}"
-
-# Apply device-specific environment variables
-if [[ ${#DEVICE_ENV_VARS[@]} -gt 0 ]]; then
-    for ENV_VAR in "${DEVICE_ENV_VARS[@]}"; do
-        eval export "$ENV_VAR"
-        echo -e " ${CHECK} Set ${CYAN}$ENV_VAR${RESET}"
-    done
-fi
+configure_git_safe_directories
+echo -e " ${CHECK} Configured git safe directories for ${CYAN}$PRIMUS_ROOT${RESET}"
 
 # Prompt for HuggingFace token
 echo -en " ${ARROW} Enter HuggingFace Token: "
@@ -665,25 +787,69 @@ echo
 export HF_TOKEN
 echo -e " ${CHECK} HuggingFace token set\n"
 
+if [[ "$BACKEND" == "mlperf" ]]; then
+    MLPERF_DATA_PATH="${MLPERF_DATA_PATH:-/data/mlperf_llama31_8b/data}"
+    MLPERF_PACKED_DATA_DIR="${MLPERF_PACKED_DATA_DIR:-/data}"
+    MLPERF_PRETRAINED_CHECKPOINT="${MLPERF_PRETRAINED_CHECKPOINT:-/data/megatron_checkpoints/Llama-2-70b-hf}"
+    echo -e " ${CHECK} MLPerf llama3.1_8b DATA_PATH: ${CYAN}$MLPERF_DATA_PATH${RESET}"
+    echo -e " ${CHECK} MLPerf llama2_70b PACKED_DATA_DIR: ${CYAN}$MLPERF_PACKED_DATA_DIR${RESET}"
+    echo -e " ${CHECK} MLPerf llama2_70b PRETRAINED_CHECKPOINT: ${CYAN}$MLPERF_PRETRAINED_CHECKPOINT${RESET}\n"
+fi
+
 sleep 0.2
 
 # ------------------------------------------
-# 6. RUN BENCHMARK(S)
+# 5. RUN BENCHMARK(S)
 # ------------------------------------------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 LOG_DIR="${SCRIPT_DIR}/results/logs_${BACKEND}"
 mkdir -p "$LOG_DIR"
 
-TOTAL_CONFIGS=${#SELECTED_CONFIGS[@]}
+if [[ "$BACKEND" == "mlperf" ]]; then
+    TOTAL_CONFIGS=${#SELECTED_MLPERF_MODELS[@]}
+else
+    TOTAL_CONFIGS=${#SELECTED_CONFIGS[@]}
+fi
 CURRENT=1
 
 echo -e "${INFO} ${BOLD}Total configurations to run: ${TOTAL_CONFIGS}${RESET}"
 echo -e "${INFO} ${BOLD}Configuration list:${RESET}"
-for i in "${!SELECTED_CONFIGS[@]}"; do
-    echo -e "   ${DOT} $((i+1)). $(basename "${SELECTED_CONFIGS[$i]}")"
-done
+if [[ "$BACKEND" == "mlperf" ]]; then
+    for i in "${!SELECTED_MLPERF_MODELS[@]}"; do
+        echo -e "   ${DOT} $((i+1)). ${SELECTED_MLPERF_MODELS[$i]}"
+    done
+else
+    for i in "${!SELECTED_CONFIGS[@]}"; do
+        echo -e "   ${DOT} $((i+1)). $(basename "${SELECTED_CONFIGS[$i]}")"
+    done
+fi
 echo
 
+if [[ "$BACKEND" == "mlperf" ]]; then
+    for MLPERF_MODEL in "${SELECTED_MLPERF_MODELS[@]}"; do
+        echo -e "\n${MAGENTA}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
+        echo -e "${MAGENTA}${BOLD}║  LOOP ITERATION: ${CURRENT}/${TOTAL_CONFIGS}${RESET}"
+        echo -e "${MAGENTA}${BOLD}║  MLPerf MODEL: ${MLPERF_MODEL}${RESET}"
+        echo -e "${MAGENTA}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}\n"
+
+        prepare_mlperf_artifacts "$MLPERF_MODEL"
+        echo -e "   ${DOT} Run label: ${CYAN}$PREP_RUN_LABEL${RESET}"
+
+        execute_mlperf_benchmark_run \
+            "$MLPERF_MODEL" \
+            "$PREP_LOG_FILE" \
+            "$CURRENT" \
+            "$TOTAL_CONFIGS" || true
+
+        CURRENT=$((CURRENT + 1))
+
+        if [[ $CURRENT -le $TOTAL_CONFIGS ]]; then
+            echo -e "${YELLOW}Preparing next benchmark...${RESET}\n"
+            echo -e "${INFO} ${BOLD}Next: Model ${CURRENT}/${TOTAL_CONFIGS}${RESET}\n"
+            sleep 2
+        fi
+    done
+else
 for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     echo -e "\n${MAGENTA}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
     echo -e "${MAGENTA}${BOLD}║  LOOP ITERATION: ${CURRENT}/${TOTAL_CONFIGS}${RESET}"
@@ -692,17 +858,11 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
 
     prepare_benchmark_artifacts "$CFG_FILE"
 
-    if [[ -n "${EDITED_CONFIGS[$CFG_FILE]:-}" && ${#PARAM_OVERRIDES[@]} -eq 0 ]]; then
-        echo -e "${INFO} ${BOLD}Using edited config for ${CYAN}$PREP_MODEL_NAME${RESET}"
+    if [[ -n "${EDITED_CONFIGS[$CFG_FILE]:-}" ]]; then
+        echo -e "${INFO} ${BOLD}Using edited working copy for ${CYAN}$PREP_MODEL_NAME${RESET}"
     fi
     echo -e "   ${DOT} Run label: ${CYAN}$PREP_RUN_LABEL${RESET}"
-    if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
-        echo -e "${STAR} ${BOLD}Applying parameter overrides...${RESET}"
-        for KEY in "${!PARAM_OVERRIDES[@]}"; do
-            echo -e "   ${DOT} ${CYAN}$KEY${RESET}: ${PARAM_OVERRIDES[$KEY]}"
-        done
-        echo -e " ${CHECK} Override config saved: ${YELLOW}$PREP_WORKING_CONFIG${RESET}\n"
-    fi
+    echo -e "   ${DOT} Working config: ${CYAN}$PREP_WORKING_CONFIG${RESET}"
 
     execute_benchmark_run \
         "$PREP_CFG_FILE" \
@@ -720,6 +880,7 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
         sleep 2
     fi
 done
+fi
 
 echo
 echo -e "${MAGENTA}${BOLD}=========================================${RESET}"
@@ -727,6 +888,6 @@ echo -e "${MAGENTA}${BOLD}  All ${TOTAL_CONFIGS} benchmarks completed!${RESET}"
 echo -e "${MAGENTA}${BOLD}=========================================${RESET}"
 
 # ------------------------------------------
-# 7. GENERATE METRICS TABLE
+# 6. GENERATE METRICS TABLE
 # ------------------------------------------
 generate_metrics_table

@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
@@ -19,7 +20,10 @@ ERROR_STATUS = "Error found - check log"
 OK_STATUS = "OK"
 
 ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
-LOG_EXIT_CODE_REGEX = re.compile(r"primus launcher exited with code (\d+)", re.IGNORECASE)
+LOG_EXIT_CODE_REGEX = re.compile(
+    r"(?:primus launcher|\[direct\].*torchrun|torchrun) exited with code (\d+)",
+    re.IGNORECASE,
+)
 
 LOG_ERROR_PATTERNS = (
     re.compile(r"Traceback \(most recent call last\)", re.IGNORECASE),
@@ -38,6 +42,9 @@ LOG_ERROR_EXCLUSIONS = (
     re.compile(r"avoid ImportError", re.IGNORECASE),
     re.compile(r"TORCH_NCCL_ASYNC_ERROR_HANDLING", re.IGNORECASE),
     re.compile(r"destroy_process_group\(\)", re.IGNORECASE),
+    re.compile(r"\[CK-JIT\] ERROR:", re.IGNORECASE),
+    re.compile(r"\[Patch\].*failed due to missing dependency", re.IGNORECASE),
+    re.compile(r"\[Patch\].*Patch '.*' failed", re.IGNORECASE),
 )
 
 RUN_LABEL_REGEX = re.compile(r"_run(\d+)\.log$", re.IGNORECASE)
@@ -78,6 +85,25 @@ NOTE:
 - "Status" is "Error found - check log" when the log contains errors or metrics could not be computed.
 """
 
+MEGATRON_BRIDGE_NOTE_TEXT = """
+NOTE:
+- Results are saved to results/metrics_megatron_bridge.csv (latest) and a timestamped snapshot.
+- "Run" is run1, run2, ... per model and device, ordered oldest to newest.
+- "BS", "Seq", and "GBS" come from the benchmark yaml when available.
+- Megatron-Bridge logs split iteration timing and MODEL_TFLOP/s/GPU across lines; both are merged.
+- Warm-up: the first five iterations are excluded before averaging.
+- "Status" is "Error found - check log" when metrics could not be computed from the log.
+"""
+
+MLPERF_NOTE_TEXT = """
+NOTE:
+- Results are saved to results/metrics_mlperf.csv (latest) and a timestamped snapshot.
+- Metrics are parsed from :::MLLOG lines emitted at the end of MLPerf timed runs.
+- "Run Duration", "Throughput", and "Samples" come from run_duration / overall_throughput / throughput keys.
+- llama3.1_8b uses overall_throughput; llama2_70b uses throughput.
+- "Status" is "Error found - check log" when MLLOG metrics could not be parsed from the log.
+"""
+
 MEGATRON_NUM = r"[\d,]+(?:\.\d+)?"
 MEGATRON_METRIC_VALUE = rf"({MEGATRON_NUM})(?:\s*/\s*{MEGATRON_NUM})?"
 
@@ -94,7 +120,22 @@ MEGATRON_ITERATION_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+MEGATRON_BRIDGE_ITERATION_REGEX = re.compile(
+    rf"iteration\s+(\d+)/\s*\d+.*?"
+    rf"elapsed time per iteration \(ms\):\s*{MEGATRON_METRIC_VALUE}.*?"
+    rf"global batch size:\s*(\d+)",
+    re.IGNORECASE,
+)
+
+MEGATRON_BRIDGE_TFLOPS_REGEX = re.compile(
+    rf"Step Time\s*:\s*[\d.]+\s*s\s+GPU utilization:\s*{MEGATRON_METRIC_VALUE}MODEL_TFLOP/s/GPU",
+    re.IGNORECASE,
+)
+
 MEGATRON_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_megatron_(?P<device>MI\d+X?)", re.IGNORECASE)
+MEGATRON_BRIDGE_FILENAME_REGEX = re.compile(
+    r"(?P<model>.+?)_megatron_bridge_(?P<device>MI\d+X?)", re.IGNORECASE
+)
 
 TORCHTITAN_STEP_REGEX = re.compile(
     r"step:\s*(\d+).*?"
@@ -108,6 +149,9 @@ TORCHTITAN_BS_REGEX = re.compile(r"training\.local_batch_size\s*\.{2,}\s*(\d+)")
 TORCHTITAN_SEQ_REGEX = re.compile(r"training\.seq_len\s*\.{2,}\s*(\d+)")
 
 TORCHTITAN_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_torchtitan_(?P<device>MI\d+X?)", re.IGNORECASE)
+
+MLPERF_FILENAME_REGEX = re.compile(r"(?P<model>.+?)_mlperf_(?P<device>MI\d+X?)", re.IGNORECASE)
+MLPERF_MLLOG_PREFIX = ":::MLLOG"
 
 PRECISION_REGEX = re.compile(r"(BF16|FP8)", re.IGNORECASE)
 
@@ -181,7 +225,7 @@ def load_yaml_dict(path):
 def resolve_config_yaml(log_fname, backend, device, model, log_dir):
     base = log_fname[:-4] if log_fname.endswith(".log") else log_fname
 
-    for suffix in ("_override", "_edited", ""):
+    for suffix in ("_working", "_override", "_edited", ""):
         candidate = os.path.join(log_dir, f"{base}{suffix}.yaml")
         if os.path.isfile(candidate):
             return candidate
@@ -192,7 +236,7 @@ def resolve_config_yaml(log_fname, backend, device, model, log_dir):
 
 def load_training_params(backend, device, model, log_fname, log_dir):
     path = resolve_config_yaml(log_fname, backend, device, model, log_dir)
-    if backend == "megatron":
+    if backend in ("megatron", "megatron_bridge"):
         bs_keys, seq_keys, gbs_keys = MEGATRON_BS_KEYS, MEGATRON_SEQ_KEYS, MEGATRON_GBS_KEYS
     else:
         bs_keys, seq_keys, gbs_keys = TORCHTITAN_BS_KEYS, TORCHTITAN_SEQ_KEYS, TORCHTITAN_GBS_KEYS
@@ -363,11 +407,32 @@ def render_results(backend, headers, rows, note_text):
 
 def is_megatron(filename):
     name = filename.lower()
+    if "megatron_bridge" in name:
+        return False
     return "megatron" in name or "megatorn" in name
+
+
+def is_megatron_bridge(filename):
+    return "megatron_bridge" in filename.lower()
 
 
 def megatron_parse_filename(filename):
     m = MEGATRON_FILENAME_REGEX.search(filename)
+    if not m:
+        return None
+
+    p = PRECISION_REGEX.search(filename)
+    precision = p.group(1).upper() if p else "-"
+
+    return {
+        "model": m.group("model"),
+        "device": m.group("device"),
+        "precision": precision,
+    }
+
+
+def megatron_bridge_parse_filename(filename):
+    m = MEGATRON_BRIDGE_FILENAME_REGEX.search(filename)
     if not m:
         return None
 
@@ -390,10 +455,11 @@ def megatron_parse_log_file(path):
 
     with open(path, "r", errors="ignore") as f:
         for line in f:
-            if "iteration" not in line:
+            plain = strip_ansi(line)
+            if "iteration" not in plain:
                 continue
 
-            m = MEGATRON_ITERATION_REGEX.search(line)
+            m = MEGATRON_ITERATION_REGEX.search(plain)
             if not m:
                 continue
 
@@ -412,50 +478,102 @@ def megatron_parse_log_file(path):
     return [records_by_iter[i] for i in sorted(records_by_iter)]
 
 
+def megatron_bridge_parse_log_file(path):
+    records_by_iter = {}
+    pending_tflops = []
+
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            plain = strip_ansi(line)
+
+            tm = MEGATRON_BRIDGE_TFLOPS_REGEX.search(plain)
+            if tm:
+                pending_tflops.append(megatron_to_float(tm.group(1)))
+                continue
+
+            if "iteration" not in plain:
+                continue
+
+            m = MEGATRON_BRIDGE_ITERATION_REGEX.search(plain)
+            if not m:
+                continue
+
+            iter_num = int(m.group(1))
+            if iter_num in records_by_iter:
+                continue
+
+            tflops_gpu = pending_tflops.pop(0) if pending_tflops else None
+            records_by_iter[iter_num] = {
+                "iter": iter_num,
+                "elapsed_ms": megatron_to_float(m.group(2)),
+                "tflops_gpu": tflops_gpu,
+                "tokens_gpu": None,
+                "gbs": int(m.group(3)),
+            }
+
+    return [records_by_iter[i] for i in sorted(records_by_iter)]
+
+
 def megatron_compute_averages(records):
     if len(records) <= WARMUP_SKIP:
         return None
 
     records = records[WARMUP_SKIP:]
     token_values = [r["tokens_gpu"] for r in records if r["tokens_gpu"] is not None]
+    tflops_values = [r["tflops_gpu"] for r in records if r["tflops_gpu"] is not None]
 
     return {
         "count": len(records),
         "elapsed_ms": mean(r["elapsed_ms"] for r in records),
-        "tflops_gpu": mean(r["tflops_gpu"] for r in records),
+        "tflops_gpu": mean(tflops_values) if tflops_values else None,
         "tokens_gpu": mean(token_values) if token_values else None,
         "gbs": records[0]["gbs"],
     }
 
 
-def megatron_collect_rows():
-    log_dir = os.path.join(RESULTS_DIR, "logs_megatron")
+def megatron_collect_rows(
+    backend="megatron",
+    log_subdir=None,
+    parse_filename=None,
+    filename_filter=None,
+    parse_log_file=None,
+    include_tokens=True,
+):
+    if log_subdir is None:
+        log_subdir = f"logs_{backend}"
+    if parse_filename is None:
+        parse_filename = megatron_parse_filename
+    if filename_filter is None:
+        filename_filter = is_megatron
+    if parse_log_file is None:
+        parse_log_file = megatron_parse_log_file
+
+    log_dir = os.path.join(RESULTS_DIR, log_subdir)
     entries = []
 
     if not os.path.isdir(log_dir):
         return []
 
     for fname in sorted(os.listdir(log_dir)):
-        if not fname.endswith(".log") or not is_megatron(fname):
+        if not fname.endswith(".log") or not filename_filter(fname):
             continue
 
-        meta = megatron_parse_filename(fname)
+        meta = parse_filename(fname)
         if not meta:
             continue
 
         path = os.path.join(log_dir, fname)
-        has_error = log_has_error(path)
-        records = megatron_parse_log_file(path)
+        records = parse_log_file(path)
         stats = megatron_compute_averages(records)
 
-        bs, seq, gbs = load_training_params("megatron", meta["device"], meta["model"], fname, log_dir)
+        bs, seq, gbs = load_training_params(backend, meta["device"], meta["model"], fname, log_dir)
 
-        if has_error or not stats:
+        if not stats:
             if gbs == "-" and records:
                 gbs = records[0]["gbs"]
             values = [
                 ERROR_STATUS,
-                "megatron",
+                backend,
                 meta["device"],
                 bs,
                 seq,
@@ -464,16 +582,17 @@ def megatron_collect_rows():
                 "-",
                 "-",
                 "-",
-                "-",
             ]
+            if include_tokens:
+                values.append("-")
         else:
             if gbs == "-":
                 gbs = stats["gbs"]
 
-            tokens_gpu = f"{stats['tokens_gpu']:.2f}" if stats["tokens_gpu"] is not None else "-"
+            tflops_gpu = f"{stats['tflops_gpu']:.2f}" if stats["tflops_gpu"] is not None else "-"
             values = [
                 OK_STATUS,
-                "megatron",
+                backend,
                 meta["device"],
                 bs,
                 seq,
@@ -481,9 +600,11 @@ def megatron_collect_rows():
                 meta["precision"],
                 stats["count"],
                 f"{stats['elapsed_ms']:.2f}",
-                f"{stats['tflops_gpu']:.2f}",
-                tokens_gpu,
+                tflops_gpu,
             ]
+            if include_tokens:
+                tokens_gpu = f"{stats['tokens_gpu']:.2f}" if stats["tokens_gpu"] is not None else "-"
+                values.append(tokens_gpu)
 
         entries.append(
             {
@@ -519,6 +640,158 @@ def megatron_main():
         "Tokens/GPU",
     ]
     render_results("megatron", headers, megatron_collect_rows(), MEGATRON_NOTE_TEXT)
+
+
+def megatron_bridge_main():
+    headers = [
+        "Model",
+        "Run",
+        "Status",
+        "Backend",
+        "Device",
+        "BS",
+        "Seq",
+        "GBS",
+        "Precision",
+        "Iterations",
+        "Iter Time (ms)",
+        "TFLOPS/GPU",
+    ]
+    render_results(
+        "megatron_bridge",
+        headers,
+        megatron_collect_rows(
+            backend="megatron_bridge",
+            log_subdir="logs_megatron_bridge",
+            parse_filename=megatron_bridge_parse_filename,
+            filename_filter=is_megatron_bridge,
+            parse_log_file=megatron_bridge_parse_log_file,
+            include_tokens=False,
+        ),
+        MEGATRON_BRIDGE_NOTE_TEXT,
+    )
+
+
+def is_mlperf(filename):
+    return "_mlperf_" in filename.lower()
+
+
+def mlperf_parse_filename(filename):
+    m = MLPERF_FILENAME_REGEX.search(filename)
+    if not m:
+        return None
+
+    return {
+        "model": m.group("model"),
+        "device": m.group("device"),
+    }
+
+
+def mlperf_parse_mllog_line(line):
+    idx = line.find(MLPERF_MLLOG_PREFIX)
+    if idx == -1:
+        return None
+
+    payload = line[idx + len(MLPERF_MLLOG_PREFIX) :].strip()
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+
+def mlperf_parse_log_file(path):
+    run_duration = None
+    throughput = None
+    samples = None
+
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            plain = strip_ansi(line)
+            event = mlperf_parse_mllog_line(plain)
+            if not event:
+                continue
+
+            key = event.get("key")
+            value = event.get("value")
+            metadata = event.get("metadata") or {}
+
+            if key == "run_duration":
+                run_duration = value
+            elif key in ("overall_throughput", "throughput"):
+                throughput = value
+
+            if metadata.get("samples") is not None:
+                samples = metadata.get("samples")
+
+    if run_duration is None and throughput is None and samples is None:
+        return None
+
+    return {
+        "run_duration": run_duration if run_duration is not None else "-",
+        "throughput": throughput if throughput is not None else "-",
+        "samples": samples if samples is not None else "-",
+    }
+
+
+def mlperf_collect_rows():
+    log_dir = os.path.join(RESULTS_DIR, "logs_mlperf")
+    entries = []
+
+    if not os.path.isdir(log_dir):
+        return []
+
+    for fname in sorted(os.listdir(log_dir)):
+        if not fname.endswith(".log") or not is_mlperf(fname):
+            continue
+
+        meta = mlperf_parse_filename(fname)
+        if not meta:
+            continue
+
+        path = os.path.join(log_dir, fname)
+        stats = mlperf_parse_log_file(path)
+
+        if not stats:
+            values = [ERROR_STATUS, "mlperf", meta["device"], "-", "-", "-"]
+        else:
+            values = [
+                OK_STATUS,
+                "mlperf",
+                meta["device"],
+                stats["samples"],
+                stats["run_duration"],
+                stats["throughput"],
+            ]
+
+        entries.append(
+            {
+                "model": meta["model"],
+                "device": meta["device"],
+                "fname": fname,
+                "path": path,
+                "values": values,
+            }
+        )
+
+    assign_run_labels(entries)
+
+    rows = [[entry["model"], entry["run"], *entry["values"]] for entry in entries]
+    rows.sort(key=lambda row: (row[0], run_sort_key(row[1]), str(row[5])))
+    return rows
+
+
+def mlperf_main():
+    headers = [
+        "Model",
+        "Run",
+        "Status",
+        "Backend",
+        "Device",
+        "Samples",
+        "Run Duration",
+        "Throughput",
+    ]
+    render_results("mlperf", headers, mlperf_collect_rows(), MLPERF_NOTE_TEXT)
 
 
 def is_torchtitan(filename):
@@ -699,6 +972,8 @@ def torchtitan_main():
 
 BACKENDS = {
     "megatron": megatron_main,
+    "megatron_bridge": megatron_bridge_main,
+    "mlperf": mlperf_main,
     "torchtitan": torchtitan_main,
 }
 
