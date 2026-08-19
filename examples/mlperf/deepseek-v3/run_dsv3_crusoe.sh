@@ -93,13 +93,10 @@ fi
 export PRIMUS_LAUNCHER=slurm
 export SLURM_LAUNCH_CMD="${SLURM_LAUNCH_CMD:-sbatch}"
 export SLURM_PARTITION="${SLURM_PARTITION:-amd-spur}"
-# QOS is site policy and it moves. A QOS has to match the account it is used
-# with -- amd-burst-qos belongs to the amd-burst account, and asking for it as
-# an amd-primus user gets the job rejected outright ("QOS ... is not permitted
-# for user ... under account ..."). Empty lets the cluster apply its default,
-# which is always valid; set it when you know which one you are entitled to.
-export SLURM_QOS="${SLURM_QOS:-}"
-export SLURM_ACCOUNT="${SLURM_ACCOUNT:-amd-primus}"
+# QOS must match the account it is used with. Default is the MLPerf training
+# pair; override when submitting under a different account.
+export SLURM_QOS="${SLURM_QOS:-amd-mlperf-training-qos}"
+export SLURM_ACCOUNT="${SLURM_ACCOUNT:-amd-mlperf-training}"
 export SLURM_EXCLUDE="${SLURM_EXCLUDE:-}"
 
 # --- container -------------------------------------------------------------
@@ -163,6 +160,8 @@ fi
 echo "[dsv3-crusoe] partition=$SLURM_PARTITION qos=$SLURM_QOS account=$SLURM_ACCOUNT"
 echo "[dsv3-crusoe] socket=$NCCL_SOCKET_IFNAME hca=$NCCL_IB_HCA"
 echo "[dsv3-crusoe] logs=$RUN_DIR"
+export PRIMUS_LIBIONIC_SRC_ABI4_SO="bak/ainic/libionic-rdmav34.so.host-abi4/libionic.so.1.0.54.0-149.g3304be71"
+export NCCL_DEBUG="${NCCL_DEBUG:-}"
 if [ -n "${PRIMUS_LIBIONIC_SRC_ABI4_SO:-}" ]; then
     echo "[dsv3-crusoe] libionic abi4=$PRIMUS_LIBIONIC_SRC_ABI4_SO"
 else
