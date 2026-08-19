@@ -26,7 +26,7 @@ class TestPrimusTurboFP4Selection:
         monkeypatch.setattr(
             global_vars,
             "get_args",
-            lambda: SimpleNamespace(enable_primus_turbo=True, use_turbo_fp4_autocast=False),
+            lambda: SimpleNamespace(enable_primus_turbo=True),
         )
 
         assert not fp4_utils._primus_turbo_enabled()
@@ -40,7 +40,7 @@ class TestPrimusTurboFP4Selection:
         monkeypatch.setattr(
             global_vars,
             "get_args",
-            lambda: SimpleNamespace(enable_primus_turbo=True, use_turbo_fp4_autocast=True),
+            lambda: SimpleNamespace(enable_primus_turbo=True),
         )
 
         assert fp4_utils._primus_turbo_enabled()

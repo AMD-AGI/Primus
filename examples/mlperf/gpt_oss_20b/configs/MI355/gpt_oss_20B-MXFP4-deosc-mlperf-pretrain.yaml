@@ -174,7 +174,6 @@ modules:
 
       # Primus-Turbo
       enable_primus_turbo: true
-      use_turbo_fp4_autocast: true
       use_turbo_gemm: true
       weight_deosc: true
       weight_deosc_start_step: 1500
