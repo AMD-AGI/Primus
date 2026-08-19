@@ -927,10 +927,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         # NOTE: query, key, value maybe a view of the original tensor, call contiguous to copy a new tensor
         # and let torch allocator can release the original tensor.
-        if torch.is_grad_enabled():
-            query = query.contiguous() if query.requires_grad else query
-            key = key.contiguous() if key.requires_grad else key
-            value = value.contiguous() if value.requires_grad else value
+        # This must also run under no-grad evaluation: the unified FlyDSL
+        # dispatcher relies on the subsequent BSHD view retaining SBHD storage.
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
 
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)
