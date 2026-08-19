@@ -98,7 +98,6 @@ RUN rm -rf /workspace/Primus && \
     git clone --recursive https://github.com/AMD-AGI/Primus.git Primus && \
     cd Primus && git checkout "${PRIMUS_REF}" && \
     git submodule update --init --recursive && \
-    python3 -m pip install -r requirements.txt && \
     rm -rf /root/.cache
 
 ENV PYTHONPATH=/workspace/Primus:/workspace/Primus/third_party/Megatron-LM:${PYTHONPATH}
