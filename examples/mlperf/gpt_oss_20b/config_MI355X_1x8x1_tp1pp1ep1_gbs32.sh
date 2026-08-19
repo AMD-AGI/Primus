@@ -16,7 +16,7 @@ export MASTER_PORT=29501
 # -----------------------------------------------------------------------------
 # Paths
 # -----------------------------------------------------------------------------
-export PRIMUS_PATH=/workspace/Primus
+export PRIMUS_PATH=/home/ruibzhan/workspace/mlperf/Primus
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
 export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-mlperf-pretrain.yaml
 export DATA_PATH=/data
@@ -183,7 +183,7 @@ export CK_FUSED_ATTN_LOG_CONFIG=0
 export LOG_INTERVAL=999999
 export MLLOG_TRAIN_LOSS_LOG_FREQ=0
 export MLLOG_TARGET_EVAL_LOSS=3.34
-export MLLOG_OUTPUT_FILE=/results/mlperf_logging.out
+export MLLOG_OUTPUT_FILE=/home/ruibzhan/workspace/mlperf/Primus/output/mlperf_logging.out
 export MLLOG_SAVE_TO_FILE=0
 export MLLOG_SUBMISSION_BENCHMARK=gpt_oss_20b
 export MLLOG_SUBMISSION_DIVISION=closed
@@ -246,3 +246,6 @@ export MLPERF_VERBOSE_LOGS=${MLPERF_VERBOSE_LOGS:-0}
 export PRIMUS_FUSED_RESIDUAL_NORM=1
 export PRIMUS_MOE_SWIGLU_NOCAT=1
 export MLLOG_BLOCK_TPUT_LOG=0
+
+export PRIMUS_TURBO_GEMM_BACKEND=hipblaslt
+export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=flydsl
