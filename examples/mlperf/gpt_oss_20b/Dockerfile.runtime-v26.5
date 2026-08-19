@@ -32,6 +32,11 @@ RUN git clone --recursive https://github.com/AMD-AGI/Primus-Turbo.git && \
       python3 -m pip install --no-build-isolation --no-deps -v . && \
     cd .. && rm -rf Primus-Turbo
 
+# Install MLPerf common.
+ARG MLPERF_COMMON_REF=56d8ca70f60f866312add84adfea66f5447a4c86
+RUN python3 -m pip install --no-cache-dir \
+      "git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}"
+
 # Compile the hand-tuned forward and numerically validated backward payloads.
 RUN git clone https://github.com/mawad-amd/fwd-attn-asm.git && \
     cd fwd-attn-asm && git checkout "${FWD_ATTN_ASM_REF}" && \
@@ -87,15 +92,14 @@ RUN printf 'import aiter_hd64_asm_override\n' \
       /opt/venv/lib/python3.12/site-packages/aiter_hd64_asm_fwd_d64_opt128.co && \
     rm -f /tmp/fwd_attn.co /tmp/bwd_attn.co
 
-# Install the pinned Primus source last so the runtime uses the matching
-# FlyDSL Turbo Attention integration and MLPerf configuration.
+# Install Primus.
 WORKDIR /workspace
-RUN --mount=type=ssh \
-    mkdir -p -m 0700 /root/.ssh && \
-    ssh-keyscan github.com >> /root/.ssh/known_hosts && \
-    rm -rf /workspace/Primus && \
-    git clone --recursive git@github.com:AMD-AGI/Primus.git Primus && \
+RUN rm -rf /workspace/Primus && \
+    git clone --recursive https://github.com/AMD-AGI/Primus.git Primus && \
     cd Primus && git checkout "${PRIMUS_REF}" && \
     git submodule update --init --recursive && \
     python3 -m pip install -r requirements.txt && \
     rm -rf /root/.cache
+
+ENV PYTHONPATH=/workspace/Primus:/workspace/Primus/third_party/Megatron-LM:${PYTHONPATH}
+WORKDIR /workspace/Primus
