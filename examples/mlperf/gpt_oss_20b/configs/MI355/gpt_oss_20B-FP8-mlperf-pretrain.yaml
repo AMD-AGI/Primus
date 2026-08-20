@@ -221,3 +221,7 @@ modules:
       log_memory_to_tensorboard: true
       log_world_size_to_tensorboard: true
       log_loss_scale_to_tensorboard: true
+
+      # ===== Primus-Turbo ops backend =====
+      turbo_gemm_backend: hipblaslt
+      turbo_grouped_gemm_backend: flydsl
