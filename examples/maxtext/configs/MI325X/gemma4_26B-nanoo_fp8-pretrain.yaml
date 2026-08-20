@@ -1,0 +1,81 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:gemma4_26B-fp8-pretrain}
+workspace: ./output
+
+# STATUS (MI300X / gfx942, maxtext release/v26.6): DOES NOT RUN.
+# Blocked upstream in the MoE + fp8 path, not by anything configurable here.
+# RoutedMoE.dense_matmul builds its fp8 einsum module inside the traced einsum
+# (get_einsum -> quant.einsum(**kw)(*args)), so the module's setup() allocates the
+# amax-history/scale variables under a trace and they escape during
+# setup_initial_state:
+#   UnexpectedTracerError: ... intermediate value with type float32[1024] ...
+# Verified on 2026-08-10 that this is not a config problem:
+#   quantization: "fp8"        -> leaks from flax Fp8DotGeneralBase.setup
+#   quantization: "nanoo_fp8"  -> leaks from maxtext Fp8Einsum.setup (quantizations.py:345)
+#   sparse_matmul: true        -> AttributeError: 'NANOOFp8Quantization' has no 'quant_dg'
+#                                 (the sparse MoE path only supports AQT quantization)
+# The other MoE fp8 configs (e.g. mixtral_8x7B-nanoo_fp8) DO train, so this is
+# specific to gemma4, which additionally scans its local/global layers internally
+# (gemma4.py _scan_local_layers -> nnx_scan.apply_scanned_layers).
+# The bf16 gemma4_26B config trains normally; use that until MaxText moves the fp8
+# einsum construction out of the traced call.
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: gemma4_26B.yaml
+    overrides:
+      run_name: "gemma4_26b_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy (MoE: shard experts)
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: -1
+
+      # training
+      # Same attention constraint as the bf16 gemma4 configs: the efficient kernels
+      # reject gemma4's bidirectional sliding-window layers on synthetic (unpacked) data.
+      attention: "dot_product"
+      max_target_length: 4096
+      # MI300X has less HBM (192GB) than MI355X; conservative default, untuned on gfx942.
+      per_device_batch_size: 1
+      remat_policy: "full"
+      sparse_matmul: false
+      megablox: false
+      capacity_factor: 1
+
+      # quantization (nanoo_fp8)
+      # MaxText picks the fp8 implementation from this string and the two are
+      # vendor-specific (see layers/quantizations.py): "fp8" -> Fp8Quantization,
+      # documented "for NVIDIA GPUs"; "nanoo_fp8" -> NANOOFp8Quantization, "for AMD
+      # MI300/MI325 GPUs", using the e4m3fnuz/e5m2fnuz types gfx942 implements.
+      # This config previously asked for "fp8" (copied from MI355X, where gfx950
+      # does support OCP e4m3fn). nanoo_fp8 is the right choice for this hardware
+      # and matches every other MI300X fp8 config, though see the STATUS note above:
+      # neither value gets gemma4 MoE past the tracer leak.
+      quantization: "nanoo_fp8"
+
+      # v26.6 fp8-MoE fix, as for the other MoE fp8 configs: the legacy per-module
+      # linen Fp8Einsum needs an active Linen binding scope, which the pure-NNX
+      # decoder does not provide. Required (and verified sufficient) for
+      # mixtral_8x7B-nanoo_fp8; necessary but not sufficient for gemma4.
+      pure_nnx_decoder: false
