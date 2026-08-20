@@ -64,3 +64,8 @@ __all__ = [
     "run_patches",
     "version_matches",
 ]
+
+# Backend-independent patches. Unlike the per-backend collections, nothing walks
+# this package for "*_patches" modules, so a patch that has to register for every
+# backend is imported here explicitly (after the names above exist).
+import primus.core.patches.triton_bufops_war_patches  # noqa: F401, E402
