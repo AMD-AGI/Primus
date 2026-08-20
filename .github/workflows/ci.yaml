@@ -424,7 +424,7 @@ jobs:
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
           pytest --maxfail=1 -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
-            --cov=primus --cov-report=term-missing:skip-covered \
+            --cov=primus --cov-branch --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
@@ -457,7 +457,7 @@ jobs:
           set -e
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
-          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "${GITHUB_WORKSPACE}/.coveragerc_e2e"
+          printf '[run]\nparallel = true\nbranch = true\nsource = primus\nsigterm = true\n' > "${GITHUB_WORKSPACE}/.coveragerc_e2e"
           IN
           echo "COVERAGE_PROCESS_START=${CWS}/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=${CWS}/.coverage_e2e" >> "$GITHUB_ENV"
@@ -607,16 +607,31 @@ jobs:
         continue-on-error: true
         run: |
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
-          set +e
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
           unset COVERAGE_PROCESS_START
-          # docker exec doesn't inherit GITHUB_ENV; set COVERAGE_FILE for E2E shards before merging with unit.
-          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_e2e" python -m coverage combine
-          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage combine --keep \
-            "${GITHUB_WORKSPACE}/.coverage_unit" "${GITHUB_WORKSPACE}/.coverage_e2e"
-          COVERAGE_FILE="${GITHUB_WORKSPACE}/.coverage_all" python -m coverage json -o coverage_combined.json
-          if [[ ! -s coverage_combined.json ]]; then
-            echo "::warning::coverage_combined.json missing; Unit+E2E summary will omit torch E2E data"
+          shopt -s nullglob
+          # docker exec doesn't inherit GITHUB_ENV; set COVERAGE_FILE explicitly
+          # for every command below rather than globbing the default .coverage.*,
+          # which would also match (and consume) .coverage_unit.
+          e2e_shards=(.coverage_e2e.*)
+          if [ ${#e2e_shards[@]} -gt 0 ]; then
+            COVERAGE_FILE=.coverage_e2e python -m coverage combine
           fi
+          if [ ! -s .coverage_unit ] && [ ! -s .coverage_e2e ]; then
+            echo "::warning::no torch coverage data to combine (neither unit nor E2E wrote a snapshot)"
+            exit 1
+          fi
+          if [ ! -s .coverage_e2e ]; then
+            echo "::warning::no torch E2E coverage data; skipping coverage_combined.json (Unit+E2E summary will fall back to unit-only)"
+            exit 0
+          fi
+          parts=(.coverage_e2e)
+          [ -s .coverage_unit ] && parts=(.coverage_unit .coverage_e2e)
+          echo "Combining: ${parts[*]}"
+          COVERAGE_FILE=.coverage_all python -m coverage combine --keep "${parts[@]}"
+          COVERAGE_FILE=.coverage_all python -m coverage json -o coverage_combined.json
+          test -s coverage_combined.json
           IN
       - name: Upload torch coverage json
         if: always()
@@ -757,7 +772,7 @@ jobs:
           pip install coverage >/dev/null 2>&1 || true
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
-          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
+          printf '[run]\nparallel = true\nbranch = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
       - name: Decide E2E scope (jax)
