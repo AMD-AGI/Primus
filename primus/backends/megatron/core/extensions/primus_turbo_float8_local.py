@@ -1229,6 +1229,7 @@ class _DelayedScalingRegistry:
         "amax_reduce_group",
         "skip_bootstrap",
         "filter_zeros",
+        "margin",
     )
 
     def __init__(self, modules):
@@ -1261,6 +1262,19 @@ class _DelayedScalingRegistry:
         self.reduce_amax = getattr(_config, "fp8_reduce_amax", False) if _config else False
         self.skip_bootstrap = getattr(_config, "fp8_skip_first_step_bootstrap", False) if _config else False
         self.filter_zeros = getattr(_config, "fp8_filter_zeros_in_history", False) if _config else False
+
+        # TransformerEngine's delayed recipe applies fp8_margin as scale / 2**margin, leaving
+        # headroom for an amax that grows before the lagged scale catches up. Folding the divisor
+        # into the maxes gives identical arithmetic at every scale-computation site (the fused
+        # kernel reads fp8_maxes, the bootstrap and fallback paths read fwd_max/bwd_max) without
+        # touching the per-step kernel. These three are only ever used to compute scales; the
+        # cast-time clamp reads module._fp8_fwd_max, which must keep the true dtype maximum.
+        self.margin = int(getattr(_config, "fp8_margin", 0) or 0) if _config else 0
+        if self.margin:
+            _div = float(2**self.margin)
+            self.fwd_max = self.fwd_max / _div
+            self.bwd_max = self.bwd_max / _div
+            self.fp8_maxes.div_(_div)
         self.amax_reduce_group = None
         if self.reduce_amax:
             from megatron.core import parallel_state
