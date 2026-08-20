@@ -6,6 +6,17 @@ enable_primus_turbo: false
 # enable turbo auto-tuning
 use_turbo_autotune: false
 
+# ===== Primus-Turbo Backend Selection =====
+# Format:
+#   1. Use default backend: turbo_gemm_backend=default
+#   2. All precisions use the same backend: turbo_gemm_backend=triton
+#   3. Each precision uses a different backend: turbo_gemm_backend=fp4:aiter,fp8:triton,other:hipblaslt
+
+# backend for turbo gemm.
+turbo_gemm_backend: default
+# backend for turbo grouped gemm.
+turbo_grouped_gemm_backend: default
+
 # ===== MXFP4 =====
 # Use stochastic rounding when quantizing MXFP4 gradients. This is disabled by
 # default and requires a Primus-Turbo grouped GEMM implementation with matching
@@ -33,6 +44,9 @@ use_turbo_gemm: false
 # ===== Grouped MLP =====
 # use turbo grouped gemm
 use_turbo_grouped_gemm: false
+# let Turbo grouped GEMMs consume non-aligned expert token counts directly,
+# without TE Fp8Padding/Fp8Unpadding
+turbo_grouped_gemm_without_padding: false
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 
@@ -51,7 +65,17 @@ turbo_sync_free_moe_stage: 0
 # ===== Mega MoE =====
 # fused MegaMoE layer replacement (EP-only/TP=1/bf16)
 use_turbo_mega_moe: false
+# precision of the MegaMoE experts: bf16 | mxfp8. Only read when use_turbo_mega_moe is on.
+# Independent of Megatron's --fp8, which drives the TE fp8 recipe for the dense layers and has no
+# path to this fused op, so the MoE can be A/B'd on its own. Parameters stay bf16 either way.
+# The op keeps an internal mxfp8 weight cache and the fp8 path advances a separate generation counter
+# at the optimizer-step boundary to invalidate it (the optimizer may not bump w._version).
+turbo_mega_moe_precision: bf16
 
 # ===== Layer Norm =====
 # operator switch
 use_turbo_rms_norm: false
+# Route the fused layernorm+QKV site through Turbo's rmsnorm while leaving its
+# GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
+# which costs more than the norm saves on the GPT-OSS-20B shapes.
+use_turbo_norm_te_linear: false

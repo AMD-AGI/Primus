@@ -27,6 +27,7 @@ which in turn triggers this package's import and registers all patches.
 
 from primus.backends.torchtitan.patches import (  # noqa: F401
     dcp_consolidate_patches,
+    dsv3_v022_perf_patches,
     embedding_amp_patches,
     flex_attention_patches,
     fsdp_weight_tying_patches,

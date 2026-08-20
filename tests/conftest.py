@@ -109,6 +109,16 @@ def pytest_configure(config):
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
+    # What belongs in this tier, and what should be deleted instead of demoted
+    # into it, is documented in docs/06-developer-guide/testing.md.
+    config.addinivalue_line(
+        "markers",
+        (
+            "weekly: extended or not-yet-burned-in E2E coverage. Deselected on "
+            "PR/push CI via -m 'not weekly'; run by the weekend scheduled CI run."
+        ),
+    )
+
     megatron_path = os.environ.get("MEGATRON_PATH")
     if megatron_path is None or not os.path.exists(megatron_path):
         megatron_path = project_root / "third_party" / "Megatron-LM"

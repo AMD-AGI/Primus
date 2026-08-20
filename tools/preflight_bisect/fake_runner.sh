@@ -19,13 +19,13 @@
 #
 # Usage with bisect.py:
 #   python tools/preflight_bisect/bisect.py \
-#       --nodelist "chi2867,chi2879" \
+#       --nodelist "node001,node002" \
 #       --partition mi355x \
 #       --output-dir "output/bisect-$(date +%Y%m%d-%H%M%S)" \
 #       --trial-timeout-sec 600 \
 #       --slurm-time 00:15:00 \
 #       --runner tools/preflight_bisect/fake_runner.sh \
-#       --preflight-env BAD_NODE=chi2879
+#       --preflight-env BAD_NODE=node002
 ###############################################################################
 set -euo pipefail
 

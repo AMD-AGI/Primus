@@ -46,4 +46,39 @@ python ./tests/run_unit_tests.py          # Torch backends
 python ./tests/run_unit_tests.py --jax    # JAX/MaxText backend
 ```
 
+## Test Tiers
+
+Every trainer E2E case is a full training launch, so the suites hold **one model
+per architecture and per feature path**. Anything beyond that is either deleted
+or deferred to the weekend:
+
+- **Deleted.** A model that only scales the dims of an existing test earns no
+  coverage. Its recipe is still schema-checked by
+  `unit_tests/configs/test_example_configs.py`, which loads every yaml under
+  `examples/**/configs/`.
+- **`@pytest.mark.weekly`.** Extended coverage worth having but not worth a PR's
+  wall clock, and new cases during burn-in. Deselected on PRs and pushes; run by
+  the weekend scheduled build (Saturday 18:00 UTC), which you can also trigger by
+  hand via the `Primus-CI-TAS` workflow with `full_tests=true`. Promote a case to
+  the per-PR tier by deleting the marker once a weekend run has shown it green.
+- **Per-PR.** Everything else.
+
+```bash
+# What PR CI runs
+pytest tests/trainer/test_megatron_trainer.py -m "not weekly" -s
+
+# The weekend tier: full matrix, plus the slow unit-test shape gates
+pytest tests/trainer/test_megatron_trainer.py -s
+pytest tests/unit_tests/ --run-slow -s
+```
+
+Before removing a model, check it is not the last user of a feature path. The
+difference often lives in the recipe yaml rather than in the test body, so two
+cases whose `extra_args` look identical can still cover different code — diff the
+recipes before concluding they are isomorphic.
+
+Cases hidden by `--deselect` in `ci.yaml` (broken on the current toolchain) and
+by `JAX_SKIP_UT=1` (most MaxText models) stay hidden in **both** tiers; they are
+not part of this mechanism.
+
 For comprehensive testing documentation, see the [Testing Guide](../docs/06-developer-guide/testing.md).

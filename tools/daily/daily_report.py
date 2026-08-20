@@ -17,8 +17,15 @@ ANSI_ESCAPE_PATTERN = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 MEGATRON_ITERATION_PATTERN = re.compile(
     r"iteration\s+\d+\s*/\s*\d+.*?"
     r"elapsed time per iteration\s*\(ms\):\s*(?P<elapsed_ms>[\d.]+)(?:/(?P<elapsed_ms_avg>[\d.]+))?.*?"
-    r"throughput per GPU\s*\(TFLOP/s/GPU\):\s*(?P<tflops>[\d.]+)/(?P<tflops_avg>[\d.]+).*?"
-    r"tokens per GPU\s*\(tokens/s/GPU\):\s*(?P<tokens>[\d.]+)/(?P<tokens_avg>[\d.]+).*?"
+    # Compute (TFLOP/s/GPU) accepts both the current "compute per GPU (...): X (avg Y)"
+    # label and the legacy "throughput per GPU (...): X/Y" label. The average is
+    # optional so raw (un-averaged) Megatron lines still parse.
+    r"(?:compute|throughput) per GPU\s*\(TFLOP/s/GPU\):\s*(?P<tflops>[\d.]+)"
+    r"(?:\s*(?:/|\(avg\s*)\s*(?P<tflops_avg>[\d.]+)\)?)?.*?"
+    # Tokens accepts both the current "tokens/s/GPU inst/harmonic mean: X/Y" label
+    # and the legacy "tokens per GPU (tokens/s/GPU): X/Y" label.
+    r"(?:tokens per GPU\s*\(tokens/s/GPU\)|tokens/s/GPU\s+inst/harmonic mean):\s*"
+    r"(?P<tokens>[\d.]+)(?:\s*/\s*(?P<tokens_avg>[\d.]+))?.*?"
     r"hip mem usage/free/total/usage_ratio:\s*"
     r"(?P<hip_used>[\d.]+)\s*G(?:i)?B/(?P<hip_free>[\d.]+)\s*G(?:i)?B/(?P<hip_total>[\d.]+)\s*G(?:i)?B/(?P<hip_ratio>[\d.]+)%",
     re.DOTALL,
@@ -138,10 +145,12 @@ def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
     if not last_m:
         raise ValueError(f"No valid iteration metrics found in {file_path}")
     metric = last_m.groupdict()
-    step_time_s_avg = float(metric["elapsed_ms_avg"]) / 1000.0
+    # Averages are optional in the pattern (raw Megatron lines omit them); fall
+    # back to the instantaneous value when an average is not present.
+    step_time_s_avg = float(metric["elapsed_ms_avg"] or metric["elapsed_ms"]) / 1000.0
     mem_usage = float(metric["hip_used"])
-    tflops_avg = float(metric["tflops_avg"])
-    tokens_avg = float(metric["tokens_avg"])
+    tflops_avg = float(metric["tflops_avg"] or metric["tflops"])
+    tokens_avg = float(metric["tokens_avg"] or metric["tokens"])
 
     return {
         "TFLOP/s/GPU": round(tflops_avg, 2),
