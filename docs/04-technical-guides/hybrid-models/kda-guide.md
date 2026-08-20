@@ -263,8 +263,9 @@ The architecture-only YAML it extends from is
 
 ```bash
 # inside the container, in /home/<user>/Primus
-EXP=examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml \
-  bash examples/run_pretrain.sh 2>&1 | tee primus_kda.log
+bash ./runner/primus-cli direct --log_file primus_kda.log \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_300M_kda_pure-pretrain.yaml
 ```
 
 Expected wall time on a healthy MI300X box: **~1h 56m** for the full 4768

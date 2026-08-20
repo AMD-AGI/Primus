@@ -272,40 +272,39 @@ Launch training inside a Docker container on a single node:
 
 ```bash
 # Zebra-Llama 1B with KDA (Kimi Delta Attention)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
-DATA_PATH=./data \
-GPUS_PER_NODE=8 \
-HF_TOKEN=$HF_TOKEN \
-bash examples/run_local_pretrain.sh
+export DATA_PATH=./data
+GPUS_PER_NODE=8 HF_TOKEN=$HF_TOKEN \
+bash ./runner/primus-cli container --volume "$DATA_PATH:$DATA_PATH" \
+  --env DATA_PATH \
+  -- train pretrain --config examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml
 ```
 
-Other model variants:
+Other model variants (same launcher, different `--config`):
 
 ```bash
 # Zebra-Llama 1B with Mamba SSM
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml \
-bash examples/run_local_pretrain.sh
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml
 
 # Zebra-Llama 1B with pure KDA (no attention layers)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml \
-bash examples/run_local_pretrain.sh
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml
 
 # Zebra-Llama 1B with GDN (pure recurrent, no attention)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_gdn-pretrain.yaml \
-bash examples/run_local_pretrain.sh
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B_gdn-pretrain.yaml
 
 # Zebra-Llama 1B pure GDN (FLA-validated, 4-GPU)
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_gdn_pure-pretrain.yaml \
-GPUS_PER_NODE=4 \
-bash examples/run_local_pretrain.sh
+GPUS_PER_NODE=4 bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B_gdn_pure-pretrain.yaml
 
 # Zebra-Llama 3B
-EXP=examples/megatron/configs/MI300X/zebra_llama_3B-pretrain.yaml \
-bash examples/run_local_pretrain.sh
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_3B-pretrain.yaml
 
 # Zebra-Llama 8B
-EXP=examples/megatron/configs/MI300X/zebra_llama_8B-pretrain.yaml \
-bash examples/run_local_pretrain.sh
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_8B-pretrain.yaml
 ```
 
 ### Multi-Node (Slurm)
@@ -313,30 +312,31 @@ bash examples/run_local_pretrain.sh
 For multi-node training on a Slurm cluster:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
-DATA_PATH=/shared/data \
-NNODES=2 \
-bash examples/run_slurm_pretrain.sh
+export DATA_PATH=/shared/data
+bash ./runner/primus-cli slurm srun -N 2 \
+  -- container --volume "$DATA_PATH:$DATA_PATH" \
+  --env DATA_PATH \
+  -- train pretrain --config examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml
 ```
 
 Ensure the `global_batch_size` in your config is divisible by `micro_batch_size * GPUS_PER_NODE * NNODES`.
 
 ### If Already Inside a Container
 
-If you are already inside a Docker container or on a bare-metal node with the environment set up:
+If you are already inside a Docker container or on a bare-metal node with the environment set up, use `direct` mode instead of `container` — it skips the container launch and runs `torchrun` in place:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml
 ```
 
 ### Mock Data (Smoke Test)
 
-To quickly verify the model runs without real data, the 3B and 8B configs come with `mock_data: true` by default. For the 1B configs, you can override:
+To quickly verify the model runs without real data, the 3B and 8B configs come with `mock_data: true` by default. For the 1B configs, you can override on the command line — every argument after `--config` is forwarded to the Primus Python CLI:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
-bash examples/run_local_pretrain.sh \
+bash ./runner/primus-cli container -- train pretrain \
+  --config examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml \
   --mock_data true --train_iters 10
 ```
 
@@ -610,9 +610,8 @@ Primus/
 │   │   ├── chat_zebra_llama.py                  # Interactive chat
 │   │   └── convert_fla_to_megatron.py           # FLA Arrow → Megatron binary converter
 │   └── docker/start_container.sh                # Dev container launcher
-├── examples/
-│   ├── run_local_pretrain.sh                    # Single-node Docker launcher
-│   ├── run_slurm_pretrain.sh                    # Slurm launcher
-│   └── run_pretrain.sh                          # Core training entrypoint
+├── runner/
+│   ├── primus-cli                               # Unified launcher (direct/container/slurm)
+│   └── helpers/envs/base_env.sh                 # NCCL/ROCm/cache env defaults
 └── requirements.txt                             # Python dependencies
 ```

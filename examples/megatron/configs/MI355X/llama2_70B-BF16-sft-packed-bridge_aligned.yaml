@@ -3,8 +3,8 @@ user_name: ${PRIMUS_USER:root}
 # Recommended invocation::
 #
 #   export PRIMUS_EXP_NAME=native_llama2_70b_$(date +%Y%m%d_%H%M%S)
-#   EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-bridge_aligned.yaml \
-#       bash examples/run_pretrain.sh
+#   bash ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-bridge_aligned.yaml
 exp_name: ${PRIMUS_EXP_NAME:llama2_70B-sft-packed-bridge_aligned}
 workspace: ${PRIMUS_WORKSPACE:./output}
 

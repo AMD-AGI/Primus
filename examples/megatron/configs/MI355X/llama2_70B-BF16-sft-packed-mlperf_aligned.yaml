@@ -36,8 +36,8 @@ user_name: ${PRIMUS_USER:root}
 #     export PYTORCH_ALLOC_CONF=expandable_segments:True
 #     export GLOO_SOCKET_IFNAME=lo
 #     export NCCL_SOCKET_IFNAME=lo
-#     EXP=examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml \
-#       bash examples/run_pretrain.sh
+#     bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/megatron/configs/MI355X/llama2_70B-BF16-sft-packed-mlperf_aligned.yaml
 #   '
 #
 # Apples-to-apples points (vs Bridge llama2_70b_lora_posttrain.yaml):

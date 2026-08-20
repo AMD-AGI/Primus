@@ -56,25 +56,20 @@ Verify your environment has:
 # See primus/configs/data/megatron/diffusion/README.md
 
 # 2. Train Flux 535M with FP8
-EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml \
-GPUS_PER_NODE=1 \
-bash examples/run_pretrain.sh
+GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 ```
 
 ### Production training with Flux 12B
 
 ```bash
 # After validating with 535M, scale to 12B (TransformerEngine FP8)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml \
-GPUS_PER_NODE=8 \
-NNODES=4 \
-bash examples/run_slurm_pretrain.sh
+GPUS_PER_NODE=8 bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml
 
 # Or local-spec FP8 (no TransformerEngine dependency)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml \
-GPUS_PER_NODE=8 \
-NNODES=4 \
-bash examples/run_slurm_pretrain.sh
+GPUS_PER_NODE=8 bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml
 ```
 
 ---
@@ -386,8 +381,8 @@ The local-spec FP8 kernels benefit from the Primus-Turbo autotuner, which picks 
 unset PRIMUS_TURBO_GEMM_BACKEND          # or scope it so it does not cover FP8
 export PRIMUS_TURBO_AUTO_TUNE=1
 
-EXP=examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml \
-  bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml
 ```
 
 ### Contrast with MXFP4
@@ -448,9 +443,8 @@ export HSA_ENABLE_SDMA=0  # Disable SDMA for stability
 
 ```bash
 # Quick 100-step validation run
-EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml \
-GPUS_PER_NODE=1 \
-bash examples/run_pretrain.sh
+GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 ```
 
 ### Convergence test

@@ -144,7 +144,7 @@ balancing (for reproducibility) but preserves the step-to-step shape variation o
 The examples below use the rebuild hook (`REBUILD_PRIMUS_TURBO=1
 PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b`) to build Primus-Turbo from source.
 
-### Example 1 — single-node EP8, 4 layers (`run_pretrain_cli.sh`)
+### Example 1 — single-node EP8, 4 layers (`primus-cli direct`)
 
 1 node × 8 GPUs, `TP=1 / PP=1 / EP=8`, DeepSeek-V3 BF16, `GBS = MBS*GPUS*GA = 2*8*64 = 1024`.
 Minimal fused-MegaMoE run from `Primus/`:
@@ -161,7 +161,7 @@ export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 export GPU_ARCHS=gfx950
 
 # Parallelism (EP-only) + fused MegaMoE
-bash examples/run_pretrain_cli.sh \
+bash ./runner/primus-cli direct -- train pretrain --config "$EXP" \
   --num_layers 4 \
   --micro_batch_size 2 \
   --global_batch_size 1024 \
@@ -198,7 +198,7 @@ export REBUILD_PRIMUS_TURBO=1
 export PRIMUS_TURBO_REF=9b5d3092efcbc087657b233d8e9ae662cee6ec6b
 export GPU_ARCHS=gfx950
 
-bash examples/run_pretrain_cli.sh \
+bash ./runner/primus-cli direct -- train pretrain --config "$EXP" \
   --num_layers 4 \
   --micro_batch_size 2 \
   --global_batch_size 1024 \
@@ -237,7 +237,11 @@ export USING_AINIC=1
 # Toggle the fused MegaMoE layer + model config
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-BF16-pretrain.yaml
 
-bash examples/run_slurm_pretrain_cli.sh \
+# USING_AINIC / REBUILD_PRIMUS_TURBO / GPU_ARCHS are forwarded into the container
+# by the default env whitelist in runner/.primus.yaml, and PRIMUS_TURBO_REF by the
+# automatic PRIMUS_* passthrough, so none of them need an explicit --env.
+bash ./runner/primus-cli slurm srun -N "$NNODES" -- container \
+  -- train pretrain --config "$EXP" \
   --train_iters 15 \
   --micro_batch_size 2 \
   --global_batch_size 1024 \

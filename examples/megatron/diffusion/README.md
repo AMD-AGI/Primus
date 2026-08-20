@@ -49,10 +49,10 @@ energon prepare . --num-workers 4
 2. **Launch training:**
 
 ```bash
-EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml \
 DATA_PATH=/tmp/flux_test_data \
 GPUS_PER_NODE=1 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 ```
 
 ---
@@ -111,14 +111,14 @@ uses smaller default micro/global batch sizes on the 12B DDP configs.
 
 ```bash
 # Flux 535M (1-8 GPUs)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml \
 GPUS_PER_NODE=8 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain.yaml
 
 # Flux 12B (FSDP2, BF16, 8 GPUs)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_fsdp2_energon_schnell_resample_local_spec.yaml \
 GPUS_PER_NODE=8 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_fsdp2_energon_schnell_resample_local_spec.yaml
 ```
 
 ### Multi-Node Training (SLURM)
@@ -128,8 +128,8 @@ export DOCKER_IMAGE="docker.io/rocm/primus:v26.1"
 export NNODES=8
 export GPUS_PER_NODE=8
 
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_fsdp2_energon_schnell_resample_local_spec.yaml \
-bash examples/run_slurm_pretrain.sh
+bash ./runner/primus-cli slurm srun -N "$NNODES" -- container -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_fsdp2_energon_schnell_resample_local_spec.yaml
 ```
 
 ### MLPerf Benchmark Reproduction (MI355X)
@@ -143,9 +143,9 @@ primus-cli direct -- data diffusion-ingest \
   --config primus/configs/data/megatron/diffusion/preprocessing/mlperf_flux1.yaml
 
 # Step 2: Train (configs already set vae_latent_mode: resample, vae_scale: 0.3611, vae_shift: 0.1159)
-EXP=examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8_mlperf.yaml \
 GPUS_PER_NODE=8 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8_mlperf.yaml
 ```
 
 ---
@@ -156,19 +156,19 @@ FP8 provides ~2x memory reduction and 1.5-2x training speedup on AMD MI300X/MI35
 
 ```bash
 # Quick validation with 535M
-EXP=examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml \
 GPUS_PER_NODE=1 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_535m_pretrain_fp8.yaml
 
 # Production with 12B (TransformerEngine FP8)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml \
-GPUS_PER_NODE=8 NNODES=4 \
-bash examples/run_slurm_pretrain.sh
+GPUS_PER_NODE=8 \
+bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_te_spec_fp8.yaml
 
 # Production with 12B (local-spec FP8, no TransformerEngine dependency)
-EXP=examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml \
-GPUS_PER_NODE=8 NNODES=4 \
-bash examples/run_slurm_pretrain.sh
+GPUS_PER_NODE=8 \
+bash ./runner/primus-cli slurm srun -N 4 -- container -- train pretrain \
+  --config examples/megatron/configs/MI300X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_fp8.yaml
 ```
 
 | Model | Precision | Memory/GPU | Batch Size | Speed |
@@ -191,11 +191,11 @@ MXFP4 (E2M1 + E8M0 block-of-32 scales) Flux 12B training on MI355X is supported 
 # Set TUNED_GEMM_DIR to wherever you have the tuned configs available.
 export TUNED_GEMM_DIR=${TUNED_GEMM_DIR:-/path/to/tuned_gemm_configs}
 
-EXP=examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_mxfp4.yaml \
 PRIMUS_TURBO_GEMM_BACKEND=FP4:AITER \
 AITER_CONFIG_GEMM_A4W4=$TUNED_GEMM_DIR/mi355x/flux_12b.csv \
 AITER_LOG_TUNED_CONFIG=1 \
-bash examples/run_pretrain.sh
+bash ./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/diffusion/flux_12b_ddp_energon_schnell_resample_local_spec_mxfp4.yaml
 ```
 
 For configuration knobs, backend-selector semantics, tuned-GEMM verification, and troubleshooting, see the [MXFP4 Training Guide](../../../docs/04-technical-guides/diffusion-models/mxfp4_training.md).
