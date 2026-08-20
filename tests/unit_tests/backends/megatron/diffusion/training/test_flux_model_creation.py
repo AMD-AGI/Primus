@@ -161,6 +161,69 @@ class TestFluxModelCreation:
         assert config.params_dtype == torch.bfloat16
         assert config.transformer_impl == "local"
 
+    def test_build_flux_config_from_yaml_forwards_graduated_routing(self, monkeypatch: pytest.MonkeyPatch):
+        backend_args = SimpleNamespace(
+            mock_data=True,
+            transformer_impl="local",
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            bf16=True,
+            fp16=False,
+            params_dtype=torch.bfloat16,
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=4,
+            sensitive_layers_end=4,
+            sensitive_layer_precision="tw_fp8",
+            outer_sensitive_layers_start=1,
+            outer_sensitive_layers_end=1,
+            outer_sensitive_layer_precision="bf16",
+        )
+
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+        config = trainer._build_flux_config_from_yaml()
+
+        assert config.sensitive_layers_start == 4
+        assert config.sensitive_layers_end == 4
+        assert config.sensitive_layer_precision == "tw_fp8"
+        assert config.outer_sensitive_layers_start == 1
+        assert config.outer_sensitive_layers_end == 1
+        assert config.outer_sensitive_layer_precision == "bf16"
+        assert config.fp8 == "e4m3"
+        assert config.fp8_recipe == "tensorwise"
+
+    def test_log_flux_config_includes_graduated_routing(self, monkeypatch: pytest.MonkeyPatch):
+        backend_args = SimpleNamespace(
+            mock_data=True,
+            transformer_impl="local",
+            fp4="mxfp4",
+            fp4_recipe="mxfp4",
+            bf16=True,
+            fp16=False,
+            params_dtype=torch.bfloat16,
+            sensitive_layers_enabled=True,
+            sensitive_layers_start=4,
+            sensitive_layers_end=4,
+            sensitive_layer_precision="tw_fp8",
+            outer_sensitive_layers_start=1,
+            outer_sensitive_layers_end=1,
+            outer_sensitive_layer_precision="bf16",
+        )
+        trainer = _build_flux_trainer(monkeypatch, backend_args)
+        config = trainer._build_flux_config_from_yaml()
+        messages = []
+        monkeypatch.setattr(
+            "primus.backends.megatron.flux_pretrain_trainer.log_rank_0",
+            messages.append,
+        )
+
+        trainer._log_flux_config(config, SimpleNamespace(rank=0))
+
+        rendered = "\n".join(messages)
+        assert "sensitive_layer_precision" in rendered
+        assert "outer_sensitive_layers_start" in rendered
+        assert "outer_sensitive_layers_end" in rendered
+        assert "outer_sensitive_layer_precision" in rendered
+
     def test_build_flux_config_from_yaml_torch_compile_settings(self, monkeypatch: pytest.MonkeyPatch):
         """Test that torch_compile settings are extracted from backend_args."""
         backend_args = SimpleNamespace(
