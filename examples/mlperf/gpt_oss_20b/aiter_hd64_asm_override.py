@@ -8,6 +8,7 @@ and remains inactive unless ``MLPERF_ENABLE_FWD_ATTN_ASM=1``.
 from __future__ import annotations
 
 import ctypes
+import functools
 import inspect
 import logging
 import math
@@ -413,85 +414,54 @@ def _install_fused_attn_override():
     import torch
 
     original_fused_attn_fwd = fused_attn_module.fused_attn_fwd
-    original_parameter_names = frozenset(inspect.signature(original_fused_attn_fwd).parameters)
+    original_signature = inspect.signature(original_fused_attn_fwd)
 
-    def patched_fused_attn_fwd(
-        is_training,
-        max_seqlen_q,
-        max_seqlen_kv,
-        cu_seqlens_q,
-        cu_seqlens_kv,
-        q,
-        k,
-        v,
-        fake_dtype,
-        fused_attention_backend,
-        attn_bias=None,
-        cu_seqlens_q_padded=None,
-        cu_seqlens_kv_padded=None,
-        page_table_k=None,
-        page_table_v=None,
-        s_quantizer=None,
-        o_quantizer=None,
-        attn_scale=None,
-        dropout=0.0,
-        fast_zero_fill=True,
-        qkv_layout="sbh3d",
-        attn_bias_type="no_bias",
-        attn_mask_type="padding",
-        softmax_type="vanilla",
-        window_size=(-1, -1),
-        bottom_right_diagonal=None,
-        rng_gen=None,
-        softmax_offset=None,
-        return_max_logit=False,
-        cuda_graph=False,
-    ):
+    @functools.wraps(original_fused_attn_fwd)
+    def patched_fused_attn_fwd(*args, **kwargs):
         global _DISPATCH_COUNT
+
+        bound = original_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        parameters = bound.arguments
+
+        is_training = parameters["is_training"]
+        max_seqlen_q = parameters["max_seqlen_q"]
+        max_seqlen_kv = parameters["max_seqlen_kv"]
+        q = parameters["q"]
+        k = parameters["k"]
+        v = parameters["v"]
+        attn_bias = parameters.get("attn_bias")
+        page_table_k = parameters.get("page_table_k")
+        s_quantizer = parameters.get("s_quantizer")
+        o_quantizer = parameters.get("o_quantizer")
+        attn_scale = parameters.get("attn_scale")
+        dropout = parameters.get("dropout", 0.0)
+        qkv_layout = parameters.get("qkv_layout", "sbh3d")
+        attn_bias_type = parameters.get("attn_bias_type", "no_bias")
+        attn_mask_type = parameters.get("attn_mask_type", "padding")
+        softmax_type = parameters.get("softmax_type", "vanilla")
+        window_size = parameters.get("window_size", (-1, -1))
+        bottom_right_diagonal = parameters.get("bottom_right_diagonal")
+        softmax_offset = parameters.get("softmax_offset")
+        return_max_logit = parameters.get("return_max_logit", False)
 
         # TE 2.12 uses False as the "no softmax offset" sentinel, while its
         # C++ binding and TE 2.15 expect None.
         if softmax_offset is False:
             softmax_offset = None
+            parameters["softmax_offset"] = None
 
-        all_kwargs = dict(
-            is_training=is_training,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            q=q,
-            k=k,
-            v=v,
-            fake_dtype=fake_dtype,
-            fused_attention_backend=fused_attention_backend,
-            attn_bias=attn_bias,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            page_table_k=page_table_k,
-            page_table_v=page_table_v,
-            s_quantizer=s_quantizer,
-            o_quantizer=o_quantizer,
-            attn_scale=attn_scale,
-            dropout=dropout,
-            fast_zero_fill=fast_zero_fill,
-            qkv_layout=qkv_layout,
-            attn_bias_type=attn_bias_type,
-            attn_mask_type=attn_mask_type,
-            softmax_type=softmax_type,
-            window_size=window_size,
-            bottom_right_diagonal=bottom_right_diagonal,
-            rng_gen=rng_gen,
-            softmax_offset=softmax_offset,
-            return_max_logit=return_max_logit,
-            cuda_graph=cuda_graph,
-        )
-        # TE 2.15 (v26.5) adds bottom_right_diagonal; TE 2.12 (v26.3)
-        # does not accept it. Keep one superset wrapper, but only forward
-        # parameters supported by the installed TE revision.
-        original_kwargs = {
-            name: value for name, value in all_kwargs.items() if name in original_parameter_names
-        }
+        def fallback():
+            return original_fused_attn_fwd(*bound.args, **bound.kwargs)
+
+        # Newer TE revisions added independent output and FP8 scale-inverse
+        # formats. The hand-tuned BF16 kernel writes the same layout as Q and
+        # does not produce FP8 scale inverses, so preserve TE for other formats.
+        expected_o_format = "bshd" if qkv_layout.startswith("bshd") else "sbhd"
+        if parameters.get("o_format", expected_o_format) != expected_o_format:
+            return fallback()
+        if parameters.get("qkv_scale_inv_format") is not None:
+            return fallback()
 
         if not _eligible(
             max_seqlen_q=max_seqlen_q,
@@ -513,9 +483,9 @@ def _install_fused_attn_override():
             o_quantizer=o_quantizer,
             fp8=False,
         ):
-            return original_fused_attn_fwd(**original_kwargs)
+            return fallback()
         if return_max_logit or page_table_k is not None:
-            return original_fused_attn_fwd(**original_kwargs)
+            return fallback()
 
         if qkv_layout.startswith("bshd"):
             batch, sequence_length, query_heads, _ = q.shape
@@ -546,7 +516,7 @@ def _install_fused_attn_override():
                 "hand-tuned launch failed (%r); falling back to CK",
                 error,
             )
-            return original_fused_attn_fwd(**original_kwargs)
+            return fallback()
 
         _DISPATCH_COUNT += 1
         if _DISPATCH_LOG:
@@ -566,7 +536,7 @@ def _install_fused_attn_override():
             ck_output = None
             ck_aux = None
             try:
-                ck_output, ck_aux = original_fused_attn_fwd(**original_kwargs)
+                ck_output, ck_aux = fallback()
                 template = list(ck_aux)
             except RuntimeError as error:
                 if "fused attn configs not supported" not in str(error):

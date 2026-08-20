@@ -74,7 +74,7 @@
 ######################### Training Docker and Variables #########################
 # fla (flash-linear-attention) is not in the base image; the megatron pretrain
 # hook installs it (runner/helpers/hooks/train/pretrain/.../requirements-megatron.txt).
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.4"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.5"}
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-1}
 export SKIP_TRAIN=${SKIP_TRAIN:-0}
 

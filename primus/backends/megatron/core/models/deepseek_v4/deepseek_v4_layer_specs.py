@@ -94,9 +94,7 @@ PRIMUS_TURBO_DEEPEP_DISPATCHER_NAME = "PrimusTurboDeepEPTokenDispatcher"
 def is_v4_turbo_deepep_active(args) -> bool:
     """Plan-3 P23: V4-side gate for the Turbo DeepEP MoE dispatcher.
 
-    Returns ``True`` only when **all** of the following hold (matches
-    the conditions enforced by the upstream
-    ``megatron.turbo.moe_dispatcher`` patch):
+    Returns ``True`` only when **all** of the following hold:
 
     * ``primus_turbo`` package is importable;
     * ``args.enable_primus_turbo`` is True;
@@ -104,8 +102,9 @@ def is_v4_turbo_deepep_active(args) -> bool:
     * ``args.tensor_model_parallel_size == 1``
       (PrimusTurboDeepEPTokenDispatcher requires TPxEP > 1; we keep
       TP == 1 here because TP > 1 paths haven't been validated against
-      the Turbo dispatcher and the existing patch enforces the same
-      gate).
+      the Turbo dispatcher. This is a V4-only restriction -- the
+      ``megatron.turbo.moe_dispatcher`` patch itself no longer gates on
+      TP).
     """
     if importlib.util.find_spec("primus_turbo") is None:
         return False
