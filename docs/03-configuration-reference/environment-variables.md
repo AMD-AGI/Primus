@@ -121,6 +121,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `HSA_NO_SCRATCH_RECLAIM` | `1` | `base_env.sh`, container passthrough | ROCm runtime; documented for MoE stability | `1` keeps scratch allocated (often used for MoE stability). See [ROCR environment](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-7.1.1/environment_variables.html). |
 | `HIP_VISIBLE_DEVICES` | `0..GPUS_PER_NODE-1` | `base_env.sh` | ROCm device visibility | Restricts which GPU indices ROCm exposes. |
 | `ROCBLAS_DEFAULT_ATOMICS_MODE` | (unset) | User | `primus/backends/megatron/patches/args/rocm_arg_validation.py` | Read for deterministic / accuracy-sensitive GEMM behavior. |
+| `TORCH_COMPILE_CACHE_KEY_TAG` | (unset) | `primus/core/patches/triton_bufops_war_patches.py`, on ROCm only | torch.compile caching | Gets `primus-bufops-war-v<N>` appended so graphs compiled before (or under a different version of) the workaround are not reused. An existing value is appended to, not replaced. |
 
 ---
 
