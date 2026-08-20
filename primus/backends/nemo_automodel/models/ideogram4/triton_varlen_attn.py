@@ -108,9 +108,19 @@ IDEOGRAM4_HEAD_DIM = 256
 # The backward pair is not separable: BLOCK_N1=64 alone gives 29.4 ms and num_stages=2
 # alone gives 64.5 ms. Pipelining only pays once the narrower block frees the registers
 # it needs (512 regs/lane with 212 spilled -> 256 with 81).
+#
+# Re-swept over a range of packed sequence lengths (4k-20k tokens) rather than the single
+# shape above. The warps/stages half of the fwd line turned out to be an artefact of having
+# been tuned jointly with BLOCK_N: once BLOCK_N=16 is in force, aiter's original 4/1 wins
+# again by 3.7-11.2%, widening with sequence length, with bit-identical out and grads. The
+# pairing is what mattered -- 4 warps with 2 stages is 59% SLOWER, which is presumably how
+# 8/2 was arrived at. BLOCK_N=16 is confirmed optimal: every larger N is worse, and halving
+# BLOCK_M to 64 to free the accumulator registers for one costs 26%, so the fp32 accumulator
+# footprint -- not the online-softmax rescale frequency -- is what bounds this kernel. The
+# backward is already at its optimum; nothing in the swept grid beats the line below.
 _TUNED_DELTAS: Dict[Tuple[str, int], Dict[str, Dict[str, int]]] = {
     ("gfx950", 256): {
-        "fwd": {"BLOCK_N": 16, "num_warps": 8, "num_stages": 2},
+        "fwd": {"BLOCK_N": 16, "num_warps": 4, "num_stages": 1},
         "bwd": {"BLOCK_N1": 64, "num_stages": 2},
     },
 }
