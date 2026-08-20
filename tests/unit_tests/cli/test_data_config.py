@@ -22,6 +22,7 @@ from primus.cli.subcommands.data import (
     _get_encoded_parser_defaults,
     _load_config_with_cli_overrides,
     _validate_preprocessing_config,
+    register_subcommand,
 )
 from tests.utils import PrimusUT
 
@@ -156,7 +157,19 @@ class TestValidatePreprocessingConfig(PrimusUT):
 
 
 class TestLoadConfigWithCliOverrides(PrimusUT):
-    """Tests for _load_config_with_cli_overrides merge logic."""
+    """Tests for _load_config_with_cli_overrides merge logic.
+
+    These drive the real parser rather than hand-building a namespace: only the
+    parser can express the difference between "flag omitted" and "flag typed
+    with a value that happens to equal the default", which is precisely the
+    distinction the merge depends on.
+    """
+
+    def _merge(self, *argv):
+        parser = argparse.ArgumentParser(prog="primus")
+        register_subcommand(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(["data", "diffusion-encoded", *argv])
+        return _load_config_with_cli_overrides(args)
 
     @patch("primus.core.utils.yaml_utils.parse_yaml")
     def test_cli_overrides_yaml(self, mock_parse_yaml):
@@ -165,36 +178,106 @@ class TestLoadConfigWithCliOverrides(PrimusUT):
             "source": {"type": "huggingface", "hf_dataset": "yaml-dataset"},
             "model": {"batch_size": 4},
         }
-        defaults = _get_encoded_parser_defaults()
-        args = argparse.Namespace(
-            config="test.yaml",
-            batch_size=16,
-            **{k: v for k, v in defaults.items() if k not in ("config", "batch_size")},
-        )
 
-        result = _load_config_with_cli_overrides(args)
+        result = self._merge("--config", "test.yaml", "--batch-size", "16")
 
         assert result.batch_size == 16
         assert result.hf_dataset == "yaml-dataset"
 
     @patch("primus.core.utils.yaml_utils.parse_yaml")
-    def test_yaml_used_when_cli_is_default(self, mock_parse_yaml):
-        """YAML values used when CLI arg equals its default."""
-        mock_parse_yaml.return_value = {
-            "model": {"batch_size": 4},
-        }
-        defaults = _get_encoded_parser_defaults()
-        args = argparse.Namespace(config="test.yaml", **{k: v for k, v in defaults.items() if k != "config"})
+    def test_yaml_used_when_flag_not_passed(self, mock_parse_yaml):
+        """YAML values are used for options the user did not pass."""
+        mock_parse_yaml.return_value = {"model": {"batch_size": 4}}
 
-        result = _load_config_with_cli_overrides(args)
+        result = self._merge("--config", "test.yaml")
 
         assert result.batch_size == 4
 
-    def test_no_config_passthrough(self):
-        """No config file returns args unchanged."""
-        original = argparse.Namespace(config=None, batch_size=8)
-        result = _load_config_with_cli_overrides(original)
-        assert result is original
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_explicit_cli_wins_when_value_equals_default(self, mock_parse_yaml):
+        """A flag typed with its default value still overrides the YAML.
+
+        Regression test: the merge used to infer "was this typed?" by comparing
+        against the default table, so passing the default value looked identical
+        to passing nothing and the YAML silently won.
+        """
+        mock_parse_yaml.return_value = {
+            "model": {"batch_size": 64, "precision": "fp32", "t5_max_length": 256},
+            "image": {"image_size": 512},
+        }
+
+        result = self._merge(
+            "--config",
+            "test.yaml",
+            "--batch-size",
+            "8",  # 8 is also the parser default
+            "--precision",
+            "bf16",  # bf16 is also the parser default
+            "--t5-max-length",
+            "512",  # 512 is also the parser default
+            "--image-size",
+            "1024",  # 1024 is also the parser default
+        )
+
+        assert result.batch_size == 8
+        assert result.precision == "bf16"
+        assert result.t5_max_length == 512
+        assert result.image_size == 1024
+
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_omitted_yaml_section_falls_back_to_defaults(self, mock_parse_yaml):
+        """Options in no YAML section and not typed still resolve to defaults.
+
+        Regression test: the merged namespace was built from the YAML plus the
+        flags believed to be explicit, so a key absent from both simply vanished
+        and _prepare_encoded raised AttributeError on it.
+        """
+        mock_parse_yaml.return_value = {
+            "source": {"type": "huggingface", "hf_dataset": "yaml-dataset"},
+            "output": {"output_dir": "/data/out"},
+        }
+
+        result = self._merge("--config", "test.yaml")
+
+        # The optional image: section is absent, so these come from the defaults.
+        assert result.image_size == 1024
+        assert result.variable_size is False
+        assert result.center_crop is True
+        assert result.max_size == 1024
+
+    @patch("primus.core.utils.yaml_utils.parse_yaml")
+    def test_every_configurable_key_present(self, mock_parse_yaml):
+        """The merged namespace exposes every key the pipeline may read."""
+        mock_parse_yaml.return_value = {"source": {"type": "huggingface"}}
+
+        result = self._merge("--config", "test.yaml")
+
+        missing = [key for key in _get_encoded_parser_defaults() if not hasattr(result, key)]
+        assert missing == []
+
+    def test_no_config_applies_defaults(self):
+        """Without a config file, defaults are applied and CLI args preserved."""
+        result = self._merge("--batch-size", "16")
+
+        assert result.batch_size == 16
+        assert result.image_size == 1024
+        assert result.precision == "bf16"
+
+
+class TestParserDefaults(PrimusUT):
+    """The raw parser keeps argparse defaults; the encoded parser reads them from
+    _get_encoded_parser_defaults(). Guard the two against drifting apart."""
+
+    def test_raw_parser_defaults_match_table(self):
+        parser = argparse.ArgumentParser(prog="primus")
+        register_subcommand(parser.add_subparsers(dest="command"))
+        raw = vars(parser.parse_args(["data", "diffusion-raw"]))
+        table = _get_encoded_parser_defaults()
+
+        mismatched = {
+            key: (value, table[key]) for key, value in raw.items() if key in table and value != table[key]
+        }
+        assert mismatched == {}
 
 
 class TestSetupHfAuthenticationPriority(PrimusUT):
