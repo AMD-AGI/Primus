@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
@@ -65,6 +66,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
+from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -97,8 +99,27 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_gemm_backend_env() -> None:
+    """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
+    backend = getattr(get_args(), "turbo_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
+
+
+@lru_cache(maxsize=1)
+def _apply_turbo_grouped_gemm_backend_env() -> None:
+    """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
+    backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
+    if backend != "default":
+        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
 @lru_cache(maxsize=1)
@@ -990,6 +1011,8 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1196,6 +1219,8 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
 
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1399,6 +1424,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1606,6 +1633,8 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
     ):
+        _apply_turbo_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
@@ -1971,6 +2000,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        _apply_turbo_grouped_gemm_backend_env()
+
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
