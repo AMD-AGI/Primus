@@ -190,8 +190,8 @@ def render(primary: dict, title: str, secondaries: list = None) -> str:
             % (_pct(tc, tn), _pct(te, tn), format(tn, ","), excl)
         )
         out.append(
-            "_Including all modules (nothing excluded, lines+branches): "
-            "Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
+            "_Including all modules (nothing excluded; Unit also counts "
+            "branches, E2E is lines only): Unit %.1f%% -> Unit+E2E %.1f%%._\n" % (p_all, s_all)
         )
         out.append(_LEGEND)
         out += ["| Module | Stmts | Unit | Unit+E2E | Notes |", "|---|--:|--:|--:|---|"]

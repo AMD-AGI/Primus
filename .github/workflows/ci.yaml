@@ -457,7 +457,12 @@ jobs:
           set -e
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
-          printf '[run]\nparallel = true\nbranch = true\nsource = primus\nsigterm = true\n' > "${GITHUB_WORKSPACE}/.coveragerc_e2e"
+          # branch=true is NOT set here: it makes the trainer subprocess chain
+          # crash (SIGABRT across all ranks in test_memory_benchmark) once the
+          # coverage trace function is active during real GPU training, so E2E
+          # stays line-only. Unit (a plain pytest process, no torchrun/GPU
+          # kernels) is unaffected and gets --cov-branch below.
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "${GITHUB_WORKSPACE}/.coveragerc_e2e"
           IN
           echo "COVERAGE_PROCESS_START=${CWS}/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=${CWS}/.coverage_e2e" >> "$GITHUB_ENV"
@@ -772,7 +777,8 @@ jobs:
           pip install coverage >/dev/null 2>&1 || true
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
-          printf '[run]\nparallel = true\nbranch = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
+          # branch=true stays off here too -- see the torch E2E step for why.
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > "$GITHUB_WORKSPACE/.coveragerc_e2e"
           echo "COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc_e2e" >> "$GITHUB_ENV"
           echo "COVERAGE_FILE=$GITHUB_WORKSPACE/.coverage_e2e" >> "$GITHUB_ENV"
       - name: Decide E2E scope (jax)
