@@ -10,14 +10,22 @@ TorchTitan v0.2.2 DeepSeek-V3 MoE memory fixes (Primus patches).
 Reduce DSv3-16B HBM on MI355X with torchtitan v0.2.2 without modifying the
 upstream submodule. The balanced-routing field migration
 (``training.debug_moe_force_load_balance`` -> ``debug.moe_force_load_balance``)
-is already handled in the DeepSeek configs on main, so this module only carries
-the two memory fixes:
+is already handled in the DeepSeek configs on main.
 
-1. Replace v0.2.2 ``apply_compile`` (capture_scalar_outputs + per-submodule
-   compile) with whole-block compile matching v0.1.0 behavior (drops the
-   fragmented reserved HBM re-introduced by per-submodule compilation).
-2. Replace MoE combine fp32 ``bmm`` with a bf16 weighted sum (drops the fp32
-   activation copy retained across the MoE layers).
+Whole-block compilation is still needed to avoid the fragmented reserved HBM
+caused by v0.2.2's per-submodule compilation. Compiling the entire MoE forward
+is unsafe, however: it pulls expert-parallel token dispatch/combine and
+GroupedExperts FSDP hooks into one inductor graph. On MI300X that silently
+produces a NaN forward loss from the first step.
+
+Use a safe dense-only boundary instead: dense blocks compile as a full graph,
+while MoE TransformerBlocks remain eager. Compiling even the outer MoE block
+with a graph break around ``MoE.forward`` still produces the NaN, whereas
+v0.2.2's per-submodule policy reintroduces the fragmented reserved HBM this
+patch was created to avoid. Keeping MoE blocks eager avoids both failure modes;
+the expensive attention and grouped-GEMM work still uses Primus-Turbo kernels.
+The MoE forward replacement also changes its fp32 ``bmm`` combine into a bf16
+weighted sum, dropping the fp32 activation copy retained across MoE layers.
 """
 
 from __future__ import annotations
@@ -52,36 +60,38 @@ def _compile_enabled(ctx: PatchContext) -> bool:
     return bool(get_param(ctx, "compile.enable", False))
 
 
+def _apply_dense_only_compile(model: nn.Module, compile_config: Any, ep_enabled: bool) -> None:
+    """Whole-block compile dense layers and leave MoE TransformerBlocks eager."""
+    from torchtitan.tools.logging import logger
+
+    del ep_enabled  # MoE blocks stay eager, including EP dispatch.
+    for layer_id, transformer_block in model.layers.named_children():
+        if not transformer_block.moe_enabled:
+            transformer_block = torch.compile(
+                transformer_block,
+                backend=compile_config.backend,
+                fullgraph=True,
+            )
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling dense TransformerBlocks; leaving MoE TransformerBlocks eager (Primus patch)")
+
+
 @register_patch(
     "torchtitan.dsv3.whole_block_compile",
     backend="torchtitan",
     phase="setup",
-    description="Whole-block torch.compile; leave capture_scalar_outputs disabled",
+    description="Whole-block compile dense layers; leave MoE TransformerBlocks eager",
     condition=lambda ctx: _is_deepseek_model(ctx) and _compile_enabled(ctx),
 )
 def patch_whole_block_compile(ctx: PatchContext) -> None:
-    """Replace v0.2.2 apply_compile with v0.1.0-style whole TransformerBlock compile."""
-    from torchtitan.config.job_config import Compile as CompileConfig
+    """Install low-fragment dense-only compilation."""
     from torchtitan.models.llama4.infra import parallelize as parallelize_module
-    from torchtitan.tools.logging import logger
 
-    def apply_compile_patched(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool) -> None:
-        # Match v0.1.0: do NOT set capture_scalar_outputs=True (avoids fragmentation).
-        for layer_id, transformer_block in model.layers.named_children():
-            fullgraph = not transformer_block.moe_enabled
-            transformer_block = torch.compile(
-                transformer_block,
-                backend=compile_config.backend,
-                fullgraph=fullgraph,
-            )
-            model.layers.register_module(layer_id, transformer_block)
-
-        logger.info("Compiling each TransformerBlock with torch.compile (Primus whole-block patch)")
-
-    parallelize_module.apply_compile = apply_compile_patched
+    parallelize_module.apply_compile = _apply_dense_only_compile
     log_rank_0(
         "[Patch:torchtitan.dsv3.whole_block_compile] "
-        "Patched torchtitan.models.llama4.infra.parallelize.apply_compile",
+        "Patched apply_compile with eager MoE TransformerBlocks",
     )
 
 
@@ -143,8 +153,10 @@ def patch_moe_bf16_combine(ctx: PatchContext) -> None:
     """Replace MoE.forward to drop the fp32 bmm copy in the combine step."""
     import torchtitan.models.moe.moe as moe_module
 
-    moe_module.MoE.forward = _moe_forward_bf16_combine
+    # Keep this explicit eager boundary in case a caller wraps a larger parent
+    # module in torch.compile outside the DeepSeek parallelization path.
+    moe_module.MoE.forward = torch.compiler.disable(_moe_forward_bf16_combine)
     log_rank_0(
         "[Patch:torchtitan.dsv3.moe_bf16_combine] "
-        "Patched torchtitan.models.moe.moe.MoE.forward (bf16 weighted combine)",
+        "Patched MoE.forward (eager boundary, bf16 weighted combine)",
     )
