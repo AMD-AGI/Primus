@@ -688,11 +688,27 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 # overlap_grad_reduce / param_gather OFF and crippled cross-node
                 # DP scaling. So freeze unless the loss is actually enabled.
                 # PRIMUS_V4_INDEXER_TRAINABLE=1 still forces trainable.
-                if not self.indexer_distill_enabled and (
-                    os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
+                #
+                # PRIMUS_V4_DISTILL_FREEZE_INDEXER=1 additionally freezes the
+                # indexer *while still computing the loss*. That is not a
+                # training mode -- the indexer then learns nothing -- it exists
+                # to measure how much of the loss's cost is its backward, by
+                # A/B-ing against the same run without it.
+                _diag_freeze = os.environ.get("PRIMUS_V4_DISTILL_FREEZE_INDEXER", "0") == "1"
+                if _diag_freeze or (
+                    not self.indexer_distill_enabled
+                    and os.environ.get("PRIMUS_V4_INDEXER_TRAINABLE", "0") != "1"
                 ):
                     for _indexer_param in self.indexer.parameters():
                         _indexer_param.requires_grad_(False)
+
+                # Most of what training the indexer costs is the autograd engine
+                # walking the ~20 nodes its forward builds, per CSA layer, not
+                # arithmetic; torch.compile lets AOTAutograd emit one fused
+                # backward instead. `topk` is data-dependent and graph-breaks,
+                # which is fine -- everything before it is what costs.
+                if self.indexer_distill_enabled and os.environ.get("PRIMUS_V4_INDEXER_COMPILE", "0") == "1":
+                    self.indexer = torch.compile(self.indexer, dynamic=False)
 
         # ---- core attention (Turbo / TE flash) — dense layers only ----
         # Plan-3 P22: when the spec emits a ``core_attention`` submodule
@@ -1480,6 +1496,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # kernel the layer dispatches to, without threading a second return
         # value through all of them.
         if self.indexer_distill_enabled and self.training and torch.is_grad_enabled():
+            # k_local / sink / swa_window let the target use the same joint
+            # denominator the attention below does: this layer runs one softmax
+            # over [window, sparse, sink], so the target for the sparse part is
+            # a conditional of that, not a softmax over the sparse part alone.
             indexer_loss = compute_indexer_distill_loss(
                 index_topk_scores=topk_scores,
                 topk_idxs=topk_idxs,
@@ -1488,6 +1508,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 softmax_scale=self._attention_scale(),
                 loss_coeff=self.indexer_distill_coeff,
                 head_reduce_group=self._indexer_loss_head_group(),
+                k_local=k_local_bh,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
             )
             self.last_indexer_distill_loss = indexer_loss.detach()
             pool = V4IndexerLossAutoScaler.apply(pool, indexer_loss)
