@@ -632,7 +632,18 @@ jobs:
             exit 0
           fi
           parts=(.coverage_e2e)
-          [ -s .coverage_unit ] && parts=(.coverage_unit .coverage_e2e)
+          if [ -s .coverage_unit ]; then
+            # .coverage_unit carries branch data (unit runs with --cov-branch);
+            # `coverage combine` refuses to mix branch data with the E2E lane's
+            # statement-only data ("Can't combine branch coverage data with
+            # statement data"). Project unit's data down to its executed-line
+            # set (CoverageData.lines() reads correctly from either branch or
+            # statement data) into a throwaway statement-only file before
+            # merging -- coverage_unit.json, already exported above from the
+            # original branch-aware data, is unaffected by this.
+            python -c "import coverage; src=coverage.CoverageData(basename='.coverage_unit'); src.read(); dst=coverage.CoverageData(basename='.coverage_unit_lines'); [dst.add_lines({f: src.lines(f)}) for f in src.measured_files()]; dst.write()"
+            parts=(.coverage_unit_lines .coverage_e2e)
+          fi
           echo "Combining: ${parts[*]}"
           COVERAGE_FILE=.coverage_all python -m coverage combine --keep "${parts[@]}"
           COVERAGE_FILE=.coverage_all python -m coverage json -o coverage_combined.json
@@ -665,7 +676,7 @@ jobs:
           set +e
           cd "${GITHUB_WORKSPACE}" || exit 0
           rm -rf logs test-reports ut_out .pytest_cache .hypothesis \
-                 .coverage .coverage.* .coverage_e2e* .coverage_unit .coverage_all \
+                 .coverage .coverage.* .coverage_e2e* .coverage_unit .coverage_unit_lines* .coverage_all \
                  .coveragerc_e2e .e2e_scope coverage_unit.json coverage_combined.json
           # Bytecode caches written during the run (root-owned; block checkout clean).
           find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
