@@ -68,10 +68,19 @@ def _enable_preshuffle() -> bool:
     (pre Primus-Turbo PR #383) so MXFP4LinearFunction can keep passing a bool
     into its custom ops.
     """
-    return (
-        GlobalBackendManager.get_gemm_backend(PrecisionType.FP4) == BackendType.AITER
-        and not GlobalBackendManager.auto_tune_enabled()
-    )
+    choice = GlobalBackendManager.get_gemm_backend(PrecisionType.FP4)
+
+    # Primus-Turbo PR #447 ("support auto tune on different ops") changed this
+    # getter from returning a bare BackendType to returning a BackendChoice that
+    # carries its own auto_tune flag. Both shapes have to work here: the Flux local
+    # spec needs a Turbo new enough to expose the merged FlashAttnFunc, which
+    # postdates #447, while older pinned Turbos are still in use elsewhere.
+    # Comparing the BackendChoice against BackendType silently yields False, which
+    # would turn every MXFP4 run into a preshuffle-contract failure.
+    backend = getattr(choice, "backend", choice)
+    auto_tune = getattr(choice, "auto_tune", False) or GlobalBackendManager.auto_tune_enabled()
+
+    return backend == BackendType.AITER and not auto_tune
 
 
 def _assert_preshuffle_contract(config, preshuffle: bool) -> None:
