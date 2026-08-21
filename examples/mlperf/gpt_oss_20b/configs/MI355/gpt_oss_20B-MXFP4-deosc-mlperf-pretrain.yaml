@@ -55,7 +55,7 @@ modules:
       first_last_layers_bf16: true
       num_layers_at_start_in_bf16: 2
       num_layers_at_end_in_bf16: 2
-      mxfp4_gradient_stochastic_rounding: false
+      mxfp4_gradient_stochastic_rounding: true
       clip_grad: 1.0
       check_for_nan_in_loss_and_grad: false
 
@@ -111,10 +111,13 @@ modules:
       multi_latent_attention: false
       apply_rope_fusion: true
 
-      # sliding window attention
-      use_turbo_attention: false
-      window_size: [128, 0]
-      window_attn_skip_freq: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+      # GPT-OSS alternates 128-token sliding attention and full attention.
+      # PrimusTurboAttention derives this pattern itself; TE's window_size and
+      # window_attn_skip_freq must remain unset.
+      use_turbo_attention: true
+      use_sink_attention: true
+      sink_sliding_window: 128
+      sink_window_even_layers_only: true
 
       # MoE settings
       moe_apply_probs_on_input: false
