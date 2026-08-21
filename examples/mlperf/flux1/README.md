@@ -6,11 +6,10 @@ loss threshold of `0.586`.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.1` by default. Pull it
-before starting training:
+The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default.
 
 ```bash
-docker pull zirui3/primus-v26.3-flux:v0.1
+docker pull zirui3/primus-v26.3-flux:v0.4
 ```
 
 ## Prepare data
@@ -38,43 +37,59 @@ The resulting data root must contain:
 See the [MLPerf FLUX preprocessing instructions](https://github.com/mlcommons/training/tree/master/text_to_image#preprocessing)
 for details.
 
-## Run on one node
+## Select a configuration
 
-`OUTPUT_ROOT` must be writable from the compute node. A full `dtcp_full`
-checkpoint is approximately 93 GB, so use shared storage with enough space.
+Each `config_*.sh` sources `config_common.sh` and then exports its qualified
+shape-specific settings:
 
-```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
-bash examples/mlperf/flux1/run_with_docker.sh
-```
+| `FLUX_CONFIG` | Nodes | MBS | GA | GBS | FP8 GEMM | Compile mode |
+|---|---:|---:|---:|---:|---|---|
+| `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | TorchAO/Inductor | `max-autotune-no-cudagraphs` |
+| `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | selective FlyDSL | default |
+| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
 
-For a short training smoke test without saving a checkpoint:
+The MBS64 profile retains checkpoint ratio `0.25`. Both MBS32 profiles use
+ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
+MBS32 Inductor fusion benchmarking.
 
-```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
-MAX_STEPS=1 \
-SAVE_STRATEGY=none \
-COMPILE_TRANSFORMER_BLOCKS=false \
-bash examples/mlperf/flux1/run_with_docker.sh
-```
-
-## Run with Slurm or Spur
-
-From an existing allocation, launch one Docker container per node and one
-training process per GPU. Spur exposes the Slurm environment and `srun`
-interface used by this script, so both schedulers use the same entry point:
+Inside an allocation, select a configuration and use the same launcher:
 
 ```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
+FLUX_CONFIG=config_1n_gbs512.sh \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `LOCAL_BATCH_SIZE`,
-`SEED`, `MASTER_PORT`, `SAVE_STRATEGY`, `SAVE_STEPS`,
-`RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
+Use `config_1n_gbs1024.sh` for single-node MBS32 kernel development. The
+4-node MLPerf target is the default, so it needs no `FLUX_CONFIG` override:
+
+```bash
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+For a short smoke test, append `MAX_STEPS=1 SAVE_STRATEGY=none` before `bash`.
+
+## Submit the default four-node target
+
+```bash
+REPO=/shared_nfs/zirui/code/primus-compile
+DATA_ROOT=/shared_nfs/zirui/data
+OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-fp8-4n
+
+sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
+  -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
+  --output="$OUTPUT_ROOT-%j.slurm.log" \
+  --wrap="cd '$REPO' && DATA_ROOT='$DATA_ROOT' \
+    OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
+    bash examples/mlperf/flux1/run_with_docker_slurm.sh"
+```
+
+Add `--nodelist=node1,node2,node3,node4` only when specific idle nodes are
+required.
+
+Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
+`SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
 
 ## Files
 
@@ -82,7 +97,12 @@ Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `LOCAL_BATCH_SIZE`,
 examples/mlperf/flux1/
 ├── Dockerfile
 ├── README.md
+├── config_common.sh
+├── config_1n_gbs512.sh
+├── config_1n_gbs1024.sh
+├── config_4n_gbs1024.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
+├── luanch-multi-nodes.md
 ├── requirements.txt
 ├── run_with_docker.sh
 └── run_with_docker_slurm.sh

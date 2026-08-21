@@ -1,0 +1,160 @@
+FROM zirui3/primus-v26.3-flux@sha256:f3e8e7c484c2a47779bf13e93df4957ba69a9af12f2bdd0c20f13224b2b98a61
+
+ARG PRIMUS_TURBO_REVISION=a14521b8db39ef8a4410b91b22b6a3e9c4e5a476
+
+# PR #453 changes only these dense-GEMM implementation files.
+RUN pip install --no-cache-dir --upgrade flydsl==0.2.4 && \
+    git clone --filter=blob:none --no-checkout https://github.com/AMD-AGI/Primus-Turbo.git /tmp/Primus-Turbo && \
+    git -C /tmp/Primus-Turbo checkout "${PRIMUS_TURBO_REVISION}" && \
+    cp /tmp/Primus-Turbo/primus_turbo/flydsl/gemm/gemm_fp8_kernel.py \
+       /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/gemm/ && \
+    cp /tmp/Primus-Turbo/primus_turbo/flydsl/utils/gemm_helper.py \
+       /opt/venv/lib/python3.12/site-packages/primus_turbo/flydsl/utils/ && \
+    rm -rf /tmp/Primus-Turbo
+
+# Reuse the forward weight cast for dgrad and dispatch the qualified MBS32 and
+# MBS64 natural-layout wgrads before TorchAO canonicalizes their operands.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torchao/float8/float8_linear.py")
+source = path.read_text().replace("from typing import Optional\n", "from typing import Optional\n\nimport os\n", 1)
+source = source.replace(
+    "from torchao.float8.config import Float8LinearConfig, ScalingType",
+    "from torchao.float8.config import Float8LinearConfig, ScalingGranularity, ScalingType",
+    1,
+)
+source = source.replace(
+    "from torchao.float8.float8_training_tensor import (\n    GemmInputRole,",
+    "from torchao.float8.float8_training_tensor import (\n    Float8TrainingTensor,\n    GemmInputRole,",
+    1,
+)
+source = source.replace(
+    "        ctx.save_for_backward(input_hp, weight_hp_t)\n        ctx.linear_mm_config = linear_mm_config\n        ctx.config = config\n",
+    "        ctx.linear_mm_config = linear_mm_config\n        ctx.config = config\n",
+    1,
+)
+source = source.replace(
+    "        # the reshapes are needed in order to make the shapes compatible with\n        # torch.mm\n        orig_shape = input_maybe_fp8.shape\n",
+    "        ctx.reuse_forward_input = (\n            os.getenv(\"PRIMUS_FLUX_REUSE_FP8_INPUT\", \"0\") == \"1\"\n            and c.cast_config_input == c.cast_config_input_for_grad_weight\n            and c.cast_config_input.scaling_granularity is ScalingGranularity.TENSORWISE\n        )\n        saved_input = input_maybe_fp8 if ctx.reuse_forward_input else input_hp\n        ctx.save_for_backward(input_hp, weight_hp_t, weight_maybe_fp8_t, saved_input)\n\n        # the reshapes are needed in order to make the shapes compatible with\n        # torch.mm\n        orig_shape = input_maybe_fp8.shape\n",
+    1,
+)
+source = source.replace(
+    "        input_hp, weight_hp_t = ctx.saved_tensors\n        c = ctx.config\n",
+    "        input_hp, weight_hp_t, forward_weight, forward_input = ctx.saved_tensors\n        c = ctx.config\n",
+    1,
+)
+source = source.replace(
+    "        if tensor_already_casted_to_fp8(weight_hp_t):\n            # TODO(future PR): var name is axiswise specific, fix it\n            weight_t_maybe_fp8_dim0 = weight_hp_t\n",
+    "        if c.cast_config_weight == c.cast_config_weight_for_grad_input:\n            weight_t_maybe_fp8_dim0 = forward_weight\n        elif tensor_already_casted_to_fp8(weight_hp_t):\n            # TODO(future PR): var name is axiswise specific, fix it\n            weight_t_maybe_fp8_dim0 = weight_hp_t\n",
+    1,
+)
+source = source.replace(
+    "        if tensor_already_casted_to_fp8(input_hp_reshaped):\n            # TODO(future PR): var name is axiswise specific, fix it\n            input_reshaped_maybe_fp8_dim1 = input_hp_reshaped\n",
+    "        if ctx.reuse_forward_input:\n            input_reshaped_maybe_fp8_dim1 = forward_input.reshape(input_hp_reshaped.shape)\n        elif tensor_already_casted_to_fp8(input_hp_reshaped):\n            # TODO(future PR): var name is axiswise specific, fix it\n            input_reshaped_maybe_fp8_dim1 = input_hp_reshaped\n",
+    1,
+)
+old = """        grad_weight = torch.mm(
+            grad_output_reshaped_maybe_fp8_dim1.t(),
+            input_reshaped_maybe_fp8_dim1,
+        )
+"""
+new = """        use_flydsl_wgrad = (
+            os.environ.get("PRIMUS_FLUX_FP8_GEMM_BACKEND") == "selective_flydsl"
+            and (
+                (
+                    grad_output_reshaped.shape == (16384, 3072)
+                    and input_hp_reshaped.shape == (16384, 15360)
+                )
+                or (
+                    grad_output_reshaped.shape == (32768, 3072)
+                    and input_hp_reshaped.shape == (32768, 15360)
+                )
+                or (
+                    (grad_output_reshaped.shape, input_hp_reshaped.shape)
+                    in {
+                        ((8192, 12288), (8192, 3072)),
+                        ((8192, 3072), (8192, 12288)),
+                        ((16384, 21504), (16384, 3072)),
+                        ((32768, 21504), (32768, 3072)),
+                    }
+                )
+            )
+            and isinstance(grad_output_reshaped_maybe_fp8_dim1, Float8TrainingTensor)
+            and isinstance(input_reshaped_maybe_fp8_dim1, Float8TrainingTensor)
+        )
+        if use_flydsl_wgrad:
+            grad_weight = torch.ops.primus.flux_flydsl_natural_wgrad.default(
+                grad_output_reshaped_maybe_fp8_dim1._data,
+                input_reshaped_maybe_fp8_dim1._data,
+                grad_output_reshaped_maybe_fp8_dim1._scale.reciprocal(),
+                input_reshaped_maybe_fp8_dim1._scale.reciprocal(),
+            )
+        else:
+            grad_weight = torch.mm(
+                grad_output_reshaped_maybe_fp8_dim1.t(),
+                input_reshaped_maybe_fp8_dim1,
+            )
+"""
+assert source.count(old) == 1
+path.write_text(source.replace(old, new))
+PY
+
+# Keep both changes runtime-selective so MBS64 retains its qualified defaults.
+RUN python - <<'PY'
+from pathlib import Path
+
+path = Path("/workspace/aiter/aiter/ops/mha.py")
+source = path.read_text().replace("from typing import Any, Optional, Tuple\n", "from typing import Any, Optional, Tuple\n\nimport os\n", 1)
+old = "        True,  # is_v3_atomic_fp32\n"
+new = "        os.getenv(\"PRIMUS_FLUX_AITER_ATOMIC_FP32\", \"1\") == \"1\",  # is_v3_atomic_fp32\n"
+assert source.count(old) == 1
+path.write_text(source.replace(old, new))
+
+path = Path("/opt/venv/lib/python3.12/site-packages/torch/_inductor/scheduler.py")
+source = path.read_text()
+old = """        else:
+            # Start parallel compilation for all three kernels
+            future_and_mod_l1 = compile_kernel(node_list_1)
+            future_and_mod_l2 = compile_kernel(node_list_2)
+            future_and_mod_l1_fused = compile_kernel(node_list_fused)
+
+            def benchmark_when_ready() -> bool:
+"""
+new = """        else:
+            # Unsupported fusion groups should not abort the whole graph compile.
+            try:
+                future_and_mod_l1 = compile_kernel(node_list_1)
+                future_and_mod_l2 = compile_kernel(node_list_2)
+                future_and_mod_l1_fused = compile_kernel(node_list_fused)
+            except (NotImplementedError, CompilationError):
+                return False
+
+            def benchmark_when_ready() -> bool:
+"""
+assert source.count(old) == 1
+path.write_text(source.replace(old, new))
+PY
+
+RUN python - <<'PY'
+from importlib.metadata import version
+from pathlib import Path
+
+import torch
+import torch._inductor.kernel.mm as mm
+from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+assert torch.__version__ == "2.10.0+git94c6e04", torch.__version__
+assert torch.version.hip == "7.2.53211", torch.version.hip
+assert version("flydsl") == "0.2.4", version("flydsl")
+assert mm._PRIMUS_FLUX_SELECTIVE_TRITON
+assert gemm_fp8_tensorwise_flydsl_kernel
+float8_linear = Path("/opt/venv/lib/python3.12/site-packages/torchao/float8/float8_linear.py").read_text()
+assert "grad_output_reshaped.shape == (16384, 3072)" in float8_linear
+assert "grad_output_reshaped.shape == (32768, 3072)" in float8_linear
+assert "PRIMUS_FLUX_REUSE_FP8_INPUT" in float8_linear
+assert "((8192, 12288), (8192, 3072))" in float8_linear
+assert "PRIMUS_FLUX_AITER_ATOMIC_FP32" in Path("/workspace/aiter/aiter/ops/mha.py").read_text()
+PY
+
+CMD ["/usr/bin/bash"]

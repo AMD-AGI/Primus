@@ -141,6 +141,31 @@ class Flux(nn.Module):
 
         return checkpoint_utils.checkpoint(block, img, vec, pe, use_reentrant=False)
 
+    def _run_double_blocks(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
+        use_checkpoint = self.training and self.gradient_checkpointing
+        for block in self.double_blocks:
+            if use_checkpoint:
+                img, txt = self._checkpoint_double(block, img, txt, vec, pe)
+            else:
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+        return img, txt
+
+    def _run_single_blocks(self, img: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+        use_checkpoint = self.training and self.gradient_checkpointing
+        for block in self.single_blocks:
+            if use_checkpoint:
+                img = self._checkpoint_single(block, img, vec, pe)
+            else:
+                img = block(img, vec=vec, pe=pe)
+        return img
+
+    def _run_dit(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+        img, txt = self._run_double_blocks(img, txt, vec, pe)
+        img = torch.cat((txt, img), 1)
+        img = self._run_single_blocks(img, vec, pe)
+        img = img[:, txt.shape[1] :, ...]
+        return self.final_layer(img, vec)
+
     def forward(
         self,
         img: Tensor,
@@ -165,19 +190,4 @@ class Flux(nn.Module):
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-
-        use_checkpoint = self.training and self.gradient_checkpointing
-        for block in self.double_blocks:
-            if use_checkpoint:
-                img, txt = self._checkpoint_double(block, img, txt, vec, pe)
-            else:
-                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
-
-        img = torch.cat((txt, img), 1)
-        for block in self.single_blocks:
-            if use_checkpoint:
-                img = self._checkpoint_single(block, img, vec, pe)
-            else:
-                img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
-        return self.final_layer(img, vec)
+        return self._run_dit(img, txt, vec, pe)

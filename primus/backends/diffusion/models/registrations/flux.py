@@ -51,6 +51,65 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.0",
     "txt_mlp.2",
 }
+_FP8_SELECTIVE_GEMM_SHAPES = {
+    (3072, 15360, 16384),
+    (8192, 3072, 12288),
+    (16384, 3072, 15360),
+}
+
+
+@torch.library.custom_op("primus::flux_flydsl_scaled_mm", mutates_args=())
+def _flux_flydsl_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+    return gemm_fp8_tensorwise_flydsl_kernel(
+        a,
+        a_scale,
+        b.t(),
+        b_scale,
+        trans_a=False,
+        trans_b=True,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@_flux_flydsl_scaled_mm.register_fake
+def _(a, b, a_scale, b_scale):
+    return torch.empty((a.shape[0], b.shape[1]), device=a.device, dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("primus::flux_flydsl_natural_wgrad", mutates_args=())
+def _flux_flydsl_natural_wgrad(
+    grad_output: torch.Tensor,
+    input: torch.Tensor,
+    grad_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+) -> torch.Tensor:
+    from primus_turbo.flydsl.gemm.gemm_fp8_kernel import gemm_fp8_tensorwise_flydsl_kernel
+
+    return gemm_fp8_tensorwise_flydsl_kernel(
+        grad_output,
+        grad_scale,
+        input,
+        input_scale,
+        trans_a=True,
+        trans_b=False,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@_flux_flydsl_natural_wgrad.register_fake
+def _(grad_output, input, grad_scale, input_scale):
+    return torch.empty(
+        (grad_output.shape[1], input.shape[1]),
+        device=input.device,
+        dtype=torch.bfloat16,
+    )
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -168,6 +227,14 @@ def build_flux_model(model_config: dict[str, Any]):
     float8_recipe = str(cfg_dict.get("float8_recipe") or "").strip().lower()
     if float8_recipe not in {"", "tensorwise"}:
         raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
+    fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
+    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl"}:
+        raise ValueError(
+            "Unsupported FLUX float8_gemm_backend="
+            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', or 'selective_flydsl'"
+        )
+    if fp8_gemm_backend and not float8_recipe:
+        raise ValueError("FLUX float8_gemm_backend requires float8_recipe='tensorwise'")
     preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
     preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
@@ -199,6 +266,60 @@ def build_flux_model(model_config: dict[str, Any]):
             )
         except ImportError as exc:
             raise ImportError("TorchAO is required for FLUX tensor-wise FP8 training") from exc
+
+        if fp8_gemm_backend:
+            os.environ["PRIMUS_FLUX_FP8_GEMM_BACKEND"] = fp8_gemm_backend
+        else:
+            os.environ.pop("PRIMUS_FLUX_FP8_GEMM_BACKEND", None)
+
+        if fp8_gemm_backend == "selective_triton":
+            from torch._inductor.kernel import mm
+
+            if not getattr(mm, "_PRIMUS_FLUX_SELECTIVE_TRITON", False):
+                raise RuntimeError("selective_triton requires the FLUX FP8 Inductor image patch")
+            logger.info(f"Using Triton FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
+
+        if fp8_gemm_backend == "selective_flydsl":
+            import torchao.float8.float8_ops as float8_ops
+
+            original_addmm = float8_ops.addmm_float8_unwrapped
+
+            def selective_flydsl_addmm(
+                a_data,
+                a_scale,
+                b_data,
+                b_scale,
+                output_dtype,
+                output_scale=None,
+                bias=None,
+                use_fast_accum=False,
+            ):
+                shape = (a_data.shape[0], b_data.shape[1], a_data.shape[1])
+                if (
+                    shape in _FP8_SELECTIVE_GEMM_SHAPES
+                    and output_dtype == torch.bfloat16
+                    and output_scale is None
+                    and bias is None
+                ):
+                    return _flux_flydsl_scaled_mm(
+                        a_data,
+                        b_data,
+                        a_scale.reciprocal(),
+                        b_scale.reciprocal(),
+                    )
+                return original_addmm(
+                    a_data,
+                    a_scale,
+                    b_data,
+                    b_scale,
+                    output_dtype,
+                    output_scale,
+                    bias,
+                    use_fast_accum,
+                )
+
+            float8_ops.addmm_float8_unwrapped = selective_flydsl_addmm
+            logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
 
         full_wgrad_fqns: list[str] = []
         high_precision_wgrad_fqns: list[str] = []

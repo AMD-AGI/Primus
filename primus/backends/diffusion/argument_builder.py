@@ -141,6 +141,12 @@ class DiffusionArgBuilder:
             "fsdp_module_paths_no_reshard": "final_layer",
             "fsdp2_reshard_after_forward": True,
             "compile_transformer_blocks": True,
+            "compile_strategy": "per_block",
+            "compile_backend": "inductor",
+            "compile_fullgraph": True,
+            "compile_dynamic": False,
+            "compile_output_head": False,
+            "profile": False,
             "save_strategy": "dit_only",
             "sp_size": 1,
             "dp_replicate": 1,
@@ -367,6 +373,18 @@ class DiffusionArgBuilder:
             ("gradient_checkpointing",): ("gradient_checkpointing",),
             ("gradient_checkpointing_ratio",): ("gradient_checkpointing_ratio",),
             ("compile_transformer_blocks",): ("compile_transformer_blocks",),
+            ("compile_strategy",): ("compile_strategy",),
+            ("compile_backend",): ("compile_backend",),
+            ("compile_fullgraph",): ("compile_fullgraph",),
+            ("compile_dynamic",): ("compile_dynamic",),
+            ("compile_output_head",): ("compile_output_head",),
+            ("profile",): ("profile",),
+            ("profile_rank",): ("profile_rank",),
+            ("profile_wait_steps",): ("profile_wait_steps",),
+            ("profile_warmup_steps",): ("profile_warmup_steps",),
+            ("profile_active_steps",): ("profile_active_steps",),
+            ("profile_output_dir",): ("profile_output_dir",),
+            ("profile_with_stack",): ("profile_with_stack",),
             ("fsdp2_reshard_after_forward",): ("fsdp2_reshard_after_forward",),
         }
         for source_path, target_path in runtime_map.items():
@@ -377,6 +395,11 @@ class DiffusionArgBuilder:
                     ("fp16",),
                     ("gradient_checkpointing",),
                     ("compile_transformer_blocks",),
+                    ("compile_fullgraph",),
+                    ("compile_dynamic",),
+                    ("compile_output_head",),
+                    ("profile",),
+                    ("profile_with_stack",),
                     ("fsdp2_reshard_after_forward",),
                 }:
                     value = self._coerce_bool(value)
@@ -395,6 +418,9 @@ class DiffusionArgBuilder:
         mlperf = params.get("mlperf") or {}
         mlperf_map = {
             ("enable",): ("mlperf_enable",),
+            ("performance_mode",): ("performance_mode",),
+            ("warmup_train_steps",): ("mlperf_warmup_train_steps",),
+            ("warmup_validation_steps",): ("mlperf_warmup_validation_steps",),
             ("target_eval_loss",): ("mlperf_target_eval_loss",),
             ("eval_samples",): ("mlperf_eval_samples",),
             ("eval_steps",): ("mlperf_eval_steps",),

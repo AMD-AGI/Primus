@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:local}
 user_name: ${PRIMUS_USER:local}
-exp_name: ${PRIMUS_EXP_NAME:flux.1_schnell_t2i-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:flux.1_dev_t2i-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 platform:
@@ -11,7 +11,7 @@ modules:
     framework: diffusion
     config: pre_trainer.yaml
 
-    model: flux.1_schnell_t2i.yaml
+    model: flux.1_dev_t2i.yaml
     overrides:
       sink_level: null
       file_sink_level: INFO
@@ -25,13 +25,13 @@ modules:
         local_batch_size: ${LOCAL_BATCH_SIZE:1}
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
-        gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS:1}
-        output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/flux.1_dev_t2i-pretrain}
         save_steps: ${SAVE_STEPS:100}
         save_strategy: ${SAVE_STRATEGY:dtcp_full}
         save_total_limit: ${CHECKPOINT_KEEP_LATEST:3}
         resume_from_checkpoint: ${RESUME_FROM_CHECKPOINT:latest}
-        run_name: flux.1_schnell_t2i-pretrain
+        run_name: flux.1_dev_t2i-pretrain
 
       data:
         dataset_path: ${DATASET_PATH:}

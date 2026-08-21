@@ -24,22 +24,16 @@ See the [MLPerf FLUX preprocessing instructions](https://github.com/mlcommons/tr
 
 ## Launch
 
-Run from the repository root:
+Use the single maintained entry point documented in
+[`examples/mlperf/flux1/README.md`](../mlperf/flux1/README.md):
 
 ```bash
-DATA_ROOT=/path/to/data
-OUTPUT_ROOT=/path/to/output
-
-docker run --rm --init --privileged \
-  --device=/dev/kfd --device=/dev/dri --group-add video \
-  --ipc=host --network=host --shm-size=20G \
-  -v "$PWD:/workspace/Primus" \
-  -v "$DATA_ROOT:/data" \
-  -v "$OUTPUT_ROOT:/output" \
-  -w /workspace/Primus \
-  zirui3/primus-v26.3-flux:v0.1 \
-  bash examples/diffusion/run_flux_mlperf.sh
+DATA_ROOT=/path/to/data \
+OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
-Override launcher defaults such as `MAX_STEPS`, `LOCAL_BATCH_SIZE`, or `SEED`
-with `docker run --env NAME=value`.
+The natural-backward stack is `zirui3/primus-v26.3-flux:v0.4`, built from
+`examples/mlperf/flux1/Dockerfile`. It pins FlyDSL 0.2.4 and Primus-Turbo
+`a14521b8`, and enables qualified natural-layout wgrads and forward-input FP8
+reuse for the MBS32 recipe.
