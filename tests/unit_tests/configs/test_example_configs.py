@@ -33,10 +33,16 @@ BACKENDS = ("megatron", "torchtitan", "maxtext", "megatron_bridge")
 
 MODULE_NAMES = {"pre_trainer", "post_trainer"}
 
-# Not an experiment: a Transformer Engine precision-matcher fragment that lives
-# next to the recipes and has no work_group / modules of its own.
+# Files shipped next to the recipes that are not runnable experiments, so
+# resolving them is not meaningful:
+#   - lfm2...te-precision: a Transformer Engine precision-matcher fragment with
+#     no work_group / modules of its own.
+#   - native_hf_to_megatron_sft.template: a copy-and-fill template whose `model`
+#     preset and paths are <...> placeholders by design, so it only resolves
+#     once a user substitutes them.
 NOT_AN_EXPERIMENT = {
     "examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml",
+    "examples/megatron/configs/MI355X/native_hf_to_megatron_sft.template.yaml",
 }
 
 
