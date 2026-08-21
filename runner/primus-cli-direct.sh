@@ -698,8 +698,15 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
     fi
 
-    # Build filter argument (only if FILTERS is non-empty)
-    if [ "${#FILTERS[@]}" -gt 0 ]; then
+    # Build filter argument (only if FILTERS is non-empty).
+    # PRIMUS_LOCAL_RANKS_FILTER overrides the default rank-0-only console filter,
+    # which otherwise discards the stderr of a crashing non-zero rank. Set it to
+    # "all" to keep every rank's output.
+    if [ "${PRIMUS_LOCAL_RANKS_FILTER:-}" = "all" ]; then
+        FILTER_ARG=()
+    elif [ -n "${PRIMUS_LOCAL_RANKS_FILTER:-}" ]; then
+        FILTER_ARG=(--local-ranks-filter "$PRIMUS_LOCAL_RANKS_FILTER")
+    elif [ "${#FILTERS[@]}" -gt 0 ]; then
         LOCAL_FILTER=$(IFS=,; echo "${FILTERS[*]}")
         FILTER_ARG=(--local-ranks-filter "$LOCAL_FILTER")
     else
