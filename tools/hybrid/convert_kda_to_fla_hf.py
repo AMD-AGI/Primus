@@ -23,7 +23,7 @@ so `fla_layer_idx` maps to `gdn_idx = 2*i` and `mlp_idx = 2*i+1`.
 Usage
 -----
     python3 tools/hybrid/convert_kda_to_fla_hf.py \\
-        --checkpoint-path output/amd/root/kda_300M_pure-pretrain/checkpoints/iter_0004768 \\
+        --checkpoint-path output/amd/root/kda_300M-precision-pretrain/checkpoints/iter_0004768 \\
         --output-dir output/kda_pure_300M_fla_hf \\
         --config /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json
 

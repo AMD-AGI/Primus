@@ -1,6 +1,6 @@
 # Zebra: Hybrid Recurrent-Attention Models on AMD GPUs
 
-Zebra is the Primus family of **hybrid** models that combine recurrent layers (Mamba, KDA, or GDN) with **Multi-Latent Attention (MLA)** and SwiGLU MLP. Pure recurrent models (KDA/GDN/Mamba without MLA) use FLA-aligned names (`kda_*_pure`, `gdn_*_pure`, `mamba_*`) and are documented separately in the pure KDA/GDN guides.
+Zebra is the Primus family of **hybrid** models that combine recurrent layers (Mamba, KDA, or GDN) with **Multi-Latent Attention (MLA)** and SwiGLU MLP. Pure recurrent models (KDA/GDN/Mamba without MLA) use Megatron-style names: architecture presets at `kda_*` / `gdn_*` / `mamba_*`, with FLA-parity pretrain configs at `{model}-precision-pretrain.yaml` (same pattern as `llama3.2_1B-BF16-pretrain.yaml`). See the pure KDA/GDN guides below.
 
 This guide covers the complete workflow: environment setup, data preparation, pretraining, checkpoint conversion, and evaluation.
 
@@ -67,9 +67,9 @@ The `hybrid_attention_ratio` parameter controls what fraction of recurrent+atten
 |--------|-------|---------------|------------|--------|-----------|
 | `zebra_mamba_1B_hybrid-pretrain.yaml` | 1B (Mamba+MLA) | Mamba SSM | 2048 | ~1B | `meta-llama/Llama-3.2-1B` |
 | `zebra_kda_1B_hybrid-pretrain.yaml` | 1B (KDA+MLA) | Kimi Delta Attention | 8192 | ~1B | `meta-llama/Llama-3.2-1B` |
-| `kda_1B_pure-pretrain.yaml` | 1B (pure KDA) | Kimi Delta Attention | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
+| `kda_1B-precision-pretrain.yaml` | 1B (pure KDA) | Kimi Delta Attention | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
 | `zebra_gdn_1B_hybrid-pretrain.yaml` | 1B (GDN only) | Gated Delta Net | 8192 | ~1B | `fla-hub/gla-1.3B-100B` |
-| `gdn_1B_pure-pretrain.yaml` | 1B (pure GDN) | Gated Delta Net | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
+| `gdn_1B-precision-pretrain.yaml` | 1B (pure GDN) | Gated Delta Net | 2048 | ~1.2B | `meta-llama/Llama-3.2-1B` |
 | `zebra_mamba_3B_hybrid-pretrain.yaml` | 3B (Mamba+MLA) | Mamba SSM | 8192 | ~3B | `meta-llama/Llama-3.2-3B` |
 | `zebra_mamba_8B_hybrid-pretrain.yaml` | 8B (Mamba+MLA) | Mamba SSM | 8192 | ~8B | `meta-llama/Llama-3.1-8B` |
 
@@ -78,18 +78,18 @@ The `hybrid_attention_ratio` parameter controls what fraction of recurrent+atten
 | Config | Layers | Hidden | FFN | Attention Ratio | Attention Type |
 |--------|--------|--------|-----|----------------|----------------|
 | `zebra_mamba_1B_hybrid.yaml` | 32 | 2048 | 8192 | 0.25 | MLA |
-| `kda_1B_pure.yaml` | 32 | 2048 | 8192 | 0.0 (pure KDA) | None |
+| `kda_1B.yaml` | 32 | 2048 | 8192 | 0.0 (pure KDA) | None |
 | `zebra_gdn_1B_hybrid.yaml` | 32 | 2048 | 8192 | 0.0 (pure GDN) | None |
-| `gdn_1B_pure.yaml` | 32 (16 GDN+16 MLP) | 2048 | 8192 | 0.0 (pure GDN) | None |
+| `gdn_1B.yaml` | 32 (16 GDN+16 MLP) | 2048 | 8192 | 0.0 (pure GDN) | None |
 | `zebra_mamba_3B_hybrid.yaml` | 56 | 3072 | 8192 | 0.25 | MLA |
 | `zebra_mamba_8B_hybrid.yaml` | 64 | 4096 | 14436 | 0.25 | MLA |
 
-> **Note on pure KDA**: The `kda_1B_pure` config matches FLA's `kda_1B_pure.json`
+> **Note on pure KDA**: The `kda_1B` config matches FLA's `kda_1B_pure.json`
 > architecture (16 KDA layers, `head_dim=32` for keys, `head_dim=64` for values, tied
 > embeddings, `norm_eps=1e-6`). It uses the FLA Triton kernel (`use_fla_triton_kda: true`)
 > for fused forward+backward during training.
 
-> **Note on pure GDN**: The `gdn_1B_pure` config matches FLA's
+> **Note on pure GDN**: The `gdn_1B` config matches FLA's
 > `gated_deltanet_1B_pure.json` architecture (16 GDN + 16 MLP layers, `num_heads=8`,
 > `num_v_heads=16`, short convolution with kernel size 4, tied embeddings). This config
 > has been validated end-to-end against FLA on MI300X — the training loss curves match
@@ -288,7 +288,7 @@ Other model variants (same launcher, different `--config`):
 
 # Zebra hybrid 1B with pure KDA (no attention layers)
 ./primus-cli container -- train pretrain \
-  --config examples/megatron/configs/MI300X/kda_1B_pure-pretrain.yaml
+  --config examples/megatron/configs/MI300X/kda_1B-precision-pretrain.yaml
 
 # Zebra hybrid 1B with GDN (pure recurrent, no attention)
 ./primus-cli container -- train pretrain \
@@ -296,7 +296,7 @@ Other model variants (same launcher, different `--config`):
 
 # Zebra hybrid 1B pure GDN (FLA-validated, 4-GPU)
 GPUS_PER_NODE=4 ./primus-cli container -- train pretrain \
-  --config examples/megatron/configs/MI300X/gdn_1B_pure-pretrain.yaml
+  --config examples/megatron/configs/MI300X/gdn_1B-precision-pretrain.yaml
 
 # Zebra hybrid 3B
 ./primus-cli container -- train pretrain \
@@ -367,7 +367,7 @@ Pure GDN models use a dedicated converter that maps Primus's fused projections t
 
 ```bash
 python tools/hybrid/convert_gdn_to_fla_hf.py \
-    --checkpoint-path output/amd/root/gdn_1B_pure-pretrain/checkpoints/iter_0076294 \
+    --checkpoint-path output/amd/root/gdn_1B-precision-pretrain/checkpoints/iter_0076294 \
     --output-dir output/gdn_pure_1B_fla_hf \
     --config /path/to/gated_deltanet_1B_pure.json
 ```
@@ -399,7 +399,7 @@ python tools/hybrid/convert_zebra_llama_to_hf.py \
 
 # Pure KDA model
 python tools/hybrid/convert_zebra_llama_to_hf.py \
-    --checkpoint-path output/kda_1B_pure-pretrain/iter_0038000 \
+    --checkpoint-path output/kda_1B-precision-pretrain/iter_0038000 \
     --output-dir output/kda_1B_pure_hf
 ```
 
@@ -581,9 +581,9 @@ Primus/
 │   ├── configs/MI300X/
 │   │   ├── zebra_mamba_1B_hybrid-pretrain.yaml        # 1B Mamba+MLA
 │   │   ├── zebra_kda_1B_hybrid-pretrain.yaml     # 1B KDA+MLA hybrid
-│   │   ├── kda_1B_pure-pretrain.yaml # 1B pure KDA
+│   │   ├── kda_1B-precision-pretrain.yaml # 1B pure KDA
 │   │   ├── zebra_gdn_1B_hybrid-pretrain.yaml     # 1B GDN
-│   │   ├── gdn_1B_pure-pretrain.yaml # 1B pure GDN (FLA-validated)
+│   │   ├── gdn_1B-precision-pretrain.yaml # 1B pure GDN (FLA-validated)
 │   │   ├── zebra_mamba_3B_hybrid-pretrain.yaml         # 3B Mamba+MLA
 │   │   └── zebra_mamba_8B_hybrid-pretrain.yaml         # 8B Mamba+MLA
 │   ├── prepare_fineweb_edu.py                   # Data preparation script
@@ -591,9 +591,9 @@ Primus/
 │   └── preprocess_data.py                       # Megatron tokenizer
 ├── primus/configs/models/megatron/
 │   ├── zebra_mamba_1B_hybrid.yaml                      # 1B model architecture
-│   ├── kda_1B_pure.yaml             # 1B pure KDA architecture
+│   ├── kda_1B.yaml             # 1B pure KDA architecture
 │   ├── zebra_gdn_1B_hybrid.yaml                  # 1B GDN architecture
-│   ├── gdn_1B_pure.yaml             # 1B pure GDN (FLA-validated)
+│   ├── gdn_1B.yaml             # 1B pure GDN (FLA-validated)
 │   ├── zebra_mamba_3B_hybrid.yaml                      # 3B model architecture
 │   └── zebra_mamba_8B_hybrid.yaml                      # 8B model architecture
 ├── tools/

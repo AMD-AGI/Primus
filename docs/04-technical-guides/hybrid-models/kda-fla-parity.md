@@ -79,7 +79,7 @@ python tools/hybrid/convert_fla_kda_init_to_megatron.py
 #    Primus's patch system -- no separate apply step needed.
 ./primus-cli direct --log_file primus_kda.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml
+  --config examples/megatron/configs/MI300X/kda_300M-precision-pretrain.yaml
 ```
 
 ### Recommended toggle profile (YAML or env var)
@@ -137,7 +137,7 @@ for the patch-by-patch breakdown. Nothing needs to be run by hand.
 
 ### C. YAML configuration changes
 
-#### `primus/configs/models/megatron/kda_300M_pure.yaml` (new)
+#### `primus/configs/models/megatron/kda_300M.yaml` (new)
 
 300M architecture-only YAML matched to FLA's `kda_300M_pure.json`:
 
@@ -167,7 +167,7 @@ norm_epsilon: 1.0e-6
 position_embedding_type: none
 ```
 
-#### `examples/megatron/configs/MI300X/kda_300M_pure-pretrain.yaml` (new)
+#### `examples/megatron/configs/MI300X/kda_300M-precision-pretrain.yaml` (new)
 
 The training-side config sets:
 
@@ -258,9 +258,9 @@ primus/backends/megatron/patches/                  # 6 patches (same as GDN), Pr
   fla_runtime_patches.py                           # resolves PRIMUS_FLA_* knobs onto args
   mamba_fla_data_patches.py                        # FLA-order dataset shim wiring
 primus/configs/models/megatron/
-  kda_300M_pure.yaml                   # architecture-only
+  kda_300M.yaml                   # architecture-only
 examples/megatron/configs/MI300X/
-  kda_300M_pure-pretrain.yaml          # training config
+  kda_300M-precision-pretrain.yaml          # training config
 tools/hybrid/
   convert_fla_to_megatron.py                       # FLA Arrow → Megatron .bin/.idx (shared)
   fla_order_dataset.py                             # FLA-order dataset shim (shared)

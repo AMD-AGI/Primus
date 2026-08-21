@@ -21,29 +21,31 @@ HYBRID_MODELS = [
 ]
 
 PURE_MODELS = [
-    "kda_1B_pure",
-    "gdn_1B_pure",
-    "kda_300M_pure",
-    "gdn_300M_pure",
+    "kda_1B",
+    "gdn_1B",
+    "kda_300M",
+    "gdn_300M",
 ]
 
 PRETRAIN_CONFIGS = [
     "MI300X/zebra_mamba_1B_hybrid-pretrain.yaml",
     "MI300X/zebra_kda_1B_hybrid-pretrain.yaml",
     "MI300X/zebra_gdn_1B_hybrid-pretrain.yaml",
-    "MI300X/kda_1B_pure-pretrain.yaml",
-    "MI300X/gdn_1B_pure-pretrain.yaml",
-    "MI300X/kda_300M_pure-pretrain.yaml",
+    "MI300X/kda_1B-precision-pretrain.yaml",
+    "MI300X/gdn_1B-precision-pretrain.yaml",
+    "MI300X/kda_300M-precision-pretrain.yaml",
     "MI355X/zebra_mamba_1B_hybrid-pretrain.yaml",
-    "MI355X/kda_1B_pure-pretrain.yaml",
+    "MI355X/kda_1B-precision-pretrain.yaml",
 ]
 
 DEPRECATED_SYMLINKS = [
     "examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml",
     "examples/megatron/configs/MI300X/zebra_llama_1B_kda_pure-pretrain.yaml",
     "examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml",
+    "examples/megatron/configs/MI300X/kda_1B_pure-pretrain.yaml",
     "primus/configs/models/megatron/zebra_llama_1B.yaml",
     "primus/configs/models/megatron/zebra_llama_1B_kda_pure.yaml",
+    "primus/configs/models/megatron/kda_1B_pure.yaml",
 ]
 
 
@@ -90,8 +92,8 @@ def test_deprecated_symlinks_resolve(rel_path):
     ), f"broken symlink: {rel_path} -> {os.readlink(path) if path.is_symlink() else path}"
 
 
-def test_kda_1B_pure_inherits_mamba_base_defaults():
-    cfg = PresetLoader.load("kda_1B_pure", "megatron", config_type="models")
+def test_kda_1B_inherits_mamba_base_defaults():
+    cfg = PresetLoader.load("kda_1B", "megatron", config_type="models")
     base = PresetLoader.load("mamba_base", "megatron", config_type="models")
     assert cfg["use_legacy_models"] == base["use_legacy_models"]
     assert cfg["attention_dropout"] == base["attention_dropout"]

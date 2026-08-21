@@ -38,7 +38,7 @@ Inside the `rocm/primus:v26.2` container with the repo mounted at
 # no separate apply step needed.
 ./primus-cli direct --log_file primus_gdn.log \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/gdn_300M_pure-pretrain.yaml
+  --config examples/megatron/configs/MI300X/gdn_300M-precision-pretrain.yaml
 ```
 
 Optional toggles (all default off unless noted).  Each is exposed at
@@ -109,7 +109,7 @@ it on the relevant config flag, so it's a no-op unless that flag is set.
 
 ### C. YAML configuration changes
 
-#### `primus/configs/models/megatron/{mamba_base,kda_*_pure,gdn_*_pure,zebra_*_hybrid}.yaml`
+#### `primus/configs/models/megatron/{mamba_base,kda_*,gdn_*,zebra_*_hybrid}.yaml`
 
 Renamed `bases:` → `extends:` (4 files). The Primus YAML resolver was
 silently dropping inheritance from `bases:` lists, which meant model
@@ -118,7 +118,7 @@ configs were missing the dropout/normalization defaults from
 checking that `hidden_dropout` was leaking through as `0.1` despite
 `mamba_base.yaml` setting it to `0.0`.
 
-#### `examples/megatron/configs/MI300X/gdn_300M_pure-pretrain.yaml`
+#### `examples/megatron/configs/MI300X/gdn_300M-precision-pretrain.yaml`
 
 The training-side config picked up these settings during the
 parity work:

@@ -14,7 +14,7 @@ Usage:
     Example:
         PRIMUS_FLA_DATA=1 \\
         PRIMUS_FLA_CACHE_DIR=/home/<user>/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train \\
-        EXP=examples/megatron/configs/MI300X/gdn_300M_pure-pretrain.yaml \\
+        EXP=examples/megatron/configs/MI300X/gdn_300M-precision-pretrain.yaml \\
         GPUS_PER_NODE=8 bash examples/run_pretrain.sh
 """
 
