@@ -1,7 +1,7 @@
 extends:
   - mamba_base.yaml
 
-# Pure KDA 1B — matches FLA kda_1B.json (no zebra_ prefix: not a hybrid model)
+# Pure KDA 1B — matches FLA kda_1B.json (no hylo_ prefix: not a hybrid model)
 model_type: mamba
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B

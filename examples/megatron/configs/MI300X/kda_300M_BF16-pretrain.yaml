@@ -10,7 +10,7 @@ modules:
 
     model: kda_300M.yaml
     overrides:
-      wandb_project: "Primus_Zebra_300M_KDA_Pure_Pretrain"
+      wandb_project: "Primus_Hylo_300M_KDA_Pure_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0

@@ -9,13 +9,13 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_ROOT = REPO_ROOT / "examples" / "megatron" / "configs"
 
 HYBRID_MODELS = [
-    "zebra_mamba_1B_hybrid",
-    "zebra_mamba_3B_hybrid",
-    "zebra_mamba_8B_hybrid",
-    "zebra_kda_1B_hybrid",
-    "zebra_gdn_1B_hybrid",
-    "zebra_mamba_300M_hybrid",
-    "zebra_gdn_300M_hybrid",
+    "hylo_mamba_1B_hybrid",
+    "hylo_mamba_3B_hybrid",
+    "hylo_mamba_8B_hybrid",
+    "hylo_kda_1B_hybrid",
+    "hylo_gdn_1B_hybrid",
+    "hylo_mamba_300M_hybrid",
+    "hylo_gdn_300M_hybrid",
 ]
 
 PURE_MODELS = [
@@ -26,17 +26,17 @@ PURE_MODELS = [
 ]
 
 HYBRID_PRETRAIN_CONFIGS = [
-    "MI300X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_mamba_300M_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_gdn_300M_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_mamba_3B_BF16-pretrain.yaml",
-    "MI300X/zebra_llama_mamba_8B_BF16-pretrain.yaml",
-    "MI325X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
-    "MI355X/zebra_llama_mamba_1B_BF16-pretrain.yaml",
-    "MI355X/zebra_llama_kda_1B_BF16-pretrain.yaml",
-    "MI355X/zebra_llama_gdn_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_kda_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_gdn_1B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_300M_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_gdn_300M_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_3B_BF16-pretrain.yaml",
+    "MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml",
+    "MI325X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_mamba_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_kda_1B_BF16-pretrain.yaml",
+    "MI355X/hylo_llama_gdn_1B_BF16-pretrain.yaml",
 ]
 
 PURE_PRETRAIN_CONFIGS = [
@@ -89,7 +89,7 @@ def test_kda_1B_inherits_mamba_base_defaults():
 
 
 def test_mi300x_kda_hybrid_batch_size():
-    cfg_path = CONFIG_ROOT / "MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml"
+    cfg_path = CONFIG_ROOT / "MI300X/hylo_llama_kda_1B_BF16-pretrain.yaml"
     overrides = parse_yaml(str(cfg_path))["modules"]["pre_trainer"]["overrides"]
     assert overrides["micro_batch_size"] == 8
     assert overrides["global_batch_size"] == 64

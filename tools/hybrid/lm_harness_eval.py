@@ -8,10 +8,10 @@ from lm_eval.utils import make_table
 from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from modeling_zebra_llama import ZebraLlamaConfig, ZebraLlamaForCausalLM
+from modeling_hylo_llama import HyloLlamaConfig, HyloLlamaForCausalLM
 
-AutoConfig.register("zebra_llama", ZebraLlamaConfig)
-AutoModelForCausalLM.register(ZebraLlamaConfig, ZebraLlamaForCausalLM)
+AutoConfig.register("hylo_llama", HyloLlamaConfig)
+AutoModelForCausalLM.register(HyloLlamaConfig, HyloLlamaForCausalLM)
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
     )
 
     print("=" * 72)
-    print("Zebra hybrid lm-eval")
+    print("Hylo hybrid lm-eval")
     print("=" * 72)
     print(f"  Model path:  {args.model_path}")
     print(f"  Tokenizer:   {tokenizer_path}")

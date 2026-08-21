@@ -638,7 +638,7 @@ meaningfully affects RACE.
 
 ## See also
 
-- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Zebra hybrid family
+- [`docs/04-technical-guides/hybrid-models/README.md`](README.md) — full Hylo hybrid family
   overview (1 B / 3 B / 8 B Mamba+MLA, KDA variants)
 - [`docs/04-technical-guides/hybrid-models/gdn-guide.md`](gdn-guide.md) — the GDN companion
   recipe (shares Megatron patches and dataset shim with this one)

@@ -674,14 +674,14 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def test_zebra_mamba_1B_hybrid(self):
+    def test_hylo_mamba_1B_hybrid(self):
         # Hybrid Mamba+MLA (HybridStack) path. num_layers=8 is the minimum that
         # keeps the default hybrid_attention_ratio=0.25 from allocating zero
         # attention layers (division by zero).
         run_script(
             self.__class__.__name__,
-            "zebra_mamba_1B_hybrid",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/zebra_llama_mamba_1B_BF16-pretrain.yaml",
+            "hylo_mamba_1B_hybrid",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/hylo_llama_mamba_1B_BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -696,7 +696,7 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     def test_mamba_130M_bridge_pretrain(self):
-        # Only E2E covering the megatron_bridge backend (mamba/zebra above use
+        # Only E2E covering the megatron_bridge backend (mamba/hylo above use
         # the megatron backend). extra_args pin a tiny shape so the test doesn't
         # depend on the example yaml's sizes. Don't override seq_length: the
         # recipe feeds it to both model and dataset but a CLI override reaches

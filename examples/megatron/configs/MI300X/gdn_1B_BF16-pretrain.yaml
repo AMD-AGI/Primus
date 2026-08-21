@@ -10,7 +10,7 @@ modules:
 
     model: gdn_1B.yaml
     overrides:
-      wandb_project: "Primus_Zebra_1B_GDN_Pure_Pretrain"
+      wandb_project: "Primus_Hylo_1B_GDN_Pure_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0

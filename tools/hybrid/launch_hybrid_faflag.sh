@@ -49,7 +49,7 @@ export PRIMUS_FLA_DATA=1
 # that drives the +0.02 late-training loss gap and the +2.4 warm-up bump.
 export PRIMUS_FLA_CACHE_DIR=${PRIMUS_FLA_CACHE_DIR:-$HOME/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train}
 
-EXP=${EXP:-examples/megatron/configs/MI300X/zebra_llama_gdn_300M_BF16-pretrain.yaml}
+EXP=${EXP:-examples/megatron/configs/MI300X/hylo_llama_gdn_300M_BF16-pretrain.yaml}
 LOG=${LOG:-primus_gdn_hybrid_300M_faflag.log}
 
 echo "==========[launch_hybrid_faflag.sh]=========="

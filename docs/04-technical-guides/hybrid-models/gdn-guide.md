@@ -574,6 +574,6 @@ Expected with all four `PRIMUS_FLA_`* env vars set. The biggest single cost is `
 
 ## See also
 
-- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Zebra hybrid family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
+- `[docs/04-technical-guides/hybrid-models/README.md](README.md)` — full Hylo hybrid family overview (1B / 3B / 8B Mamba+MLA, KDA variants)
 - `[gdn-fla-parity.md](gdn-fla-parity.md)` — exhaustive list of code/config/runtime changes that made parity possible
 - FLA upstream: [https://github.com/fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)

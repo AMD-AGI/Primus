@@ -109,7 +109,7 @@ it on the relevant config flag, so it's a no-op unless that flag is set.
 
 ### C. YAML configuration changes
 
-#### `primus/configs/models/megatron/{mamba_base,kda_*,gdn_*,zebra_*_hybrid}.yaml`
+#### `primus/configs/models/megatron/{mamba_base,kda_*,gdn_*,hylo_*_hybrid}.yaml`
 
 Renamed `bases:` → `extends:` (4 files). The Primus YAML resolver was
 silently dropping inheritance from `bases:` lists, which meant model

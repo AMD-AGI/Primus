@@ -1,5 +1,0 @@
-recipe: zebra.zebra
-flavor: zebra_llama_3b_finetune_config
-
-dataset:
-    mock: true

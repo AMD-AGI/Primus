@@ -50,7 +50,7 @@ downstream lm-eval can score each on its own merits.
 Usage (inside the container):
 
     python tools/hybrid/convert_mamba_hybrid_to_fla_hf.py \
-        --checkpoint-path output/amd/root/zebra_llama_mamba_300M_BF16-pretrain/checkpoints/iter_0004768 \
+        --checkpoint-path output/amd/root/hylo_llama_mamba_300M_BF16-pretrain/checkpoints/iter_0004768 \
         --output-dir output/mamba_hybrid_300M_fla_hf \
         --tokenizer /home/<user>/checkpoints/gdn_300M_10B
 """

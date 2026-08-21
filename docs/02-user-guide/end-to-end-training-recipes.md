@@ -194,7 +194,7 @@ Scale batch size with node count and align `tensor_model_parallel_size`, `pipeli
 
 **Model-specific notes:**
 
-- **Zebra hybrid** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/zebra_llama_mamba_1B_BF16-pretrain.yaml` (and `_3B`, `_8B`), and run via the legacy runtime — prefix the command with `PRIMUS_TRAIN_RUNTIME=legacy`. Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
+- **Hylo hybrid** (hybrid Mamba+MLA) pretrain presets ship at `examples/megatron/configs/<ARCH>/hylo_llama_mamba_1B_BF16-pretrain.yaml` (and `_3B`, `_8B`), and run via the legacy runtime — prefix the command with `PRIMUS_TRAIN_RUNTIME=legacy`. Megatron Bridge SFT variants live under `examples/megatron_bridge/configs/<ARCH>/`.
 - **MoE models** (DeepSeek-V2-Lite, Mixtral, Qwen3-A3B, GPT-OSS) may need extra grouped-GEMM or router flags; the [Megatron-LM recipe](megatron-lm-training.md#31-single-node-training) gives the exact command per model.
 
 ---
