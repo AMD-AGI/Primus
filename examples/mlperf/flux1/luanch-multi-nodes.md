@@ -5,8 +5,8 @@ allocation. A single `srun` cannot span multiple allocation job IDs, so launch
 one node-local process through each allocation and point all four processes at
 the same torchrun rendezvous.
 
-Prefer one four-node allocation and
-`examples/mlperf/flux1/run_with_docker_slurm.sh` whenever possible.
+Prefer one four-node allocation and the local `run_with_docker.sh` whenever
+possible.
 
 ## Prerequisites
 
@@ -43,25 +43,13 @@ ROOT=${ROOT:?}
 
 cd "$REPO"
 exec env \
+  FLUX_NODE_LAUNCH=1 \
   DATA_ROOT=/shared_nfs/zirui/data \
   OUTPUT_ROOT="$ROOT" \
-  DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4 \
-  NNODES=4 NODE_RANK="$rank" MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT" \
-  GPUS_PER_NODE=8 DP_REPLICATE=4 \
-  LOCAL_BATCH_SIZE=32 GRADIENT_ACCUMULATION_STEPS=1 \
-  MAX_STEPS=30000 LR=0.00025 WARMUP_STEPS=800 SEED=10007 \
-  GRADIENT_CHECKPOINTING_RATIO=0 \
-  FLUX_FLOAT8_RECIPE=tensorwise FLUX_FP8_GEMM_BACKEND=selective_flydsl \
-  TORCHINDUCTOR_BENCHMARK_FUSION=1 PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
-  PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
-  ATTENTION_BACKEND=flash_attn_aiter \
-  COMPILE_TRANSFORMER_BLOCKS=true COMPILE_STRATEGY=per_block \
-  COMPILE_FULLGRAPH=true COMPILE_DYNAMIC=false \
-  FSDP2_RESHARD_AFTER_FORWARD=false FSDP2_REDUCE_DTYPE=bf16 \
-  FLUX_PERFORMANCE_MODE=nemo_mlperf \
-  TARGET_ACCURACY=0.586 VAL_CHECK_INTERVAL=262144 \
+  NNODES=4 NODE_RANK="$rank" \
+  MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT" \
   CONTAINER_NAME="flux-fp8-4n-${rank}" \
-  bash examples/mlperf/flux1/run_with_docker.sh
+  bash "$REPO/examples/mlperf/flux1/run_with_docker.sh"
 EOF
 chmod +x "$ROOT/launch_node.sh"
 export REPO ROOT MASTER_ADDR MASTER_PORT

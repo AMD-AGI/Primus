@@ -45,7 +45,7 @@ Relative to the matched unified baseline, this is about `1.03x`; relative to the
 
 Files changed:
 
-- `docker/flux-fp8/Dockerfile.v26.3-natural-bwd`
-- `local_runs/run_flux_mlperf.sh`
+- `examples/mlperf/flux1/Dockerfile`
+- `examples/mlperf/flux1/run_with_docker.sh`
 
 The remaining path to 1.20x depends on the separate selective-contraction kernel campaign and/or a larger complete backward-region fusion. The candidate has passed full MBS32 convergence both with stateful periodic checkpoints and in the checkpoint-disabled matched E2E setup, plus checkpoint/resume, an MBS64 smoke test, and 54 unit tests. Final multi-node qualification remains before promotion.

@@ -7,8 +7,8 @@ loss threshold of `0.586`.
 ## Docker image
 
 The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default. This image
-contains the selective FlyDSL and natural-backward optimizations from
-`docker/flux-fp8/Dockerfile.v26.3-natural-bwd`.
+contains the selective FlyDSL and natural-backward optimizations from the
+[`Dockerfile`](Dockerfile) in this directory.
 
 ```bash
 docker pull zirui3/primus-v26.3-flux:v0.4
@@ -77,31 +77,22 @@ sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
   -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
   $NODELIST_ARG \
   --output="$OUTPUT_ROOT-%j.slurm.log" \
-  --wrap="cd '$REPO' && env DATA_ROOT='$DATA_ROOT' OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
-    DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4 \
-    DP_REPLICATE=4 LOCAL_BATCH_SIZE=32 GRADIENT_ACCUMULATION_STEPS=1 \
-    LR=0.00025 WARMUP_STEPS=800 GRADIENT_CHECKPOINTING_RATIO=0 \
-    FSDP2_REDUCE_DTYPE=bf16 FLUX_FP8_GEMM_BACKEND=selective_flydsl \
-    TORCHINDUCTOR_BENCHMARK_FUSION=1 PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
-    PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
-    bash examples/mlperf/flux1/run_with_docker_slurm.sh"
+  --wrap="cd '$REPO' && DATA_ROOT='$DATA_ROOT' \
+    OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
+    bash examples/mlperf/flux1/run_with_docker.sh"
 ```
 
 This gives 32 GPUs, HSDP `dp_replicate=4`, `dp_shard=8`, MBS 32, GA 1, and
 GBS 1024. Verify that the selected account and QOS are allowed before
 submitting. For nodes split across independent allocations, follow
-[`luanch-multi-nodes.md`](../../../luanch-multi-nodes.md).
+[`luanch-multi-nodes.md`](luanch-multi-nodes.md).
 
-From an existing four-node allocation, run only the command wrapped above:
+The launcher selects the validated 4-node MBS32/GBS1024 defaults automatically.
+From an existing four-node allocation, run:
 
 ```bash
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
-DP_REPLICATE=4 LOCAL_BATCH_SIZE=32 GRADIENT_ACCUMULATION_STEPS=1 \
-LR=0.00025 WARMUP_STEPS=800 GRADIENT_CHECKPOINTING_RATIO=0 \
-FSDP2_REDUCE_DTYPE=bf16 FLUX_FP8_GEMM_BACKEND=selective_flydsl \
-TORCHINDUCTOR_BENCHMARK_FUSION=1 PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
-PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
-bash examples/mlperf/flux1/run_with_docker_slurm.sh
+bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
 Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
@@ -112,9 +103,10 @@ Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
 
 ```text
 examples/mlperf/flux1/
+├── Dockerfile
 ├── README.md
 ├── flux.1_schnell_t2i-pretrain.yaml
+├── luanch-multi-nodes.md
 ├── requirements.txt
-├── run_with_docker.sh
-└── run_with_docker_slurm.sh
+└── run_with_docker.sh
 ```
