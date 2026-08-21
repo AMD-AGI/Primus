@@ -286,7 +286,7 @@ If you are using AINIC in your cluster, you can use the `runner/use_ainic.yaml` 
 
 Here is an example of using the AINIC configuration file to run a training job:
 ```bash
-./primus-cli --config runner/use_ainic.yaml slurm srun -N 2 -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml
+./primus-cli --config runner/use_ainic.yaml slurm srun -N 2 -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
 ```
 
 ### Configuration Priority
