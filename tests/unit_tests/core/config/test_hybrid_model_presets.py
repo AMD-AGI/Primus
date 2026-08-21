@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
 
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.config.yaml_loader import parse_yaml
@@ -86,7 +85,9 @@ def test_pretrain_configs_reference_existing_models(rel_path):
 def test_deprecated_symlinks_resolve(rel_path):
     path = REPO_ROOT / rel_path
     assert path.exists(), f"missing deprecated symlink: {rel_path}"
-    assert path.resolve().exists(), f"broken symlink: {rel_path} -> {os.readlink(path) if path.is_symlink() else path}"
+    assert (
+        path.resolve().exists()
+    ), f"broken symlink: {rel_path} -> {os.readlink(path) if path.is_symlink() else path}"
 
 
 def test_kda_1B_pure_inherits_mamba_base_defaults():
