@@ -6,11 +6,12 @@ loss threshold of `0.586`.
 
 ## Docker image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.1` by default. Pull it
-before starting training:
+The launch scripts use `zirui3/primus-v26.3-flux:v0.4` by default. This image
+contains the selective FlyDSL and natural-backward optimizations from
+`docker/flux-fp8/Dockerfile.v26.3-natural-bwd`.
 
 ```bash
-docker pull zirui3/primus-v26.3-flux:v0.1
+docker pull zirui3/primus-v26.3-flux:v0.4
 ```
 
 ## Prepare data
@@ -60,27 +61,57 @@ COMPILE_TRANSFORMER_BLOCKS=false \
 bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
-## Run with Slurm or Spur
+## Run on four Slurm or Spur nodes
 
-From an existing allocation, launch one Docker container per node and one
-training process per GPU. Spur exposes the Slurm environment and `srun`
-interface used by this script, so both schedulers use the same entry point:
+Submit one four-node allocation; the script uses one `srun` task per node and
+starts eight training processes in each container. Set `NODELIST_ARG` to
+`--nodelist=node1,node2,node3,node4` only when specific idle nodes are needed.
 
 ```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
+REPO=/shared_nfs/zirui/code/primus-compile
+DATA_ROOT=/shared_nfs/zirui/data
+OUTPUT_ROOT=/shared_nfs/zirui/runs/flux-fp8-4n
+NODELIST_ARG=
+
+sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
+  -N4 --ntasks-per-node=1 --exclusive --gpus-per-node=8 -t 04:00:00 \
+  $NODELIST_ARG \
+  --output="$OUTPUT_ROOT-%j.slurm.log" \
+  --wrap="cd '$REPO' && env DATA_ROOT='$DATA_ROOT' OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
+    DOCKER_IMAGE=zirui3/primus-v26.3-flux:v0.4 \
+    DP_REPLICATE=4 LOCAL_BATCH_SIZE=32 GRADIENT_ACCUMULATION_STEPS=1 \
+    LR=0.00025 WARMUP_STEPS=800 GRADIENT_CHECKPOINTING_RATIO=0 \
+    FSDP2_REDUCE_DTYPE=bf16 FLUX_FP8_GEMM_BACKEND=selective_flydsl \
+    TORCHINDUCTOR_BENCHMARK_FUSION=1 PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
+    PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
+    bash examples/mlperf/flux1/run_with_docker_slurm.sh"
+```
+
+This gives 32 GPUs, HSDP `dp_replicate=4`, `dp_shard=8`, MBS 32, GA 1, and
+GBS 1024. Verify that the selected account and QOS are allowed before
+submitting. For nodes split across independent allocations, follow
+[`luanch-multi-nodes.md`](../../../luanch-multi-nodes.md).
+
+From an existing four-node allocation, run only the command wrapped above:
+
+```bash
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+DP_REPLICATE=4 LOCAL_BATCH_SIZE=32 GRADIENT_ACCUMULATION_STEPS=1 \
+LR=0.00025 WARMUP_STEPS=800 GRADIENT_CHECKPOINTING_RATIO=0 \
+FSDP2_REDUCE_DTYPE=bf16 FLUX_FP8_GEMM_BACKEND=selective_flydsl \
+TORCHINDUCTOR_BENCHMARK_FUSION=1 PRIMUS_FLUX_AITER_ATOMIC_FP32=0 \
+PRIMUS_FLUX_REUSE_FP8_INPUT=1 \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `LOCAL_BATCH_SIZE`,
-`SEED`, `MASTER_PORT`, `SAVE_STRATEGY`, `SAVE_STEPS`,
-`RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
+Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
+`SAVE_STRATEGY`, `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and
+`MLPERF_CLEAR_CACHES=false`.
 
 ## Files
 
 ```text
 examples/mlperf/flux1/
-├── Dockerfile
 ├── README.md
 ├── flux.1_schnell_t2i-pretrain.yaml
 ├── requirements.txt

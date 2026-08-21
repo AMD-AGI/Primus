@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.3}
+DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4}
 CONTAINER_NAME=${CONTAINER_NAME:-primus-flux-mlperf}
 NOFILE_LIMIT=${NOFILE_LIMIT:-1048576}
 

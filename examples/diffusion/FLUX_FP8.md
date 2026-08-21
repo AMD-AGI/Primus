@@ -65,10 +65,11 @@ selective-gemm image also enables MBS32-only Inductor fusion benchmarking and
 the faster AITER hd128 backward conversion path; MBS64 retains the prior AITER
 accumulation policy.
 
-The production MBS32/MBS64 stack is `zirui3/primus-v26.3-flux:v0.3`, built
-from `docker/flux-fp8/Dockerfile.v26.3-combined`. It pins FlyDSL 0.2.4 and
+The natural-backward MBS32/MBS64 stack is
+`zirui3/primus-v26.3-flux:v0.4`, built from
+`docker/flux-fp8/Dockerfile.v26.3-natural-bwd`. It pins FlyDSL 0.2.4 and
 Primus-Turbo commit `a14521b8`, retaining the MBS32 optimizations while adding
-the two qualified MBS64 natural-layout TN wgrads. Use
+the qualified natural-layout wgrads and forward-input FP8 reuse. Use
 `FLUX_FP8_GEMM_BACKEND=selective_flydsl`; exact-shape dispatch keeps the MBS32
 and MBS64 paths independent. `Dockerfile.v26.3-pr453-tn-wgrad` remains available
 to reproduce the earlier MBS64-only qualification image.

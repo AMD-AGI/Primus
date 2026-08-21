@@ -25,7 +25,7 @@ modules:
         local_batch_size: ${LOCAL_BATCH_SIZE:1}
         steps: ${MAX_STEPS:50}
         num_train_epochs: 1000
-        gradient_accumulation_steps: 1
+        gradient_accumulation_steps: ${GRADIENT_ACCUMULATION_STEPS:1}
         output_dir: ${OUTPUT_DIR:./output/flux.1_schnell_t2i-pretrain}
         save_steps: ${SAVE_STEPS:100}
         save_strategy: ${SAVE_STRATEGY:dtcp_full}
@@ -58,11 +58,19 @@ modules:
         attention_backend: ${ATTENTION_BACKEND:sdpa}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:true}
         gradient_checkpointing_ratio: ${GRADIENT_CHECKPOINTING_RATIO:1.0}
-        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:false}
+        compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
+        compile_strategy: ${COMPILE_STRATEGY:per_block}
+        compile_backend: ${COMPILE_BACKEND:inductor}
+        compile_fullgraph: ${COMPILE_FULLGRAPH:true}
+        compile_dynamic: ${COMPILE_DYNAMIC:false}
+        compile_output_head: ${COMPILE_OUTPUT_HEAD:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
 
       mlperf:
         enable: ${MLPERF_ENABLE:false}
+        performance_mode: ${FLUX_PERFORMANCE_MODE:null}
+        warmup_train_steps: ${MLPERF_WARMUP_TRAIN_STEPS:2}
+        warmup_validation_steps: ${MLPERF_WARMUP_VALIDATION_STEPS:2}
         target_eval_loss: ${TARGET_ACCURACY:0.586}
         eval_samples: ${VAL_CHECK_INTERVAL:262144}
         output_file: ${MLLOG_OUTPUT_FILE:}
