@@ -84,13 +84,14 @@ The `hybrid_attention_ratio` parameter controls what fraction of recurrent+atten
 | `zebra_mamba_3B_hybrid.yaml` | 56 | 3072 | 8192 | 0.25 | MLA |
 | `zebra_mamba_8B_hybrid.yaml` | 64 | 4096 | 14436 | 0.25 | MLA |
 
-> **Note on pure KDA**: The `kda_1B` config matches FLA's `kda_1B_pure.json`
+> **Note on pure KDA**: The `kda_1B` config matches FLA's `kda_1B.json`
 > architecture (16 KDA layers, `head_dim=32` for keys, `head_dim=64` for values, tied
 > embeddings, `norm_eps=1e-6`). It uses the FLA Triton kernel (`use_fla_triton_kda: true`)
-> for fused forward+backward during training.
+> for fused forward+backward during training. Older FLA trees may still ship
+> `kda_1B_pure.json`; hybrid conversion tools accept both names.
 
 > **Note on pure GDN**: The `gdn_1B` config matches FLA's
-> `gated_deltanet_1B_pure.json` architecture (16 GDN + 16 MLP layers, `num_heads=8`,
+> `gated_deltanet_1B.json` architecture (16 GDN + 16 MLP layers, `num_heads=8`,
 > `num_v_heads=16`, short convolution with kernel size 4, tied embeddings). This config
 > has been validated end-to-end against FLA on MI300X — the training loss curves match
 > within ~1% across 76K steps on FineWeb-Edu 10BT. See
@@ -369,7 +370,7 @@ Pure GDN models use a dedicated converter that maps Primus's fused projections t
 python tools/hybrid/convert_gdn_to_fla_hf.py \
     --checkpoint-path output/amd/root/gdn_1B-precision-pretrain/checkpoints/iter_0076294 \
     --output-dir output/gdn_pure_1B_fla_hf \
-    --config /path/to/gated_deltanet_1B_pure.json
+    --config /path/to/gated_deltanet_1B.json
 ```
 
 This handles:

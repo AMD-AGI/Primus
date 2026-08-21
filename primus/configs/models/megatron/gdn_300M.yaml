@@ -1,7 +1,7 @@
 extends:
   - mamba_base.yaml
 
-# Pure Gated DeltaNet 300M — matches FLA gated_deltanet_300M_pure.json exactly
+# Pure Gated DeltaNet 300M — matches FLA gated_deltanet_300M.json exactly
 #   ~300M params (tied embeddings)
 #   12 GDN blocks + 12 MLP blocks = 24 Megatron sublayers
 model_type: mamba

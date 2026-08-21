@@ -56,7 +56,7 @@ The 300M pure-GDN model has:
 - Tokenizer: `meta-llama/Llama-3.2-1B` (128k vocab)
 - Total parameters: **0.308B**
 
-Training schedule (matched to FLA's `gated_deltanet_300M_pure.json`):
+Training schedule (matched to FLA's `gated_deltanet_300M.json`):
 
 - 4768 iterations × 1024 global batch × 2048 seq len = **10.0 B tokens**
 - AdamW (β1=0.9, β2=0.95, wd=0.01), peak LR `2e-4`, cosine decay, 200-step warmup
@@ -361,7 +361,7 @@ python tools/hybrid/convert_gdn_to_fla_hf.py \
     --output-dir      output/gdn_pure_300M_fla_hf_final
 ```
 
-The converter auto-detects 300M from the path and uses `gated_deltanet_300M_pure.json`. What it does:
+The converter auto-detects 300M from the path and uses `gated_deltanet_300M.json`. What it does:
 
 - Reads `mp_rank_00/model_optim_rng.pt` and pulls the `model` state dict
 - For each of the 12 FLA layers, pairs the alternating Megatron sublayers:
@@ -385,7 +385,7 @@ output/gdn_pure_300M_fla_hf_final/
 └── tokenizer_config.json    # placeholder — point to meta-llama/Llama-3.2-1B at load time
 ```
 
-For the 1B pure-GDN model, same command but use the 1B checkpoint path — the converter auto-selects `gated_deltanet_1B_pure.json`.
+For the 1B pure-GDN model, same command but use the 1B checkpoint path — the converter auto-selects `gated_deltanet_1B.json`.
 
 ---
 

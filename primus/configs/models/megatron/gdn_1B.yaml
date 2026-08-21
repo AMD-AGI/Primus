@@ -1,7 +1,7 @@
 extends:
   - mamba_base.yaml
 
-# Pure GDN 1B — matches FLA gated_deltanet_1B_pure.json (no zebra_ prefix: not a hybrid model)
+# Pure GDN 1B — matches FLA gated_deltanet_1B.json (no zebra_ prefix: not a hybrid model)
 #   ~1.20B params (tied embeddings)
 #   16 GDN blocks + 16 MLP blocks = 32 Megatron sublayers
 model_type: mamba

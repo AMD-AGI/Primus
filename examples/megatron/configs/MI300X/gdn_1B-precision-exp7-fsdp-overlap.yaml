@@ -9,7 +9,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # iter-for-iter once we drive Primus from FLA's token order via PRIMUS_FLA_DATA).
 #
 # FLA's run:
-#   model:       configs/gated_deltanet_1B_pure_100B.json (same arch as the
+#   model:       configs/gated_deltanet_1B_100B.json (same arch as the
 #                10B config we already replicate in gdn_1B.yaml)
 #   lr:          3e-4   (vs the 10B run's 2e-4 — bigger LR for the longer schedule)
 #   scheduler:   cosine_with_min_lr  (min_lr ≈ 0.1 × peak = 3e-5)

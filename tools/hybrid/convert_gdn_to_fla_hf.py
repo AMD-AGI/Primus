@@ -9,7 +9,7 @@ Usage:
     python tools/hybrid/convert_gdn_to_fla_hf.py \
         --checkpoint-path output/amd/root/gdn_1B-precision-pretrain/checkpoints/iter_0076294 \
         --output-dir output/gdn_pure_1B_fla_hf \
-        --config /path/to/gated_deltanet_1B_pure.json
+        --config /path/to/gated_deltanet_1B.json
 """
 
 import argparse
@@ -25,6 +25,10 @@ import torch
 _megatron_path = str(Path(__file__).resolve().parents[2] / "third_party" / "Megatron-LM")
 if _megatron_path not in sys.path:
     sys.path.insert(0, _megatron_path)
+_hybrid_tools = Path(__file__).resolve().parent
+if str(_hybrid_tools) not in sys.path:
+    sys.path.insert(0, str(_hybrid_tools))
+from fla_config_paths import fla_training_configs_dir, gdn_fla_config
 
 
 def load_megatron_checkpoint(checkpoint_path):
@@ -189,30 +193,20 @@ def main():
     parser.add_argument("--checkpoint-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument(
-        "--config", type=str, default=None, help="Path to FLA config JSON (gated_deltanet_1B_pure.json)"
+        "--config", type=str, default=None, help="Path to FLA config JSON (gated_deltanet_1B.json)"
     )
     args = parser.parse_args()
 
     # Default config path — auto-detect model size from checkpoint
     if args.config is None:
-        fla_root = os.environ.get("FLA_ROOT", os.path.expanduser("~/flash-linear-attention"))
-        fla_configs_dir = Path(fla_root) / "legacy" / "training" / "configs"
-        alt_dir = (
-            Path(__file__).parent.parent.parent
-            / "third_party"
-            / "flash-linear-attention"
-            / "legacy"
-            / "training"
-            / "configs"
-        )
-        configs_dir = fla_configs_dir if fla_configs_dir.exists() else alt_dir
-
-        # Detect from checkpoint path name
+        configs_dir = fla_training_configs_dir()
         ckpt_str = str(args.checkpoint_path).lower()
-        if "300m" in ckpt_str:
-            args.config = str(configs_dir / "gated_deltanet_300M_pure.json")
+        if "100b" in ckpt_str:
+            args.config = str(gdn_fla_config(configs_dir, size="1B", hundred_b=True))
+        elif "300m" in ckpt_str:
+            args.config = str(gdn_fla_config(configs_dir, size="300M"))
         else:
-            args.config = str(configs_dir / "gated_deltanet_1B_pure.json")
+            args.config = str(gdn_fla_config(configs_dir, size="1B"))
 
     print("=" * 70)
     print("Primus GDN → FLA HuggingFace Conversion")

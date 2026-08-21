@@ -139,7 +139,7 @@ for the patch-by-patch breakdown. Nothing needs to be run by hand.
 
 #### `primus/configs/models/megatron/kda_300M.yaml` (new)
 
-300M architecture-only YAML matched to FLA's `kda_300M_pure.json`:
+300M architecture-only YAML matched to FLA's `kda_300M.json`:
 
 ```yaml
 extends: [mamba_base.yaml]

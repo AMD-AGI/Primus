@@ -247,7 +247,7 @@ def main() -> int:
     print(f"        --checkpoint-path {args.output_dir} \\")
     print(f"        --output-dir output/gdn_pure_1B_fla_hf \\")
     print(
-        f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_pure_100B.json"
+        f"        --config /home/<user>/flash-linear-attention/legacy/training/configs/gated_deltanet_1B_100B.json"
     )
     return 0
 

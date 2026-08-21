@@ -96,7 +96,7 @@ The 300M pure-KDA model has:
 - Tokenizer: `meta-llama/Llama-3.2-1B` (128k vocab)
 - Total parameters: **0.302 B**
 
-Training schedule (matched to FLA's `kda_300M_pure.json`):
+Training schedule (matched to FLA's `kda_300M.json`):
 
 - 4768 iterations × 1024 global batch × 2048 seq len = **10.0 B tokens**
 - AdamW (β1=0.9, β2=0.95, wd=0.01), peak LR `2e-4`, cosine decay, 200-step warmup
@@ -371,7 +371,7 @@ to translate the Megatron checkpoint into FLA's native
 python tools/hybrid/convert_kda_to_fla_hf.py \
     --checkpoint-path output/amd/root/kda_300M-precision-pretrain/checkpoints/iter_0004768 \
     --output-dir      output/kda_pure_300M_fla_hf \
-    --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M_pure.json \
+    --config          /home/<user>/flash-linear-attention/legacy/training/configs/kda_300M.json \
     --tokenizer-src   /home/<user>/checkpoints/kda_pure_300M_10B
 ```
 

@@ -1,7 +1,7 @@
 extends:
   - mamba_base.yaml
 
-# Pure Kimi Delta Attention 300M — matches FLA kda_300M_pure.json exactly
+# Pure Kimi Delta Attention 300M — matches FLA kda_300M.json exactly
 #   ~300M params (tied embeddings)
 #   12 KDA blocks + 12 MLP blocks = 24 Megatron sublayers
 model_type: mamba
