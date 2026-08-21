@@ -435,6 +435,9 @@ done
 ###############################################################################
 # STEP 4.6: Setup log file path
 ###############################################################################
+if [[ -z "${direct_config[log_file]:-}" && -n "${TRAIN_LOG:-}" ]]; then
+    direct_config[log_file]="$TRAIN_LOG"
+fi
 if [[ -z "${direct_config[log_file]:-}" ]]; then
     direct_config[log_file]="logs/log_$(date +%Y%m%d_%H%M%S).txt"
 fi
@@ -468,7 +471,7 @@ fi
 # slurm-entry -> container -> direct chain already passes them via --env, so
 # this block is a no-op there). When called directly under srun on the host,
 # this block derives them from SLURM_*.
-export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+export GPUS_PER_NODE="${GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}"
 export MASTER_PORT="${MASTER_PORT:-1234}"
 
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then

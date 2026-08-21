@@ -269,7 +269,7 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-bash ./examples/run_slurm_pretrain.sh \
+bash ./runner/helpers/launch/slurm_pretrain.sh \
     --num_layers "$NUM_LAYERS" \
     --moe_layer_freq "$MOE_LAYER_FREQ" \
     --micro_batch_size "$MBS" \

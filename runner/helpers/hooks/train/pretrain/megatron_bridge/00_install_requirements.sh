@@ -26,6 +26,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${PRIMUS_SKIP_PIP:-0}" == "1" ]]; then
+  echo "[INFO] PRIMUS_SKIP_PIP=1: skipping Megatron-Bridge dependency installation"
+  exit 0
+fi
+
 DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
 

@@ -291,7 +291,6 @@ def main():
     print(f"env.JAX_COORDINATOR_PORT={master_port}")
 
     # Expose MaxText/JAX performance tuning environment variables
-    # These mirror the settings from examples/run_pretrain.sh
     log_info("Exposing MaxText performance tuning environment variables")
 
     # XLA/JAX settings

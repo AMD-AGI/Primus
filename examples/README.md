@@ -23,12 +23,6 @@ It supports both **single-node** and **multi-node** training, and includes optio
     - [Stage 3: Train with Tuned Kernel](#stage-3-train-with-tuned-kernel)
   - [✅ Supported Models](#-supported-models)
     - [🏃‍♂️ How to Run a Supported Model](#️-how-to-run-a-supported-model)
-  - [☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)](#️-kubernetes-training-management-run_k8s_pretrainsh)
-    - [Requirements](#requirements)
-    - [Usage](#usage)
-    - [⚙️ Commands](#️-commands)
-    - [⚙️ Create Command Options](#️-create-command-options)
-    - [Example](#example)
 
 ---
 
@@ -100,6 +94,13 @@ Notes on the argument shape:
   enablement and dataset preparation run as hooks under `runner/helpers/hooks/`.
 - `runner/.primus.yaml` holds the defaults for each mode (container image, devices, and
   the list of environment variables forwarded into the container).
+
+The packaged launchers under `examples/customer_package/` and `examples/moe_package/` share
+`runner/helpers/launch/slurm_pretrain.sh`, which turns the `EXP` / `NNODES` / `DATA_PATH`
+environment contract into the `primus-cli slurm srun ... -- container -- train pretrain`
+command above. It is an internal helper, not an entry point: launch training with
+`primus-cli` directly.
+
 #### 🚀 Quick Start Mode
 
 Use this mode for **rapid iteration or validation** of a model config.
@@ -284,100 +285,4 @@ export EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 # run torchtitan
 export EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
 ./primus-cli slurm srun -N "$NNODES" -- container -- train pretrain --config "$EXP"
-```
-
-## ☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)
-
-The `run_k8s_pretrain.sh` script provides convenient CLI commands to manage training workloads on a Kubernetes cluster via a REST API. It supports creating, querying, deleting training jobs, and listing cluster nodes, facilitating flexible workload control for distributed training with Primus or similar frameworks.
-
-### Requirements
-
-- `jq` installed (for JSON processing)
-- Access to Kubernetes API endpoint URL
-
-### Usage
-
-```bash
-./run_k8s_pretrain.sh --url <api_base_url> <command> [options]
-
-```
-
-
-
-### ⚙️ Commands
-
-Primus provides several command-line interfaces to manage training workloads and cluster resources. Below are the commonly used commands:
-
-| Command | Description                    |
-| ------- | ------------------------------|
-| create  | Create a new training workload |
-| get     | Retrieve workload details      |
-| delete  | Delete an existing workload    |
-| list    | List all current workloads     |
-| nodes   | List all nodes in the cluster  |
-
-Use these commands to interact with Primus for workload scheduling and resource management.
-
-
----
-
-### ⚙️ Create Command Options
-
-When using the `create` command to start a new training workload, the following options are supported:
-
-| Option       | Description                                          | Default                                  |
-| ------------ | ---------------------------------------------------- | ---------------------------------------- |
-| `--replica`    | Number of replicas (instances)                       | 1                                        |
-| `--cpu`        | Number of CPUs                                       | 96                                       |
-| `--gpu`        | Number of GPUs                                       | 8                                        |
-| `--exp`        | Path to experiment (training config) file (required) | —                                        |
-| `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v26.5` |
-| `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
-| `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
-| `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |
-
-### Example
-
-Create a training workload with 2 replicas and custom config:
-
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com create --replica 2 --cpu 96 --gpu 4 \
-  --exp examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml --data_path /mnt/data/train \
-  --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev
-
-#result:
-{
-  "workloadId": "abc123"
-}
-
-```
-
-Get workload details:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com get --workload-id abc123
-
-```
-
-Delete a workload:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com delete --workload-id abc123
-
-```
-
-List all workloads:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com list
-
-```
-
-List all cluster nodes:
-
-```bash
-bash examples/run_k8s_pretrain.sh --url http://api.example.com nodes
-
 ```

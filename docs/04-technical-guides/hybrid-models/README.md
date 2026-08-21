@@ -330,6 +330,22 @@ If you are already inside a Docker container or on a bare-metal node with the en
   --config examples/megatron/configs/MI300X/zebra_llama_1B_kda-pretrain.yaml
 ```
 
+> **ROCm FLA Triton note.** FLA's KDA intra-chunk kernels autotune over `num_stages`
+> values that AMD Triton 3.6 cannot compile — the MLIR pass pipeline aborts inside
+> `tritonamdgpu-schedule-loops{num_stages=4}`, so a KDA run dies during its first
+> autotune sweep. Primus applies the workaround for you, inside the training process:
+> the `megatron.fla.kda_safe_autotune` patch
+> (`primus/backends/megatron/patches/fla_kda_autotune_patches.py`) drops the
+> `num_stages >= 3` candidates from the two kernels' autotune space at startup, keeping the
+> `num_warps` sweep. Nothing on disk is rewritten — the installed `fla` package is left
+> pristine. It fires on ROCm whenever the run resolves to the FLA KDA backend
+> (`use_fla_triton_kda: true`, or `kda_backend: fla` /
+> `use_kimi_k3_attention_backend: fla`). GDN, mamba and plain-attention configs drive
+> different FLA ops, compile fine, and are left untouched. On Triton 3.7 the full sweep
+> compiles and the autotuner reaches the same configs on its own, so the narrowing costs
+> at most ~1% of the KDA op on the largest shape measured; it will be removed once the
+> supported toolchain floor reaches Triton 3.7.
+
 ### Mock Data (Smoke Test)
 
 To quickly verify the model runs without real data, the 3B and 8B configs come with `mock_data: true` by default. For the 1B configs, you can override on the command line — every argument after `--config` is forwarded to the Primus Python CLI:

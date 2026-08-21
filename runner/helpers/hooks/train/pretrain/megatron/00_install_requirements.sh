@@ -32,6 +32,11 @@ done
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/../../../../hook_common.sh"
 
+if [[ "${PRIMUS_SKIP_PIP:-0}" == "1" ]]; then
+  LOG_INFO "PRIMUS_SKIP_PIP=1: skipping Megatron dependency installation"
+  exit 0
+fi
+
 DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
 

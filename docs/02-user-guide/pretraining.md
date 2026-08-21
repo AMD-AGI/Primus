@@ -280,7 +280,7 @@ The tables above in the Megatron, TorchTitan, and MaxText sections are curated M
 | TorchTitan | `examples/torchtitan/configs/MI300X/` | `parallelism.*` (e.g. `tensor_parallel_degree`, `pipeline_parallel_degree`, `expert_parallel_degree`, FSDP shard settings). |
 | MaxText | `examples/maxtext/configs/MI300X/` | `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_fsdp_parallelism`, `dcn_data_parallelism`. |
 
-For scripting patterns that predate `primus-cli`, the repository still documents `examples/run_local_pretrain.sh` and `examples/run_slurm_pretrain.sh` in `examples/README.md`; equivalent launches are shown above using `./runner/primus-cli`.
+`./runner/primus-cli` is the only entry point. The packaged launchers under `examples/customer_package/` and `examples/moe_package/` reach it through the shared helper `runner/helpers/launch/slurm_pretrain.sh`, which translates their `EXP` / `NNODES` / `DATA_PATH` environment contract into a `primus-cli slurm` invocation; call the CLI directly as shown above.
 
 ---
 

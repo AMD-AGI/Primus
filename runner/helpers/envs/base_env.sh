@@ -86,7 +86,7 @@ export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
-export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+export GPUS_PER_NODE=${GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}
 
 log_exported_vars "Training Cluster Info" \
     MASTER_ADDR MASTER_PORT NNODES NODE_RANK GPUS_PER_NODE
@@ -111,6 +111,51 @@ export PRIMUS_IMPORT_ROOT
 # Set data paths
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
+
+# ---------------------------------------------------------------------------
+# Persistent kernel/JIT cache layout
+# ---------------------------------------------------------------------------
+# The default lives under /workspace because that is where the training image
+# keeps its writable persistent volume. Bare-metal runs (primus-cli direct)
+# source this file too, and there /workspace is typically absent or root-owned,
+# so probe the default before committing to it: otherwise the first Triton JIT
+# compile is what surfaces the unwritable directory. An explicitly configured
+# PRIMUS_CACHE_ROOT is always honoured as-is.
+PRIMUS_CACHE_ROOT_DEFAULT=/workspace/cache_persist
+if [[ -z "${PRIMUS_CACHE_ROOT:-}" ]]; then
+    PRIMUS_CACHE_ROOT="${PRIMUS_CACHE_ROOT_DEFAULT}"
+    if ! { mkdir -p "${PRIMUS_CACHE_ROOT}" 2>/dev/null && [[ -w "${PRIMUS_CACHE_ROOT}" ]]; }; then
+        PRIMUS_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/primus"
+        LOG_WARN "[env] ${PRIMUS_CACHE_ROOT_DEFAULT} is not writable; falling back to ${PRIMUS_CACHE_ROOT} for the kernel/JIT cache. Export PRIMUS_CACHE_ROOT=<dir> to pick a different location."
+    fi
+fi
+export PRIMUS_CACHE_ROOT
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${PRIMUS_CACHE_ROOT}/triton}
+export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-${PRIMUS_CACHE_ROOT}/torchinductor}
+export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${PRIMUS_CACHE_ROOT}/torch_extensions}
+export PYTORCH_KERNEL_CACHE_PATH=${PYTORCH_KERNEL_CACHE_PATH:-${PRIMUS_CACHE_ROOT}/pytorch_kernel}
+export MIOPEN_USER_DB_PATH=${MIOPEN_USER_DB_PATH:-${PRIMUS_CACHE_ROOT}/miopen_db}
+export MIOPEN_CUSTOM_CACHE_DIR=${MIOPEN_CUSTOM_CACHE_DIR:-${PRIMUS_CACHE_ROOT}/miopen_cache}
+export MIOPEN_FIND_MODE=${MIOPEN_FIND_MODE:-2}
+export MIOPEN_DISABLE_CACHE=${MIOPEN_DISABLE_CACHE:-0}
+export AOTRITON_CACHE_DIR=${AOTRITON_CACHE_DIR:-${PRIMUS_CACHE_ROOT}/aotriton}
+export AMD_COMGR_CACHE_DIR=${AMD_COMGR_CACHE_DIR:-${PRIMUS_CACHE_ROOT}/comgr}
+export AMD_COMGR_CACHE=${AMD_COMGR_CACHE:-1}
+export HIPBLASLT_TUNING_FILE=${HIPBLASLT_TUNING_FILE:-${PRIMUS_CACHE_ROOT}/hipblaslt_tuning.json}
+export HF_HUB_CACHE=${HF_HUB_CACHE:-${HF_HOME}/hub}
+export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-${HF_HOME}/datasets}
+
+mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" \
+         "${TORCH_EXTENSIONS_DIR}" "${PYTORCH_KERNEL_CACHE_PATH}" \
+         "${MIOPEN_USER_DB_PATH}" "${MIOPEN_CUSTOM_CACHE_DIR}" \
+         "${AOTRITON_CACHE_DIR}" "${AMD_COMGR_CACHE_DIR}" \
+         "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" 2>/dev/null || true
+
+log_exported_vars "Persistent Cache Layout" \
+    PRIMUS_CACHE_ROOT TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR \
+    TORCH_EXTENSIONS_DIR PYTORCH_KERNEL_CACHE_PATH MIOPEN_USER_DB_PATH \
+    MIOPEN_CUSTOM_CACHE_DIR AOTRITON_CACHE_DIR AMD_COMGR_CACHE_DIR \
+    HIPBLASLT_TUNING_FILE HF_HUB_CACHE HF_DATASETS_CACHE
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
 if [[ -n "$site_packages" ]]; then

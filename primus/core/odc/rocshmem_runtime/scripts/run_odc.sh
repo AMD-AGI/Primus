@@ -93,5 +93,16 @@ TRAIN_LOG_DIR=${TRAIN_LOG_DIR:-$HOME/odc_logs}; mkdir -p "$TRAIN_LOG_DIR"
 export TRAIN_LOG="$TRAIN_LOG_DIR/runlog_${EXPNAME}_${TRAIN_LOG_TS}.log"
 echo "[run_odc] ROOT=$PRIMUS_ROOT BACKEND=$BACKEND PAD=$PAD P2P=$ODC_P2P_BACKEND EXP=$EXP NAME=$EXPNAME TS=$TRAIN_LOG_TS"
 echo "[run_odc] TURBO_PATH=${PRIMUS_TURBO_PATH:-<installed>} TRITON_CACHE_DIR=$TRITON_CACHE_DIR LOG=$TRAIN_LOG"
-bash examples/run_pretrain.sh
-echo "[run_odc] DONE exit=$? log=$TRAIN_LOG"
+if bash "$PRIMUS_ROOT/runner/primus-cli" direct \
+      ${TRAIN_LOG:+--log_file "$TRAIN_LOG"} \
+      -- train pretrain --config "$EXP"; then
+  exit_code=0
+else
+  exit_code=$?
+fi
+if [ "$exit_code" -eq 0 ]; then
+  echo "[run_odc] DONE exit=$exit_code log=$TRAIN_LOG"
+else
+  echo "[run_odc] FAILED exit=$exit_code log=$TRAIN_LOG"
+fi
+exit "$exit_code"

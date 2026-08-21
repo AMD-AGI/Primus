@@ -392,8 +392,8 @@ def _resolve_pack_cache_dir() -> Path:
     Resolution order:
         1. ``$PRIMUS_PACK_CACHE_DIR`` (explicit user override)
         2. ``$HF_DATASETS_CACHE/primus_packed`` (default in our launcher,
-           which routes to ``/workspace/cache_persist/hf_cache/datasets``
-           via ``run_pretrain.sh``)
+           which routes under ``$PRIMUS_CACHE_ROOT`` via
+           ``runner/helpers/envs/base_env.sh``)
         3. ``$HF_HOME/primus_packed``
         4. ``~/.cache/primus_packed_sft``
     """
