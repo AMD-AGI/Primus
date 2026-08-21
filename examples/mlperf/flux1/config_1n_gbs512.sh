@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/config_common.sh"
+
 export NNODES=1
-export GPUS_PER_NODE=8
 export DP_REPLICATE=1
 export LOCAL_BATCH_SIZE=64
 export GRADIENT_ACCUMULATION_STEPS=1
@@ -9,4 +10,6 @@ export GLOBAL_BATCH_SIZE=512
 export LR=2e-4
 export WARMUP_STEPS=1600
 export GRADIENT_CHECKPOINTING_RATIO=0.25
-export FSDP2_REDUCE_DTYPE=fp32
+export TORCH_COMPILE_MODE=max-autotune-no-cudagraphs
+export FLUX_FP8_GEMM_BACKEND=
+unset TORCHINDUCTOR_BENCHMARK_FUSION PRIMUS_FLUX_AITER_ATOMIC_FP32 PRIMUS_FLUX_REUSE_FP8_INPUT

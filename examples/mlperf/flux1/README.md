@@ -41,13 +41,18 @@ for details.
 
 ## Select a configuration
 
-The `config_*.sh` files contain the reproducible batch and optimizer settings:
+Each `config_*.sh` sources `config_common.sh` and then exports its qualified
+shape-specific settings:
 
-| `FLUX_CONFIG` | Nodes | MBS | GA | GBS |
-|---|---:|---:|---:|---:|
-| `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 |
-| `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 |
-| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 |
+| `FLUX_CONFIG` | Nodes | MBS | GA | GBS | FP8 GEMM | Compile mode |
+|---|---:|---:|---:|---:|---|---|
+| `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | TorchAO/Inductor | `max-autotune-no-cudagraphs` |
+| `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | selective FlyDSL | default |
+| `config_4n_gbs1024.sh` (default) | 4 | 32 | 1 | 1024 | selective FlyDSL | default |
+
+The MBS64 profile retains checkpoint ratio `0.25`. Both MBS32 profiles use
+ratio `0`, forward-input FP8 reuse, the qualified natural-layout wgrads, and
+MBS32 Inductor fusion benchmarking.
 
 Inside an allocation, select a configuration and use the same launcher:
 
@@ -96,6 +101,7 @@ Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 examples/mlperf/flux1/
 ├── Dockerfile
 ├── README.md
+├── config_common.sh
 ├── config_1n_gbs512.sh
 ├── config_1n_gbs1024.sh
 ├── config_4n_gbs1024.sh
