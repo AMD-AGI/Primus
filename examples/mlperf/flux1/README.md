@@ -91,6 +91,23 @@ required.
 Common overrides include `MAX_STEPS`, `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`,
 `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
 
+### Experimental FP8 gradient AllReduce
+
+The HSDP replica AllReduce can be compressed independently of the intra-node
+BF16 ReduceScatter:
+
+```bash
+FSDP2_HSDP_FP8_ALL_REDUCE=e4m3 \
+FSDP2_HSDP_FP8_BLOCK_SIZE=1024 \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
+```
+
+Omit the block-size variable for tensor-wise scaling. This remains opt-in:
+four-node qualification improved steady step time by at most 2.8%, but both
+modes needed one extra validation interval and did not improve MLPerf TTQ. See
+[`FP8_ALLREDUCE_RESULTS.md`](../../../FP8_ALLREDUCE_RESULTS.md).
+
 ## Files
 
 ```text
