@@ -7,28 +7,6 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 : "${DATA_ROOT:?Set DATA_ROOT to the directory containing the MLPerf datasets}"
 : "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the output directory}"
 
-# A single invocation fans out once inside a multi-node Slurm/Spur allocation.
-if [[ "${FLUX_NODE_LAUNCH:-0}" != "1" && -n "${SLURM_JOB_ID:-}" && "${SLURM_NNODES:-1}" -gt 1 ]]; then
-    command -v srun >/dev/null || { echo "srun is required" >&2; exit 1; }
-    export NNODES=${NNODES:-$SLURM_NNODES}
-    if [[ -z "${MASTER_ADDR:-}" ]]; then
-        if command -v scontrol >/dev/null; then
-            MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
-        else
-            MASTER_ADDR=${SPUR_PEER_NODES:?Set MASTER_ADDR: node-list expansion is unavailable}
-            MASTER_ADDR=${MASTER_ADDR%%,*}
-            MASTER_ADDR=${MASTER_ADDR%%:*}
-        fi
-    fi
-    export MASTER_ADDR MASTER_PORT=${MASTER_PORT:-29500}
-
-    srun_args=(--nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1)
-    if command -v spur >/dev/null; then
-        srun_args+=(--jobid="$SLURM_JOB_ID" --overlap)
-    fi
-    exec srun "${srun_args[@]}" env FLUX_NODE_LAUNCH=1 bash "$SCRIPT_DIR/run_with_docker.sh"
-fi
-
 export DOCKER_IMAGE=${DOCKER_IMAGE:-zirui3/primus-v26.3-flux:v0.4}
 export CONTAINER_NAME=${CONTAINER_NAME:-primus-mlperf-flux1-${SLURM_JOB_ID:-local}-${SLURM_PROCID:-0}}
 export NNODES=${NNODES:-1}

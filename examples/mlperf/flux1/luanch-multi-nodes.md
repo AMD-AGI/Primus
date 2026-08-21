@@ -5,7 +5,7 @@ allocation. A single `srun` cannot span multiple allocation job IDs, so launch
 one node-local process through each allocation and point all four processes at
 the same torchrun rendezvous.
 
-Prefer one four-node allocation and the local `run_with_docker.sh` whenever
+Prefer one four-node allocation and `run_with_docker_slurm.sh` whenever
 possible.
 
 ## Prerequisites
@@ -43,7 +43,6 @@ ROOT=${ROOT:?}
 
 cd "$REPO"
 exec env \
-  FLUX_NODE_LAUNCH=1 \
   DATA_ROOT=/shared_nfs/zirui/data \
   OUTPUT_ROOT="$ROOT" \
   NNODES=4 NODE_RANK="$rank" \

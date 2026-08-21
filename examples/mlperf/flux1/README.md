@@ -79,7 +79,7 @@ sbatch -A amd-spur -p amd-spur --qos=amd-spur-qos \
   --output="$OUTPUT_ROOT-%j.slurm.log" \
   --wrap="cd '$REPO' && DATA_ROOT='$DATA_ROOT' \
     OUTPUT_ROOT='$OUTPUT_ROOT'-\$SLURM_JOB_ID \
-    bash examples/mlperf/flux1/run_with_docker.sh"
+    bash examples/mlperf/flux1/run_with_docker_slurm.sh"
 ```
 
 This gives 32 GPUs, HSDP `dp_replicate=4`, `dp_shard=8`, MBS 32, GA 1, and
@@ -92,7 +92,7 @@ From an existing four-node allocation, run:
 
 ```bash
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
-bash examples/mlperf/flux1/run_with_docker.sh
+bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
 Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
@@ -108,5 +108,6 @@ examples/mlperf/flux1/
 ├── flux.1_schnell_t2i-pretrain.yaml
 ├── luanch-multi-nodes.md
 ├── requirements.txt
-└── run_with_docker.sh
+├── run_with_docker.sh
+└── run_with_docker_slurm.sh
 ```
