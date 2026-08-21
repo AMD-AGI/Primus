@@ -27,6 +27,18 @@ echo "Rank:   ${NODE_RANK}"
 echo "Master: ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
 
+# Prefer an explicit tokenizer override, then a mounted local tokenizer
+# (/model), and otherwise keep the yaml HuggingFace default.
+if [[ -n "${PRIMUS_TOKENIZER_MODEL:-}" ]]; then
+    echo "Tokenizer: ${PRIMUS_TOKENIZER_MODEL} (environment override)"
+elif [[ -d /model && -n "$(ls -A /model 2>/dev/null)" ]]; then
+    export PRIMUS_TOKENIZER_MODEL=/model
+    echo "Tokenizer: /model (local mount)"
+else
+    unset PRIMUS_TOKENIZER_MODEL
+    echo "Tokenizer: meta-llama/Llama-3.1-8B (HuggingFace default)"
+fi
+
 # Start timing
 start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)
