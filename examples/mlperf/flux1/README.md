@@ -95,12 +95,15 @@ submitting. For nodes split across independent allocations, follow
 [`luanch-multi-nodes.md`](luanch-multi-nodes.md).
 
 The launcher selects the validated 4-node MBS32/GBS1024 defaults automatically.
-From an existing four-node allocation, run:
+From the original batch or interactive shell of an existing allocation, run:
 
 ```bash
 DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
+
+When attaching to a holder allocation externally with `spur run --jobid`, use
+the cross-allocation procedure instead; a nested `srun` does not fan out.
 
 Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `SEED`, `MASTER_PORT`,
 `SAVE_STRATEGY`, `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT`, and
